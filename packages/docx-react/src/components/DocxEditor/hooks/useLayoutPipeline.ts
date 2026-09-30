@@ -101,6 +101,7 @@ export interface UseLayoutPipelineOptions {
   /** Hands passes to the resident worker, which then runs the only layout. */
   layoutInWorker?: LayoutInWorker;
   fontRequirementsInWorker?: FontRequirementsInWorker;
+  experimentalWorkerOpen?: boolean;
   onAnchorPositionsChange?: (positions: Map<string, number>) => void;
 }
 
@@ -143,6 +144,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     onLayoutComputed,
     layoutInWorker,
     fontRequirementsInWorker,
+    experimentalWorkerOpen = false,
     onAnchorPositionsChange,
   } = opts;
 
@@ -168,6 +170,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   layoutInWorkerRef.current = layoutInWorker;
   const fontRequirementsInWorkerRef = useRef(fontRequirementsInWorker);
   fontRequirementsInWorkerRef.current = fontRequirementsInWorker;
+  const workerOpenEnabledRef = useRef(experimentalWorkerOpen);
+  workerOpenEnabledRef.current = experimentalWorkerOpen;
   // Bumped by every pass, so a worker pass answering late never overwrites a
   // newer layout.
   const passRef = useRef(0);
@@ -292,7 +296,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           const request = buildResidentRegionLayoutRequest(document, pageGap, renderEnv);
           const input = JSON.stringify(request);
           const pendingRequirements =
-            workerRequirements === undefined
+            workerOpenEnabledRef.current && workerRequirements === undefined
               ? fontRequirementsInWorkerRef.current?.(session, input)
               : null;
           if (pendingRequirements) {
@@ -340,7 +344,10 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           version = sourceVersion
         ) => {
           const { layout: newLayout } = computation;
-          stampSourceVersion(newLayout, workerOpenSourceVersion(session, version));
+          stampSourceVersion(
+            newLayout,
+            workerOpenEnabledRef.current ? workerOpenSourceVersion(session, version) : version
+          );
           stampRevisionPreviewKey(newLayout, previewKey);
 
           const pagesEl = pagesContainerRef.current;
@@ -389,7 +396,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         const layOutHere = (): void => {
           try {
             // An edit may have landed since the pass began.
-            ensureWorkerOpenReplica(session);
+            if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(session);
             const version = readSessionVersion(session);
             const computation = computeLayout(computeInputs);
             applyComputation(computation, layoutUpdateOrigin, version);
@@ -418,7 +425,9 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         if (
           !onHost &&
           sourceVersion !== null &&
-          sourceVersion === workerOpenSourceVersion(session, openedVersionRef.current.version)
+          sourceVersion === (workerOpenEnabledRef.current
+            ? workerOpenSourceVersion(session, openedVersionRef.current.version)
+            : openedVersionRef.current.version)
         ) {
           try {
             workerPass =
@@ -445,7 +454,9 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
               // A change that landed meanwhile makes the worker's layout stale.
               if (
                 !computation ||
-                readSessionVersion(session) !== workerOpenSourceVersion(session, sourceVersion)
+                readSessionVersion(session) !== (workerOpenEnabledRef.current
+                  ? workerOpenSourceVersion(session, sourceVersion)
+                  : sourceVersion)
               ) {
                 layOutHere();
                 return;
@@ -457,7 +468,9 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                   if (pass !== passRef.current || sessionRef.current !== session) return;
                   if (
                     complete &&
-                    readSessionVersion(session) === workerOpenSourceVersion(session, sourceVersion)
+                    readSessionVersion(session) === (workerOpenEnabledRef.current
+                      ? workerOpenSourceVersion(session, sourceVersion)
+                      : sourceVersion)
                   ) {
                     // Nothing the user did changed: keep their viewport.
                     applyComputation(complete, 'remote');

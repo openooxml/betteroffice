@@ -731,6 +731,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onLayoutComputed: publishResidentLayout,
       layoutInWorker,
       fontRequirementsInWorker,
+      experimentalWorkerOpen: yrsCore.experimentalWorkerOpen,
       onAnchorPositionsChange,
     });
     runLayoutPipelineRef.current = yrsCore.session ? runLayoutPipeline : null;
@@ -776,7 +777,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
 
     const yrsProjectionVersionRef = useRef(0);
     const projectionReplicaReadyRef = useRef(yrsCore.replicaReady);
-    if (projectionReplicaReadyRef.current !== yrsCore.replicaReady) {
+    if (
+      yrsCore.experimentalWorkerOpen &&
+      projectionReplicaReadyRef.current !== yrsCore.replicaReady
+    ) {
       projectionReplicaReadyRef.current = yrsCore.replicaReady;
       yrsProjectionVersionRef.current += 1;
     }
@@ -958,7 +962,12 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       const session = yrsCore.session;
       if (!session) return;
       return session.onUpdate((_update, origin) => {
-        if (origin === 'remote' && !workerOpenReplicaPending(session)) syncYrsInputState(true, origin);
+        if (
+          origin === 'remote' &&
+          (!yrsCore.experimentalWorkerOpen || !workerOpenReplicaPending(session))
+        ) {
+          syncYrsInputState(true, origin);
+        }
       });
     }, [syncYrsInputState, yrsCore.session]);
 
@@ -1390,6 +1399,13 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       (rootStory: string): YrsPositionProjection | null => {
         const session = yrsCore.session;
         if (!session || !session.hasStory(rootStory)) return null;
+        if (yrsCore.experimentalWorkerOpen) {
+          const ready = yrsCore.replicaReadyRef?.current ?? yrsCore.replicaReady;
+          if (projectionReplicaReadyRef.current !== ready) {
+            projectionReplicaReadyRef.current = ready;
+            yrsProjectionVersionRef.current += 1;
+          }
+        }
         const cached = yrsPositionProjectionCacheRef.current;
         if (
           cached?.version === yrsProjectionVersionRef.current &&
@@ -1799,6 +1815,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       documentFromYrs: yrsCore.documentFromYrs,
       yrsSession: yrsCore.session,
       replicaReady: yrsCore.replicaReady,
+      experimentalWorkerOpen: yrsCore.experimentalWorkerOpen,
       yrsLocToDisplayPosition,
       syncYrsInputState: (docChanged, dirtyStory) =>
         syncYrsInputState(docChanged, 'local', dirtyStory),
@@ -1823,6 +1840,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
 
     usePagedEditorCommandBridge({
       bridgeRef: commandBridgeRef,
+      experimentalWorkerOpen: yrsCore.experimentalWorkerOpen,
       yrsInputRef,
       session: yrsCore.session,
       rootStory: activeYrsRootStory,
@@ -1884,7 +1902,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         <YrsInput
           ref={yrsInputRef}
           enabled
-          readOnly={readOnly || !yrsCore.replicaReady || (!!partEdit && activeYrsRootStory === 'body')}
+          readOnly={readOnly || (!!partEdit && activeYrsRootStory === 'body')}
+          replicaReadyRef={yrsCore.experimentalWorkerOpen ? yrsCore.replicaReadyRef : undefined}
           session={yrsCore.session}
           story={activeYrsRootStory}
           isSuggesting={isSuggesting}

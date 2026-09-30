@@ -164,9 +164,10 @@ const LAYOUT_REFUSALS: ReadonlySet<string> = new Set([
  */
 async function exportWithPages(
   pagedEditorRef: React.RefObject<PagedEditorRef | null>,
-  options: DocxPageExportOptions
+  options: DocxPageExportOptions,
+  experimentalWorkerOpen = false
 ): Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>> {
-  const { session } = await flushedSession(pagedEditorRef);
+  const { session } = await flushedSession(pagedEditorRef, experimentalWorkerOpen);
   const editor = (): PagedEditorRef => {
     const current = pagedEditorRef.current;
     if (!current || current.getYrsSession() !== session) {
@@ -322,7 +323,7 @@ export function useDocxEditorRefApi({
       getDocument: () => pagedEditorRef.current?.getDocument() ?? documentFromYrs() ?? document,
       getEditorRef: () => pagedEditorRef.current,
       flushPendingInput: async () => {
-        await flushedSession(pagedEditorRef);
+        await flushedSession(pagedEditorRef, experimentalWorkerOpen);
       },
       save: handleSave,
       setZoom,
@@ -344,33 +345,37 @@ export function useDocxEditorRefApi({
       loadDocument: loadParsedDocument,
       loadDocumentBuffer: loadBuffer,
 
-      readParagraphs: async (request) => (await flushedSession(pagedEditorRef)).session.readParagraphs(request),
+      readParagraphs: async (request) => (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.readParagraphs(request),
       listContentControls: async (options) =>
-        (await flushedSession(pagedEditorRef)).session.listContentControls(options),
+        (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.listContentControls(options),
       findContentControls: async (query, options) =>
-        (await flushedSession(pagedEditorRef)).session.findContentControls(query, options),
-      findText: async (request) => (await flushedSession(pagedEditorRef)).session.findText(request),
+        (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.findContentControls(query, options),
+      findText: async (request) => (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.findText(request),
       validateEdits: async (request) => {
-        const { session } = await flushedSession(pagedEditorRef);
+        const { session } = await flushedSession(pagedEditorRef, experimentalWorkerOpen);
         return modeRefusal(session, modeRef.current, request) ?? session.validateEdits(request);
       },
       applyEdits: async (request) => {
-        const outcome = await applyEditBatch(pagedEditorRef, () => modeRef.current, request);
+        const outcome = await applyEditBatch(
+          pagedEditorRef, () => modeRef.current, request, undefined, undefined, experimentalWorkerOpen
+        );
         if ('flush' in outcome) throw outcome.flush.error;
         return outcome.result;
       },
 
       proposeChanges: (request) =>
-        applyProposalCall(pagedEditorRef, hostProposalsAllowed, (session) =>
-          session.proposeChanges(request)
+        applyProposalCall(
+          pagedEditorRef, hostProposalsAllowed, (session) => session.proposeChanges(request),
+          experimentalWorkerOpen
         ),
       setProposalStates: (request) =>
-        applyProposalCall(pagedEditorRef, hostProposalsAllowed, (session) =>
-          session.setProposalStates(request)
+        applyProposalCall(
+          pagedEditorRef, hostProposalsAllowed, (session) => session.setProposalStates(request),
+          experimentalWorkerOpen
         ),
-      getProposals: async () => (await flushedSession(pagedEditorRef)).session.getProposals(),
+      getProposals: async () => (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.getProposals(),
 
-      exportStructuredWithPages: (options) => exportWithPages(pagedEditorRef, options),
+      exportStructuredWithPages: (options) => exportWithPages(pagedEditorRef, options, experimentalWorkerOpen),
       getPositionAtPoint: (clientX, clientY) =>
         pagedEditorRef.current?.getPositionAtPoint(clientX, clientY) ?? null,
 

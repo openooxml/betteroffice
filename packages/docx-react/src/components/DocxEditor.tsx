@@ -909,7 +909,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     rustFontChainsProviderRef,
     resolvedIdsForRender,
     () => pagedEditorRef.current?.relayout(),
-    memoryBudget?.workerLimitBytes
+    memoryBudget?.workerLimitBytes,
+    experimentalWorkerOpen
   );
   useEffect(() => {
     if (canvasRenderer.error) onError?.(canvasRenderer.error);
@@ -1156,6 +1157,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   }, []);
 
   const commands = useDocxCommandBinding({
+    experimentalWorkerOpen,
     pagedEditorRef,
     bridgeRef: commandBridgeRef,
     isLoading: state.isLoading,
@@ -2210,7 +2212,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               onRemoveHeaderFooter={handleRemoveHeaderFooter}
               onBodyClick={handleBodyClick}
               zoom={state.zoom}
-              readOnly={readOnly || !yrsCore.replicaReady}
+              readOnly={readOnly}
               showHiddenText={showHiddenText}
               isSuggesting={editingMode === 'suggesting'}
               author={author}

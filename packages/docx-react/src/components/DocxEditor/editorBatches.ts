@@ -21,7 +21,8 @@ export type EditorFlushFailure = Extract<EditorFlush, { ok: false }>;
  * the document the flush started on.
  */
 export async function flushEditorInput(
-  pagedEditorRef: React.RefObject<PagedEditorRef | null>
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  experimentalWorkerOpen = false
 ): Promise<EditorFlush> {
   const editor = pagedEditorRef.current;
   const session = editor?.getYrsSession();
@@ -33,7 +34,7 @@ export async function flushEditorInput(
     };
   }
   try {
-    const ready = awaitWorkerOpenReplica(session);
+    const ready = experimentalWorkerOpen ? awaitWorkerOpenReplica(session) : undefined;
     if (ready) {
       await ready;
       if (pagedEditorRef.current?.getYrsSession() !== session) {
@@ -62,9 +63,10 @@ export async function flushEditorInput(
 
 /** Flushes pending input and returns the current handle; throws when that fails. */
 export async function flushedSession(
-  pagedEditorRef: React.RefObject<PagedEditorRef | null>
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  experimentalWorkerOpen = false
 ): Promise<{ editor: PagedEditorRef; session: YrsSession }> {
-  const flushed = await flushEditorInput(pagedEditorRef);
+  const flushed = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen);
   if (!flushed.ok) throw flushed.error;
   return flushed;
 }
@@ -103,7 +105,8 @@ export async function applyEditBatch<Refusal = never>(
   mode: () => EditorMode,
   request: DocxEditRequest,
   authorize?: () => Refusal | null,
-  commit: <T>(write: () => T) => T = (write) => write()
+  commit: <T>(write: () => T) => T = (write) => write(),
+  experimentalWorkerOpen = false
 ): Promise<{ flush: EditorFlushFailure } | { result: DocxEditResult | Refusal }> {
   const session = pagedEditorRef.current?.getYrsSession();
   if (!session) {
@@ -115,7 +118,7 @@ export async function applyEditBatch<Refusal = never>(
       },
     };
   }
-  const ready = awaitWorkerOpenReplica(session);
+  const ready = experimentalWorkerOpen ? awaitWorkerOpenReplica(session) : undefined;
   if (ready) {
     try {
       await ready;
@@ -140,7 +143,7 @@ export async function applyEditBatch<Refusal = never>(
   }
   const early = modeRefusal(session, mode(), request);
   if (early) return { result: early };
-  const flushed = await flushEditorInput(pagedEditorRef);
+  const flushed = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen);
   if (!flushed.ok) return { flush: flushed };
   if (flushed.session !== session || pagedEditorRef.current?.getYrsSession() !== session) {
     return {
@@ -174,7 +177,8 @@ export async function applyEditBatch<Refusal = never>(
 export async function applyProposalCall(
   pagedEditorRef: React.RefObject<PagedEditorRef | null>,
   allowed: () => boolean,
-  call: (session: YrsSession) => DocxProposalResult
+  call: (session: YrsSession) => DocxProposalResult,
+  experimentalWorkerOpen = false
 ): Promise<DocxProposalResult> {
   const denied = (session: YrsSession): DocxProposalResult => ({
     ok: false,
@@ -183,7 +187,7 @@ export async function applyProposalCall(
   });
   const session = pagedEditorRef.current?.getYrsSession();
   if (!session) throw new Error('The editor input is unavailable');
-  const ready = awaitWorkerOpenReplica(session);
+  const ready = experimentalWorkerOpen ? awaitWorkerOpenReplica(session) : undefined;
   if (ready) {
     await ready;
     if (pagedEditorRef.current?.getYrsSession() !== session) {
@@ -191,7 +195,7 @@ export async function applyProposalCall(
     }
   }
   if (!allowed()) return denied(session);
-  const flushed = await flushEditorInput(pagedEditorRef);
+  const flushed = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen);
   if (!flushed.ok) throw flushed.error;
   if (flushed.session !== session || pagedEditorRef.current?.getYrsSession() !== session) {
     throw new Error('The document changed while flushing input');

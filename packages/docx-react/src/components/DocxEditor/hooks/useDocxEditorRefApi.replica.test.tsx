@@ -2,14 +2,22 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { useRef } from 'react';
+import { useRef, type ReactNode } from 'react';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import { createYrsSession, yrsToDocument, type YrsSession } from '@betteroffice/docx/yrs';
+import {
+  createYrsSession,
+  createYrsInputPositionMap,
+  displayPositionToYrsLoc,
+  yrsLocToDisplayPosition,
+  yrsToDocument,
+  type YrsSession,
+} from '@betteroffice/docx/yrs';
 import type { Document } from '@betteroffice/docx/types/document';
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
 import type { DocxEditorRef } from '../../DocxEditor';
 import type { PagedEditorRef } from '../PagedEditor';
+import { YrsInput, type YrsInputRef } from '../YrsInput';
 import { createCommentIdAllocator } from '../commentFactories';
 import { deferWorkerOpenReplica } from '../internals/workerOpenReplica';
 import type { EditorMode } from '../internals/editing-modes';
@@ -33,8 +41,14 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-function apiFor(session: YrsSession, document: Document, mode: EditorMode = 'viewing') {
+function apiFor(
+  session: YrsSession,
+  document: Document,
+  mode: EditorMode = 'viewing',
+  replicaReadyRef?: { current: boolean }
+) {
   const events: string[] = [];
+  const inputRef = { current: null as YrsInputRef | null };
   const project = () => {
     const base = session.materializeDocx();
     return base ? yrsToDocument(session, base) : null;
@@ -42,7 +56,11 @@ function apiFor(session: YrsSession, document: Document, mode: EditorMode = 'vie
   const editor = {
     getYrsSession: () => session,
     getDocument: project,
-    flushPendingInput: async () => { events.push('flush'); },
+    flushPendingInput: async () => {
+      events.push('flush');
+      await inputRef.current?.flushPendingInput();
+    },
+    insertText: (text: string) => inputRef.current?.insertText(text),
     syncYrsInputState: () => { events.push('sync'); return true; },
     getLayout: () => null,
     getLayoutRequest: () => null,
@@ -87,13 +105,34 @@ function apiFor(session: YrsSession, document: Document, mode: EditorMode = 'vie
       settledDisplayList: async () => ({ pages: [] }),
     });
     return ref;
+  }, {
+    wrapper: replicaReadyRef ? ({ children }: { children: ReactNode }) => {
+      const map = () => createYrsInputPositionMap('body', session.paragraphSpans('body'));
+      return (
+        <div>
+          {children}
+          <YrsInput
+            ref={inputRef}
+            enabled
+            readOnly={mode === 'viewing'}
+            replicaReadyRef={replicaReadyRef}
+            session={session}
+            inputPositionMap={map}
+            displayPositionToLoc={(position) => displayPositionToYrsLoc(map(), position)}
+            locToDisplayPosition={(loc) => yrsLocToDisplayPosition(map(), loc)}
+            onStateChange={() => {}}
+            onDirectInput={() => {}}
+          />
+        </div>
+      );
+    } : undefined,
   });
   const api = hook.result.current.current;
   if (!api) throw new Error('The ref API is not mounted');
   return { api, events, pagedEditorRef };
 }
 
-async function pendingReplica(mode: EditorMode = 'viewing') {
+async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false) {
   const worker = await createYrsSession();
   const session = await createYrsSession();
   sessions.push(worker, session);
@@ -102,6 +141,7 @@ async function pendingReplica(mode: EditorMode = 'viewing') {
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });
   const opens: boolean[] = [];
+  const readiness = { current: false };
   const replica = deferWorkerOpenReplica(
     session,
     async () => {
@@ -116,9 +156,9 @@ async function pendingReplica(mode: EditorMode = 'viewing') {
       opens.push(true);
       session.openDocx(bytes, true);
     },
-    () => {}
+    () => { readiness.current = true; }
   );
-  const mounted = apiFor(session, document, mode);
+  const mounted = apiFor(session, document, mode, mountInput ? readiness : undefined);
   return { ...mounted, session, worker, replica, release, opens };
 }
 
@@ -156,7 +196,7 @@ test('async reads, save, exports and write refusals wait for the main replica', 
     api.setProposalStates(states),
     api.save(),
     api.flushPendingInput(),
-    api.exportStructuredWithPages({ expectLayoutVersion: 'before-ready' }),
+    api.exportStructuredWithPages({ revisionView: 'markup', expectLayoutVersion: 'before-ready' }),
     api.whenLayoutComplete(),
   ]);
   const completed = { value: false };
@@ -250,4 +290,16 @@ test('independent APIs do not start a replica open', async () => {
   unsubscribe();
   expect(opens).toEqual([]);
   expect(replica.pending).toBe(true);
+});
+
+test('getEditorRef immediately inserts text after synchronously finishing the replica', async () => {
+  const { api, session, replica, opens } = await pendingReplica('editing', true);
+  expect(replica.pending).toBe(true);
+  await act(async () => {
+    api.getEditorRef()!.insertText('Immediate ');
+    await api.flushPendingInput();
+  });
+  expect(replica.pending).toBe(false);
+  expect(opens).toEqual([true]);
+  expect(session.paragraphs('body')[0]!.text).toStartWith('Immediate ');
 });

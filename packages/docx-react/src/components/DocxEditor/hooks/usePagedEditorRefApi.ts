@@ -63,6 +63,7 @@ export interface PagedEditorCommandBridge {
 }
 
 interface RefApiInputs {
+  workerOpenEnabledRef: React.RefObject<boolean>;
   yrsInputRef: React.RefObject<YrsInputRef | null>;
   layout: Layout | null;
   runLayoutPipeline: (options?: { onHost?: boolean }) => void;
@@ -106,6 +107,7 @@ function storyOffsetToLoc(session: YrsSession, story: string, offset: number): Y
 function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
   const {
     yrsInputRef,
+    workerOpenEnabledRef,
     layout,
     runLayoutPipeline,
     getLayoutRequest,
@@ -196,7 +198,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     getYrsSession: () => yrsSessionRef.current,
     flushPendingInput: async () => {
       const session = yrsSessionRef.current;
-      const ready = session ? awaitWorkerOpenReplica(session) : undefined;
+      const ready = workerOpenEnabledRef.current && session ? awaitWorkerOpenReplica(session) : undefined;
       if (ready) await ready;
       const input = yrsInputRef.current;
       if (!input || !session) throw new Error('The editor input is unavailable');
@@ -272,6 +274,7 @@ export interface UsePagedEditorRefApiOptions {
   documentFromYrs: () => Document | null;
   yrsSession: YrsSession | null;
   replicaReady?: boolean;
+  experimentalWorkerOpen?: boolean;
   yrsLocToDisplayPosition: (loc: YrsLoc) => number | null;
   syncYrsInputState: (docChanged: boolean, dirtyStory?: string | readonly string[]) => boolean;
   applyYrsFormatting: (action: FormattingAction) => boolean;
@@ -297,6 +300,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     documentFromYrs,
     yrsSession,
     replicaReady = true,
+    experimentalWorkerOpen = false,
     yrsLocToDisplayPosition,
     syncYrsInputState,
     applyYrsFormatting,
@@ -305,6 +309,8 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     displayPositionToYrsLoc,
     getPositionAtPoint,
   } = opts;
+  const workerOpenEnabledRef = useRef(experimentalWorkerOpen);
+  workerOpenEnabledRef.current = experimentalWorkerOpen;
   const documentFromYrsRef = useRef(documentFromYrs);
   const yrsSessionRef = useRef(yrsSession);
   const yrsLocToDisplayPositionRef = useRef(yrsLocToDisplayPosition);
@@ -325,6 +331,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   getPositionAtPointRef.current = getPositionAtPoint;
 
   const inputs = {
+    workerOpenEnabledRef,
     yrsInputRef,
     layout,
     runLayoutPipeline,
@@ -361,6 +368,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
 }
 
 export interface UsePagedEditorCommandBridgeOptions {
+  experimentalWorkerOpen?: boolean;
   bridgeRef: React.MutableRefObject<PagedEditorCommandBridge | null> | undefined;
   yrsInputRef: React.RefObject<YrsInputRef | null>;
   session: YrsSession | null;
@@ -386,7 +394,7 @@ export function usePagedEditorCommandBridge(options: UsePagedEditorCommandBridge
     bridge.current = {
       runAfterPendingInput(operation) {
         const session = latest.current.session;
-        const ready = session ? awaitWorkerOpenReplica(session) : undefined;
+        const ready = latest.current.experimentalWorkerOpen && session ? awaitWorkerOpenReplica(session) : undefined;
         if (ready) {
           return ready.then(() => {
             if (latest.current.session !== session) throw new DocxCommandAdmissionError('editor-unavailable');
@@ -400,7 +408,7 @@ export function usePagedEditorCommandBridge(options: UsePagedEditorCommandBridge
         return input.runAfterPendingInput(operation);
       },
       hasPendingInput: () =>
-        (latest.current.session !== null && workerOpenReplicaPending(latest.current.session)) ||
+        (latest.current.experimentalWorkerOpen && latest.current.session !== null && workerOpenReplicaPending(latest.current.session)) ||
         (latest.current.yrsInputRef.current?.hasPendingInput() ?? false),
       subscribe(listener) {
         const listeners = latest.current.listenersRef.current;

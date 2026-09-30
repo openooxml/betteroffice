@@ -30,6 +30,8 @@ export interface YrsCoreSession {
   /** The seed generation `session` was created for. */
   sessionGeneration: number | null;
   replicaReady: boolean;
+  replicaReadyRef?: React.RefObject<boolean>;
+  experimentalWorkerOpen?: boolean;
   storyBlocks(storyId: string, env: YrsRenderEnv): LayoutBlock[] | null;
   bodyBlocks(env: YrsRenderEnv): LayoutBlock[] | null;
   inputPositionMap(storyId?: string): YrsInputPositionMap | null;
@@ -241,7 +243,10 @@ export function useYrsCoreSession(
   const [session, setSession] = useState<YrsSession | null>(null);
   const [sessionGeneration, setSessionGeneration] = useState<number | null>(null);
   const [replicaReady, setReplicaReady] = useState(true);
+  const replicaReadyRef = useRef(true);
   const openInWorker = workerOpen?.openInWorker;
+  const workerOpenEnabledRef = useRef(Boolean(openInWorker));
+  workerOpenEnabledRef.current = Boolean(openInWorker);
   const pendingReplicaRef = useRef<ReturnType<typeof deferWorkerOpenReplica> | null>(null);
   const inheritedFrameRef = useRef<object | null>(null);
   const renderedFrameRef = useRef(workerOpen?.renderedFrame ?? null);
@@ -250,11 +255,14 @@ export function useYrsCoreSession(
 
   useEffect(() => {
     setSession(null);
-    setReplicaReady(true);
+    if (openInWorker) {
+      replicaReadyRef.current = true;
+      setReplicaReady(true);
+    }
     if (!enabled || (!seedDocument && !seedBytes)) return;
     let cancelled = false;
     let openedWorker: WorkerOpenedDocument | null = null;
-    inheritedFrameRef.current = renderedFrameRef.current;
+    if (openInWorker) inheritedFrameRef.current = renderedFrameRef.current;
     inputPositionMapsRef.current.clear();
     projectionStoriesRef.current.clear();
     compatibilityBaseRef.current = null;
@@ -295,7 +303,10 @@ export function useYrsCoreSession(
               openedWorker = null;
             }
           }
-          if (cancelled || callbacksRef.current?.isCurrentLoad?.(seedGeneration) === false) {
+          if (
+            openInWorker &&
+            (cancelled || callbacksRef.current?.isCurrentLoad?.(seedGeneration) === false)
+          ) {
             openedWorker?.destroy();
             next.destroy();
             return;
@@ -318,11 +329,13 @@ export function useYrsCoreSession(
               },
               () => {
                 inputPositionMapsRef.current.clear();
+                replicaReadyRef.current = true;
                 worker.replicaReady();
                 setReplicaReady(true);
               }
             );
             pendingReplicaRef.current = pending;
+            replicaReadyRef.current = false;
             setReplicaReady(false);
             void pending.ready.catch((error: unknown) => {
               if (!cancelled && callbacksRef.current?.isCurrentLoad?.(seedGeneration) !== false) {
@@ -365,9 +378,11 @@ export function useYrsCoreSession(
 
     return () => {
       cancelled = true;
-      pendingReplicaRef.current?.cancel();
-      pendingReplicaRef.current = null;
-      openedWorker?.destroy();
+      if (openInWorker) {
+        pendingReplicaRef.current?.cancel();
+        pendingReplicaRef.current = null;
+        openedWorker?.destroy();
+      }
       cancelCompatibilityWarmRef.current?.();
       cancelCompatibilityWarmRef.current = null;
       retire(sessionRef.current);
@@ -388,6 +403,7 @@ export function useYrsCoreSession(
   ]);
 
   useEffect(() => {
+    if (!openInWorker) return;
     const frame = workerOpen?.renderedFrame;
     const pending = pendingReplicaRef.current;
     if (!session || !frame || frame === inheritedFrameRef.current || !pending?.pending) return;
@@ -399,7 +415,7 @@ export function useYrsCoreSession(
       frameId = requestAnimationFrame(() => pending.start());
     });
     return () => cancelAnimationFrame(frameId);
-  }, [session, workerOpen?.renderedFrame]);
+  }, [openInWorker, session, workerOpen?.renderedFrame]);
 
   // Save, export and getDocument materialize the base on first use; only a
   // host projecting every change asks for it ahead of the first edit.
@@ -408,7 +424,7 @@ export function useYrsCoreSession(
     if (
       !enabledRef.current ||
       !live ||
-      workerOpenReplicaPending(live) ||
+      (workerOpenEnabledRef.current && workerOpenReplicaPending(live)) ||
       !seedBytesRef.current ||
       compatibilityBaseRef.current ||
       cancelCompatibilityWarmRef.current
@@ -435,7 +451,7 @@ export function useYrsCoreSession(
 
   useEffect(() => {
     const onReplica = collaboration?.onReplica;
-    if (!onReplica || !session || !replicaReady) return;
+    if (!onReplica || !session || (openInWorker && !replicaReady)) return;
     onReplica(session);
     return () => onReplica(null);
   }, [collaboration?.onReplica, replicaReady, session]);
@@ -493,7 +509,7 @@ export function useYrsCoreSession(
     let base = host;
     if (!enabledRef.current || !live || !facade || !base) return null;
     try {
-      ensureWorkerOpenReplica(live);
+      if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(live);
       const compatibilityBase = compatibilityBaseRef.current ?? live.materializeDocx();
       if (compatibilityBase) {
         base = mergeDocxHostMetadata(compatibilityBase, base);
@@ -529,7 +545,9 @@ export function useYrsCoreSession(
   return {
     session,
     sessionGeneration,
-    replicaReady,
+    replicaReady: !openInWorker || replicaReady,
+    replicaReadyRef: openInWorker ? replicaReadyRef : undefined,
+    experimentalWorkerOpen: Boolean(openInWorker),
     storyBlocks,
     bodyBlocks,
     inputPositionMap,

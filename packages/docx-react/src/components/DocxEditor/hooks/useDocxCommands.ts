@@ -63,6 +63,7 @@ type StyleResolver = ReturnType<typeof createStyleResolver>;
 
 /** Everything the command binding reads from the editor, refreshed every render. */
 export interface DocxCommandInputs {
+  experimentalWorkerOpen?: boolean;
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   bridgeRef: React.RefObject<PagedEditorCommandBridge | null>;
   isLoading: boolean;
@@ -751,7 +752,7 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
       ordered: (id, args) => {
         const session = latest.current.session;
         if (
-          session && workerOpenReplicaPending(session) &&
+          latest.current.experimentalWorkerOpen && session && workerOpenReplicaPending(session) &&
           (id === 'find' || id === 'replace' || id === 'insertImage' ||
             id === 'imageProperties' || id === 'pageSetup' || id === 'watermark')
         ) return true;

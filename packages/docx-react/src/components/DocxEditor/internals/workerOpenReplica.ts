@@ -4,6 +4,7 @@ interface PendingReplica {
   ready: Promise<void>;
   start(): void;
   ensure(): void;
+  fail(error: unknown): void;
   cancel(): void;
   pending: boolean;
   initialVersion: string;
@@ -67,10 +68,13 @@ export function deferWorkerOpenReplica(
       if (failure !== undefined) throw failure;
     },
     cancel() {
+      replica.fail(new Error('The document changed while opening the replica'));
+    },
+    fail(error) {
       if (!replica.pending) return;
       replica.pending = false;
-      failure = new Error('The document changed while opening the replica');
-      reject(failure);
+      failure = error;
+      reject(error);
     },
   };
   replicas.set(session, replica);
@@ -87,6 +91,10 @@ export function awaitWorkerOpenReplica(session: YrsSession): Promise<void> | und
 
 export function ensureWorkerOpenReplica(session: YrsSession): void {
   replicas.get(session)?.ensure();
+}
+
+export function failWorkerOpenReplica(session: YrsSession, error: unknown): void {
+  replicas.get(session)?.fail(error);
 }
 
 export function workerOpenSourceVersion(session: YrsSession, version: string | null): string | null {
