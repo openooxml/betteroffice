@@ -1480,6 +1480,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // right-click → host context-menu.
     const {
       bumpInputEpoch,
+      inputEpoch,
       handlePagesContextMenu,
       handleTableInsertClick,
       tableInsertButton,
@@ -1496,9 +1497,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       syncYrsInputState,
       readOnly,
       replicaPending: () =>
-        yrsCore.experimentalWorkerOpen === true &&
-        !(yrsCore.replicaReadyRef?.current ?? yrsCore.replicaReady),
+        yrsCore.hydrateOnDemand && !(yrsCore.replicaReadyRef?.current ?? yrsCore.replicaReady),
       replicaReady: yrsCore.replicaReady,
+      requestReplica: yrsCore.requestReplica,
       partEdit,
       displayListQueries,
       canvasHostRef,
@@ -1849,6 +1850,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // Imperative-handle setup — exposes PagedEditorRef + mirrors via onReady.
     usePagedEditorRefApi({
       bumpInputEpoch,
+      inputEpoch,
       ref,
       yrsInputRef,
       layout,
@@ -1955,6 +1957,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           readOnly={readOnly || (!!partEdit && activeYrsRootStory === 'body')}
           replicaReadyRef={yrsCore.experimentalWorkerOpen ? yrsCore.replicaReadyRef : undefined}
           requestReplica={yrsCore.hydrateOnDemand ? yrsCore.requestReplica : undefined}
+          seedSelection={!yrsCore.hydrateOnDemand}
           session={yrsCore.session}
           story={activeYrsRootStory}
           isSuggesting={isSuggesting}

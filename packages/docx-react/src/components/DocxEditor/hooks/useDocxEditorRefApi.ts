@@ -33,6 +33,8 @@ import type { DocxHostSearch } from './useHostSearch';
 import {
   awaitWorkerOpenReplica,
   ensureWorkerOpenReplica,
+  requestOnDemandWorkerOpenReplica,
+  requestWorkerOpenReplica,
   workerOpenReplicaOnDemand,
 } from '../internals/workerOpenReplica';
 import {
@@ -100,6 +102,22 @@ export const DOCX_REF_REPLICA_ACCESS = {
   onSelectionChange: 'independent',
 } as const satisfies Record<keyof DocxEditorRef, 'await' | 'sync' | 'independent' | 'commands'>;
 
+/**
+ * Synchronous APIs that an on-demand replica still loading answers without loading it at once:
+ * `direct` needs no replica (the display list, print, focus, or a call that waits for the replica
+ * itself), `unselected` has nothing selected before the replica, and `request` answers as unready
+ * and asks for the replica.
+ */
+const ON_DEMAND_SYNC_ACCESS: Partial<Record<keyof DocxEditorRef, 'direct' | 'unselected' | 'request'>> = {
+  focus: 'direct',
+  scrollToPosition: 'direct',
+  openPrintPreview: 'direct',
+  print: 'direct',
+  highlightRange: 'direct',
+  getSelectionInfo: 'unselected',
+  getPositionAtPoint: 'request',
+};
+
 function withDeadline(ready: Promise<void>, timeoutMs: number | undefined): Promise<void> {
   if (timeoutMs === undefined) return ready;
   return new Promise<void>((resolve, reject) => {
@@ -143,8 +161,20 @@ function gateReplicaAccess(
           if (WORKER_PROPOSAL_ACCESS.has(key) && workerProposalAuthority(session)) {
             return Reflect.apply(call, api, args);
           }
-          if (access === 'sync') ensureWorkerOpenReplica(session);
-          else {
+          if (access === 'sync') {
+            const onDemand = workerOpenReplicaOnDemand(session) ? ON_DEMAND_SYNC_ACCESS[key] : undefined;
+            if (onDemand === 'unselected') return null;
+            if (onDemand === 'request') {
+              requestOnDemandWorkerOpenReplica(session);
+              return null;
+            }
+            // Proposals only the worker holds cannot be rebuilt here: the replica takes them over.
+            if (onDemand === undefined && workerProposalAuthority(session)?.holdsWorkerState()) {
+              void requestWorkerOpenReplica(session)?.catch(() => {});
+              return null;
+            }
+            if (onDemand === undefined) ensureWorkerOpenReplica(session);
+          } else {
             if (key === 'whenLayoutComplete' && workerOpenReplicaOnDemand(session)) {
               return Reflect.apply(call, api, args);
             }

@@ -52,7 +52,7 @@ import type {
   PagedEditorCommandBridge,
   PagedEditorSelectedImage,
 } from './usePagedEditorRefApi';
-import { workerOpenReplicaPending } from '../internals/workerOpenReplica';
+import { workerOpenReplicaOnDemand, workerOpenReplicaPending } from '../internals/workerOpenReplica';
 
 /** Outcome of the built-in save workflow. */
 export type DocxSaveOutcome = 'saved' | 'requested' | 'failed';
@@ -710,7 +710,8 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
           return (async (): Promise<DocxCommandResult> => {
             try {
               if (!editor || !session) throw new DocxCommandAdmissionError('editor-unavailable');
-              await editor.runAfterPendingInput(() => undefined);
+              // A replica still to load has no input to wait for; the pages print as shown.
+              if (!workerOpenReplicaOnDemand(session)) await editor.runAfterPendingInput(() => undefined);
               const displayList = await latest.current.renderedDisplayList();
               assertCurrent();
               await job.prepare(displayList);

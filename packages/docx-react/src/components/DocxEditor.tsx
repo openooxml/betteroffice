@@ -75,6 +75,7 @@ import {
 import { useCanvasOverlayTarget } from './DocxEditor/internals/useCanvasOverlayTarget';
 import { isWithinPageArea } from './DocxEditor/internals/pageAreaRouting';
 import { requestWorkerOpenReplica } from './DocxEditor/internals/workerOpenReplica';
+import { pagePressNeedsReplica } from './DocxEditor/internals/replicaTriggers';
 import { useImageActions } from './DocxEditor/hooks/useImageActions';
 import { useDocxEditorRefApi } from './DocxEditor/hooks/useDocxEditorRefApi';
 import {
@@ -1249,7 +1250,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             refreshWorkerLayout: () => pagedEditorRef.current?.refreshWorkerLayout(),
             renderedFrame: canvasRenderer.status === 'ready' ? canvasRenderer.displayList : null,
             pendingCompletion: canvasRenderer.pendingCompletion,
-            completingLayout: canvasRenderer.completingLayout,
             hydrateOnDemand: workerProposals,
             onWorkerContentChange: () => workerContentChangeRef.current(),
             onWorkerRevisions: () => workerRevisionsRef.current(),
@@ -2182,7 +2182,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     allSidebarItems.some((item) => !item.hidden) || (opening && showCommentsSidebar);
 
   const requestReplica = yrsCore.requestReplica;
-  const replicaPending = Boolean(experimentalWorkerOpen && yrsCore.session && !yrsCore.replicaReady);
+  const replicaPending = Boolean(
+    experimentalWorkerOpen && yrsCore.hydrateOnDemand && yrsCore.session && !yrsCore.replicaReady
+  );
   // Sidebars and the outline read the replica; so do plugins and geometry callbacks, unless the
   // worker serves them proposals.
   const replicaWanted =
@@ -2199,14 +2201,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   useEffect(() => {
     if (experimentalWorkerOpen && replicaReady && showOutlineRef.current) refreshHeadings();
   }, [experimentalWorkerOpen, replicaReady, refreshHeadings, showOutlineRef]);
-  // A pointer on a page needs the replica; plugin overlays do not. The input asks for itself.
+  // A tap asks through its gesture, the input for itself.
   useEffect(() => {
     const content = editorContentRef.current;
     if (!replicaPending || !content) return;
-    const onPointer = (event: Event) => {
-      if (event.target instanceof Element && event.target.closest('.canvas-page') !== null) {
-        requestReplica();
-      }
+    const onPointer = (event: PointerEvent) => {
+      if (pagePressNeedsReplica(event)) requestReplica();
     };
     content.addEventListener('pointerdown', onPointer, true);
     return () => content.removeEventListener('pointerdown', onPointer, true);

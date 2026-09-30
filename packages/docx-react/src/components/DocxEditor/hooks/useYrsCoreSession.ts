@@ -99,8 +99,6 @@ interface WorkerOpenOptions {
   refreshWorkerLayout?: () => void;
   /** The engine whose provisional layout is shown with the rest not yet asked of the worker. */
   pendingCompletion?: unknown;
-  /** The engine whose provisional layout the worker has not yet finished completing. */
-  completingLayout?: unknown;
   /** Leaves the replica unhydrated until a caller needs it; see requestReplica. */
   hydrateOnDemand?: boolean;
   /** A worker-held proposal changed document content. */
@@ -372,7 +370,30 @@ export function useYrsCoreSession(
   // Asks the worker whether the document has tracked changes, once per session.
   const revisionQueryRef = useRef<(() => void) | null>(null);
   const workerLaidOutRef = useRef<(() => void) | null>(null);
+  // An on-demand replica loads once wanted and past the point main's automatic load waits for.
+  const replicaGateRef = useRef<{ reached: boolean; wanted: boolean } | null>(null);
+  const requestReplicaRef = useRef<(() => void) | null>(null);
   const replicaWaitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const openReplicaGate = useCallback((): void => {
+    const gate = replicaGateRef.current;
+    const start = startReplicaRef.current;
+    if (!gate || !start) return;
+    if (!gate.reached) {
+      gate.reached = true;
+      if (hydrateOnDemandRef.current) revisionQueryRef.current?.();
+    }
+    if (!hydrateOnDemandRef.current || gate.wanted) start();
+  }, []);
+  const armReplicaGate = useCallback(
+    (delayMs: number): void => {
+      if (replicaWaitTimerRef.current !== null) clearTimeout(replicaWaitTimerRef.current);
+      replicaWaitTimerRef.current = setTimeout(() => {
+        replicaWaitTimerRef.current = null;
+        openReplicaGate();
+      }, delayMs);
+    },
+    [openReplicaGate]
+  );
   const inheritedFrameRef = useRef<object | null>(null);
   const renderedFrameRef = useRef(workerOpen?.renderedFrame ?? null);
   renderedFrameRef.current = workerOpen?.renderedFrame ?? null;
@@ -613,6 +634,11 @@ export function useYrsCoreSession(
             inheritedFrameRef.current = renderedFrameRef.current;
             const worker = openedWorker;
             const source = bytes;
+            const gate = { reached: false, wanted: false };
+            const request = (): void => {
+              gate.wanted = true;
+              if (gate.reached) startReplicaRef.current?.();
+            };
             const pending = deferWorkerOpenReplica(
               next,
               async () => {
@@ -640,7 +666,7 @@ export function useYrsCoreSession(
                 worker.replicaReady();
                 setReplicaReady(true);
               },
-              () => hydrateOnDemandRef.current
+              { active: () => hydrateOnDemandRef.current, request }
             );
             if (workerOpenRef.current?.workerProposals) {
               const laidOut = new Promise<void>((resolve) => {
@@ -662,6 +688,8 @@ export function useYrsCoreSession(
               });
             }
             pendingReplicaRef.current = pending;
+            replicaGateRef.current = gate;
+            requestReplicaRef.current = request;
             let revisionsQueried = false;
             revisionQueryRef.current = () => {
               if (revisionsQueried) return;
@@ -674,11 +702,11 @@ export function useYrsCoreSession(
                   if (workerOpenRef.current?.onWorkerRevisions) {
                     workerOpenRef.current.onWorkerRevisions();
                   } else {
-                    startReplicaRef.current?.();
+                    request();
                   }
                 },
                 () => {
-                  if (!stale() && sessionRef.current === next) startReplicaRef.current?.();
+                  if (!stale() && sessionRef.current === next) request();
                 }
               );
             };
@@ -736,9 +764,7 @@ export function useYrsCoreSession(
         setSession(next);
         setPreviewing(false);
         setSessionGeneration(seedGeneration);
-        if (openedWorker && startReplicaRef.current && !hydrateOnDemandRef.current) {
-          replicaWaitTimerRef.current = setTimeout(startReplicaRef.current, REPLICA_OPEN_WAIT_MS);
-        }
+        if (openedWorker && startReplicaRef.current) armReplicaGate(REPLICA_OPEN_WAIT_MS);
         if (host) callbacksRef.current?.onHostDocument?.(host, seedGeneration, next);
       })
       .catch((error) => {
@@ -756,6 +782,8 @@ export function useYrsCoreSession(
       revisionQueryRef.current = null;
       workerLaidOutRef.current?.();
       workerLaidOutRef.current = null;
+      replicaGateRef.current = null;
+      requestReplicaRef.current = null;
       if (replicaWaitTimerRef.current !== null) clearTimeout(replicaWaitTimerRef.current);
       replicaWaitTimerRef.current = null;
       openedWorker?.destroy();
@@ -808,21 +836,13 @@ export function useYrsCoreSession(
     }
     // The replica blocks this thread: it loads once the worker is laying out the rest.
     if (workerOpen?.pendingCompletion === session) return;
-    // Asked after the first frame and the layout's completion, so it delays neither.
-    if (workerOpen?.hydrateOnDemand) {
-      if (workerOpen.completingLayout !== session) revisionQueryRef.current?.();
-      return;
-    }
-    if (replicaWaitTimerRef.current !== null) {
-      clearTimeout(replicaWaitTimerRef.current);
-    }
-    replicaWaitTimerRef.current = setTimeout(start, REPLICA_FRAME_WAIT_MS);
+    armReplicaGate(REPLICA_FRAME_WAIT_MS);
     if (typeof requestAnimationFrame !== 'function') {
-      const timer = setTimeout(start, 0);
+      const timer = setTimeout(openReplicaGate, 0);
       return () => clearTimeout(timer);
     }
     let frameId = requestAnimationFrame(() => {
-      frameId = requestAnimationFrame(start);
+      frameId = requestAnimationFrame(openReplicaGate);
     });
     return () => cancelAnimationFrame(frameId);
   }, [
@@ -830,7 +850,6 @@ export function useYrsCoreSession(
     session,
     workerOpen?.renderedFrame,
     workerOpen?.pendingCompletion,
-    workerOpen?.completingLayout,
     workerOpen?.hydrateOnDemand,
     previewing,
     handoffFrom,
@@ -856,7 +875,7 @@ export function useYrsCoreSession(
   }, [hydrateOnDemand, openInWorker]);
 
   const requestReplica = useCallback((): void => {
-    startReplicaRef.current?.();
+    requestReplicaRef.current?.();
   }, []);
 
   const notifyFramePresented = useCallback((engine: unknown): void => {

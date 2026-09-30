@@ -1572,11 +1572,9 @@ test('a provisional layout paints first and settles only once the full layout fo
   }
 });
 
-test('with worker open, a provisional layout names its engine until the rest is asked of the worker and completed', async () => {
+test('with worker open, a provisional layout names its engine until the rest is asked of the worker', async () => {
   const { native, layoutJson, frame, engine } = setup();
   try {
-    const fullLayoutJson = native.layout_document_with_regions_retained_json(REQUEST);
-    const fullFrame = native.build_display_list_frame(JSON.stringify({}), 1);
     const { result, rerender, unmount } = renderHook(
       ({ layout, source }) =>
         useRustDisplayList(
@@ -1593,7 +1591,6 @@ test('with worker open, a provisional layout names its engine until the rest is 
       { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
     );
     expect(result.current.pendingCompletion).toBeNull();
-    expect(result.current.completingLayout).toBeNull();
     const pending = result.current.layoutInWorker(engine, REQUEST);
     const worker = FakeWorker.last!;
     worker.reply({
@@ -1612,7 +1609,6 @@ test('with worker open, a provisional layout names its engine until the rest is 
     });
     await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(1));
     expect(result.current.pendingCompletion).toBe(engine);
-    expect(result.current.completingLayout).toBe(engine);
     expect(worker.posted).toHaveLength(1);
     await act(async () => {
       void result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
@@ -1621,20 +1617,6 @@ test('with worker open, a provisional layout names its engine until the rest is 
     await waitFor(() => expect(worker.posted).toHaveLength(3));
     expect(worker.posted[2]).toMatchObject({ type: 'completeLayout' });
     expect(result.current.pendingCompletion).toBeNull();
-    expect(result.current.completingLayout).toBe(engine);
-    worker.reply({
-      id: worker.posted[2].id,
-      ok: true,
-      frame: fullFrame.slice().buffer,
-      caret: { frameEpoch: 2, caretRect: null },
-      selection: null,
-      layoutRevision: 1,
-      layoutJson: fullLayoutJson,
-    });
-    await act(async () => {
-      await provisional!.complete;
-    });
-    await waitFor(() => expect(result.current.completingLayout).toBeNull());
     unmount();
   } finally {
     native.free();

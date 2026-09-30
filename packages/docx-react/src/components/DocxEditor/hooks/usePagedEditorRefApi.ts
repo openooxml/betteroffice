@@ -22,7 +22,11 @@ import {
 } from '../yrsToolbar';
 import { DocxCommandAdmissionError } from '../../../commands/createDocxCommandStore';
 import type { RevealPositionOutcome } from './usePagedScrollApi';
-import { awaitWorkerOpenReplica, workerOpenReplicaPending } from '../internals/workerOpenReplica';
+import {
+  awaitWorkerOpenReplica,
+  workerOpenReplicaOnDemand,
+  workerOpenReplicaPending,
+} from '../internals/workerOpenReplica';
 
 /** The image under a one-unit selection. */
 export interface PagedEditorSelectedImage {
@@ -64,6 +68,7 @@ export interface PagedEditorCommandBridge {
 
 interface RefApiInputs {
   bumpInputEpochRef: React.RefObject<(() => void) | undefined>;
+  inputEpochRef: React.RefObject<(() => number) | undefined>;
   workerOpenEnabledRef: React.RefObject<boolean>;
   yrsInputRef: React.RefObject<YrsInputRef | null>;
   layout: Layout | null;
@@ -110,9 +115,12 @@ function storyOffsetToLoc(session: YrsSession, story: string, offset: number): Y
   return { story, paraId: last.paraId, offset: span.end - span.start };
 }
 
+const READER_INPUT = ['wheel', 'touchmove', 'pointerdown', 'keydown'] as const;
+
 function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
   const {
     bumpInputEpochRef,
+    inputEpochRef,
     yrsInputRef,
     workerOpenEnabledRef,
     layout,
@@ -260,13 +268,41 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     },
     highlightRange: (from, to) => {
       bumpInputEpochRef.current?.();
-      const projection = getYrsPositionProjectionRef.current();
-      if (!projection || !Number.isFinite(from) || !Number.isFinite(to) || from < 0 || from > to)
+      const highlight = (): void => {
+        const projection = getYrsPositionProjectionRef.current();
+        if (!projection || !Number.isFinite(from) || !Number.isFinite(to) || from < 0 || from > to)
+          return;
+        const end = Math.min(to, projection.size);
+        if (from > projection.size) return;
+        setDisplaySelection(from, end);
+        scrollToPositionImpl(from, true);
+      };
+      const session = yrsSessionRef.current;
+      if (!session || !workerOpenReplicaOnDemand(session)) {
+        highlight();
         return;
-      const end = Math.min(to, projection.size);
-      if (from > projection.size) return;
-      setDisplaySelection(from, end);
-      scrollToPositionImpl(from, true);
+      }
+      // Runs once the replica has loaded, unless newer input or the reader's own navigation came first.
+      const epoch = inputEpochRef.current?.();
+      let navigated = false;
+      const onReaderInput = (): void => {
+        navigated = true;
+      };
+      for (const type of READER_INPUT) {
+        document.addEventListener(type, onReaderInput, { capture: true, passive: true });
+      }
+      const stop = (): void => {
+        for (const type of READER_INPUT) document.removeEventListener(type, onReaderInput, true);
+      };
+      void awaitWorkerOpenReplica(session)?.then(
+        () => {
+          stop();
+          if (!navigated && yrsSessionRef.current === session && inputEpochRef.current?.() === epoch) {
+            highlight();
+          }
+        },
+        stop
+      );
     },
     scrollToCommentId: (commentId) => {
       bumpInputEpochRef.current?.();
@@ -299,6 +335,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
 
 export interface UsePagedEditorRefApiOptions {
   bumpInputEpoch?: () => void;
+  inputEpoch?: () => number;
   ref: React.Ref<PagedEditorRef>;
   yrsInputRef: React.RefObject<YrsInputRef | null>;
   layout: Layout | null;
@@ -331,6 +368,7 @@ export interface UsePagedEditorRefApiOptions {
 export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   const {
     bumpInputEpoch,
+    inputEpoch,
     ref,
     yrsInputRef,
     layout,
@@ -357,6 +395,8 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   } = opts;
   const bumpInputEpochRef = useRef(bumpInputEpoch);
   bumpInputEpochRef.current = bumpInputEpoch;
+  const inputEpochRef = useRef(inputEpoch);
+  inputEpochRef.current = inputEpoch;
   const workerOpenEnabledRef = useRef(experimentalWorkerOpen);
   workerOpenEnabledRef.current = experimentalWorkerOpen;
   const documentFromYrsRef = useRef(documentFromYrs);
@@ -382,6 +422,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
 
   const inputs = {
     bumpInputEpochRef,
+    inputEpochRef,
     workerOpenEnabledRef,
     yrsInputRef,
     layout,
