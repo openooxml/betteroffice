@@ -169,6 +169,7 @@ export function useDocxEditorRefApi({
   zoom,
   setZoom,
   scrollPageInfo,
+  readCurrentPage,
   loadParsedDocument,
   loadBuffer,
   comments,
@@ -195,6 +196,8 @@ export function useDocxEditorRefApi({
   zoom: number;
   setZoom: (zoom: number) => void;
   scrollPageInfo: { currentPage: number; totalPages: number; visible: boolean };
+  /** The page the scroll position shows now, where it can be read. */
+  readCurrentPage?: () => number | null;
   loadParsedDocument: (doc: Document) => void;
   loadBuffer: (buffer: DocxInput) => Promise<void>;
   comments: Comment[];
@@ -233,7 +236,7 @@ export function useDocxEditorRefApi({
       setZoom,
       getZoom: () => zoom,
       focus: () => pagedEditorRef.current?.focus(),
-      getCurrentPage: () => scrollPageInfo.currentPage,
+      getCurrentPage: () => readCurrentPage?.() ?? scrollPageInfo.currentPage,
       getTotalPages: () =>
         awaitingDocument?.() ? 0 : documentPageCount(pagedEditorRef.current?.getLayout()),
       whenLayoutComplete: async (options) => {
@@ -500,7 +503,7 @@ export function useDocxEditorRefApi({
       documentFromYrs,
       zoom,
       scrollPageInfo,
-      scrollPageInfo,
+      readCurrentPage,
       handleSave,
       loadParsedDocument,
       loadBuffer,

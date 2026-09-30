@@ -216,8 +216,207 @@ fn replace_range_suggesting_shares_one_revision_id() {
     );
     assert_eq!(
         doc.para_text(&para, TextView::Raw).unwrap(),
-        "alpha BETAbeta gamma"
+        "alpha betaBETA gamma"
     );
+    let inserted = receipt.range.as_ref().unwrap();
+    assert_eq!(
+        doc.locate_range(inserted).unwrap(),
+        StoryRange::new("body", 10, 14)
+    );
+    assert_eq!(doc.text_between(inserted, TextView::Raw).unwrap(), "BETA");
+}
+
+#[test]
+fn replace_range_suggesting_follows_retained_text_and_retracts_own_insertions() {
+    for rich in [false, true] {
+        for accept in [false, true] {
+            let (doc, _) = doc_with("abcdef");
+            doc.insert_text(
+                &sug("Alice"),
+                Position::new("body", 2),
+                "ZZ",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+            doc.insert_text(
+                &sug("Bob"),
+                Position::new("body", 5),
+                "XY",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+            let range = StoryRange::new("body", 1, 9);
+            let receipt = if rich {
+                doc.replace_range_rich(
+                    &sug("Bob"),
+                    range,
+                    &[RichRun {
+                        text: "NEW".to_owned(),
+                        ..RichRun::default()
+                    }],
+                )
+            } else {
+                doc.replace_range(&sug("Bob"), range, "NEW")
+            }
+            .unwrap();
+            assert_eq!(raw_text(&doc), "abZZcdeNEWf");
+            let inserted = receipt.range.as_ref().unwrap();
+            assert_eq!(
+                doc.locate_range(inserted).unwrap(),
+                StoryRange::new("body", 7, 10)
+            );
+            assert_eq!(doc.text_between(inserted, TextView::Raw).unwrap(), "NEW");
+            let nested = seg_attrs(&doc, "ZZ");
+            assert_eq!(revision_author_of(&nested, "ins").as_deref(), Some("Alice"));
+            assert_eq!(revision_author_of(&nested, "del").as_deref(), Some("Bob"));
+            let target = ChangeTarget::Revision(receipt.revision_ids[0].clone());
+            if accept {
+                doc.accept_change(&ctx(), &target).unwrap();
+                assert_eq!(raw_text(&doc), "aNEWf");
+            } else {
+                doc.reject_change(&ctx(), &target).unwrap();
+                assert_eq!(raw_text(&doc), "abZZcdef");
+                assert!(!active(&seg_attrs(&doc, "ZZ"), "del"));
+            }
+        }
+    }
+}
+
+#[test]
+fn replace_range_suggesting_across_paragraphs_follows_the_struck_pilcrow() {
+    for rich in [false, true] {
+        for accept in [false, true] {
+            let (doc, first) = doc_with("onetwo");
+            let split = doc
+                .split_paragraph(&ctx(), Position::new("body", 3), None)
+                .unwrap();
+            let range = StoryRange::new("body", 2, 5);
+            let receipt = if rich {
+                doc.replace_range_rich(
+                    &sug("Bob"),
+                    range,
+                    &[RichRun {
+                        text: "X".to_owned(),
+                        ..RichRun::default()
+                    }],
+                )
+            } else {
+                doc.replace_range(&sug("Bob"), range, "X")
+            }
+            .unwrap();
+            let paragraphs = doc.paragraphs("body").unwrap();
+            assert_eq!(paragraphs[0].para_id, first);
+            assert_eq!(paragraphs[0].text, "one");
+            assert_eq!(paragraphs[1].text, "tXwo");
+            assert!(active(&paragraphs[0].properties, "pPrDel"));
+            assert_eq!(
+                receipt.range,
+                Some(LocRange::new(
+                    Loc::new("body", split.second_para_id.clone(), 1),
+                    Loc::new("body", split.second_para_id, 2),
+                ))
+            );
+            let target = ChangeTarget::Revision(receipt.revision_ids[0].clone());
+            if accept {
+                doc.accept_change(&ctx(), &target).unwrap();
+                let paragraphs = doc.paragraphs("body").unwrap();
+                assert_eq!(paragraphs.len(), 1);
+                assert_eq!(paragraphs[0].text, "onXwo");
+            } else {
+                doc.reject_change(&ctx(), &target).unwrap();
+                let paragraphs = doc.paragraphs("body").unwrap();
+                assert_eq!(paragraphs.len(), 2);
+                assert_eq!(paragraphs[0].text, "one");
+                assert_eq!(paragraphs[1].text, "two");
+                assert!(!active(&paragraphs[0].properties, "pPrDel"));
+            }
+        }
+    }
+}
+
+#[test]
+fn replace_range_suggesting_clamps_before_the_final_pilcrow() {
+    for rich in [false, true] {
+        for accept in [false, true] {
+            let (doc, para) = doc_with("abc");
+            doc.insert_text(
+                &sug("Bob"),
+                Position::new("body", 3),
+                "XY",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+            let range = StoryRange::new("body", 0, doc.story_len("body").unwrap());
+            let receipt = if rich {
+                doc.replace_range_rich(
+                    &sug("Bob"),
+                    range,
+                    &[RichRun {
+                        text: "Z".to_owned(),
+                        ..RichRun::default()
+                    }],
+                )
+            } else {
+                doc.replace_range(&sug("Bob"), range, "Z")
+            }
+            .unwrap();
+            assert_eq!(raw_text(&doc), "abcZ");
+            assert_eq!(doc.story_len("body").unwrap(), 5);
+            assert_eq!(
+                receipt.range,
+                Some(LocRange::new(
+                    Loc::new("body", para.clone(), 3),
+                    Loc::new("body", para.clone(), 4),
+                ))
+            );
+            let paragraphs = doc.paragraphs("body").unwrap();
+            assert_eq!(paragraphs.len(), 1);
+            assert_eq!(paragraphs[0].para_id, para);
+            assert!(!active(&paragraphs[0].properties, "pPrDel"));
+            let segments = doc.story_segments("body").unwrap();
+            assert!(!active(&segments.last().unwrap().attributes, "del"));
+            let target = ChangeTarget::Revision(receipt.revision_ids[0].clone());
+            if accept {
+                doc.accept_change(&ctx(), &target).unwrap();
+                assert_eq!(raw_text(&doc), "Z");
+            } else {
+                doc.reject_change(&ctx(), &target).unwrap();
+                assert_eq!(raw_text(&doc), "abc");
+            }
+        }
+    }
+}
+
+#[test]
+fn replace_range_suggesting_collapsed_inserts_at_the_caret() {
+    for rich in [false, true] {
+        let (doc, _) = doc_with("abc");
+        let range = StoryRange::new("body", 1, 1);
+        let receipt = if rich {
+            doc.replace_range_rich(
+                &sug("Bob"),
+                range,
+                &[RichRun {
+                    text: "X".to_owned(),
+                    ..RichRun::default()
+                }],
+            )
+        } else {
+            doc.replace_range(&sug("Bob"), range, "X")
+        }
+        .unwrap();
+        assert_eq!(raw_text(&doc), "aXbc");
+        assert_eq!(
+            doc.locate_range(receipt.range.as_ref().unwrap()).unwrap(),
+            StoryRange::new("body", 1, 2)
+        );
+        assert_eq!(
+            revision_author_of(&seg_attrs(&doc, "X"), "ins").as_deref(),
+            Some("Bob")
+        );
+        assert!(!active(&seg_attrs(&doc, "a"), "del"));
+        assert!(!active(&seg_attrs(&doc, "bc"), "del"));
+    }
 }
 
 #[test]

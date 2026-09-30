@@ -161,6 +161,17 @@ describe('YrsSession host proposals', () => {
     for (const id of record!.revisionIds) expect(listed.has(id)).toBe(true);
     expect(texts(session, 'accepted')[0]).toBe('Hello earth');
     expect(texts(session, 'original')[0]).toBe('Hello world');
+    const revised = session
+      .storySegments('body')
+      .filter(
+        (segment) =>
+          segment.kind === 'text' && (segment.attributes.del || segment.attributes.ins)
+      );
+    expect(revised.map((segment) => (segment.kind === 'text' ? segment.text : '')).join('')).toBe(
+      'worldearth'
+    );
+    expect(revised[0]!.attributes.del).toMatchObject({ author: 'Atira' });
+    expect(revised.at(-1)!.attributes.ins).toMatchObject({ author: 'Atira' });
     expect(session.listRevisions().every((revision) => revision.author === 'Atira')).toBe(true);
   });
 
