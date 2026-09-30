@@ -1620,9 +1620,10 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     findText: (request) => facade.findText(request),
     readParagraphs: (request) => facade.readParagraphs(request),
     applyEdits: (request) => facade.applyEdits(request),
-    settleRevisions: (accept, reject, stories) => {
-      markDirty(stories);
+    settleRevisions: (accept, reject) => {
+      const since = facade.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
       session.settle_revisions_json(JSON.stringify({ accept, reject }));
+      markDirty(facade.storiesChangedSince(since).stories);
     },
   });
 

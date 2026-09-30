@@ -105,15 +105,8 @@ export interface DocxProposalSession {
   findText(request: DocxFindTextRequest): DocxFindTextResult;
   readParagraphs(request: DocxReadParagraphsRequest): DocxReadParagraphsResult;
   applyEdits(request: DocxEditRequest): DocxEditResult;
-  /**
-   * Accepts and rejects revisions for good, outside undo history, in the given stories; unknown
-   * ids are skipped.
-   */
-  settleRevisions(
-    accept: readonly string[],
-    reject: readonly string[],
-    stories: readonly string[]
-  ): void;
+  /** Accepts and rejects revisions for good, outside undo history; unknown ids are skipped. */
+  settleRevisions(accept: readonly string[], reject: readonly string[]): void;
 }
 
 /** @internal */
@@ -646,10 +639,8 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     }
     const accept: string[] = [];
     const reject: string[] = [];
-    const stories = new Set<string>();
     for (const id of withdrawn) {
       const { record } = records.get(id)!;
-      if (record.revisionIds.length > 0) stories.add(record.paragraph.story);
       for (const revisionId of record.revisionIds) {
         const other = kept.get(revisionId);
         if (other !== undefined) {
@@ -662,7 +653,7 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
         (record.state === 'accepted' ? accept : reject).push(revisionId);
       }
     }
-    if (stories.size > 0) session.settleRevisions(accept, reject, [...stories]);
+    if (accept.length > 0 || reject.length > 0) session.settleRevisions(accept, reject);
     let decided = false;
     for (const id of withdrawn) {
       decided ||= records.get(id)!.record.state !== 'proposed';

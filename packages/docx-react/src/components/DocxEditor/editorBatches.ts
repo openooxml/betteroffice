@@ -137,7 +137,7 @@ export async function applyEditBatch<Refusal = never>(
 
 /**
  * The ref's proposal path: the host-proposal gate, an input flush, the gate again, the session
- * call, then one refresh of the stories that new or withdrawn proposals changed. Throws when the
+ * call, then one refresh of the stories new proposals or a withdrawal changed. Throws when the
  * document is unavailable or replaced while flushing.
  */
 export async function applyProposalCall(
@@ -159,19 +159,16 @@ export async function applyProposalCall(
     throw new Error('The document changed while flushing input');
   }
   if (!allowed()) return denied(session);
-  const known = session.getProposals().proposals;
+  const known = new Set(session.getProposals().proposals.map((proposal) => proposal.id));
+  const since = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
   const result = call(session);
   if (!result.ok) return result;
-  const before = new Set(known.map((proposal) => proposal.id));
-  const after = new Set(result.snapshot.proposals.map((proposal) => proposal.id));
-  const stories = new Set(
-    [
-      ...result.snapshot.proposals.filter((proposal) => !before.has(proposal.id)),
-      ...known.filter((proposal) => !after.has(proposal.id)),
-    ]
-      .filter((proposal) => proposal.changed)
-      .map((proposal) => proposal.paragraph.story)
-  );
+  const stories = new Set([
+    ...result.snapshot.proposals
+      .filter((proposal) => proposal.changed && !known.has(proposal.id))
+      .map((proposal) => proposal.paragraph.story),
+    ...session.storiesChangedSince(since).stories,
+  ]);
   if (stories.size > 0) {
     try {
       flushed.editor.syncYrsInputState(true, [...stories]);

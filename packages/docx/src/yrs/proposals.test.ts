@@ -64,6 +64,10 @@ const FILLABLE = [
   paragraph('0000F007', ''),
   paragraph('0000F007', ''),
   paragraph('0000F008', run('Keep this sentence.')),
+  paragraph(
+    '0000F009',
+    `<w:del w:id="42" w:author="Bob" w:date="2026-09-01T00:00:00Z"><w:r><w:delText>gone</w:delText></w:r></w:del>`
+  ),
 ].join('');
 
 function fixture(body = DOCUMENT): Uint8Array {
@@ -718,6 +722,10 @@ describe('YrsSession host proposals', () => {
       ok: false,
       failure: { code: 'ambiguous-target', proposalId: 'twin' },
     });
+    expect(propose(session, replace('struck', '0000F009', '', 'x'))).toMatchObject({
+      ok: false,
+      failure: { code: 'tracked-revision-conflict', proposalId: 'struck' },
+    });
     expect(
       propose(
         session,
@@ -749,6 +757,7 @@ describe('YrsSession host proposals', () => {
       ok: false,
       failure: { code: 'missing-target' },
     });
+    await saveYrsDocx(session);
     const events: DocxProposalSnapshot[] = [];
     session.onProposalChange((snapshot) => events.push(snapshot));
     const before = session.version();
@@ -776,6 +785,12 @@ describe('YrsSession host proposals', () => {
       new Set(withdrawn.proposals[0]!.revisionIds)
     );
     expect(session.canUndo()).toBe(false);
+    const saved = new TextDecoder().decode(
+      unzipContainer((await saveYrsDocx(session)).bytes)['word/document.xml']
+    );
+    expect(saved.match(/<w:(ins|del) /g)).toHaveLength(2);
+    expect(saved).not.toContain('>that<');
+    expect(saved).not.toContain('>Tail<');
 
     snapshotOf(propose(session, replace('again', '00000003', 'this', 'the')));
     expect(texts(session, 'accepted')[2]).toBe('Keep the sentence.');
