@@ -31,7 +31,7 @@ function reply(version = 'worker-1', changedStories: string[] = []): ResidentPro
     mirror: { version, proposals: { previewVersion: 0, entries: [] } },
     result: { ok: true, snapshot: { version, previewVersion: 0, proposals: [] } },
     changedStories,
-    geometry: { version, previewVersion: 0, targets: {}, hidden: [] },
+    geometry: { version, previewVersion: 0, proposals: '[]', targets: {}, hidden: [] },
     updates: [],
     stateVector: new Uint8Array(),
   };
