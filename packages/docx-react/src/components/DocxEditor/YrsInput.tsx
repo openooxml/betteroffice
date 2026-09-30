@@ -1098,7 +1098,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       compositionCommitRef.current =
         event.currentTarget.value || event.data || compositionCommitRef.current;
       queueMicrotask(() => {
-        if (!compositionPendingRef.current || inputLifetimeRef.current.session !== session) return;
+        if (!compositionPendingRef.current || !isCurrentInput(session)) return;
         const text = textareaRef.current?.value || compositionCommitRef.current;
         // Reset the browser model before applying the document op. A trailing
         // post-composition beforeinput therefore observes an empty model and
@@ -1112,7 +1112,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         onPendingInputChangeRef.current?.(inputOperationQueueRef.current?.hasPending() ?? false);
       });
     },
-    [insertText, session]
+    [insertText, isCurrentInput, session]
   );
 
   const handleInput = useCallback(
