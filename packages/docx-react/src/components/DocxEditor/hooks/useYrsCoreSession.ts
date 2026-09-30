@@ -170,21 +170,28 @@ export function dirtyProjectionStory(activeStory: string): string {
 
 /**
  * Frees sessions the editor let go of. Consumers' effects in the commit that replaces a session
- * still run with the session they rendered, so `retire` keeps that one until they render without
- * it; any other session is freed at once, and unmounting frees every retired one.
+ * still run with the session they rendered, and the renderer keeps the engines in `held` (its
+ * layout's) until the next document's layout replaces them, so `retire` keeps such a session
+ * until neither renders with it; any other session is freed at once, and unmounting frees every
+ * retired one.
  */
-function useRetiredSessions(session: YrsSession | null): (replaced: YrsSession | null) => void {
-  const renderedRef = useRef(session);
-  renderedRef.current = session;
+function useRetiredSessions(
+  session: YrsSession | null,
+  /** A fixed number of holders on every render: the effect compares them slot by slot. */
+  held: readonly unknown[]
+): (replaced: YrsSession | null) => void {
+  const renderedRef = useRef({ session, held });
+  renderedRef.current = { session, held };
   const retiredRef = useRef(new Set<YrsSession>());
   const unmountedRef = useRef(false);
   useEffect(() => {
     for (const retired of retiredRef.current) {
-      if (retired === session) continue;
+      if (retired === session || held.includes(retired)) continue;
       retiredRef.current.delete(retired);
       retired.destroy();
     }
-  }, [session]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, ...held]);
   useEffect(() => {
     unmountedRef.current = false;
     return () => {
@@ -195,8 +202,15 @@ function useRetiredSessions(session: YrsSession | null): (replaced: YrsSession |
   }, []);
   return useCallback((replaced: YrsSession | null): void => {
     if (!replaced) return;
-    if (replaced === renderedRef.current && !unmountedRef.current) retiredRef.current.add(replaced);
-    else replaced.destroy();
+    const rendered = renderedRef.current;
+    if (
+      !unmountedRef.current &&
+      (replaced === rendered.session || rendered.held.includes(replaced))
+    ) {
+      retiredRef.current.add(replaced);
+    } else {
+      replaced.destroy();
+    }
   }, []);
 }
 
@@ -208,7 +222,11 @@ export function useYrsCoreSession(
   seedGeneration: number,
   collaboration?: DocxEditorCollaborationOptions,
   callbacks?: YrsCoreSessionCallbacks,
-  mediaTokens?: boolean
+  options?: {
+    /** The engine the renderer still builds with; a replaced session it names lives on. */
+    heldEngine?: unknown;
+    mediaTokens?: boolean;
+  }
 ): YrsCoreSession {
   const collaborationClientId = collaboration?.clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
@@ -222,15 +240,15 @@ export function useYrsCoreSession(
   const cancelCompatibilityWarmRef = useRef<(() => void) | null>(null);
   const seedBytesRef = useRef(seedBytes);
   seedBytesRef.current = seedBytes;
-  const mediaTokensRef = useRef(mediaTokens);
-  mediaTokensRef.current = mediaTokens;
+  const mediaTokensRef = useRef(options?.mediaTokens);
+  mediaTokensRef.current = options?.mediaTokens;
   const inputPositionMapsRef = useRef(new Map<string, YrsInputPositionMap>());
   const projectionStoriesRef = useRef(new Set<string>());
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
   const [session, setSession] = useState<YrsSession | null>(null);
   const [sessionGeneration, setSessionGeneration] = useState<number | null>(null);
-  const retire = useRetiredSessions(session);
+  const retire = useRetiredSessions(session, [options?.heldEngine ?? null]);
 
   useEffect(() => {
     setSession(null);

@@ -23,9 +23,24 @@ export type ResidentEngineWorkerRequest =
        * marked `layoutProvisional` is finished by `completeLayout`.
        */
       provisionalPages?: number;
+      /** Lay out the document `open` seeded here, not the snapshot's state. */
+      opened?: boolean;
       /** The most the worker's editing core may allocate at once. */
       heapLimitBytes?: number;
     }
+  | {
+      id: number;
+      type: 'open';
+      /** The DOCX package, parsed and seeded in a fresh session here. */
+      bytes: ArrayBuffer;
+      /** The package's SHA-256, when the caller already took it. */
+      digest?: string;
+      generation?: string;
+      /** The most the worker's editing core may allocate at once. */
+      heapLimitBytes?: number;
+    }
+  | { id: number; type: 'fontRequirements'; layoutInput: string }
+  | { id: number; type: 'encodeState' }
   | {
       id: number;
       type: 'sync';
@@ -134,6 +149,12 @@ export type ResidentEngineWorkerResponse = (
       layoutJson?: string;
       /** `layoutJson` covers only the first pages of the body. */
       layoutProvisional?: boolean;
+      /** An `open` reply: the opened package's host metadata JSON. */
+      hostJson?: string;
+      /** A `fontRequirements` reply. */
+      requirementsJson?: string;
+      /** An `encodeState` reply: the document state as one yrs v1 update. */
+      state?: ArrayBuffer;
     }
   | {
       id: number;
