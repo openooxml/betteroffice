@@ -87,6 +87,7 @@ mod queries;
 mod raw;
 mod read_state;
 pub mod read_types;
+mod script_fonts;
 mod search;
 mod seed;
 mod segments;
@@ -529,6 +530,7 @@ pub struct EditingDoc {
     media: Mutex<Option<Arc<docx_parse::media::MediaTable>>>,
     media_sources: Mutex<media::MediaSources>,
     seen: identity::SeenCell,
+    scan_cache: identity::ScanCache,
     story_revisions: Arc<Mutex<StoryRevisions>>,
     _update_sub: Subscription,
     _story_revision_sub: Subscription,
@@ -579,6 +581,7 @@ impl EditingDoc {
             media: Mutex::new(None),
             media_sources: Mutex::default(),
             seen,
+            scan_cache: identity::ScanCache::default(),
             story_revisions,
             _update_sub: update_sub,
             _story_revision_sub: story_revision_sub,
