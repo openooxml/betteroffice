@@ -1889,7 +1889,7 @@ fn a_multiple_rule_adds_its_room_below_an_image_alone_on_its_line() {
         approx(line["ascent"].as_f64().unwrap(), 100.0, "image at the top");
         approx(
             line["lineHeight"].as_f64().unwrap(),
-            100.0 + (multiple - 1.0) * 18.4,
+            100.0 + (multiple - 1.0) * LH,
             &format!("{multiple}x: image plus the rule's added room"),
         );
     }
