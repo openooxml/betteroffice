@@ -588,6 +588,43 @@ describe('resident worker layout ownership', () => {
     expect(late.ok && late.layoutJson).toBe(full);
     expect(extras.at(-1)).toBe('{"headersFooters":{"parts":["full"]}}');
     expect(calls).toHaveLength(4);
+
+    await w.send({
+      type: 'bootstrap',
+      expectedFrameEpoch: 0,
+      extras: '',
+      snapshot,
+      layoutExtras: '{}',
+      provisionalPages: 3,
+    });
+    Object.assign(w.harness.session, {
+      setSelection: () => {},
+      applyInput: (_text: string, expected: number) => {
+        calls.push('input');
+        const session = w.harness.session as unknown as {
+          buildDisplayListFrame: (input: string, expected: number) => Uint8Array;
+        };
+        return session.buildDisplayListFrame('input', expected);
+      },
+    });
+    // A header caret needs no body caret geometry from the stub.
+    const loc = { story: 'header1', paraId: '1', offset: 0 };
+    const selection = { anchor: loc, head: loc };
+    await w.send({
+      type: 'applyInput',
+      text: 'x',
+      selection,
+      expectedFrameEpoch: epoch,
+      profile: false,
+      paintCaret: false,
+    });
+    expect(calls.slice(4)).toEqual(['prefix:3', 'full', 'input']);
+    // The edit re-paginated: a completion built now would pair its cached headers with the new pages.
+    const framesBefore = extras.length;
+    const afterEdit = await w.send({ type: 'completeLayout', expectedFrameEpoch: epoch, paintCaret: false });
+    expect(afterEdit.ok && afterEdit.frame).toBeUndefined();
+    expect(afterEdit.ok && afterEdit.layoutJson).toBeUndefined();
+    expect(extras).toHaveLength(framesBefore);
   });
 });
 

@@ -290,6 +290,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   await completeProvisionalLayout();
+  // The edit replaces the pagination a cached completion's frame would paint.
+  completedLayout = null;
   session.setSelection(request.selection.anchor, request.selection.head);
   pendingUpdates = [];
   const started = performance.now();
