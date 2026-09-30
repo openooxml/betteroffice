@@ -1,7 +1,8 @@
 // Imports every export of every published package in plain Node, without a DOM,
 // each in its own process. Run after `bun run build:packages`.
 import { spawnSync } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { publishedPackageManifests } from './published-packages.mjs';
 
 const BROWSER_GLOBALS = [
@@ -113,6 +114,7 @@ function main() {
       if (failure) failures.push(failure);
     }
   }
+  if (checked === 0) failures.push('no package entries found to import');
   if (failures.length) {
     console.error(`${failures.length} package entries failed to import in plain Node:\n`);
     for (const failure of failures) console.error(`- ${failure}`);
@@ -121,4 +123,5 @@ function main() {
   console.log(`${checked} package entries import in plain Node without a DOM.`);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) main();
+const invoked = process.argv[1] ? realpathSync(process.argv[1]) : null;
+if (invoked === realpathSync(fileURLToPath(import.meta.url))) main();
