@@ -58,10 +58,18 @@ struct Seq {
 /// block by block, table cells row by row, and a text box or shape where its
 /// block stands.
 pub fn number_sequence_fields(blocks: &mut [LayoutBlock]) {
+    number_sequence_fields_with_opaque(blocks, std::iter::empty());
+}
+
+/// Numbers SEQ fields while keeping opaque sequences' cached results.
+pub fn number_sequence_fields_with_opaque(
+    blocks: &mut [LayoutBlock],
+    opaque_sequences: impl IntoIterator<Item = String>,
+) {
     let mut fields = Vec::new();
     // Sequences with a field nested in another field, which Word counts and
     // the blocks don't show.
-    let mut nested = HashSet::new();
+    let mut nested = opaque_sequences.into_iter().collect();
     collect_blocks(blocks, &mut fields, &mut nested);
     let parsed: Vec<_> = fields.iter().map(|field| parse(field)).collect();
     let opaque: HashSet<&str> = parsed

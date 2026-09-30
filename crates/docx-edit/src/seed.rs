@@ -98,6 +98,7 @@ struct LoweringContext {
     root: String,
     /// Every lowered paragraph in document order, nested stories in place.
     paragraphs: Vec<SeededParagraph>,
+    opaque_sequences: Vec<String>,
     source: SourceStructure,
     provenance: Provenance,
     /// Each source story's steps from its part's root element.
@@ -136,6 +137,7 @@ struct SourceStructure {
 /// Package context retained after lowering, for planning host edits and exporting in Rust.
 pub(crate) struct SourceMetadata {
     styles: StyleResolver,
+    opaque_sequences: Vec<String>,
     structure: SourceStructure,
     read: ReadSource,
 }
@@ -265,6 +267,10 @@ impl SourceMetadata {
     /// The document's numbering definitions.
     pub(crate) fn numbering(&self) -> Arc<docx_parse::NumberingMap> {
         Arc::clone(&self.read.numbering)
+    }
+
+    pub(crate) fn opaque_sequences(&self) -> &[String] {
+        &self.opaque_sequences
     }
 
     /// Records the comment writes committed to `doc` from now on.
@@ -1540,10 +1546,56 @@ pub(crate) fn nested_sequence_names(field_value: &Value) -> Vec<String> {
                 {
                     names.push(name);
                 }
+                if string(map.get("type")) == Some("hyperlink") {
+                    names.extend(
+                        hyperlink_sequence_names(value)
+                            .into_iter()
+                            .filter(|name| seen.insert(name.clone())),
+                    );
+                }
                 pending.extend(map.values().rev());
             }
             Value::Array(values) => pending.extend(values.iter().rev()),
             _ => {}
+        }
+    }
+    names
+}
+
+pub(crate) fn hyperlink_sequence_names(hyperlink: &Value) -> Vec<String> {
+    let children =
+        field(Some(hyperlink), "structuredChildren").or_else(|| field(Some(hyperlink), "children"));
+    let mut instructions: Vec<Option<String>> = Vec::new();
+    let mut names = Vec::new();
+    for run in array(children) {
+        if string(field(Some(run), "type")) != Some("run") {
+            continue;
+        }
+        for content in array(field(Some(run), "content")) {
+            let instruction = match string(field(Some(content), "type")) {
+                Some("fieldChar") => match string(field(Some(content), "charType")) {
+                    Some("begin") => {
+                        instructions.push(Some(String::new()));
+                        None
+                    }
+                    Some("separate") => instructions.last_mut().and_then(Option::take),
+                    Some("end") => instructions.pop().flatten(),
+                    _ => None,
+                },
+                Some("instrText") => {
+                    if let Some(Some(instruction)) = instructions.last_mut() {
+                        instruction
+                            .push_str(string(field(Some(content), "text")).unwrap_or_default());
+                    }
+                    None
+                }
+                _ => None,
+            };
+            names.extend(
+                instruction
+                    .as_deref()
+                    .and_then(docx_layout::sequence_fields::sequence_name),
+            );
         }
     }
     names
@@ -1803,6 +1855,7 @@ fn field_to_units(
     styles: &StyleResolver,
     source: &BTreeMap<String, String>,
     projection_id: usize,
+    opaque_sequences: &mut Vec<String>,
 ) -> Vec<InlineUnit> {
     let result = array(field(field(Some(value), "structuredResult"), "inline"));
     let code = array(field(field(Some(value), "structuredCode"), "inline"));
@@ -1833,7 +1886,10 @@ fn field_to_units(
     let mut children = Vec::new();
     for (index, child) in projected_children {
         let mut projected = match string(field(Some(child), "type")) {
-            Some("hyperlink") => hyperlink_to_units(child, style_formatting, styles, &[], source),
+            Some("hyperlink") => {
+                opaque_sequences.extend(hyperlink_sequence_names(child));
+                hyperlink_to_units(child, style_formatting, styles, &[], source)
+            }
             Some("simpleField") => {
                 let (payload, marks) = field_payload(child, style_formatting, source);
                 vec![embed_unit("field", payload, &marks, None, 1)]
@@ -1892,6 +1948,7 @@ fn tracked_to_units(
     styles: &StyleResolver,
     comment_id: Option<String>,
     source: &BTreeMap<String, String>,
+    opaque_sequences: &mut Vec<String>,
 ) -> Vec<InlineUnit> {
     let content_type = string(field(Some(content), "type")).unwrap_or_default();
     let kind = if matches!(content_type, "insertion" | "moveTo") {
@@ -1916,6 +1973,9 @@ fn tracked_to_units(
                 source,
             ));
         } else {
+            if string(field(Some(child), "type")) == Some("hyperlink") {
+                opaque_sequences.extend(hyperlink_sequence_names(child));
+            }
             let mut linked = hyperlink_to_units(
                 child,
                 style_formatting,
@@ -1958,6 +2018,7 @@ fn sdt_payload(
     style_formatting: Option<&Value>,
     styles: &StyleResolver,
     source: &BTreeMap<String, String>,
+    opaque_sequences: &mut Vec<String>,
 ) -> JsonObject {
     let mut content = Vec::new();
     let append = |content: &mut Vec<Value>, unit: InlineUnit| match unit.content {
@@ -2003,6 +2064,7 @@ fn sdt_payload(
                 }
             }
             "hyperlink" => {
+                opaque_sequences.extend(hyperlink_sequence_names(child));
                 for unit in hyperlink_to_units(child, style_formatting, styles, &[], source) {
                     append(&mut content, unit);
                 }
@@ -2015,7 +2077,7 @@ fn sdt_payload(
                 &mut content,
                 embed_unit(
                     "sdt",
-                    sdt_payload(child, style_formatting, styles, source),
+                    sdt_payload(child, style_formatting, styles, source, opaque_sequences),
                     &[],
                     None,
                     1,
@@ -2773,6 +2835,7 @@ struct ParagraphUnits {
     ppr: JsonObject,
     omitted: Vec<Omitted>,
     breaks: Vec<FlowBreak>,
+    opaque_sequences: Vec<String>,
 }
 
 fn paragraph_units(
@@ -2784,6 +2847,7 @@ fn paragraph_units(
     let mut units = Vec::new();
     let mut omitted = Vec::new();
     let mut breaks = Vec::new();
+    let mut opaque_sequences = Vec::new();
     let mut active_comments: Vec<String> = Vec::new();
     let mut boundaries = Some(Vec::new());
     let mut unit_counts = Vec::new();
@@ -2826,6 +2890,7 @@ fn paragraph_units(
             }
             "hyperlink" => {
                 boundaries = None;
+                opaque_sequences.extend(hyperlink_sequence_names(content));
                 let mut linked =
                     hyperlink_to_units(content, style_formatting.as_ref(), styles, &[], source);
                 for unit in &mut linked {
@@ -2841,13 +2906,20 @@ fn paragraph_units(
                     styles,
                     source,
                     unit_counts.len(),
+                    &mut opaque_sequences,
                 ));
             }
             "inlineSdt" => {
                 boundaries = None;
                 units.push(embed_unit(
                     "sdt",
-                    sdt_payload(content, style_formatting.as_ref(), styles, source),
+                    sdt_payload(
+                        content,
+                        style_formatting.as_ref(),
+                        styles,
+                        source,
+                        &mut opaque_sequences,
+                    ),
                     &[],
                     None,
                     2,
@@ -2861,6 +2933,7 @@ fn paragraph_units(
                     styles,
                     comment_id,
                     source,
+                    &mut opaque_sequences,
                 ));
             }
             "mathEquation" => {
@@ -2895,6 +2968,7 @@ fn paragraph_units(
         units,
         omitted,
         breaks,
+        opaque_sequences,
     }
 }
 
@@ -4109,7 +4183,11 @@ fn visit_story(
                     mut ppr,
                     omitted,
                     breaks,
+                    opaque_sequences,
                 } = paragraph_units(block, &context.styles, None, &context.source_json);
+                if context.root == "body" {
+                    context.opaque_sequences.extend(opaque_sequences);
+                }
                 let base = context.plans[plan_index].width();
                 let offsets: Vec<u32> = std::iter::once(0)
                     .chain(units.iter().scan(0, |width, unit| {
@@ -4694,6 +4772,7 @@ fn seed_lowered(
     document.install_source(
         SourceMetadata {
             styles: context.styles,
+            opaque_sequences: context.opaque_sequences,
             structure: context.source,
             read,
         },
@@ -4736,6 +4815,7 @@ fn scratch_context(styles: StyleResolver) -> LoweringContext {
         compatibility_mode: 12,
         root: String::new(),
         paragraphs: Vec::new(),
+        opaque_sequences: Vec::new(),
         source: SourceStructure::default(),
         provenance: Provenance::default(),
         locators: HashMap::new(),
@@ -4870,6 +4950,7 @@ pub(crate) fn source_metadata(
     }
     Ok(SourceMetadata {
         styles: context.styles,
+        opaque_sequences: context.opaque_sequences,
         structure: context.source,
         read,
     })
@@ -4888,6 +4969,7 @@ fn lower_package(
         compatibility_mode,
         root: "body".to_owned(),
         paragraphs: Vec::new(),
+        opaque_sequences: Vec::new(),
         source: SourceStructure::default(),
         provenance: Provenance::default(),
         locators: HashMap::from([("body".to_owned(), vec![Step::Body])]),
@@ -4956,6 +5038,10 @@ fn lower_package(
             );
         }
     }
+    let mut seen = HashSet::new();
+    context
+        .opaque_sequences
+        .retain(|name| seen.insert(name.clone()));
     (context, roots)
 }
 
@@ -5354,15 +5440,15 @@ mod tests {
     #[test]
     fn nested_sequence_names_keep_first_seen_order() {
         let field = json!({"type": "complexField", "instruction": "SEQ Outer",
-            "structuredCode": {"inline": [
-                {"type": "simpleField", "instruction": "sEq \"Figure\""},
-                {"type": "complexField", "instruction": "SEQ Table"},
-                {"type": "simpleField", "instruction": "SEQ FIGURE"}
-            ]},
-            "structuredResult": {"inline": [
-                {"type": "complexField", "instruction": "SEQ TABLE"},
-                {"type": "simpleField", "instruction": "SEQ Other"}
-            ]}});
+        "structuredCode": {"inline": [
+            {"type": "simpleField", "instruction": "sEq \"Figure\""},
+            {"type": "complexField", "instruction": "SEQ Table"},
+            {"type": "simpleField", "instruction": "SEQ FIGURE"}
+        ]},
+        "structuredResult": {"inline": [
+            {"type": "complexField", "instruction": "SEQ TABLE"},
+            {"type": "simpleField", "instruction": "SEQ Other"}
+        ]}});
         assert_eq!(nested_sequence_names(&field), ["figure", "table", "other"]);
     }
 
@@ -5428,6 +5514,7 @@ mod tests {
             compatibility_mode: 12,
             root: "body".to_owned(),
             paragraphs: Vec::new(),
+            opaque_sequences: Vec::new(),
             source: SourceStructure::default(),
             provenance: Provenance::default(),
             locators: HashMap::new(),
@@ -5715,6 +5802,7 @@ mod tests {
             compatibility_mode: 12,
             root: "body".to_owned(),
             paragraphs: Vec::new(),
+            opaque_sequences: Vec::new(),
             source: SourceStructure::default(),
             provenance: Provenance::default(),
             locators: HashMap::new(),

@@ -15,6 +15,13 @@ fn field(instruction: &str) -> String {
     )
 }
 
+fn hyperlink_sequence() -> String {
+    format!(
+        r#"<w:hyperlink w:anchor="top"><w:r><w:fldChar w:fldCharType="begin" w:fldLock="true"/></w:r><w:r><w:instrText> SEQ Figure </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:fldSimple w:instr="PAGE">{}</w:fldSimple><w:r><w:fldChar w:fldCharType="end"/></w:r></w:hyperlink>"#,
+        run("1")
+    )
+}
+
 fn paragraph(content: &str) -> String {
     format!("<w:p>{}{content}</w:p>", run("Caption "))
 }
@@ -186,6 +193,30 @@ fn a_text_box_with_a_projected_sequence_keeps_cached_results() {
         boxed_sequence_results(&body),
         [(false, "2"), (false, "1")].map(|(boxed, result)| (boxed, result.to_owned()))
     );
+}
+
+#[test]
+fn a_text_box_with_a_hyperlink_sequence_keeps_cached_results() {
+    let body = [
+        format!("<w:p>{}</w:p>", text_box(&hyperlink_sequence())),
+        paragraph(&field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>2</w:t>", 1)),
+        paragraph(&field("SEQ Table")),
+    ]
+    .concat();
+    assert_eq!(
+        boxed_sequence_results(&body),
+        [(false, "2"), (false, "1")].map(|(boxed, result)| (boxed, result.to_owned()))
+    );
+}
+
+#[test]
+fn a_body_hyperlink_sequence_keeps_cached_results() {
+    let body = [
+        paragraph(&hyperlink_sequence()),
+        paragraph(&field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>2</w:t>", 1)),
+    ]
+    .concat();
+    assert_eq!(sequence_results(&body), ["2"]);
 }
 
 #[test]

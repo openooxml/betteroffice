@@ -483,12 +483,15 @@ fn shape_content_runs(
     }
     match string(content, "type").as_deref() {
         Some("run") => shape_document_runs(content),
-        Some("hyperlink") => array(content, "structuredChildren")
-            .or_else(|| array(content, "children"))
-            .into_iter()
-            .flatten()
-            .flat_map(|child| shape_content_runs(child, depth + 1, nested_sequences))
-            .collect(),
+        Some("hyperlink") => {
+            nested_sequences.extend(crate::seed::hyperlink_sequence_names(content));
+            array(content, "structuredChildren")
+                .or_else(|| array(content, "children"))
+                .into_iter()
+                .flatten()
+                .flat_map(|child| shape_content_runs(child, depth + 1, nested_sequences))
+                .collect()
+        }
         Some("inlineSdt") => array(content, "content")
             .into_iter()
             .flatten()

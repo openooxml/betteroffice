@@ -324,7 +324,8 @@ pub fn yrs_doc_to_mapped_layout_blocks(
         return Err(BridgeError::WrongOffsetKind);
     }
 
-    let mut list_state = ListState::new(doc.source_metadata().map(|source| source.numbering()));
+    let source = doc.source_metadata();
+    let mut list_state = ListState::new(source.as_ref().map(|source| source.numbering()));
     let txn = doc.yrs_doc().transact();
     let mut active_stories = BTreeSet::new();
     let mut map = LoweringMap::default();
@@ -340,7 +341,14 @@ pub fn yrs_doc_to_mapped_layout_blocks(
     )?;
     // Word numbers SEQ fields in the main text only.
     if story_id == "body" {
-        docx_layout::sequence_fields::number_sequence_fields(&mut blocks);
+        let opaque_sequences = source
+            .as_ref()
+            .map(|source| source.opaque_sequences())
+            .unwrap_or_default();
+        docx_layout::sequence_fields::number_sequence_fields_with_opaque(
+            &mut blocks,
+            opaque_sequences.iter().cloned(),
+        );
     }
     map.finish();
     Ok((blocks, map))
