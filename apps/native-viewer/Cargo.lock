@@ -166,6 +166,7 @@ dependencies = [
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
  "betteroffice-ooxml-diff",
+ "betteroffice-ooxml-text",
  "betteroffice-opc",
  "ryu-js",
  "serde",
