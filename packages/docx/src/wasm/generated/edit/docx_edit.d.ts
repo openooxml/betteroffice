@@ -1665,7 +1665,7 @@ export interface InitOutput {
     readonly set_wasm_heap_limit: (a: number) => void;
     readonly reset_wasm_peak_bytes: () => void;
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
-    readonly clear_measure_fonts: () => void;
+    readonly clear_measure_fonts: () => [number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly hit_test_regions_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

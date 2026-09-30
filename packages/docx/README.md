@@ -24,7 +24,8 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { parseDocx, repackDocx } from '@betteroffice/docx/docx';
 
 const document = await parseDocx(await readFile('contract.docx'));
-// document.package: body, styles, numbering, theme, media, headers/footers
+// document.package.document.content: the body's paragraphs and tables
+// document.package also holds styles, numbering, theme, media, headers and footers
 
 const bytes = await repackDocx(document);
 await writeFile('contract-out.docx', Buffer.from(bytes));
