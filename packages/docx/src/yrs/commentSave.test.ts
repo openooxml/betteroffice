@@ -456,3 +456,23 @@ it('keeps the ranges of comments inside a table cell and a content control after
     }
   }
 });
+
+it('keeps every range of a comment anchored in the body and a table cell across save and reopen', async () => {
+  const session = await open(docx(), 91083);
+  const cell = session.storyIds().find((story) => story !== 'body' && story.startsWith('body'))!;
+  const { paraId } = session.paragraphs(cell)[0]!;
+  session.setCommentRanges('1', [
+    range(session, 2, 0, 7),
+    { story: cell, start: { paraId, offset: 0 }, end: { paraId, offset: 4 } },
+  ]);
+  const ranges = session.resolveComment('1');
+  expect(ranges.map(({ story }) => story)).toEqual(['body', cell]);
+  let bytes = (await saveYrsDocx(session)).bytes;
+  for (let cycle = 0; cycle < 2; cycle += 1) {
+    const reopened = await open(bytes, 91084 + cycle);
+    expect(reopened.resolveComment('1')).toEqual(ranges);
+    const { paraId: after } = reopened.paragraphs('body')[3]!;
+    reopened.insertText({ story: 'body', paraId: after, offset: 0 }, '!');
+    bytes = (await saveYrsDocx(reopened)).bytes;
+  }
+});

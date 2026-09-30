@@ -1951,7 +1951,8 @@ fn comments_in_cells_and_block_controls_are_anchored() {
         )
     };
     let xml = format!(
-        r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl><w:sdt><w:sdtPr><w:id w:val="6"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>{}"#,
+        r#"{}<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl><w:sdt><w:sdtPr><w:id w:val="6"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>{}"#,
+        para("0F600000", &commented(1, "Body")),
         para("0F600001", &commented(1, "Cell")),
         para("0F600002", &commented(2, "Controlled")),
         para("0F600003", &run("Tail"))
@@ -1971,13 +1972,18 @@ fn comments_in_cells_and_block_controls_are_anchored() {
             .part("comments.xml", "rIdComments", COMMENTS, COMMENTS, &comments)
             .bytes(),
     );
-    for (id, story, len) in [("1", "body:t0:r0c0", 4), ("2", "", 10)] {
-        let anchors = doc.resolve_comment(id).unwrap();
-        assert_eq!(anchors.len(), 1);
-        assert_ne!(anchors[0].story, "body");
-        assert!(story.is_empty() || anchors[0].story == story);
-        assert_eq!((anchors[0].start, anchors[0].end), (0, len));
-    }
+    let spans = |id: &str| {
+        doc.resolve_comment(id)
+            .unwrap()
+            .into_iter()
+            .map(|anchor| (anchor.story, anchor.start, anchor.end))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        spans("1"),
+        [("body".to_owned(), 0, 4), ("body:t0:r0c0".to_owned(), 0, 4)]
+    );
+    assert_eq!(spans("2"), [("body:sdt0".to_owned(), 0, 10)]);
 }
 
 #[test]
