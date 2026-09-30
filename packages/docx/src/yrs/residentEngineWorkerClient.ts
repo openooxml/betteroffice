@@ -209,7 +209,14 @@ export class ResidentEngineWorkerClient {
     extras: string,
     expectedFrameEpoch: number,
     paintCaret = false,
-    options: ResidentEngineWorkerLayoutOptions & ResidentEngineWorkerSnapshotOptions = {}
+    options: ResidentEngineWorkerLayoutOptions &
+      ResidentEngineWorkerSnapshotOptions & {
+        /**
+         * Lets a later layout sync supersede this one while both are queued:
+         * it then rejects with `ResidentWorkerSupersededError`.
+         */
+        supersedable?: boolean;
+      } = {}
   ): Promise<ResidentEngineWorkerFrame> {
     const fontsRevision = snapshot.fontsRevision;
     const pending = this.request(
@@ -221,6 +228,7 @@ export class ResidentEngineWorkerClient {
         paintCaret,
         ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
         ...(options.displayWindow ? { displayWindow: options.displayWindow } : {}),
+        ...(options.supersedable ? { supersedable: true } : {}),
       },
       snapshotTransfers(snapshot)
     );
@@ -444,10 +452,7 @@ class ResidentWorkerUnavailableError extends Error {}
 /** The worker itself failed (crash, timeout, torn-down, corrupt reply). */
 export class ResidentWorkerFailureError extends Error {}
 
-/**
- * A sync the worker took the state of but did not lay out: a later sync
- * waiting behind it builds the frame instead.
- */
+/** A sync that loaded its snapshot while a later sync builds the frame. */
 export class ResidentWorkerSupersededError extends Error {}
 
 /** The worker trapped because its wasm memory could not grow any further. */

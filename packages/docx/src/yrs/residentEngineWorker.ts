@@ -88,8 +88,6 @@ const ALL_BLOCKS = 2 ** 32 - 1;
 // The request being handled, and the requests answered with a trap.
 let handlingId = 0;
 const trappedIds = new Set<number>();
-
-// Requests received and not yet started, in order.
 const queuedRequests: { id: number; sync: boolean; layout: boolean }[] = [];
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
@@ -99,10 +97,7 @@ scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
   enqueue(() => handle(request), request.id);
 };
 
-/**
- * Whether a layout sync is waiting behind the sync about to run with only
- * syncs in between: that one lays out and builds the frame this one would.
- */
+/** A later layout sync supersedes this sync unless another request intervenes. */
 function syncSuperseded(): boolean {
   for (const next of queuedRequests) {
     if (!next.sync) return false;
@@ -210,10 +205,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (!session) throw new Error('Resident engine worker is not initialized');
   if (request.type === 'sync') {
+    // Each message is its own task, so a turn lets syncs posted meanwhile queue behind this one.
+    if (request.supersedable) await new Promise<void>((resolve) => nextTurn(resolve));
     unsubscribe?.();
     unsubscribe = null;
     if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
-    if (syncSuperseded()) {
+    if (request.supersedable && syncSuperseded()) {
       // Later snapshots diff against this one's state and fonts, so it still loads them.
       loadSnapshot(request.snapshot);
       subscribe();
@@ -398,9 +395,6 @@ function hydrate(
   provisionalPages?: number
 ): { layoutJson: string | null; provisional: boolean } {
   if (!session) throw new Error('Resident engine worker is not initialized');
-  supersedeSlicedCompletion();
-  incompleteLayout = null;
-  completedLayout = null;
   loadSnapshot(snapshot);
   for (const { story, env } of snapshot.renderInputs) session.yrsBlocksForStory(story, env);
   for (const input of snapshot.measureInputs) session.measureParagraphJson(input);
@@ -424,9 +418,12 @@ function hydrate(
   return { layoutJson, provisional };
 }
 
-/** Loads a snapshot's document state and fonts. */
+/** Loads a snapshot's document state and fonts, replacing any layout of the previous state. */
 function loadSnapshot(snapshot: YrsResidentWorkerSnapshot): void {
   if (!session) throw new Error('Resident engine worker is not initialized');
+  supersedeSlicedCompletion();
+  incompleteLayout = null;
+  completedLayout = null;
   session.loadState(snapshot.state);
   session.setPartialDocument(snapshot.partialDocument === true);
   if (snapshot.fontsRevision !== fontsRevision) {

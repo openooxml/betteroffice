@@ -13,6 +13,8 @@ export interface InProcessResidentWorker extends ResidentEngineWorkerPort {
   /** Holds the worker's replies until `release`. */
   hold(): void;
   release(): void;
+  /** Delivers each request as its own task, as a browser worker does. */
+  deliverAsTasks(): void;
 }
 
 const STUBS: Record<string, string> = {
@@ -61,6 +63,8 @@ export async function residentWorkerFactory(): Promise<() => InProcessResidentWo
   ) as (scope: unknown, canvas: unknown, harness: unknown) => void;
   return () => {
     let held: ResidentEngineWorkerResponse[] | null = null;
+    let tasks: MessageChannel | null = null;
+    const pendingTasks: ResidentEngineWorkerRequest[] = [];
     const scope = {
       onmessage: null as ((event: { data: ResidentEngineWorkerRequest }) => void) | null,
       postMessage(reply: ResidentEngineWorkerResponse) {
@@ -82,7 +86,19 @@ export async function residentWorkerFactory(): Promise<() => InProcessResidentWo
       postMessage(message) {
         worker.requests.push(message.type);
         const data = structuredClone(message);
-        queueMicrotask(() => scope.onmessage?.({ data }));
+        if (!tasks) {
+          queueMicrotask(() => scope.onmessage?.({ data }));
+          return;
+        }
+        pendingTasks.push(data);
+        tasks.port2.postMessage(null);
+      },
+      deliverAsTasks() {
+        tasks ??= new MessageChannel();
+        tasks.port1.onmessage = () => {
+          const data = pendingTasks.shift();
+          if (data) scope.onmessage?.({ data });
+        };
       },
       terminate() {},
       hold() {

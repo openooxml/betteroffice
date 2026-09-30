@@ -39,6 +39,8 @@ export type ResidentEngineWorkerRequest =
        */
       layoutExtras?: string;
       displayWindow?: [number, number];
+      /** A later layout sync queued behind this one may answer it `superseded`. */
+      supersedable?: boolean;
     }
   | {
       id: number;
@@ -133,10 +135,7 @@ export type ResidentEngineWorkerResponse = (
       layoutJson?: string;
       /** `layoutJson` covers only the first pages of the body. */
       layoutProvisional?: boolean;
-      /**
-       * A sync that loaded its snapshot and left the layout and frame to a
-       * later sync already waiting; it carries no frame.
-       */
+      /** A sync that loaded its snapshot and left layout and frame to a later sync. */
       superseded?: boolean;
     }
   | {

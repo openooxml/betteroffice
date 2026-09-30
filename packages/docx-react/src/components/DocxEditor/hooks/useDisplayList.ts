@@ -1106,7 +1106,10 @@ export function useRustDisplayList(
         paintedCaretMachine.shouldPaint(performance.now());
       const reply = bootstrapping
         ? worker.bootstrap(snapshot, '', options)
-        : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, options);
+        : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, {
+            ...options,
+            supersedable: true,
+          });
       const inFlight = { engine: hostEngine, revision: adoptedRevision };
       workerLayoutInFlightRef.current = inFlight;
       const answered = () => {
@@ -1476,6 +1479,7 @@ export function useRustDisplayList(
                 : worker.sync(snapshot, extras, previousFrame?.frameEpoch ?? 0, paintCaret, {
                     ...sent(),
                     displayWindow: displayWindowRef.current,
+                    supersedable: true,
                   });
         return workerFrame
           .then((result) => {
