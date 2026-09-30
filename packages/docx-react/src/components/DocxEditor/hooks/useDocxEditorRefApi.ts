@@ -13,6 +13,7 @@ import type {
   YrsParagraph,
   YrsSession,
   YrsStoryRange,
+  WasmModuleMemory,
 } from '@betteroffice/docx/yrs';
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import type { DocxInput, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
@@ -25,7 +26,10 @@ import { createComment } from '../commentFactories';
 import { applyEditBatch, applyProposalCall, flushedSession, modeRefusal } from '../editorBatches';
 import type { EditorMode } from '../internals/editing-modes';
 import type { SelectionState } from '../types';
+import { readMemoryStats } from '../memoryStats';
 import { documentPageCount } from './documentPageCount';
+
+const noWorkerMemory = (): null => null;
 
 type LocatedParagraph = {
   story: string;
@@ -182,6 +186,7 @@ export function useDocxEditorRefApi({
   commands,
   modeRef,
   allowHostProposalsRef,
+  workerMemory = noWorkerMemory,
   settledDisplayList,
   awaitingDocument,
 }: {
@@ -213,6 +218,8 @@ export function useDocxEditorRefApi({
   modeRef: React.RefObject<EditorMode>;
   /** Whether proposal methods run while the editor is read-only. */
   allowHostProposalsRef: React.RefObject<boolean>;
+  /** The resident worker's wasm memories as of its latest reply. */
+  workerMemory?: () => WasmModuleMemory[] | null;
   /** The renderer's display list once it shows the whole current document. */
   settledDisplayList?: (relayout: null, timeoutMs: number | null) => Promise<DisplayList>;
   /** Whether a document load has not yet produced its first layout. */
@@ -240,6 +247,7 @@ export function useDocxEditorRefApi({
         if (!settledDisplayList) throw new Error('This editor paints no display list');
         return (await settledDisplayList(null, options?.timeoutMs ?? null)).pages.length;
       },
+      getMemoryStats: () => readMemoryStats(workerMemory),
       scrollToPage: (pageNumber) => pagedEditorRef.current?.scrollToPage(pageNumber),
       scrollToPosition: (displayPosition) =>
         pagedEditorRef.current?.scrollToPosition(displayPosition),
@@ -505,6 +513,7 @@ export function useDocxEditorRefApi({
       loadBuffer,
       comments,
       commands,
+      workerMemory,
       settledDisplayList,
       awaitingDocument,
     ]

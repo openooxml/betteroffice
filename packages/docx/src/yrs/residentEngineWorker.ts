@@ -17,6 +17,7 @@ import {
   type RetainedFrame,
 } from '../layout/render/frameDelta';
 import { GlyphCache } from '../layout/render/glyphCache';
+import { wasmModuleMemories } from '../wasm/loadWasmAsset';
 import {
   encodeDisplayListFrameExtras,
   type DisplayListBuildInputs,
@@ -85,6 +86,10 @@ const COMPLETION_SLICE_MS = 24;
 const COMPLETION_RESTARTS = 3;
 const ALL_BLOCKS = 2 ** 32 - 1;
 
+// The request being handled, and the requests answered with a trap.
+let handlingId = 0;
+const trappedIds = new Set<number>();
+
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
   enqueue(() => handle(event.data), event.data.id);
 };
@@ -99,20 +104,17 @@ function enqueue(
     .then(() => {
       if (!current()) return;
       if (trap) throw trap;
+      handlingId = id;
       return operation();
     })
     .catch((error) => replyFailure(id, error));
 }
 
 function replyFailure(id: number, error: unknown): void {
-  if (error instanceof WebAssembly.RuntimeError) {
-    trap = error;
-    reply({
-      id,
-      ok: false,
-      error: `Resident engine worker trapped: ${error.message}`,
-      terminal: true,
-    });
+  // Once trapped, every failure is the trap's, answered once per request.
+  const failure = trap ?? error;
+  if (failure instanceof WebAssembly.RuntimeError) {
+    trapped(id, failure);
     return;
   }
   reply({
@@ -122,17 +124,31 @@ function replyFailure(id: number, error: unknown): void {
   });
 }
 
+/** A trap leaves the module unusable: `id` is answered as terminal, and nothing succeeds after. */
+function trapped(id: number, error: WebAssembly.RuntimeError): void {
+  if (trappedIds.has(id)) return;
+  trappedIds.add(id);
+  trap = error;
+  const failed = editFailedAllocationBytes();
+  reply({
+    id,
+    ok: false,
+    error:
+      failed > 0
+        ? `Resident engine worker ran out of memory allocating ${failed} bytes: ${error.message}`
+        : `Resident engine worker trapped: ${error.message}`,
+    terminal: true,
+    ...(failed > 0 ? { outOfMemory: true } : {}),
+  });
+}
+
 async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'warm') {
     try {
       await preloadEditWasm();
       reply({ id: request.id, ok: true });
     } catch (error) {
-      reply({
-        id: request.id,
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      replyFailure(request.id, error);
     }
     return;
   }
@@ -146,7 +162,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     // makes a fast structural input race overlap one client's clock range and
     // corrupt the update; a fresh id lets yrs merge queued/local operations
     // safely while the main replica applies worker updates with local origin.
-    session = await createResidentEngineSession();
+    session = await createResidentEngineSession(request.heapLimitBytes);
     if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
     const { layoutJson, provisional } = hydrate(request.snapshot, request.provisionalPages);
     if (provisional) {
@@ -338,6 +354,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       request.type === 'applyDelete' ? session.residentDeletedUnits() : undefined
     );
   } catch (error) {
+    if (trap) throw trap;
     if (error instanceof WebAssembly.RuntimeError) throw error;
     const message = error instanceof Error ? error.message : String(error);
     reply({
@@ -686,7 +703,17 @@ async function replayOffscreen(
   }
   if (!glyphCache && session) {
     glyphCache = new GlyphCache({
-      provider: (fontId, glyphId) => session!.outlineGlyphJson(fontId, glyphId),
+      provider: (fontId, glyphId) => {
+        try {
+          return session!.outlineGlyphJson(fontId, glyphId);
+        } catch (error) {
+          // The raster paints on with browser text, so running out of memory is answered here.
+          if (error instanceof WebAssembly.RuntimeError && editFailedAllocationBytes() > 0) {
+            trapped(handlingId, error);
+          }
+          throw error;
+        }
+      },
     });
   }
   const caretTarget =
@@ -783,6 +810,13 @@ function exactBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.slice().buffer;
 }
 
+function editFailedAllocationBytes(): number {
+  return wasmModuleMemories().find((module) => module.label === 'docx-edit')?.failedAllocationBytes ?? 0;
+}
+
 function reply(response: ResidentEngineWorkerResponse, transfer: Transferable[] = []): void {
-  scope.postMessage(response, transfer);
+  // A trap the raster painted past fails the request that would succeed, and
+  // every request waiting on it, through the paths that answer failures.
+  if (trap && response.ok) throw trap;
+  scope.postMessage({ ...response, memory: wasmModuleMemories() }, transfer);
 }
