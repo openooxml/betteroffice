@@ -833,10 +833,9 @@ pub(crate) fn table_revisions<T: ReadTxn>(table: &MapRef, txn: &T) -> [Option<An
     };
     [TR_INS, TR_DEL].map(|key| {
         let stamp = data.rows.first()?.tr_pr.get(key)?;
-        let revision = row_revision_parts(stamp)?;
         data.rows
             .iter()
-            .all(|row| row.tr_pr.get(key).and_then(row_revision_parts).as_ref() == Some(&revision))
+            .all(|row| row.tr_pr.get(key).and_then(row_revision_parts).is_some())
             .then(|| stamp.clone())
     })
 }

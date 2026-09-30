@@ -427,6 +427,23 @@ fn a_wmf_draws_text_and_bitmaps_in_its_placeable_frame() {
 }
 
 #[test]
+fn a_wmf_without_a_placeable_header_or_window_origin_draws_from_the_default_origin() {
+    let unplaced =
+        |records: Vec<(u16, Vec<u8>)>| Wmf::new(0, 0, 1440).recs(records).bytes()[22..].to_vec();
+    let square = (0x041B, i16s(&[50, 100, 0, 0]));
+    let drawing = replay(&unplaced(vec![(0x020C, i16s(&[100, 200])), square.clone()])).unwrap();
+    let explicit = replay(&unplaced(vec![
+        (0x020B, i16s(&[0, 0])),
+        (0x020C, i16s(&[100, 200])),
+        square.clone(),
+    ]))
+    .unwrap();
+    assert_eq!(format!("{drawing:?}"), format!("{explicit:?}"));
+    assert!(!shapes(&drawing.ops).is_empty());
+    assert!(replay(&unplaced(vec![square])).is_err());
+}
+
+#[test]
 fn a_wmf_carrying_an_emf_draws_the_emf() {
     let emf = Emf::new(10, 10).recs(vec![rect(0, 0, 5, 5)]).bytes();
     let mut escape = u16s(&[0x000F, (34 + emf.len()) as u16]);
