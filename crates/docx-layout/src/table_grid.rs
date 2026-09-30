@@ -222,6 +222,7 @@ fn resolve_fixed_column_widths(
         explicit_width_px.unwrap_or(content_width),
     );
     let table_width = explicit_width_px.unwrap_or_else(|| widths.iter().sum());
+    let mut has_cell_preferences = false;
     for grid_cell in resolve_cell_grid(table_block)
         .into_iter()
         .filter(|cell| cell.row_index == 0)
@@ -241,6 +242,7 @@ fn resolve_fixed_column_widths(
             if start >= end {
                 continue;
             }
+            has_cell_preferences = true;
             let total: f64 = widths[start..end].iter().sum();
             if total > preferred {
                 let scale = preferred / total;
@@ -254,7 +256,7 @@ fn resolve_fixed_column_widths(
     }
     if let Some(target) = explicit_width_px {
         let total: f64 = widths.iter().sum();
-        if total > target {
+        if total > target || (!has_cell_preferences && total > 0.0) {
             let scale = target / total;
             return widths.into_iter().map(|width| width * scale).collect();
         }
@@ -428,6 +430,13 @@ fn autofit_content_widths(
             for column in remaining_columns {
                 maximums[column] += share;
             }
+        } else if percentage_total < 1.0
+            && minimums
+                .iter()
+                .zip(&percentages)
+                .all(|(minimum, percentage)| *minimum / *percentage <= table_width)
+        {
+            maximums = distribute_to_target(maximums, table_width);
         }
     }
     (minimums, maximums)
@@ -905,6 +914,33 @@ mod tests {
     }
 
     #[test]
+    fn fixed_layout_enlarges_automatic_columns_in_proportion_to_the_grid() {
+        let mut block: TableBlock = serde_json::from_value(json!({
+            "id": 0, "layoutMode": "fixed",
+            "gridWidths": [twips_to_pixels(1500.0), twips_to_pixels(4500.0)],
+            "preferredWidth": {"value": 9000, "type": "dxa"},
+            "rows": [{"id": 0, "cells": [
+                {"id": 0, "blocks": [], "preferredWidth": {"value": 0, "type": "auto"}},
+                {"id": 1, "blocks": [], "preferredWidth": {"value": 0, "type": "auto"}}
+            ]}]
+        }))
+        .unwrap();
+        for legacy in [false, true] {
+            if legacy {
+                for cell in &mut block.rows[0].cells {
+                    let preferred = cell.preferred_width.take().unwrap();
+                    cell.width_value = preferred.value;
+                    cell.width_type = preferred.r#type;
+                }
+            }
+            assert_eq!(
+                resolve_table_column_widths(&block, 601.333_333),
+                vec![150.0, 450.0]
+            );
+        }
+    }
+
+    #[test]
     fn fixed_layout_replaces_spanning_first_row_preferences() {
         let block: TableBlock = serde_json::from_value(json!({
             "id": 0, "layoutMode": "fixed", "gridWidths": [300, 300, 300],
@@ -1001,6 +1037,40 @@ mod tests {
             for (actual, expected) in widths.iter().zip(expected) {
                 assert_close_to(*actual, expected, 6);
             }
+        }
+    }
+
+    #[test]
+    fn autofit_preserves_content_sized_width_when_all_percentages_total_less_than_100() {
+        let mut block: TableBlock = serde_json::from_value(json!({
+            "id": 0, "layoutMode": "autofit", "gridWidths": [300, 300],
+            "rows": [{"id": 0, "cells": [
+                {"id": 0, "preferredWidth": {"value": 1250, "type": "pct"},
+                 "blocks": [{"kind": "paragraph", "id": 0, "runs": [{"kind": "text", "text": "Hello"}]}]},
+                {"id": 1, "preferredWidth": {"value": 1250, "type": "pct"},
+                 "blocks": [{"kind": "paragraph", "id": 1, "runs": [{"kind": "text", "text": "HelloHello"}]}]}
+            ]}]
+        }))
+        .unwrap();
+        let content = vec![vec![Some((36.4675, 36.4675)), Some((72.935, 72.935))]];
+        for legacy in [false, true] {
+            if legacy {
+                for cell in &mut block.rows[0].cells {
+                    let preferred = cell.preferred_width.take().unwrap();
+                    cell.width_value = preferred.value;
+                    cell.width_type = preferred.r#type;
+                }
+            }
+            let widths =
+                resolve_table_column_widths_with_content(&block, 601.333_333, Some(&content));
+            assert_eq!(widths.len(), 2);
+            for width in widths {
+                assert_close_to(width, 145.87, 6);
+            }
+            let (minimum, maximum) =
+                resolve_table_intrinsic_widths(&block, 601.333_333, Some(&content));
+            assert_close_to(minimum, 109.4025, 6);
+            assert_close_to(maximum, 291.74, 6);
         }
     }
 
