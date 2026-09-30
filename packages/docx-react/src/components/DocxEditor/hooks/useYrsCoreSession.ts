@@ -84,6 +84,8 @@ interface YrsCoreSessionCallbacks {
 interface WorkerOpenOptions {
   openInWorker: OpenInWorker;
   renderedFrame: object | null;
+  /** The engine whose provisional layout is shown with the rest not yet asked of the worker. */
+  pendingCompletion?: unknown;
 }
 
 export interface YrsCoreSessionOptions {
@@ -394,6 +396,9 @@ export function useYrsCoreSession(
     let abandoned = false;
     let shown: { session: YrsSession; host: YrsDocxHost } | null = null;
     let fullOpenTimer: ReturnType<typeof setTimeout> | null = null;
+    // Disposes a full open started alongside the preview that the load never took.
+    let dropEarly = (): void => {};
+    let earlyTaken = false;
     const stale = () =>
       cancelled ||
       abandoned ||
@@ -449,6 +454,66 @@ export function useYrsCoreSession(
         const prepared = seedBytes ? yrs.prepareDocxBytes(seedBytes) : Promise.resolve(null);
         // Awaited below unless the load ends first.
         prepared.catch(() => {});
+        // The full session, opened in the worker when one takes it.
+        const openFull = async (): Promise<{
+          bytes: Uint8Array | null;
+          next: YrsSession;
+          host: YrsDocxHost | null;
+        } | null> => {
+          const bytes = await prepared;
+          if (stale()) return null;
+          const next = await yrs.createYrsSession({ clientId: collaborationClientId });
+          if (stale()) {
+            next.destroy();
+            return null;
+          }
+          callbacksRef.current?.onSession?.(next);
+          let host: YrsDocxHost | null = null;
+          if (openWorker && bytes && !collaborationInitialUpdate) {
+            try {
+              openedWorker = await openWorker(
+                next,
+                bytes,
+                yrs.preparedDocxDigest(bytes),
+                seedGeneration
+              );
+              if (!stale()) {
+                host = openedWorker ? yrs.decodeDocxHostJson(openedWorker.hostJson, bytes) : null;
+              }
+            } catch (error) {
+              openedWorker?.destroy();
+              openedWorker = null;
+              if (error instanceof yrs.ResidentWorkerOutOfMemoryError) {
+                next.destroy();
+                throw error;
+              }
+            }
+            if (stale()) {
+              openedWorker?.destroy();
+              openedWorker = null;
+              next.destroy();
+              return null;
+            }
+          }
+          return { bytes, next, host };
+        };
+        // A preview never lays out in the worker, so the worker opens the
+        // full document while the preview opens and paints.
+        const early =
+          openWorker && previewFirstPage && seedBytes && !collaborationInitialUpdate
+            ? openFull()
+            : null;
+        early?.catch(() => {});
+        dropEarly = (): void => {
+          if (earlyTaken) return;
+          earlyTaken = true;
+          void early?.then((full) => {
+            if (!full) return;
+            openedWorker?.destroy();
+            openedWorker = null;
+            full.next.destroy();
+          }, () => {});
+        };
         // A preview paints the first pages before the full open begins.
         const opened =
           previewFirstPage && seedBytes
@@ -457,6 +522,7 @@ export function useYrsCoreSession(
         shown = opened;
         if (opened && stale()) {
           opened.session.destroy();
+          dropEarly();
           return;
         }
         if (opened) {
@@ -489,7 +555,10 @@ export function useYrsCoreSession(
               )
             );
           });
-          if (stale()) return;
+          if (stale()) {
+            dropEarly();
+            return;
+          }
           const preview = opened.session;
           fullOpenTimer = setTimeout(() => {
             fullOpenTimer = null;
@@ -498,41 +567,18 @@ export function useYrsCoreSession(
             fail(new Error('The document did not finish opening in time'));
           }, fullOpenTimeoutRef.current);
         }
-        const bytes = await prepared;
-        if (stale()) return;
-        const next = await yrs.createYrsSession({ clientId: collaborationClientId });
+        const full = await (early ?? openFull());
+        earlyTaken = true;
+        if (!full) return;
         if (stale()) {
-          next.destroy();
+          openedWorker?.destroy();
+          openedWorker = null;
+          full.next.destroy();
           return;
         }
-        callbacksRef.current?.onSession?.(next);
-        let host: YrsDocxHost | null = null;
+        const { bytes, next } = full;
+        let host = full.host;
         try {
-          if (openWorker && bytes && !collaborationInitialUpdate) {
-            try {
-              openedWorker = await openWorker(
-                next,
-                bytes,
-                yrs.preparedDocxDigest(bytes),
-                seedGeneration
-              );
-              if (stale()) {
-                openedWorker?.destroy();
-                next.destroy();
-                return;
-              }
-              host = openedWorker ? yrs.decodeDocxHostJson(openedWorker.hostJson, bytes) : null;
-            } catch (error) {
-              if (error instanceof yrs.ResidentWorkerOutOfMemoryError) throw error;
-              openedWorker?.destroy();
-              openedWorker = null;
-            }
-          }
-          if (openWorker && stale()) {
-            openedWorker?.destroy();
-            next.destroy();
-            return;
-          }
           if (openedWorker && bytes) {
             inheritedFrameRef.current = renderedFrameRef.current;
             const worker = openedWorker;
@@ -619,6 +665,7 @@ export function useYrsCoreSession(
         if (host) callbacksRef.current?.onHostDocument?.(host, seedGeneration, next);
       })
       .catch((error) => {
+        dropEarly();
         console.error('[yrs] failed to start the editing session', error);
         if (abandoned) return;
         fail(error);
@@ -672,6 +719,8 @@ export function useYrsCoreSession(
       !start
     ) return;
     if (previewing || (handoffFrom && options?.shownEngine !== session)) return;
+    // The replica blocks this thread: it loads once the worker is laying out the rest.
+    if (workerOpen?.pendingCompletion === session) return;
     if (replicaWaitTimerRef.current !== null) {
       clearTimeout(replicaWaitTimerRef.current);
     }
@@ -684,7 +733,15 @@ export function useYrsCoreSession(
       frameId = requestAnimationFrame(start);
     });
     return () => cancelAnimationFrame(frameId);
-  }, [openInWorker, session, workerOpen?.renderedFrame, previewing, handoffFrom, options?.shownEngine]);
+  }, [
+    openInWorker,
+    session,
+    workerOpen?.renderedFrame,
+    workerOpen?.pendingCompletion,
+    previewing,
+    handoffFrom,
+    options?.shownEngine,
+  ]);
 
   const notifyFramePresented = useCallback((engine: unknown): void => {
     const waiting = paintWaitRef.current;
