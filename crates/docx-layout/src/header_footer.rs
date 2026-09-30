@@ -5,8 +5,8 @@ use serde::Serialize;
 use crate::measure_blocks::{MeasurementConfig, extent_height, measure_blocks, measure_paragraph};
 use crate::paragraph_spacing::apply_contextual_spacing_blocks;
 use crate::types::{
-    BlockExtent, BlockId, FieldRun, ImageRun, Layout, LayoutBlock, MeasuredBlock, PageMargins,
-    ParagraphBlock, Run, Size,
+    AxisPosition, BlockExtent, BlockId, BoxEdges, FieldRun, ImageRun, ImageRunPosition, Layout,
+    LayoutBlock, MeasuredBlock, PageFloatBand, PageMargins, ParagraphBlock, Run, Size,
 };
 
 const DEFAULT_HF_DISTANCE_PX: f64 = 48.0;
@@ -421,6 +421,233 @@ fn image_visual_top(
 
 fn emu_to_pixels(value: f64) -> f64 {
     value / 914_400.0 * 96.0
+}
+
+pub fn header_footer_float_bands(
+    variant: &HeaderFooterVariant,
+    metrics: HeaderFooterMetrics<'_>,
+) -> Vec<PageFloatBand> {
+    let distance = match metrics.kind {
+        HeaderFooterKind::Header => metrics.margins.header,
+        HeaderFooterKind::Footer => metrics.margins.footer,
+    }
+    .unwrap_or(DEFAULT_HF_DISTANCE_PX);
+    let flow_top = match metrics.kind {
+        HeaderFooterKind::Header => distance,
+        HeaderFooterKind::Footer => metrics.page_size.h - distance - variant.flow_height,
+    };
+    let mut bands = Vec::new();
+    let mut add = |position: Option<&ImageRunPosition>,
+                   size: Size,
+                   wrap: Option<&str>,
+                   behind: bool,
+                   distances: BoxEdges,
+                   anchor_y: f64,
+                   emu: bool| {
+        let Some(position) = position else {
+            return;
+        };
+        if behind
+            || position.behind_doc == Some(true)
+            || !matches!(wrap, Some("topAndBottom" | "square" | "tight" | "through"))
+            || !size.w.is_finite()
+            || !size.h.is_finite()
+            || size.w <= 0.0
+            || size.h <= 0.0
+        {
+            return;
+        }
+        let mut position = position.clone();
+        if emu {
+            for axis in [&mut position.horizontal, &mut position.vertical]
+                .into_iter()
+                .flatten()
+            {
+                axis.pos_offset = axis.pos_offset.map(emu_to_pixels);
+            }
+            if let Some(simple) = position.simple_pos.as_mut() {
+                for axis in ["x", "y"] {
+                    if let Some(value) = simple.get(axis).and_then(serde_json::Value::as_f64) {
+                        simple[axis] = serde_json::json!(emu_to_pixels(value));
+                    }
+                }
+            }
+        }
+        let left = metrics.margins.left;
+        let right = metrics.page_size.w - metrics.margins.right;
+        let mut frame = crate::anchor::AnchorFrame {
+            page_width: metrics.page_size.w,
+            page_height: metrics.page_size.h,
+            margin_left: left,
+            margin_right: metrics.margins.right,
+            margin_top: metrics.margins.top.abs(),
+            margin_bottom: metrics.margins.bottom.abs(),
+            flow_x: left,
+            flow_y: flow_top + anchor_y,
+            flow_width: right - left,
+            flow_height: 0.0,
+            odd_page: true,
+        };
+        let finite = |value: f64| {
+            if value.is_finite() {
+                value.max(0.0)
+            } else {
+                0.0
+            }
+        };
+        for odd_page in [true, false] {
+            frame.odd_page = odd_page;
+            let (x, y) = crate::anchor::resolve_position(Some(&position), size.w, size.h, &frame);
+            let full_width = x - finite(distances.left) - left
+                < crate::floating_objects::MIN_WRAP_SEGMENT_WIDTH
+                && right - x - size.w - finite(distances.right)
+                    < crate::floating_objects::MIN_WRAP_SEGMENT_WIDTH;
+            if y.is_finite() && (wrap == Some("topAndBottom") || full_width) {
+                bands.push(PageFloatBand {
+                    top: y - finite(distances.top),
+                    bottom: y + size.h + finite(distances.bottom),
+                    odd_page: Some(odd_page),
+                });
+            }
+        }
+    };
+    let mut flow = HeaderFooterFlow::default();
+    for measured in &variant.measured {
+        let block = &measured.block;
+        let anchor_y = flow.cursor;
+        let (before, after) = block_spacing(block);
+        let height = (extent_height(&measured.measure) - before - after).max(0.0);
+        if contributes_to_flow(block) {
+            flow.place(height, before, after);
+        }
+        let zero = || BoxEdges {
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 0.0,
+        };
+        match block {
+            LayoutBlock::Paragraph(paragraph) => {
+                for run in &paragraph.runs {
+                    if let Run::Image(image) = run {
+                        add(
+                            image.position.as_ref(),
+                            Size {
+                                w: image.width,
+                                h: image.height,
+                            },
+                            image.wrap_type.as_deref(),
+                            false,
+                            BoxEdges {
+                                top: image.dist_top.unwrap_or(0.0),
+                                right: image.dist_right.unwrap_or(0.0),
+                                bottom: image.dist_bottom.unwrap_or(0.0),
+                                left: image.dist_left.unwrap_or(0.0),
+                            },
+                            anchor_y,
+                            true,
+                        );
+                    }
+                }
+            }
+            LayoutBlock::Shape(shape) => add(
+                shape.position.as_ref(),
+                Size {
+                    w: shape.width,
+                    h: shape.height,
+                },
+                shape.wrap_type.as_deref(),
+                shape.behind_doc == Some(true),
+                shape.wrap_distances.clone().unwrap_or_else(zero),
+                anchor_y,
+                false,
+            ),
+            LayoutBlock::TextBox(text_box) => add(
+                text_box.position.as_ref(),
+                Size {
+                    w: text_box.width,
+                    h: height,
+                },
+                text_box.wrap_type.as_deref(),
+                false,
+                BoxEdges {
+                    top: text_box.dist_top.unwrap_or(0.0),
+                    right: text_box.dist_right.unwrap_or(0.0),
+                    bottom: text_box.dist_bottom.unwrap_or(0.0),
+                    left: text_box.dist_left.unwrap_or(0.0),
+                },
+                anchor_y,
+                true,
+            ),
+            LayoutBlock::Image(image) => {
+                if let Some(anchor) = &image.anchor {
+                    add(
+                        anchor.position.as_ref(),
+                        Size {
+                            w: image.width,
+                            h: image.height,
+                        },
+                        anchor.wrap_type.as_deref(),
+                        anchor.behind_doc == Some(true),
+                        zero(),
+                        anchor_y,
+                        false,
+                    );
+                }
+            }
+            LayoutBlock::Table(table) => {
+                if let Some(floating) = &table.floating {
+                    let axis = |relative: Option<&str>, offset, align: Option<&str>, fallback| {
+                        Some(AxisPosition {
+                            relative_to: Some(relative.unwrap_or(fallback).to_owned()),
+                            pos_offset: offset,
+                            align: align.map(str::to_owned),
+                        })
+                    };
+                    let position = ImageRunPosition {
+                        horizontal: axis(
+                            floating.horz_anchor.as_deref(),
+                            floating.tblp_x,
+                            floating.tblp_x_spec.as_deref(),
+                            "margin",
+                        ),
+                        vertical: axis(
+                            floating.vert_anchor.as_deref(),
+                            floating.tblp_y,
+                            floating.tblp_y_spec.as_deref(),
+                            "paragraph",
+                        ),
+                        use_simple_pos: None,
+                        simple_pos: None,
+                        relative_height: None,
+                        behind_doc: None,
+                    };
+                    if let BlockExtent::Table(extent) = &measured.measure {
+                        add(
+                            Some(&position),
+                            Size {
+                                w: extent.total_width,
+                                h: extent.total_height,
+                            },
+                            Some("square"),
+                            false,
+                            BoxEdges {
+                                top: floating.top_from_text.unwrap_or(0.0),
+                                right: floating.right_from_text.unwrap_or(0.0),
+                                bottom: floating.bottom_from_text.unwrap_or(0.0),
+                                left: floating.left_from_text.unwrap_or(0.0),
+                            },
+                            anchor_y,
+                            false,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    bands.sort_by(|a, b| a.top.total_cmp(&b.top));
+    bands
 }
 
 pub fn extend_body_margins(

@@ -1417,7 +1417,8 @@ fn image_payload(image: &Value) -> JsonObject {
         "position": position.map(|_| json!({
             "horizontal": axis(horizontal),
             "vertical": axis(vertical),
-            "relativeHeight": nullish(field(position, "relativeHeight"))
+            "relativeHeight": nullish(field(position, "relativeHeight")),
+            "behindDoc": nullish(field(position, "behindDoc"))
         })),
         "borderWidth": border_width,
         "borderColor": border_color,

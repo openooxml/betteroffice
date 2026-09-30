@@ -1936,6 +1936,8 @@ pub struct LayoutOptions {
     /// footer other than the default one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub section_page_margins: Option<Vec<SectionPageMargins>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section_page_float_bands: Option<Vec<SectionPageFloatBands>>,
     #[serde(default)]
     pub sections: Option<Vec<SectionLayoutContract>>,
 }
@@ -1954,6 +1956,24 @@ pub struct SectionPageMargins {
     pub even: Option<PageMargins>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart: Option<u64>,
+}
+
+/// A full-width float exclusion in page coordinates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PageFloatBand {
+    pub top: f64,
+    pub bottom: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub odd_page: Option<bool>,
+}
+
+/// Float bands for each header/footer variant a section shows.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SectionPageFloatBands {
+    pub default: Vec<PageFloatBand>,
+    pub first: Option<Vec<PageFloatBand>>,
+    pub even: Option<Vec<PageFloatBand>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

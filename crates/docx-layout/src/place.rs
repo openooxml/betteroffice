@@ -259,6 +259,8 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
         options.footnote_reserved_heights.clone(),
     )?;
     paginator.set_section_page_margins(options.section_page_margins.clone().unwrap_or_default());
+    paginator
+        .set_section_page_float_bands(options.section_page_float_bands.clone().unwrap_or_default());
     if let Some(Some(restart)) = plan.section_page_restarts.first() {
         paginator.restart_page_numbering(restart.start);
     }
@@ -378,6 +380,8 @@ pub fn layout_document_incremental(
         options.footnote_reserved_heights.clone(),
     )?;
     paginator.set_section_page_margins(options.section_page_margins.clone().unwrap_or_default());
+    paginator
+        .set_section_page_float_bands(options.section_page_float_bands.clone().unwrap_or_default());
     // move retained pages out; restored on failure so the caller's stays valid
     let mut previous_pages = std::mem::take(&mut previous_layout.pages);
     let convergence = ConvergenceInput {
@@ -554,7 +558,11 @@ fn place(
                 page_has_content,
             )?;
             if must_advance {
-                paginator.force_authored_page_break(false);
+                if paginator.has_float_bands() {
+                    paginator.ensure_fits(group_height);
+                } else {
+                    paginator.force_authored_page_break(false);
+                }
             }
         }
 
@@ -907,11 +915,11 @@ fn layout_paragraph(
     if paragraph_is_unbreakable(block, measure) {
         let state_idx = paginator.get_current();
         let state = paginator.state(state_idx);
-        let capacity = state.content_limit - state.content_top;
         let required = paginator
             .leading_spacing(space_before)
             .max(state.deferred_spacing)
             + paragraph_height;
+        let capacity = paginator.get_column_capacity();
         if paragraph_height <= capacity && required > paginator.get_available_height() {
             paginator.ensure_fits(required);
         }
@@ -920,6 +928,21 @@ fn layout_paragraph(
     let mut current_line_index = 0usize;
 
     while current_line_index < lines.len() {
+        if paginator.has_float_bands() {
+            let state_idx = paginator.get_current();
+            let before = if current_line_index == 0 {
+                paginator
+                    .leading_spacing(space_before)
+                    .max(paginator.state(state_idx).deferred_spacing)
+            } else {
+                0.0
+            };
+            paginator.ensure_fits(
+                before
+                    + lines[current_line_index].line_height
+                    + lines[current_line_index].float_skip_before.unwrap_or(0.0),
+            );
+        }
         let state_idx = paginator.get_current();
         let deferred_spacing = paginator.state(state_idx).deferred_spacing;
         let column_index = paginator.state(state_idx).column_index;
@@ -955,13 +978,16 @@ fn layout_paragraph(
         let remaining_after = lines.len() - (current_line_index + fitting_lines);
         if widow_control && remaining_after > 0 {
             if current_line_index == 0 && fitting_lines == 1 {
-                let capacity = paginator.state(state_idx).content_limit
-                    - paginator.state(state_idx).content_top;
+                let capacity = paginator.get_column_capacity();
                 let first_two_height = lines.iter().take(2).fold(0.0, |sum, line| {
                     sum + line.line_height + line.float_skip_before.unwrap_or(0.0)
                 });
                 if reserved_before + first_two_height <= capacity {
-                    paginator.advance_for_overflow();
+                    if paginator.has_float_bands() {
+                        paginator.ensure_fits(reserved_before + first_two_height);
+                    } else {
+                        paginator.advance_for_overflow();
+                    }
                     continue;
                 }
             }
