@@ -2423,7 +2423,7 @@ fn paragraph_attrs(
         "listLevelNumFmts": truthy(field(list, "levelNumFmts")).then(|| field(list, "levelNumFmts").cloned()).flatten(),
         "listAbstractNumId": nullish(field(list, "abstractNumId")),
         "listStartOverride": nullish(field(list, "startOverride")),
-        "_originalFormatting": nullish(formatting)
+        "_originalFormatting": formatting.filter(|value| !value.is_null()).cloned().unwrap_or_else(|| json!({}))
     }));
     if styles.enabled {
         let (style_ppr, resolved_run) = styles.resolve_paragraph_style(style_id);
@@ -6397,6 +6397,38 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn inherited_paragraph_properties_stay_out_of_direct_formatting() {
+        let styles = StyleResolver::new(Some(&json!({
+            "docDefaults": {"pPr": {"spaceAfter": 200, "lineSpacing": 276, "lineSpacingRule": "auto"}},
+            "styles": [
+                {"styleId": "Normal", "type": "paragraph", "default": true},
+                {"styleId": "Spaced", "type": "paragraph", "pPr": {"spaceAfter": 480, "alignment": "center"}}
+            ]
+        })));
+        for (formatting, after) in [
+            (None, 200),
+            (Some(Value::Null), 200),
+            (Some(json!({"spaceAfter": 0})), 0),
+            (Some(json!({"spaceAfter": 200})), 200),
+            (Some(json!({"styleId": "Spaced"})), 480),
+        ] {
+            let mut paragraph = json!({"content": []});
+            if let Some(formatting) = &formatting {
+                paragraph["formatting"] = formatting.clone();
+            }
+            let attrs = paragraph_attrs(&paragraph, &styles, &[], &[], None);
+            assert_eq!(attrs["spaceAfter"], json!(after));
+            assert_eq!(attrs["lineSpacing"], json!(276));
+            assert_eq!(
+                attrs["_originalFormatting"],
+                formatting
+                    .filter(|value| !value.is_null())
+                    .unwrap_or_else(|| json!({}))
+            );
+        }
     }
 
     #[test]

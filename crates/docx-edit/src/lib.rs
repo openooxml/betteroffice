@@ -957,7 +957,8 @@ impl EditingDoc {
             for (_, pilcrow) in pilcrows(&story, &txn) {
                 if map_string(&pilcrow, &txn, PARA_ID).as_deref() == Some(para_id) {
                     identity::promote(self, &mut txn, &pilcrow);
-                    pilcrow.insert(&mut txn, key, value);
+                    pilcrow.insert(&mut txn, key.clone(), value);
+                    ops::paragraph::sync_direct_paragraph_property(&mut txn, &pilcrow, &key);
                     return Ok(());
                 }
             }

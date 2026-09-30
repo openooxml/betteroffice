@@ -54,36 +54,37 @@ export function paragraphAttrsToFormatting(
   if (attrs._originalFormatting) {
     const orig = attrs._originalFormatting;
     const result = { ...orig };
-    if (attrs.alignment !== (orig.alignment || undefined)) {
+    if (orig.alignment !== undefined && attrs.alignment !== (orig.alignment || undefined)) {
       result.alignment = attrs.alignment || undefined;
     }
     if (isStyleSourcedNumPr(attrs)) {
       delete result.numPr;
       delete result.numPrFromStyle;
     } else if (
+      orig.numPr !== undefined &&
       attrs.numPr !== orig.numPr &&
       JSON.stringify(attrs.numPr) !== JSON.stringify(orig.numPr)
     ) {
       result.numPr = attrs.numPr || undefined;
       delete result.numPrFromStyle;
     }
-    if (attrs.styleId !== (orig.styleId || undefined)) {
+    if (orig.styleId !== undefined && attrs.styleId !== (orig.styleId || undefined)) {
       result.styleId = attrs.styleId || undefined;
     }
-    if (attrs.pageBreakBefore !== (orig.pageBreakBefore || undefined)) {
-      result.pageBreakBefore = attrs.pageBreakBefore || undefined;
+    if (orig.pageBreakBefore !== undefined && attrs.pageBreakBefore !== orig.pageBreakBefore) {
+      result.pageBreakBefore = attrs.pageBreakBefore ?? undefined;
     }
-    if (attrs.widowControl !== (orig.widowControl ?? undefined)) {
+    if (orig.widowControl !== undefined && attrs.widowControl !== orig.widowControl) {
       result.widowControl = attrs.widowControl ?? undefined;
     }
-    if (attrs.autoSpaceDE !== (orig.autoSpaceDE ?? undefined)) {
+    if (orig.autoSpaceDE !== undefined && attrs.autoSpaceDE !== orig.autoSpaceDE) {
       result.autoSpaceDE = attrs.autoSpaceDE ?? undefined;
     }
-    if (attrs.autoSpaceDN !== (orig.autoSpaceDN ?? undefined)) {
+    if (orig.autoSpaceDN !== undefined && attrs.autoSpaceDN !== orig.autoSpaceDN) {
       result.autoSpaceDN = attrs.autoSpaceDN ?? undefined;
     }
-    if (attrs.bidi !== (orig.bidi || undefined)) {
-      result.bidi = attrs.bidi || undefined;
+    if (orig.bidi !== undefined && attrs.bidi !== orig.bidi) {
+      result.bidi = attrs.bidi ?? undefined;
     }
     return result;
   }
