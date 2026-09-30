@@ -249,6 +249,112 @@ test('a retained worker query facade forwards within a document load but never t
   }
 });
 
+test("a snapshot rebuilt after the next document starts loading keeps its own document's line", async () => {
+  const requestB = JSON.stringify({
+    ...JSON.parse(REQUEST),
+    regions: { sections: [{ sectionId: 'main', properties: { pageWidth: 14400 } }] },
+  });
+  const documentA = setup();
+  const documentB = setup(9302, 'Document B', requestB);
+  try {
+    const { preloadLayoutWasm } = await import('@betteroffice/docx/wasm/layout');
+    await preloadLayoutWasm(
+      new Uint8Array(
+        readFileSync(
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+        )
+      )
+    );
+    let inputs = {
+      ...JSON.parse(documentA.native.retained_kernel_inputs_json()),
+      ...JSON.parse(documentA.layoutJson),
+    };
+    const layoutA = inputs.layout as Layout;
+    const overrides = { getInputs: () => inputs };
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source, resolved }) =>
+        useRustDisplayList(layout, overrides, undefined, resolved, source),
+      {
+        initialProps: {
+          layout: layoutA,
+          source: documentA.engine,
+          resolved: undefined as ReadonlySet<number> | undefined,
+        },
+      }
+    );
+    const publish = async (worker: FakeWorker, frame: Uint8Array, frameEpoch: number) => {
+      await act(async () => {
+        worker.reply({
+          id: worker.posted.at(-1)!.id,
+          ok: true,
+          frame: frame.slice().buffer,
+          caret: { frameEpoch, caretRect: null },
+          selection: null,
+          layoutRevision: 0,
+        });
+      });
+      await waitFor(() => {
+        if (result.current.error) throw result.current.error;
+        expect(result.current.frame?.frameEpoch).toBe(frameEpoch);
+        expect(result.current.queries).not.toBeNull();
+        expect(result.current.workerSurfacesActive).toBe(true);
+      });
+      return result.current.queries!;
+    };
+    const workerA = FakeWorker.last!;
+    expect(workerA.posted.at(-1)).toMatchObject({ type: 'bootstrap' });
+    const queriesA0 = await publish(workerA, documentA.frame, 1);
+    const displayListA0 = queriesA0.displayList;
+    await queriesA0.whenReady();
+    queriesA0.prime();
+
+    act(() => result.current.resetSettled());
+    expect(result.current.awaitingDocument()).toBe(true);
+    const frameA1 = documentA.native.build_display_list_frame('{"resolvedCommentIds":[7]}', 1);
+    await act(async () => {
+      rerender({ layout: layoutA, source: documentA.engine, resolved: new Set([7]) });
+    });
+    expect(FakeWorker.last).toBe(workerA);
+    expect(workerA.posted.at(-1)).toMatchObject({ type: 'buildFrame', expectedFrameEpoch: 1 });
+    const queriesA1 = await publish(workerA, frameA1, 2);
+    await queriesA1.whenReady();
+    queriesA1.prime();
+    const displayListA1 = queriesA1.displayList;
+    const pageSizeA1 = queriesA1.pageSize(0);
+    const forwardedDisplayListA0 = queriesA0.displayList;
+    expect(queriesA1).not.toBe(queriesA0);
+    expect(displayListA1).not.toBe(displayListA0);
+    expect(pageSizeA1).not.toBeNull();
+    expect(result.current.awaitingDocument()).toBe(true);
+
+    inputs = {
+      ...JSON.parse(documentB.native.retained_kernel_inputs_json()),
+      ...JSON.parse(documentB.layoutJson),
+    };
+    await act(async () => {
+      rerender({ layout: inputs.layout, source: documentB.engine, resolved: undefined });
+    });
+    const workerB = FakeWorker.last!;
+    expect(workerB).not.toBe(workerA);
+    expect(workerB.posted.at(-1)).toMatchObject({ type: 'bootstrap' });
+    const queriesB = await publish(workerB, documentB.frame, 1);
+    expect(result.current.awaitingDocument()).toBe(false);
+    expect(queriesB.pageSize(0)).not.toEqual(pageSizeA1);
+
+    expect(queriesA1.displayList).toBe(displayListA1);
+    expect(queriesA1.displayList).not.toBe(queriesB.displayList);
+    expect(queriesA1.pageSize(0)).toEqual(pageSizeA1);
+    expect(forwardedDisplayListA0).toBe(displayListA1);
+    queriesA0.dispose();
+    queriesA1.dispose();
+    queriesB.dispose();
+    unmount();
+  } finally {
+    documentA.native.free();
+    documentB.native.free();
+  }
+});
+
 test('a failed worker layout hands the pass back to the main thread', async () => {
   const { native, engine } = setup();
   const errors = spyOn(console, 'error').mockImplementation(() => {});
