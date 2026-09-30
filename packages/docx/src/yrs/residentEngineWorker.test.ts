@@ -814,6 +814,44 @@ describe('sliced layout completion', () => {
     expect(calls).not.toContain('whole');
   });
 
+  test('a glyph trap while a frame request finishes the pass answers both requests once', async () => {
+    const { w, onResume, bootstrap } = steppedWorker(100);
+    await bootstrap();
+    await w.attach([1]);
+    w.harness.memories = [
+      { label: 'docx-edit', bufferBytes: 65536, liveBytes: 65000, peakBytes: 65000, failedAllocationBytes: 112 },
+    ];
+    Object.assign(w.harness.session, {
+      outlineGlyphJson: () => {
+        throw new WebAssembly.RuntimeError('unreachable');
+      },
+    });
+    const rasterize = w.harness.rasterize;
+    w.harness.rasterize = async (...args: Parameters<typeof rasterize>) => {
+      try {
+        (w.harness as { glyphs?: (fontId: number, glyphId: number) => string }).glyphs?.(1, 1);
+      } catch {
+        // painted with browser text instead
+      }
+      return rasterize(...args);
+    };
+    let frame: Promise<ResidentEngineWorkerResponse> | undefined;
+    onResume.push(() => {
+      frame = w.send({ type: 'buildFrame', extras: 'given', expectedFrameEpoch: 2, paintCaret: false });
+    });
+    const completion = await w.send({
+      type: 'completeLayout',
+      expectedFrameEpoch: 1,
+      paintCaret: false,
+      sliceBlocks: 2,
+    });
+    const framed = await frame!;
+    expect(!completion.ok && completion.terminal && completion.outOfMemory).toBe(true);
+    expect(!framed.ok && framed.terminal && framed.outOfMemory).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(new Set(w.answered).size).toBe(w.answered.length);
+  });
+
   test('a frame request finishes the pass first and answers it first', async () => {
     const { w, calls, onResume, bootstrap } = steppedWorker(100);
     await bootstrap();

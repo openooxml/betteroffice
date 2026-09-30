@@ -85,9 +85,9 @@ const COMPLETION_SLICE_MS = 24;
 const COMPLETION_RESTARTS = 3;
 const ALL_BLOCKS = 2 ** 32 - 1;
 
-// The request being handled, and the last one answered with a trap.
+// The request being handled, and the requests answered with a trap.
 let handlingId = 0;
-let trappedId = 0;
+const trappedIds = new Set<number>();
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
   enqueue(() => handle(event.data), event.data.id);
@@ -123,9 +123,9 @@ function replyFailure(id: number, error: unknown): void {
 
 /** A trap leaves the module unusable: `id` is answered as terminal, and nothing succeeds after. */
 function trapped(id: number, error: WebAssembly.RuntimeError): void {
-  if (trap && id === trappedId) return;
+  if (trappedIds.has(id)) return;
+  trappedIds.add(id);
   trap = error;
-  trappedId = id;
   const failed = editFailedAllocationBytes();
   reply({
     id,
@@ -802,6 +802,8 @@ function editFailedAllocationBytes(): number {
 }
 
 function reply(response: ResidentEngineWorkerResponse, transfer: Transferable[] = []): void {
-  if (trap && response.ok) return;
+  // A trap the raster painted past fails the request that would succeed, and
+  // every request waiting on it, through the paths that answer failures.
+  if (trap && response.ok) throw trap;
   scope.postMessage({ ...response, memory: wasmModuleMemories() }, transfer);
 }
