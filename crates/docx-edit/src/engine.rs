@@ -699,9 +699,8 @@ struct DisplayState {
     fresh_base: bool,
     incremental_display_builds: u64,
     rebuilt_display_pages: u64,
-    /// Pages a full build compiles besides those already built; the rest stay
-    /// unbuilt placeholders until [`EngineSession::build_display_pages_frame`].
-    /// `None` builds every page.
+    /// Incremental updates build re-placed pages in this window; full builds
+    /// also build previously built pages. `None` builds every page.
     window: Option<std::ops::Range<usize>>,
 }
 
@@ -899,6 +898,18 @@ fn full_build_pages(display: &DisplayState, page_count: usize) -> Vec<bool> {
                     .as_ref()
                     .and_then(|list| list.pages.get(index))
                     .is_some_and(|page| !page.unbuilt)
+        })
+        .collect()
+}
+
+/// Re-placed pages an incremental display update builds; `None` builds all.
+fn window_build_pages(display: &DisplayState, page_count: usize) -> Vec<bool> {
+    (0..page_count)
+        .map(|index| {
+            display
+                .window
+                .as_ref()
+                .is_none_or(|window| window.contains(&index))
         })
         .collect()
 }
@@ -3217,7 +3228,7 @@ impl EngineSession {
                     ..pagination.rebuilt_page_end)
                     .chain(note_pages.iter().copied())
                     .collect();
-                let build = full_build_pages(&display, layout.pages.len());
+                let build = window_build_pages(&display, layout.pages.len());
                 let incremental = if let DisplayState {
                     list: Some(previous),
                     resident_input: Some(resident_input),
@@ -3252,7 +3263,15 @@ impl EngineSession {
                     display.resident_input = Some(resident_input);
                     display.list = Some(list);
                 }
-                (incremental, rebuilt_pages.len(), rebuilt_pages)
+                let rebuilt_display_pages = if incremental {
+                    rebuilt_pages
+                        .iter()
+                        .filter(|&&index| build.get(index).copied().unwrap_or(true))
+                        .count()
+                } else {
+                    rebuilt_pages.len()
+                };
+                (incremental, rebuilt_display_pages, rebuilt_pages)
             } else {
                 let build = full_build_pages(&display, layout.pages.len());
                 let (resident_input, list) =
@@ -3323,8 +3342,9 @@ impl EngineSession {
         Ok(bytes)
     }
 
-    /// Limit full display builds to `window` plus the pages already built;
-    /// `None` builds every page.
+    /// Build re-placed pages in `window` on incremental updates, leaving the
+    /// rest unbuilt. Full builds also build previously built pages; `None`
+    /// builds every page.
     pub fn set_display_window(&self, window: Option<std::ops::Range<usize>>) {
         self.display.borrow_mut().window = window;
     }
@@ -7141,6 +7161,117 @@ mod tests {
         engine.build_display_pages_frame(&rest, epoch).unwrap();
         let built = engine.with_display_list(Clone::clone).unwrap();
         assert_eq!(built.pages, full_display_build(&engine, &extras).pages);
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn an_edit_turns_re_placed_pages_outside_the_window_into_placeholders() {
+        let (engine, extras) = paged_filler_engine(207, 40);
+        engine.set_display_window(Some(0..1));
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let pages = engine.with_display_list(|list| list.pages.len()).unwrap();
+        assert!(pages >= 4, "the fixture must span several pages");
+        let rest: Vec<usize> = (1..pages).collect();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.build_display_pages_frame(&rest, epoch).unwrap();
+        assert_eq!(
+            engine.with_display_list(Clone::clone).unwrap().pages,
+            full_display_build(&engine, &extras).pages
+        );
+
+        let paragraph = engine.doc().paragraphs("body").unwrap().remove(0);
+        let offset = u32::try_from(paragraph.text.encode_utf16().count()).unwrap();
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", offset),
+                " that now runs long enough to wrap onto a second line of the page",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let before = engine.stats();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        let after = engine.stats();
+        assert_eq!(
+            after.incremental_display_builds,
+            before.incremental_display_builds + 1
+        );
+        assert_eq!(
+            after.rebuilt_display_pages - before.rebuilt_display_pages,
+            1
+        );
+        assert_eq!(engine.pagination.borrow().rebuilt_page_start, 0);
+        assert_eq!(engine.pagination.borrow().rebuilt_page_end, pages);
+
+        let edited = engine.with_display_list(Clone::clone).unwrap();
+        let windowed = {
+            let pagination = engine.pagination.borrow();
+            docx_layout::build_resident_display_list_partial_observed(
+                pagination.input.as_ref().unwrap(),
+                pagination.layout.as_ref().unwrap(),
+                &extras,
+                &|index| index == 0,
+                &mut || {},
+            )
+            .unwrap()
+            .1
+        };
+        assert!(!edited.pages[0].unbuilt);
+        assert_eq!(
+            edited.pages[0],
+            full_display_build(&engine, &extras).pages[0]
+        );
+        for (page, placeholder) in edited.pages.iter().zip(&windowed.pages).skip(1) {
+            assert!(page.unbuilt && page.primitives.is_empty());
+            assert!(page.position_span.is_some());
+            assert_eq!(page.position_span, placeholder.position_span);
+            assert_eq!(page, placeholder);
+        }
+
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.build_display_pages_frame(&rest, epoch).unwrap();
+        let built = engine.with_display_list(Clone::clone).unwrap();
+        assert_eq!(built.pages, full_display_build(&engine, &extras).pages);
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn an_edit_without_a_display_window_builds_every_re_placed_page() {
+        let (engine, extras) = paged_filler_engine(208, 40);
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let pages = engine.with_display_list(|list| list.pages.len()).unwrap();
+        assert!(pages >= 4, "the fixture must span several pages");
+
+        let paragraph = engine.doc().paragraphs("body").unwrap().remove(0);
+        let offset = u32::try_from(paragraph.text.encode_utf16().count()).unwrap();
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", offset),
+                " that now runs long enough to wrap onto a second line of the page",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let before = engine.stats();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        let after = engine.stats();
+        assert_eq!(
+            after.incremental_display_builds,
+            before.incremental_display_builds + 1
+        );
+        assert_eq!(
+            after.rebuilt_display_pages - before.rebuilt_display_pages,
+            pages as u64
+        );
+        assert_eq!(engine.pagination.borrow().rebuilt_page_start, 0);
+        assert_eq!(engine.pagination.borrow().rebuilt_page_end, pages);
+        let edited = engine.with_display_list(Clone::clone).unwrap();
+        assert!(edited.pages.iter().all(|page| !page.unbuilt));
+        assert_eq!(edited.pages, full_display_build(&engine, &extras).pages);
         docx_layout::clear_measure_fonts();
     }
 

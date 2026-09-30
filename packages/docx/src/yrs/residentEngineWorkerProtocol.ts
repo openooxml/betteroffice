@@ -56,6 +56,7 @@ export type ResidentEngineWorkerRequest =
       extras: string;
       expectedFrameEpoch: number;
       paintCaret: boolean;
+      displayWindow?: [number, number];
     }
   | {
       id: number;
@@ -65,6 +66,7 @@ export type ResidentEngineWorkerRequest =
       expectedFrameEpoch: number;
       profile: boolean;
       paintCaret: boolean;
+      displayWindow?: [number, number];
     }
   | {
       id: number;
@@ -75,6 +77,7 @@ export type ResidentEngineWorkerRequest =
       expectedFrameEpoch: number;
       profile: boolean;
       paintCaret: boolean;
+      displayWindow?: [number, number];
     }
   | {
       id: number;

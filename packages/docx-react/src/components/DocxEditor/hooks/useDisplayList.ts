@@ -55,6 +55,7 @@ import {
   DisplayListQueryEpochGate,
   type ResolveDisplayListQueries,
 } from './displayListQueryEpochGate';
+import { bindDisplayWindow, type DisplayWindow } from '../internals/displayWindow';
 
 // provider for the canvas renderer's display list: returns the injected value
 // when the host supplies one, otherwise the demo fixture. consumers only ever
@@ -291,6 +292,19 @@ export function useRustDisplayList(
   } | null>(null);
   const workerFallbackEngineRef = useRef<YrsSession | null>(null);
   const displayWindowRef = useRef<[number, number]>(INITIAL_DISPLAY_WINDOW);
+  const displayWindowListenersRef = useRef(new Set<() => void>());
+  const displayWindow = useMemo<DisplayWindow>(
+    () => ({
+      read: () => displayWindowRef.current,
+      subscribe(listener) {
+        displayWindowListenersRef.current.add(listener);
+        return () => {
+          displayWindowListenersRef.current.delete(listener);
+        };
+      },
+    }),
+    []
+  );
   const pageBuildInFlightRef = useRef(false);
   const pageBuildTimerRef = useRef<PageBuildTimer | null>(null);
   const schedulePageBuildsWhenIdleRef = useRef<() => void>(() => {});
@@ -475,6 +489,7 @@ export function useRustDisplayList(
         return;
       }
       if (contentEpoch !== contentEpochRef.current) return;
+      bindDisplayWindow(queries, displayWindow);
       queryEpochGate.invalidate();
       const publish = (): void => {
         if (
@@ -502,7 +517,7 @@ export function useRustDisplayList(
         }
       });
     },
-    [queryEpochGate]
+    [displayWindow, queryEpochGate]
   );
 
   const resolveQueries = useCallback<ResolveDisplayListQueries>(
@@ -616,7 +631,8 @@ export function useRustDisplayList(
                   selection,
                   currentFrame.frameEpoch,
                   false,
-                  paintCaret
+                  paintCaret,
+                  displayWindowRef.current
                 )
               : await worker.client.applyDelete(
                   operation.direction,
@@ -624,7 +640,8 @@ export function useRustDisplayList(
                   currentFrame.frameEpoch,
                   false,
                   paintCaret,
-                  operation.count
+                  operation.count,
+                  displayWindowRef.current
                 );
           if (result.applied) {
             try {
@@ -910,6 +927,7 @@ export function useRustDisplayList(
       if (current[0] === start && current[1] === end) return;
       displayWindowRef.current = [start, end];
       schedulePageBuilds(0);
+      for (const listener of [...displayWindowListenersRef.current]) listener();
     },
     [schedulePageBuilds]
   );
@@ -1277,7 +1295,12 @@ export function useRustDisplayList(
             previewKey !== null && shownKey !== null && shownKey !== previewKey
               ? Promise.reject(new SupersededPreviewError())
               : !snapshot
-                ? worker.buildFrame(extras, previousFrame?.frameEpoch ?? 0, paintCaret)
+                ? worker.buildFrame(
+                    extras,
+                    previousFrame?.frameEpoch ?? 0,
+                    paintCaret,
+                    displayWindowRef.current
+                  )
                 : bootstrapping
                   ? worker.bootstrap(snapshot, extras, {
                       ...sent(),

@@ -141,10 +141,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (!session) throw new Error('Resident engine worker is not initialized');
+  if ('displayWindow' in request && request.displayWindow) {
+    session.setDisplayWindow(...request.displayWindow);
+  }
   if (request.type === 'sync') {
     unsubscribe?.();
     unsubscribe = null;
-    if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
     const { layoutJson } = hydrate(request.snapshot);
     subscribe();
     const started = performance.now();
