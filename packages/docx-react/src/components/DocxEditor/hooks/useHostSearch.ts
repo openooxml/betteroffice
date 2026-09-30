@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
+import { displayPageCanvases, type DisplayListQueries } from '@betteroffice/docx/layout/render';
+import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import type { YrsSession, YrsStickyPosition } from '@betteroffice/docx/yrs';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { CanvasFindMatch } from '../overlays/CanvasFindHighlightOverlay';
+import { scrollViewport } from '../internals/viewportBand';
 
 /** Options for {@link DocxHostSearch.search}. */
 export interface DocxSearchOptions {
@@ -83,6 +85,18 @@ function stateOf(run: SearchRun | null): DocxSearchState | null {
     : null;
 }
 
+/** The index of the topmost page showing in the scroller, from the painted page canvases. */
+export function topPageInView(host: HTMLElement | null): number {
+  if (!host) return 0;
+  const viewport = scrollViewport(findVerticalScrollParentOrRoot(host));
+  for (const canvas of displayPageCanvases(host)) {
+    if (canvas.getBoundingClientRect().bottom > viewport.top + 1) {
+      return Number(canvas.dataset.pageIndex) || 0;
+    }
+  }
+  return 0;
+}
+
 /** The first match on or after the page in view, wrapping to the first. */
 function firstInView(
   matches: readonly SearchMatch[],
@@ -143,19 +157,17 @@ function carriedCurrent(
 export function useHostSearch({
   pagedEditorRef,
   displayListQueries,
-  currentPage,
+  canvasHostRef,
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   displayListQueries: DisplayListQueries | null;
-  /** The one-based page in view. */
-  currentPage: () => number;
+  /** `.canvas-pages` host; its painted pages tell which page is in view. */
+  canvasHostRef: React.RefObject<HTMLElement | null>;
 }): { api: DocxHostSearch; highlight: { matches: readonly CanvasFindMatch[]; current: number } | null } {
   const runRef = useRef<SearchRun | null>(null);
   const listenersRef = useRef(new Set<(state: DocxSearchState | null) => void>());
   const queriesRef = useRef(displayListQueries);
   queriesRef.current = displayListQueries;
-  const currentPageRef = useRef(currentPage);
-  currentPageRef.current = currentPage;
   // Bumped by every search and clear; a search that resumes after another started stops.
   const generationRef = useRef(0);
   // A reveal the layout could not place yet, retried as the layout grows.
@@ -230,7 +242,7 @@ export function useHostSearch({
         return empty;
       }
       const matches = collectMatches(editor, session, query, normalized);
-      const current = firstInView(matches, queriesRef.current, currentPageRef.current() - 1);
+      const current = firstInView(matches, queriesRef.current, topPageInView(canvasHostRef.current));
       const run: SearchRun = {
         query,
         options: normalized,
@@ -244,7 +256,7 @@ export function useHostSearch({
       publish(run);
       return stateOf(run)!;
     },
-    [pagedEditorRef, publish, reveal]
+    [canvasHostRef, pagedEditorRef, publish, reveal]
   );
 
   // A new display list follows every document change, and every page the layout adds.
@@ -258,9 +270,11 @@ export function useHostSearch({
       return;
     }
     if (session.version() !== run.version) {
+      const revealing = pendingRevealRef.current !== null;
       pendingRevealRef.current = null;
       const matches = collectMatches(editor, session, run.query, run.options);
       const current = carriedCurrent(editor, session, matches, run.anchor);
+      if (revealing && current >= 0) reveal(matches[current].displayFrom);
       publish({
         ...run,
         version: session.version(),
@@ -272,6 +286,8 @@ export function useHostSearch({
       reveal(pendingRevealRef.current);
     }
   }, [clearSearch, displayListQueries, pagedEditorRef, publish, reveal]);
+
+  useEffect(() => clearSearch, [clearSearch]);
 
   const api = useMemo<DocxHostSearch>(
     () => ({

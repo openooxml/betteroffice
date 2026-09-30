@@ -1627,12 +1627,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   }, [canvasRenderer.queries, expandedSidebarItem, trackedChanges]);
 
   // Expose ref methods
-  const scrollPageInfoRef = useRef(scrollPageInfo);
-  scrollPageInfoRef.current = scrollPageInfo;
   const hostSearch = useHostSearch({
     pagedEditorRef,
     displayListQueries: canvasRenderer.queries,
-    currentPage: () => scrollPageInfoRef.current.currentPage,
+    canvasHostRef: canvasRenderer.canvasHostRef,
   });
 
   useDocxEditorRefApi({

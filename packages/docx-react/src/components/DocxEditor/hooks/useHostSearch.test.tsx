@@ -86,12 +86,21 @@ async function mount(page = 1) {
     return lists.get(version)!;
   };
   const pagedEditorRef: { current: PagedEditorRef | null } = { current: editor };
+  // pages 1 and 2 painted, `page` at the top of the window
+  const host = document.createElement('div');
+  for (const index of [0, 1]) {
+    const canvas = document.createElement('canvas');
+    canvas.dataset.pageIndex = String(index);
+    const top = (index + 1 - page) * 1000 + 10;
+    canvas.getBoundingClientRect = () => new DOMRect(0, top, 800, 990);
+    host.append(canvas);
+  }
   const hook = renderHook(
     ({ version }) =>
       useHostSearch({
         pagedEditorRef,
         displayListQueries: queries(version),
-        currentPage: () => page,
+        canvasHostRef: { current: host },
       }),
     { initialProps: { version: 0 } }
   );
@@ -206,6 +215,23 @@ test('a match past the laid-out pages is revealed once the layout reaches it', a
   expect(reveals).toHaveLength(3);
 });
 
+test('an edit before the layout reaches the match keeps revealing it', async () => {
+  const { session, first, hook, reveals, layOut } = await mount();
+  layOut(() => false);
+  await act(async () => {
+    await hook.result.current.api.search('dog');
+  });
+  session.insertText({ story: 'body', paraId: first, offset: 0 }, 'A ');
+  hook.rerender({ version: 1 });
+  const moved = hook.result.current.highlight!.matches[0].displayFrom;
+  expect(reveals.at(-1)).toBe(moved);
+  layOut(() => true);
+  hook.rerender({ version: 2 });
+  expect(reveals.at(-1)).toBe(moved);
+  hook.rerender({ version: 3 });
+  expect(reveals).toHaveLength(3);
+});
+
 test('clearing wins over a search still flushing input', async () => {
   const { hook, pagedEditorRef } = await mount();
   let release!: () => void;
@@ -229,6 +255,15 @@ test('clearing wins over a search still flushing input', async () => {
   });
   expect(hook.result.current.api.getSearchState()).toBeNull();
   expect(hook.result.current.highlight).toBeNull();
+});
+
+test('unmounting the editor ends its search', async () => {
+  const { hook, events } = await mount();
+  await act(async () => {
+    await hook.result.current.api.search('the');
+  });
+  hook.unmount();
+  expect(events.at(-1)).toBeNull();
 });
 
 test('a search ends with its editor or document', async () => {
