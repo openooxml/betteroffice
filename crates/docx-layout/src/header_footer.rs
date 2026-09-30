@@ -470,7 +470,8 @@ pub fn header_footer_float_bands(
                    behind: bool,
                    distances: BoxEdges,
                    anchor_y: f64,
-                   emu: bool| {
+                   emu: bool,
+                   image: bool| {
         let Some(position) = position else {
             return;
         };
@@ -525,6 +526,11 @@ pub fn header_footer_float_bands(
         for odd_page in [true, false] {
             frame.odd_page = odd_page;
             let (x, y) = crate::anchor::resolve_position(Some(&position), size.w, size.h, &frame);
+            let y = if image {
+                y.min(metrics.page_size.h - size.h).max(0.0)
+            } else {
+                y
+            };
             let full_width = x - finite(distances.left) - left
                 < crate::floating_objects::MIN_WRAP_SEGMENT_WIDTH
                 && right - x - size.w - finite(distances.right)
@@ -557,11 +563,18 @@ pub fn header_footer_float_bands(
             LayoutBlock::Paragraph(paragraph) => {
                 for run in &paragraph.runs {
                     if let Run::Image(image) = run {
+                        let bound = |axis: &str| {
+                            image
+                                .rotation_bounds
+                                .as_ref()
+                                .and_then(|bounds| bounds.get(axis))
+                                .and_then(serde_json::Value::as_f64)
+                        };
                         add(
                             image.position.as_ref(),
                             Size {
-                                w: image.width,
-                                h: image.height,
+                                w: bound("width").unwrap_or(image.width),
+                                h: bound("height").unwrap_or(image.height),
                             },
                             image.wrap_type.as_deref(),
                             false,
@@ -572,6 +585,7 @@ pub fn header_footer_float_bands(
                                 left: image.dist_left.unwrap_or(0.0),
                             },
                             anchor_y,
+                            true,
                             true,
                         );
                     }
@@ -587,6 +601,7 @@ pub fn header_footer_float_bands(
                 shape.behind_doc == Some(true),
                 shape.wrap_distances.clone().unwrap_or_else(zero),
                 anchor_y,
+                false,
                 false,
             ),
             LayoutBlock::TextBox(text_box) => add(
@@ -605,6 +620,7 @@ pub fn header_footer_float_bands(
                 },
                 anchor_y,
                 true,
+                false,
             ),
             LayoutBlock::Image(image) => {
                 if let Some(anchor) = &image.anchor {
@@ -619,6 +635,7 @@ pub fn header_footer_float_bands(
                         zero(),
                         anchor_y,
                         false,
+                        true,
                     );
                 }
             }
@@ -665,6 +682,7 @@ pub fn header_footer_float_bands(
                                 left: floating.left_from_text.unwrap_or(0.0),
                             },
                             anchor_y,
+                            false,
                             false,
                         );
                     }
