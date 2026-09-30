@@ -10,7 +10,8 @@ use crate::format::{FormatPolicy, HYPERLINK, PROTECTED_ATTRS};
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
 use crate::ops::{
     Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
-    capture_pilcrow, last_pilcrow, snapshot_range, utf16_len,
+    block_embed_at, capture_pilcrow, last_pilcrow, paragraph_content_before, snapshot_range,
+    utf16_len,
 };
 use crate::{
     BREAK_KIND, DEL, EditCtx, EditingDoc, INS, KIND_KEY, Position, StoryRange, check_position,
@@ -166,6 +167,7 @@ pub(crate) fn plain_delete(
     start: u32,
     end: u32,
     chunks: &[Chunk],
+    replacement_has_content: bool,
 ) -> DeleteOutcome {
     let pilcrows_in_range: Vec<(u32, yrs::MapRef)> = chunks
         .iter()
@@ -181,19 +183,27 @@ pub(crate) fn plain_delete(
         .first()
         .map(|(_, map)| capture_pilcrow(map, txn));
 
-    let final_in_range = final_pilcrow
+    let protected_pilcrow = final_pilcrow
         .as_ref()
         .filter(|(index, _)| *index >= start && *index < end)
-        .cloned();
-    let (removed, survivor) = if let Some((final_index, final_map)) = final_in_range {
-        // Keep the final pilcrow alive: remove around it.
-        if end > final_index + 1 {
-            story.remove_range(txn, final_index + 1, end - final_index - 1);
+        .cloned()
+        .or_else(|| {
+            pilcrows_in_range
+                .last()
+                .filter(|_| {
+                    block_embed_at(story, txn, end)
+                        && (replacement_has_content || paragraph_content_before(story, txn, start))
+                })
+                .cloned()
+        });
+    let (removed, survivor) = if let Some((index, map)) = protected_pilcrow {
+        if end > index + 1 {
+            story.remove_range(txn, index + 1, end - index - 1);
         }
-        if final_index > start {
-            story.remove_range(txn, start, final_index - start);
+        if index > start {
+            story.remove_range(txn, start, index - start);
         }
-        ((end - start) - 1, Some(final_map))
+        ((end - start) - 1, Some(map))
     } else {
         story.remove_range(txn, start, end - start);
         let survivor = if pilcrows_in_range.is_empty() {
@@ -289,7 +299,7 @@ impl EditingDoc {
             );
             range.end - outcome.removed
         } else {
-            plain_delete(&mut txn, &story, range.start, range.end, &chunks);
+            plain_delete(&mut txn, &story, range.start, range.end, &chunks, false);
             range.start
         };
         let loc_range = loc_range_in_txn(&range.story, &story, &txn, range.start, result_end)?;
@@ -365,7 +375,14 @@ impl EditingDoc {
                     &chunks,
                 );
             } else {
-                plain_delete(&mut txn, &story, range.start, range.end, &chunks);
+                plain_delete(
+                    &mut txn,
+                    &story,
+                    range.start,
+                    range.end,
+                    &chunks,
+                    !text.is_empty(),
+                );
             }
         }
         if !text.is_empty() {
@@ -435,7 +452,14 @@ impl EditingDoc {
                     &chunks,
                 );
             } else {
-                plain_delete(&mut txn, &story, range.start, range.end, &chunks);
+                plain_delete(
+                    &mut txn,
+                    &story,
+                    range.start,
+                    range.end,
+                    &chunks,
+                    runs.iter().any(|run| !run.text.is_empty()),
+                );
             }
         }
         let mut cursor = range.start;

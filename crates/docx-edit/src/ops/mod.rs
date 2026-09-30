@@ -38,6 +38,11 @@ impl Chunk {
         matches!(self.attrs.get(key), Some(value) if *value != Any::Null)
     }
 
+    pub fn is_block_embed<T: ReadTxn>(&self, txn: &T) -> bool {
+        matches!(&self.kind, ChunkKind::Embed(Some(map)) if map_string(map, txn, KIND_KEY)
+            .is_some_and(|kind| crate::segments::is_block_embed(&kind)))
+    }
+
     /// The `author` of an `ins`/`del` revision value on this chunk, if any.
     pub fn revision_author(&self, key: &str) -> Option<String> {
         let Some(Any::Map(revision)) = self.attrs.get(key) else {
@@ -50,7 +55,7 @@ impl Chunk {
     }
 }
 
-fn revision_id_for_author(value: &Any, author: &str) -> Option<String> {
+pub(crate) fn revision_id_for_author(value: &Any, author: &str) -> Option<String> {
     let Any::Map(revision) = value else {
         return None;
     };
@@ -193,6 +198,21 @@ pub(crate) fn snapshot_range<T: ReadTxn>(story: &TextRef, txn: &T, lo: u32, hi: 
         offset += len;
     }
     chunks
+}
+
+pub(crate) fn block_embed_at<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> bool {
+    snapshot_range(story, txn, index, index.saturating_add(1))
+        .first()
+        .is_some_and(|chunk| chunk.is_block_embed(txn))
+}
+
+pub(crate) fn paragraph_content_before<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> bool {
+    index > 0
+        && snapshot_range(story, txn, index - 1, index)
+            .last()
+            .is_some_and(|chunk| {
+                !matches!(chunk.kind, ChunkKind::Pilcrow(_)) && !chunk.is_block_embed(txn)
+            })
 }
 
 /// The story's last pilcrow as `(index, map)`.

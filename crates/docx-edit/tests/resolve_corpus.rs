@@ -1,14 +1,21 @@
 //! Tracked-change accept and reject corpus.
 //! (`EditingDoc::accept_change` / `reject_change`), by revision id and by range.
 
-use std::collections::HashMap;
+#[path = "support/revision_boundary.rs"]
+mod boundary;
+
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
+use docx_edit::bridge::{RenderEnv, yrs_doc_to_layout_blocks};
 use docx_edit::{
-    ChangeKind, ChangeTarget, EditCtx, EditingDoc, FormatPolicy, MergeDirection, OpError,
-    ParaAttrDelta, ParaSelector, Patch, Position, SegmentContent, StoryRange,
+    CellLoc, ChangeKind, ChangeTarget, EditCtx, EditingDoc, FormatPolicy, MergeDirection, OpError,
+    ParaAttrDelta, ParaSelector, Patch, Position, RawOp, RichRun, SegmentContent, StoryRange,
+    TableLocator, TableRange,
 };
+use docx_layout::types::LayoutBlock;
 use yrs::Any;
+use yrs::types::Attrs;
 
 const DATE: &str = "2026-07-14T12:00:00Z";
 
@@ -40,6 +47,500 @@ fn change_count(doc: &EditingDoc) -> usize {
 
 fn body_len(doc: &EditingDoc) -> u32 {
     doc.story_len("body").unwrap()
+}
+
+fn stamp(id: &str) -> Any {
+    Any::Map(Arc::new(HashMap::from([
+        ("id".to_owned(), Any::from(id)),
+        ("author".to_owned(), Any::from("Remote")),
+        ("date".to_owned(), Any::from(DATE)),
+    ])))
+}
+
+fn boundary_target(doc: &EditingDoc, id: &str, end: u32, target: &str) -> ChangeTarget {
+    match target {
+        "id" => ChangeTarget::Revision(id.to_owned()),
+        "range" => ChangeTarget::Range(StoryRange::new("body", 0, end)),
+        "all" => ChangeTarget::Range(StoryRange::new("body", 0, body_len(doc))),
+        _ => unreachable!(),
+    }
+}
+
+fn assert_block_boundary(doc: &EditingDoc, kind: &str, text: Option<&str>) {
+    let expected: Vec<&str> = text.into_iter().chain(["tail"]).collect();
+    assert_eq!(body_texts(doc), expected);
+    assert!(doc.list_revisions().unwrap().is_empty());
+    let blocks = yrs_doc_to_layout_blocks(doc, "body", &RenderEnv::default()).unwrap();
+    let block_index = usize::from(text.is_some());
+    assert_eq!(blocks.len(), block_index + 2);
+    if text.is_some() {
+        assert!(matches!(&blocks[0], LayoutBlock::Paragraph(_)));
+    }
+    assert!(matches!(blocks.last(), Some(LayoutBlock::Paragraph(_))));
+    assert!(match (&blocks[block_index], kind) {
+        (LayoutBlock::Table(table), "table") => {
+            let LayoutBlock::Paragraph(cell) = &table.rows[0].cells[0].blocks[0] else {
+                panic!("cell paragraph missing");
+            };
+            serde_json::to_value(&cell.runs).unwrap()[0]["text"] == "cell"
+        }
+        (LayoutBlock::Paragraph(_), "blockSdt")
+        | (LayoutBlock::PageBreak(_), "pageBreak")
+        | (LayoutBlock::ColumnBreak(_), "columnBreak") => true,
+        _ => false,
+    });
+}
+
+#[test]
+fn accepting_a_deleted_mark_keeps_only_needed_block_boundaries() {
+    for kind in ["table", "blockSdt", "pageBreak", "columnBreak"] {
+        for replacement in ["", "X"] {
+            for target in ["id", "range", "all"] {
+                let doc = EditingDoc::new(301);
+                boundary::seed(&doc, kind, &local());
+                let table = (kind == "table")
+                    .then(|| doc.table_payload(&TableLocator::new("body", 0)).unwrap());
+                let receipt = if replacement.is_empty() {
+                    doc.delete_range(&suggesting("Ada"), StoryRange::new("body", 0, 4))
+                } else {
+                    doc.replace_range(
+                        &suggesting("Ada"),
+                        StoryRange::new("body", 0, 4),
+                        replacement,
+                    )
+                }
+                .unwrap();
+                let target = boundary_target(
+                    &doc,
+                    &receipt.revision_ids[0],
+                    4 + replacement.len() as u32,
+                    target,
+                );
+                doc.accept_change(&local(), &target).unwrap();
+                assert_block_boundary(&doc, kind, (!replacement.is_empty()).then_some(replacement));
+                if let Some(table) = table {
+                    assert_eq!(
+                        doc.table_payload(&TableLocator::new("body", 0)).unwrap(),
+                        table
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn rejecting_an_inserted_mark_keeps_the_boundary_before_a_surviving_block() {
+    for kind in ["table", "blockSdt", "pageBreak", "columnBreak"] {
+        for target in ["id", "range", "all"] {
+            let doc = EditingDoc::new(302);
+            let split = boundary::seed(&doc, kind, &suggesting("Ada"));
+            let target = boundary_target(&doc, &split.revision_ids[0], 4, target);
+            doc.reject_change(&local(), &target).unwrap();
+            assert_block_boundary(&doc, kind, Some("old"));
+        }
+    }
+}
+
+#[test]
+fn a_retained_mark_resolves_both_classes_of_the_same_revision() {
+    for accept in [false, true] {
+        for by_id in [false, true] {
+            let doc = EditingDoc::new(310);
+            let split = boundary::seed(&doc, "table", &suggesting("Ada"));
+            let replacement = doc
+                .replace_range(&suggesting("Ada"), StoryRange::new("body", 3, 4), "X")
+                .unwrap();
+            assert_eq!(replacement.revision_ids, split.revision_ids);
+            let target = if by_id {
+                ChangeTarget::Revision(split.revision_ids[0].clone())
+            } else {
+                ChangeTarget::Range(StoryRange::new("body", 3, 5))
+            };
+            if accept {
+                doc.accept_change(&local(), &target).unwrap();
+            } else {
+                doc.reject_change(&local(), &target).unwrap();
+            }
+            assert_block_boundary(&doc, "table", Some(if accept { "oldX" } else { "old" }));
+            let mark = doc
+                .story_segments("body")
+                .unwrap()
+                .into_iter()
+                .find(|segment| matches!(segment.content, SegmentContent::Pilcrow(_)))
+                .unwrap();
+            for key in ["ins", "del"] {
+                assert!(
+                    mark.attributes
+                        .get(key)
+                        .is_none_or(|stamp| *stamp == Any::Null)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn retained_marks_keep_each_stamp_outside_the_id_target() {
+    for accept in [false, true] {
+        for attr_target in [false, true] {
+            let doc = EditingDoc::new(311);
+            let split = boundary::seed(&doc, "table", &local());
+            let (marker, attribute) = if accept {
+                ("pPrDel", "del")
+            } else {
+                ("pPrIns", "ins")
+            };
+            doc.set_paragraph_attr(&split.first_para_id, marker, stamp("map"))
+                .unwrap();
+            doc.apply_raw_ops(
+                "body",
+                vec![RawOp::Format {
+                    index: 3,
+                    len: 1,
+                    attrs: Attrs::from([(Arc::from(attribute), stamp("attr"))]),
+                }],
+                &local(),
+            )
+            .unwrap();
+            let id = if attr_target { "attr" } else { "map" };
+            let target = ChangeTarget::Revision(id.to_owned());
+            let receipt = if accept {
+                doc.accept_change(&local(), &target)
+            } else {
+                doc.reject_change(&local(), &target)
+            }
+            .unwrap();
+            assert_eq!(receipt.revision_ids, [id]);
+            let mark = doc
+                .story_segments("body")
+                .unwrap()
+                .into_iter()
+                .find(|segment| matches!(segment.content, SegmentContent::Pilcrow(_)))
+                .unwrap();
+            let SegmentContent::Pilcrow(properties) = mark.content else {
+                unreachable!()
+            };
+            if attr_target {
+                assert_eq!(properties.values.get(marker), Some(&stamp("map")));
+                assert!(
+                    mark.attributes
+                        .get(attribute)
+                        .is_none_or(|stamp| *stamp == Any::Null)
+                );
+            } else {
+                assert!(!properties.values.contains_key(marker));
+                assert_eq!(mark.attributes.get(attribute), Some(&stamp("attr")));
+            }
+            assert_eq!(body_texts(&doc), ["old", "tail"]);
+            yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+        }
+    }
+}
+
+#[test]
+fn accepting_and_rejecting_all_listed_revisions_preserves_block_boundaries() {
+    for accept in [false, true] {
+        let doc = EditingDoc::new(309);
+        let split_ctx = if accept { local() } else { suggesting("Ada") };
+        boundary::seed(&doc, "table", &split_ctx);
+        if accept {
+            doc.replace_range(&suggesting("Ada"), StoryRange::new("body", 0, 4), "X")
+                .unwrap();
+        }
+        doc.insert_text(
+            &suggesting("Bob"),
+            Position::new("body", body_len(&doc) - 1),
+            "!",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        let revisions = doc.list_revisions().unwrap();
+        assert_eq!(revisions.len(), if accept { 4 } else { 2 });
+        let ids: BTreeSet<String> = revisions
+            .into_iter()
+            .map(|revision| revision.change.revision_id)
+            .collect();
+        assert_eq!(ids.len(), 2);
+        for id in ids {
+            let target = ChangeTarget::Revision(id);
+            if accept {
+                doc.accept_change(&local(), &target).unwrap();
+            } else {
+                doc.reject_change(&local(), &target).unwrap();
+            }
+        }
+        let expected = if accept {
+            ["X", "tail!"]
+        } else {
+            ["old", "tail"]
+        };
+        assert_eq!(body_texts(&doc), expected);
+        assert!(doc.list_revisions().unwrap().is_empty());
+        assert_eq!(
+            yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default())
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+}
+
+#[test]
+fn a_mark_can_join_when_its_following_block_is_removed_in_the_same_resolve() {
+    for kind in ["table", "blockSdt", "pageBreak", "columnBreak"] {
+        for target in ["id", "range", "all"] {
+            let doc = EditingDoc::new(303);
+            boundary::seed(&doc, kind, &local());
+            let receipt = doc
+                .delete_range(&suggesting("Ada"), StoryRange::new("body", 3, 5))
+                .unwrap();
+            let target = boundary_target(&doc, &receipt.revision_ids[0], 5, target);
+            doc.accept_change(&local(), &target).unwrap();
+            assert_eq!(body_texts(&doc), ["oldtail"]);
+            assert!(doc.list_revisions().unwrap().is_empty());
+            let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+            assert_eq!(blocks.len(), 1);
+        }
+    }
+}
+
+#[test]
+fn rejecting_a_mark_and_its_inserted_break_still_joins_paragraphs() {
+    for kind in ["pageBreak", "columnBreak"] {
+        let doc = seed("oldtail");
+        let split = doc
+            .split_paragraph(&suggesting("Ada"), Position::new("body", 3), None)
+            .unwrap();
+        let inserted = doc
+            .insert_embed(&suggesting("Ada"), Position::new("body", 4), kind, vec![])
+            .unwrap();
+        assert_eq!(inserted.revision_ids, split.revision_ids);
+        doc.reject_change(
+            &local(),
+            &ChangeTarget::Revision(split.revision_ids[0].clone()),
+        )
+        .unwrap();
+        assert_eq!(body_texts(&doc), ["oldtail"]);
+        assert!(doc.list_revisions().unwrap().is_empty());
+        assert_eq!(
+            yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default())
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
+
+#[test]
+fn accepting_a_deleted_mark_between_text_paragraphs_still_joins() {
+    for target in ["id", "range", "all"] {
+        let doc = seed("oldtail");
+        doc.split_paragraph(&local(), Position::new("body", 3), None)
+            .unwrap();
+        let receipt = doc
+            .replace_range(&suggesting("Ada"), StoryRange::new("body", 0, 4), "X")
+            .unwrap();
+        let target = boundary_target(&doc, &receipt.revision_ids[0], 5, target);
+        doc.accept_change(&local(), &target).unwrap();
+        assert_eq!(body_texts(&doc), ["Xtail"]);
+        assert!(doc.list_revisions().unwrap().is_empty());
+        assert_eq!(
+            yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default())
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
+
+#[test]
+fn accepting_only_the_mark_keeps_a_deleted_block_outside_the_target() {
+    for by_id in [false, true] {
+        let doc = EditingDoc::new(304);
+        boundary::seed(&doc, "table", &local());
+        let mark = doc
+            .delete_range(&suggesting("Ada"), StoryRange::new("body", 3, 4))
+            .unwrap();
+        doc.delete_range(&suggesting("Bob"), StoryRange::new("body", 4, 5))
+            .unwrap();
+        let target = if by_id {
+            ChangeTarget::Revision(mark.revision_ids[0].clone())
+        } else {
+            ChangeTarget::Range(StoryRange::new("body", 3, 4))
+        };
+        doc.accept_change(&local(), &target).unwrap();
+        assert_eq!(body_texts(&doc), ["old", "tail"]);
+        assert_eq!(change_count(&doc), 1);
+        yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+    }
+}
+
+#[test]
+fn removing_a_break_still_keeps_the_mark_before_the_next_table() {
+    let doc = EditingDoc::new(305);
+    boundary::seed(&doc, "table", &local());
+    doc.insert_embed(&local(), Position::new("body", 4), "pageBreak", vec![])
+        .unwrap();
+    let receipt = doc
+        .delete_range(&suggesting("Ada"), StoryRange::new("body", 3, 5))
+        .unwrap();
+    doc.accept_change(
+        &local(),
+        &ChangeTarget::Revision(receipt.revision_ids[0].clone()),
+    )
+    .unwrap();
+    assert_block_boundary(&doc, "table", Some("old"));
+}
+
+#[test]
+fn removing_all_table_rows_allows_the_mark_to_join_and_keeps_range_bounds() {
+    for accept in [false, true] {
+        let doc = EditingDoc::new(306);
+        let mark = doc
+            .create_story("body", "oldtail", "Normal", "left")
+            .unwrap();
+        doc.split_paragraph(&local(), Position::new("body", 3), None)
+            .unwrap();
+        let table_ctx = if accept { local() } else { suggesting("Ada") };
+        doc.insert_table(&table_ctx, Position::new("body", 4), 1, 1)
+            .unwrap();
+        if accept {
+            doc.delete_range(&suggesting("Ada"), StoryRange::new("body", 3, 4))
+                .unwrap();
+            doc.delete_row(
+                &suggesting("Ada"),
+                &TableRange::cell(CellLoc::new("body", 0, 0, 0)),
+            )
+            .unwrap();
+        } else {
+            let revision = Any::Map(Arc::new(HashMap::from([
+                ("id".to_owned(), Any::from("mark")),
+                ("author".to_owned(), Any::from("Ada")),
+                ("date".to_owned(), Any::from(DATE)),
+            ])));
+            doc.set_paragraph_attr(&mark, "pPrIns", revision).unwrap();
+        }
+        doc.insert_text(
+            &suggesting("Bob"),
+            Position::new("body", 5),
+            "Z",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        let target = ChangeTarget::Range(StoryRange::new("body", 3, 5));
+        if accept {
+            doc.accept_change(&local(), &target).unwrap();
+        } else {
+            doc.reject_change(&local(), &target).unwrap();
+        }
+        assert_eq!(body_texts(&doc), ["oldZtail"]);
+        assert_eq!(change_count(&doc), 1);
+        assert_eq!(
+            yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default())
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
+
+#[test]
+fn plain_deletion_and_merges_preserve_boundaries_before_blocks() {
+    for kind in ["table", "blockSdt", "pageBreak", "columnBreak"] {
+        let doc = EditingDoc::new(307);
+        let split = boundary::seed(&doc, kind, &local());
+        doc.merge_paragraphs(&local(), &split.first_para_id, MergeDirection::Forward)
+            .unwrap();
+        assert_block_boundary(&doc, kind, Some("old"));
+        doc.delete_range(&local(), StoryRange::new("body", 0, 4))
+            .unwrap();
+        assert_block_boundary(&doc, kind, None);
+
+        let doc = EditingDoc::new(308);
+        let split = boundary::seed(&doc, kind, &suggesting("Ada"));
+        doc.merge_paragraphs(
+            &suggesting("Ada"),
+            &split.first_para_id,
+            MergeDirection::Forward,
+        )
+        .unwrap();
+        assert_block_boundary(&doc, kind, Some("old"));
+    }
+}
+
+#[test]
+fn empty_paragraph_merges_before_blocks_still_remove_the_mark() {
+    for kind in ["table", "blockSdt", "pageBreak", "columnBreak"] {
+        for own_split in [false, true] {
+            let doc = EditingDoc::new(312);
+            let ctx = if own_split {
+                suggesting("Ada")
+            } else {
+                local()
+            };
+            let split = boundary::seed(&doc, kind, &ctx);
+            doc.delete_range(&local(), StoryRange::new("body", 0, 3))
+                .unwrap();
+            doc.merge_paragraphs(&ctx, &split.first_para_id, MergeDirection::Forward)
+                .unwrap();
+            assert_block_boundary(&doc, kind, None);
+        }
+    }
+}
+
+#[test]
+fn plain_replacements_keep_the_boundary_for_their_new_content() {
+    for kind in ["table", "blockSdt", "pageBreak", "columnBreak"] {
+        for rich in [false, true] {
+            let doc = EditingDoc::new(313);
+            boundary::seed(&doc, kind, &local());
+            let range = StoryRange::new("body", 0, 4);
+            if rich {
+                doc.replace_range_rich(
+                    &local(),
+                    range,
+                    &[RichRun {
+                        text: "X".to_owned(),
+                        attrs: Default::default(),
+                    }],
+                )
+                .unwrap();
+            } else {
+                doc.replace_range(&local(), range, "X").unwrap();
+            }
+            assert_block_boundary(&doc, kind, Some("X"));
+        }
+    }
+}
+
+#[test]
+fn surviving_inline_content_requires_a_boundary_before_the_table() {
+    let doc = EditingDoc::new(314);
+    boundary::seed(&doc, "table", &local());
+    let deleted = doc
+        .delete_range(&suggesting("Ada"), StoryRange::new("body", 0, 4))
+        .unwrap();
+    doc.insert_embed(
+        &local(),
+        Position::new("body", 0),
+        "image",
+        vec![
+            ("src".to_owned(), Any::from("data:image/png;base64,AA==")),
+            ("width".to_owned(), Any::Number(80.0)),
+            ("height".to_owned(), Any::Number(60.0)),
+        ],
+    )
+    .unwrap();
+    doc.accept_change(
+        &local(),
+        &ChangeTarget::Revision(deleted.revision_ids[0].clone()),
+    )
+    .unwrap();
+    assert_block_boundary(&doc, "table", Some(""));
+    doc.delete_range(&local(), StoryRange::new("body", 0, 2))
+        .unwrap();
+    assert_block_boundary(&doc, "table", None);
 }
 
 #[test]
@@ -472,4 +973,53 @@ fn tracked_image_deletion_accepts_or_rejects_as_one_embed_revision() {
         assert_eq!(images, usize::from(!accept));
         assert_eq!(change_count(&doc), 0);
     }
+}
+
+#[test]
+fn retracting_a_kept_split_resolves_only_its_own_stamps() {
+    // Ada's split then her deletion of the same mark share one revision.
+    let doc = EditingDoc::new(314);
+    let split = boundary::seed(&doc, "table", &suggesting("Ada"));
+    doc.replace_range(&suggesting("Ada"), StoryRange::new("body", 3, 4), "")
+        .unwrap();
+    doc.merge_paragraphs(
+        &suggesting("Ada"),
+        &split.first_para_id,
+        MergeDirection::Forward,
+    )
+    .unwrap();
+    assert_eq!(body_texts(&doc), ["old", "tail"]);
+    assert!(doc.list_revisions().unwrap().is_empty());
+
+    // Another revision on the mark survives the retraction.
+    let doc = EditingDoc::new(315);
+    let split = boundary::seed(&doc, "table", &suggesting("Ada"));
+    doc.apply_raw_ops(
+        "body",
+        vec![RawOp::Format {
+            index: 3,
+            len: 1,
+            attrs: Attrs::from([(Arc::from("ins"), stamp("bob"))]),
+        }],
+        &local(),
+    )
+    .unwrap();
+    doc.merge_paragraphs(
+        &suggesting("Ada"),
+        &split.first_para_id,
+        MergeDirection::Forward,
+    )
+    .unwrap();
+    let mark = doc
+        .story_segments("body")
+        .unwrap()
+        .into_iter()
+        .find(|segment| matches!(segment.content, SegmentContent::Pilcrow(_)))
+        .unwrap();
+    let SegmentContent::Pilcrow(properties) = mark.content else {
+        unreachable!()
+    };
+    assert!(!properties.values.contains_key("pPrIns"));
+    assert_eq!(mark.attributes.get("ins"), Some(&stamp("bob")));
+    assert_eq!(body_texts(&doc), ["old", "tail"]);
 }

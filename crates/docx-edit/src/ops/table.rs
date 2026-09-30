@@ -905,7 +905,7 @@ pub(crate) fn resolve_table_row_revisions(
     span: Option<(u32, u32)>,
     filter: Option<&str>,
     resolved: &mut Vec<String>,
-) -> OpResult<()> {
+) -> OpResult<u32> {
     let (span_start, span_end) = span.unwrap_or((0, u32::MAX));
     let mut tables = Vec::new();
     let mut offset = 0u32;
@@ -923,6 +923,7 @@ pub(crate) fn resolve_table_row_revisions(
         offset += len;
     }
 
+    let mut removed_tables = 0;
     for (table_offset, table_index, table) in tables.into_iter().rev() {
         let mut data = read_table(&table, txn)?;
         let mut remove = Vec::new();
@@ -951,6 +952,7 @@ pub(crate) fn resolve_table_row_revisions(
         if remove.len() == data.rows.len() {
             let locator = TableLocator::new(story_id, table_index);
             delete_table_in_txn(txn, &locator, story, table_offset, &data)?;
+            removed_tables += 1;
             continue;
         }
         let mut deleted = Vec::new();
@@ -959,7 +961,7 @@ pub(crate) fn resolve_table_row_revisions(
         }
         write_table(txn, &table, &data);
     }
-    Ok(())
+    Ok(removed_tables)
 }
 
 fn delete_table_in_txn(
