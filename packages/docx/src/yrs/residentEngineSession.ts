@@ -40,6 +40,7 @@ export type ResidentEngineSession = Pick<
   | 'residentDeletedUnits'
   | 'resumeRegionLayout'
   | 'selection'
+  | 'setDisplayRetainBuiltPages'
   | 'setDisplayWindow'
   | 'setSelection'
   | 'yrsBlocksForStory'
@@ -118,6 +119,7 @@ export async function createResidentEngineSession(
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
     setDisplayWindow: (start, end) => session.set_display_window(start, end),
+    setDisplayRetainBuiltPages: (retain) => session.set_display_retain_built_pages(retain),
     setWindowedIncrementalBuilds: (enabled) => session.set_windowed_incremental_builds(enabled),
     buildDisplayPagesFrame: (pages, expectedFrameEpoch) =>
       session.build_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch),

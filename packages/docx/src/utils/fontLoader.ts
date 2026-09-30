@@ -1017,6 +1017,9 @@ interface BufferFace {
 
 // Buffer faces by `cssFamily|weight|style|content`.
 const bufferFaces = new Map<string, BufferFace>();
+const bufferFacesBySlot = new Map<string, Set<BufferFace>>();
+const bufferFamilyCounts = new Map<string, number>();
+const MAX_DOCUMENT_FACES = 256;
 // Families loadedFonts holds only because buffer faces are registered.
 const bufferOnlyFamilies = new Set<string>();
 // Mapped originals loadedFonts holds only because their equivalent is such a family.
@@ -1031,7 +1034,10 @@ function markFamilyLoaded(family: string): void {
 function markBufferFamily(entry: BufferFace, family: string): void {
   if (!loadedFonts.has(family)) bufferOnlyFamilies.add(family);
   loadedFonts.add(family);
-  entry.families.add(family);
+  if (!entry.families.has(family)) {
+    entry.families.add(family);
+    bufferFamilyCounts.set(family, (bufferFamilyCounts.get(family) ?? 0) + 1);
+  }
 }
 
 function bytesOf(face: BufferFaceInput): Uint8Array<ArrayBuffer> {
@@ -1087,12 +1093,15 @@ function heldByOthers(
 ): boolean {
   const slot = familySlot(cssFamily, face.weight, face.style ?? 'normal');
   const bytes = bytesOf(face);
-  return [...bufferFaces.values()].some(
-    (entry) =>
-      entry.cssSlot === slot &&
+  for (const entry of bufferFacesBySlot.get(slot) ?? []) {
+    if (
       !sameBytes(entry.bytes, bytes) &&
       [...entry.owners].some((owner) => !replacing.has(owner))
-  );
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -1158,6 +1167,12 @@ function registerBufferFace(
     url: null,
   };
   bufferFaces.set(key, entry);
+  let slotFaces = bufferFacesBySlot.get(cssSlot);
+  if (!slotFaces) {
+    slotFaces = new Set();
+    bufferFacesBySlot.set(cssSlot, slotFaces);
+  }
+  slotFaces.add(entry);
 
   entry.promise = (async (): Promise<boolean> => {
     isLoadingAny = true;
@@ -1204,18 +1219,19 @@ function registerBufferFace(
 function dropBufferFace(entry: BufferFace): void {
   if (bufferFaces.get(entry.key) !== entry) return;
   bufferFaces.delete(entry.key);
+  const slotFaces = bufferFacesBySlot.get(entry.cssSlot);
+  slotFaces?.delete(entry);
+  if (slotFaces?.size === 0) bufferFacesBySlot.delete(entry.cssSlot);
   loadedFaces.delete(entry.key);
   entry.style?.remove();
   if (entry.url) URL.revokeObjectURL(entry.url);
   entry.style = null;
   entry.url = null;
   for (const family of entry.families) {
-    if (
-      !bufferOnlyFamilies.has(family) ||
-      [...bufferFaces.values()].some((face) => face.families.has(family))
-    ) {
-      continue;
-    }
+    const count = (bufferFamilyCounts.get(family) ?? 0) - 1;
+    if (count > 0) bufferFamilyCounts.set(family, count);
+    else bufferFamilyCounts.delete(family);
+    if (!bufferOnlyFamilies.has(family) || count > 0) continue;
     bufferOnlyFamilies.delete(family);
     loadedFonts.delete(family);
     for (const [original, source] of mappedOriginals) {
@@ -1276,9 +1292,14 @@ export function claimDocumentFaces(
       return null;
     }
     const families = new Map<string, BufferFaceInput[]>();
-    for (const face of list) {
+    for (const face of list.slice(0, MAX_DOCUMENT_FACES)) {
       const family = face.family.trim();
-      families.set(family, [...(families.get(family) ?? []), face]);
+      let group = families.get(family);
+      if (!group) {
+        group = [];
+        families.set(family, group);
+      }
+      group.push(face);
     }
     const loads: Array<Promise<[string, string, boolean]>> = [];
     for (const [family, group] of families) {

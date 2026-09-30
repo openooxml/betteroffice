@@ -11,6 +11,7 @@ import {
   drawDisplayPage,
   drawPrimitive,
   rasterizeDisplayPageToBackBuffer,
+  releaseOffscreenPageCanvas,
   sizeCanvasForPage,
   withFontFamilies,
 } from './canvasBackend';
@@ -534,5 +535,40 @@ describe('Canvas font families', () => {
     } as TextRunPrimitive;
     await drawPrimitive(recorded, run, { fontFamilies: new Map([['Calibri', 'Calibri#1f2e']]) });
     expect(fonts).toEqual(['400 13px "Calibri#1f2e", sans-serif']);
+  });
+});
+
+describe('Offscreen page canvas release', () => {
+  it('shrinks to one pixel with an empty bitmap, never to 0x0, and only once', () => {
+    const bitmaps: unknown[] = [];
+    const sizes: number[] = [];
+    let width = 794;
+    let height = 1123;
+    const canvas = {
+      get width() {
+        return width;
+      },
+      set width(value: number) {
+        sizes.push(value);
+        width = value;
+      },
+      get height() {
+        return height;
+      },
+      set height(value: number) {
+        sizes.push(value);
+        height = value;
+      },
+      getContext: (kind: string) =>
+        kind === 'bitmaprenderer'
+          ? { transferFromImageBitmap: (bitmap: unknown) => bitmaps.push(bitmap) }
+          : null,
+    };
+    releaseOffscreenPageCanvas(canvas as unknown as OffscreenCanvas);
+    expect(sizes).toEqual([1, 1]);
+    expect(bitmaps).toEqual([null]);
+    releaseOffscreenPageCanvas(canvas as unknown as OffscreenCanvas);
+    expect(sizes).toEqual([1, 1]);
+    expect(bitmaps).toEqual([null]);
   });
 });

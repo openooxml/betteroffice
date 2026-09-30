@@ -70,10 +70,11 @@ interface HarnessProps {
   pagedRef: RefObject<PagedEditorRef | null>;
   docxRef: RefObject<DocxEditorRef | null>;
   display: { current: UseRustDisplayListResult | null };
+  replicaReady?: boolean;
 }
 
 /** The editor's input, resident-frame and ref wiring, without its canvas. */
-function Harness({ session, layout, overrides, pagedRef, docxRef, display }: HarnessProps) {
+function Harness({ session, layout, overrides, pagedRef, docxRef, display, replicaReady = true }: HarnessProps) {
   const frames = useRustDisplayList(layout, overrides, undefined, undefined, session);
   display.current = frames;
   const inputRef = useRef<YrsInputRef>(null);
@@ -140,7 +141,7 @@ function Harness({ session, layout, overrides, pagedRef, docxRef, display }: Har
     <YrsInput
       ref={inputRef}
       enabled
-      readOnly={false}
+      readOnly={!replicaReady}
       session={session}
       inputPositionMap={map}
       displayPositionToLoc={(position) => displayPositionToYrsLoc(map(), position)}
@@ -227,4 +228,31 @@ test('applyEdits waits for worker input in flight, then refuses the batch that t
   expect(applied).toMatchObject({ ok: true, applied: true, changedStories: ['body'] });
   expect(texts(session)).toEqual(['Batch typed']);
   expect(worker.requests.filter((type) => type === 'applyUpdate')).toHaveLength(forwarded + 1);
+});
+
+test('canvas input stays blocked until the replica is ready', async () => {
+  const session = await createYrsSession();
+  sessions.push(session);
+  const { paraId } = session.createStory('body', 'Seed');
+  session.registerFont(new Uint8Array(readFileSync(FONT)));
+  const inputs = JSON.parse(session.layoutDocumentWithRegionsJson(LAYOUT));
+  session.setSelection({ story: 'body', paraId, offset: 4 });
+  const props: HarnessProps = {
+    session,
+    layout: inputs.layout as Layout,
+    overrides: { build: async () => ({ pages: [] }), getInputs: () => inputs },
+    pagedRef: createRef<PagedEditorRef>(),
+    docxRef: createRef<DocxEditorRef>(),
+    display: { current: null },
+    replicaReady: false,
+  };
+  const view = render(<Harness {...props} />);
+  await act(async () => { props.pagedRef.current!.insertText(' blocked'); });
+  expect(texts(session)).toEqual(['Seed']);
+  act(() => view.rerender(<Harness {...props} replicaReady />));
+  await act(async () => {
+    props.pagedRef.current!.insertText(' typed');
+    await props.pagedRef.current!.flushPendingInput();
+  });
+  expect(texts(session)).toEqual(['Seed typed']);
 });

@@ -22,13 +22,13 @@ const MODULES: WasmModule[] = [
     crate: 'docx-edit',
     name: 'docx_edit',
     generated: 'packages/docx/src/wasm/generated/edit',
-    cargoArgs: ['--locked', '--features', 'wasm,tiff,heap-stats'],
+    cargoArgs: ['--locked', '--features', 'wasm,tiff,metafile,heap-stats'],
   },
   {
     crate: 'docx-parse',
     name: 'docx_parse',
     generated: 'packages/docx/src/wasm/generated/parse',
-    cargoArgs: ['--locked', '--features', 'wasm,tiff'],
+    cargoArgs: ['--locked', '--features', 'wasm,tiff,metafile'],
   },
 ];
 

@@ -504,6 +504,75 @@ test('a family Google does not serve is asked for once, and its link removed', a
   }
 });
 
+test('a document declaring thousands of embedded families registers only the first 256', async () => {
+  const scope = createFontLoadScope();
+  const data = fontBytes(1, 2, 3);
+  const faces = Array.from({ length: 5_000 }, (_, index) => ({
+    family: `Budget Family ${index}`,
+    data,
+  }));
+  try {
+    const registered = await registerDocumentFaces(faces, scope);
+    expect(registered.size).toBe(256);
+    expect(registered).toEqual(
+      new Map(faces.slice(0, 256).map(({ family }) => [family, family]))
+    );
+    expect(faceStyles()).toEqual(faces.slice(0, 256).map(({ family }) => family));
+    expect(faceStyles().length).toBeLessThanOrEqual(256);
+    expect(isFontLoaded(faces[256].family)).toBe(false);
+  } finally {
+    scope.dispose();
+  }
+});
+
+test('the document face budget also caps faces sharing one family', async () => {
+  const scope = createFontLoadScope();
+  const data = fontBytes(4, 5, 6);
+  const faces: BufferFaceInput[] = Array.from({ length: 257 }, (_, index) => ({
+    family: 'Budget Weights',
+    data,
+    weight: index + 1,
+  }));
+  faces.push({ family: 'Past Face Budget', data });
+  try {
+    expect(await registerDocumentFaces(faces, scope)).toEqual(
+      new Map([['Budget Weights', 'Budget Weights']])
+    );
+    expect(faceStyles()).toHaveLength(256);
+    const weights = [...document.head.querySelectorAll('style')].map(
+      (style) => /font-weight: (\d+);/.exec(style.textContent ?? '')?.[1]
+    );
+    expect(weights).toEqual(Array.from({ length: 256 }, (_, index) => String(index + 1)));
+    expect(isFontLoaded('Past Face Budget')).toBe(false);
+  } finally {
+    scope.dispose();
+  }
+});
+
+test('a buffer family stays loaded until its last face is released, even after repeated joins', async () => {
+  const first = createFontLoadScope();
+  const second = createFontLoadScope();
+  const family = 'Counted Faces';
+  const regular = { family, data: fontBytes(7), weight: 400 };
+  const bold = { family, data: fontBytes(8), weight: 700 };
+  try {
+    await registerDocumentFaces([regular], first);
+    await registerDocumentFaces([regular, bold], second);
+    await registerDocumentFaces([regular], first);
+    first.dispose();
+    expect(isFontLoaded(family)).toBe(true);
+    await registerDocumentFaces([bold], second);
+    expect(isFontLoaded(family)).toBe(true);
+    expect(faceStyles()).toEqual([family]);
+    second.dispose();
+    expect(isFontLoaded(family)).toBe(false);
+    expect(faceStyles()).toEqual([]);
+  } finally {
+    first.dispose();
+    second.dispose();
+  }
+});
+
 test('documents embedding different faces under one name each keep their own', async () => {
   const first = createFontLoadScope();
   const second = createFontLoadScope();

@@ -300,6 +300,32 @@ const handleFinalizers: HandleFinalizationRegistry | null = (() => {
   return Ctor ? new Ctor((close) => close()) : null;
 })();
 
+/** A facade's Rust store handle and the engine that owns it. */
+interface HandleCell {
+  handle: number | null;
+  eng: RustDisplayListQueryEngine | null;
+}
+
+/**
+ * The finalizer's held value. Built outside `createDisplayListQueries`: a
+ * closure made there shares the factory's context, whose donor facade can lead
+ * back to the registered facade, which then is never finalized. Only an engine
+ * holds a handle (a resident source never opens one), so `cell.eng` is the
+ * source the dead check needs.
+ */
+function handleCloser(cell: HandleCell): () => void {
+  return () => {
+    const handle = cell.handle;
+    cell.handle = null;
+    if (handle === null || !cell.eng || deadSources.has(cell.eng)) return;
+    try {
+      cell.eng.closeDisplayList?.(handle);
+    } catch {
+      // a close failure must never surface; the store caps handles anyway
+    }
+  };
+}
+
 /**
  * Internal handoff state for handle adoption between consecutive facades.
  * Keyed weakly so a dropped facade can never leak its list.
@@ -602,9 +628,11 @@ export function createDisplayListQueries(
   const resident: ResidentDisplayListQueryEngine | null = isResidentQueryEngine(engine)
     ? engine
     : null;
-  let eng: RustDisplayListQueryEngine | null = resident
-    ? null
-    : (engine as RustDisplayListQueryEngine | undefined) ?? null;
+  // The finalizer holds this cell, so it must never lead to a facade.
+  const cell: HandleCell = {
+    handle: null,
+    eng: resident ? null : ((engine as RustDisplayListQueryEngine | undefined) ?? null),
+  };
   let sourceError: Error | null = null;
   let resolveReady!: () => void;
   let rejectReady!: (error: Error) => void;
@@ -617,9 +645,8 @@ export function createDisplayListQueries(
   void readyPromise.catch(() => undefined);
 
   // session-handle state: the parsed display list lives in the Rust store behind
-  // `handle`; null means the JSON-arg fallback (unsupported wasm, open failed, or
-  // a handle dropped after a stale-handle error).
-  let handle: number | null = null;
+  // `cell.handle`; null means the JSON-arg fallback (unsupported wasm, open failed,
+  // or a handle dropped after a stale-handle error).
   let handleAttempted = false;
   let superseded = false;
   let disposed = false;
@@ -644,7 +671,7 @@ export function createDisplayListQueries(
     lineages.set(line, lineage);
   }
 
-  const source = (): DisplayListQuerySource | null => resident ?? eng;
+  const source = (): DisplayListQuerySource | null => resident ?? cell.eng;
 
   const isDead = (): boolean => {
     const current = source();
@@ -659,7 +686,7 @@ export function createDisplayListQueries(
   const killSource = (label: string, error: unknown): void => {
     const failure = error instanceof Error ? error : new Error(String(error));
     sourceError = failure;
-    handle = null;
+    cell.handle = null;
     handleFinalizers?.unregister(finalizerToken);
     const current = source();
     if (!current || deadSources.has(current)) return;
@@ -677,36 +704,23 @@ export function createDisplayListQueries(
     }
   };
 
-  const closeHandle = (): void => {
-    if (handle !== null && isDead()) {
-      handle = null;
-      return;
-    }
-    if (handle !== null) {
-      try {
-        eng?.closeDisplayList?.(handle);
-      } catch {
-        // a close failure must never surface — the store caps handles anyway
-      }
-      handle = null;
-    }
-  };
+  const closeHandle = handleCloser(cell);
 
   // adopt the donor facade's parsed list when only some pages changed:
   // ships a page-delta into the Rust store instead of the whole list
   const adoptHandle = (): boolean => {
     const donor = donorFacade;
     donorFacade = null;
-    if (!donor || !eng?.updateDisplayList || !eng.hasDisplayListUpdate?.()) return false;
+    if (!donor || !cell.eng?.updateDisplayList || !cell.eng.hasDisplayListUpdate?.()) return false;
     const seed = facadeDeltaSeeds.get(donor);
-    if (!seed || seed.engine() !== eng) return false;
+    if (!seed || seed.engine() !== cell.eng) return false;
     const update = buildDisplayListUpdateJson(seed, list);
     if (!update) return false;
     const adopted = seed.takeHandle();
     if (adopted === null) return false;
     try {
-      eng.updateDisplayList(adopted, update.json);
-      handle = adopted;
+      cell.eng.updateDisplayList(adopted, update.json);
+      cell.handle = adopted;
       storeRevisions = update.revisions;
       return true;
     } catch (error) {
@@ -714,7 +728,7 @@ export function createDisplayListQueries(
       // anyway (idempotent) in case the failure happened before wasm ran, then
       // fall through to a fresh full open
       try {
-        eng.closeDisplayList?.(adopted);
+        cell.eng.closeDisplayList?.(adopted);
       } catch {
         // the capped store reclaims it eventually
       }
@@ -726,15 +740,24 @@ export function createDisplayListQueries(
   // acquire at most one handle, on the first query that wants it (or via
   // prime()); a failure leaves `handle` null so queries take the JSON-arg path
   const openHandle = (): void => {
-    if (disposed || superseded || handleAttempted || handle !== null || !eng || isDead()) return;
-    if (!eng.hasDisplayListSession?.() || !eng.openDisplayList) return;
+    if (
+      disposed ||
+      superseded ||
+      handleAttempted ||
+      cell.handle !== null ||
+      !cell.eng ||
+      isDead()
+    ) {
+      return;
+    }
+    if (!cell.eng.hasDisplayListSession?.() || !cell.eng.openDisplayList) return;
     handleAttempted = true;
     if (adoptHandle()) return;
     try {
-      if (eng.updateDisplayList && eng.hasDisplayListUpdate?.()) {
+      if (cell.eng.updateDisplayList && cell.eng.hasDisplayListUpdate?.()) {
         // Pages are parsed into the store when a query first needs them, so
         // opening costs their sizes only.
-        handle = eng.openDisplayList(
+        cell.handle = cell.eng.openDisplayList(
           JSON.stringify({
             ...(list.contractVersion !== undefined
               ? { contractVersion: list.contractVersion }
@@ -744,11 +767,11 @@ export function createDisplayListQueries(
         );
         storeRevisions = list.pages.map(() => UNLOADED);
       } else {
-        handle = eng.openDisplayList(getJson());
+        cell.handle = cell.eng.openDisplayList(getJson());
         storeRevisions = list.pages.map(displayPageRevision);
       }
     } catch (error) {
-      handle = null;
+      cell.handle = null;
       if (isWasmTrap(error)) {
         killSource('display-list session open', error);
         return;
@@ -763,7 +786,7 @@ export function createDisplayListQueries(
   // Parse the pages a query reads into the store. A failed update closes the
   // handle on the Rust side; the query then takes the JSON-arg path.
   const ensurePages = (pageIndices: readonly number[]): void => {
-    if (handle === null || !storeRevisions || !eng?.updateDisplayList) return;
+    if (cell.handle === null || !storeRevisions || !cell.eng?.updateDisplayList) return;
     const revisions = storeRevisions;
     const replace: Array<[number, DisplayPage]> = [];
     for (const index of pageIndices) {
@@ -772,8 +795,8 @@ export function createDisplayListQueries(
     }
     if (replace.length === 0) return;
     try {
-      eng.updateDisplayList(
-        handle,
+      cell.eng.updateDisplayList(
+        cell.handle,
         JSON.stringify({
           total: list.pages.length,
           ...(list.contractVersion !== undefined
@@ -801,12 +824,12 @@ export function createDisplayListQueries(
 
   const allPages = (): number[] => list.pages.map((_, index) => index);
 
-  if (resident || eng) {
+  if (resident || cell.eng) {
     resolveReady();
   } else {
     loadRustDisplayListQueryEngine().then(
       (loaded) => {
-        eng = loaded;
+        cell.eng = loaded;
         resolveReady();
       },
       (error) => {
@@ -827,13 +850,13 @@ export function createDisplayListQueries(
     label: string,
     pages: () => readonly number[]
   ): string | null => {
-    if (!eng || isDead()) return null;
-    if (handle === null) openHandle();
-    if (handle !== null && byHandle) ensurePages(pages());
+    if (!cell.eng || isDead()) return null;
+    if (cell.handle === null) openHandle();
+    if (cell.handle !== null && byHandle) ensurePages(pages());
     if (isDead()) return null;
-    if (handle !== null && byHandle) {
+    if (cell.handle !== null && byHandle) {
       try {
-        return byHandle(handle);
+        return byHandle(cell.handle);
       } catch (error) {
         if (isWasmTrap(error)) {
           killSource(label, error);
@@ -874,7 +897,7 @@ export function createDisplayListQueries(
    * answers itself; null when no live facade is left, which answers nothing.
    */
   const handedOff = (): DisplayListQueries | null | undefined => {
-    if (resident || !superseded || handle !== null || !line) return undefined;
+    if (resident || !superseded || cell.handle !== null || !line) return undefined;
     // never names this facade: the finalizer's closure context must not retain it
     const newest = lineage.newest?.deref();
     return newest && !facadeDeltaSeeds.get(newest)?.disposed() ? newest : null;
@@ -920,9 +943,9 @@ export function createDisplayListQueries(
       );
     }
     const raw = runQuery(
-      eng?.hitTestRegionsByHandle &&
-        ((h: number) => eng!.hitTestRegionsByHandle!(h, pageIndex, x, y)),
-      () => eng!.hitTestRegionsJson(getJson(), pageIndex, x, y),
+      cell.eng?.hitTestRegionsByHandle &&
+        ((h: number) => cell.eng!.hitTestRegionsByHandle!(h, pageIndex, x, y)),
+      () => cell.eng!.hitTestRegionsJson(getJson(), pageIndex, x, y),
       'hit_test_regions',
       () => [pageIndex]
     );
@@ -940,8 +963,8 @@ export function createDisplayListQueries(
       );
     }
     const raw = runQuery(
-      eng?.rangeRectsByHandle && ((h: number) => eng!.rangeRectsByHandle!(h, from, to)),
-      () => eng!.rangeRectsJson(getJson(), from, to),
+      cell.eng?.rangeRectsByHandle && ((h: number) => cell.eng!.rangeRectsByHandle!(h, from, to)),
+      () => cell.eng!.rangeRectsJson(getJson(), from, to),
       'range_rects',
       () => pagesTouchingPositions(list, from, to)
     );
@@ -966,11 +989,11 @@ export function createDisplayListQueries(
         'vertical_move'
       );
     }
-    if (!eng?.verticalMoveJson) return null;
+    if (!cell.eng?.verticalMoveJson) return null;
     const raw = runQuery(
-      eng.verticalMoveByHandle &&
-        ((h: number) => eng!.verticalMoveByHandle!(h, position, direction, resolvedGoalX)),
-      () => eng!.verticalMoveJson!(getJson(), position, direction, resolvedGoalX),
+      cell.eng.verticalMoveByHandle &&
+        ((h: number) => cell.eng!.verticalMoveByHandle!(h, position, direction, resolvedGoalX)),
+      () => cell.eng!.verticalMoveJson!(getJson(), position, direction, resolvedGoalX),
       'vertical_move',
       () => pagesTouchingPositions(list, position, position, 1)
     );
@@ -1007,11 +1030,11 @@ export function createDisplayListQueries(
     // Probe capability first: invoking an absent by-handle export would trip
     // `runQuery`'s close-on-failure and drop the shared session handle,
     // degrading body queries too. Feature-detect and no-op instead.
-    if (!eng || !eng.hasRangeRectsRegion?.()) return [];
+    if (!cell.eng || !cell.eng.hasRangeRectsRegion?.()) return [];
     const raw = runQuery(
-      eng.rangeRectsRegionByHandle &&
-        ((h: number) => eng!.rangeRectsRegionByHandle!(h, region, partId, from, to)),
-      () => eng!.rangeRectsRegionJson!(getJson(), region, partId, from, to),
+      cell.eng.rangeRectsRegionByHandle &&
+        ((h: number) => cell.eng!.rangeRectsRegionByHandle!(h, region, partId, from, to)),
+      () => cell.eng!.rangeRectsRegionJson!(getJson(), region, partId, from, to),
       'range_rects_region',
       allPages
     );
@@ -1383,11 +1406,11 @@ export function createDisplayListQueries(
     get displayList() {
       return handedOff()?.displayList ?? list;
     },
-    isReady: () => (resident !== null || eng !== null) && sourceError === null,
+    isReady: () => (resident !== null || cell.eng !== null) && sourceError === null,
     sourceState: () =>
       sourceError
         ? { status: 'error', error: sourceError }
-        : resident || eng
+        : resident || cell.eng
           ? { status: 'ready' }
           : { status: 'loading' },
     whenReady: () => readyPromise,
@@ -1441,15 +1464,15 @@ export function createDisplayListQueries(
   };
 
   // Auto-release the handle if the facade is dropped without dispose(). The held
-  // value is `closeHandle` (a thunk over `handle`/`eng`, never over `queries`),
-  // so registering cannot keep `queries` alive.
+  // value closes over `cell` only, never over `queries` or its donor, so
+  // registering cannot keep `queries` alive.
   handleFinalizers?.register(queries, closeHandle, finalizerToken);
 
   facadeDeltaSeeds.set(queries, {
     list,
     storeRevisions: () => storeRevisions,
-    engine: () => eng,
-    hasHandle: () => handle !== null,
+    engine: () => cell.eng,
+    hasHandle: () => cell.handle !== null,
     donor: () => donorFacade,
     supersede: () => {
       superseded = true;
@@ -1458,11 +1481,11 @@ export function createDisplayListQueries(
     line: line ?? null,
     disposed: () => disposed,
     takeHandle: () => {
-      const transferred = handle;
+      const transferred = cell.handle;
       if (transferred !== null) {
         // ownership moves to the adopting facade: neither dispose() nor the
         // finalizer may close it here anymore
-        handle = null;
+        cell.handle = null;
         handleFinalizers?.unregister(finalizerToken);
       }
       return transferred;

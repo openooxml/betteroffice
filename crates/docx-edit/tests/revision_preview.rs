@@ -2,6 +2,9 @@
 #[path = "support/page_fixture.rs"]
 mod fixture;
 
+#[path = "support/revision_boundary.rs"]
+mod boundary;
+
 use docx_edit::bridge::{RenderEnv, RevisionPreview};
 use docx_edit::structured::{ExportFailureCode, PageExportOptions, RevisionView};
 use docx_edit::{
@@ -144,6 +147,52 @@ fn paragraph_bounds(blocks: &Value) -> Vec<(Value, Value)> {
         .iter()
         .map(|block| (block["pmStart"].clone(), block["pmEnd"].clone()))
         .collect()
+}
+
+#[test]
+fn previews_of_changes_before_a_table_keep_valid_block_boundaries() {
+    for (inserted_mark, replacement) in [(false, ""), (false, "X"), (true, "")] {
+        let engine = EngineSession::new(75110);
+        let plain = EditCtx::local("", "");
+        let suggest = EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting();
+        let split_ctx = if inserted_mark { &suggest } else { &plain };
+        let split = boundary::seed(engine.doc(), "table", split_ctx);
+        let id = if inserted_mark {
+            split.revision_ids[0].clone()
+        } else {
+            let receipt = if replacement.is_empty() {
+                engine
+                    .doc()
+                    .delete_range(&suggest, StoryRange::new("body", 0, 4))
+            } else {
+                engine
+                    .doc()
+                    .replace_range(&suggest, StoryRange::new("body", 0, 4), replacement)
+            }
+            .unwrap();
+            receipt.revision_ids[0].clone()
+        };
+        let native = lower(&engine, &RenderEnv::default());
+        for decision in [Accepted, Rejected] {
+            let blocks = lower(&engine, &preview(&[(&id, decision)]));
+            assert_eq!(
+                blocks
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|block| block["kind"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["paragraph", "table", "paragraph"]
+            );
+            assert_eq!(paragraph_bounds(&blocks), paragraph_bounds(&native));
+            let text: String = runs(&blocks, 0).into_iter().map(|run| run.0).collect();
+            let expected = match decision {
+                Accepted if !inserted_mark => replacement,
+                _ => "old",
+            };
+            assert_eq!(text, expected);
+        }
+    }
 }
 
 #[test]

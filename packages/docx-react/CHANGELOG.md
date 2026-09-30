@@ -1,5 +1,127 @@
 # @betteroffice/docx-react
 
+## 0.4.0
+
+### Minor Changes
+
+- 9ef6699: Add host proposals: `YrsSession.proposeChanges()` records a tracked-change batch outside undo history, and `setProposalStates()` previews accept/reject/restore via the new `revisionPreview` entry without changing the document. `getProposals()` and `YrsSession.onProposalChange()` read them; `DocxEditorRef`'s matching methods reach read-only viewers via the new `allowHostProposals` prop, off by default.
+- b788552: Adds `search`, `searchNext`, `searchPrevious`, `searchGoTo`, `clearSearch`, `getSearchState` and `onSearchChange` to the editor ref, so a host's own find box can highlight and step through matches, also in a read-only editor. Find highlights now draw only for the pages in view.
+- 73324c2: Add `getAnchorGeometry()`, page-aware plugin geometry for proposals, revisions, paragraphs, searches and text ranges. Proposal preview changes are now published and invalidate geometry, keeping overlays positioned as the document or preview changes.
+- 0e3743c: Add the experimental `previewFirstPage` option to `DocxEditor`, off by default: it paints a read-only preview of a document's first pages while the whole document opens.
+- 76026a5: Adds `withdrawProposals`, which settles finished host proposals as their decisions show, and `search: ''` proposals that fill an empty paragraph. Typing into an empty paragraph in the editor now takes the paragraph mark's formatting, as Word does.
+- 6f0896c: Adds the opt-in `onFirstPagePainted` callback to `DocxEditor`, called once per document when its first pages are painted on screen.
+- ae13248: Adds opt-in `experimentalWorkerOpen` for faster DOCX opening. Off by default.
+
+### Patch Changes
+
+- 66f7145: Pages stay painted, and scroll-to calls land on target, when a host scales the editor with CSS `zoom` on an ancestor. New `effectiveZoom(element)` export from `@betteroffice/docx/layout/render`.
+- 6c1699f: `getAnchorGeometry` reads the document once per version and reuses those reads for later targets, so anchoring many proposals no longer rereads the whole document for each one.
+- ef0bd77: Stop eagerly re-parsing the document after opening. The model for `onChange`/`onContentChange` now builds once the first pages appear, only if such a listener exists; save, export and `getDocument()` still build it on first use.
+- 33e0e1d: `getCurrentPage()` now returns the page on screen at the moment it is called, and a read-only editor no longer scrolls back to its caret while pages build, so `scrollToPage` lands on its page.
+- 62789d0: A document no longer fails to open with "resident pagination input is not built" when a layout reaches the display just as the editor switches to a new session, such as the handoff from a first-page preview.
+- f47d11d: Editor teardown is more precise: a StrictMode remount keeps its worker, pages whose canvases no worker took repaint, a document that fails to open frees its session at once, and decoded images are released with their document.
+- e4fd867: Highlights, remote cursors, table and image handles, link popups and comment cards now line up with the pages under a host's ancestor CSS `zoom`, and comment cards also at editor zoom other than 100%. `detectDisplayListTableInsertHover` takes an optional `buttonZoom`.
+- a5b9424: Adds `preloadDocxEngine` and the `experimentalPrewarm` editor prop to prepare the editing engine ahead of opening a document. Both are opt-in.
+- 3f1feb8: A superseded display-list query facade now answers from the live layout only within its own document line, never after the editor releases that document, and never across documents when no `line` is given. New `endDisplayListQueriesLine(line)` export from `@betteroffice/docx/layout/render`.
+- a72d500: By default, editors sharing a page keep fonts apart: `onFontsLoaded` and `onError` ignore other editors' font loads, and same-named embedded fonts no longer override each other and are released on unmount. Direct callers opt in via `createFontLoadScope`, `registerDocumentFaces` and `loadEmbeddedFontFamilies`.
+- add4cdb: Adds opt-in `set_windowed_incremental_builds` to limit incremental rebuilds to the display window and caret pages. The editor enables this for edits and proposal decisions, rebuilds other affected pages in the background, and waits for exact visible proposal geometry.
+- 45e89f1: An editor that unmounts while its first layout is still running no longer throws "null pointer passed to rust" when that layout finishes.
+- b626f7f: Adds `whenLayoutComplete()` to the editor ref, resolving with the page count once the whole document is laid out. Await it, not `onFirstPagePainted`, before reading page counts or content: until then `getTotalPages()` returns 0 and `getPageContent(n)` returns `null`, even for painted pages.
+- 9c12794: The loading indicator stays centered over the editor until the first page paints, instead of jumping up when the toolbar and ruler mount; a custom `loadingIndicator` now shows too.
+- 8a481c6: Embedded images stay compressed in the opened file until a page shows them. `createCanvasImageResolver` accepts a `media` source, and the new `mediaTokens` option (`DocxEditor`, `YrsOpeningOptions`), off by default, keeps images out of the shared document state.
+- adb33ac: Selection and story queries on large documents no longer trigger whole-document rework; the first read of every story after an edit was quadratic in story count.
+- 00f5a64: With opt-in windowed builds, full rebuilds build only visible pages and the caret's page. `set_display_retain_built_pages` keeps every built page, and the editor sets it while a page widget has focus.
+- b7f564a: Page canvas lookups (pointer routing, caret, selection, highlight overlays, table handles, viewport anchoring) now read a registry instead of scanning the whole pages subtree.
+- b6c407c: Large documents now keep each page's accessible text in the DOM only near the viewport, on by default. Tab, links, content controls and `RenderedDomContext.findElementsForRange()` still reach every page.
+- 057dbf0: Plugin overlays, anchor geometry, sidebar cards and `RenderedDomContext` rectangles now line up with the pages when a host scales the editor with CSS `zoom` on an ancestor.
+- 52040dd: A plugin's `scrollToParagraph` now waits for the layout to reach the target paragraph on large documents instead of failing after a second.
+- 1e1c786: With both `previewFirstPage` and `experimentalWorkerOpen` on, the full document now opens in the worker after the preview paints, instead of on the main thread.
+- 89c5d8e: Rebuild the editor's position projection incrementally: an edit now re-reads only changed paragraphs, via new `storiesChangedSince`, `storySegmentUnitDigests` and `storySegmentUnits` session queries.
+- ea45cfd: `@betteroffice/docx-react` now re-exports the host-proposal types (`DocxProposalRequest`, `DocxProposalResult`, `DocxProposalStateRequest`, `DocxProposalSnapshot`, `DocxProposalFailure`, and related types), so hosts no longer need to import `@betteroffice/docx/yrs` directly.
+- c5da06a: A read-only or viewing editor now selects text by dragging, double- or triple-clicking and Ctrl/Cmd+A, and copies it. Ctrl/Cmd+C copies the selection as plain text in every mode, with tabs, line breaks and tables kept.
+- 9f65726: Loading another document into a mounted `DocxEditor` no longer sometimes replaces the editor with its error view and leaves the new document unlaid out.
+- 6795634: Typing and deleting in table cells now goes through the resident engine worker in one request, like body paragraphs, instead of laying out the document first.
+- f41899b: The resident worker now finishes a document's first layout in short steps, so requests that arrive meanwhile run between them, with identical results. `YrsSession.beginRegionLayout` and `resumeRegionLayout` expose the stepped region layout.
+- 3f471de: Replacing or closing a document no longer throws "null pointer passed to rust" when the previous document's pages rebuild, or its fonts finish loading, after the switch.
+- 0e8ca7e: Add `YrsRenderEnv.revisionPreview`, an opt-in map that lays out accepted or rejected tracked changes without changing the document. Plugin geometry follows a previewed decision once it is painted, and a paged export of a previewed layout is refused.
+- c15d0ec: Reads a document's revisions and sidebar projection once per document version, so scrolling or building pages of a document with tracked changes no longer relists them.
+- 0912663: Navigating to a distant page or position now jumps there directly, while nearby navigation still scrolls smoothly.
+- cd2a6d7: The editor no longer loads, or reports errors for, East Asian or complex-script fonts a document names without having text in that script. `YrsDocxHost` gains `unusedScriptFonts`, which lists them.
+- 4b39070: Suggested replacements now show the struck-out text before the new text, as Word does. `replaceRange` receipts carry the new text's `range`.
+- cf221d8: Table resize handles are now built only for pages around the viewport, instead of every table on every page, via the new `deriveDisplayListTableFragmentsOnPages` query.
+- dd9f00d: A new `tablePayload` session query reads just the current table's structure instead of the whole story, cutting per-keystroke cost in the toolbar and dialogs.
+- 4538842: The viewport's scroll anchor now comes from the lines of on-screen pages instead of the whole document, via a new `visualLinesOnPage` query.
+- 5c6e00c: Add `getMemoryStats()` and opt-in `onMemoryPressure` and `memoryBudget` for the editor's wasm memory. A worker that runs out of memory, or past the opt-in `memoryBudget.workerLimitBytes`, is replaced once, then reported as `ResidentWorkerOutOfMemoryError` without a main-thread fallback; other failures fall back as before.
+- 4919560: The layout worker now starts while the document's fonts are still loading, so the first worker layout no longer waits for it to boot afterwards.
+- 6809b31: Keep editing on the resident engine worker when a large document takes over five seconds to reply, instead of falling back to the main thread; only a worker silent for a minute is replaced. Queued keystrokes and worker-failure recovery now apply in order.
+- Updated dependencies [f88ca8b]
+- Updated dependencies [66f7145]
+- Updated dependencies [726c5b4]
+- Updated dependencies [81a2b31]
+- Updated dependencies [c64ae45]
+- Updated dependencies [5f5d4f0]
+- Updated dependencies [b58c0b5]
+- Updated dependencies [110414c]
+- Updated dependencies [3d64f98]
+- Updated dependencies [e4fd867]
+- Updated dependencies [e49077d]
+- Updated dependencies [a5b9424]
+- Updated dependencies [3f1feb8]
+- Updated dependencies [a72d500]
+- Updated dependencies [384a90c]
+- Updated dependencies [add4cdb]
+- Updated dependencies [2763a8e]
+- Updated dependencies [9ef6699]
+- Updated dependencies [a6ac04e]
+- Updated dependencies [ab5b7a8]
+- Updated dependencies [86fcf80]
+- Updated dependencies [0aa1c45]
+- Updated dependencies [751515b]
+- Updated dependencies [8a481c6]
+- Updated dependencies [42ce38a]
+- Updated dependencies [adb33ac]
+- Updated dependencies [bf4471b]
+- Updated dependencies [00f5a64]
+- Updated dependencies [b204133]
+- Updated dependencies [b7f564a]
+- Updated dependencies [b6c407c]
+- Updated dependencies [6ac2d8c]
+- Updated dependencies [7ca1b0f]
+- Updated dependencies [7205060]
+- Updated dependencies [057dbf0]
+- Updated dependencies [c4dbef0]
+- Updated dependencies [89c5d8e]
+- Updated dependencies [751515b]
+- Updated dependencies [76026a5]
+- Updated dependencies [7852788]
+- Updated dependencies [77c07ec]
+- Updated dependencies [6795634]
+- Updated dependencies [f41899b]
+- Updated dependencies [92cd82c]
+- Updated dependencies [0e8ca7e]
+- Updated dependencies [c15d0ec]
+- Updated dependencies [4ad3ade]
+- Updated dependencies [6a71241]
+- Updated dependencies [d9472e7]
+- Updated dependencies [85eac34]
+- Updated dependencies [cd2a6d7]
+- Updated dependencies [9b6cab0]
+- Updated dependencies [0b8b954]
+- Updated dependencies [4b39070]
+- Updated dependencies [cf221d8]
+- Updated dependencies [dd9f00d]
+- Updated dependencies [dfa6b47]
+- Updated dependencies [4538842]
+- Updated dependencies [751515b]
+- Updated dependencies [5c6e00c]
+- Updated dependencies [2311375]
+- Updated dependencies [91d414c]
+- Updated dependencies [ae13248]
+- Updated dependencies [92900b6]
+- Updated dependencies [6809b31]
+  - @betteroffice/docx@0.4.0
+  - @betteroffice/docx-i18n@0.4.0
+
 ## 0.3.0
 
 ### Minor Changes

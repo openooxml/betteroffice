@@ -31,8 +31,8 @@ use crate::format::{PROTECTED_ATTRS, Patch};
 use crate::identity::{self, IdAllocator, PARA_ORIGIN, SOURCE_PARA_ID};
 use crate::op::{OpError, OpResult, ParaBounds, Receipt, SplitReceipt, para_bounds};
 use crate::ops::{
-    adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow, capture_pilcrow,
-    revision_id_in_range, snapshot_range,
+    adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow, block_embed_at,
+    capture_pilcrow, paragraph_content_before, revision_id_in_range, snapshot_range,
 };
 use crate::{
     DEL, EditCtx, EditingDoc, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, ParagraphId,
@@ -400,7 +400,17 @@ impl EditingDoc {
                 story: at.story.clone(),
                 index: at.index,
             })?;
-        let (first_para_id, props) = capture_pilcrow(&orig_map, &txn);
+        let (first_para_id, mut props) = capture_pilcrow(&orig_map, &txn);
+        // A mark kept before a pending block carries that block's revision; the new mark does not.
+        let block_revisions = snapshot_range(&story, &txn, orig_index + 1, orig_index + 2)
+            .first()
+            .and_then(|chunk| chunk.block_revisions(&txn))
+            .unwrap_or_default();
+        props.retain(|(key, value)| match key.as_str() {
+            PPR_INS => block_revisions[0].as_ref() != Some(value),
+            PPR_DEL => block_revisions[1].as_ref() != Some(value),
+            _ => true,
+        });
         let second_half_empty = orig_index == at.index;
 
         let ins = revision_id
@@ -520,6 +530,12 @@ impl EditingDoc {
         let survivor = &targets[boundary_index + 1];
         let story = boundary.story.clone();
         let pilcrow_index = boundary.bounds.pilcrow;
+        let needs_boundary = block_embed_at(&story, &txn, pilcrow_index + 1)
+            && paragraph_content_before(&story, &txn, pilcrow_index)
+            && snapshot_range(&story, &txn, pilcrow_index + 1, pilcrow_index + 2)
+                .first()
+                .and_then(|chunk| chunk.block_revisions(&txn))
+                .is_none_or(|revisions| revisions.iter().all(Option::is_none));
         let own_insert = ctx
             .is_suggesting()
             .then(|| paragraph_revision_id(&boundary.map, &txn, PPR_INS, &ctx.author))
@@ -538,10 +554,37 @@ impl EditingDoc {
         if own_insert.is_some() {
             // Backspacing over this author's still-pending split retracts the
             // suggestion itself; it must not author a second pPrDel revision.
-            let (donor_id, mut donor_props) = capture_pilcrow(&boundary.map, &txn);
-            donor_props.retain(|(key, _)| !matches!(key.as_str(), PPR_INS | PPR_DEL));
-            story.remove_range(&mut txn, pilcrow_index, 1);
-            adopt_pilcrow(&mut txn, &survivor.map, &donor_id, &donor_props);
+            if needs_boundary {
+                // The mark stays; every stamp of the retracted revision goes with it.
+                for key in [PPR_INS, PPR_DEL] {
+                    if paragraph_revision_id(&boundary.map, &txn, key, &ctx.author) == own_insert {
+                        boundary.map.remove(&mut txn, key);
+                    }
+                }
+                let stamps = snapshot_range(&story, &txn, pilcrow_index, pilcrow_index + 1)
+                    .first()
+                    .map(|chunk| chunk.attrs.clone())
+                    .unwrap_or_default();
+                for key in [crate::INS, DEL] {
+                    if stamps
+                        .get(key)
+                        .and_then(|stamp| super::revision_id_for_author(stamp, &ctx.author))
+                        == own_insert
+                    {
+                        story.format(
+                            &mut txn,
+                            pilcrow_index,
+                            1,
+                            Attrs::from([(Arc::from(key), Any::Null)]),
+                        );
+                    }
+                }
+            } else {
+                let (donor_id, mut donor_props) = capture_pilcrow(&boundary.map, &txn);
+                donor_props.retain(|(key, _)| !matches!(key.as_str(), PPR_INS | PPR_DEL));
+                story.remove_range(&mut txn, pilcrow_index, 1);
+                adopt_pilcrow(&mut txn, &survivor.map, &donor_id, &donor_props);
+            }
         } else if let Some(id) = revision_id.as_ref() {
             let revision = revision_value(id, &ctx.revision_author());
             story.format(
@@ -551,7 +594,7 @@ impl EditingDoc {
                 Attrs::from([(Arc::from(DEL), revision.clone())]),
             );
             boundary.map.insert(&mut txn, PPR_DEL, revision);
-        } else {
+        } else if !needs_boundary {
             let (donor_id, donor_props) = capture_pilcrow(&boundary.map, &txn);
             story.remove_range(&mut txn, pilcrow_index, 1);
             adopt_pilcrow(&mut txn, &survivor.map, &donor_id, &donor_props);
