@@ -991,11 +991,35 @@ fn full_build_pages(display: &DisplayState, page_count: usize) -> Vec<bool> {
         .collect()
 }
 
+/// Where the resident caret sits, for the pages a windowed build keeps.
+#[derive(Clone, Copy)]
+enum CaretExtent {
+    /// Its display position, when the paragraph lowers one display position
+    /// per story unit.
+    Position(f64),
+    /// Its paragraph's whole display span otherwise, as inline content such as
+    /// a content control expands when lowered.
+    Paragraph(f64, f64),
+    /// No block maps it, so every re-placed page is kept.
+    Unmapped,
+}
+
+impl CaretExtent {
+    /// Whether a fragment over display positions `start..=end` holds the caret.
+    fn holds(self, start: f64, end: f64) -> bool {
+        match self {
+            Self::Position(position) => start <= position && position <= end,
+            Self::Paragraph(low, high) => start < high && end > low,
+            Self::Unmapped => true,
+        }
+    }
+}
+
 fn window_build_pages(
     display: &DisplayState,
     layout: &Layout,
     rebuilt_pages: &HashSet<usize>,
-    caret_span: Option<(f64, f64)>,
+    caret: Option<CaretExtent>,
 ) -> Vec<bool> {
     if !display.windowed_incremental_builds || display.window.is_none() {
         return full_build_pages(display, layout.pages.len());
@@ -1005,13 +1029,10 @@ fn window_build_pages(
         .iter()
         .enumerate()
         .map(|(index, page)| {
-            display
-                .window
-                .as_ref()
-                .is_some_and(|window| window.contains(&index))
-                || caret_span.is_some_and(|(caret_start, caret_end)| {
-                    rebuilt_pages.contains(&index)
-                        && page.fragments.iter().any(|fragment| {
+            let caret_page = || {
+                caret.is_some_and(|caret| {
+                    matches!(caret, CaretExtent::Unmapped)
+                        || page.fragments.iter().any(|fragment| {
                             let (start, end) = match fragment {
                                 Fragment::Paragraph(value) => (value.pm_start, value.pm_end),
                                 Fragment::Table(value) => (value.pm_start, value.pm_end),
@@ -1020,10 +1041,17 @@ fn window_build_pages(
                                 Fragment::Chart(value) => (value.pm_start, value.pm_end),
                                 Fragment::TextBox(value) => (value.pm_start, value.pm_end),
                             };
-                            start.is_some_and(|start| start <= caret_end)
-                                && end.is_some_and(|end| end >= caret_start)
+                            start
+                                .zip(end)
+                                .is_some_and(|(start, end)| caret.holds(start, end))
                         })
                 })
+            };
+            display
+                .window
+                .as_ref()
+                .is_some_and(|window| window.contains(&index))
+                || (rebuilt_pages.contains(&index) && caret_page())
         })
         .collect()
 }
@@ -3540,24 +3568,33 @@ impl EngineSession {
                     ..pagination.rebuilt_page_end)
                     .chain(note_pages.iter().copied())
                     .collect();
-                // The caret's whole paragraph, since its story units and display
-                // positions differ inside inline content.
-                let caret_span = if display.windowed_incremental_builds && display.window.is_some()
-                {
+                let caret = if display.windowed_incremental_builds && display.window.is_some() {
                     self.resident_caret_head
                         .borrow()
                         .as_ref()
-                        .and_then(|(story, head)| {
-                            let txn = self.doc.yrs_doc().transact();
-                            let index = head.get_offset(&txn)?.index;
-                            drop(txn);
-                            let segments = self.doc.segment_index(story).ok()?;
-                            resident_paragraph_span(input, &segments.para_at(index)?.para_id)
+                        .map(|(story, head)| {
+                            let extent = || {
+                                let txn = self.doc.yrs_doc().transact();
+                                let index = head.get_offset(&txn)?.index;
+                                drop(txn);
+                                let segments = self.doc.segment_index(story).ok()?;
+                                let paragraph = segments.para_at(index)?;
+                                let (start, end) =
+                                    resident_paragraph_span(input, &paragraph.para_id)?;
+                                let units = paragraph.pilcrow.saturating_sub(paragraph.node_start);
+                                let offset = index.saturating_sub(paragraph.node_start);
+                                Some(if end - start == f64::from(units) + 2.0 {
+                                    CaretExtent::Position(start + 1.0 + f64::from(offset))
+                                } else {
+                                    CaretExtent::Paragraph(start, end)
+                                })
+                            };
+                            extent().unwrap_or(CaretExtent::Unmapped)
                         })
                 } else {
                     None
                 };
-                let build = window_build_pages(&display, layout, &rebuilt_pages, caret_span);
+                let build = window_build_pages(&display, layout, &rebuilt_pages, caret);
                 let incremental = if let DisplayState {
                     list: Some(previous),
                     resident_input: Some(resident_input),
@@ -7332,6 +7369,42 @@ mod tests {
     }
 
     fn paged_engine(client_id: u64, body: &str) -> (EngineSession, String) {
+        let (engine, extras, output) = paged_region_engine(client_id, body);
+        let font_chains =
+            serde_json::from_str::<serde_json::Value>(&extras).unwrap()["fontChains"].clone();
+        for measured_block in output["measured"].as_array().unwrap() {
+            if measured_block["block"]["kind"] != "paragraph" {
+                continue;
+            }
+            let template = serde_json::json!({
+                "block": measured_block["block"],
+                "maxWidth": 248,
+                "fontChains": font_chains,
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
+                "authoritativeShaping": true
+            });
+            engine
+                .measure_paragraph_json(&template.to_string())
+                .unwrap();
+        }
+        engine
+            .layout_document_json(
+                &serde_json::json!({
+                    "measured": output["measured"],
+                    "options": output["options"]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        (engine, extras)
+    }
+
+    /// [`paged_engine`] with its region state kept, so an edit in a table cell
+    /// relays out through the region pass as it does in the worker.
+    fn paged_region_engine(
+        client_id: u64,
+        body: &str,
+    ) -> (EngineSession, String, serde_json::Value) {
         docx_layout::clear_measure_fonts();
         let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
         let engine = EngineSession::new(client_id);
@@ -7362,33 +7435,9 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        for measured_block in output["measured"].as_array().unwrap() {
-            if measured_block["block"]["kind"] != "paragraph" {
-                continue;
-            }
-            let template = serde_json::json!({
-                "block": measured_block["block"],
-                "maxWidth": 248,
-                "fontChains": { "liberation sans|0|0": [font_id] },
-                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
-                "authoritativeShaping": true
-            });
-            engine
-                .measure_paragraph_json(&template.to_string())
-                .unwrap();
-        }
-        engine
-            .layout_document_json(
-                &serde_json::json!({
-                    "measured": output["measured"],
-                    "options": output["options"]
-                })
-                .to_string(),
-            )
-            .unwrap();
         let extras =
             serde_json::json!({ "fontChains": { "liberation sans|0|0": [font_id] } }).to_string();
-        (engine, extras)
+        (engine, extras, output)
     }
 
     fn full_display_build(
@@ -7662,7 +7711,7 @@ mod tests {
     fn an_edit_builds_the_table_cell_caret_page_outside_the_display_window() {
         use yrs::{Assoc, IndexedSequence};
 
-        let (engine, extras) = paged_engine(
+        let (engine, extras, _) = paged_region_engine(
             211,
             &format!(
                 r#"<w:tbl><w:tblGrid><w:gridCol w:w="3600"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="3600" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Editable cell paragraph</w:t></w:r></w:p></w:tc></w:tr></w:tbl>{}"#,
@@ -7739,6 +7788,45 @@ mod tests {
             resident_paragraph_span(&input, &paragraph.para_id),
             Some(span)
         );
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn windowed_builds_keep_the_caret_paragraphs_pages_or_every_re_placed_page() {
+        let (engine, _) = paged_filler_engine(213, 160);
+        let pagination = engine.pagination.borrow();
+        let layout = pagination.layout.as_ref().unwrap();
+        let display = DisplayState {
+            window: Some(8..11),
+            windowed_incremental_builds: true,
+            ..DisplayState::default()
+        };
+        let rebuilt: HashSet<usize> = (0..layout.pages.len()).collect();
+        let built = |caret| {
+            window_build_pages(&display, layout, &rebuilt, caret)
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, built)| built.then_some(index))
+                .collect::<Vec<_>>()
+        };
+        let Some(Fragment::Paragraph(last)) = layout.pages[0].fragments.last() else {
+            panic!("expected a paragraph at the end of the first page");
+        };
+        let (start, end) = (last.pm_start.unwrap(), last.pm_end.unwrap());
+        assert_eq!(built(None), [8, 9, 10]);
+        assert_eq!(
+            built(Some(CaretExtent::Position(start + 1.0))),
+            [0, 8, 9, 10]
+        );
+        assert_eq!(
+            built(Some(CaretExtent::Paragraph(start, end))),
+            [0, 8, 9, 10]
+        );
+        assert_eq!(
+            built(Some(CaretExtent::Unmapped)),
+            (0..layout.pages.len()).collect::<Vec<_>>()
+        );
+        drop(pagination);
         docx_layout::clear_measure_fonts();
     }
 
