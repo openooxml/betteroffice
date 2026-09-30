@@ -97,12 +97,6 @@ function withoutInherited(
       result.lineSpacing === inherited.lineSpacing &&
       (result.lineSpacingRule ?? 'auto') === (inherited.lineSpacingRule ?? 'auto')
   );
-  drop(
-    ['indentFirstLine', 'hangingIndent'],
-    inherited.indentFirstLine !== undefined &&
-      result.indentFirstLine === inherited.indentFirstLine &&
-      Boolean(result.hangingIndent) === Boolean(inherited.hangingIndent)
-  );
   return Object.values(result).some((value) => value !== undefined) ? result : undefined;
 }
 
