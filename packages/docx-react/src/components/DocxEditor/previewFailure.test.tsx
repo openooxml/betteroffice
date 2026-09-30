@@ -19,10 +19,12 @@ let created = 0;
 let fullSession: unknown = null;
 let shownPages = false;
 let fullOpen: 'fail' | 'open' | 'layout-fail' = 'fail';
+let holdFullOpen: Promise<void> | null = null;
 mock.module('@betteroffice/docx/yrs', () => ({
   ...real,
   createYrsSession: async (options: Parameters<typeof createYrsSession>[0]) => {
     created += 1;
+    if (created === 2 && holdFullOpen) await holdFullOpen;
     if (created === 2 && fullOpen === 'fail') {
       // Fails once the preview shows, however long a loaded machine takes to paint it.
       for (let waited = 0; !shownPages && waited < 20_000; waited += 20) {
@@ -189,4 +191,36 @@ test("a preview's render error is reported once and does not fail the full sessi
   await waitFor(() => expect(ref.current!.getDocument()).not.toBeNull(), { timeout: 10_000 });
   expect(errors).toEqual(['preview render failed']);
   expect(view.container.querySelector('.docx-editor-error')).toBeNull();
+}, 30_000);
+
+test('while its preview shows, a load has no page count and its layout is not complete', async () => {
+  created = 0;
+  fullSession = null;
+  shownPages = false;
+  fullOpen = 'open';
+  failRender = null;
+  let release = () => {};
+  holdFullOpen = new Promise((done) => (release = done));
+  try {
+    const ref = createRef<Editor>();
+    render(load(documentBuffer(), () => {}, ref));
+    await waitFor(() => expect(ref.current).not.toBeNull());
+    let pages = null as number | null;
+    void ref.current!.whenLayoutComplete().then((count) => (pages = count));
+    await waitFor(() => expect(shownPages).toBe(true), { timeout: 10_000 });
+    await act(async () => {
+      await new Promise((done) => setTimeout(done, 200));
+    });
+    expect(ref.current!.getTotalPages()).toBe(0);
+    expect(pages).toBeNull();
+
+    release();
+    await waitFor(() => expect(pages).not.toBeNull(), { timeout: 20_000 });
+    expect(renderer!.presentedEngine).toBe(fullSession);
+    expect(pages).toBe(renderer!.displayList!.pages.length);
+    expect(ref.current!.getTotalPages()).toBe(pages!);
+  } finally {
+    release();
+    holdFullOpen = null;
+  }
 }, 30_000);
