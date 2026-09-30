@@ -184,6 +184,23 @@ const ON_DEMAND_SYNC_ACCESS: Partial<Record<keyof DocxEditorRef, 'direct' | 'uns
   getPositionAtPoint: 'request',
 };
 
+/**
+ * Thrown by a synchronous editor ref member that needs the document on the main thread while a
+ * read-only `experimentalWorkerOpen` editor still holds it, with host proposals, in its worker. The
+ * document starts loading; await `flushPendingInput()` (or the member's async counterpart) and call
+ * it again.
+ */
+export class DocxReplicaNotReadyError extends Error {
+  constructor(readonly member: string) {
+    const twin = (DOCX_REF_ASYNC_TWINS as Partial<Record<string, string>>)[member];
+    super(
+      `${member} needs the document on the main thread, which is still loading; ` +
+        (twin ? `call ${twin} instead` : 'await flushPendingInput() and call it again')
+    );
+    this.name = 'DocxReplicaNotReadyError';
+  }
+}
+
 function withDeadline(ready: Promise<void>, timeoutMs: number | undefined): Promise<void> {
   if (timeoutMs === undefined) return ready;
   return new Promise<void>((resolve, reject) => {
@@ -237,7 +254,7 @@ function gateReplicaAccess(
             // Proposals only the worker holds cannot be rebuilt here: the replica takes them over.
             if (onDemand === undefined && workerProposalAuthority(session)?.holdsWorkerState()) {
               void requestWorkerOpenReplica(session)?.catch(() => {});
-              return null;
+              throw new DocxReplicaNotReadyError(key);
             }
             if (onDemand === undefined) ensureWorkerOpenReplica(session);
           } else {

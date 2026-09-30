@@ -101,6 +101,8 @@ export function registerWorkerProposalAuthority(
     failWaiting = reject;
   });
   void stopped.catch(() => {});
+  let failure: { error: unknown } | null = null;
+  const pendingCalls = new Set<(error: unknown) => void>();
   let initialized = false;
   let mirror: ResidentProposalReply['mirror'] | null = null;
   let geometry: ProposalGeometryMirror | null = null;
@@ -111,11 +113,22 @@ export function registerWorkerProposalAuthority(
   const listeners = new Set<() => void>();
   const notify = () => { for (const listener of listeners) listener(); };
   const assertCurrent = () => {
+    if (failure) throw failure.error;
     if (!hooks.current()) throw new Error('The document changed while applying proposals');
+  };
+  const interruptible = <T>(pending: Promise<T>): Promise<T> => {
+    let rejectFailed!: (error: unknown) => void;
+    const failed = new Promise<never>((_, reject) => { rejectFailed = reject; });
+    pendingCalls.add(rejectFailed);
+    if (failure) rejectFailed(failure.error);
+    return Promise.race([pending, failed]).finally(() => { pendingCalls.delete(rejectFailed); });
   };
   const enqueue = <T>(call: () => Promise<T>): Promise<T> => {
     queued += 1;
-    const result = tail.then(call);
+    const result = tail.then(() => {
+      assertCurrent();
+      return interruptible(call());
+    });
     const finished = () => { queued -= 1; };
     tail = result.then(finished, finished);
     return result;
@@ -173,6 +186,7 @@ export function registerWorkerProposalAuthority(
   const authority: RegisteredAuthority = {
     get initialized() { return initialized; },
     initialize() {
+      if (failure) return Promise.reject(failure.error);
       if (initializing) return initializing;
       if (handingOver) return Promise.resolve(awaitWorkerOpenReplica(session));
       initializing = enqueue(async () => {
@@ -191,7 +205,12 @@ export function registerWorkerProposalAuthority(
     geometry: () => geometry,
     holdsWorkerState: () => holdsState,
     draining: () => handingOver && queued > 0,
-    fail: (error) => { failWaiting(error); },
+    fail: (error) => {
+      if (failure) return;
+      failure = { error };
+      failWaiting(error);
+      for (const reject of pendingCalls) reject(error);
+    },
     propose: (request, main) => mutate({ kind: 'propose', request }, () => main(request)),
     setStates: (request, main) => mutate({ kind: 'setStates', request }, () => main(request)),
     withdraw: (request, main) => mutate({ kind: 'withdraw', request }, () => main(request)),
@@ -227,6 +246,7 @@ export function registerWorkerProposalAuthority(
       return () => { listeners.delete(listener); };
     },
     beginHandover() {
+      if (failure) return Promise.reject(failure.error);
       if (handover) return handover;
       handingOver = true;
       stopWaiting();
@@ -248,11 +268,12 @@ export function registerWorkerProposalAuthority(
               session.mirrorWorkerDocument(null);
               versionRewrite = { worker: handedOver.version, main: session.version() };
             }
+            holdsState = false;
             notify();
           },
         };
       };
-      handover = snapshotPosted ? enqueue(transfer) : transfer();
+      handover = snapshotPosted ? enqueue(transfer) : interruptible(transfer());
       return handover;
     },
   };
