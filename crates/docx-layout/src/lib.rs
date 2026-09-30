@@ -664,7 +664,12 @@ impl Default for MeasureFonts {
 
 impl Drop for MeasureFonts {
     fn drop(&mut self) {
-        let _ = SESSION_FONTS.try_with(|count| count.set(count.get() - 1));
+        let _ = SESSION_FONTS.try_with(|count| {
+            count.set(count.get() - 1);
+            if count.get() == 0 {
+                measure_blocks::clear_extent_cache();
+            }
+        });
     }
 }
 

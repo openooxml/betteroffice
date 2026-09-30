@@ -1091,7 +1091,18 @@ thread_local! {
 }
 
 pub(crate) fn clear_extent_cache() {
-    EXTENT_CACHE.with(|cache| *cache.borrow_mut() = ExtentCache::default());
+    let _ = EXTENT_CACHE.try_with(|cache| *cache.borrow_mut() = ExtentCache::default());
+    let _ = EXTENT_KEY_BUF.try_with(|scratch| *scratch.borrow_mut() = Vec::new());
+}
+
+#[cfg(test)]
+fn extent_cache_stats() -> (usize, usize) {
+    let entries = EXTENT_CACHE.with(|cache| {
+        let cache = cache.borrow();
+        cache.hot.entries.len() + cache.cold.entries.len()
+    });
+    let scratch_capacity = EXTENT_KEY_BUF.with(|scratch| scratch.borrow().capacity());
+    (entries, scratch_capacity)
 }
 
 enum ExtentLookup {
@@ -2435,6 +2446,59 @@ fn cell_border_height(cell: &crate::types::TableCell) -> f64 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn cache_paragraph(fonts: &crate::MeasureFonts) {
+        let _fonts = fonts.enter();
+        let font = crate::register_measure_font_bytes(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font])]),
+            defaults: json!({"fontFamily": "Liberation Sans", "fontSize": 12}),
+            ..Default::default()
+        };
+        let paragraph = serde_json::from_value(json!({
+            "id": "cached", "runs": [{"kind": "text", "text": "Cached paragraph"}]
+        }))
+        .unwrap();
+        let extent = measure_paragraph(&paragraph, 300.0, &config).unwrap();
+        assert!(!extent.lines.is_empty());
+        assert_ne!(extent.lines[0].synthetic_fallback, Some(true));
+    }
+
+    #[test]
+    fn dropping_last_measure_fonts_releases_extent_cache_and_scratch() {
+        clear_extent_cache();
+        let fonts = crate::MeasureFonts::default();
+        cache_paragraph(&fonts);
+        let (entries, scratch_capacity) = extent_cache_stats();
+        assert_eq!(entries, 1);
+        assert!(scratch_capacity > 0);
+
+        drop(fonts);
+        assert_eq!(extent_cache_stats(), (0, 0));
+    }
+
+    #[test]
+    fn dropping_measure_fonts_keeps_extent_cache_while_another_is_alive() {
+        clear_extent_cache();
+        let (a, b) = (
+            crate::MeasureFonts::default(),
+            crate::MeasureFonts::default(),
+        );
+        cache_paragraph(&a);
+        cache_paragraph(&b);
+        let populated = extent_cache_stats();
+        assert_eq!(populated.0, 2);
+        assert!(populated.1 > 0);
+
+        drop(a);
+        assert_eq!(extent_cache_stats(), populated);
+
+        drop(b);
+        assert_eq!(extent_cache_stats(), (0, 0));
+    }
 
     #[test]
     fn wide_floating_tables_with_no_room_on_their_side_wrap_in_the_larger_gap() {
