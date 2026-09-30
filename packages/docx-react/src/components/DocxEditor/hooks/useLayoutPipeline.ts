@@ -67,7 +67,8 @@ interface CurrentViewportAnchor {
 }
 
 export interface UseLayoutPipelineOptions {
-  onError?: (error: Error) => void;
+  /** `session`: the session whose pass failed. */
+  onError?: (error: Error, session: YrsSession) => void;
   document: Document | null;
   session: YrsSession | null;
   renderEnv: YrsRenderEnv;
@@ -306,7 +307,10 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
               },
               (error: unknown) => {
                 if (pass !== passRef.current || sessionRef.current !== session) return;
-                onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
+                onErrorRef.current?.(
+                  error instanceof Error ? error : new Error(String(error)),
+                  session
+                );
                 syncCoordinator.onLayoutComplete(currentEpoch);
               }
             );
@@ -318,7 +322,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           measurement = residentMeasurementConfig(requirements);
         } catch (error) {
           console.error('[PagedEditor] Resident font preflight error:', error);
-          onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
+          onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
           syncCoordinator.onLayoutComplete(currentEpoch);
           return;
         }
@@ -409,7 +413,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             }
           } catch (error) {
             console.error('[PagedEditor] Layout pipeline error:', error);
-            onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
+            onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
           }
         };
 
@@ -425,9 +429,10 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         if (
           !onHost &&
           sourceVersion !== null &&
-          sourceVersion === (workerOpenEnabledRef.current
-            ? workerOpenSourceVersion(session, openedVersionRef.current.version)
-            : openedVersionRef.current.version)
+          sourceVersion ===
+            (workerOpenEnabledRef.current
+              ? workerOpenSourceVersion(session, openedVersionRef.current.version)
+              : openedVersionRef.current.version)
         ) {
           try {
             workerPass =
@@ -454,9 +459,10 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
               // A change that landed meanwhile makes the worker's layout stale.
               if (
                 !computation ||
-                readSessionVersion(session) !== (workerOpenEnabledRef.current
-                  ? workerOpenSourceVersion(session, sourceVersion)
-                  : sourceVersion)
+                readSessionVersion(session) !==
+                  (workerOpenEnabledRef.current
+                    ? workerOpenSourceVersion(session, sourceVersion)
+                    : sourceVersion)
               ) {
                 layOutHere();
                 return;
@@ -468,9 +474,10 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                   if (pass !== passRef.current || sessionRef.current !== session) return;
                   if (
                     complete &&
-                    readSessionVersion(session) === (workerOpenEnabledRef.current
-                      ? workerOpenSourceVersion(session, sourceVersion)
-                      : sourceVersion)
+                    readSessionVersion(session) ===
+                      (workerOpenEnabledRef.current
+                        ? workerOpenSourceVersion(session, sourceVersion)
+                        : sourceVersion)
                   ) {
                     // Nothing the user did changed: keep their viewport.
                     applyComputation(complete, 'remote');
@@ -486,7 +493,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
               // The display reports a worker out of memory; nothing lays out here.
               if (error instanceof ResidentWorkerOutOfMemoryError) return;
               console.error('[PagedEditor] Layout pipeline error:', error);
-              onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
+              onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
             }
           )
           .finally(() => {

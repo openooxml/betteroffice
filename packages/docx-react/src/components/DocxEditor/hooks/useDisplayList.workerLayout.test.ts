@@ -248,7 +248,7 @@ test('a worker-opened document reuses its worker for the first layout', async ()
   try {
     const { result, rerender, unmount } = renderHook(
       ({ layout, source }) => useRustDisplayList(
-        layout, undefined, undefined, undefined, source, undefined, undefined, true
+        layout, undefined, undefined, undefined, source, undefined, undefined, undefined, true
       ),
       { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
     );
@@ -538,7 +538,7 @@ test('a rejected completion after reload preserves the new session frame, querie
   try {
     const { result, rerender, unmount } = renderHook(
       ({ layout, source }) => useRustDisplayList(
-        layout, undefined, undefined, undefined, source, undefined, undefined, true
+        layout, undefined, undefined, undefined, source, undefined, undefined, undefined, true
       ),
       { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
     );

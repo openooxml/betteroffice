@@ -79,6 +79,10 @@ export function useDocumentLoader({
   const [yrsSeedBytes, setYrsSeedBytes] = useState<Uint8Array | null>(null);
   const [yrsSeedGeneration, setYrsSeedGeneration] = useState(0);
   const [loadGeneration] = useState(() => new DocumentLoadGeneration());
+  const previewDocumentRef = useRef<Document | null>(null);
+  // Counts accepted host documents: a preview's font loads end once the full
+  // document of its load is accepted.
+  const hostDocumentsRef = useRef(0);
   // Embedded families registered under an alias because another live document
   // registered different faces under the same name.
   const [fontAliases, setFontAliases] = useState<ReadonlyMap<string, string>>(NO_FONT_ALIASES);
@@ -139,13 +143,25 @@ export function useDocumentLoader({
   );
 
   const acceptHostDocument = useCallback(
-    (host: YrsDocxHost, generation: number, session?: Pick<YrsSession, 'onUpdate'>) => {
-      if (!loadGeneration.complete(generation)) {
+    (
+      host: YrsDocxHost,
+      generation: number,
+      session?: Pick<YrsSession, 'onUpdate'>,
+      options?: { preview: boolean }
+    ) => {
+      // A preview shows the load's first pages; the full document completes it.
+      if (
+        options?.preview
+          ? !loadGeneration.isCurrent(generation)
+          : !loadGeneration.complete(generation)
+      ) {
         // A session replaced within this load may hold another document.
         if (session && loadGeneration.isCurrent(generation)) skippedFontsRef.current?.changed();
         return;
       }
       const doc = host.document;
+      const accepted = ++hostDocumentsRef.current;
+      previewDocumentRef.current = options?.preview ? doc : null;
       history.reset(doc);
       setLoadingState({ isLoading: false, parseError: null });
       const embeddedFamilies = getEmbeddedFontFamilies(doc.package.fontTable);
@@ -156,11 +172,16 @@ export function useDocumentLoader({
       setDocumentFonts(
         [...new Map(documentFonts.map((font) => [font.name.toLowerCase(), font])).values()]
       );
-      const isCurrent = () => loadGeneration.isCurrent(generation);
-      const skipped = new Set(session ? host.unusedScriptFonts?.map(fontKey) : undefined);
+      // A preview's font loads stop once the full document is accepted.
+      const isCurrent = () =>
+        loadGeneration.isCurrent(generation) && hostDocumentsRef.current === accepted;
+      // A preview never changes, so what its first pages skip stays skipped.
+      const skipped = new Set(
+        session || options?.preview ? host.unusedScriptFonts?.map(fontKey) : undefined
+      );
       const isSkipped = (family: string) => skipped.has(fontKey(family));
       const skippedFonts =
-        session && skipped.size > 0
+        session && !options?.preview && skipped.size > 0
           ? skipUntilChanged(session, () => {
               if (!isCurrent()) return;
               fontScope
@@ -195,14 +216,28 @@ export function useDocumentLoader({
   );
 
   const failHostDocument = useCallback(
-    (error: Error, generation: number) => {
-      if (!loadGeneration.complete(generation)) return;
+    (error: Error, generation: number, options?: { opened: boolean }) => {
+      // A load that fails after its document was accepted has completed.
+      if (
+        options?.opened
+          ? !loadGeneration.isCurrent(generation)
+          : !loadGeneration.complete(generation)
+      ) {
+        return;
+      }
+      loadGeneration.fail(generation);
+      // A preview's first pages, or a document that failed to show, are not
+      // the document the load opened.
+      if (options?.opened || previewDocumentRef.current) {
+        previewDocumentRef.current = null;
+        history.reset(null);
+      }
       setYrsSeedDocument(null);
       setYrsSeedBytes(null);
       setLoadingState({ isLoading: false, parseError: error.message });
       onError?.(error);
     },
-    [loadGeneration, onError, setLoadingState]
+    [loadGeneration, history, onError, setLoadingState]
   );
 
   const isCurrentLoad = useCallback(
@@ -244,8 +279,14 @@ export function useDocumentLoader({
     if (commentsLoadedRef.current) return;
     const doc = history.state;
     if (!doc) return;
-    commentsLoadedRef.current = true;
     const bodyComments = doc.package?.document?.comments;
+    // A preview's parse generates other IDs than the full document's, whose
+    // comments are the ones loaded; its sidebar opens now all the same.
+    if (doc === previewDocumentRef.current) {
+      if (bodyComments && bodyComments.length > 0) setShowCommentsSidebar(true);
+      return;
+    }
+    commentsLoadedRef.current = true;
     if (bodyComments && bodyComments.length > 0) {
       setComments(bodyComments);
       setShowCommentsSidebar(true);

@@ -100,6 +100,7 @@ function installWorker(options: {
 
 interface HarnessProps {
   experimentalWorkerOpen: boolean;
+  previewFirstPage?: boolean;
   source: Uint8Array;
   generation: number;
   collaboration?: DocxEditorCollaborationOptions;
@@ -113,6 +114,7 @@ function useHarness(props: HarnessProps) {
     undefined,
     props.resolvedCommentIds,
     () => relayout.current?.(),
+    undefined,
     undefined,
     props.experimentalWorkerOpen
   );
@@ -143,7 +145,9 @@ function useHarness(props: HarnessProps) {
       onError: (error) => errors.current.push(error),
     },
     {
+      previewFirstPage: props.previewFirstPage,
       heldEngine: renderer.layoutEngine,
+      shownEngine: renderer.presentedEngine,
       workerOpen: props.experimentalWorkerOpen ? {
         openInWorker,
         renderedFrame: renderer.status === 'ready' ? renderer.displayList : null,
@@ -270,48 +274,52 @@ test('the default open calls no worker open, font preflight or state handoff', a
   expect(posted).toHaveLength(0);
 });
 
-test('worker font preflight and the first frame precede the save-capable main replica', async () => {
-  const { workers, posted } = installWorker({ holdState: true });
-  const replicas: Array<YrsSession | null> = [];
-  const { result } = renderHook(useHarness, {
-    initialProps: {
-      ...initialProps,
-      collaboration: { clientId: 9401, onReplica: (replica) => replicas.push(replica as YrsSession | null) },
-    },
-  });
-  await waitFor(() => expect(result.current.host).not.toBeNull());
-  const session = result.current.core.session!;
-  expect(session.clientId).toBe(9401);
-  expect(session.storyIds()).toEqual([]);
-  expect(result.current.mainOpens).toEqual([]);
-  expect(replicas).toEqual([]);
-  act(() => result.current.pipeline.runLayoutPipeline());
-  await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
-  await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
-  expect(result.current.errors).toEqual([]);
-  expect(posted.map((request) => request.type).slice(0, 3)).toEqual(['open', 'fontRequirements', 'bootstrap']);
-  expect(posted.find((request) => request.type === 'bootstrap')).toMatchObject({ opened: true });
-  expect(result.current.renderer.frame).not.toBeNull();
-  expect(result.current.mainOpens).toEqual([]);
-  expect(result.current.core.replicaReady).toBe(false);
-  expect(result.current.core.replicaReadyRef?.current).toBe(false);
-  expect(session.storyIds()).toEqual([]);
+test.each([false, true])(
+  'worker font preflight and the first frame precede the main replica with previewFirstPage=%s and collaboration',
+  async (previewFirstPage) => {
+    const { workers, posted } = installWorker({ holdState: true });
+    const replicas: Array<YrsSession | null> = [];
+    const { result } = renderHook(useHarness, {
+      initialProps: {
+        ...initialProps,
+        previewFirstPage,
+        collaboration: { clientId: 9401, onReplica: (replica) => replicas.push(replica as YrsSession | null) },
+      },
+    });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    expect(session.clientId).toBe(9401);
+    expect(session.storyIds()).toEqual([]);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(replicas).toEqual([]);
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+    await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
+    expect(result.current.errors).toEqual([]);
+    expect(posted.map((request) => request.type).slice(0, 3)).toEqual(['open', 'fontRequirements', 'bootstrap']);
+    expect(posted.find((request) => request.type === 'bootstrap')).toMatchObject({ opened: true });
+    expect(result.current.renderer.frame).not.toBeNull();
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.core.replicaReadyRef?.current).toBe(false);
+    expect(session.storyIds()).toEqual([]);
 
-  await act(async () => {
-    workers[0].release();
-    await awaitWorkerOpenReplica(session);
-  });
-  await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
-  expect(result.current.core.replicaReadyRef?.current).toBe(true);
-  expect(result.current.mainOpens).toEqual([false]);
-  expect(replicas).toEqual([session]);
-  expect(sourceVersionOf(result.current.renderer.displayList)).toBe(session.version());
-  const direct = await createYrsSession();
-  sessions.push(direct);
-  direct.openDocx(bytes, true);
-  expect(texts(session)).toEqual(texts(direct));
-  expect(result.current.core.documentFromYrs()).not.toBeNull();
-});
+    await act(async () => {
+      workers[0].release();
+      await awaitWorkerOpenReplica(session);
+    });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(result.current.core.replicaReadyRef?.current).toBe(true);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(replicas).toEqual([session]);
+    expect(sourceVersionOf(result.current.renderer.displayList)).toBe(session.version());
+    const direct = await createYrsSession();
+    sessions.push(direct);
+    direct.openDocx(bytes, true);
+    expect(texts(session)).toEqual(texts(direct));
+    expect(result.current.core.documentFromYrs()).not.toBeNull();
+  }
+);
 
 test('a failed worker open falls back to the existing main open', async () => {
   const { posted } = installWorker({ failOpen: true });

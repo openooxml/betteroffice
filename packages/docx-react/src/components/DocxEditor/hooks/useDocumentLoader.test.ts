@@ -66,7 +66,7 @@ function updateSource() {
 async function fontsLoadedFor(
   unusedScriptFonts: string[] | undefined,
   act_: (
-    accept: (session?: ReturnType<typeof updateSource>) => void,
+    accept: (session?: ReturnType<typeof updateSource>, options?: { preview: boolean }) => void,
     asked: string[]
   ) => void | Promise<void> = (accept) => accept(updateSource())
 ): Promise<string[]> {
@@ -101,8 +101,10 @@ async function fontsLoadedFor(
   };
   const generation = result.current.yrsSeedGeneration;
   await act_(
-    (session) =>
-      act(() => result.current.acceptHostDocument(host as never, generation, session as never)),
+    (session, acceptOptions) =>
+      act(() =>
+        result.current.acceptHostDocument(host as never, generation, session as never, acceptOptions)
+      ),
     asked
   );
   await waitFor(() => expect(asked).toContain('Calibri'));
@@ -120,6 +122,27 @@ test('a seeded document loads none of the fonts it names only for script text it
   expect(new Set(await fontsLoadedFor(skipped, (accept) => accept()))).toEqual(
     new Set(['Batang', 'Calibri', '바탕'])
   );
+});
+
+test("a preview loads none of the fonts its pages name only for script text they lack", async () => {
+  const skipped = ['Batang', '바탕'];
+  const preview = { preview: true };
+  expect(new Set(await fontsLoadedFor(skipped, (accept) => accept(undefined, preview)))).toEqual(
+    new Set(['Calibri'])
+  );
+  expect(new Set(await fontsLoadedFor(undefined, (accept) => accept(undefined, preview)))).toEqual(
+    new Set(['Batang', 'Calibri', '바탕'])
+  );
+  // Nothing watches a preview's session for the skipped fonts.
+  const touched = await fontsLoadedFor(skipped, async (accept, asked) => {
+    const session = updateSource();
+    accept(session, preview);
+    await waitFor(() => expect(asked).toContain('Calibri'));
+    act(() => session.update());
+    await new Promise((done) => setTimeout(done, 50));
+  });
+  expect(touched).not.toContain('Batang');
+  expect(touched).not.toContain('바탕');
 });
 
 test('the fonts skipped at open load once, after the document first changes', async () => {

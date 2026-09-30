@@ -299,7 +299,8 @@ export interface PagedEditorProps {
   /** Hands layout passes to the resident worker, which then owns them. */
   layoutInWorker?: LayoutInWorker;
   fontRequirementsInWorker?: FontRequirementsInWorker;
-  onError?: (error: Error) => void;
+  /** `session`: the session whose layout failed, if known. */
+  onError?: (error: Error, session?: unknown) => void;
   /** One-call resident body-text edit supplied by the canvas frame owner. */
   applyResidentInput?: (text: string) => Promise<ResidentFrameApplyResult | null>;
   /** One-call resident body-text deletion supplied by the canvas frame owner. */

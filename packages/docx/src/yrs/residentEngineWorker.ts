@@ -186,7 +186,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'bootstrap') {
     if (!request.opened) {
-      destroySession();
+      destroySession(request.keepSurfaces === true);
       // The worker is a genuine yrs peer. Reusing the main replica's client id
       // makes a fast structural input race overlap one client's clock range and
       // corrupt the update; a fresh id lets yrs merge queued/local operations
@@ -669,7 +669,11 @@ function subscribe(): void {
   unsubscribe = session.onUpdate((update) => pendingUpdates.push(update.slice()));
 }
 
-function destroySession(): void {
+/**
+ * Drops the document. `keepSurfaces` keeps the attached page canvases, still
+ * showing the old pages, for a document that replaces it page for page.
+ */
+function destroySession(keepSurfaces = false): void {
   unsubscribe?.();
   unsubscribe = null;
   session?.destroy();
@@ -683,10 +687,12 @@ function destroySession(): void {
   completedLayout = null;
   retainedFrame = null;
   glyphCache = null;
-  offscreenCanvases.clear();
   offscreenBackBuffers.clear();
   pendingOffscreenPageIds.clear();
-  activeOffscreenPageIds.clear();
+  if (!keepSurfaces) {
+    offscreenCanvases.clear();
+    activeOffscreenPageIds.clear();
+  }
   caretPaintRect = null;
   paintedCaretPageId = null;
   paintedCaretKey = null;
