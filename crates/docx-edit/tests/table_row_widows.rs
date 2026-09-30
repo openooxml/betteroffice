@@ -87,3 +87,13 @@ fn keep_lines_moves_the_row_whole() {
 fn every_cell_must_allow_the_break() {
     assert_eq!(row_lines("row-mixed-widow-one-fits"), [(1, 4)]);
 }
+
+/// A cell's keepNext paragraph stays with the next paragraph in the cell:
+/// with two lines of room, Word splits a row of three one-line paragraphs
+/// after the first when the second keeps with the third, else after the
+/// second.
+#[test]
+fn keep_next_inside_a_cell_moves_the_break_up() {
+    assert_eq!(row_lines("cell-keep-next-room-two"), [(0, 1), (1, 2)]);
+    assert_eq!(row_lines("cell-no-keep-next-room-two"), [(0, 2), (1, 1)]);
+}

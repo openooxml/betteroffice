@@ -19,7 +19,7 @@ import type { DocxEditorRef } from '../../DocxEditor';
 import type { PagedEditorRef } from '../PagedEditor';
 import { YrsInput, type YrsInputRef } from '../YrsInput';
 import { createCommentIdAllocator } from '../commentFactories';
-import { deferWorkerOpenReplica } from '../internals/workerOpenReplica';
+import { deferWorkerOpenReplica, workerOpenReplicaOnDemand } from '../internals/workerOpenReplica';
 import type { EditorMode } from '../internals/editing-modes';
 import { DOCX_REF_REPLICA_ACCESS, useDocxEditorRefApi } from './useDocxEditorRefApi';
 
@@ -141,7 +141,7 @@ function apiFor(
   return { api, events, pagedEditorRef };
 }
 
-async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false) {
+async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, hydrateOnDemand = false) {
   const worker = await createYrsSession();
   const session = await createYrsSession();
   sessions.push(worker, session);
@@ -165,7 +165,8 @@ async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false) 
       opens.push(true);
       session.openDocx(bytes, true);
     },
-    () => { readiness.current = true; }
+    () => { readiness.current = true; },
+    { active: () => hydrateOnDemand, request: () => replica.start() }
   );
   const mounted = apiFor(session, document, mode, mountInput ? readiness : undefined);
   return { ...mounted, session, worker, replica, release, opens };
@@ -305,6 +306,106 @@ test('a layout deadline covers the wait for the main replica', async () => {
   const error = await api.whenLayoutComplete({ timeoutMs: 20 }).then(() => null, (failure: unknown) => failure);
   expect(error).toMatchObject({ message: 'The document did not finish rendering' });
   expect(opens).toEqual([]);
+});
+
+test('layout completion leaves an on-demand replica pending while async reads start it', async () => {
+  const { api, opens, replica, session, release } = await pendingReplica('viewing', false, true);
+  expect(await api.whenLayoutComplete({ timeoutMs: 20 })).toBe(0);
+  expect(workerOpenReplicaOnDemand(session)).toBe(true);
+  expect(opens).toEqual([]);
+  const read = api.readParagraphs({ view: 'accepted' });
+  await act(async () => {
+    release();
+    expect(await read).toMatchObject({ ok: true });
+  });
+  expect(opens).toEqual([false]);
+  expect(replica.pending).toBe(false);
+});
+
+test.each(['focus', 'scrollToPosition', 'print', 'openPrintPreview', 'highlightRange'] as const)(
+  '%s leaves an on-demand replica pending', async (method) => {
+    const { api, opens, replica, release } = await pendingReplica('viewing', false, true);
+    act(() => {
+      if (method === 'scrollToPosition') api.scrollToPosition(0);
+      else if (method === 'highlightRange') api.highlightRange(0, 1);
+      else api[method]();
+    });
+    expect(opens).toEqual([]);
+    expect(replica.pending).toBe(true);
+    await act(async () => { release(); });
+    expect(opens).toEqual([]);
+    expect(replica.pending).toBe(true);
+  }
+);
+
+test('getSelectionInfo returns null without starting an on-demand replica', async () => {
+  const { api, opens, replica, release } = await pendingReplica('viewing', false, true);
+  expect(api.getSelectionInfo()).toBeNull();
+  expect(opens).toEqual([]);
+  expect(replica.pending).toBe(true);
+  await act(async () => { release(); });
+  expect(opens).toEqual([]);
+  expect(replica.pending).toBe(true);
+});
+
+test('getPositionAtPoint requests an on-demand replica and returns null', async () => {
+  const { api, opens, replica, release } = await pendingReplica('viewing', false, true);
+  let requests = 0;
+  replica.onDemand!.request = () => { requests += 1; replica.start(); };
+  expect(api.getPositionAtPoint(0, 0)).toBeNull();
+  expect(requests).toBe(1);
+  expect(opens).toEqual([]);
+  expect(replica.pending).toBe(true);
+  await act(async () => { release(); await replica.ready; });
+  expect(opens).toEqual([false]);
+  expect(replica.pending).toBe(false);
+});
+
+test.each([
+  ['getDocument', (api: DocxEditorRef) => expect(api.getDocument()).not.toBeNull()],
+  ['getEditorRef', (api: DocxEditorRef) => expect(api.getEditorRef()).not.toBeNull()],
+  ['scrollToParaId', (api: DocxEditorRef) => expect(api.scrollToParaId('00000001')).toBe(true)],
+  ['scrollToCommentId', (api: DocxEditorRef) => expect(api.scrollToCommentId(-1)).toBe(false)],
+  ['scrollToChangeId', (api: DocxEditorRef) => expect(api.scrollToChangeId(-1)).toBe(false)],
+  ['findInDocument', (api: DocxEditorRef) => expect(api.findInDocument('map')).toContainEqual({
+    paraId: '00000001', match: 'map', before: 'Page ', after: '',
+  })],
+  ['getPageContent', (api: DocxEditorRef) => expect(api.getPageContent(1)).toEqual({
+    pageNumber: 1,
+    text: '[00000001] Page map',
+    paragraphs: [{ paraId: '00000001', text: 'Page map', styleId: 'Heading1' }],
+  })],
+  ['addComment', (api: DocxEditorRef) => expect(api.addComment({
+    paraId: '00000001', search: 'map', text: 'Check', author: 'Ann',
+  })).toEqual(expect.any(Number))],
+  ['proposeChange', (api: DocxEditorRef) => expect(api.proposeChange({
+    paraId: '00000001', search: 'map', replaceWith: 'plan', author: 'Agent',
+  })).toBe(true)],
+  ['applyFormatting', (api: DocxEditorRef) => expect(api.applyFormatting({
+    paraId: '00000001', search: 'map', marks: { bold: true },
+  })).toBe(true)],
+  ['setParagraphStyle', (api: DocxEditorRef) => expect(api.setParagraphStyle({
+    paraId: '00000001', styleId: 'Normal',
+  })).toBe(true)],
+  ['insertBreak', (api: DocxEditorRef) => expect(api.insertBreak({
+    paraId: '00000001', type: 'page',
+  })).toBe(true)],
+] as const)('%s synchronously opens an on-demand replica and returns its result', async (method, check) => {
+  const mode = ['addComment', 'proposeChange', 'applyFormatting', 'setParagraphStyle', 'insertBreak']
+    .includes(method) ? 'editing' : 'viewing';
+  const { api, opens, replica, pagedEditorRef } = await pendingReplica(mode, false, true);
+  if (method === 'getPageContent') {
+    pagedEditorRef.current!.getLayout = () => ({
+      pages: [{ fragments: [{ kind: 'paragraph', pmStart: 0 }] }],
+    }) as unknown as ReturnType<PagedEditorRef['getLayout']>;
+    pagedEditorRef.current!.displayPositionToYrsLoc = () => ({
+      story: 'body', paraId: '00000001', offset: 0,
+    });
+  }
+  expect(replica.pending).toBe(true);
+  act(() => { check(api); });
+  expect(opens).toEqual([true]);
+  expect(replica.pending).toBe(false);
 });
 
 test('independent APIs do not start a replica open', async () => {

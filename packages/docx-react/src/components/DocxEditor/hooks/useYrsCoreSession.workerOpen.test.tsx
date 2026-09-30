@@ -32,18 +32,18 @@ import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandSt
 import { createCommentIdAllocator } from '../commentFactories';
 import { useDocxEditorRefApi } from './useDocxEditorRefApi';
 import { usePagedEditorCommandBridge, type PagedEditorCommandBridge } from './usePagedEditorRefApi';
-import type { YrsInputRef } from '../YrsInput';
+import { YrsInput, type YrsInputRef } from '../YrsInput';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, renderHook, waitFor } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, renderHook, waitFor } = await import('@testing-library/react');
 const originalWorker = globalThis.Worker;
 const bytes = new Uint8Array(readFileSync(resolve(
   import.meta.dir,
   '../../../../../../crates/docx-edit/tests/fixtures/page-fragments/pages.docx'
 )));
 
-async function longFixture(): Promise<Uint8Array> {
+async function longFixture(paragraphs = 205): Promise<Uint8Array> {
   const zip = new JSZip();
   zip.file(
     '[Content_Types].xml',
@@ -53,8 +53,8 @@ async function longFixture(): Promise<Uint8Array> {
     '_rels/.rels',
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'
   );
-  const body = Array.from({ length: 205 }, (_, index) => {
-    const text = index === 0 ? 'First paragraph' : index === 204 ? 'Tail paragraph' : `Paragraph ${index}`;
+  const body = Array.from({ length: paragraphs }, (_, index) => {
+    const text = index === 0 ? 'First paragraph' : index === paragraphs - 1 ? 'Tail paragraph' : `Paragraph ${index}`;
     return `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
   }).join('');
   zip.file(
@@ -93,6 +93,10 @@ function installWorker(options: {
   holdOpen?: boolean;
   oomStage?: 'open' | 'fontRequirements' | 'bootstrap' | 'encodeState';
   holdRetryOpen?: boolean;
+  revisionCount?: number;
+  failRevisionCount?: boolean;
+  onRevisionCount?: () => void;
+  holdCompletion?: boolean;
 } = {}) {
   const workers: InProcessResidentWorker[] = [];
   const posted: ResidentEngineWorkerRequest[] = [];
@@ -104,7 +108,8 @@ function installWorker(options: {
         posted.push(request);
         if ((options.holdState && request.type === 'encodeState') ||
             (options.holdOpen && request.type === 'open') ||
-            (options.holdRetryOpen && workers.length > 1 && request.type === 'open')) worker.hold();
+            (options.holdRetryOpen && workers.length > 1 && request.type === 'open') ||
+            (options.holdCompletion && request.type === 'completeLayout')) worker.hold();
         if (options.oomStage === request.type &&
             (request.type !== 'encodeState' || workers.length === 1)) {
           queueMicrotask(() => worker.onmessage?.({
@@ -114,6 +119,13 @@ function installWorker(options: {
             (options.failState && request.type === 'encodeState')) {
           queueMicrotask(() => worker.onmessage?.({
             data: { id: request.id, ok: false, error: 'open failed', terminal: true },
+          } as MessageEvent));
+        } else if (request.type === 'revisionCount') {
+          options.onRevisionCount?.();
+          queueMicrotask(() => worker.onmessage?.({
+            data: options.failRevisionCount
+              ? { id: request.id, ok: false, error: 'revision count failed' }
+              : { id: request.id, ok: true, revisionCount: options.revisionCount ?? 0 },
           } as MessageEvent));
         } else send(request, transfer);
       };
@@ -126,6 +138,7 @@ function installWorker(options: {
 
 interface HarnessProps {
   experimentalWorkerOpen: boolean;
+  hydrateOnDemand?: boolean;
   previewFirstPage?: boolean;
   openInWorker?: OpenInWorker;
   source: Uint8Array;
@@ -133,6 +146,10 @@ interface HarnessProps {
   collaboration?: DocxEditorCollaborationOptions;
   readOnly?: boolean;
   resolvedCommentIds?: ReadonlySet<number>;
+  /** Asks for the replica as soon as the session exists, as DocxEditor does for plugins, sidebars or the outline. */
+  wanted?: boolean;
+  /** Passes the renderer's own pending completion, as DocxEditor does. */
+  followCompletion?: boolean;
   /** Holds the replica as while the shown engine's completion is still to be asked of the worker. */
   holdReplica?: boolean;
 }
@@ -182,10 +199,16 @@ function useHarness(props: HarnessProps) {
         openInWorker,
         renderedFrame: renderer.status === 'ready' ? renderer.displayList : null,
         ...(props.holdReplica ? { pendingCompletion: renderer.presentedEngine } : {}),
+        ...(props.followCompletion ? { pendingCompletion: renderer.pendingCompletion } : {}),
+        hydrateOnDemand: props.hydrateOnDemand,
       } : undefined,
     }
   );
   handoffFromRef.current = core.handoffFrom;
+  const replicaPending = Boolean(core.hydrateOnDemand && core.session && !core.replicaReady);
+  useEffect(() => {
+    if (props.wanted && replicaPending) core.requestReplica();
+  }, [core, props.wanted, replicaPending]);
   const syncCoordinator = useRef(new LayoutSelectionGate());
   const element = useRef<HTMLDivElement | null>(null);
   const registeredFont = useRef<{ session: YrsSession; id: number } | null>(null);
@@ -320,6 +343,325 @@ function holdFrames() {
     },
   };
 }
+
+test.each([false, true])('textarea focus requests a replica only with hydrateOnDemand=%s', async (hydrateOnDemand) => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames();
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, hydrateOnDemand },
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const core = result.current.core;
+    expect(core.hydrateOnDemand).toBe(hydrateOnDemand);
+    if (hydrateOnDemand) {
+      act(() => result.current.pipeline.runLayoutPipeline());
+      await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+      act(() => result.current.presentFrame());
+      act(() => frames.run());
+      act(() => frames.run());
+      await waitFor(() => expect(posted.map((request) => request.type)).toContain('revisionCount'));
+      expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    }
+    const view = render(
+      <YrsInput
+        enabled
+        readOnly={hydrateOnDemand}
+        session={core.session}
+        replicaReadyRef={core.replicaReadyRef}
+        requestReplica={core.hydrateOnDemand ? core.requestReplica : undefined}
+        inputPositionMap={core.inputPositionMap}
+        displayPositionToLoc={() => null}
+        locToDisplayPosition={() => null}
+        onStateChange={() => {}}
+        onDirectInput={() => {}}
+      />
+    );
+    const textarea = view.getByTestId('yrs-input');
+    act(() => {
+      requestAnimationFrame(() => textarea.focus());
+      frames.run();
+      fireEvent.keyDown(textarea, { key: 'ArrowRight' });
+    });
+    await act(async () => { await Promise.resolve(); });
+    if (hydrateOnDemand) {
+      await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+      await act(async () => {
+        workers[0].release();
+        await awaitWorkerOpenReplica(core.session!);
+      });
+      await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    } else {
+      expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+      expect(result.current.core.replicaReady).toBe(false);
+    }
+  } finally {
+    unmount();
+    cleanup();
+    frames.restore();
+  }
+});
+
+test('on-demand hydration is inactive without worker opening', async () => {
+  installWorker();
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, experimentalWorkerOpen: false, hydrateOnDemand: true },
+  });
+  try {
+    await waitFor(() => expect(result.current.core.session).not.toBeNull());
+    expect(result.current.core.hydrateOnDemand).toBe(false);
+  } finally {
+    unmount();
+  }
+});
+
+test('an on-demand replica stays empty past its load point until requested', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames();
+  try {
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, hydrateOnDemand: true },
+    });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await waitFor(() => expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1));
+    await act(async () => {});
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.core.replicaReadyRef?.current).toBe(false);
+    expect(session.storyIds()).toEqual([]);
+    expect(result.current.mainOpens).toEqual([]);
+    act(() => result.current.core.requestReplica());
+    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    await act(async () => {
+      workers[0].release();
+      await awaitWorkerOpenReplica(session);
+    });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(result.current.core.replicaReadyRef?.current).toBe(true);
+    expect(session.hasStory('body')).toBe(true);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+}, 15_000);
+
+test('tracked changes start an on-demand replica without a replica request', async () => {
+  const { workers, posted } = installWorker({ holdState: true, revisionCount: 1 });
+  const frames = holdFrames();
+  const props = { ...initialProps, hydrateOnDemand: true, holdReplica: true };
+  const { result, rerender, unmount } = renderHook(useHarness, { initialProps: props });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await act(async () => {});
+    expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
+    rerender({ ...props, holdReplica: false });
+    expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
+    act(() => frames.run());
+    act(() => frames.run());
+    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
+    rerender({ ...props, holdReplica: true });
+    rerender({ ...props, holdReplica: false });
+    act(() => frames.run());
+    act(() => frames.run());
+    await act(async () => {});
+    expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
+    expect(result.current.core.replicaReady).toBe(false);
+    await act(async () => {
+      workers[0].release();
+      await awaitWorkerOpenReplica(session);
+    });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(session.hasStory('body')).toBe(true);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+    cleanup();
+    frames.restore();
+  }
+});
+
+test.each(['wanted', 'awaited'] as const)(
+  'a replica %s before the first layout loads only once the rest of the layout is asked of the worker',
+  async (how) => {
+    const { workers, posted } = installWorker({ holdState: true, holdCompletion: true });
+    const frames = holdFrames();
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: {
+        ...initialProps,
+        source: await longFixture(1200),
+        hydrateOnDemand: true,
+        followCompletion: true,
+        wanted: how === 'wanted',
+      },
+    });
+    try {
+      await waitFor(() => expect(result.current.host).not.toBeNull());
+      const session = result.current.core.session!;
+      const ready = how === 'awaited' ? awaitWorkerOpenReplica(session) : undefined;
+      await act(async () => {});
+      expect(posted.map((request) => request.type)).toEqual(['open']);
+      act(() => result.current.pipeline.runLayoutPipeline());
+      await waitFor(() => expect(posted.map((request) => request.type)).toContain('completeLayout'), {
+        timeout: 5000,
+      });
+      await waitFor(() => expect(result.current.renderer.pendingCompletion).toBeNull());
+      await act(async () => {});
+      expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+      act(() => result.current.presentFrame());
+      act(() => frames.run());
+      act(() => frames.run());
+      await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+      const types = posted.map((request) => request.type);
+      expect(types.indexOf('encodeState')).toBeGreaterThan(types.indexOf('bootstrap'));
+      expect(types.indexOf('encodeState')).toBeGreaterThan(types.indexOf('completeLayout'));
+      await act(async () => {
+        workers[0].release();
+        await (ready ?? awaitWorkerOpenReplica(session));
+      });
+      await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+      expect(result.current.mainOpens).toEqual([false]);
+      expect(result.current.errors).toEqual([]);
+    } finally {
+      unmount();
+      cleanup();
+      frames.restore();
+    }
+  },
+  15_000
+);
+
+test('the revision count is asked once the rest of the layout is asked of the worker, not after it completes', async () => {
+  const { workers, posted } = installWorker({ holdCompletion: true });
+  const frames = holdFrames();
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: {
+      ...initialProps,
+      source: await longFixture(1200),
+      hydrateOnDemand: true,
+      followCompletion: true,
+    },
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(posted.map((request) => request.type)).toContain('completeLayout'), {
+      timeout: 5000,
+    });
+    await waitFor(() => expect(result.current.renderer.pendingCompletion).toBeNull());
+    await act(async () => {});
+    expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await waitFor(() => expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1));
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    await act(async () => {
+      workers[0].release();
+    });
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await act(async () => {});
+    expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+    cleanup();
+    frames.restore();
+  }
+}, 15_000);
+
+test('a failed revision count starts the on-demand replica', async () => {
+  const { workers, posted } = installWorker({ holdState: true, failRevisionCount: true });
+  const frames = holdFrames();
+  const props = { ...initialProps, hydrateOnDemand: true, holdReplica: true };
+  const { result, rerender, unmount } = renderHook(useHarness, { initialProps: props });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await act(async () => {});
+    expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    rerender({ ...props, holdReplica: false });
+    act(() => frames.run());
+    act(() => frames.run());
+    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
+    expect(result.current.core.replicaReady).toBe(false);
+    await act(async () => {
+      workers[0].release();
+      await awaitWorkerOpenReplica(session);
+    });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(session.hasStory('body')).toBe(true);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+    cleanup();
+    frames.restore();
+  }
+});
+
+test('turning off on-demand hydration starts a pending replica after two frames', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames();
+  try {
+    const props = { ...initialProps, hydrateOnDemand: true };
+    const { result, rerender, unmount } = renderHook(useHarness, { initialProps: props });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const requestReplica = result.current.core.requestReplica;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    act(() => rerender({ ...props, hydrateOnDemand: false }));
+    expect(result.current.core.session).toBe(session);
+    expect(result.current.core.requestReplica).toBe(requestReplica);
+    expect(result.current.core.hydrateOnDemand).toBe(false);
+    expect(replicaHelpers.workerOpenReplicaOnDemand(session)).toBe(false);
+    expect(result.current.core.replicaReady).toBe(false);
+    act(() => frames.run());
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    act(() => frames.run());
+    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    await act(async () => {
+      workers[0].release();
+      await awaitWorkerOpenReplica(session);
+    });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
 
 test('a painted main preview hands off to the worker before hydrating the full replica', async () => {
   const { workers, posted } = installWorker({ holdOpen: true, holdState: true });
@@ -743,6 +1085,36 @@ test('a first-layout font setup failure starts the replica for pending reads, sa
     registerFont.mockRestore();
   }
 });
+
+test('an on-demand replica requested before any frame loads after the bounded wait', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, hydrateOnDemand: true, wanted: true },
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    await act(async () => {});
+    expect(posted.map((request) => request.type)).toEqual(['open']);
+    await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true), {
+      timeout: 7000,
+    });
+    const types = posted.map((request) => request.type);
+    expect(types.indexOf('revisionCount')).toBeGreaterThan(-1);
+    expect(types.indexOf('revisionCount')).toBeLessThan(types.indexOf('encodeState'));
+    expect(result.current.renderer.frame).toBeNull();
+    await act(async () => {
+      workers[0].release();
+      await awaitWorkerOpenReplica(session);
+    });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+    cleanup();
+  }
+}, 15_000);
 
 test('a worker open without a frame or error starts the replica after the bounded wait', async () => {
   const { workers, posted } = installWorker({ holdState: true });

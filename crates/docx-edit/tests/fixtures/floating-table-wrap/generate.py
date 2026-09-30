@@ -9,11 +9,13 @@ PIXEL = bytes.fromhex(
     "0000000c4944415478da63285d791b00039001faf3e482180000000049454e44ae426082"
 )
 FIXTURES = (
-    ("right-4660", "right", 4660, False),
-    ("right-4695", "right", 4695, False),
-    ("right-5500", "right", 5500, False),
-    ("left-5500", "left", 5500, False),
-    ("right-5500-empty-anchor", "right", 5500, True),
+    ("right-4660", "right", 4660, False, "text"),
+    ("right-4695", "right", 4695, False, "text"),
+    ("right-5500", "right", 5500, False, "text"),
+    ("left-5500", "left", 5500, False, "text"),
+    ("right-5500-empty-anchor", "right", 5500, True, "text"),
+    ("right-4820-margin", "right", 4820, False, "margin"),
+    ("right-4820-no-anchor", "right", 4820, False, None),
 )
 
 CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8"?>
@@ -82,7 +84,7 @@ SECTION = """<w:sectPr>
 </w:sectPr>"""
 
 
-def document(side, width, empty_anchor):
+def document(side, width, empty_anchor, horizontal):
     rows = "".join(
         f'<w:tr><w:tc><w:tcPr><w:tcW w:w="{width}" w:type="dxa"/></w:tcPr>{content}</w:tc></w:tr>'
         for content in (PICTURE, CAPTION)
@@ -98,7 +100,7 @@ def document(side, width, empty_anchor):
   <w:body>
     <w:tbl>
       <w:tblPr>
-        <w:tblpPr w:horzAnchor="text" w:vertAnchor="text" w:tblpXSpec="{side}" w:tblpY="1" w:leftFromText="141" w:rightFromText="141"/>
+        <w:tblpPr {f'w:horzAnchor="{horizontal}" ' if horizontal else ''}w:vertAnchor="text" w:tblpXSpec="{side}" w:tblpY="1" w:leftFromText="141" w:rightFromText="141"/>
         <w:tblOverlap w:val="never"/>
         <w:tblW w:w="0" w:type="auto"/>
         <w:tblLayout w:type="fixed"/>
@@ -118,13 +120,13 @@ def document(side, width, empty_anchor):
 
 def generate():
     assert len(ANCHOR) == 350
-    for name, side, width, empty_anchor in FIXTURES:
+    for name, side, width, empty_anchor, horizontal in FIXTURES:
         parts = (
             ("[Content_Types].xml", CONTENT_TYPES),
             ("_rels/.rels", PACKAGE_RELS),
             ("word/_rels/document.xml.rels", DOCUMENT_RELS),
             ("word/styles.xml", STYLES),
-            ("word/document.xml", document(side, width, empty_anchor)),
+            ("word/document.xml", document(side, width, empty_anchor, horizontal)),
             ("word/media/pixel.png", PIXEL),
         )
         with ZipFile(ROOT / f"{name}.docx", "w", compression=ZIP_STORED) as archive:

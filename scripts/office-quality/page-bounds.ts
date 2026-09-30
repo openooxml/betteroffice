@@ -12,14 +12,17 @@ export type OfficePageBounds = {
 
 const maximumPixels = 8192;
 
-export function validatePageBounds(input: unknown): OfficePageBounds | null {
+export function validatePageBounds(
+  input: unknown,
+  maxPages = MAX_REFERENCE_PAGES
+): OfficePageBounds | null {
   if (input == null) return null;
   const profile = input as OfficePageBounds;
   if (
     profile.kind !== 'office-page-bounds' ||
     !Array.isArray(profile.pages) ||
     !profile.pages.length ||
-    profile.pages.length > MAX_REFERENCE_PAGES
+    profile.pages.length > maxPages
   )
     throw new Error('Invalid Office page bounds profile');
   return {
@@ -52,7 +55,8 @@ export function capturePageExtent(
   profile: OfficePageBounds | null,
   index: number,
   width: number,
-  height: number
+  height: number,
+  keepMismatchedPages = false
 ) {
   if (
     !Number.isInteger(index) ||
@@ -60,13 +64,17 @@ export function capturePageExtent(
     [width, height].some((value) => !Number.isInteger(value) || value < 1)
   )
     throw new Error('Invalid native canvas extent');
-  const target = profile?.pages[index];
   const raw = { width_px: width, height_px: height };
-  const output = target
-    ? { width_px: target.width_px, height_px: target.height_px }
-    : { ...raw };
-  if (Math.abs(output.width_px - width) > 1 || Math.abs(output.height_px - height) > 1)
+  const target = profile?.pages[index];
+  const mismatched =
+    target &&
+    (Math.abs(target.width_px - width) > 1 || Math.abs(target.height_px - height) > 1);
+  if (mismatched && !keepMismatchedPages)
     throw new Error(`Page ${index + 1}: Office and native canvas extents differ by more than 1 pixel`);
+  const output =
+    target && !mismatched
+      ? { width_px: target.width_px, height_px: target.height_px }
+      : { ...raw };
   return {
     page: index + 1,
     raw,

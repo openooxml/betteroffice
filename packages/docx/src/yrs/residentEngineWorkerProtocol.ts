@@ -93,6 +93,7 @@ export type ResidentEngineWorkerRequest =
     }
   | { id: number; type: 'fontRequirements'; layoutInput: string }
   | { id: number; type: 'encodeState' }
+  | { id: number; type: 'revisionCount' }
   | { id: number; type: 'proposal'; operation: ResidentProposalOperation }
   | { id: number; type: 'documentRead'; read: ResidentDocumentRead }
   | {
@@ -216,6 +217,7 @@ export type ResidentEngineWorkerResponse = (
       requirementsJson?: string;
       /** An `encodeState` reply: the document state as one yrs v1 update. */
       state?: ArrayBuffer;
+      revisionCount?: number;
       /** @internal */
       proposals?: DocxProposalRegistryState;
       /** @internal */

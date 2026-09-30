@@ -14,9 +14,9 @@ function readManifest(directory) {
   }
 }
 
-/** Every workspace manifest, from the same globs Bun and Changesets expand. */
-function workspaceManifests() {
-  const manifests = [];
+/** Every workspace directory and manifest, from the same globs Bun and Changesets expand. */
+function workspaceEntries() {
+  const entries = [];
   for (const pattern of readManifest('.').workspaces) {
     if (pattern.includes('*') && !pattern.endsWith('/*')) {
       throw new Error(`published-packages.mjs cannot expand the workspace glob ${pattern}`);
@@ -27,10 +27,21 @@ function workspaceManifests() {
       : [pattern];
     for (const directory of directories) {
       const manifest = readManifest(directory);
-      if (manifest) manifests.push(manifest);
+      if (manifest) entries.push({ directory: join(ROOT, directory), manifest });
     }
   }
-  return manifests;
+  return entries;
+}
+
+function workspaceManifests() {
+  return workspaceEntries().map((entry) => entry.manifest);
+}
+
+/** The directory and manifest of every package a release uploads. */
+export function publishedPackageManifests() {
+  return workspaceEntries()
+    .filter(({ manifest }) => !manifest.private && manifest.name && manifest.version)
+    .sort((a, b) => a.manifest.name.localeCompare(b.manifest.name));
 }
 
 /** Every `@betteroffice` package name in the repository, published or not. */

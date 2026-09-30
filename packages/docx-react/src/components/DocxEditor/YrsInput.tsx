@@ -39,6 +39,7 @@ import {
   yrsTableSelectionRange,
 } from './yrsCommands';
 import { InputOperationQueue } from './inputOperationQueue';
+import { awaitWorkerOpenReplica } from './internals/workerOpenReplica';
 import { scrollIntoViewDelta, scrollViewport } from './internals/viewportBand';
 import { DocxCommandAdmissionError } from '../../commands/createDocxCommandStore';
 import { paragraphVerticalMove, VerticalCaretGoal } from './verticalCaretGoal';
@@ -46,6 +47,8 @@ import {
   shouldScrollCaretIntoView,
   type LayoutUpdateOrigin,
 } from './internals/viewportAnchoring';
+
+const READER_SCROLL = ['wheel', 'touchmove'] as const;
 
 export interface YrsDisplaySelection {
   anchor: number;
@@ -69,6 +72,8 @@ export interface YrsInputRef {
   selectWordAtDisplay(position: number, story?: string): void;
   selectParagraphAtDisplay(position: number, story?: string): void;
   displaySelection(): YrsDisplaySelection | null;
+  /** The current selection stays where it is on screen rather than scrolling into view. */
+  keepSelectionInPlace(): void;
   applyStoredFormatting(action: YrsStoredFormattingAction): void;
   clearStoredFormatting(): void;
   storedFormatting(): YrsStoredFormatting | null;
@@ -95,6 +100,14 @@ export interface YrsInputProps {
   enabled: boolean;
   readOnly: boolean;
   replicaReadyRef?: React.RefObject<boolean>;
+  /** Asks for the replica when input reaches the textarea before it has loaded. */
+  requestReplica?: () => void;
+  /** Advances on input that supersedes input still waiting for the replica. */
+  inputEpoch?: () => number;
+  /** Applies a selection gesture recorded while the replica loaded; waiting input follows it. */
+  applyPendingSelection?: () => void;
+  /** Whether a missing selection starts as a caret at the story start; input always starts one. */
+  seedSelection?: boolean;
   session: YrsSession | null;
   story?: string;
   isSuggesting?: boolean;
@@ -215,6 +228,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     enabled,
     readOnly,
     replicaReadyRef,
+    requestReplica,
+    inputEpoch,
+    applyPendingSelection,
+    seedSelection = true,
     session,
     story = 'body',
     isSuggesting = false,
@@ -245,6 +262,19 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 ) {
   const replicaReady = replicaReadyRef?.current !== false;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea || !requestReplica) return;
+    const onInput = () => {
+      if (replicaReadyRef?.current === false) requestReplica();
+    };
+    textarea.addEventListener('focus', onInput);
+    textarea.addEventListener('keydown', onInput, true);
+    return () => {
+      textarea.removeEventListener('focus', onInput);
+      textarea.removeEventListener('keydown', onInput, true);
+    };
+  }, [enabled, replicaReadyRef, requestReplica]);
   const composingRef = useRef(false);
   const compositionPendingRef = useRef(false);
   const compositionCommitRef = useRef('');
@@ -288,6 +318,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   // remote insert above the caret while sticky locs do not, so comparing locs is
   // what keeps a viewer's viewport still during someone else's edit.
   const lastCaretScrollSelectionRef = useRef<YrsSelection | null | undefined>(undefined);
+  // A selection the input shows without scrolling to it: a default caret, a replayed gesture.
+  const quietSelectionRef = useRef<YrsSelection | null>(null);
   displayListQueriesRef.current = displayListQueries;
   displayListFrameEpochRef.current = displayListFrameEpoch;
   resolveDisplayListQueriesRef.current = resolveDisplayListQueries;
@@ -301,16 +333,79 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     pendingResidentDeleteRef.current = null;
   }, []);
 
-  // An operation still queued when the input lets go of its session starts nothing.
+  const replicaInputRef = useRef({ inputEpoch, applyPendingSelection });
+  replicaInputRef.current = { inputEpoch, applyPendingSelection };
+  const readerScrollRef = useRef<{ waiting: number; scrolls: number; stop(): void } | null>(null);
+  // Counts the reader's scrolling from now until the returned check runs.
+  const watchReaderScroll = useCallback((): (() => boolean) => {
+    let watch = readerScrollRef.current;
+    if (!watch) {
+      const host = canvasHostRef?.current;
+      const surface = host ? findVerticalScrollParentOrRoot(host) : null;
+      const created = { waiting: 0, scrolls: 0, stop: () => {} };
+      const onScroll = (): void => {
+        created.scrolls += 1;
+      };
+      for (const type of READER_SCROLL) {
+        surface?.addEventListener(type, onScroll, { capture: true, passive: true });
+      }
+      created.stop = () => {
+        for (const type of READER_SCROLL) surface?.removeEventListener(type, onScroll, true);
+      };
+      readerScrollRef.current = watch = created;
+    }
+    const current = watch;
+    const from = current.scrolls;
+    current.waiting += 1;
+    return () => {
+      current.waiting -= 1;
+      if (current.waiting === 0) {
+        current.stop();
+        if (readerScrollRef.current === current) readerScrollRef.current = null;
+      }
+      return current.scrolls !== from;
+    };
+  }, [canvasHostRef]);
+
+  // An operation still queued when the input lets go of its session starts nothing. Input that
+  // reaches an on-demand replica before it has loaded waits for it, after the recorded gesture;
+  // newer input drops it, and the reader's scrolling since keeps its selection where it is.
   const enqueueInputOperation = useCallback(
-    (operation: () => void | Promise<void>): void => {
+    (operation: (waited: boolean) => void | Promise<void>, onDropped?: () => void): void => {
       sealInputBatches();
       const admitted = session;
-      inputOperationQueueRef.current?.enqueue(() =>
-        isCurrentInput(admitted) ? operation() : undefined
-      );
+      const queue = inputOperationQueueRef.current;
+      const replica =
+        admitted && requestReplica && replicaReadyRef?.current === false
+          ? awaitWorkerOpenReplica(admitted)
+          : undefined;
+      if (!replica) {
+        queue?.enqueue(() => {
+          if (!isCurrentInput(admitted)) return onDropped?.();
+          if (replicaReadyRef?.current !== false) replicaInputRef.current.applyPendingSelection?.();
+          return operation(false);
+        });
+        return;
+      }
+      const epoch = replicaInputRef.current.inputEpoch?.();
+      const readerScrolled = watchReaderScroll();
+      queue?.enqueue(async () => {
+        const loaded = await replica.then(
+          () => true,
+          () => false
+        );
+        const scrolled = readerScrolled();
+        const superseded = replicaInputRef.current.inputEpoch?.() !== epoch;
+        if (!loaded || !isCurrentInput(admitted) || superseded) {
+          onDropped?.();
+          return;
+        }
+        replicaInputRef.current.applyPendingSelection?.();
+        await operation(true);
+        if (scrolled) quietSelectionRef.current = admitted?.selection() ?? null;
+      });
     },
-    [isCurrentInput, sealInputBatches, session]
+    [isCurrentInput, replicaReadyRef, requestReplica, sealInputBatches, session, watchReaderScroll]
   );
 
   const advanceInteractionEpoch = useCallback((): void => {
@@ -326,7 +421,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [story]
   );
 
-  const ensureSelection = useCallback((): YrsSelection | null => {
+  const readSelection = useCallback((): YrsSelection | null => {
     if (!session) return null;
     const current = session.selection();
     const currentMap =
@@ -343,20 +438,27 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     ) {
       return current;
     }
+    return null;
+  }, [belongsToRootStory, inputPositionMap, session]);
+
+  const ensureSelection = useCallback((): YrsSelection | null => {
+    if (!session) return null;
+    const current = readSelection();
+    if (current) return current;
     const first = inputPositionMap(story)?.paragraphs[0];
     if (!first) return null;
     const loc = { story, paraId: first.paraId, offset: 0 };
     session.setSelection(loc);
     return { anchor: loc, head: loc };
-  }, [belongsToRootStory, inputPositionMap, session, story]);
+  }, [inputPositionMap, readSelection, session, story]);
 
   const displaySelection = useCallback((): YrsDisplaySelection | null => {
-    const current = ensureSelection();
+    const current = seedSelection ? ensureSelection() : readSelection();
     if (!current) return null;
     const anchor = locToDisplayPosition(current.anchor);
     const head = locToDisplayPosition(current.head);
     return anchor == null || head == null ? null : { anchor, head };
-  }, [ensureSelection, locToDisplayPosition]);
+  }, [ensureSelection, locToDisplayPosition, readSelection, seedSelection]);
 
   const emitSelection = useCallback(
     (docChanged: boolean, residentLayoutReady = false, residentCaretReady = false): void => {
@@ -414,14 +516,14 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, [onCaretInputDispatched, readOnly, session, replicaReadyRef]);
 
   const storedFormatting = useCallback((): YrsStoredFormatting | null => {
-    const current = ensureSelection();
+    const current = seedSelection ? ensureSelection() : readSelection();
     if (!current) return null;
     return (
       storedFormattingByParagraphRef.current.get(
         `${current.head.story}\u0000${current.head.paraId}`
       ) ?? null
     );
-  }, [ensureSelection]);
+  }, [ensureSelection, readSelection, seedSelection]);
 
   const applyStoredFormatting = useCallback(
     (action: YrsStoredFormattingAction): void => {
@@ -807,10 +909,14 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       byWord = false
     ): void => {
       const verticalDirection = direction === 'up' || direction === 'down' ? direction : null;
-      const interactionEpoch = verticalDirection
+      let interactionEpoch = verticalDirection
         ? inputOperationQueueRef.current?.captureInteractionEpoch()
         : undefined;
-      enqueueInputOperation(async () => {
+      enqueueInputOperation(async (waited) => {
+        // The gesture applied before input that waited is older than it.
+        if (waited && verticalDirection) {
+          interactionEpoch = inputOperationQueueRef.current?.captureInteractionEpoch();
+        }
         if (!verticalDirection) verticalCaretGoalRef.current.reset();
         if (!session) return;
         const queryResolver = resolveDisplayListQueriesRef.current;
@@ -1037,6 +1143,35 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     });
   }, [session]);
 
+  // A copy asked before an on-demand replica loads writes the selection it then has.
+  const copyAfterReplica = useCallback((): boolean => {
+    const clipboard = typeof navigator === 'undefined' ? undefined : navigator.clipboard;
+    if (!session || !requestReplica || replicaReadyRef?.current !== false || !clipboard) {
+      return false;
+    }
+    const copied = session;
+    const text = new Promise<Blob>((resolve, reject) => {
+      enqueueInputOperation(
+        () => {
+          const selected = yrsSelectionPlainText(copied);
+          if (selected) resolve(new Blob([selected], { type: 'text/plain' }));
+          else reject(new Error('Nothing is selected to copy'));
+        },
+        () => reject(new Error('Newer input replaced the copy'))
+      );
+    });
+    void text.catch(() => {});
+    if (typeof ClipboardItem === 'function' && clipboard.write) {
+      void clipboard.write([new ClipboardItem({ 'text/plain': text })]).catch(() => {});
+    } else {
+      void text
+        .then((blob) => blob.text())
+        .then((value) => clipboard.writeText(value))
+        .catch(() => {});
+    }
+    return true;
+  }, [enqueueInputOperation, replicaReadyRef, requestReplica, session]);
+
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
       if (event.nativeEvent.isComposing || composingRef.current) return;
@@ -1046,7 +1181,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         event.preventDefault();
         selectAll();
       } else if (mod && key === 'c' && !event.shiftKey && !event.altKey) {
-        primeCopy();
+        if (copyAfterReplica()) event.preventDefault();
+        else primeCopy();
       } else if (event.key === 'Enter') {
         event.preventDefault();
         splitParagraph();
@@ -1074,7 +1210,16 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         moveSelection(event.key === 'Home' ? 'home' : 'end', event.shiftKey, mod);
       }
     },
-    [deleteDirection, moveSelection, moveTableCell, primeCopy, readOnly, selectAll, splitParagraph]
+    [
+      copyAfterReplica,
+      deleteDirection,
+      moveSelection,
+      moveTableCell,
+      primeCopy,
+      readOnly,
+      selectAll,
+      splitParagraph,
+    ]
   );
 
   const handleCompositionStart = useCallback(
@@ -1214,6 +1359,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     inputLifetimeRef.current.mounted = true;
     return () => {
       inputLifetimeRef.current.mounted = false;
+      readerScrollRef.current?.stop();
+      readerScrollRef.current = null;
       for (const resolve of compositionWaitersRef.current) resolve();
       compositionWaitersRef.current.clear();
     };
@@ -1274,6 +1421,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         setSelection({ ...loc, offset: 0 }, { ...loc, offset: paragraph.text.length });
       },
       displaySelection,
+      keepSelectionInPlace() {
+        quietSelectionRef.current = session?.selection() ?? null;
+      },
       applyStoredFormatting,
       clearStoredFormatting() {
         const current = ensureSelection();
@@ -1330,9 +1480,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   useEffect(() => {
     if (!enabled || !session || !replicaReady) return;
-    ensureSelection();
+    if (seedSelection) ensureSelection();
     emitSelection(false);
-  }, [emitSelection, enabled, ensureSelection, session, replicaReady]);
+  }, [emitSelection, enabled, ensureSelection, seedSelection, session, replicaReady]);
 
   useEffect(() => {
     if (!enabled || !session || readOnly || !replicaReady) return;
@@ -1389,9 +1539,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const stickySelection = session?.selection() ?? null;
     const previousStickySelection = lastCaretScrollSelectionRef.current;
     lastCaretScrollSelectionRef.current = stickySelection;
+    const quiet = quietSelectionRef.current;
+    quietSelectionRef.current = null;
     const selectionChanged =
-      previousStickySelection === undefined ||
-      !sameYrsSelection(previousStickySelection, stickySelection);
+      (previousStickySelection === undefined ||
+        !sameYrsSelection(previousStickySelection, stickySelection)) &&
+      !(quiet && stickySelection && sameYrsSelection(quiet, stickySelection));
     if (
       selection.anchor === selection.head &&
       shouldScrollCaretIntoView(layoutUpdateOrigin, selectionChanged, readOnly)

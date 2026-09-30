@@ -7,8 +7,16 @@ interface PendingReplica {
   fail(error: unknown): void;
   cancel(): void;
   pending: boolean;
+  onDemand?: WorkerOpenReplicaDemand;
   initialVersion: string;
   readyVersion?: string;
+  loadedVersion?: string;
+}
+
+/** Loads a replica only when asked: `request` starts it at the point its owner allows. */
+export interface WorkerOpenReplicaDemand {
+  active(): boolean;
+  request(): void;
 }
 
 const replicas = new WeakMap<YrsSession, PendingReplica>();
@@ -17,7 +25,8 @@ export function deferWorkerOpenReplica(
   session: YrsSession,
   hydrate: () => Promise<() => void>,
   fallback: () => void,
-  onReady: () => void
+  onReady: () => void,
+  onDemand?: WorkerOpenReplicaDemand
 ): PendingReplica {
   let resolve!: () => void;
   let reject!: (error: unknown) => void;
@@ -40,6 +49,7 @@ export function deferWorkerOpenReplica(
         if (!handoff) throw error;
         fallback();
       }
+      replica.loadedVersion = session.version();
       replica.pending = false;
       onReady();
       resolve();
@@ -54,6 +64,7 @@ export function deferWorkerOpenReplica(
   const replica: PendingReplica = {
     ready,
     pending: true,
+    onDemand,
     initialVersion: session.version(),
     start() {
       if (started || !replica.pending) return;
@@ -96,7 +107,25 @@ export function requestWorkerOpenReplica(session: YrsSession): Promise<void> | u
 }
 
 export function awaitWorkerOpenReplica(session: YrsSession): Promise<void> | undefined {
-  return replicas.get(session)?.ready;
+  const replica = replicas.get(session);
+  if (replica?.pending && replica.onDemand?.active() === true) replica.onDemand.request();
+  return replica?.ready;
+}
+
+export function workerOpenReplicaOnDemand(session: YrsSession): boolean {
+  const replica = replicas.get(session);
+  return replica?.pending === true && replica.onDemand?.active() === true;
+}
+
+/** Asks an on-demand replica of `session` to load; see {@link WorkerOpenReplicaDemand}. */
+export function requestOnDemandWorkerOpenReplica(session: YrsSession): void {
+  const replica = replicas.get(session);
+  if (replica?.pending && replica.onDemand?.active() === true) replica.onDemand.request();
+}
+
+/** The version `session` had when its replica loaded; a later version holds a newer change. */
+export function workerOpenReplicaLoadedVersion(session: YrsSession): string | undefined {
+  return replicas.get(session)?.loadedVersion;
 }
 
 export function ensureWorkerOpenReplica(session: YrsSession): void {

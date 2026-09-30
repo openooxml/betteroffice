@@ -76,6 +76,7 @@ import { nearestPages } from './pageBuildOrder';
 
 export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
   encodeState(): Promise<Uint8Array>;
+  revisionCount(): Promise<number>;
   fallback(): void;
   destroy(): void;
   replicaReady(): void;
@@ -1201,6 +1202,7 @@ export function useRustDisplayList(
         return {
           ...opened,
           encodeState: () => requestOpenedWorker(hostEngine, (owner) => owner.client.encodeState()),
+          revisionCount: () => requestOpenedWorker(hostEngine, (owner) => owner.client.revisionCount()),
           fallback: () => {
             const outOfMemory = outOfMemoryRef.current.get(hostEngine);
             if (outOfMemory) throw outOfMemory;

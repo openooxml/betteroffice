@@ -1528,16 +1528,12 @@ fn image_payload(image: &Value) -> JsonObject {
         "shapeType": nullish(field(Some(image), "shapeType")),
         "opacity": nullish(field(Some(image), "opacity")),
         "effectExtentTop": number(field(field(Some(image), "padding"), "top"))
-            .filter(|value| *value != 0.0)
             .map(emu_to_pixels),
         "effectExtentBottom": number(field(field(Some(image), "padding"), "bottom"))
-            .filter(|value| *value != 0.0)
             .map(emu_to_pixels),
         "effectExtentLeft": number(field(field(Some(image), "padding"), "left"))
-            .filter(|value| *value != 0.0)
             .map(emu_to_pixels),
         "effectExtentRight": number(field(field(Some(image), "padding"), "right"))
-            .filter(|value| *value != 0.0)
             .map(emu_to_pixels),
         "layoutInCell": nullish(field(Some(image), "layoutInCell")),
         "allowOverlap": nullish(field(Some(image), "allowOverlap"))
@@ -4131,9 +4127,7 @@ fn add_comment_coverage(plan: &mut StoryPlan) {
             UnitContent::Text(text) => utf16_len(text),
             UnitContent::Embed { .. } => 1,
         };
-        if let Some(comment_id) = &unit.comment_id
-            && comment_id != "0"
-        {
+        if let Some(comment_id) = &unit.comment_id {
             let index = plan
                 .comment_coverage
                 .iter()
@@ -4607,7 +4601,7 @@ fn visit_story(
                             StoryOptions {
                                 include_page_breaks: false,
                                 append_body_tail: false,
-                                seed_comments: false,
+                                seed_comments: options.seed_comments,
                             },
                         );
                     }
@@ -4641,7 +4635,7 @@ fn visit_story(
                     StoryOptions {
                         include_page_breaks: options.include_page_breaks,
                         append_body_tail: false,
-                        seed_comments: false,
+                        seed_comments: options.seed_comments,
                     },
                 );
                 last_kind = Some("blockSdt");

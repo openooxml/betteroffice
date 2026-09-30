@@ -445,10 +445,10 @@ function imagePayload(image: Image): Attrs {
     cropLeft: image.crop?.left ?? null,
     shapeType: image.shapeType ?? null,
     opacity: image.opacity ?? null,
-    effectExtentTop: image.padding?.top ? emuToPixels(image.padding.top) : null,
-    effectExtentBottom: image.padding?.bottom ? emuToPixels(image.padding.bottom) : null,
-    effectExtentLeft: image.padding?.left ? emuToPixels(image.padding.left) : null,
-    effectExtentRight: image.padding?.right ? emuToPixels(image.padding.right) : null,
+    effectExtentTop: image.padding?.top != null ? emuToPixels(image.padding.top) : null,
+    effectExtentBottom: image.padding?.bottom != null ? emuToPixels(image.padding.bottom) : null,
+    effectExtentLeft: image.padding?.left != null ? emuToPixels(image.padding.left) : null,
+    effectExtentRight: image.padding?.right != null ? emuToPixels(image.padding.right) : null,
     layoutInCell: image.layoutInCell ?? null,
     allowOverlap: image.allowOverlap ?? null,
   }) as Attrs;
@@ -1640,7 +1640,7 @@ function addCommentCoverage(plan: StoryPlan): void {
   let offset = 0;
   for (const unit of plan.units) {
     const width = unit.kind === 'text' ? unit.text.length : 1;
-    if (unit.commentId !== undefined && unit.commentId !== 0) {
+    if (unit.commentId !== undefined) {
       const intervals = plan.commentCoverage.get(unit.commentId);
       const previous = intervals?.[intervals.length - 1];
       if (previous && previous[1] === offset) previous[1] = offset + width;
@@ -1862,7 +1862,7 @@ function visitStory(
             {
               includePageBreaks: false,
               appendBodyTail: false,
-              seedComments: false,
+              seedComments: options.seedComments,
               extraRunFormatting: cell.extraRunFormatting,
               tableParagraphFormatting: cell.paragraphFormatting,
             }
@@ -1882,7 +1882,7 @@ function visitStory(
     visitStory(context, childStory, block.content, {
       includePageBreaks: options.includePageBreaks,
       appendBodyTail: false,
-      seedComments: false,
+      seedComments: options.seedComments,
       tableParagraphFormatting: options.tableParagraphFormatting,
     });
     lastKind = 'blockSdt';

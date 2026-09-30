@@ -71,6 +71,7 @@ import {
 } from './DocxEditor/overlays/CanvasSidebarBrightenOverlay';
 import { useCanvasOverlayTarget } from './DocxEditor/internals/useCanvasOverlayTarget';
 import { isWithinPageArea } from './DocxEditor/internals/pageAreaRouting';
+import { pagePressNeedsReplica } from './DocxEditor/internals/replicaTriggers';
 import { useImageActions } from './DocxEditor/hooks/useImageActions';
 import { useDocxEditorRefApi } from './DocxEditor/hooks/useDocxEditorRefApi';
 import {
@@ -187,7 +188,8 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   /** Configure the Yrs collaboration replica used by the editor. */
   collaboration?: DocxEditorCollaborationOptions;
   /**
-   * Open DOCX files in the resident worker. Off by default.
+   * Open DOCX files in the resident worker. Off by default. A read-only editor without
+   * collaboration then loads its main-thread copy of the document only when something needs it.
    * @experimental
    */
   experimentalWorkerOpen?: boolean;
@@ -1231,6 +1233,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             openInWorker: canvasRenderer.openInWorker,
             renderedFrame: canvasRenderer.status === 'ready' ? canvasRenderer.displayList : null,
             pendingCompletion: canvasRenderer.pendingCompletion,
+            hydrateOnDemand: modeReadOnly && !collaboration,
           }
         : undefined,
       mediaTokens,
@@ -2146,6 +2149,37 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // An opening document's comment cards arrive with the full document: keep their space meanwhile.
   const sidebarOpen =
     allSidebarItems.some((item) => !item.hidden) || (opening && showCommentsSidebar);
+
+  const requestReplica = yrsCore.requestReplica;
+  const replicaPending = Boolean(
+    experimentalWorkerOpen && yrsCore.hydrateOnDemand && yrsCore.session && !yrsCore.replicaReady
+  );
+  // Plugins, sidebars, the outline and geometry callbacks read the replica.
+  const replicaWanted =
+    (plugins?.length ?? 0) > 0 ||
+    showCommentsSidebar ||
+    sidebarOpen ||
+    showOutline ||
+    Boolean(onRenderedDomContextReady);
+  useEffect(() => {
+    if (replicaPending && replicaWanted) requestReplica();
+  }, [replicaPending, replicaWanted, requestReplica, yrsCore.session]);
+  // An outline opened before the replica loaded reads its headings once it has.
+  const replicaReady = yrsCore.replicaReady;
+  useEffect(() => {
+    if (experimentalWorkerOpen && replicaReady && showOutlineRef.current) refreshHeadings();
+  }, [experimentalWorkerOpen, replicaReady, refreshHeadings, showOutlineRef]);
+  // A tap asks through its gesture, the input for itself.
+  useEffect(() => {
+    const content = editorContentRef.current;
+    if (!replicaPending || !content) return;
+    const onPointer = (event: PointerEvent) => {
+      if (pagePressNeedsReplica(event)) requestReplica();
+    };
+    content.addEventListener('pointerdown', onPointer, true);
+    return () => content.removeEventListener('pointerdown', onPointer, true);
+  }, [replicaPending, requestReplica]);
+
   // Reserve 2× the left-edge allowance so the centered page clears whatever
   // outline UI is showing, without forcing a shift on wide viewports.
   const outlineLeftAllowance =

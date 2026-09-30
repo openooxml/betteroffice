@@ -88,6 +88,13 @@ jobs:
       - name: Build
         run: bun run build:packages
 
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Import every package entry in plain Node
+        run: node scripts/check-node-import.mjs
+
   audit:
     name: Security audit
     runs-on: ubuntu-latest
