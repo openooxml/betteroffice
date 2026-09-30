@@ -437,3 +437,22 @@ fn a_kept_row_follows_its_next_row_to_a_taller_page() {
     };
     assert_eq!(page_of(2), page_of(3));
 }
+
+#[test]
+fn a_kept_row_stays_when_the_next_row_cannot_split_on_any_page() {
+    let (block, measure) = paragraph(1, 3, json!({}));
+    let table = table_rows(&[
+        (
+            2,
+            json!({"keepNext": true, "widowControl": false}),
+            json!({}),
+        ),
+        (
+            8,
+            json!({"keepLines": true, "widowControl": false}),
+            json!({}),
+        ),
+    ]);
+    let fragments = fragments(vec![json!({"block": block, "measure": measure}), table]);
+    assert_eq!(fragments[0].0, 0);
+}

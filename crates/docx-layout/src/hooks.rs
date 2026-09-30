@@ -134,44 +134,62 @@ fn get_header_rows_height(measure: &TableExtent, header_row_count: usize) -> f64
     height
 }
 
-/// Per row, the height of the keep-with-next row chain it starts (0 inside
-/// or outside a chain), which placement keeps on one page: its rows through
-/// the last one that keeps with the next, then the next row's smallest slice
-/// in a column `capacity` tall, as Word keeps a row with the next row's start.
-pub(crate) fn row_keep_heights(
+/// Per row that starts a keep-with-next row chain (a row whose cell ends in a
+/// keepNext paragraph, not inside a longer chain): the height of the chain's
+/// rows and the row that follows it.
+pub(crate) fn row_keep_chains(
+    block: &TableBlock,
+    measure: &TableExtent,
+) -> Vec<Option<(f64, usize)>> {
+    let rows = measure.rows.len();
+    let keeps_next = |index: usize| {
+        index + 1 < rows
+            && block.rows.get(index).is_some_and(|row| {
+                row.cells.iter().any(|cell| {
+                    matches!(cell.blocks.last(), Some(LayoutBlock::Paragraph(paragraph))
+                        if paragraph.attrs.as_ref().and_then(|attrs| attrs.keep_next) == Some(true))
+                })
+            })
+    };
+    let mut chains = vec![None; rows];
+    let mut index = 0;
+    while index < rows {
+        if !keeps_next(index) {
+            index += 1;
+            continue;
+        }
+        let head = index;
+        let mut height = 0.0;
+        while keeps_next(index) {
+            height += measure.rows[index].height;
+            index += 1;
+        }
+        chains[head] = Some((height, index));
+        index += 1;
+    }
+    chains
+}
+
+/// The height a keep-with-next row chain keeps on one page in a column
+/// `capacity` tall: its rows and the smallest slice of the row after it, as
+/// Word keeps a row with the next row's start, or that whole row when its
+/// paragraph rules leave no break in such a column.
+pub(crate) fn row_keep_height(
+    chain: Option<(f64, usize)>,
     block: &TableBlock,
     measure: &TableExtent,
     breaks: &RowBreaks,
     capacity: f64,
-) -> Vec<f64> {
-    let mut heights = vec![0.0_f64; measure.rows.len()];
-    for index in (0..measure.rows.len().saturating_sub(1)).rev() {
-        let keeps_next = block.rows.get(index).is_some_and(|row| {
-            row.cells.iter().any(|cell| {
-                matches!(cell.blocks.last(), Some(LayoutBlock::Paragraph(paragraph))
-                    if paragraph.attrs.as_ref().and_then(|attrs| attrs.keep_next) == Some(true))
-            })
-        });
-        if keeps_next {
-            let next = if heights[index + 1] > 0.0 {
-                heights[index + 1]
-            } else {
-                breaks.fresh_slice(index + 1, 0.0, capacity)
-            };
-            heights[index] = measure.rows[index].height + next;
-        }
+) -> f64 {
+    let Some((rows, follower)) = chain else {
+        return 0.0;
+    };
+    let slice = minimum_row_slice(block, measure, &breaks.kept, follower, 0.0);
+    rows + if slice <= capacity {
+        slice
+    } else {
+        measure.rows[follower].height
     }
-    for index in 0..heights.len() {
-        if heights[index] == 0.0 {
-            continue;
-        }
-        let mut next = index + 1;
-        while next < heights.len() && heights[next] > 0.0 {
-            heights[next] = 0.0;
-            next += 1;
-        }
-    }
-    heights
 }
 
 /// Fits `height` at the cursor and reports whether that moved it. A retry that
@@ -229,9 +247,7 @@ fn layout_table_with_position(
     let header_rows_height = get_header_rows_height(measure, header_row_count);
     let breaks = RowBreaks::new(block, measure);
     let first_fragment_height = first_table_fragment_height(block, measure, &breaks.kept);
-    // a chain's follower slice depends on the column it lands in
-    let mut keep_heights: Vec<f64> = Vec::new();
-    let mut keep_heights_capacity = f64::NAN;
+    let keep_chains = row_keep_chains(block, measure);
 
     let mut row_index = 0usize;
     let mut consumed = 0.0f64; // px of rows[row_index] already placed on a previous fragment
@@ -241,10 +257,6 @@ fn layout_table_with_position(
         let is_first_fragment = row_index == 0 && consumed == 0.0;
         // The tallest stretch a fresh column offers between float bands.
         let column_capacity = paginator.get_column_capacity();
-        if column_capacity != keep_heights_capacity {
-            keep_heights = row_keep_heights(block, measure, &breaks, column_capacity);
-            keep_heights_capacity = column_capacity;
-        }
         let body_capacity = if header_row_count > 0 && header_rows_height <= column_capacity {
             column_capacity - header_rows_height
         } else {
@@ -332,10 +344,17 @@ fn layout_table_with_position(
         let mut last_row_partial = false;
 
         while cur < rows.len() {
-            let keep_height = keep_heights[cur];
+            // a fresh column repeats the header band above a first fragment's body
+            let chain_room = if is_first_fragment && cur >= header_row_count {
+                body_capacity
+            } else {
+                column_capacity - header_overhead
+            };
+            let keep_height =
+                row_keep_height(keep_chains[cur], block, measure, &breaks, chain_room);
             if (cur > start_row || consumed == 0.0)
                 && keep_height > available_height - used
-                && keep_height <= column_capacity - header_overhead
+                && keep_height <= chain_room
             {
                 if cur > start_row {
                     break;
