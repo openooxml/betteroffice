@@ -119,6 +119,7 @@ pub fn project_story(doc: &EditingDoc, story_id: &str) -> Result<Vec<CanonicalIt
                             OOXML_PARA_ID,
                             SOURCE_PARA_ID,
                             PARA_ORIGIN,
+                            crate::JOIN_DONOR,
                         ],
                     ),
                 });

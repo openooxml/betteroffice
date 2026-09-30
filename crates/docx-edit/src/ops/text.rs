@@ -265,6 +265,7 @@ pub(crate) fn plain_delete(
             Attrs::from([(Arc::from(INS), Any::Null), (Arc::from(DEL), Any::Null)]),
         );
         inherit_block_revisions(txn, story, start, &map, &revisions);
+        map.insert(txn, crate::JOIN_DONOR, Any::Bool(true));
     }
     DeleteOutcome { removed }
 }

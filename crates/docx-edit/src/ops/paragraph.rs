@@ -36,9 +36,9 @@ use crate::ops::{
     snapshot_range,
 };
 use crate::{
-    DEL, EditCtx, EditingDoc, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, ParagraphId,
-    ParagraphIdOrigin, Position, StoryRange, check_position, insertion_attrs, next_pilcrow,
-    revision_value, story_ref,
+    DEL, EditCtx, EditingDoc, JOIN_DONOR, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS,
+    ParagraphId, ParagraphIdOrigin, Position, StoryRange, check_position, insertion_attrs,
+    next_pilcrow, revision_value, story_ref,
 };
 
 /// The paragraph attributes a style definition owns. Applying a style resets
@@ -573,7 +573,9 @@ impl EditingDoc {
                         );
                     }
                 }
-                if let Some(revisions) = block_revisions.as_ref() {
+                if let Some(revisions) = block_revisions.as_ref()
+                    && revisions.iter().any(Option::is_some)
+                {
                     inherit_block_revisions(
                         &mut txn,
                         &story,
@@ -581,10 +583,12 @@ impl EditingDoc {
                         &boundary.map,
                         revisions,
                     );
+                    boundary.map.insert(&mut txn, JOIN_DONOR, Any::Bool(true));
                 }
             } else {
                 let (donor_id, mut donor_props) = capture_pilcrow(&boundary.map, &txn);
-                donor_props.retain(|(key, _)| !matches!(key.as_str(), PPR_INS | PPR_DEL));
+                donor_props
+                    .retain(|(key, _)| !matches!(key.as_str(), PPR_INS | PPR_DEL | JOIN_DONOR));
                 story.remove_range(&mut txn, pilcrow_index, 1);
                 adopt_pilcrow(&mut txn, &survivor.map, &donor_id, &donor_props);
             }
@@ -617,6 +621,7 @@ impl EditingDoc {
                 ]),
             );
             inherit_block_revisions(&mut txn, &story, pilcrow_index, &boundary.map, &revisions);
+            boundary.map.insert(&mut txn, JOIN_DONOR, Any::Bool(true));
         }
         let caret = crate::op::loc_range_in_txn(
             &boundary.story_id,
@@ -1242,7 +1247,8 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
 fn paragraph_formatting<T: ReadTxn>(map: &MapRef, txn: &T) -> HashMap<String, Any> {
     map.iter(txn)
         .filter_map(|(key, value)| {
-            if crate::is_identity_key(key) || matches!(key.as_ref(), PPR_INS | PPR_DEL | PPR_CHANGE)
+            if crate::is_identity_key(key)
+                || matches!(key.as_ref(), PPR_INS | PPR_DEL | PPR_CHANGE | JOIN_DONOR)
             {
                 return None;
             }
