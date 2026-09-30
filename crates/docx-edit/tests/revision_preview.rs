@@ -763,21 +763,60 @@ fn a_paged_export_refuses_a_previewed_layout() {
 }
 
 #[test]
-fn a_suggested_replacement_that_ends_before_a_table_stays_in_its_paragraph() {
-    let body = r#"<w:p w14:paraId="00000001"><w:r><w:t>old</w:t></w:r></w:p><w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:p w14:paraId="00000002"><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p w14:paraId="00000003"><w:r><w:t>tail</w:t></w:r></w:p>"#;
+fn a_suggested_replacement_that_ends_before_a_block_embed_stays_in_its_paragraph() {
+    let table = r#"<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:p w14:paraId="00000002"><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;
+    let suggest = |author: &str| EditCtx::local(author, "2026-09-29T12:00:00Z").suggesting();
+    let first_runs = |engine: &EngineSession| -> Vec<(String, &'static str)> {
+        runs(&lower(engine, &RenderEnv::default()), 0)
+            .into_iter()
+            .map(|run| (run.0, run.3))
+            .collect()
+    };
+
+    // "old" and its paragraph mark, up to a table; Ann's own pending "Z" inside
+    // the range is retracted without moving the insertion ahead of "ab".
     let engine = EngineSession::new(75112);
-    seed_from_docx(engine.doc(), &document(body)).unwrap();
-    let suggest = EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting();
-    // "old" and its paragraph mark, up to the table.
+    let body = format!(
+        r#"<w:p w14:paraId="00000001"><w:r><w:t>abold</w:t></w:r></w:p>{table}<w:p w14:paraId="00000003"><w:r><w:t>tail</w:t></w:r></w:p>"#
+    );
+    seed_from_docx(engine.doc(), &document(&body)).unwrap();
     engine
         .doc()
-        .replace_range(&suggest, StoryRange::new("body", 0, 4), "X")
+        .insert_text(
+            &suggest("Ann"),
+            Position::new("body", 2),
+            "Z",
+            FormatPolicy::Inherit,
+        )
         .unwrap();
-    let blocks = lower(&engine, &RenderEnv::default());
-    let texts: Vec<(String, &str)> = runs(&blocks, 0)
-        .into_iter()
-        .map(|run| (run.0, run.3))
-        .collect();
-    assert_eq!(texts, [("X".to_owned(), "ins"), ("old".to_owned(), "del")]);
-    assert_eq!(blocks[1]["kind"], "table");
+    engine
+        .doc()
+        .replace_range(&suggest("Ann"), StoryRange::new("body", 2, 7), "X")
+        .unwrap();
+    assert_eq!(
+        first_runs(&engine),
+        [
+            ("ab".to_owned(), ""),
+            ("X".to_owned(), "ins"),
+            ("old".to_owned(), "del")
+        ]
+    );
+    assert_eq!(lower(&engine, &RenderEnv::default())[1]["kind"], "table");
+
+    // A story that ends with a page break after its last paragraph mark.
+    let engine = EngineSession::new(75114);
+    seed_from_docx(
+        engine.doc(),
+        &document(r#"<w:p w14:paraId="00000001"><w:r><w:t>old</w:t></w:r><w:r><w:br w:type="page"/></w:r></w:p>"#),
+    )
+    .unwrap();
+    let len = engine.doc().story_len("body").unwrap();
+    engine
+        .doc()
+        .replace_range(&suggest("Ann"), StoryRange::new("body", 0, len), "X")
+        .unwrap();
+    assert_eq!(
+        first_runs(&engine),
+        [("X".to_owned(), "ins"), ("old".to_owned(), "del")]
+    );
 }

@@ -209,6 +209,39 @@ test('suggesting type-over across paragraphs keeps the stored formatting at the 
   expect(typed.every((segment) => segment.attributes.bold === true)).toBe(true);
 });
 
+test('multiline suggesting type-over keeps the stored formatting on every piece', async () => {
+  for (const typed of ['\nX', 'X\nY']) {
+    const session = await seededSession();
+    const first = session.paragraphs('body')[0]!.paraId;
+    const { secondParaId: second } = session.splitParagraph({
+      story: 'body',
+      paraId: first,
+      offset: 2,
+    });
+    session.setSelection(
+      { story: 'body', paraId: first, offset: 1 },
+      { story: 'body', paraId: second, offset: 1 }
+    );
+    const input = createRef<YrsInputRef>();
+    render(inputFor(session, input, undefined, undefined, { isSuggesting: true, author: 'Ada' }));
+    act(() => {
+      input.current!.applyStoredFormatting({ type: 'set', delta: { bold: true } });
+      input.current!.insertText(typed);
+    });
+    await act(async () => {
+      await input.current!.flushPendingInput();
+    });
+    const inserted = session
+      .storySegments('body')
+      .filter((segment) => segment.kind === 'text' && /[XY]/.test(segment.text));
+    expect(inserted.map((segment) => (segment.kind === 'text' ? segment.text : '')).join('')).toBe(
+      typed.replace('\n', '')
+    );
+    expect(inserted.every((segment) => segment.attributes.bold === true)).toBe(true);
+    cleanup();
+  }
+});
+
 test('flush includes a completed IME composition exactly once', async () => {
   const { session, input, view } = await mount();
   const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;

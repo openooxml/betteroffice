@@ -105,33 +105,28 @@ fn boundary_chunks<T: yrs::ReadTxn>(story: &TextRef, txn: &T, index: u32) -> Vec
     snapshot_range(story, txn, index.saturating_sub(1), index.saturating_add(1))
 }
 
-/// Where a replacement of `range` inserts before its deletion runs: a suggested one
-/// after the text it strikes out, as Word places it, but before the story's final
-/// pilcrow and never directly ahead of a block embed, which only a paragraph
-/// boundary may precede; there, and in plain mode, at the start.
-fn suggested_insertion(
+/// Where a suggested replacement of `range` inserts, before its deletion runs:
+/// after the text it strikes out, as Word places it, and at most before the
+/// story's final unit. None in plain mode, and where that unit is a block embed,
+/// which only a paragraph boundary may precede: the text then goes at the start.
+fn after_struck_text(
     story: &TextRef,
     txn: &TransactionMut<'_>,
     ctx: &EditCtx,
     range: &StoryRange,
     len: u32,
-) -> u32 {
+) -> Option<u32> {
     if !ctx.is_suggesting() || len == 0 {
-        return range.start;
+        return None;
     }
-    let block_follows = snapshot_range(story, txn, range.end, range.end + 1)
-        .iter()
-        .any(|chunk| {
-            chunk.start == range.end
-                && matches!(&chunk.kind, ChunkKind::Embed(Some(map))
-                    if crate::map_string(map, txn, KIND_KEY)
-                        .is_some_and(|kind| crate::segments::is_block_embed(&kind)))
-        });
-    if block_follows {
-        range.start
-    } else {
-        range.end.min(story.len(txn) - 1)
-    }
+    let at = range.end.min(story.len(txn) - 1);
+    let block = snapshot_range(story, txn, at, at + 1).iter().any(|chunk| {
+        chunk.start == at
+            && matches!(&chunk.kind, ChunkKind::Embed(Some(map))
+                if crate::map_string(map, txn, KIND_KEY)
+                    .is_some_and(|kind| crate::segments::is_block_embed(&kind)))
+    });
+    (!block).then_some(at)
 }
 
 /// Stamps retained content, removes owned insertions, and protects the final pilcrow.
@@ -355,7 +350,8 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
-        let mut at = suggested_insertion(&story, &txn, ctx, &range, len);
+        let after = after_struck_text(&story, &txn, ctx, &range, len);
+        let mut at = after.unwrap_or(range.start);
         if !text.is_empty() {
             crate::identity::promote_at(self, &mut txn, &range.story, &story, at);
         }
@@ -406,7 +402,9 @@ impl EditingDoc {
                     range.end,
                     &chunks,
                 );
-                at -= outcome.removed;
+                if after.is_some() {
+                    at -= outcome.removed;
+                }
             } else {
                 plain_delete(&mut txn, &story, range.start, range.end, &chunks);
             }
@@ -457,7 +455,8 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
-        let mut at = suggested_insertion(&story, &txn, ctx, &range, len);
+        let after = after_struck_text(&story, &txn, ctx, &range, len);
+        let mut at = after.unwrap_or(range.start);
         if total > 0 {
             crate::identity::promote_at(self, &mut txn, &range.story, &story, at);
         }
@@ -488,7 +487,9 @@ impl EditingDoc {
                     range.end,
                     &chunks,
                 );
-                at -= outcome.removed;
+                if after.is_some() {
+                    at -= outcome.removed;
+                }
             } else {
                 plain_delete(&mut txn, &story, range.start, range.end, &chunks);
             }
