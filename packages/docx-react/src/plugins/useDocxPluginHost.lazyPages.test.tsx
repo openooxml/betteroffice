@@ -54,17 +54,26 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-test('a visible proposal waits for its page build and paint, then notifies plugins with exact geometry', async () => {
+test('a visible proposal waits for its page build and paint, then notifies plugins with exact geometry', () =>
+  visibleProposal(false)
+);
+
+test('scrolling before an edit reply builds newly visible placeholders and waits for paint', () =>
+  visibleProposal(true)
+);
+
+async function visibleProposal(editDuringScroll: boolean): Promise<void> {
   let nextIdle = 1;
   globalThis.requestIdleCallback = (() => nextIdle++) as typeof requestIdleCallback;
   globalThis.cancelIdleCallback = () => {};
-  const { engine, inputs, host } = lazyFixture(120);
+  const { engine, inputs, host } = lazyFixture(editDuringScroll ? undefined : 120);
   const pages = document.createElement('div');
   const layer = document.createElement('div');
   document.body.append(pages, layer);
   try {
     const paragraphs = JSON.parse(engine.paragraphs('body')) as { paraId: string; text: string }[];
     const paragraph = paragraphs.at(-1)!;
+    const revisionOffset = editDuringScroll ? paragraph.text.length - 10 : 1;
     const measured = inputs.measured.find(
       ({ block }: { block: { id: string } }) => block.id === paragraph.paraId
     );
@@ -99,8 +108,8 @@ test('a visible proposal waits for its page build and paint, then notifies plugi
           kind: 'insertion',
           story: 'body',
           range: {
-            start: { paraId: paragraph.paraId, offset: 1 },
-            end: { paraId: paragraph.paraId, offset: 5 },
+            start: { paraId: paragraph.paraId, offset: revisionOffset },
+            end: { paraId: paragraph.paraId, offset: revisionOffset + 4 },
           },
         },
       ],
@@ -198,8 +207,46 @@ test('a visible proposal waits for its page build and paint, then notifies plugi
 
     const eventsBeforeWindow = events.length;
     const worker = EngineWorker.last!;
+    let pendingEdit: ReturnType<typeof result.current.display.applyInput> | undefined;
+    if (editDuringScroll) {
+      await act(async () => {
+        await result.current.display.settledDisplayList(null);
+      });
+      await waitFor(() =>
+        expect(geometry()!.getAnchorGeometry(target)).toMatchObject({
+          ok: true,
+          rects: expect.arrayContaining([expect.objectContaining({ pageIndex: last })]),
+        })
+      );
+      expect(result.current.display.frame!.displayList.pages.every((page) => !page.unbuilt)).toBe(
+        true
+      );
+      engine.set_selection('body', paragraph.paraId, 1, paragraph.paraId, 1);
+      worker.holdInputReplies = true;
+      await act(async () => {
+        pendingEdit = result.current.display.applyInput('New ');
+      });
+      await waitFor(() => expect(worker.heldInputReplies).toHaveLength(1));
+      expect(worker.posted.at(-1)).toMatchObject({
+        type: 'applyInput',
+        displayWindow: [0, 5],
+      });
+    }
     worker.holdPageBuilds = true;
     await act(async () => result.current.display.setDisplayWindow(last, last + 1));
+    if (editDuringScroll) {
+      expect(worker.heldInputReplies).toHaveLength(1);
+      expect(worker.heldPageBuilds).toEqual([]);
+      worker.holdInputReplies = false;
+      await act(async () => {
+        worker.releaseInputReplies();
+        expect(await pendingEdit!).not.toBeNull();
+      });
+      expect(result.current.display.error).toBeNull();
+      expect(result.current.display.frame!.displayList.pages[last]!.unbuilt).toBe(true);
+      expect(result.current.display.frame!.displayList.pages[0]!.unbuilt).toBeFalsy();
+      expect(result.current.display.caret?.caretRect?.pageIndex).toBe(0);
+    }
     expect(geometry()!.getAnchorGeometry(target)).toMatchObject({
       ok: false,
       failure: { code: 'layout-unavailable' },
@@ -235,6 +282,22 @@ test('a visible proposal waits for its page build and paint, then notifies plugi
     const exact = geometry()!.getAnchorGeometry(target);
     expect(exact).toMatchObject({ ok: true, anchor: { pageIndex: last } });
     if (!exact.ok) throw new Error(exact.failure.message);
+    expect(exact.rects.length).toBeGreaterThan(0);
+
+    if (editDuringScroll) {
+      autoPresent = true;
+      worker.holdPageBuilds = false;
+      await act(async () => {
+        expect(await result.current.display.applyInput('Next ')).not.toBeNull();
+      });
+      expect(worker.posted.filter((request) => request.type === 'applyInput').at(-1)).toMatchObject({
+        displayWindow: [last, last + 1],
+      });
+      expect(result.current.display.error).toBeNull();
+      expect(result.current.display.caret?.caretRect?.pageIndex).toBe(0);
+      unmount();
+      return;
+    }
 
     const full = JSON.parse(engine.build_display_list_json(JSON.stringify(inputs))) as DisplayList;
     const fullQueries = createDisplayListQueries(full);
@@ -263,4 +326,4 @@ test('a visible proposal waits for its page build and paint, then notifies plugi
     layer.remove();
     engine.free();
   }
-});
+}

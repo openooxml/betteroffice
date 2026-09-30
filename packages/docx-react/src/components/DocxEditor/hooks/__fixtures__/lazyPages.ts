@@ -17,6 +17,8 @@ export class EngineWorker {
   posted: ResidentEngineWorkerRequest[] = [];
   holdPageBuilds = false;
   heldPageBuilds: (() => void)[] = [];
+  holdInputReplies = false;
+  heldInputReplies: (() => void)[] = [];
   constructor() {
     EngineWorker.last = this;
   }
@@ -33,6 +35,9 @@ export class EngineWorker {
       return;
     }
     let frame: Uint8Array;
+    engine.set_windowed_incremental_builds(
+      'displayWindow' in request && request.displayWindow !== undefined
+    );
     if (request.type === 'bootstrap') {
       if (request.displayWindow) engine.set_display_window(...request.displayWindow);
       frame = engine.build_display_list_frame(request.extras, 0);
@@ -50,6 +55,7 @@ export class EngineWorker {
       return;
     }
     const caret = JSON.parse(engine.resident_caret_snapshot_json());
+    const selection = JSON.parse(engine.selection());
     const respond = () =>
       this.onmessage?.({
         data: {
@@ -57,15 +63,20 @@ export class EngineWorker {
           ok: true,
           frame: frame.slice().buffer,
           caret,
-          selection: JSON.parse(engine.selection()),
+          selection,
           layoutRevision: 1,
         },
       } as MessageEvent<ResidentEngineWorkerResponse>);
     if (request.type === 'buildPages' && this.holdPageBuilds) this.heldPageBuilds.push(respond);
+    else if (request.type === 'applyInput' && this.holdInputReplies)
+      this.heldInputReplies.push(respond);
     else queueMicrotask(respond);
   }
   releasePageBuilds(): void {
     for (const respond of this.heldPageBuilds.splice(0)) queueMicrotask(respond);
+  }
+  releaseInputReplies(): void {
+    for (const respond of this.heldInputReplies.splice(0)) queueMicrotask(respond);
   }
   terminate(): void {}
 }

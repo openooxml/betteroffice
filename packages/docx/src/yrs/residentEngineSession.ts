@@ -44,6 +44,8 @@ export type ResidentEngineSession = Pick<
 > & {
   /** The region layout of only as much of the body as fills `pages` pages. */
   layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
+  /** Limit incremental rebuilds to the display window and caret pages. Off by default. */
+  setWindowedIncrementalBuilds(enabled: boolean): void;
 };
 
 export async function createResidentEngineSession(): Promise<ResidentEngineSession> {
@@ -94,6 +96,7 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
     setDisplayWindow: (start, end) => session.set_display_window(start, end),
+    setWindowedIncrementalBuilds: (enabled) => session.set_windowed_incremental_builds(enabled),
     buildDisplayPagesFrame: (pages, expectedFrameEpoch) =>
       session.build_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch),
     residentCaretSnapshot: () =>

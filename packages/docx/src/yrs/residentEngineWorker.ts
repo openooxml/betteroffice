@@ -133,7 +133,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     // corrupt the update; a fresh id lets yrs merge queued/local operations
     // safely while the main replica applies worker updates with local origin.
     session = await createResidentEngineSession();
-    if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
+    setFrameDisplayWindow(session, request.displayWindow);
     const { layoutJson, provisional } = hydrate(request.snapshot, request.provisionalPages);
     if (provisional) {
       incompleteLayout = {
@@ -169,10 +169,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (!session) throw new Error('Resident engine worker is not initialized');
-  if ('displayWindow' in request && request.displayWindow) {
-    session.setDisplayWindow(...request.displayWindow);
-  }
   if (request.type === 'sync') {
+    setFrameDisplayWindow(session, request.displayWindow);
     unsubscribe?.();
     unsubscribe = null;
     const { layoutJson } = hydrate(request.snapshot);
@@ -196,6 +194,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'buildPages') {
+    setFrameDisplayWindow(session);
     // Pages of the provisional frame build between steps, as before a completion.
     pendingUpdates = [];
     const started = performance.now();
@@ -213,6 +212,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'completeLayout') {
+    setFrameDisplayWindow(session);
     if (incompleteLayout && request.sliceBlocks) {
       supersedeSlicedCompletion();
       slicedCompletion = {
@@ -232,6 +232,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'buildFrame') {
     await completeProvisionalLayout();
+    setFrameDisplayWindow(session, request.displayWindow);
     pendingUpdates = [];
     const started = performance.now();
     const frame = session.buildDisplayListFrame(request.extras, request.expectedFrameEpoch);
@@ -286,6 +287,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   await completeProvisionalLayout();
+  setFrameDisplayWindow(session, request.displayWindow);
   session.setSelection(request.selection.anchor, request.selection.head);
   pendingUpdates = [];
   const started = performance.now();
@@ -388,6 +390,11 @@ function hydrate(
   return { layoutJson, provisional };
 }
 
+function setFrameDisplayWindow(engine: ResidentEngineSession, window?: [number, number]): void {
+  if (window) engine.setDisplayWindow(...window);
+  engine.setWindowedIncrementalBuilds(window !== undefined);
+}
+
 /**
  * Replaces a provisional layout with the full one before anything reads it,
  * finishing a sliced completion at once and answering its request first.
@@ -433,6 +440,7 @@ async function replyCompletedLayout(
     reply({ id, ok: true });
     return;
   }
+  setFrameDisplayWindow(session);
   pendingUpdates = [];
   const started = performance.now();
   const frame = session.buildDisplayListFrame(

@@ -4,4 +4,4 @@
 "@betteroffice/docx-react": patch
 ---
 
-With a viewport window set, edits and proposal decisions rebuild nearby pages right away and rebuild other affected pages in the background, while proposal buttons wait for exact positions on visible pages.
+Adds opt-in `set_windowed_incremental_builds` to limit incremental rebuilds to the display window and caret pages. The editor enables this for edits and proposal decisions, rebuilds other affected pages in the background, and waits for exact visible proposal geometry.
