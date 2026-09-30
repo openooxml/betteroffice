@@ -2133,7 +2133,7 @@ mod pagination_rule_tests {
     }
 
     #[test]
-    fn incremental_placement_refuses_multi_column_sections() {
+    fn incremental_placement_in_multi_column_sections_matches_a_full_pass() {
         let section = |columns: u32| {
             json!({
                 "block": {
@@ -2143,38 +2143,41 @@ mod pagination_rule_tests {
                 "measure": { "kind": "sectionBreak" },
             })
         };
-        for blocks in [
-            vec![
-                paragraph(0, 1, 10.0, json!({})),
-                section(1),
-                paragraph(1, 1, 10.0, json!({})),
-                paragraph(2, 1, 10.0, json!({})),
-                section(2),
-                paragraph(3, 1, 10.0, json!({})),
-            ],
-            vec![
-                paragraph(0, 1, 10.0, json!({})),
-                section(2),
-                paragraph(1, 1, 10.0, json!({})),
-                paragraph(2, 1, 10.0, json!({})),
-            ],
+        for (blocks, dirty) in [
+            (
+                vec![
+                    paragraph(0, 1, 10.0, json!({})),
+                    section(1),
+                    paragraph(1, 1, 10.0, json!({})),
+                    paragraph(2, 1, 10.0, json!({})),
+                    section(2),
+                    paragraph(3, 1, 10.0, json!({})),
+                ],
+                &[3][..],
+            ),
+            (
+                vec![
+                    paragraph(0, 1, 10.0, json!({})),
+                    section(2),
+                    paragraph(1, 1, 10.0, json!({})),
+                    paragraph(2, 1, 10.0, json!({})),
+                ],
+                &[3],
+            ),
+            (
+                vec![
+                    paragraph(0, 1, 10.0, json!({})),
+                    paragraph(1, 1, 10.0, json!({ "pageBreakBefore": true })),
+                    section(1),
+                    paragraph(2, 1, 10.0, json!({})),
+                    paragraph(3, 1, 10.0, json!({})),
+                    section(2),
+                    paragraph(4, 1, 10.0, json!({})),
+                ],
+                &[0, 6],
+            ),
         ] {
-            let retained = layout_document_checkpointed(&mut input(blocks.clone())).unwrap();
-            let previous_fingerprints = vec![1_u64; blocks.len()];
-            let mut next_fingerprints = previous_fingerprints.clone();
-            next_fingerprints[3] = 2;
-            let mut previous_layout = retained.layout.clone();
-            assert!(matches!(
-                layout_document_incremental(
-                    &mut input(blocks),
-                    &mut previous_layout,
-                    &retained.checkpoints,
-                    &previous_fingerprints,
-                    &next_fingerprints,
-                    3,
-                ),
-                Err(LayoutError::Unsupported(_))
-            ));
+            assert_incremental_matches_full(blocks.clone(), blocks, dirty);
         }
     }
 
