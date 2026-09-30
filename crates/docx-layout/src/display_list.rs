@@ -2654,6 +2654,8 @@ pub(crate) struct LineIn {
     #[serde(default)]
     ascent: f64,
     #[serde(default)]
+    descent: f64,
+    #[serde(default)]
     line_height: f64,
     #[serde(default)]
     synthetic_fallback: bool,
@@ -6445,7 +6447,11 @@ fn emit_line(
                     .as_ref()
                     .and_then(|bounds| bounds.height)
                     .unwrap_or(imr.height);
-                let y = if *single_image_line {
+                let y = if *single_image_line && line.descent <= 0.0 {
+                    // Alone on its line: the image is the box's top, any
+                    // added line spacing falls below it.
+                    geom.line_top + (line.ascent - layout_height).max(0.0)
+                } else if *single_image_line {
                     geom.line_top + ((line.line_height - layout_height) / 2.0).max(0.0)
                 } else {
                     baseline - layout_height

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixtures: an inline image alone on its line under single, 1.5 and double (auto) line spacing.
+"""Fixtures: an inline image alone on its line under single, 1.5 and double (auto) line spacing, and in a table cell.
 usage: generate.py <outdir>"""
 import struct, zlib, zipfile, sys
 from pathlib import Path
@@ -56,4 +56,13 @@ sp = lambda line: f'<w:spacing w:before="0" w:after="0" w:line="{line}" w:lineRu
 for name, line in [("img-body-240", 240), ("img-body-360", 360), ("img-body-480", 480)]:
     body = p("Top A") + p("", sp(line), image(72, 144)) + p("Bottom A") + p("", sp(line), image(72, 72, 2)) + p("Bottom B")
     build(out / f"{name}.docx", body)
+# An image alone on its line in a table cell, under the Normal style's 1.25 lines
+tstyle = ('<w:style w:type="table" w:styleId="Grid"><w:name w:val="Grid"/><w:basedOn w:val="TableNormal"/>'
+          '<w:pPr><w:spacing w:after="0" w:line="360" w:lineRule="auto"/></w:pPr><w:tblPr><w:tblBorders>'
+          '<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+          '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+          '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/></w:tblBorders></w:tblPr></w:style>')
+normal300 = '<w:spacing w:after="160" w:line="300" w:lineRule="auto"/>'
+img_cell = p("Cell top") + p("", "", image(72, 144)) + p("Cell bottom")
+build(out / "img-cell-300.docx", p("Top A") + table([img_cell], "Grid") + p("Bottom A"), normal300, tstyle)
 print("ok")
