@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { unzipContainer } from '../docx/wasm';
 import { preloadEditWasm } from '../wasm/edit';
-import { createProposalRegistry } from './proposals';
+import { createProposalRegistry, type DocxProposalSession } from './proposals';
 import {
   createYrsSession,
   proposalRevisionPreview,
@@ -17,7 +17,6 @@ import {
   type DocxSourceStory,
   type YrsSession,
 } from './index';
-import { createProposalRegistry, type DocxProposalSession } from './proposals';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 const OFFICE = 'application/vnd.openxmlformats-officedocument';
