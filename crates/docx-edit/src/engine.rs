@@ -7854,7 +7854,7 @@ mod tests {
             211,
             &format!(
                 r#"<w:tbl><w:tblGrid><w:gridCol w:w="3600"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="3600" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Editable cell paragraph</w:t></w:r></w:p></w:tc></w:tr></w:tbl>{}"#,
-                "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(160)
+                "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(156)
             ),
         );
         let ctx = crate::EditCtx::local("", "");
@@ -7892,6 +7892,18 @@ mod tests {
         let before = engine.stats();
         let epoch = engine.display.borrow().binary_frame_epoch;
         engine.apply_and_layout(&cell_story, epoch).unwrap();
+        // A page-count change takes the full region pass by design.
+        assert_eq!(
+            engine
+                .pagination
+                .borrow()
+                .layout
+                .as_ref()
+                .unwrap()
+                .pages
+                .len(),
+            initial.pages.len()
+        );
         assert_eq!(
             engine.stats().incremental_display_builds,
             before.incremental_display_builds + 1
