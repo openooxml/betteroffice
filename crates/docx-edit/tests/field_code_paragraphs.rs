@@ -144,7 +144,6 @@ fn body_field_codes_over_paragraph_marks_keep_their_paragraphs() {
         "body-field-code-adjacent",
         "body-field-code-chained",
         "body-field-code-nested",
-        "cell-field-code-paragraphs",
     ] {
         let lines: Vec<_> = pages(&fixture(name)).concat();
         let owner = |line: &String| line.starts_with("Line 041") || line.starts_with("Cell");
@@ -154,6 +153,26 @@ fn body_field_codes_over_paragraph_marks_keep_their_paragraphs() {
         );
         assert!(lines.iter().any(|line| line.starts_with("yes")), "{name}");
     }
+    let engine = seeded(&fixture("cell-field-code-paragraphs"));
+    let blocks: Value = serde_json::from_str(
+        &engine
+            .lower_story_json("body", &RenderEnv::default())
+            .unwrap(),
+    )
+    .unwrap();
+    let table = blocks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|block| block["kind"] == "table")
+        .unwrap();
+    let texts: Vec<_> = table["rows"][0]["cells"][0]["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|block| block_text(block).trim_end().to_owned())
+        .collect();
+    assert_eq!(texts, ["Cell", "", "", "yes", "Cell end"]);
 }
 
 #[test]
@@ -584,13 +603,6 @@ fn retained_display_refreshes_joined_run_positions() {
 fn a_click_in_either_part_of_a_joined_header_line_edits_that_part() {
     let engine = seeded(&fixture("header-field-code-paragraphs"));
     let [owner, _, _, target] = field_paragraph_ids(&engine);
-    let blocks = lower(&engine, &RenderEnv::default());
-    let joined = blocks
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|block| block_text(block).trim_end() == "Header 7 yes")
-        .unwrap();
     // (paragraph, offset, story index) of a display position
     let display_loc = |position: u64| {
         let (mut display_start, mut story_start, mut units) = (0_u64, 0_u64, 0_u64);
@@ -626,13 +638,20 @@ fn a_click_in_either_part_of_a_joined_header_line_edits_that_part() {
             .text
     };
     for (text, expected) in [("Header 7 ", &owner), ("yes", &target)] {
+        let blocks = lower(&engine, &RenderEnv::default());
+        let joined = blocks
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|block| block_text(block).trim_end().ends_with("Header 7 yes"))
+            .unwrap();
         let run = joined["runs"]
             .as_array()
             .unwrap()
             .iter()
             .find(|run| run["text"] == text)
             .unwrap();
-        let (para_id, offset, index) = display_loc(run["pmStart"].as_u64().unwrap());
+        let (para_id, offset, index) = display_loc(run["pmStart"].as_f64().unwrap() as u64);
         assert_eq!(&para_id, expected, "{text}");
         assert_eq!(offset, 0, "{text}");
         let other = if expected == &owner { &target } else { &owner };
