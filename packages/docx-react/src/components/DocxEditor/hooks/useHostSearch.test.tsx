@@ -96,7 +96,7 @@ async function mount(page = 1) {
 test('finds every body and table match in reading order and walks them', async () => {
   const { hook, reveals, events } = await mount();
   const api = () => hook.result.current.api;
-  let state: DocxSearchState | null = null;
+  let state = null as DocxSearchState | null;
   await act(async () => {
     state = await api().search('the');
   });
@@ -167,7 +167,7 @@ test('an empty query clears', async () => {
   await act(async () => {
     await hook.result.current.api.search('the');
   });
-  let state: DocxSearchState | null = null;
+  let state = null as DocxSearchState | null;
   await act(async () => {
     state = await hook.result.current.api.search('');
   });
