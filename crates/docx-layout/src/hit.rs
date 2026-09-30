@@ -1193,13 +1193,25 @@ fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
         }
     }
     if let Some(hit) = text_hit(primitive) {
-        let (paint_clip, rotation) = match primitive {
-            Primitive::Text(text) => (text.paint_clip.as_ref(), text.rotation_deg.as_ref()),
-            Primitive::GlyphRun(run) => (run.paint_clip.as_ref(), run.rotation_deg.as_ref()),
-            _ => (None, None),
+        let (paint_clip, rotation, scale) = match primitive {
+            Primitive::Text(text) => (
+                text.paint_clip.as_ref(),
+                text.rotation_deg.as_ref(),
+                text.horizontal_scale.as_ref(),
+            ),
+            Primitive::GlyphRun(run) => (
+                run.paint_clip.as_ref(),
+                run.rotation_deg.as_ref(),
+                run.horizontal_scale.as_ref(),
+            ),
+            _ => (None, None, None),
         };
-        // A turned run paints outside its unturned box.
-        if rotation.and_then(Number::as_f64).unwrap_or(0.0) % 360.0 != 0.0 {
+        // A turned or compressed run paints outside or short of its box.
+        if rotation.and_then(Number::as_f64).unwrap_or(0.0) % 360.0 != 0.0
+            || scale
+                .and_then(Number::as_f64)
+                .is_some_and(|scale| scale < 100.0)
+        {
             return false;
         }
         if let Some(clip) = paint_clip {
@@ -2387,20 +2399,31 @@ mod tests {
     }
 
     #[test]
-    fn turned_body_text_leaves_header_clicks_to_the_header() {
+    fn turned_or_compressed_body_text_leaves_header_clicks_to_the_header() {
         let mut turned = run(100.0, 40.0, 50.0, 1);
         turned["rotationDeg"] = 90.into();
         let dl = band_page("header", 0.0, vec![turned]);
         let hit = hit_test_regions(&dl, 0, 120.0, 35.0).unwrap();
         assert_eq!(hit.region, HitRegion::Header);
         assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
-        let mut full_turn = run(100.0, 40.0, 50.0, 1);
-        full_turn["rotationDeg"] = 360.into();
-        let dl = band_page("header", 0.0, vec![full_turn]);
+        let mut compressed = run(100.0, 40.0, 50.0, 1);
+        compressed["horizontalScale"] = 25.into();
+        let dl = band_page("header", 0.0, vec![compressed]);
         assert_eq!(
             hit_test_regions(&dl, 0, 120.0, 35.0).unwrap().region,
-            HitRegion::Body
+            HitRegion::Header
         );
+        let mut full_turn = run(100.0, 40.0, 50.0, 1);
+        full_turn["rotationDeg"] = 360.into();
+        let mut expanded = run(100.0, 40.0, 50.0, 1);
+        expanded["horizontalScale"] = 150.into();
+        for text in [full_turn, expanded] {
+            let dl = band_page("header", 0.0, vec![text]);
+            assert_eq!(
+                hit_test_regions(&dl, 0, 120.0, 35.0).unwrap().region,
+                HitRegion::Body
+            );
+        }
     }
 
     #[test]

@@ -200,9 +200,12 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
     switch (primitive.kind) {
       case 'text':
       case 'glyphRun':
-        // A turned run paints outside its unturned box.
         if (!primitive.text.trim() || textPaintsNothing(primitive)) return false;
+        // A turned or compressed run paints outside or short of its box.
         if ((primitive.rotationDeg ?? 0) % 360 !== 0) return false;
+        if (primitive.horizontalScale !== undefined && !(primitive.horizontalScale >= 100)) {
+          return false;
+        }
         if (primitive.kind === 'glyphRun' && !primitive.glyphs.length) return false;
         break;
       case 'rect':

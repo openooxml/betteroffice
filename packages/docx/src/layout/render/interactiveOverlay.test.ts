@@ -351,7 +351,7 @@ test('body text with no fill does not hide header controls', () => {
   }
 });
 
-test('turned body text does not hide header controls', () => {
+test('turned or compressed body text does not hide header controls', () => {
   const runs: DisplayPrimitive[] = [{
     kind: 'text', text: 'covered', x: 100, baselineY: 35, width: 60,
     font: '16px sans-serif', color: '#000',
@@ -361,7 +361,9 @@ test('turned body text does not hide header controls', () => {
   }];
   for (const run of runs) {
     expectActive(headerWidget([{ ...run, rotationDeg: 90 } as DisplayPrimitive]));
+    expectActive(headerWidget([{ ...run, horizontalScale: 25 } as DisplayPrimitive]));
     expectHidden(headerWidget([{ ...run, rotationDeg: 360 } as DisplayPrimitive]));
+    expectHidden(headerWidget([{ ...run, horizontalScale: 150 } as DisplayPrimitive]));
   }
 });
 
