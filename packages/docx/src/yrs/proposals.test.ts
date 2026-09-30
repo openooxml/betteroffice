@@ -744,13 +744,15 @@ describe('YrsSession host proposals', () => {
         replace('rejected', '00000003', 'this', 'that'),
         replace('accepted', '00000006', 'Tail', 'End'),
         insert('undecided', '00000001', 'end', '!'),
-        replace('kept', '00000002', 'and', 'or')
+        replace('kept', '00000002', 'and', 'or'),
+        replace('cell', '0000C001', 'value', 'text')
       )
     );
     snapshotOf(
       decide(session, [
         { id: 'rejected', state: 'rejected' },
         { id: 'accepted', state: 'accepted' },
+        { id: 'cell', state: 'rejected' },
       ])
     );
     expect(propose(session, replace('again', '00000003', 'this', 'the'))).toMatchObject({
@@ -764,7 +766,7 @@ describe('YrsSession host proposals', () => {
     const withdrawn = snapshotOf(
       session.withdrawProposals({
         expectVersion: before,
-        ids: ['rejected', 'accepted', 'undecided', 'unknown'],
+        ids: ['rejected', 'accepted', 'undecided', 'cell', 'unknown'],
       })
     );
     expect(withdrawn.version).not.toBe(before);
@@ -781,6 +783,7 @@ describe('YrsSession host proposals', () => {
       'End',
     ]);
     expect(texts(session, 'accepted')[1]).toBe('aaaa or aaaa');
+    expect(texts(session, 'accepted', 'body:t0:r0c0')).toEqual(['cell value']);
     expect(new Set(session.listRevisions().map((revision) => revision.revisionId))).toEqual(
       new Set(withdrawn.proposals[0]!.revisionIds)
     );
@@ -791,6 +794,7 @@ describe('YrsSession host proposals', () => {
     expect(saved.match(/<w:(ins|del) /g)).toHaveLength(2);
     expect(saved).not.toContain('>that<');
     expect(saved).not.toContain('>Tail<');
+    expect(saved).not.toContain('>text<');
 
     snapshotOf(propose(session, replace('again', '00000003', 'this', 'the')));
     expect(texts(session, 'accepted')[2]).toBe('Keep the sentence.');

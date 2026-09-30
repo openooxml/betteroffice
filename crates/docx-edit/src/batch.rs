@@ -2824,6 +2824,10 @@ impl EditingDoc {
             )
             .into());
         }
+        let (nonce, epoch) = (
+            self.version_nonce.load(Ordering::Relaxed),
+            self.epoch.load(Ordering::Relaxed),
+        );
         let (state, state_vector) = {
             let txn = self.yrs_doc().transact();
             if txn.store().pending_update().is_some() || txn.store().pending_ds().is_some() {
@@ -2862,10 +2866,19 @@ impl EditingDoc {
         let adoption = Update::decode_v1(&update)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         history.add_undo_barrier();
-        self.yrs_doc()
-            .transact_mut_with(HOST_ORIGIN)
-            .apply_update(adoption)
-            .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        {
+            let mut txn = self.yrs_doc().transact_mut_with(HOST_ORIGIN);
+            if self.version_nonce.load(Ordering::Relaxed) != nonce
+                || self.epoch.load(Ordering::Relaxed) != epoch
+            {
+                return Err(EditError::InvalidUpdate(
+                    "the document changed while its revisions were settling".to_owned(),
+                )
+                .into());
+            }
+            txn.apply_update(adoption)
+                .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        }
         history.add_undo_barrier();
         self.id_counter
             .store(stage.id_counter.load(Ordering::Relaxed), Ordering::Relaxed);
