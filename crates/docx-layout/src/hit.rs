@@ -1140,50 +1140,50 @@ fn text_box_distance_squared(prims: &[Primitive], x: f64, y: f64) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
-fn painted_body_hit_at(prims: &[Primitive], x: f64, y: f64) -> bool {
-    prims.iter().any(|primitive| {
-        let Some(attrs) = doc_attrs(primitive) else {
-            return false;
-        };
-        if attrs.doc_start.is_none() {
-            return false;
-        }
-        if let Some(clip) = attrs
-            .clip_group
-            .as_ref()
-            .and_then(|group| group.clip.as_ref())
+/// Whether `primitive` carries a document position and paints its hit box at
+/// the point, inside its clip as the canvas and raster painters draw it.
+fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
+    let Some(attrs) = doc_attrs(primitive) else {
+        return false;
+    };
+    if attrs.doc_start.is_none() {
+        return false;
+    }
+    if let Some(clip) = attrs
+        .clip_group
+        .as_ref()
+        .and_then(|group| group.clip.as_ref())
+    {
+        let px = |value: &Option<Number>| value.as_ref().and_then(Number::as_f64).unwrap_or(0.0);
+        let (left, top) = (px(&clip.x), px(&clip.y));
+        let (width, height) = (px(&clip.w).max(0.0), px(&clip.h).max(0.0));
+        if width <= 0.0
+            || height <= 0.0
+            || x < left
+            || x > left + width
+            || y < top
+            || y > top + height
         {
-            let px = |value: &Option<Number>| value.as_ref().and_then(Number::as_f64).unwrap_or(0.0);
-            let (left, top) = (px(&clip.x), px(&clip.y));
-            let (width, height) = (px(&clip.w).max(0.0), px(&clip.h).max(0.0));
-            if width <= 0.0
-                || height <= 0.0
-                || x < left
-                || x > left + width
-                || y < top
-                || y > top + height
-            {
-                return false;
-            }
+            return false;
         }
-        if let Some(hit) = text_hit(primitive) {
-            return hit.width > 0.0
-                && x >= hit.x
-                && x <= hit.x + hit.width
-                && y >= hit.top - BAND_SLACK
-                && y <= hit.bottom + BAND_SLACK;
+    }
+    if let Some(hit) = text_hit(primitive) {
+        return hit.width > 0.0
+            && x >= hit.x
+            && x <= hit.x + hit.width
+            && y >= hit.top - BAND_SLACK
+            && y <= hit.bottom + BAND_SLACK;
+    }
+    let (left, top, width, height) = match primitive {
+        Primitive::Image(img) => (&img.x, &img.y, &img.w, &img.h),
+        Primitive::Shape(shape) if attrs.inline_shape_atom == Some(true) => {
+            (&shape.x, &shape.y, &shape.w, &shape.h)
         }
-        let (left, top, width, height) = match primitive {
-            Primitive::Image(img) => (&img.x, &img.y, &img.w, &img.h),
-            Primitive::Shape(shape) if attrs.inline_shape_atom == Some(true) => {
-                (&shape.x, &shape.y, &shape.w, &shape.h)
-            }
-            _ => return false,
-        };
-        let (left, top) = (left.as_f64().unwrap_or(0.0), top.as_f64().unwrap_or(0.0));
-        let (width, height) = (width.as_f64().unwrap_or(0.0), height.as_f64().unwrap_or(0.0));
-        x >= left && x <= left + width && y >= top && y <= top + height
-    })
+        _ => return false,
+    };
+    let (left, top) = (left.as_f64().unwrap_or(0.0), top.as_f64().unwrap_or(0.0));
+    let (width, height) = (width.as_f64().unwrap_or(0.0), height.as_f64().unwrap_or(0.0));
+    x >= left && x <= left + width && y >= top && y <= top + height
 }
 
 /// Direct body hits override header/footer bands; empty band spots activate
@@ -1204,8 +1204,15 @@ pub fn hit_test_regions(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> 
         if let Some(band) = band
             && in_band(band)
         {
-            let body = resolve_point(&page.primitives, false, x, y);
-            if body.direct && painted_body_hit_at(&page.primitives, x, y) {
+            // Only body content painted at the point takes it, and its own position answers.
+            let painted: Vec<Primitive> = page
+                .primitives
+                .iter()
+                .filter(|primitive| painted_body_hit_at(primitive, x, y))
+                .cloned()
+                .collect();
+            let body = resolve_point(&painted, false, x, y);
+            if body.direct {
                 return Some(RegionHit {
                     region: HitRegion::Body,
                     r_id: None,
@@ -1973,6 +1980,20 @@ mod tests {
             assert_eq!(outside.region, HitRegion::Body);
             assert_eq!(outside.pos, Some(3));
         }
+    }
+
+    #[test]
+    fn a_band_click_takes_the_position_of_the_body_run_painted_there() {
+        let mut hidden = run(100.0, 40.0, 50.0, 1);
+        hidden["clipGroup"] = serde_json::json!({
+            "clip": {"x": 100, "y": 50, "w": 50, "h": 30}
+        });
+        let visible = run(100.0, 40.0, 50.0, 20);
+        let dl = band_page("header", 0.0, vec![hidden, visible]);
+
+        let hit = hit_test_regions(&dl, 0, 120.0, 35.0).unwrap();
+        assert_eq!(hit.region, HitRegion::Body);
+        assert_eq!(hit.pos, Some(22));
     }
 
     #[test]
