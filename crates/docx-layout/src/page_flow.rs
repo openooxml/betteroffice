@@ -726,18 +726,21 @@ impl Paginator {
         limit - s.pen_y
     }
 
-    fn clear_next_float_band(&mut self, idx: usize) -> bool {
+    /// Clears float bands below the cursor, in one pass over the bands (sorted
+    /// by top), until `height` fits: the new cursor and whether it fits there.
+    fn clear_float_bands(&self, idx: usize, height: f64) -> (f64, bool) {
         let state = &self.states[idx];
-        let bottom = self.float_bands[idx]
-            .iter()
-            .filter(|band| band.bottom > state.pen_y && band.top < state.content_limit)
-            .min_by(|a, b| a.top.total_cmp(&b.top))
-            .map(|band| band.bottom);
-        if let Some(bottom) = bottom {
-            self.states[idx].pen_y = bottom;
-            return true;
+        let mut pen_y = state.pen_y;
+        for band in &self.float_bands[idx] {
+            if band.bottom <= pen_y || band.top >= state.content_limit {
+                continue;
+            }
+            if band.top.max(pen_y).min(state.content_limit) - pen_y >= height {
+                return (pen_y, true);
+            }
+            pen_y = band.bottom;
         }
-        false
+        (pen_y, state.content_limit - pen_y >= height)
     }
 
     fn column_capacity(&self, idx: usize) -> f64 {
@@ -809,8 +812,10 @@ impl Paginator {
                 }
                 return idx;
             }
-            if self.clear_next_float_band(idx) {
-                continue;
+            let (pen_y, fits) = self.clear_float_bands(idx, safe_height);
+            self.states[idx].pen_y = pen_y;
+            if fits {
+                return idx;
             }
             idx = self.advance_column(idx).0;
         }
@@ -1213,6 +1218,56 @@ mod tests {
         let mut folded = margins(96.0, 96.0);
         paginator.fold_edge_float_bands(&mut folded, false, 1);
         assert_eq!((folded.top, folded.bottom), (160.0, 160.0));
+    }
+
+    fn fit_below_bands(bands: Vec<PageFloatBand>, pen_y: f64, height: f64) -> (usize, f64) {
+        let mut paginator = Paginator::new(
+            Size { w: 500.0, h: 500.0 },
+            margins(96.0, 96.0),
+            columns(),
+            None,
+        )
+        .unwrap();
+        paginator.set_section_page_float_bands(vec![SectionPageFloatBands {
+            default: bands,
+            ..Default::default()
+        }]);
+        let idx = paginator.get_current();
+        paginator.states[idx].pen_y = pen_y;
+        let idx = paginator.ensure_fits(height);
+        (
+            paginator.states[idx].page_index,
+            paginator.states[idx].pen_y,
+        )
+    }
+
+    #[test]
+    fn fitting_clears_interior_bands_until_the_first_gap_that_fits() {
+        let band = |top, bottom| PageFloatBand {
+            top,
+            bottom,
+            odd_page: None,
+        };
+        let bands = vec![band(100.0, 110.0), band(115.0, 130.0), band(125.0, 140.0)];
+        assert_eq!(fit_below_bands(bands.clone(), 96.0, 5.0), (0, 110.0));
+        assert_eq!(fit_below_bands(bands.clone(), 96.0, 10.0), (0, 140.0));
+        assert_eq!(fit_below_bands(bands, 96.0, 0.0), (0, 96.0));
+    }
+
+    #[test]
+    fn fitting_clears_a_long_overlapping_band_chain_in_one_pass() {
+        let count = 50_000_u32;
+        let bands = (1..=count)
+            .map(|index| {
+                let step = f64::from(index) / f64::from(count);
+                PageFloatBand {
+                    top: 200.0 + step,
+                    bottom: 220.0 + 2.0 * step,
+                    odd_page: None,
+                }
+            })
+            .collect();
+        assert_eq!(fit_below_bands(bands, 196.0, 20.0), (0, 222.0));
     }
 
     #[test]
