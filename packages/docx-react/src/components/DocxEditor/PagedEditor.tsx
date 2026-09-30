@@ -137,7 +137,7 @@ import {
   type YrsPositionProjection,
 } from './internals/yrsPositionProjection';
 import { SidebarRevisionReads } from './internals/sidebarRevisionReads';
-import { YrsStorySegmentCache } from './internals/yrsStorySegmentCache';
+import { storySegmentSource, YrsStorySegmentCache } from './internals/yrsStorySegmentCache';
 import { partEditStory, type NoteEdit, type PartEdit } from './partEdit';
 import type { DocxEditorCollaborationOptions, DocxPointPosition } from './types';
 import { positionAtClientPoint } from './internals/pointPosition';
@@ -1413,7 +1413,22 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     } | null>(null);
     // Rebuilding a projection re-reads only the paragraphs that changed.
     const yrsStorySegmentsRef = useRef<YrsStorySegmentCache | null>(null);
-    useEffect(() => () => yrsStorySegmentsRef.current?.dispose(), []);
+    useEffect(
+      () => () => {
+        yrsStorySegmentsRef.current?.dispose();
+        yrsStorySegmentsRef.current = null;
+      },
+      []
+    );
+    const currentStorySegments = useCallback((session: YrsSession): YrsStorySegmentCache => {
+      let segments = yrsStorySegmentsRef.current;
+      if (segments?.session !== session) {
+        segments?.dispose();
+        segments = yrsStorySegmentsRef.current = new YrsStorySegmentCache(session);
+      }
+      segments.refresh();
+      return segments;
+    }, []);
     const getYrsPositionProjection = useCallback(
       (rootStory: string): YrsPositionProjection | null => {
         const session = yrsCore.session;
@@ -1433,12 +1448,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         ) {
           return cached.projection;
         }
-        let segments = yrsStorySegmentsRef.current;
-        if (segments?.session !== session) {
-          segments?.dispose();
-          segments = yrsStorySegmentsRef.current = new YrsStorySegmentCache(session);
-        }
-        segments.refresh();
+        const segments = currentStorySegments(session);
         const projection = createYrsPositionProjection(session, rootStory, segments);
         segments.scheduleDigests();
         if (!projection) return null;
@@ -1450,7 +1460,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         };
         return projection;
       },
-      [yrsCore.session]
+      [currentStorySegments, yrsCore.session]
     );
     getYrsPositionProjectionRef.current = getYrsPositionProjection;
     const resolveYrsDisplayTarget = useCallback(
@@ -1706,7 +1716,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           }
           return;
         }
-        const { tracked, projection } = sidebarReads.tracked(session);
+        const { tracked, projection } = sidebarReads.tracked(
+          session,
+          storySegmentSource(session, currentStorySegments(session))
+        );
         sidebarReads.deliver(onYrsTrackedChangesChange, tracked, session, version);
         const hfRegions = new Map<string, 'header' | 'footer'>();
         for (const rId of document?.package?.headers?.keys() ?? []) {
@@ -1760,6 +1773,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     }, [
       canvasHostRef,
       canvasOverlayTarget,
+      currentStorySegments,
       displayListQueries,
       document,
       onAnchorPositionsChange,

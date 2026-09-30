@@ -840,6 +840,26 @@ pub(crate) fn table_revisions<T: ReadTxn>(table: &MapRef, txn: &T) -> [Option<An
     })
 }
 
+pub(crate) fn table_revision_stamps<T: ReadTxn>(
+    map: &MapRef,
+    txn: &T,
+) -> Vec<(String, String, String)> {
+    if map_string(map, txn, KIND_KEY).as_deref() != Some("table") {
+        return Vec::new();
+    }
+    let Ok(data) = read_table(map, txn) else {
+        return Vec::new();
+    };
+    data.rows
+        .iter()
+        .flat_map(|row| {
+            [TR_INS, TR_DEL]
+                .into_iter()
+                .filter_map(move |key| row.tr_pr.get(key).and_then(row_revision_parts))
+        })
+        .collect()
+}
+
 /// Collects structural row revisions at their containing table embed. Multiple
 /// rows from one table insertion intentionally collapse to one entry when they
 /// share a revision id, matching the sidebar's "Inserted table" grouping.
@@ -2080,6 +2100,41 @@ mod tests {
         doc.insert_table(ctx, Position::new("body", 0), rows, columns)
             .unwrap();
         doc
+    }
+
+    #[test]
+    fn revision_stamps_keep_distinct_dates_for_rows_sharing_a_revision() {
+        for key in [TR_INS, TR_DEL] {
+            let doc = seed_table();
+            let stamp = |date: &str| {
+                Any::from_json(&format!(
+                    r#"{{"id":"shared","author":"Ada","date":"{date}"}}"#
+                ))
+                .unwrap()
+            };
+            {
+                let mut txn = doc.yrs_doc().transact_mut();
+                let (_, table, _) = table_at(&txn, &TableLocator::new("body", 0)).unwrap();
+                let mut data = read_table(&table, &txn).unwrap();
+                data.rows[0]
+                    .tr_pr
+                    .insert(key.into(), stamp("2026-07-14T10:00:00Z"));
+                data.rows[1]
+                    .tr_pr
+                    .insert(key.into(), stamp("2026-07-14T10:01:00Z"));
+                write_table(&mut txn, &table, &data);
+            }
+            assert_eq!(
+                doc.revision_stamps(&["shared".into()]).unwrap(),
+                BTreeMap::from([(
+                    "shared".into(),
+                    std::collections::BTreeSet::from([
+                        ("Ada".into(), "2026-07-14T10:00:00Z".into()),
+                        ("Ada".into(), "2026-07-14T10:01:00Z".into()),
+                    ]),
+                )])
+            );
+        }
     }
 
     fn assert_grid_borders(doc: &EditingDoc) {

@@ -5069,8 +5069,10 @@ fn seed_lowered(
         )
         .map_err(|error| error.to_string())?;
     let mut batches = Vec::with_capacity(context.plans.len());
+    let mut deletes = Vec::with_capacity(context.plans.len());
     for plan in context.plans {
-        let (story_id, ops, fonts) = seed_plan(plan, script_fonts.as_mut())?;
+        let (story_id, mut ops, fonts) = seed_plan(plan, script_fonts.as_mut())?;
+        deletes.push((story_id.clone(), vec![ops.remove(0)]));
         batches.push((story_id, ops));
         referenced_fonts.extend(fonts);
     }
@@ -5085,8 +5087,12 @@ fn seed_lowered(
             layout_tokens,
         )?,
     };
+    let ctx = EditCtx::local(String::new(), String::new());
+    document
+        .apply_raw_story_batches(deletes, &ctx)
+        .map_err(|error| error.to_string())?;
     let ranges = document
-        .apply_raw_seed_batches(batches, &EditCtx::local(String::new(), String::new()))
+        .apply_raw_seed_batches(batches, &ctx)
         .map_err(|error| error.to_string())?;
     seed_opaque_sequences(document, &context.opaque_sequences);
     document.set_media_sources(sources);
@@ -5894,6 +5900,44 @@ mod tests {
         }
         provenance.pin(&doc, &ranges);
         assert_pins_match_story(&doc, &provenance);
+    }
+
+    #[test]
+    fn placeholder_delete_commit_preserves_single_transaction_seed_bytes() {
+        let bytes = include_bytes!("../../../apps/demo/public/betteroffice-demo.docx");
+        let mut lowered = lower_docx(parse_docx_for_edit(bytes).unwrap(), None).unwrap();
+        let original = EditingDoc::new(1);
+        original
+            .create_empty_stories(
+                &lowered
+                    .context
+                    .plans
+                    .iter()
+                    .map(|plan| plan.story_id.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let batches = lowered
+            .context
+            .plans
+            .into_iter()
+            .map(|plan| {
+                let (story_id, ops, _) = seed_plan(plan, lowered.script_fonts.as_mut()).unwrap();
+                (story_id, ops)
+            })
+            .collect();
+        original
+            .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
+            .unwrap();
+        seed_opaque_sequences(&original, &lowered.context.opaque_sequences);
+
+        let split = EditingDoc::new(1);
+        let lowered = lower_docx(parse_docx_for_edit(bytes).unwrap(), None).unwrap();
+        seed_lowered(&split, lowered, None, SeedMedia::AsParsed).unwrap();
+        assert_eq!(
+            split.encode_state_as_update_v1(),
+            original.encode_state_as_update_v1()
+        );
     }
 
     #[test]

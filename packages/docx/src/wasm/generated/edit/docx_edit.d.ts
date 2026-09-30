@@ -71,6 +71,11 @@ export class EditSession {
      */
     apply_edits_json(request: string): string;
     /**
+     * Applies an update another replica of this document committed for a host batch.
+     * It commits outside undo history and notifies as a local change.
+     */
+    apply_host_update(update: Uint8Array): void;
+    /**
      * Applies one ordinary insertion at this session's collapsed selection
      * and returns the resulting binary `FrameDelta`. The inserted text
      * inherits the formatting at the caret; selection, measurement inputs,
@@ -104,11 +109,6 @@ export class EditSession {
      * the edit; remote/collaboration updates must use `apply_update` instead.
      */
     apply_local_update(update: Uint8Array): void;
-    /**
-     * Applies an update another replica of this document committed for a host batch.
-     * It commits outside undo history and notifies as a local change.
-     */
-    apply_host_update(update: Uint8Array): void;
     /**
      * Writes `style_id` as the `pStyle` of every paragraph intersecting
      * `[start, end)`. Only that key changes: this boundary has no style
@@ -849,6 +849,10 @@ export class EditSession {
      * fallback after a retained-only region layout.
      */
     retained_kernel_inputs_json(): string;
+    /**
+     * Author and date stamps for the requested revision ids.
+     */
+    revision_stamps_json(ids_json: string): string;
     search_text(query: string, case_sensitive: boolean, limit?: number | null): string;
     /**
      * [`EditSession::open_docx`] with seeding always on.
@@ -1489,12 +1493,6 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
-    readonly wasm_failed_allocation_bytes: () => number;
-    readonly wasm_heap_counted: () => number;
-    readonly wasm_live_bytes: () => number;
-    readonly wasm_peak_bytes: () => number;
-    readonly set_wasm_heap_limit: (a: number) => void;
-    readonly reset_wasm_peak_bytes: () => void;
     readonly __wbg_editsession_free: (a: number, b: number) => void;
     readonly editsession_accept_change: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_add_comment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
@@ -1502,11 +1500,11 @@ export interface InitOutput {
     readonly editsession_apply_delete: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_apply_delete_profiled: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_apply_edits_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_apply_host_update: (a: number, b: number, c: number) => [number, number];
     readonly editsession_apply_input: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_apply_input_profile_json: (a: number) => [number, number];
     readonly editsession_apply_input_profiled: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_apply_local_update: (a: number, b: number, c: number) => [number, number];
-    readonly editsession_apply_host_update: (a: number, b: number, c: number) => [number, number];
     readonly editsession_apply_paragraph_style: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
     readonly editsession_apply_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_apply_seed_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
@@ -1615,6 +1613,7 @@ export interface InitOutput {
     readonly editsession_resume_region_layout: (a: number, b: number) => [number, number, number, number];
     readonly editsession_retained_headers_footers_json: (a: number) => [number, number, number, number];
     readonly editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
+    readonly editsession_revision_stamps_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_seed_opaque_sequences: (a: number, b: number, c: number) => [number, number];
@@ -1671,6 +1670,12 @@ export interface InitOutput {
     readonly list_docx_content_controls_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly render_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly render_docx_markdown_with_pages_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly wasm_failed_allocation_bytes: () => number;
+    readonly wasm_heap_counted: () => number;
+    readonly wasm_live_bytes: () => number;
+    readonly wasm_peak_bytes: () => number;
+    readonly set_wasm_heap_limit: (a: number) => void;
+    readonly reset_wasm_peak_bytes: () => void;
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
     readonly clear_measure_fonts: () => [number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
