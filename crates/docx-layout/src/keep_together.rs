@@ -253,10 +253,10 @@ pub fn measure_keep_with_next_group_at(
 /// that fits keeps its flow slice, as it is not placed in the flow.
 fn table_leading_slice(block: &TableBlock, measure: &TableExtent, capacity: f64) -> f64 {
     let breaks = RowBreaks::new(block, measure);
-    let mut first = first_table_fragment_height(block, measure, &breaks.kept);
     if block.floating.is_some() && measure.total_height <= capacity {
-        return first;
+        return first_table_fragment_height(block, measure, breaks.lines());
     }
+    let mut first = first_table_fragment_height(block, measure, &breaks.kept);
     let headers = block
         .rows
         .iter()

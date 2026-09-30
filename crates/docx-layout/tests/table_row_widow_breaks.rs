@@ -283,7 +283,14 @@ fn an_oversized_cant_split_row_keeps_widow_control_where_a_fresh_page_allows_it(
 /// Pages of the keepNext heading and of the table's first fragment after a
 /// 60px filler on 100px pages.
 fn heading_and_table_pages(table: Value) -> (Option<usize>, Option<usize>) {
-    let (filler, filler_measure) = paragraph(1, 3, json!({}));
+    heading_and_table_pages_after(3, table)
+}
+
+fn heading_and_table_pages_after(
+    filler_lines: usize,
+    table: Value,
+) -> (Option<usize>, Option<usize>) {
+    let (filler, filler_measure) = paragraph(1, filler_lines, json!({}));
     let (heading, heading_measure) = paragraph(2, 1, json!({"keepNext": true}));
     let input = json!({
         "measured":[
@@ -343,4 +350,15 @@ fn a_keep_next_heading_moves_with_a_tall_floating_table_placed_in_flow() {
     table["block"]["floating"] =
         json!({"horzAnchor": "margin", "vertAnchor": "text", "tblpX": 0, "tblpY": 0});
     assert_eq!(heading_and_table_pages(table), (Some(1), Some(1)));
+}
+
+#[test]
+fn a_keep_next_heading_stays_beside_a_fitting_floating_table() {
+    let mut table = table_rows(&[
+        (1, json!({}), json!({"isHeader": true})),
+        (2, json!({"widowControl": true}), json!({})),
+    ]);
+    table["block"]["floating"] =
+        json!({"horzAnchor": "page", "tblpX": 90, "vertAnchor": "page", "tblpY": 10});
+    assert_eq!(heading_and_table_pages_after(2, table).0, Some(0));
 }
