@@ -886,6 +886,7 @@ struct DisplayState {
     incremental_display_builds: u64,
     rebuilt_display_pages: u64,
     window: Option<std::ops::Range<usize>>,
+    kept_pages: Vec<usize>,
     windowed_incremental_builds: bool,
 }
 
@@ -1147,23 +1148,25 @@ fn window_build_pages(
                 .window
                 .as_ref()
                 .is_some_and(|window| window.contains(&index))
+                || display.kept_pages.contains(&index)
                 || (rebuilt_pages.contains(&index) && caret_page())
         })
         .collect()
 }
 
-/// Which pages a full display build compiles: with windowed builds on, the
-/// window and the caret's page, as an incremental build keeps them; otherwise,
-/// or when the caret has no exact position, [`full_build_pages`].
+/// With windowed builds on, compile only the window, kept pages and a mapped
+/// caret's page; otherwise use [`full_build_pages`].
 fn windowed_full_build_pages(
     display: &DisplayState,
     layout: &Layout,
     caret: Option<CaretExtent>,
 ) -> Vec<bool> {
-    if matches!(caret, Some(CaretExtent::Unmapped)) {
-        return full_build_pages(display, layout.pages.len());
-    }
-    window_build_pages(display, layout, &(0..layout.pages.len()).collect(), caret)
+    window_build_pages(
+        display,
+        layout,
+        &(0..layout.pages.len()).collect(),
+        caret.filter(|caret| matches!(caret, CaretExtent::Position(_))),
+    )
 }
 
 fn resident_paragraph_position(input: &LayoutInput, para_id: &str, offset: u32) -> Option<i64> {
@@ -3959,6 +3962,11 @@ impl EngineSession {
     /// Limit full builds to `window` and previously built pages; `None` builds all.
     pub fn set_display_window(&self, window: Option<std::ops::Range<usize>>) {
         self.display.borrow_mut().window = window;
+    }
+
+    /// Pages a windowed build keeps besides the window and the caret's page.
+    pub fn set_display_kept_pages(&self, pages: Vec<usize>) {
+        self.display.borrow_mut().kept_pages = pages;
     }
 
     /// Limit incremental rebuilds to the display window and caret pages. Off by default.
@@ -7944,12 +7952,19 @@ mod tests {
         assert_eq!(built.pages[last], expected.pages[last]);
         assert!(built.pages[2].unbuilt);
 
-        // A later full build keeps what is built and leaves the rest unbuilt.
+        // A later full build evicts pages outside the window.
         engine
             .build_display_list_frame(&format!("{extras} "), epoch + 1)
             .unwrap();
         let rebuilt = engine.with_display_list(Clone::clone).unwrap();
-        assert!(!rebuilt.pages[last].unbuilt && rebuilt.pages[2].unbuilt);
+        assert!(!rebuilt.pages[0].unbuilt);
+        assert!(rebuilt.pages[last].unbuilt && rebuilt.pages[2].unbuilt);
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.build_display_pages_frame(&[last], epoch).unwrap();
+        assert_eq!(
+            engine.with_display_list(Clone::clone).unwrap().pages[last],
+            full_build(&engine).pages[last]
+        );
         docx_layout::clear_measure_fonts();
     }
 
@@ -8183,17 +8198,49 @@ mod tests {
             before.incremental_display_builds
         );
         let windowed = engine.with_display_list(Clone::clone).unwrap();
+        for (index, page) in windowed.pages.iter().enumerate() {
+            assert_eq!(page.unbuilt, !(8..11).contains(&index), "page {index}");
+        }
+
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 0),
+                "x",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        engine.set_display_kept_pages(vec![4]);
+        let before = engine.stats();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine
+            .build_display_list_frame(&format!("{extras} "), epoch)
+            .unwrap();
+        assert_eq!(
+            engine.stats().incremental_display_builds,
+            before.incremental_display_builds
+        );
+        let full = full_display_build(&engine, &extras);
+        let windowed = engine.with_display_list(Clone::clone).unwrap();
         for (index, (page, full_page)) in windowed.pages.iter().zip(&full.pages).enumerate() {
-            if index == 0 || (8..11).contains(&index) {
+            if index == 0 || index == 4 || (8..11).contains(&index) {
                 assert_eq!(page, full_page, "page {index} is built");
             } else {
-                assert!(page.unbuilt && page.primitives.is_empty(), "page {index} waits");
-                assert_eq!(page.position_span, full_page.position_span);
+                assert!(
+                    page.unbuilt && page.primitives.is_empty(),
+                    "page {index} waits"
+                );
+                assert_eq!(page.width, full_page.width);
+                assert_eq!(page.height, full_page.height);
+                assert_eq!(page.content_bounds, full_page.content_bounds);
             }
         }
         assert_eq!(
             engine
-                .resident_caret_snapshot(Some((&paragraph.para_id, 0)))
+                .resident_caret_snapshot(Some((&paragraph.para_id, 1)))
                 .unwrap()
                 .caret_rect
                 .unwrap()
@@ -8201,10 +8248,15 @@ mod tests {
             0
         );
 
-        let rest: Vec<usize> = (1..8).chain(11..full.pages.len()).collect();
+        let rest: Vec<usize> = (0..full.pages.len())
+            .filter(|index| *index != 0 && *index != 4 && !(8..11).contains(index))
+            .collect();
         let epoch = engine.display.borrow().binary_frame_epoch;
         engine.build_display_pages_frame(&rest, epoch).unwrap();
-        assert_eq!(engine.with_display_list(Clone::clone).unwrap().pages, full.pages);
+        assert_eq!(
+            engine.with_display_list(Clone::clone).unwrap().pages,
+            full.pages
+        );
         docx_layout::clear_measure_fonts();
     }
 

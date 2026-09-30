@@ -1803,6 +1803,13 @@ impl EditSession {
             .set_display_window(Some(start as usize..(end.max(start)) as usize));
     }
 
+    /// Pages a windowed build keeps besides the window and the caret's page.
+    pub fn set_display_kept_pages(&self, pages: Vec<u32>) {
+        let _fonts = self.fonts.enter();
+        self.engine
+            .set_display_kept_pages(pages.into_iter().map(|page| page as usize).collect());
+    }
+
     /// Limit incremental rebuilds to the display window and caret pages. Off by default.
     pub fn set_windowed_incremental_builds(&self, enabled: bool) {
         let _fonts = self.fonts.enter();

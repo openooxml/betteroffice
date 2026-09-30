@@ -1,7 +1,7 @@
 ---
 "@betteroffice/docx": patch
-"@betteroffice/rust-crates": patch
+"@betteroffice/rust-crates": minor
 "@betteroffice/docx-react": patch
 ---
 
-With `set_windowed_incremental_builds` on, a full display rebuild also builds only the display window and the caret's page. The editor now waits for a pending frame before building more pages, so a proposal decision builds one frame.
+With opt-in windowed builds on, full rebuilds keep only visible pages, the caret's page when known and pages selected with `set_display_kept_pages`. Focused widgets stay available, and pages outside the window rebuild when needed without stalling.

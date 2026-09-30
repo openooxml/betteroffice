@@ -18,6 +18,7 @@ export type ResidentEngineWorkerRequest =
       layoutExtras?: string;
       /** Pages `[start, end)` a full build compiles; the rest stay unbuilt. */
       displayWindow?: [number, number];
+      keptPages?: number[];
       /**
        * Lay out only as much of the body as fills this many pages; a reply
        * marked `layoutProvisional` is finished by `completeLayout`.
@@ -60,6 +61,7 @@ export type ResidentEngineWorkerRequest =
        */
       layoutExtras?: string;
       displayWindow?: [number, number];
+      keptPages?: number[];
     }
   | {
       id: number;
@@ -86,6 +88,7 @@ export type ResidentEngineWorkerRequest =
       expectedFrameEpoch: number;
       paintCaret: boolean;
       displayWindow?: [number, number];
+      keptPages?: number[];
     }
   | {
       id: number;
@@ -96,6 +99,7 @@ export type ResidentEngineWorkerRequest =
       profile: boolean;
       paintCaret: boolean;
       displayWindow?: [number, number];
+      keptPages?: number[];
     }
   | {
       id: number;
@@ -107,6 +111,7 @@ export type ResidentEngineWorkerRequest =
       profile: boolean;
       paintCaret: boolean;
       displayWindow?: [number, number];
+      keptPages?: number[];
     }
   | {
       id: number;

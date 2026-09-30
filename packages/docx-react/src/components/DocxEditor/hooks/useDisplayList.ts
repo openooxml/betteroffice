@@ -122,6 +122,7 @@ export interface UseRustDisplayListResult {
    * other page arrives as geometry until it comes near.
    */
   setDisplayWindow(start: number, end: number): void;
+  setKeptPages?(pages: number[]): void;
   /** The resident worker's wasm memories as of its latest reply; null without a worker. */
   workerMemory(): WasmModuleMemory[] | null;
   /**
@@ -361,6 +362,7 @@ export function useRustDisplayList(
     /** The document load its session belongs to. */
     load: number;
   } | null>(null);
+  const keptPagesRef = useRef<number[]>([]);
   // The document load each session belongs to: the one under way when it was
   // created, as the editor records it, else when it was first laid out or shown.
   const sessionLoadsRef = useRef(new WeakMap<YrsSession, number>());
@@ -399,6 +401,7 @@ export function useRustDisplayList(
         client: spare ?? new ResidentEngineWorkerClient(),
         load,
       };
+      workerRef.current.client.setKeptPages(keptPagesRef.current);
       return workerRef.current;
     },
     [handoffFromRef, sessionLoad]
@@ -426,7 +429,7 @@ export function useRustDisplayList(
   const pageBuildInFlightRef = useRef(false);
   const pageBuildTimerRef = useRef<PageBuildTimer | null>(null);
   const schedulePageBuildsWhenIdleRef = useRef<() => void>(() => {});
-  const retryPageBuildsRef = useRef<() => void>(() => {});
+  const retryPageBuildsRef = useRef<(idle: boolean) => void>(() => {});
   const unadoptedFrameSinceRef = useRef<number | null>(null);
   const workerLayoutFramesRef = useRef(new WeakMap<Layout, WorkerLayoutFrame>());
   const completionGateRef = useRef<(() => void) | null>(null);
@@ -1070,11 +1073,12 @@ export function useRustDisplayList(
           unadoptedFrameSinceRef.current = now;
         }
         if (now - unadoptedFrameSinceRef.current < UNADOPTED_FRAME_WAIT_MS) {
-          retryPageBuildsRef.current();
+          retryPageBuildsRef.current(idle);
           return;
         }
+      } else {
+        unadoptedFrameSinceRef.current = null;
       }
-      unadoptedFrameSinceRef.current = null;
       let batch = unbuilt.filter((index) => index >= start && index < end);
       if (batch.length === 0) {
         const settling = settleWaitersRef.current.size > 0;
@@ -1174,7 +1178,10 @@ export function useRustDisplayList(
     },
     [buildUnbuiltPages]
   );
-  retryPageBuildsRef.current = () => schedulePageBuilds(PAGE_BUILD_RETRY_MS);
+  retryPageBuildsRef.current = (idle) => {
+    cancelPageBuilds(pageBuildTimerRef);
+    pageBuildTimerRef.current = setTimeout(() => buildUnbuiltPages(idle), PAGE_BUILD_RETRY_MS);
+  };
   schedulePageBuildsWhenIdleRef.current = () => {
     cancelPageBuilds(pageBuildTimerRef);
     pageBuildTimerRef.current =
@@ -1193,6 +1200,11 @@ export function useRustDisplayList(
     },
     [schedulePageBuilds]
   );
+
+  const setKeptPages = useCallback((pages: number[]): void => {
+    keptPagesRef.current = [...pages];
+    workerRef.current?.client.setKeptPages(keptPagesRef.current);
+  }, []);
 
   useEffect(() => {
     if (!snapshot.frame?.displayList.pages.some((page) => page.unbuilt)) return;
@@ -1882,6 +1894,7 @@ export function useRustDisplayList(
     shownFrameEngine,
     release,
     setDisplayWindow,
+    setKeptPages,
     workerMemory,
     workerSurfacesActive,
     workerPresentationActive,
@@ -2068,6 +2081,7 @@ export interface UseCanvasRendererResult {
   layoutInWorker: LayoutInWorker;
   /** The pages `[start, end)` near the viewport, built before the others. */
   setDisplayWindow(start: number, end: number): void;
+  setKeptPages?(pages: number[]): void;
   /** The resident worker's wasm memories as of its latest reply; null without a worker. */
   workerMemory(): WasmModuleMemory[] | null;
   setWorkerPresentationActive(active: boolean): void;
@@ -2159,6 +2173,7 @@ export function useCanvasRenderer(
     shownFrameEngine,
     release,
     setDisplayWindow,
+    setKeptPages,
     workerMemory,
     workerSurfacesActive,
     workerPresentationActive,
@@ -2289,6 +2304,7 @@ export function useCanvasRenderer(
     applyDelete,
     layoutInWorker,
     setDisplayWindow,
+    setKeptPages,
     workerMemory,
     setWorkerPresentationActive,
     offscreenReplay,

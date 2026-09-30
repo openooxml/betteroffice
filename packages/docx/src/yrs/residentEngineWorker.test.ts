@@ -105,6 +105,7 @@ function worker() {
     delta: null as DecodedFrameDelta | null,
     caret: null as YrsResidentCaretRect | null,
     displayWindows: [] as [number, number][],
+    keptPages: [] as number[][],
     windowedIncrementalBuilds: [] as boolean[],
     rasterized: [] as number[],
     presented: [] as number[],
@@ -117,6 +118,9 @@ function worker() {
       setPartialDocument() {},
       setDisplayWindow(start: number, end: number) {
         harness.displayWindows.push([start, end]);
+      },
+      setDisplayKeptPages(pages: number[]) {
+        harness.keptPages.push(pages);
       },
       setWindowedIncrementalBuilds(enabled: boolean) {
         harness.windowedIncrementalBuilds.push(enabled);
@@ -364,6 +368,7 @@ describe('resident worker page damage', () => {
     expect(w.harness.windowedIncrementalBuilds).toEqual([false]);
     expect((await w.build([], 100, null, [8, 11])).ok).toBe(true);
     expect(w.harness.displayWindows).toEqual([[8, 11]]);
+    expect(w.harness.keptPages).toEqual([[]]);
     expect(w.harness.windowedIncrementalBuilds).toEqual([false, true]);
     expect((await w.build([])).ok).toBe(true);
     expect(w.harness.displayWindows).toEqual([[8, 11]]);

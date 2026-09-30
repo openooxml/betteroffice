@@ -122,24 +122,53 @@ function setup() {
   return { worker, client };
 }
 
-test('frame and edit requests carry the current display window', async () => {
+test('frame and edit requests carry the current display window and copied kept pages', async () => {
   const { worker, client } = setup();
-  const bootstrap = client.bootstrap(snapshot, '');
+  const keptPages = [4];
+  client.setKeptPages(keptPages);
+  keptPages.push(6);
+  const bootstrap = client.bootstrap(snapshot, '', { displayWindow: [0, 5] });
+  expect(worker.posted.at(-1)).toMatchObject({
+    type: 'bootstrap',
+    displayWindow: [0, 5],
+    keptPages: [4],
+  });
   worker.reply(frameReply(worker.lastId()));
   await bootstrap;
 
+  const sync = client.sync(snapshot, '', 0, false, { displayWindow: [1, 6] });
+  expect(worker.posted.at(-1)).toMatchObject({
+    type: 'sync',
+    displayWindow: [1, 6],
+    keptPages: [4],
+  });
+  worker.reply(frameReply(worker.lastId()));
+  await sync;
+
   const frame = client.buildFrame('', 0, false, [8, 11]);
-  expect(worker.posted.at(-1)).toMatchObject({ type: 'buildFrame', displayWindow: [8, 11] });
+  expect(worker.posted.at(-1)).toMatchObject({
+    type: 'buildFrame',
+    displayWindow: [8, 11],
+    keptPages: [4],
+  });
   worker.reply(frameReply(worker.lastId()));
   await frame;
 
   const input = client.applyInput('a', selection, 0, false, false, [9, 12]);
-  expect(worker.posted.at(-1)).toMatchObject({ type: 'applyInput', displayWindow: [9, 12] });
+  expect(worker.posted.at(-1)).toMatchObject({
+    type: 'applyInput',
+    displayWindow: [9, 12],
+    keptPages: [4],
+  });
   worker.reply(frameReply(worker.lastId()));
   expect(await input).toMatchObject({ applied: true });
 
   const deletion = client.applyDelete('backward', selection, 0, false, false, 1, [10, 13]);
-  expect(worker.posted.at(-1)).toMatchObject({ type: 'applyDelete', displayWindow: [10, 13] });
+  expect(worker.posted.at(-1)).toMatchObject({
+    type: 'applyDelete',
+    displayWindow: [10, 13],
+    keptPages: [4],
+  });
   worker.reply(frameReply(worker.lastId()));
   expect(await deletion).toMatchObject({ applied: true });
 });

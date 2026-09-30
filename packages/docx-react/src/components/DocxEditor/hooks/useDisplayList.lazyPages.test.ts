@@ -128,6 +128,59 @@ test('pages away from the viewport build in batches while the main thread idles'
   }
 });
 
+test('a full worker rebuild keeps selected pages and rebuilds evicted pages on demand', async () => {
+  const { engine, inputs, host } = lazyFixture();
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, rerender, unmount } = renderHook(
+      ({ resolved }) =>
+        useRustDisplayList(inputs.layout as Layout, overrides, undefined, resolved, host),
+      { initialProps: { resolved: undefined as ReadonlySet<number> | undefined } }
+    );
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    const pages = () => result.current.frame!.displayList.pages;
+    for (let round = 0; round < 50 && pages().some((page) => page.unbuilt); round += 1) {
+      await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+      await act(async () => runIdleCallbacks());
+    }
+    expect(pages().every((page) => !page.unbuilt)).toBe(true);
+    const last = pages().length - 1;
+    const kept = last - 1;
+    expect(kept).toBeGreaterThanOrEqual(5);
+    const before = result.current.frame!.frameEpoch;
+    const requestsBeforeRebuild = worker.posted.length;
+    await act(async () => {
+      result.current.setKeptPages!([kept]);
+      rerender({ resolved: new Set([1]) });
+    });
+    await waitFor(() => expect(result.current.frame!.frameEpoch).toBeGreaterThan(before));
+    expect(worker.posted[requestsBeforeRebuild]).toMatchObject({
+      type: 'buildFrame',
+      displayWindow: [0, 5],
+      keptPages: [kept],
+      expectedFrameEpoch: before,
+    });
+    expect(pages()[kept]!.unbuilt).toBeFalsy();
+    expect(pages()[kept]!.primitives.length).toBeGreaterThan(0);
+    expect(pages()[last]!.unbuilt).toBe(true);
+    const adopted = result.current.frame!.frameEpoch;
+    const requestsBeforeScroll = worker.posted.length;
+    await act(async () => {
+      result.current.setDisplayWindow(last, last + 1);
+    });
+    await waitFor(() => expect(pages()[last]!.unbuilt).toBeFalsy());
+    expect(
+      worker.posted.slice(requestsBeforeScroll).filter((request) => request.type === 'buildPages')
+    ).toEqual([expect.objectContaining({ pages: [last], expectedFrameEpoch: adopted })]);
+    expect(pages()[last]!.primitives.length).toBeGreaterThan(0);
+    expect(result.current.error).toBeNull();
+    unmount();
+  } finally {
+    engine.free();
+  }
+});
+
 test('an edit schedules idle rebuilds for formerly built pages away from the viewport', async () => {
   const { engine, inputs, host } = lazyFixture();
   try {
@@ -236,6 +289,59 @@ test('page builds wait for the frame of an edit in flight', async () => {
   }
 });
 
+test.each([false, true])(
+  'background pages recover after a newer worker frame stays unadopted (idle retry: %s)',
+  async (idle) => {
+    const { engine, inputs, host } = lazyFixture();
+    let now = performance.now();
+    const clock = spyOn(performance, 'now').mockImplementation(() => now);
+    try {
+      const overrides = { getInputs: () => inputs };
+      const { result, unmount } = renderHook(() =>
+        useRustDisplayList(inputs.layout as Layout, overrides, undefined, undefined, host)
+      );
+      await waitFor(() => expect(result.current.frame).not.toBeNull());
+      const worker = EngineWorker.last!;
+      const bootstrap = worker.posted.find((request) => request.type === 'bootstrap')!;
+      const adopted = result.current.frame!.frameEpoch;
+      const pageBuilds = () => worker.posted.filter((request) => request.type === 'buildPages');
+      if (idle) await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+      await act(async () => {
+        worker.postMessage({
+          id: 0,
+          type: 'buildFrame',
+          extras: bootstrap.extras,
+          expectedFrameEpoch: adopted,
+          paintCaret: false,
+          displayWindow: [0, 5],
+        });
+        await Promise.resolve();
+        if (idle) runIdleCallbacks();
+        else {
+          result.current.setDisplayWindow(0, 4);
+          await new Promise((resolve) => setTimeout(resolve, 75));
+        }
+      });
+      expect(result.current.frame!.frameEpoch).toBe(adopted);
+      expect(pageBuilds()).toEqual([]);
+      now += 2001;
+      if (!idle) {
+        await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+        await act(async () => runIdleCallbacks());
+      }
+      await waitFor(() => expect(pageBuilds().length).toBeGreaterThan(0));
+      expect(pageBuilds()[0]).toMatchObject({ expectedFrameEpoch: adopted });
+      await waitFor(() => expect(result.current.frame!.displayList.pages[5]!.unbuilt).toBeFalsy());
+      expect(result.current.frame!.displayList.pages[5]!.primitives.length).toBeGreaterThan(0);
+      expect(result.current.error).toBeNull();
+      unmount();
+    } finally {
+      clock.mockRestore();
+      engine.free();
+    }
+  }
+);
+
 test('a failed page build hands rendering back to the main thread', async () => {
   const { engine, inputs, host } = lazyFixture();
   const errors = spyOn(console, 'error').mockImplementation(() => {});
@@ -282,6 +388,7 @@ test('a page build out of memory restarts the worker once, then reports without 
     const first = EngineWorker.last!;
     const last = result.current.frame!.displayList.pages.length - 1;
     await act(async () => {
+      result.current.setKeptPages!([0]);
       result.current.setDisplayWindow(last, last + 1);
     });
     await waitFor(() => expect(relayouts).toBe(1));
@@ -292,7 +399,7 @@ test('a page build out of memory restarts the worker once, then reports without 
     await act(async () => rerender({ layout: { ...inputs.layout } }));
     await waitFor(() => expect(EngineWorker.spawned).toBe(2));
     const second = EngineWorker.last!;
-    expect(second.posted[0]).toMatchObject({ type: 'bootstrap' });
+    expect(second.posted[0]).toMatchObject({ type: 'bootstrap', keptPages: [0] });
     await waitFor(() => expect(result.current.workerSurfacesActive).toBe(true));
     await act(async () => {
       const middle = Math.floor(last / 2);

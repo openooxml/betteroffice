@@ -137,6 +137,7 @@ export class ResidentEngineWorkerClient {
   private keepSurfaces = false;
   private lastMemory: WasmModuleMemory[] | null = null;
   private answeredFrameEpoch = 0;
+  private keptPages: number[] = [];
 
   constructor(private readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
     this.worker.onmessage = (event) => {
@@ -193,6 +194,11 @@ export class ResidentEngineWorkerClient {
   /** @internal The newest frame epoch a reply carried; 0 before any frame. */
   answeredFrame(): number {
     return this.answeredFrameEpoch;
+  }
+
+  /** @internal Pages kept by windowed frame builds. */
+  setKeptPages(pages: number[]): void {
+    this.keptPages = [...pages];
   }
 
   /** @internal Whether a frame request other than `buildPages` awaits its reply. */
@@ -323,7 +329,9 @@ export class ResidentEngineWorkerClient {
         extras,
         expectedFrameEpoch: options.frameEpoch ?? 0,
         ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
-        ...(options.displayWindow ? { displayWindow: options.displayWindow } : {}),
+        ...(options.displayWindow
+          ? { displayWindow: options.displayWindow, keptPages: this.keptPages }
+          : {}),
         ...(options.provisionalPages !== undefined
           ? { provisionalPages: options.provisionalPages }
           : {}),
@@ -369,7 +377,9 @@ export class ResidentEngineWorkerClient {
         expectedFrameEpoch,
         paintCaret,
         ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
-        ...(options.displayWindow ? { displayWindow: options.displayWindow } : {}),
+        ...(options.displayWindow
+          ? { displayWindow: options.displayWindow, keptPages: this.keptPages }
+          : {}),
       },
       snapshotTransfers(snapshot)
     );
@@ -412,7 +422,7 @@ export class ResidentEngineWorkerClient {
         extras,
         expectedFrameEpoch,
         paintCaret,
-        ...(displayWindow ? { displayWindow } : {}),
+        ...(displayWindow ? { displayWindow, keptPages: this.keptPages } : {}),
       })
     );
     return result;
@@ -447,7 +457,7 @@ export class ResidentEngineWorkerClient {
           expectedFrameEpoch,
           profile,
           paintCaret,
-          ...(displayWindow ? { displayWindow } : {}),
+          ...(displayWindow ? { displayWindow, keptPages: this.keptPages } : {}),
         })
       );
       return { applied: true, ...result };
@@ -477,7 +487,7 @@ export class ResidentEngineWorkerClient {
           expectedFrameEpoch,
           profile,
           paintCaret,
-          ...(displayWindow ? { displayWindow } : {}),
+          ...(displayWindow ? { displayWindow, keptPages: this.keptPages } : {}),
         })
       );
       return { applied: true, ...result };
