@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value, json};
 use yrs::types::Attrs;
-use yrs::{Any, Map as YrsMap, Out, ReadTxn, Transact};
+use yrs::{Any, Array as _, Map as YrsMap, Out, ReadTxn, Text as _, Transact};
 
 use crate::control_source::safety_key;
 use crate::identity::{
@@ -28,16 +28,21 @@ type JsonObject = BTreeMap<String, Value>;
 /// lacks this key and keeps cached SEQ results.
 pub(crate) const OPAQUE_SEQUENCES: &str = "opaqueSequences";
 
+/// Writes the first marker, so a seed keeps the operation ids an earlier seed of the same
+/// document gave its stories and session: replicas that seeded it before still converge.
+const SEQUENCE_METADATA_CLIENT: u64 = 0x1_0000_05e9;
+
 pub(crate) fn seed_opaque_sequences(document: &EditingDoc, names: &[String]) {
     let mut txn = document.transact_for(&EditCtx::system(""));
     let session = txn
         .get_map(crate::identity::SESSION)
         .expect("session root is declared by EditingDoc::new");
-    if names.is_empty() && session.contains_key(&txn, OPAQUE_SEQUENCES) {
+    let previous = session.get(&txn, OPAQUE_SEQUENCES);
+    if previous.is_none() && names.is_empty() && !holds_sequence_fields(&txn) {
         return;
     }
     let mut opaque_sequences: BTreeSet<String> = names.iter().cloned().collect();
-    if let Some(Out::Any(Any::Array(previous))) = session.get(&txn, OPAQUE_SEQUENCES) {
+    if let Some(Out::Any(Any::Array(previous))) = &previous {
         opaque_sequences.extend(previous.iter().filter_map(|value| match value {
             Any::String(name) => Some(name.to_string()),
             _ => None,
@@ -50,9 +55,58 @@ pub(crate) fn seed_opaque_sequences(document: &EditingDoc, names: &[String]) {
             .collect::<Vec<_>>()
             .into(),
     );
-    if session.get(&txn, OPAQUE_SEQUENCES) != Some(Out::Any(names.clone())) {
-        session.insert(&mut txn, OPAQUE_SEQUENCES, names);
+    if previous.is_some() {
+        if previous != Some(Out::Any(names.clone())) {
+            session.insert(&mut txn, OPAQUE_SEQUENCES, names);
+        }
+        return;
     }
+    drop(txn);
+    let marker = yrs::Doc::with_client_id(SEQUENCE_METADATA_CLIENT);
+    let root = marker.get_or_insert_map(crate::identity::SESSION);
+    let mut marker_txn = marker.transact_mut();
+    root.insert(&mut marker_txn, OPAQUE_SEQUENCES, names);
+    let update = marker_txn.encode_update_v1();
+    drop(marker_txn);
+    document
+        .apply_verbatim_v1(&update)
+        .expect("a one-entry session update applies");
+}
+
+/// Whether a story embeds anything that names a SEQ field (a field instruction, nested
+/// sequence names, shape text). A document without one seeds exactly as before.
+fn holds_sequence_fields<T: ReadTxn>(txn: &T) -> bool {
+    let Some(stories) = txn.get_map(crate::STORIES) else {
+        return false;
+    };
+    let mut pending: Vec<Out> = stories.values(txn).collect();
+    let mut anys: Vec<Any> = Vec::new();
+    while let Some(value) = pending.pop() {
+        match value {
+            Out::YText(text) => pending.extend(
+                text.diff(txn, yrs::types::text::YChange::identity)
+                    .into_iter()
+                    .map(|chunk| chunk.insert)
+                    .filter(|insert| !matches!(insert, Out::Any(Any::String(_)))),
+            ),
+            Out::YMap(map) => pending.extend(map.values(txn)),
+            Out::YArray(array) => pending.extend(array.iter(txn)),
+            Out::Any(any) => anys.push(any),
+            _ => {}
+        }
+    }
+    for any in &anys {
+        let mut values = vec![any];
+        while let Some(value) = values.pop() {
+            match value {
+                Any::String(text) if text.contains("SEQ") => return true,
+                Any::Array(items) => values.extend(items.iter()),
+                Any::Map(entries) => values.extend(entries.values()),
+                _ => {}
+            }
+        }
+    }
+    false
 }
 
 /// A parsed node's `w:p` occurrence in its part: read for identity, never seeded.
@@ -5543,17 +5597,19 @@ mod tests {
     #[test]
     fn opaque_sequence_names_accumulate_in_document_state() {
         let doc = EditingDoc::new(1);
+        let empty = doc.encode_state_vector_v1();
         seed_opaque_sequences(&doc, &[]);
+        assert_eq!(doc.encode_state_vector_v1(), empty);
+        seed_opaque_sequences(&doc, &["table".into(), "figure".into(), "table".into()]);
         {
             let txn = doc.yrs_doc().transact();
+            assert_eq!(txn.state_vector().get(&doc.yrs_doc().client_id()), 0);
             assert_eq!(
-                txn.get_map(crate::identity::SESSION)
-                    .unwrap()
-                    .get(&txn, OPAQUE_SEQUENCES),
-                Some(Out::Any(Any::Array(Vec::new().into())))
+                txn.state_vector()
+                    .get(&yrs::ClientID::new(SEQUENCE_METADATA_CLIENT)),
+                1
             );
         }
-        seed_opaque_sequences(&doc, &["table".into(), "figure".into(), "table".into()]);
         seed_opaque_sequences(&doc, &["other".into(), "figure".into()]);
         let before = doc.encode_state_vector_v1();
         seed_opaque_sequences(&doc, &[]);
