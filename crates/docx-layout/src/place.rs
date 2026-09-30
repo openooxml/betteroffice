@@ -1366,7 +1366,13 @@ fn layout_paragraph(
                 fitting_lines -= 1;
                 // at a float band the space below it still takes the line, and
                 // balancing chose its column depth with the line kept here
-                pushed_widow = !has_float_bands && !paginator.balances_region();
+                let tail: f64 = lines[current_line_index + fitting_lines..]
+                    .iter()
+                    .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
+                    .sum();
+                pushed_widow = !has_float_bands
+                    && !paginator.balances_region()
+                    && tail <= paginator.get_column_capacity();
                 let removed = &lines[current_line_index + fitting_lines];
                 lines_height -= removed.line_height + removed.float_skip_before.unwrap_or(0.0);
             }
@@ -2957,6 +2963,14 @@ mod pagination_rule_tests {
             ]);
             assert_eq!(paragraph_slices(&result, 2.0), expected);
         }
+    }
+
+    #[test]
+    fn widow_control_keeps_the_pushed_line_when_the_last_two_cannot_share_a_page() {
+        let mut block = paragraph(1, 4, 20.0, json!({}));
+        block["measure"]["lines"][3]["lineHeight"] = json!(90.0);
+        let result = layout(vec![block]);
+        assert_eq!(result.pages.len(), 2);
     }
 
     #[test]
