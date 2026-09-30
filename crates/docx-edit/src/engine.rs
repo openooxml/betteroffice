@@ -156,6 +156,7 @@ struct PreparedRegionLayout {
     resident_body: bool,
     block_fingerprints: Option<Vec<u64>>,
     lowered_from: Option<Rc<Vec<LayoutBlock>>>,
+    input_lowering: Option<(u64, Rc<LoweringMap>)>,
     has_floats: bool,
     measured_widths: Vec<f64>,
     measured_float_geometry: Option<[f64; 5]>,
@@ -749,6 +750,8 @@ struct PaginationState {
     measured_with: Option<u64>,
     /// The body lowering a float document's `input` arena was measured from.
     lowered_from: Option<Rc<Vec<LayoutBlock>>>,
+    /// The doc epoch and lowering map a resident edit path built `input` from.
+    input_lowering: Option<(u64, Rc<LoweringMap>)>,
     /// The widths and float page geometry the `input` arena was measured at,
     /// and whether floating zones shaped it.
     measured_widths: Vec<f64>,
@@ -994,12 +997,10 @@ fn full_build_pages(display: &DisplayState, page_count: usize) -> Vec<bool> {
 /// Where the resident caret sits, for the pages a windowed build keeps.
 #[derive(Clone, Copy)]
 enum CaretExtent {
-    /// Its display position, when the lowering maps its run one display
-    /// position per story unit.
+    /// Its display position, through the lowering the layout was built from.
     Position(f64),
-    /// Its paragraph's whole display span otherwise, as in an atom or hidden text.
-    Paragraph(f64, f64),
-    /// No block maps it, so every re-placed page is kept.
+    /// No exact position (inside an atom or hidden text, or no retained
+    /// lowering), so every re-placed page is kept.
     Unmapped,
 }
 
@@ -1008,7 +1009,6 @@ impl CaretExtent {
     fn holds(self, start: f64, end: f64) -> bool {
         match self {
             Self::Position(position) => start <= position && position <= end,
-            Self::Paragraph(low, high) => start < high && end > low,
             Self::Unmapped => true,
         }
     }
@@ -1091,18 +1091,18 @@ fn resident_paragraph_span(input: &LayoutInput, para_id: &str) -> Option<(f64, f
     span
 }
 
-/// The display position of story index `index` in paragraph `para_id` of `story`, from the
-/// lowering whose blocks start that paragraph at `start`. `None` inside an atom or hidden
-/// text, or a run that does not show one display position per story unit.
+/// The display position of story index `index` in `paragraph` of `story`, through the lowering
+/// `input` was built from. `None` inside an atom or hidden text, or when the lowering does not
+/// start the paragraph where `input` does.
 fn lowered_caret_position(
     map: &LoweringMap,
+    input: &LayoutInput,
     story: &str,
-    para_id: &str,
-    start: f64,
+    paragraph: &crate::segments::ParaEntry,
     index: u32,
 ) -> Option<f64> {
     let source = map.paragraphs.iter().position(|(slot, id)| {
-        id == para_id
+        id.as_str() == &*paragraph.para_id
             && map
                 .stories
                 .get(*slot as usize)
@@ -1112,17 +1112,30 @@ fn lowered_caret_position(
     let first_block = map
         .paragraph_blocks
         .iter()
-        .filter(|(_, paragraph)| *paragraph == source)
+        .filter(|(_, block)| *block == source)
         .map(|(pm, _)| *pm)
         .min()?;
+    let (start, _) = resident_paragraph_span(input, &paragraph.para_id)?;
     if first_block as f64 != start {
         return None;
     }
-    map.spans.iter().find_map(|span| {
+    let mut spans = map
+        .spans
+        .iter()
+        .filter(|span| span.paragraph == source)
+        .peekable();
+    if spans.peek().is_none() {
+        return (index == paragraph.node_start).then_some(start + 1.0);
+    }
+    spans.find_map(|span| {
+        if span.atom {
+            return (index == span.raw_start)
+                .then_some(span.pm_start)
+                .or_else(|| (index == span.raw_end).then_some(span.pm_end))
+                .map(|pm| pm as f64);
+        }
         let units = span.raw_end.checked_sub(span.raw_start)?;
-        (span.paragraph == source
-            && !span.atom
-            && span.pm_end.checked_sub(span.pm_start) == Some(u64::from(units))
+        (span.pm_end.checked_sub(span.pm_start) == Some(u64::from(units))
             && (span.raw_start..=span.raw_end).contains(&index))
         .then(|| (span.pm_start + u64::from(index - span.raw_start)) as f64)
     })
@@ -2055,6 +2068,7 @@ impl EngineSession {
         let resident_body = body_story.is_some();
         let mut block_fingerprints: Option<Vec<u64>> = None;
         let mut lowered_from = None;
+        let mut input_lowering = None;
         let mut has_floats = false;
         let mut measured_widths = Vec::new();
         let mut measured_float_geometry = None;
@@ -2101,6 +2115,7 @@ impl EngineSession {
                     }
                 })
                 .map_err(|error| error.to_string())??;
+            input_lowering = self.cached_lowering(story);
             if has_floats {
                 lowered_from = self
                     .render
@@ -2195,6 +2210,7 @@ impl EngineSession {
             resident_body,
             block_fingerprints,
             lowered_from,
+            input_lowering,
             has_floats,
             measured_widths,
             measured_float_geometry,
@@ -2219,6 +2235,7 @@ impl EngineSession {
             resident_body,
             mut block_fingerprints,
             lowered_from,
+            input_lowering,
             has_floats,
             measured_widths,
             measured_float_geometry,
@@ -2413,6 +2430,7 @@ impl EngineSession {
         pagination.measured_with =
             (resident_body && !provisional).then_some(measurement_fingerprint);
         pagination.lowered_from = lowered_from;
+        pagination.input_lowering = input_lowering;
         pagination.measured_widths = measured_widths;
         pagination.measured_float_geometry = measured_float_geometry;
         pagination.measured_with_floats = has_floats;
@@ -2753,6 +2771,7 @@ impl EngineSession {
         pagination.input = Some(input);
         pagination.measured_with = None;
         pagination.lowered_from = None;
+        pagination.input_lowering = None;
         pagination.note_changed_pages.clear();
         let mut layout = run.layout;
         // Every pass over part of a package, the resident edit paths' too.
@@ -3286,6 +3305,7 @@ impl EngineSession {
         }
         let resident = self.resident_layout_input(story)?;
         self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
+        self.pagination.borrow_mut().input_lowering = self.cached_lowering(story);
         let extras = self
             .display
             .borrow()
@@ -3424,6 +3444,7 @@ impl EngineSession {
         let previous_capture = self.capture.borrow_mut().take();
         self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
         let mut pagination = self.pagination.borrow_mut();
+        pagination.input_lowering = self.cached_lowering(story);
         // The fast path measures through the region config too, so its
         // retained arena is also eligible for the next pass's reuse walk.
         pagination.measured_with = Some(measurement_fingerprint);
@@ -3534,6 +3555,7 @@ impl EngineSession {
                 resident.input,
                 resident.block_fingerprints,
             )?;
+            self.pagination.borrow_mut().input_lowering = self.cached_lowering(story);
             let finished = now();
             profile.paginate_ms = finished - started;
             started = finished;
@@ -3635,28 +3657,12 @@ impl EngineSession {
                                 drop(txn);
                                 let segments = self.doc.segment_index(story).ok()?;
                                 let paragraph = segments.para_at(index)?;
-                                let (start, end) =
-                                    resident_paragraph_span(input, &paragraph.para_id)?;
-                                let epoch = self.doc_epoch();
-                                let position = self
-                                    .render
-                                    .borrow()
-                                    .stories
-                                    .values()
-                                    .filter(|lowered| lowered.doc_epoch == epoch)
-                                    .find_map(|lowered| {
-                                        lowered_caret_position(
-                                            &lowered.map,
-                                            story,
-                                            &paragraph.para_id,
-                                            start,
-                                            index,
-                                        )
-                                    });
-                                Some(position.map_or(
-                                    CaretExtent::Paragraph(start, end),
-                                    CaretExtent::Position,
-                                ))
+                                let (epoch, map) = pagination.input_lowering.as_ref()?;
+                                if *epoch != self.doc_epoch() {
+                                    return None;
+                                }
+                                lowered_caret_position(map, input, story, paragraph, index)
+                                    .map(CaretExtent::Position)
                             };
                             extent().unwrap_or(CaretExtent::Unmapped)
                         })
@@ -4313,6 +4319,14 @@ impl EngineSession {
     }
 
     /// The lowering map of `story` for this document epoch and environment.
+    fn cached_lowering(&self, story: &str) -> Option<(u64, Rc<LoweringMap>)> {
+        self.render
+            .borrow()
+            .stories
+            .get(story)
+            .map(|lowered| (lowered.doc_epoch, Rc::clone(&lowered.map)))
+    }
+
     fn lowering_map(&self, story: &str, env: &RenderEnv) -> Result<Rc<LoweringMap>, BridgeError> {
         let epoch = self.doc_epoch();
         if !self.story_is_resident(story, epoch, env) {
@@ -7874,7 +7888,7 @@ mod tests {
     }
 
     #[test]
-    fn windowed_builds_keep_the_caret_paragraphs_pages_or_every_re_placed_page() {
+    fn windowed_builds_keep_the_caret_page_or_every_re_placed_page() {
         let (engine, _) = paged_filler_engine(213, 160);
         let pagination = engine.pagination.borrow();
         let layout = pagination.layout.as_ref().unwrap();
@@ -7894,14 +7908,10 @@ mod tests {
         let Some(Fragment::Paragraph(last)) = layout.pages[0].fragments.last() else {
             panic!("expected a paragraph at the end of the first page");
         };
-        let (start, end) = (last.pm_start.unwrap(), last.pm_end.unwrap());
+        let start = last.pm_start.unwrap();
         assert_eq!(built(None), [8, 9, 10]);
         assert_eq!(
             built(Some(CaretExtent::Position(start + 1.0))),
-            [0, 8, 9, 10]
-        );
-        assert_eq!(
-            built(Some(CaretExtent::Paragraph(start, end))),
             [0, 8, 9, 10]
         );
         assert_eq!(
@@ -8031,9 +8041,7 @@ mod tests {
                 .fragments
                 .iter()
                 .find_map(|fragment| match fragment {
-                    Fragment::Paragraph(value)
-                        if block_key(&value.block_id) == bounds.para_id =>
-                    {
+                    Fragment::Paragraph(value) if block_key(&value.block_id) == bounds.para_id => {
                         value.pm_end
                     }
                     _ => None,
