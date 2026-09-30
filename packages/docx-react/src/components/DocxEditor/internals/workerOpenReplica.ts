@@ -85,6 +85,16 @@ export function workerOpenReplicaPending(session: YrsSession): boolean {
   return replicas.get(session)?.pending === true;
 }
 
+/**
+ * Starts loading the replica of `session` from its worker, once, and returns the promise that
+ * settles when it is ready; undefined when `session` has no worker-open replica.
+ */
+export function requestWorkerOpenReplica(session: YrsSession): Promise<void> | undefined {
+  const replica = replicas.get(session);
+  replica?.start();
+  return replica?.ready;
+}
+
 export function awaitWorkerOpenReplica(session: YrsSession): Promise<void> | undefined {
   return replicas.get(session)?.ready;
 }
