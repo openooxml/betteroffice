@@ -8,16 +8,7 @@ SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling o
 
 ## Private DOCX layout gate
 
-Documents that must stay on this machine are scored locally against a Word-exported PDF, with existing DOCX, DOCX React and fonts builds:
-
-```sh
-node scripts/office-quality/private-ssim.mjs \
-  --source /local/document.docx --reference-pdf /local/word.pdf --reference-dir /local/word-pages \
-  --package-root packages/docx --react-root packages/docx-react --fonts-dist packages/fonts/dist \
-  --out /local/run-after --baseline /local/run-before/compare/score.json --cache /local/ssim-cache
-```
-
-The reference is rasterized with pypdfium2 at 150 DPI; the capture uses this checkout's fonts and blocks external requests. `compare/score.json` reports index SSIM (page-penalized, as above), SSIM after text-anchor alignment of page starts, page and break agreement, the first diverging page, and deltas against `--baseline`. The command exits with status 1 on a regression: penalized SSIM drops by more than 0.001, fewer page starts agree, or the page-count error grows. References up to 5,000 pages are accepted in this mode only.
+`node scripts/office-quality/private-ssim.mjs --source <docx> --reference-pdf <word.pdf> --reference-dir <dir> --package-root packages/docx --react-root packages/docx-react --fonts-dist packages/fonts/dist --out <dir> [--baseline <score.json>]` scores a local document against its Word PDF without leaving the machine: page-penalized and text-aligned SSIM at 150 DPI, page and break agreement, and the first diverging page; it exits 1 when a baseline comparison regresses.
 
 ## Local benchmark
 
