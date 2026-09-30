@@ -6,6 +6,10 @@ Compare DOCX, PPTX, and XLSX renders against Microsoft Office. Inputs and genera
 
 SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling or alignment correction. DOCX uses recorded page bounds with at most a one-pixel edge adjustment. Missing or extra pages are penalized. Exact page counts are the documents whose rendered page count equals the reference; absolute page error sums the per-document difference. BetterOffice browser renders use pinned CDN fonts; native DOCX and LibreOffice share bundled fonts in CI. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Means cover successful comparisons only; failed or missing comparisons have no score. Compare coverage alongside SSIM because the channels may score different subsets.
 
+## Private DOCX layout gate
+
+`node scripts/office-quality/private-ssim.mjs --source <docx> --reference-pdf <word.pdf> --reference-dir <dir> --package-root packages/docx --react-root packages/docx-react --fonts-dist packages/fonts/dist --out <dir> [--baseline <score.json>]` scores a local document against its Word PDF without leaving the machine: page-penalized and text-aligned SSIM at 150 DPI, page and break agreement, and the first diverging page; it exits 1 when a baseline comparison regresses.
+
 ## Local benchmark
 
 Run from the repository root with Bun, Node.js, Python 3.13, and the project's Rust/Wasm toolchain installed:

@@ -114,3 +114,13 @@ fn wide_left_float_matches_word() {
 fn wide_right_float_with_an_empty_anchor_matches_word() {
     assert_matches_word("right-5500-empty-anchor");
 }
+
+#[test]
+fn wide_right_float_anchored_to_the_margin_matches_word() {
+    assert_matches_word("right-4820-margin");
+}
+
+#[test]
+fn wide_right_float_without_a_horizontal_anchor_matches_word() {
+    assert_matches_word("right-4820-no-anchor");
+}

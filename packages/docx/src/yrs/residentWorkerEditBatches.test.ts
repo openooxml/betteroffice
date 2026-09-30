@@ -11,6 +11,7 @@ import { preloadEditWasm } from '../wasm/edit';
 import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
 import { createYrsSession, type DocxEditRequest, type YrsSession } from './index';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
+import type { DocxProposalInput } from './proposals';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 const FONT = resolve(
@@ -299,4 +300,108 @@ test('the worker lays a host batch out exactly as the main thread does', async (
   const inWorker = JSON.parse(synced.layoutJson!) as { layout: { pages: unknown[] } };
   expect(inWorker.layout.pages.length).toBeGreaterThan(3);
   expect(inWorker).toEqual(JSON.parse(main.layoutDocumentWithRegionsRetainedJson(LAYOUT)));
+});
+
+test('a worker that has not laid out its document refuses proposal rounds', async () => {
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  await expect(
+    client.executeProposal({
+      kind: 'withdraw',
+      owned: [],
+      accept: [],
+      reject: [],
+      expectVersion: '',
+    })
+  ).rejects.toThrow('has not laid out its document');
+});
+
+test('worker proposal rounds return adoptable host updates and refuse stale versions', async () => {
+  const main = await createYrsSession({ clientId: 5106 });
+  sessions.push(main);
+  const { paraId } = main.createStory('body', 'Seed');
+  main.registerFont(new Uint8Array(readFileSync(FONT)));
+  main.layoutDocumentWithRegionsJson(LAYOUT);
+  main.setSelection({ story: 'body', paraId, offset: 4 });
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  await client.bootstrap(main.residentWorkerSnapshot()!, '{}');
+  const proposal: DocxProposalInput = {
+    id: 'worker-proposal',
+    paragraph: {
+      kind: 'session',
+      sessionId: main.paragraphIdentities().sessionId,
+      story: 'body',
+      paraId,
+    },
+    suggest: { author: 'Atira', date: '2026-09-29T12:00:00Z' },
+    op: 'replaceText',
+    search: 'Seed',
+    replaceWith: 'Proposed',
+  };
+  const initial = await client.executeProposal({
+    kind: 'propose',
+    proposals: [proposal],
+    expectVersion: 'stale',
+  });
+  expect(initial.outcome).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+  expect(initial.updates).toEqual([]);
+  expect(initial.changedStories).toEqual([]);
+
+  const applied = await client.executeProposal({
+    kind: 'propose',
+    proposals: [proposal],
+    expectVersion: initial.version,
+  });
+  expect(applied.outcome).toMatchObject({ ok: true });
+  expect(applied.updates.length).toBeGreaterThan(0);
+  expect(applied.changedStories).toEqual(['body']);
+  for (const update of applied.updates) main.applyHostUpdate(update);
+  const worker = await createYrsSession({ clientId: 5107 });
+  sessions.push(worker);
+  worker.applyUpdate(await client.encodeState());
+  expect(accepted(main)).toEqual(['Proposed']);
+  expect(accepted(main)).toEqual(accepted(worker));
+  expect(client.remoteStateVector()).toEqual(main.encodeStateVector());
+  expect(main.getProposals().proposals).toEqual([]);
+
+  const stale = await client.executeProposal({
+    kind: 'propose',
+    proposals: [{ ...proposal, id: 'stale-proposal', search: 'Proposed', replaceWith: 'Later' }],
+    expectVersion: initial.version,
+  });
+  expect(stale.outcome).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+  expect(stale.version).toBe(applied.version);
+  expect(stale.updates).toEqual([]);
+  expect(stale.changedStories).toEqual([]);
+  expect(accepted(main)).toEqual(['Proposed']);
+
+  if (!applied.outcome.ok || !('receipts' in applied.outcome)) {
+    throw new Error('expected proposal receipts');
+  }
+  const owned = applied.outcome.receipts.flatMap((receipt) => receipt.revisionIds);
+  const late = await client.executeProposal({
+    kind: 'withdraw',
+    owned,
+    accept: [],
+    reject: owned,
+    expectVersion: initial.version,
+  });
+  expect(late.outcome).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+  expect(late.updates).toEqual([]);
+  expect(late.changedStories).toEqual([]);
+  const withdrawn = await client.executeProposal({
+    kind: 'withdraw',
+    owned,
+    accept: [],
+    reject: owned,
+    expectVersion: applied.version,
+  });
+  expect(withdrawn.outcome).toEqual({ ok: true });
+  expect(withdrawn.updates.length).toBeGreaterThan(0);
+  expect(withdrawn.changedStories).toEqual(['body']);
+  for (const update of withdrawn.updates) main.applyHostUpdate(update);
+  worker.applyUpdate(await client.encodeState());
+  expect(accepted(main)).toEqual(['Seed']);
+  expect(accepted(main)).toEqual(accepted(worker));
 });

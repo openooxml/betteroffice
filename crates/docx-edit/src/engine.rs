@@ -1016,8 +1016,8 @@ enum RegionResidentPhase {
 /// Long-lived owner of the authoritative editing document and its retained
 /// render projections.
 ///
-/// The yrs update observer advances `doc_epoch` for every committed local or
-/// remote transaction. Render caches are generation-tagged instead of being
+/// The yrs transaction observer advances `doc_epoch` for every store-changing
+/// local or remote commit. Render caches are generation-tagged instead of being
 /// eagerly cleared, so an in-flight read can never publish blocks from a
 /// different document generation.
 pub struct EngineSession {
@@ -1807,10 +1807,12 @@ impl EngineSession {
         let observer_epoch = Rc::clone(&doc_epoch);
         let observer = doc
             .yrs_doc()
-            .observe_update_v1(move |_txn, _event| {
-                observer_epoch.set(observer_epoch.get().wrapping_add(1));
+            .observe_after_transaction(move |txn| {
+                if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
+                    observer_epoch.set(observer_epoch.get().wrapping_add(1));
+                }
             })
-            .expect("EngineSession document update observer registers");
+            .expect("EngineSession document transaction observer registers");
         Self {
             doc,
             doc_epoch,
@@ -2106,20 +2108,16 @@ impl EngineSession {
         };
         let default_family =
             docx_layout::measure_blocks::default_font_family(&measurement.defaults);
-        let mut requirements = BTreeMap::new();
-        let mut preview_superset_safe = true;
+        let mut collector = docx_layout::measure_blocks::FontRequirementCollector::default();
         if cache_key.is_some() {
-            preview_superset_safe &=
-                docx_layout::measure_blocks::collect_preview_font_requirements_into(
-                    input.measured.iter().map(|measured| &measured.block),
-                    default_family,
-                    &mut requirements,
-                );
-        } else {
-            docx_layout::measure_blocks::collect_font_requirements_into(
+            collector.collect_preview(
                 input.measured.iter().map(|measured| &measured.block),
                 default_family,
-                &mut requirements,
+            );
+        } else {
+            collector.collect(
+                input.measured.iter().map(|measured| &measured.block),
+                default_family,
             );
         }
         if let Some(body_story) = body_story {
@@ -2147,28 +2145,35 @@ impl EngineSession {
                     .map(|r_id| format!("hf:{r_id}")),
                 );
             }
-            stories.extend(notes.contents.into_iter().map(|content| {
-                let prefix = match content.note_kind {
-                    docx_layout::footnotes::NoteKind::Footnote => "fn",
-                    docx_layout::footnotes::NoteKind::Endnote => "en",
-                };
-                format!("{prefix}:{}", content.id)
-            }));
+            let note_stories: BTreeMap<_, _> = notes
+                .contents
+                .into_iter()
+                .map(|content| {
+                    let prefix = match content.note_kind {
+                        docx_layout::footnotes::NoteKind::Footnote => "fn",
+                        docx_layout::footnotes::NoteKind::Endnote => "en",
+                    };
+                    (format!("{prefix}:{}", content.id), content)
+                })
+                .collect();
+            stories.extend(note_stories.keys().cloned());
             for story in stories {
                 self.with_lowered_story(&story, &render_env, |blocks| {
-                    if cache_key.is_some() {
-                        preview_superset_safe &=
-                            docx_layout::measure_blocks::collect_preview_font_requirements_into(
-                                blocks,
-                                default_family,
-                                &mut requirements,
-                            );
-                    } else {
-                        docx_layout::measure_blocks::collect_font_requirements_into(
-                            blocks,
-                            default_family,
-                            &mut requirements,
+                    let blocks = if let Some(content) = note_stories.get(&story) {
+                        let mut blocks = blocks.to_vec();
+                        apply_note_presentation(
+                            &mut blocks,
+                            content.display_number.unwrap_or(1),
+                            content.display_label.as_deref().unwrap_or("1"),
                         );
+                        Cow::Owned(blocks)
+                    } else {
+                        Cow::Borrowed(blocks)
+                    };
+                    if cache_key.is_some() {
+                        collector.collect_preview(blocks.iter(), default_family);
+                    } else {
+                        collector.collect(blocks.iter(), default_family);
                     }
                 })
                 .map_err(|error| error.to_string())?;
@@ -2182,15 +2187,14 @@ impl EngineSession {
                             .expect("resident story exists after lowering")
                             .revealable_blocks,
                     );
-                    preview_superset_safe &=
-                        docx_layout::measure_blocks::collect_preview_font_requirements_into(
-                            revealable.iter(),
-                            default_family,
-                            &mut requirements,
-                        );
+                    collector.collect_preview(revealable.iter(), default_family);
                 }
             }
         }
+        let requirements = collector.finish();
+        let preview_superset_safe = requirements
+            .values()
+            .all(|requirement| requirement.scripts.is_empty());
         if let Some((doc_epoch, request_fingerprint)) = cache_key
             && !preview_superset_safe
         {
@@ -5022,6 +5026,80 @@ mod tests {
     }
 
     #[test]
+    fn seeded_session_epochs_advance_before_local_and_remote_update_listeners() {
+        let engine = EngineSession::new(7);
+        crate::seed::seed_from_docx(
+            engine.doc(),
+            &docx_bytes("", "<w:p><w:r><w:t>hello</w:t></w:r></w:p>"),
+        )
+        .unwrap();
+        let peer = EditingDoc::new(8);
+        peer.apply_update_v1(&engine.doc().encode_state_as_update_v1())
+            .unwrap();
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let observed = Rc::clone(&events);
+        let epoch = Rc::clone(&engine.doc_epoch);
+        let _listener = engine
+            .doc()
+            .yrs_doc()
+            .observe_update_v1(move |txn, event| {
+                observed.borrow_mut().push((
+                    epoch.get(),
+                    txn.origin().is_none(),
+                    event.update.clone(),
+                ));
+            })
+            .unwrap();
+        let seeded_epoch = engine.doc_epoch();
+        let seeded_version = engine.doc().version();
+        drop(engine.doc().yrs_doc().transact_mut());
+        assert_eq!(engine.doc_epoch(), seeded_epoch);
+        assert_eq!(engine.doc().version(), seeded_version);
+        assert!(events.borrow().is_empty());
+
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 5),
+                "!",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let edited_epoch = engine.doc_epoch();
+        let edited_version = engine.doc().version();
+        assert_eq!(edited_epoch, seeded_epoch + 1);
+        assert_ne!(edited_version, seeded_version);
+        assert_eq!(events.borrow().len(), 1);
+        assert_eq!(events.borrow()[0].0, edited_epoch);
+        assert!(!events.borrow()[0].1);
+        peer.apply_update_v1(&events.borrow()[0].2).unwrap();
+
+        let vector = engine.doc().encode_state_vector_v1();
+        peer.apply_raw_ops(
+            "body",
+            vec![crate::RawOp::Delete { index: 0, len: 1 }],
+            &crate::EditCtx::local("", ""),
+        )
+        .unwrap();
+        let update = peer.encode_diff_v1(&vector).unwrap();
+        engine.doc().apply_update_v1(&update).unwrap();
+        assert_eq!(engine.doc().encode_state_vector_v1(), vector);
+        assert_eq!(engine.doc_epoch(), edited_epoch + 1);
+        assert_ne!(engine.doc().version(), edited_version);
+        assert_eq!(events.borrow().len(), 2);
+        assert_eq!(events.borrow()[1].0, engine.doc_epoch());
+        assert!(events.borrow()[1].1);
+        assert!(!events.borrow()[1].2.is_empty());
+
+        let merged_version = engine.doc().version();
+        engine.doc().apply_update_v1(&update).unwrap();
+        assert_eq!(engine.doc_epoch(), edited_epoch + 1);
+        assert_eq!(engine.doc().version(), merged_version);
+        assert_eq!(events.borrow().len(), 2);
+    }
+
+    #[test]
     fn measured_fingerprints_preserve_relative_run_positions() {
         let measured = |start: f64, gap: f64| {
             serde_json::from_value::<MeasuredBlock>(serde_json::json!({
@@ -6405,6 +6483,56 @@ mod tests {
         assert!(requirements[0].get("blocks").is_none());
         assert_eq!(engine.stats().layout_epoch, 0);
         assert_eq!(engine.stats().retained_measured_blocks, 0);
+    }
+
+    #[test]
+    fn region_font_preflight_covers_generated_note_labels() {
+        for (prefix, note_kind) in [("fn", "footnote"), ("en", "endnote")] {
+            let engine = EngineSession::new(1371);
+            let body = [serde_json::json!({
+                "type": "paragraph",
+                "formatting": {"runProperties": {"fontFamily": {"ascii": "Arial"}}},
+                "content": [{
+                    "type": "run",
+                    "formatting": {"fontFamily": {
+                        "ascii": "Arial", "hAnsi": "Arial", "cs": "Calibri"
+                    }},
+                    "content": [{"type": "text", "text": "Body"}]
+                }]
+            })];
+            let note = [serde_json::json!({
+                "type": "paragraph",
+                "formatting": {"runProperties": {"fontFamily": {"ascii": "Arial"}}},
+                "content": []
+            })];
+            crate::seed::seed_blocks(
+                engine.doc(),
+                None,
+                &[("body".to_owned(), &body), (format!("{prefix}:5"), &note)],
+            )
+            .unwrap();
+            for preview in [serde_json::json!({}), serde_json::json!({"9": "accepted"})] {
+                let request = serde_json::json!({
+                    "bodyStory": "body",
+                    "notes": {"contents": [{"id": 5, "noteKind": note_kind, "height": 0}]},
+                    "measurement": {"defaults": {"fontFamily": "Calibri"}},
+                    "renderEnv": {"revisionPreview": preview}
+                });
+                let requirements: Vec<serde_json::Value> = serde_json::from_str(
+                    &engine
+                        .layout_font_requirements_json(&request.to_string())
+                        .unwrap(),
+                )
+                .unwrap();
+
+                assert!(
+                    requirements
+                        .iter()
+                        .any(|requirement| requirement["key"] == "calibri|0|0"),
+                    "{note_kind}: {requirements:?}"
+                );
+            }
+        }
     }
 
     #[test]

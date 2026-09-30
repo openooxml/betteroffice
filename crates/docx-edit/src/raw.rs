@@ -151,7 +151,6 @@ impl EditingDoc {
         Ok(())
     }
 
-    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
     pub(crate) fn apply_raw_story_batches(
         &self,
         batches: Vec<(String, Vec<RawOp>)>,

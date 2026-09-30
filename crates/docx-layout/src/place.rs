@@ -35,7 +35,7 @@
 use crate::LayoutError;
 use crate::hooks;
 use crate::keep_together::{
-    paragraph_breaks_before_run, paragraph_is_unbreakable, paragraph_widow_control,
+    measure_keep_with_next_group_witnessing, paragraph_is_unbreakable, paragraph_widow_control,
 };
 use crate::page_flow::{PageFlowGeometry, Paginator};
 use crate::paragraph_spacing::{
@@ -230,6 +230,8 @@ fn checkpoint_order(checkpoint: &LayoutCheckpoint) -> (usize, usize) {
 /// block that opened a page may now start on the one before it (a removed page
 /// break, a paragraph that now fits), and one inside or right after a
 /// keep-with-next run can move that run's head, so resume strictly before either.
+/// Right after a run counts even when the dirty block is no longer its
+/// follower: a page break it gained releases the run from it.
 fn restart_index(
     keep_with_next: &crate::keep_together::KeepWithNextScan,
     dirty_index: usize,
@@ -240,7 +242,7 @@ fn restart_index(
         .rev()
         .take(2)
         .filter(|(_, group)| {
-            group.members.contains(&dirty_index) || group.follower == Some(dirty_index)
+            group.members.contains(&dirty_index) || group.tail_index + 1 == dirty_index
         })
         .map(|(&head, _)| head)
         .min()
@@ -864,33 +866,33 @@ fn place(
             let state_idx = paginator.get_current();
             let page_content_height =
                 paginator.state(state_idx).content_limit - paginator.state(state_idx).content_top;
-            let group_height = hooks::measure_keep_with_next_group_at(
+            // between float bands a table row's first slice may not share a gap
+            // with the run, so a table follower keeps its whole first row there
+            let split_first_row = !paginator.has_float_bands();
+            let group_height = measure_keep_with_next_group_witnessing(
                 group,
                 measured,
                 |before| paginator.leading_spacing(before),
                 paginator.state(state_idx).deferred_spacing,
                 page_content_height,
-            )?;
-            let fresh_page_height = hooks::measure_keep_with_next_group_at(
+                split_first_row,
+            );
+            let fresh_page_height = measure_keep_with_next_group_witnessing(
                 group,
                 measured,
                 |_| 0.0,
                 0.0,
                 page_content_height,
-            )?;
-            // only paragraph runs and followers, and a page break on any of
-            // them wins over the keep
+                split_first_row,
+            );
+            // only runs of paragraphs with a paragraph follower
             let paragraph_run = group.follower.is_some()
                 && group
                     .members
                     .iter()
                     .skip(1)
                     .chain(group.follower.as_ref())
-                    .all(|&index| {
-                        let block = &measured[index].block;
-                        matches!(block, LayoutBlock::Paragraph(_))
-                            && paragraph_breaks_before_run(block) == (false, false)
-                    });
+                    .all(|&index| matches!(measured[index].block, LayoutBlock::Paragraph(_)));
             let oversized = fresh_page_height > page_content_height
                 && paragraph_run
                 && !paginator.balanced_limit_in_force(state_idx);
@@ -1374,6 +1376,7 @@ fn layout_paragraph(
         }
 
         let remaining_after = lines.len() - (current_line_index + fitting_lines);
+        let mut pushed_widow = false;
         if widow_control && remaining_after > 0 {
             if current_line_index == 0 && fitting_lines == 1 {
                 let capacity = paginator.get_column_capacity();
@@ -1403,6 +1406,15 @@ fn layout_paragraph(
             }
             if remaining_after == 1 && fitting_lines > 2 {
                 fitting_lines -= 1;
+                // at a float band the space below it still takes the line, and
+                // balancing chose its column depth with the line kept here
+                let tail: f64 = lines[current_line_index + fitting_lines..]
+                    .iter()
+                    .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
+                    .sum();
+                pushed_widow = !has_float_bands
+                    && !paginator.balances_region()
+                    && tail <= paginator.get_column_capacity();
                 let removed = &lines[current_line_index + fitting_lines];
                 lines_height -= removed.line_height + removed.float_skip_before.unwrap_or(0.0);
             }
@@ -1448,8 +1460,11 @@ fn layout_paragraph(
 
         current_line_index += fitting_lines;
 
-        // leftover lines: move the pen to a column/page with room for the next
-        if current_line_index < lines.len() {
+        // leftover lines: move the pen to a column/page with room for the next;
+        // a line widow control pushed down still fits here, so break anyway
+        if pushed_widow {
+            paginator.advance_for_overflow();
+        } else if current_line_index < lines.len() {
             paginator.ensure_fits(lines[current_line_index].line_height);
         }
     }
@@ -2588,6 +2603,36 @@ mod pagination_rule_tests {
 
     /// Lays `previous` out in full, then `next` incrementally with the blocks
     /// `dirty` changed, and checks it against a full pass over `next`.
+    #[test]
+    fn a_page_break_a_keep_with_next_follower_gains_relays_out_the_run_head() {
+        let blocks = |page_break_before: bool| {
+            vec![
+                paragraph(0, 1, 90.0, json!({})),
+                paragraph(1, 1, 10.0, json!({ "keepNext": true })),
+                paragraph(2, 1, 10.0, json!({ "pageBreakBefore": page_break_before })),
+            ]
+        };
+        let layout = assert_incremental_matches_full(blocks(false), blocks(true), &[2]);
+        assert_eq!(layout.layout.pages.len(), 2);
+        assert_incremental_matches_full(blocks(true), blocks(false), &[2]);
+
+        let interior = |page_break_before: bool| {
+            vec![
+                paragraph(0, 1, 80.0, json!({})),
+                paragraph(1, 1, 10.0, json!({ "keepNext": true })),
+                paragraph(
+                    2,
+                    1,
+                    10.0,
+                    json!({ "keepNext": true, "pageBreakBefore": page_break_before }),
+                ),
+                paragraph(3, 1, 10.0, json!({})),
+            ]
+        };
+        assert_incremental_matches_full(interior(false), interior(true), &[2]);
+        assert_incremental_matches_full(interior(true), interior(false), &[2]);
+    }
+
     fn assert_incremental_matches_full(
         previous: Vec<serde_json::Value>,
         next: Vec<serde_json::Value>,
@@ -2879,6 +2924,43 @@ mod pagination_rule_tests {
         );
     }
 
+    #[test]
+    fn a_heading_above_a_table_on_a_page_with_float_bands_keeps_the_whole_row_witness() {
+        let cell_paragraph = json!({
+            "kind": "paragraph", "id": 10,
+            "runs": [{ "kind": "text", "text": "x", "fmt": {} }],
+        });
+        let lines: Vec<_> = [25.0, 25.0, 20.0, 20.0].into_iter().map(line).collect();
+        let table = json!({
+            "block": {
+                "kind": "table", "id": 3,
+                "rows": [{ "id": 20, "cells": [{ "id": 30, "blocks": [cell_paragraph] }] }],
+                "columnWidths": [100],
+            },
+            "measure": {
+                "kind": "table", "columnWidths": [100], "totalWidth": 100, "totalHeight": 90,
+                "rows": [{ "height": 90, "cells": [{ "width": 100, "height": 90, "blocks": [
+                    { "kind": "paragraph", "lines": lines, "totalHeight": 90 }
+                ] }] }],
+            },
+        });
+        let mut value = input(vec![
+            paragraph(1, 1, 5.0, json!({})),
+            paragraph(2, 1, 15.0, json!({ "keepNext": true })),
+            table,
+        ]);
+        value.options.section_page_float_bands = Some(
+            serde_json::from_value(json!([{"default": [{"top": 60, "bottom": 65}]}])).unwrap(),
+        );
+        let result = layout_document(&mut value).unwrap();
+        assert_eq!(result.pages.len(), 2);
+        assert!(result.pages[0].fragments.iter().any(|fragment| matches!(
+            fragment,
+            Fragment::Paragraph(p)
+                if matches!(p.block_id, crate::types::BlockId::Num(value) if value == 2.0)
+        )));
+    }
+
     fn oversized_cant_split_table() -> serde_json::Value {
         let paragraph_block = json!({
             "kind": "paragraph", "id": 10,
@@ -2975,6 +3057,54 @@ mod pagination_rule_tests {
             })
             .collect();
         assert_eq!(second_page_lines, vec![(0, 4)]);
+    }
+
+    #[test]
+    fn widow_control_carries_the_pushed_line_to_the_next_page() {
+        for (preceding_height, lines, expected) in [
+            (40.0, 4, vec![(0, 0, 2), (1, 2, 4)]),
+            (20.0, 5, vec![(0, 0, 3), (1, 3, 5)]),
+        ] {
+            let result = layout(vec![
+                paragraph(1, 1, preceding_height, json!({})),
+                paragraph(2, lines, 20.0, json!({})),
+            ]);
+            assert_eq!(paragraph_slices(&result, 2.0), expected);
+        }
+    }
+
+    #[test]
+    fn widow_control_keeps_the_pushed_line_when_the_last_two_cannot_share_a_page() {
+        let mut block = paragraph(1, 4, 20.0, json!({}));
+        block["measure"]["lines"][3]["lineHeight"] = json!(90.0);
+        let result = layout(vec![block]);
+        assert_eq!(result.pages.len(), 2);
+    }
+
+    #[test]
+    fn widow_control_keeps_the_pushed_line_above_a_float_band_on_its_page() {
+        let mut value = input(vec![paragraph(1, 4, 20.0, json!({}))]);
+        value.options.page_size = Some(crate::types::Size { w: 200.0, h: 220.0 });
+        value.options.section_page_float_bands = Some(
+            serde_json::from_value(json!([{"default": [{"top": 70, "bottom": 90}]}])).unwrap(),
+        );
+        let result = layout_document(&mut value).unwrap();
+        assert_eq!(result.pages.len(), 1);
+    }
+
+    #[test]
+    fn widow_control_in_balanced_columns_keeps_the_section_on_one_page() {
+        let mut value = input(vec![
+            paragraph(1, 4, 20.0, json!({})),
+            paragraph(2, 5, 20.0, json!({})),
+            paragraph(3, 4, 20.0, json!({})),
+            paragraph(4, 5, 20.0, json!({})),
+        ]);
+        value.options.page_size = Some(crate::types::Size { w: 500.0, h: 320.0 });
+        value.options.columns =
+            Some(serde_json::from_value(json!({"count": 3, "gap": 20})).unwrap());
+        let result = layout_document(&mut value).unwrap();
+        assert_eq!(result.pages.len(), 1);
     }
 
     fn paragraph_slices(layout: &Layout, id: f64) -> Vec<(usize, usize, usize)> {

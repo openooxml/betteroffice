@@ -1230,6 +1230,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         ? {
             openInWorker: canvasRenderer.openInWorker,
             renderedFrame: canvasRenderer.status === 'ready' ? canvasRenderer.displayList : null,
+            pendingCompletion: canvasRenderer.pendingCompletion,
           }
         : undefined,
       mediaTokens,
@@ -2554,6 +2555,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               activations={pluginHost.activations}
               target={pluginOverlayTarget}
               layerRef={pluginHost.overlayLayerRef}
+              heldGeometry={pluginHost.heldGeometry}
             />
           </CanvasPagedArea>
         }

@@ -1,12 +1,6 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
-export const wasm_failed_allocation_bytes: () => number;
-export const wasm_heap_counted: () => number;
-export const wasm_live_bytes: () => number;
-export const wasm_peak_bytes: () => number;
-export const set_wasm_heap_limit: (a: number) => void;
-export const reset_wasm_peak_bytes: () => void;
 export const __wbg_editsession_free: (a: number, b: number) => void;
 export const editsession_accept_change: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_add_comment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
@@ -14,6 +8,7 @@ export const editsession_add_undo_boundary: (a: number) => void;
 export const editsession_apply_delete: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_apply_delete_profiled: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_apply_edits_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_apply_host_update: (a: number, b: number, c: number) => [number, number];
 export const editsession_apply_input: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_apply_input_profile_json: (a: number) => [number, number];
 export const editsession_apply_input_profiled: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -103,6 +98,7 @@ export const editsession_new: (a: number) => [number, number, number];
 export const editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
 export const editsession_open_docx_preview: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_paragraph_id_count: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const editsession_paragraph_identities: (a: number) => [number, number, number, number];
 export const editsession_paragraph_save_plan: (a: number) => [number, number, number, number];
 export const editsession_paragraph_spans: (a: number, b: number, c: number) => [number, number, number, number];
@@ -125,6 +121,7 @@ export const editsession_resolve_sticky_position: (a: number, b: number, c: numb
 export const editsession_resume_region_layout: (a: number, b: number) => [number, number, number, number];
 export const editsession_retained_headers_footers_json: (a: number) => [number, number, number, number];
 export const editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
+export const editsession_revision_stamps_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_seed_opaque_sequences: (a: number, b: number, c: number) => [number, number];
@@ -181,6 +178,12 @@ export const find_docx_content_controls_json: (a: number, b: number, c: number, 
 export const list_docx_content_controls_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const render_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const render_docx_markdown_with_pages_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const wasm_failed_allocation_bytes: () => number;
+export const wasm_heap_counted: () => number;
+export const wasm_live_bytes: () => number;
+export const wasm_peak_bytes: () => number;
+export const set_wasm_heap_limit: (a: number) => void;
+export const reset_wasm_peak_bytes: () => void;
 export const build_display_list_json: (a: number, b: number) => [number, number, number, number];
 export const clear_measure_fonts: () => [number, number];
 export const hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

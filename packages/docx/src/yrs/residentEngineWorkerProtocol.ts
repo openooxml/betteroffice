@@ -6,6 +6,20 @@ import type {
 } from './index';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
+import type {
+  DocxProposalInput,
+  ProposalRoundOutcome,
+  ProposalWithdrawal,
+  ProposalWithdrawalOutcome,
+} from './proposals';
+
+/** @internal */
+export type ResidentProposalOperation =
+  | { kind: 'propose'; proposals: DocxProposalInput[]; expectVersion: string }
+  | ({ kind: 'withdraw'; expectVersion: string } & ProposalWithdrawal);
+
+/** @internal */
+export type ResidentProposalOutcome = ProposalRoundOutcome | ProposalWithdrawalOutcome;
 
 export type ResidentEngineWorkerRequest =
   | { id: number; type: 'warm' }
@@ -47,6 +61,7 @@ export type ResidentEngineWorkerRequest =
     }
   | { id: number; type: 'fontRequirements'; layoutInput: string }
   | { id: number; type: 'encodeState' }
+  | { id: number; type: 'executeProposal'; operation: ResidentProposalOperation }
   | {
       id: number;
       type: 'sync';
@@ -168,6 +183,12 @@ export type ResidentEngineWorkerResponse = (
       requirementsJson?: string;
       /** An `encodeState` reply: the document state as one yrs v1 update. */
       state?: ArrayBuffer;
+      /** An `executeProposal` reply. @internal */
+      outcome?: ResidentProposalOutcome;
+      /** The worker's version after proposal execution. @internal */
+      version?: string;
+      /** Stories changed by proposal execution. @internal */
+      changedStories?: string[];
     }
   | {
       id: number;

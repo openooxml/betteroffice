@@ -6,6 +6,7 @@ import {
   type ResidentEngineSession,
 } from './residentEngineSession';
 import { preloadEditWasm } from './wasm/index';
+import { executeProposalRound, executeProposalWithdrawal } from './proposals';
 import {
   presentOffscreenPageBackBuffer,
   presentOffscreenPageBackBufferWithCaret,
@@ -26,6 +27,7 @@ import {
 import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
+  ResidentProposalOutcome,
 } from './residentEngineWorkerProtocol';
 import {
   residentCaretDeviceRect,
@@ -259,6 +261,51 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (!session) throw new Error('Resident engine worker is not initialized');
+  if (request.type === 'executeProposal') {
+    if (!unsubscribe) throw new Error('Resident engine worker has not laid out its document');
+    // The edit must not land between a provisional layout and the completion that finishes it.
+    await completeProvisionalLayout();
+    pendingUpdates = [];
+    try {
+      const replica = session;
+      const engine = replica.proposalEngine;
+      const since = replica.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+      let changedStories: string[] = [];
+      const execute = (): ResidentProposalOutcome => {
+        if (request.operation.kind === 'propose') {
+          const outcome = executeProposalRound(
+            engine,
+            request.operation.proposals,
+            request.operation.expectVersion
+          );
+          if (outcome.ok) changedStories = outcome.changedStories;
+          return outcome;
+        }
+        const outcome = executeProposalWithdrawal(engine, request.operation);
+        if (outcome.ok) changedStories = replica.storiesChangedSince(since).stories;
+        return outcome;
+      };
+      const outcome = engine.sharedReads ? engine.sharedReads(execute) : execute();
+      if (changedStories.length > 0) completedLayout = null;
+      const updates = pendingUpdates.map(exactBuffer);
+      const stateVector = exactBuffer(session.encodeStateVector());
+      reply(
+        {
+          id: request.id,
+          ok: true,
+          outcome,
+          version: engine.version(),
+          updates,
+          changedStories,
+          stateVector,
+        },
+        [...updates, stateVector]
+      );
+    } finally {
+      pendingUpdates = [];
+    }
+    return;
+  }
   if (request.type === 'sync') {
     unsubscribe?.();
     unsubscribe = null;

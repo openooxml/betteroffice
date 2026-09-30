@@ -104,9 +104,9 @@ export function resolveParagraph(
   const { story, paraId } = target ?? {};
   if (typeof story !== 'string' || typeof paraId !== 'string') return 'missing-target';
   if (!session.hasStory(story)) return 'missing-target';
-  const matches = session.paragraphs(story).filter((paragraph) => paragraph.paraId === paraId);
-  if (matches.length === 0) return 'missing-target';
-  if (matches.length > 1) return 'ambiguous-target';
+  const count = session.paragraphIdCount(story, paraId);
+  if (count === 0) return 'missing-target';
+  if (count > 1) return 'ambiguous-target';
   const loc = { story, paraId, offset: 0 };
   const point = createYrsSidebarProjection(session).locToDisplayPoint(loc);
   if (!point || point.hfRid) return 'unsupported';

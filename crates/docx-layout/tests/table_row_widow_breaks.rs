@@ -390,3 +390,69 @@ fn a_full_width_text_floating_table_splits_its_rows_at_any_line() {
         json!({"horzAnchor": "margin", "vertAnchor": "text", "tblpX": 0, "tblpY": 0});
     assert_eq!(heading_and_table_pages_after(2, table), (Some(0), Some(0)));
 }
+
+#[test]
+fn a_kept_row_follows_its_next_row_to_a_taller_page() {
+    let mut table = table_rows(&[
+        (1, json!({}), json!({})),
+        (10, json!({}), json!({"height": 200, "heightRule": "exact"})),
+        (
+            2,
+            json!({"keepNext": true, "widowControl": false}),
+            json!({}),
+        ),
+        (
+            10,
+            json!({"keepLines": true, "widowControl": false}),
+            json!({}),
+        ),
+    ]);
+    table["block"]["rows"][1]["cells"][0]["blocks"] = json!([]);
+    table["measure"]["rows"][1]["cells"][0]["blocks"] = json!([]);
+    let input = json!({"measured": [table], "options": {
+        "pageSize": {"w": 200, "h": 320},
+        "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10},
+        "sectionPageFloatBands": [{"default": [], "first": [{"top": 190, "bottom": 230}]}],
+    }});
+    let layout: Value =
+        serde_json::from_str(&docx_layout::layout_to_canonical_json(&input.to_string()).unwrap())
+            .unwrap();
+    let page_of = |row: u64| {
+        layout["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|page| {
+                page["fragments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|fragment| {
+                        fragment["kind"] == "table"
+                            && fragment["rowStart"].as_u64().unwrap() <= row
+                            && row < fragment["rowEnd"].as_u64().unwrap()
+                    })
+            })
+            .unwrap()
+    };
+    assert_eq!(page_of(2), page_of(3));
+}
+
+#[test]
+fn a_kept_row_stays_when_the_next_row_cannot_split_on_any_page() {
+    let (block, measure) = paragraph(1, 3, json!({}));
+    let table = table_rows(&[
+        (
+            2,
+            json!({"keepNext": true, "widowControl": false}),
+            json!({}),
+        ),
+        (
+            8,
+            json!({"keepLines": true, "widowControl": false}),
+            json!({}),
+        ),
+    ]);
+    let fragments = fragments(vec![json!({"block": block, "measure": measure}), table]);
+    assert_eq!(fragments[0].0, 0);
+}
