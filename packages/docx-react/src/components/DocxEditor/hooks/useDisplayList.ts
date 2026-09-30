@@ -301,8 +301,18 @@ export function useRustDisplayList(
   // it settles no wait: waits are for the document being loaded.
   const replacedLayoutRef = useRef<{ layout: Layout | null; line: object } | null>(null);
   const documentLoadsRef = useRef(0);
-  // The document load a layout belongs to: a facade forwards only within its load.
+  // Layouts without a source engine share a line only within a document load.
   const documentLineRef = useRef<object>({});
+  const sourceLinesRef = useRef(new WeakMap<object, object>());
+  const sourceLine = useCallback((source: RustDisplayListEngine | null | undefined): object => {
+    if (!source) return replacedLayoutRef.current?.line ?? documentLineRef.current;
+    let line = sourceLinesRef.current.get(source);
+    if (!line) {
+      line = {};
+      sourceLinesRef.current.set(source, line);
+    }
+    return line;
+  }, []);
   const markSettled = useCallback(
     (epoch: number | null, failure: Error | null = null, authoritative = false): void => {
       if (replacedLayoutRef.current && !authoritative) return;
@@ -626,7 +636,6 @@ export function useRustDisplayList(
   const applyResidentInput = useCallback(
     (operation: ResidentInputOperation): Promise<ResidentFrameApplyResult | null> => {
       const documentLoad = documentLoadsRef.current;
-      const line = replacedLayoutRef.current?.line ?? documentLineRef.current;
       const replayInputOnMainThread = async (
         pending: ResidentInputOperation,
         hostEngine: YrsSession,
@@ -681,7 +690,7 @@ export function useRustDisplayList(
           { ...previous, queries: null },
           readSessionVersion(hostEngine),
           UNKNOWN_REVISION_PREVIEW_KEY,
-          line
+          sourceLine(hostEngine)
         );
         generationRef.current += 1;
         snapshotRef.current = nextSnapshot;
@@ -699,6 +708,7 @@ export function useRustDisplayList(
         const worker = workerRef.current;
         const currentFrame = snapshotRef.current.frame;
         if (!worker || !worker.client.isReady() || !currentFrame) return null;
+        const line = sourceLine(worker.engine);
         const selection = worker.engine.selection();
         if (!selection) return null;
         const dispatchedEpoch = contentEpochRef.current;
@@ -763,6 +773,9 @@ export function useRustDisplayList(
           for (const update of result.updates) worker.engine.applyLocalUpdate(update);
         } finally {
           suppressWorkerInvalidationRef.current -= 1;
+        }
+        if (workerRef.current !== worker) {
+          return { frameEpoch: null, caretSynchronized: false, deletedUnits: result.deletedUnits };
         }
         const previous = snapshotRef.current;
         if (previous.frame && delta.frameEpoch <= previous.frame.frameEpoch) {
@@ -862,6 +875,7 @@ export function useRustDisplayList(
       queryEpochGate,
       replaceOutOfMemoryWorker,
       requestSettleRelayout,
+      sourceLine,
     ]
   );
 
@@ -939,7 +953,7 @@ export function useRustDisplayList(
       }
       pageBuildInFlightRef.current = true;
       const dispatchedEpoch = contentEpochRef.current;
-      const line = replacedLayoutRef.current?.line ?? documentLineRef.current;
+      const line = sourceLine(worker.engine);
       const paintToken = paintedCaretMachine.token();
       const paintCaret =
         workerPresentationActiveRef.current && paintedCaretMachine.shouldPaint(performance.now());
@@ -1008,6 +1022,7 @@ export function useRustDisplayList(
       paintedCaretMachine,
       publishQuerySnapshot,
       replaceOutOfMemoryWorker,
+      sourceLine,
     ]
   );
 
@@ -1267,7 +1282,7 @@ export function useRustDisplayList(
     }
     if (previewKey !== null) layoutPreviewKeyRef.current = previewKey;
     const contentEpoch = contentEpochRef.current;
-    const line = replacedLayoutRef.current?.line ?? documentLineRef.current;
+    const line = sourceLine(engine);
     const sourceVersion = sourceVersionOf(layout);
     const inputs = (overrides?.getInputs ?? getLayoutKernelInputs)(layout);
     const generation = ++generationRef.current;
@@ -1595,6 +1610,7 @@ export function useRustDisplayList(
     replaceOutOfMemoryWorker,
     requestSettleRelayout,
     sessionLoad,
+    sourceLine,
   ]);
 
   const resetSettled = useCallback(
