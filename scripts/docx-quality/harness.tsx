@@ -138,7 +138,14 @@ api.oraclePage = async (index: number) => {
       `canvas[data-page-index="${index}"]`
     );
     if (canvas?.width && canvas?.height) {
-      const extent = capturePageExtent(captureProfile, index, canvas.width, canvas.height);
+      // local captures keep a page whose size differs from Word's page at that index
+      const extent = capturePageExtent(
+        captureProfile,
+        index,
+        canvas.width,
+        canvas.height,
+        maxPages !== undefined
+      );
       const output = document.createElement('canvas');
       output.width = extent.output.width_px;
       output.height = extent.output.height_px;

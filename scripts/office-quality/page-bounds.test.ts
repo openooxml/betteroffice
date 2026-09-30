@@ -125,3 +125,12 @@ test('rejects invalid page indices and native canvas dimensions', () => {
     expect(() => capturePageExtent(null, index, width, height)).toThrow('native canvas');
   }
 });
+
+test('keeps a mismatched page at its own size only when asked', () => {
+  const bounds = validatePageBounds(profile([a4]))!;
+  expect(() => capturePageExtent(bounds, 0, 1755, 1241)).toThrow('more than 1 pixel');
+  expect(capturePageExtent(bounds, 0, 1755, 1241, true)).toMatchObject({
+    output: { width_px: 1755, height_px: 1241 },
+    adjustment: 'none',
+  });
+});
