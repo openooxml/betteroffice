@@ -197,18 +197,26 @@ export class ResidentEngineWorkerClient {
     if (this.openedHeapLimit || this.bootstrapped) {
       throw new ResidentWorkerFailureError('Resident engine worker already holds a document');
     }
-    this.openedHeapLimit = { bytes: options.heapLimitBytes };
+    const reservation = { bytes: options.heapLimitBytes };
+    this.openedHeapLimit = reservation;
     const copy = new Uint8Array(bytes);
-    const response = await this.request(
-      {
-        type: 'open',
-        bytes: copy.buffer,
-        ...(options.digest !== undefined ? { digest: options.digest } : {}),
-        ...(options.generation !== undefined ? { generation: options.generation } : {}),
-        ...(options.heapLimitBytes !== undefined ? { heapLimitBytes: options.heapLimitBytes } : {}),
-      },
-      [copy.buffer]
-    );
+    let response: ResidentEngineWorkerResponse & { ok: true };
+    try {
+      response = await this.request(
+        {
+          type: 'open',
+          bytes: copy.buffer,
+          ...(options.digest !== undefined ? { digest: options.digest } : {}),
+          ...(options.generation !== undefined ? { generation: options.generation } : {}),
+          ...(options.heapLimitBytes !== undefined ? { heapLimitBytes: options.heapLimitBytes } : {}),
+        },
+        [copy.buffer]
+      );
+    } catch (error) {
+      // The worker freed the session a failed open made, so it can open again.
+      if (this.openedHeapLimit === reservation) this.openedHeapLimit = null;
+      throw error;
+    }
     if (response.hostJson === undefined || !response.stateVector) {
       throw new ResidentWorkerFailureError('Resident engine worker omitted the opened document');
     }

@@ -336,6 +336,23 @@ describe('resident worker opening', () => {
     expect(client.isReady()).toBe(true);
   });
 
+  test('a package that fails to open leaves the client able to open another', async () => {
+    const { worker, client } = setup();
+    const failed = client.open(new Uint8Array([1]));
+    worker.reply({ id: worker.lastId(), ok: false, error: 'not a package' });
+    await expect(failed).rejects.toThrow('not a package');
+    const opened = client.open(new Uint8Array([2]));
+    expect(worker.posted).toHaveLength(2);
+    worker.reply({
+      id: worker.lastId(),
+      ok: true,
+      hostJson: '{}',
+      stateVector: new Uint8Array([5]).buffer,
+    });
+    expect((await opened).hostJson).toBe('{}');
+    await expect(client.open(new Uint8Array([3]))).rejects.toThrow('already holds a document');
+  });
+
   for (const type of ['open', 'fontRequirements', 'encodeState'] as const) {
     test(`${type} propagates the worker's OOM error and memory`, async () => {
       const { worker, client } = setup();
