@@ -88,6 +88,10 @@ function worker() {
       setPartialDocument() {},
       clearFonts() {},
       layoutDocumentJson() {},
+      layoutDocumentWithRegionsRetained() {},
+      retainedHeadersFootersJson(): string | undefined {
+        return undefined;
+      },
       onUpdate() {
         return () => {};
       },
@@ -401,8 +405,14 @@ describe('resident worker layout ownership', () => {
       notesConverged: true,
     });
     let epoch = 0;
+    const layouts: string[] = [];
     Object.assign(w.harness.session, {
-      layoutDocumentWithRegionsRetainedJson: () => layoutJson,
+      layoutDocumentWithRegionsRetainedJson: () => {
+        layouts.push('reply');
+        return layoutJson;
+      },
+      layoutDocumentWithRegionsRetained: () => layouts.push('retained'),
+      retainedHeadersFootersJson: () => JSON.stringify({ parts: [] }),
       residentCaretSnapshot: () => ({ frameEpoch: epoch, caretRect: null }),
       buildDisplayListFrame: (input: string) => {
         extras.push(input);
@@ -454,6 +464,7 @@ describe('resident worker layout ownership', () => {
     });
     expect(plain.ok && plain.layoutJson).toBeUndefined();
     expect(extras.at(-1)).toBe('given');
+    expect(layouts).toEqual(['reply', 'retained']);
   });
 
   test('marks a replica as a preview or not before it lays it out', async () => {
@@ -462,10 +473,7 @@ describe('resident worker layout ownership', () => {
     Object.assign(w.harness.session, {
       loadState: () => calls.push('load'),
       setPartialDocument: (partial: boolean) => calls.push(`partial:${partial}`),
-      layoutDocumentWithRegionsRetainedJson: () => {
-        calls.push('layout');
-        return JSON.stringify({ layout: { pages: [] }, notesConverged: true });
-      },
+      layoutDocumentWithRegionsRetained: () => calls.push('layout'),
     });
     const snapshot = {
       clientId: 1,

@@ -134,7 +134,11 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     // safely while the main replica applies worker updates with local origin.
     session = await createResidentEngineSession();
     if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
-    const { layoutJson, provisional } = hydrate(request.snapshot, request.provisionalPages);
+    const { layoutJson, provisional } = hydrate(
+      request.snapshot,
+      request.provisionalPages,
+      request.layoutExtras !== undefined
+    );
     if (provisional) {
       incompleteLayout = {
         layoutInput: request.snapshot.layoutInput,
@@ -145,7 +149,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     subscribe();
     const started = performance.now();
     const frame = session.buildDisplayListFrame(
-      frameExtras(request.extras, request.layoutExtras, layoutJson),
+      frameExtras(request.extras, request.layoutExtras, layoutJson !== null),
       request.expectedFrameEpoch
     );
     await replyFrame(
@@ -173,11 +177,11 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     unsubscribe?.();
     unsubscribe = null;
     if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
-    const { layoutJson } = hydrate(request.snapshot);
+    const { layoutJson } = hydrate(request.snapshot, undefined, request.layoutExtras !== undefined);
     subscribe();
     const started = performance.now();
     const frame = session.buildDisplayListFrame(
-      frameExtras(request.extras, request.layoutExtras, layoutJson),
+      frameExtras(request.extras, request.layoutExtras, layoutJson !== null),
       request.expectedFrameEpoch
     );
     await replyFrame(
@@ -342,11 +346,13 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
 
 /**
  * Loads a snapshot and runs its layout, over the first `provisionalPages`
- * pages only when given; returns the region layout reply.
+ * pages only when given; returns the region layout reply, which a full pass
+ * serializes only when `reply` asks for it.
  */
 function hydrate(
   snapshot: YrsResidentWorkerSnapshot,
-  provisionalPages?: number
+  provisionalPages?: number,
+  reply = true
 ): { layoutJson: string | null; provisional: boolean } {
   if (!session) throw new Error('Resident engine worker is not initialized');
   supersedeSlicedCompletion();
@@ -374,6 +380,8 @@ function hydrate(
       provisionalPages
     );
     provisional = (JSON.parse(layoutJson) as { provisional?: boolean }).provisional === true;
+  } else if (snapshot.layoutWithRegions && !reply) {
+    session.layoutDocumentWithRegionsRetained(snapshot.layoutInput);
   } else if (snapshot.layoutWithRegions) {
     // the retained reply leaves out the tens-of-MB measured arena
     layoutJson = session.layoutDocumentWithRegionsRetainedJson(snapshot.layoutInput);
@@ -434,7 +442,7 @@ async function replyCompletedLayout(
   pendingUpdates = [];
   const started = performance.now();
   const frame = session.buildDisplayListFrame(
-    frameExtras(completed.extras, completed.layoutExtras, completed.layoutJson),
+    frameExtras(completed.extras, completed.layoutExtras, true),
     expectedFrameEpoch
   );
   await replyFrame(
@@ -543,12 +551,15 @@ function supersedeSlicedCompletion(): void {
 function frameExtras(
   extras: string,
   layoutExtras: string | undefined,
-  layoutJson: string | null
+  regionLayout: boolean
 ): string {
   if (layoutExtras === undefined) return extras;
-  const headersFooters = layoutJson
-    ? (JSON.parse(layoutJson) as Pick<DisplayListBuildInputs, 'headersFooters'>).headersFooters
-    : undefined;
+  if (!session) throw new Error('Resident engine worker is not initialized');
+  const retained = regionLayout ? session.retainedHeadersFootersJson() : undefined;
+  const headersFooters =
+    retained === undefined
+      ? undefined
+      : (JSON.parse(retained) as DisplayListBuildInputs['headersFooters']);
   return encodeDisplayListFrameExtras({
     ...(JSON.parse(layoutExtras) as DisplayListBuildInputs),
     ...(headersFooters ? { headersFooters } : {}),
