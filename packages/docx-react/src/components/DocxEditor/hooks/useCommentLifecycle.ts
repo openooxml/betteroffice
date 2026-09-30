@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
+import type { TrackedChangesResult } from '@betteroffice/docx/layout/render';
 
 /**
  * Small effects that link the comment-management state to the document
@@ -9,7 +10,7 @@ import type { Comment } from '@betteroffice/docx/types/content';
  *    in the same doc walk as `extractTrackedChanges`, so this is a
  *    no-op extra cost per transaction.
  *  - Auto-open the comments sidebar on the first load of a document
- *    that already has tracked changes — guarded by
+ *    that already has tracked changes of its own (host proposals excluded) — guarded by
  *    `trackedChangesLoadedRef` so it only fires once per document.
  *
  * The `trackedChangesLoadedRef` is owned by the parent because
@@ -20,14 +21,16 @@ export function useCommentLifecycle({
   commentToRevision,
   setComments,
   isLoading,
-  trackedChangesCount,
+  trackedChanges,
+  getProposalAnchorKeys,
   setShowCommentsSidebar,
   trackedChangesLoadedRef,
 }: {
   commentToRevision: Map<number, number>;
   setComments: React.Dispatch<React.SetStateAction<Comment[]>>;
   isLoading: boolean;
-  trackedChangesCount: number;
+  trackedChanges: TrackedChangesResult['entries'];
+  getProposalAnchorKeys: () => Set<string>;
   setShowCommentsSidebar: React.Dispatch<React.SetStateAction<boolean>>;
   trackedChangesLoadedRef: React.RefObject<boolean>;
 }) {
@@ -55,6 +58,16 @@ export function useCommentLifecycle({
     if (trackedChangesLoadedRef.current) return;
     if (isLoading) return;
     trackedChangesLoadedRef.current = true;
+    const proposed = getProposalAnchorKeys();
+    const trackedChangesCount = trackedChanges.filter(
+      (change) => !proposed.has(`revision-${change.revisionId}`)
+    ).length;
     if (trackedChangesCount > 0) setShowCommentsSidebar(true);
-  }, [isLoading, trackedChangesCount, setShowCommentsSidebar, trackedChangesLoadedRef]);
+  }, [
+    isLoading,
+    trackedChanges,
+    getProposalAnchorKeys,
+    setShowCommentsSidebar,
+    trackedChangesLoadedRef,
+  ]);
 }

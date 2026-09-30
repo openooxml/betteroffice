@@ -144,16 +144,7 @@ const MIRROR_LABELLED = MIRROR_LABEL_REFERENCES.map((name) => `[${name}]`).join(
 const MIRROR_CELL = `.${MIRROR_CLASS_NAMES.tableCell}`;
 const MIRROR_HEADER_CELL = `${MIRROR_CELL}[role="columnheader"]`;
 
-/**
- * Reduces a `buildMirrorPage` tree, in place, to its links, its notes (the
- * targets of note references), its header cells (which cells on any page may
- * name) and the elements that label what stays. What stays inside a table
- * cell keeps the whole outermost cell, so the cell keeps its accessible name.
- * Every other element and text goes; the ancestors of what stays keep their
- * attributes, so the ids, order, positions and table semantics that remain
- * are the full mirror's.
- */
-export function reduceMirrorToLinks(mirror: HTMLElement): HTMLElement {
+function mirrorKeptElements(mirror: HTMLElement): { kept: Set<Element>; onPath: Set<Element> } {
   const byId = new Map<string, Element>();
   for (const element of mirror.querySelectorAll('[id]')) byId.set(element.id, element);
   const outermostCell = (element: Element): Element => {
@@ -190,6 +181,20 @@ export function reduceMirrorToLinks(mirror: HTMLElement): HTMLElement {
       }
     }
   }
+  return { kept, onPath };
+}
+
+/**
+ * Reduces a `buildMirrorPage` tree, in place, to its links, its notes (the
+ * targets of note references), its header cells (which cells on any page may
+ * name) and the elements that label what stays. What stays inside a table
+ * cell keeps the whole outermost cell, so the cell keeps its accessible name.
+ * Every other element and text goes; the ancestors of what stays keep their
+ * attributes, so the ids, order, positions and table semantics that remain
+ * are the full mirror's.
+ */
+export function reduceMirrorToLinks(mirror: HTMLElement): HTMLElement {
+  const { kept, onPath } = mirrorKeptElements(mirror);
   const prune = (element: Element): void => {
     for (const child of Array.from(element.childNodes)) {
       if (kept.has(child as Element)) continue;
@@ -207,6 +212,102 @@ export function buildMirrorPageLinks(
   options: BuildMirrorPageOptions = {}
 ): HTMLElement {
   return reduceMirrorToLinks(buildMirrorPage(page, options));
+}
+
+const MIRROR_STRUCTURE = [
+  'layout-page-mirror',
+  MIRROR_CLASS_NAMES.content,
+  MIRROR_CLASS_NAMES.header,
+  MIRROR_CLASS_NAMES.footer,
+  MIRROR_CLASS_NAMES.block,
+  MIRROR_CLASS_NAMES.table,
+  MIRROR_CLASS_NAMES.tableRow,
+  MIRROR_CLASS_NAMES.tableCell,
+  MIRROR_CLASS_NAMES.notes,
+  MIRROR_CLASS_NAMES.blockSdt,
+];
+
+/** A run's text, in a bare span only where its language or direction differs from its context. */
+function plainRun(run: Element, text: string): Node {
+  const doc = run.ownerDocument;
+  const lang = run.getAttribute('lang');
+  const dir = run.getAttribute('dir');
+  const context = run.parentElement;
+  const differs = (name: string, value: string | null): boolean =>
+    value !== null && context?.closest(`[${name}]`)?.getAttribute(name) !== value;
+  if (!differs('lang', lang) && !differs('dir', dir)) return doc.createTextNode(text);
+  const span = doc.createElement('span');
+  if (lang) span.setAttribute('lang', lang);
+  if (dir) span.setAttribute('dir', dir);
+  span.textContent = text;
+  return span;
+}
+
+/**
+ * Reduces a `buildMirrorPage` tree, in place, to what a screen reader reads:
+ * everything `reduceMirrorToLinks` keeps, unchanged, plus the text of every
+ * other run as plain text inside its paragraph, table and region wrappers,
+ * and images with an accessible name. Wrappers that hold no kept element lose
+ * their ids and data attributes, so painter-contract queries never match them.
+ */
+export function reduceMirrorToText(mirror: HTMLElement): HTMLElement {
+  const { kept, onPath } = mirrorKeptElements(mirror);
+  const reduce = (element: Element): void => {
+    if (kept.has(element)) return;
+    if (!onPath.has(element) || (element === mirror && kept.size === 0)) {
+      for (const attribute of Array.from(element.attributes)) {
+        if (attribute.name === 'id' || attribute.name.startsWith('data-')) {
+          element.removeAttribute(attribute.name);
+        }
+      }
+    }
+    const structural =
+      element === mirror ||
+      (!element.classList.contains('layout-run') &&
+        MIRROR_STRUCTURE.some((name) => element.classList.contains(name)));
+    if (!structural && !onPath.has(element)) {
+      if (
+        element.classList.contains(MIRROR_CLASS_NAMES.revisionPmarkGlyph) ||
+        element.getAttribute('aria-hidden') === 'true' ||
+        element.hasAttribute('inert') ||
+        (element as HTMLElement).style?.visibility === 'hidden'
+      ) {
+        element.remove();
+        return;
+      }
+      const object = element.getAttribute('role') === 'img' || Boolean(element.getAttribute('alt'));
+      const accessible = object || Boolean(element.getAttribute('aria-label'));
+      if (element.children.length === 0) {
+        if (element.textContent && !object) {
+          element.replaceWith(plainRun(element, element.textContent));
+        } else if (!accessible) {
+          element.remove();
+        }
+        return;
+      }
+    }
+    for (const child of Array.from(element.children)) reduce(child);
+    for (const child of Array.from(element.childNodes)) {
+      if (child.nodeType !== 3) continue;
+      while (child.nextSibling?.nodeType === 3) {
+        const next = child.nextSibling;
+        child.textContent = (child.textContent ?? '') + (next.textContent ?? '');
+        next.remove();
+      }
+      if (!child.textContent) child.remove();
+    }
+  };
+  reduce(mirror);
+  mirror.style.contentVisibility = 'auto';
+  return mirror;
+}
+
+/** `buildMirrorPage(page)` reduced to readable text: see `reduceMirrorToText`. */
+export function buildMirrorPageText(
+  page: DisplayPage,
+  options: BuildMirrorPageOptions = {}
+): HTMLElement {
+  return reduceMirrorToText(buildMirrorPage(page, options));
 }
 
 /** Whether `page`'s mirror holds the note or note reference with element id `id`. */
