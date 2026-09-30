@@ -39,14 +39,17 @@ pub(crate) fn fingerprint_without_positions<T: Serialize + ?Sized>(
 }
 
 /// Fingerprint of positions relative to the first pm and doc position, and of the
-/// distance between those two.
+/// distance between those two. Without a pm position the doc positions stay
+/// absolute: only a pm shift is carried to a retained display.
 pub(crate) fn relative_positions_fingerprint<T: Serialize + ?Sized>(
     value: &T,
 ) -> Result<u64, String> {
     let mut hasher = Hasher::<true>::new();
     value.serialize(&mut hasher).map_err(|error| error.0)?;
-    if let [Some(pm), Some(doc)] = hasher.first_positions {
-        hasher.inner.write_u64((doc - pm).to_bits());
+    match hasher.first_positions {
+        [Some(pm), Some(doc)] => hasher.inner.write_u64((doc - pm).to_bits()),
+        [None, Some(doc)] => hasher.inner.write_u64(doc.to_bits()),
+        _ => {}
     }
     Ok(hasher.finish())
 }
@@ -668,6 +671,12 @@ mod tests {
         doc_moved.fmt.doc_start = Some(101.0);
         doc_moved.extra["nested"][0]["docEnd"] = json!(101.0);
         assert_ne!(base, relative_positions_fingerprint(&doc_moved).unwrap());
+
+        let doc_only = |position: f64| json!({ "docStart": position, "docEnd": position + 1.0 });
+        assert_ne!(
+            relative_positions_fingerprint(&doc_only(100.0)).unwrap(),
+            relative_positions_fingerprint(&doc_only(200.0)).unwrap()
+        );
     }
 
     #[test]
