@@ -33,8 +33,12 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-/** Body "The cat and the dog", a 1x2 table "the | THE", then "the end"; a header with "the". */
-async function mount(page = 1) {
+/**
+ * Body "The cat and the dog", a 1x2 table "the | THE", then "the end"; a header with "the".
+ * `repeat` has the second page paint the first page's positions again, as a repeated table
+ * header does.
+ */
+async function mount(page = 1, repeat = false) {
   const session = await createYrsSession();
   sessions.push(session);
   const { paraId: first } = session.createStory('body', 'The cat and the dog');
@@ -80,7 +84,13 @@ async function mount(page = 1) {
         displayList: {
           pages: [
             { pageIndex: 0, primitives: [{ kind: 'text', docStart: 0, docEnd: splitAt - 1 }] },
-            { pageIndex: 1, primitives: [{ kind: 'text', docStart: splitAt, docEnd: 100000 }] },
+            {
+              pageIndex: 1,
+              primitives: [
+                ...(repeat ? [{ kind: 'text', docStart: 0, docEnd: splitAt - 3 }] : []),
+                { kind: 'text', docStart: splitAt, docEnd: 100000 },
+              ],
+            },
           ],
         },
         anchorRect: (position: number) => ({
@@ -181,6 +191,15 @@ test('starts at the first match on the page in view', async () => {
     await hook.result.current.api.search('the');
   });
   expect(hook.result.current.api.getSearchState()?.current).toBe(2);
+});
+
+test('a repeated header on the page in view does not send the search back', async () => {
+  const { hook, reveals } = await mount(2, true);
+  await act(async () => {
+    await hook.result.current.api.search('the');
+  });
+  expect(hook.result.current.api.getSearchState()?.current).toBe(2);
+  expect(reveals).toEqual([hook.result.current.highlight!.matches[2].displayFrom]);
 });
 
 test('a document change re-runs the search and keeps the current match', async () => {

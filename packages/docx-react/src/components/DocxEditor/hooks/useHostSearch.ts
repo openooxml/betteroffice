@@ -105,6 +105,26 @@ export function topPageInView(host: HTMLElement | null): number {
   return 0;
 }
 
+/**
+ * The first match `pageIndex` paints that a reveal shows there or later: a repeated table
+ * header paints matches whose reveal goes back to the table's start.
+ */
+function firstOnPage(
+  matches: readonly SearchMatch[],
+  order: ReturnType<typeof displayOrder>,
+  queries: DisplayListQueries,
+  pageIndex: number,
+  fromPage: number
+): number {
+  for (const { from, to } of pagePositionIntervals(queries.displayList, { start: pageIndex, end: pageIndex })) {
+    for (const index of matchesInRange(matches, order, from, to)) {
+      const page = queries.anchorRect(matches[index].displayFrom)?.pageIndex;
+      if (page == null || page >= fromPage) return index;
+    }
+  }
+  return -1;
+}
+
 /** The first match on or after the page in view, wrapping to the first. */
 function firstInView(
   matches: readonly SearchMatch[],
@@ -114,20 +134,12 @@ function firstInView(
   if (matches.length === 0) return -1;
   if (!queries || pageIndex <= 0) return 0;
   // A table row split across pages puts page indices out of position order, so the positions
-  // the page paints decide first.
+  // each page paints decide first, the page in view and then the next ones.
   const order = displayOrder(matches);
-  let first = Infinity;
-  for (const { from, to } of pagePositionIntervals(queries.displayList, { start: pageIndex, end: pageIndex })) {
-    first = Math.min(first, ...matchesInRange(matches, order, from, to).slice(0, 1));
-  }
-  if (Number.isFinite(first)) return first;
-  // the next painted pages, until one holds a match
   const pages = queries.displayList.pages.length;
-  for (let index = pageIndex + 1; index < Math.min(pages, pageIndex + 32); index += 1) {
-    for (const { from, to } of pagePositionIntervals(queries.displayList, { start: index, end: index })) {
-      first = Math.min(first, ...matchesInRange(matches, order, from, to).slice(0, 1));
-    }
-    if (Number.isFinite(first)) return first;
+  for (let index = pageIndex; index < Math.min(pages, pageIndex + 32); index += 1) {
+    const first = firstOnPage(matches, order, queries, index, pageIndex);
+    if (first >= 0) return first;
   }
   let low = 0;
   let high = matches.length;
