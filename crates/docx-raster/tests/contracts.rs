@@ -708,9 +708,7 @@ fn header_and_footer_drawings_lie_under_the_body() {
 
 #[test]
 fn watermark_prefix_lies_under_header_footer_and_body_drawings() {
-    let rect = |x: u32, y: u32, w: u32, fill: &str| {
-        json!({"kind":"rect","x":x,"y":y,"w":w,"h":10,"fill":fill})
-    };
+    let rect = |x: u32, y: u32, w: u32, fill: &str| json!({"kind":"rect","x":x,"y":y,"w":w,"h":10,"fill":fill});
     let scene: DisplayList = serde_json::from_value(json!({
         "pages": [{
             "pageIndex": 0, "width": 80, "height": 50,
