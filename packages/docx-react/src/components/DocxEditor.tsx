@@ -375,6 +375,11 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   /** Receives the editor's rendered-DOM context whenever a new frame or zoom rebuilds it. */
   onRenderedDomContextReady?: (context: RenderedDomContext) => void;
   /**
+   * Called once per document, when its first page is painted on screen, by the first-page
+   * preview or the full document, whichever shows first. The document may still be opening.
+   */
+  onFirstPagePainted?: () => void;
+  /**
    * Unmanaged overlay content, drawn under managed plugin overlays.
    * @deprecated Contribute an `overlay` through `plugins` instead.
    */
@@ -860,6 +865,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     commentsSidebarOpen,
     onCommentsSidebarOpenChange,
     onRenderedDomContextReady,
+    onFirstPagePainted,
     pluginOverlays,
     pluginSidebarItems,
     pluginRenderedDomContext,
@@ -1106,8 +1112,20 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     cleanOrphanedCommentsTimerRef,
   });
   const { resetSettled, awaitingDocument } = canvasRenderer;
+  const shownListRef = useRef(canvasRenderer.displayList);
+  shownListRef.current = canvasRenderer.displayList;
+  // Pages shown while a load is under way belong to the document it replaces.
+  const replacedListsRef = useRef(new WeakSet<object>());
+  if (canvasRenderer.displayList && awaitingDocument()) {
+    replacedListsRef.current.add(canvasRenderer.displayList);
+  }
+  const firstPagePendingRef = useRef(true);
+  const onFirstPagePaintedRef = useRef(onFirstPagePainted);
+  onFirstPagePaintedRef.current = onFirstPagePainted;
   const resetForNewDocument = useCallback(() => {
     beginPluginLoadRef.current();
+    if (shownListRef.current) replacedListsRef.current.add(shownListRef.current);
+    firstPagePendingRef.current = true;
     resetEditorState();
     resetSettled();
   }, [resetEditorState, resetSettled]);
@@ -1207,7 +1225,21 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   useEffect(() => {
     const offPresented = onPresented((displayList) => {
       const shown = shownRef.current;
-      if (shown.engine && displayList === shown.displayList) notifyFramePresented(shown.engine);
+      if (displayList !== shown.displayList) return;
+      if (shown.engine) notifyFramePresented(shown.engine);
+      if (
+        firstPagePendingRef.current &&
+        !awaitingDocument() &&
+        !replacedListsRef.current.has(displayList) &&
+        shown.displayList?.pages.some((page) => page.pageIndex === 0)
+      ) {
+        firstPagePendingRef.current = false;
+        try {
+          onFirstPagePaintedRef.current?.();
+        } catch (error) {
+          console.error('[DocxEditor] onFirstPagePainted threw', error);
+        }
+      }
     });
     // Pages of the opening session that fail to paint fail the load, as its render errors do.
     const offFailed = onReplayFailed((displayList, error) => {
@@ -1222,7 +1254,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       offPresented();
       offFailed();
     };
-  }, [notifyFramePresented]);
+  }, [awaitingDocument, notifyFramePresented]);
   sessionGenerationRef.current = yrsCore.sessionGeneration;
   // Content listeners project the document on every edit; warm its base once
   // the first pages are on screen so neither opening nor the first key pays.
