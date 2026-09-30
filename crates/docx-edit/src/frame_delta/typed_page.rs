@@ -71,11 +71,14 @@ struct Scope {
 }
 
 /// Emit the typed value stream for `page` using the frame's string table,
-/// returning the page's fingerprints.
+/// returning the page's fingerprints. `slots` collects the offset of every
+/// emitted string-table id so a frame encoder that interns pages into a
+/// per-worker table can retarget them to the shared table afterwards.
 pub(super) fn encode_page(
     page: &DisplayPage,
     ids: &mut StringTable,
     out: &mut Vec<u8>,
+    slots: &mut Vec<u32>,
 ) -> Result<PageHashes, String> {
     let mut hashes = PageHashes {
         fingerprint: super::FNV_OFFSET,
@@ -84,6 +87,7 @@ pub(super) fn encode_page(
     page.serialize(EmitSer {
         ids,
         out,
+        slots,
         hashes: &mut hashes,
         scope: Scope {
             fingerprint: true,
@@ -99,7 +103,12 @@ pub(super) fn encode_page(
 /// The fingerprints [`encode_page`] returns, without keeping its output.
 #[cfg(test)]
 pub(super) fn hash_page(page: &DisplayPage) -> Result<PageHashes, String> {
-    encode_page(page, &mut StringTable::default(), &mut Vec::new())
+    encode_page(
+        page,
+        &mut StringTable::default(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -315,6 +324,7 @@ const CONTAINER_END: u64 = u64::MAX;
 struct EmitSer<'a> {
     ids: &'a mut StringTable,
     out: &'a mut Vec<u8>,
+    slots: &'a mut Vec<u32>,
     hashes: &'a mut PageHashes,
     scope: Scope,
     /// True only for the page's outermost container: its direct fields apply
@@ -339,6 +349,7 @@ impl EmitSer<'_> {
     fn string(mut self, value: &str) -> Result<(), SerError> {
         let (id, hash) = self.ids.intern(value).map_err(SerError)?;
         self.tag(VALUE_STRING);
+        self.slots.push(self.out.len() as u32);
         write_u32(self.out, id);
         self.hashes.mix(self.scope, hash);
         Ok(())
@@ -348,6 +359,7 @@ impl EmitSer<'_> {
 struct EmitContainer<'a> {
     ids: &'a mut StringTable,
     out: &'a mut Vec<u8>,
+    slots: &'a mut Vec<u32>,
     hashes: &'a mut PageHashes,
     scope: Scope,
     fields_root: bool,
@@ -375,6 +387,7 @@ impl<'a> EmitContainer<'a> {
         EmitContainer {
             ids: ser.ids,
             out: ser.out,
+            slots: ser.slots,
             hashes: ser.hashes,
             scope: ser.scope,
             fields_root: ser.root,
@@ -445,6 +458,7 @@ impl<'a> EmitContainer<'a> {
         value.serialize(EmitSer {
             ids: &mut *self.ids,
             out: &mut *self.out,
+            slots: &mut *self.slots,
             hashes: &mut *self.hashes,
             scope: self.scope,
             root: false,
@@ -478,6 +492,7 @@ impl<'a> EmitContainer<'a> {
             .ok_or_else(|| SerError("object field count exceeds u32".to_owned()))?;
         let (key_id, key_hash) = self.ids.intern(key).map_err(SerError)?;
         self.entries.push((key_id, self.out.len()));
+        self.slots.push(self.out.len() as u32);
         write_u32(self.out, key_id);
         self.hashes.mix(scope, key_hash);
         if key == "glyphs"
@@ -488,6 +503,7 @@ impl<'a> EmitContainer<'a> {
         value.serialize(EmitSer {
             ids: &mut *self.ids,
             out: &mut *self.out,
+            slots: &mut *self.slots,
             hashes: &mut *self.hashes,
             scope,
             root: false,

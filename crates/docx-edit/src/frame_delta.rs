@@ -7,6 +7,7 @@
 //! page reaches canvas replay.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasher, Hasher};
 use std::rc::Rc;
 
 use docx_layout::display_list::{DisplayList, DisplayPage, DocAttrs, Primitive};
@@ -48,6 +49,56 @@ const MAGIC: [u8; 4] = *b"FDV1";
 const MAX_U32: usize = u32::MAX as usize;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// Word-wise [`Hasher`] for tables keyed by document strings: `mix` per eight
+/// bytes plus a padded tail. Seeded per table so a hostile document cannot
+/// precompute collisions, unlike a fixed-seed alternative like FNV.
+struct WordHasher {
+    state: u64,
+}
+
+impl Hasher for WordHasher {
+    fn finish(&self) -> u64 {
+        self.state
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        let (chunks, remainder) = bytes.as_chunks::<8>();
+        for chunk in chunks {
+            self.state = mix(self.state, u64::from_le_bytes(*chunk));
+        }
+        let mut tail = [0; 8];
+        tail[..remainder.len()].copy_from_slice(remainder);
+        self.state = mix(self.state, u64::from_le_bytes(tail));
+    }
+}
+
+/// [`BuildHasher`] minting [`WordHasher`]s on a per-table random seed.
+#[derive(Clone)]
+struct WordHashSeed(u64);
+
+impl BuildHasher for WordHashSeed {
+    type Hasher = WordHasher;
+
+    fn build_hasher(&self) -> WordHasher {
+        WordHasher {
+            state: mix(FNV_OFFSET, self.0),
+        }
+    }
+}
+
+impl Default for WordHashSeed {
+    fn default() -> Self {
+        Self(
+            std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish(),
+        )
+    }
+}
+
+/// Fast string-keyed maps whose keys stay inside one frame encode.
+type WordMap<K, V> = HashMap<K, V, WordHashSeed>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FramePageSnapshot {
@@ -105,6 +156,38 @@ struct EmittedPage {
     primitive_ids_offset: usize,
     payload_offset: usize,
     payload_len: usize,
+}
+
+/// One page's emitted payload, the offsets of its string-table ids, its
+/// primitive ids and its fingerprints, computed before the page's change is
+/// known. Workers intern into a table local to their page range; the merge
+/// retargets `slots` to the frame's table in first-use order, so the bytes
+/// equal what one sequential emit would produce.
+struct PageEmit {
+    primitive_ids: Vec<u64>,
+    payload: Vec<u8>,
+    slots: Vec<u32>,
+    hashes: typed_page::PageHashes,
+}
+
+/// One worker range's pages plus its local string table in first-use order.
+struct ChunkEmit {
+    strings: Vec<String>,
+    items: Vec<(usize, PageEmit)>,
+}
+
+/// A page's work through `prepare_pages`: what the sequential merge needs
+/// after matching, positions and (for rebuilt pages) payload emission.
+struct PageJob<'a> {
+    page: &'a DisplayPage,
+    anchor: String,
+    page_id: u64,
+    is_new: bool,
+    moved: bool,
+    matched: Option<usize>,
+    positions: Vec<PrimitivePositionSnapshot>,
+    note_anchors: Vec<NoteAnchorSnapshot>,
+    full_prepare: bool,
 }
 
 /// What a frame sends for a page, against the page's previous snapshot.
@@ -564,11 +647,12 @@ fn prepare_pages<'a>(
             index as i64
         }
     };
-    let mut prepared = Vec::with_capacity(list.pages.len());
+    let mut jobs = Vec::with_capacity(list.pages.len());
+    let mut emit_jobs: Vec<(usize, &DisplayPage, u64)> = Vec::new();
     for ((index, page), anchor) in list.pages.iter().enumerate().zip(anchors) {
         let page_index = checked_u32(index, "page index")?;
-        let matched = matched_previous[index].map(|previous_index| &previous[previous_index]);
-        let (page_id, is_new, moved) = if let Some(old) = matched {
+        let matched = matched_previous[index];
+        let (page_id, is_new, moved) = if let Some(old) = matched.map(|old| &previous[old]) {
             (old.page_id, false, old.page_index != page_index)
         } else {
             *next_page_id = next_page_id
@@ -583,17 +667,72 @@ fn prepare_pages<'a>(
         let full_prepare = is_new
             || page.unbuilt
             || rebuilt_pages.is_none_or(|rebuilt_pages| rebuilt_pages(index))
-            || matched.is_none_or(|old| i64::from(old.page_index) != retained_index(index));
-        let mut emitted = None;
-        let (fingerprint, visual_fingerprint, primitive_ids) = if full_prepare {
-            let primitive_ids: Rc<[u64]> = primitive_ids(page, page_id).into();
-            let mark = (data.out.len(), data.strings.mark());
-            let (page_emitted, hashes) =
-                emit_page(page, &primitive_ids, &mut data.strings, &mut data.out)?;
-            emitted = Some((page_emitted, mark));
-            (hashes.fingerprint, hashes.visual_fingerprint, primitive_ids)
+            || matched
+                .map(|old| &previous[old])
+                .is_none_or(|old| i64::from(old.page_index) != retained_index(index));
+        if full_prepare {
+            emit_jobs.push((index, page, page_id));
+        }
+        jobs.push(PageJob {
+            page,
+            anchor,
+            page_id,
+            is_new,
+            moved,
+            matched,
+            positions,
+            note_anchors,
+            full_prepare,
+        });
+    }
+
+    let mut payloads: Vec<Option<PageEmit>> = jobs.iter().map(|_| None).collect();
+    let mut payload_chunk = vec![0_usize; jobs.len()];
+    let mut chunk_strings: Vec<Vec<String>> = Vec::new();
+    let mut chunk_maps: Vec<Vec<u32>> = Vec::new();
+    for (chunk, emitted) in emit_pages(&emit_jobs)?.into_iter().enumerate() {
+        chunk_maps.push(vec![u32::MAX; emitted.strings.len()]);
+        chunk_strings.push(emitted.strings);
+        for (index, emit) in emitted.items {
+            payload_chunk[index] = chunk;
+            payloads[index] = Some(emit);
+        }
+    }
+
+    let mut prepared = Vec::with_capacity(jobs.len());
+    for (index, job) in jobs.into_iter().enumerate() {
+        let PageJob {
+            page,
+            anchor,
+            page_id,
+            is_new,
+            moved,
+            matched,
+            positions,
+            note_anchors,
+            full_prepare,
+        } = job;
+        let page_index = checked_u32(index, "page index")?;
+        let pending = if full_prepare {
+            Some((
+                payloads[index]
+                    .take()
+                    .expect("full-prepare pages emit before the merge"),
+                payload_chunk[index],
+            ))
         } else {
-            let old = matched.expect("clean incremental pages retain a previous snapshot");
+            None
+        };
+        let (fingerprint, visual_fingerprint, primitive_ids) = if let Some((emit, _)) = &pending {
+            (
+                emit.hashes.fingerprint,
+                emit.hashes.visual_fingerprint,
+                Rc::from(emit.primitive_ids.as_slice()),
+            )
+        } else {
+            let old = matched
+                .map(|old| &previous[old])
+                .expect("clean incremental pages retain a previous snapshot");
             let fingerprint = if positions == old.positions && note_anchors == old.note_anchors {
                 old.fingerprint
             } else {
@@ -615,17 +754,25 @@ fn prepare_pages<'a>(
             positions,
             note_anchors,
         };
-        let change = page_change(full, is_new, moved, matched, &snapshot);
-        // A page emitted to be fingerprinted that does not upsert gives its
-        // bytes and the strings it added back.
-        let emitted = match emitted {
-            Some((emitted, _)) if matches!(change, PageChange::Upsert) => Some(emitted),
-            Some((_, (end, mark))) => {
-                data.out.truncate(end);
-                data.strings.rollback(mark);
-                None
-            }
-            None => None,
+        let change = page_change(
+            full,
+            is_new,
+            moved,
+            matched.map(|old| &previous[old]),
+            &snapshot,
+        );
+        // A page emitted to be fingerprinted that does not upsert drops its
+        // payload; the merge only interns strings on retained references, so
+        // the shared table matches the sequential rollback.
+        let emitted = match (pending, &change) {
+            (Some((emit, chunk)), PageChange::Upsert) => Some(append_prepared(
+                emit,
+                &mut chunk_maps[chunk],
+                &chunk_strings[chunk],
+                &mut data.strings,
+                &mut data.out,
+            )?),
+            _ => None,
         };
         prepared.push(PreparedPage {
             snapshot,
@@ -635,6 +782,107 @@ fn prepare_pages<'a>(
         });
     }
     Ok(prepared)
+}
+
+/// Emits each job's page payload, in parallel over contiguous ranges of the
+/// job list on native targets (one range on wasm). A range's local string
+/// table accumulates its pages' first-use order, the same order the merge
+/// replays.
+fn emit_pages(jobs: &[(usize, &DisplayPage, u64)]) -> Result<Vec<ChunkEmit>, String> {
+    fn emit_chunk(jobs: &[(usize, &DisplayPage, u64)]) -> Result<ChunkEmit, String> {
+        let mut strings = StringTable::default();
+        let mut items = Vec::with_capacity(jobs.len());
+        for &(index, page, page_id) in jobs {
+            let primitive_ids = primitive_ids(page, page_id);
+            let mut payload = Vec::new();
+            let mut slots = Vec::new();
+            let hashes = encode_page(page, &mut strings, &mut payload, &mut slots)?;
+            items.push((
+                index,
+                PageEmit {
+                    primitive_ids,
+                    payload,
+                    slots,
+                    hashes,
+                },
+            ));
+        }
+        Ok(ChunkEmit {
+            strings: strings.into_strings(),
+            items,
+        })
+    }
+
+    let workers = if jobs.len() < 8 || cfg!(target_arch = "wasm32") {
+        1
+    } else {
+        std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1)
+            .min(jobs.len())
+    };
+    if workers <= 1 {
+        return Ok(vec![emit_chunk(jobs)?]);
+    }
+    let size = jobs.len().div_ceil(workers);
+    let mut chunks = Vec::with_capacity(workers);
+    std::thread::scope(|scope| -> Result<(), String> {
+        let mut handles = Vec::new();
+        for range in jobs.chunks(size).skip(1) {
+            handles.push(scope.spawn(move || emit_chunk(range)));
+        }
+        chunks.push(emit_chunk(&jobs[..size])?);
+        for handle in handles {
+            chunks.push(
+                handle
+                    .join()
+                    .map_err(|_| "display page emit worker panicked".to_owned())??,
+            );
+        }
+        Ok(())
+    })?;
+    Ok(chunks)
+}
+
+/// Retargets `emit`'s string-table ids from its worker-local table to the
+/// frame's table, in first-use order across the retained payloads, then
+/// appends the aligned primitive ids and payload to the data section.
+fn append_prepared(
+    mut emit: PageEmit,
+    map: &mut [u32],
+    local: &[String],
+    strings: &mut StringTable,
+    out: &mut Vec<u8>,
+) -> Result<EmittedPage, String> {
+    for &slot in &emit.slots {
+        let at = slot as usize;
+        let local_id = u32::from_le_bytes(
+            emit.payload[at..at + 4]
+                .try_into()
+                .expect("recorded string id slot"),
+        ) as usize;
+        let id = match map[local_id] {
+            u32::MAX => {
+                let (id, _) = strings.intern(&local[local_id])?;
+                map[local_id] = id;
+                id
+            }
+            id => id,
+        };
+        emit.payload[at..at + 4].copy_from_slice(&id.to_le_bytes());
+    }
+    align(out, 8);
+    let primitive_ids_offset = out.len();
+    for id in &emit.primitive_ids {
+        write_u64(out, *id);
+    }
+    let payload_offset = out.len();
+    out.extend_from_slice(&emit.payload);
+    Ok(EmittedPage {
+        primitive_ids_offset,
+        payload_offset,
+        payload_len: emit.payload.len(),
+    })
 }
 
 /// Emits `page`'s aligned primitive ids and then its payload.
@@ -650,7 +898,7 @@ fn emit_page(
         write_u64(out, *id);
     }
     let payload_offset = out.len();
-    let hashes = encode_page(page, strings, out)?;
+    let hashes = encode_page(page, strings, out, &mut Vec::new())?;
     Ok((
         EmittedPage {
             primitive_ids_offset,
@@ -732,6 +980,7 @@ fn page_anchors(list: &DisplayList) -> Vec<String> {
         .map(|page| {
             let semantic = visit_primitives(page)
                 .find_map(|(_, primitive)| primitive_owner(primitive))
+                .map(|owner| owner.to_string())
                 .unwrap_or_else(|| format!("empty:{}", page.page_index));
             let section = page.section_id.as_deref().unwrap_or("");
             let raw = format!("{section}|{semantic}");
@@ -743,22 +992,57 @@ fn page_anchors(list: &DisplayList) -> Vec<String> {
         .collect()
 }
 
+/// The identity string a primitive hashes under: `para:x`, `block:x` (key or
+/// id), `cell:x`, or `page:N` when the primitive carries no owner.
+#[derive(Clone, Copy)]
+enum OwnerKey<'a> {
+    Para(&'a str),
+    Block(&'a str),
+    BlockId(&'a serde_json::Number),
+    Cell(&'a str),
+    Page(u64),
+}
+
+impl std::fmt::Display for OwnerKey<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OwnerKey::Para(value) => write!(f, "para:{value}"),
+            OwnerKey::Block(value) => write!(f, "block:{value}"),
+            OwnerKey::BlockId(value) => write!(f, "block:{value}"),
+            OwnerKey::Cell(value) => write!(f, "cell:{value}"),
+            OwnerKey::Page(id) => write!(f, "page:{id}"),
+        }
+    }
+}
+
 fn primitive_ids(page: &DisplayPage, page_id: u64) -> Vec<u64> {
-    let mut occurrences: HashMap<String, usize> = HashMap::new();
+    use std::fmt::Write as _;
+    let mut occurrences: WordMap<String, usize> = WordMap::default();
     let mut used = HashSet::new();
+    let mut key = String::new();
     visit_primitives(page)
         .map(|(region, primitive)| {
             let kind = primitive_kind(primitive);
-            let owner = primitive_owner(primitive).unwrap_or_else(|| format!("page:{page_id}"));
-            let raw = format!("{region}|{kind}|{owner}");
-            let occurrence = occurrences.entry(raw.clone()).or_default();
-            let key = format!("{raw}|{}", *occurrence);
-            *occurrence += 1;
+            let owner = primitive_owner(primitive).unwrap_or(OwnerKey::Page(page_id));
+            key.clear();
+            let _ = write!(key, "{region}|{kind}|{owner}");
+            let base = key.len();
+            let occurrence = if let Some(count) = occurrences.get_mut(key.as_str()) {
+                let occurrence = *count;
+                *count += 1;
+                occurrence
+            } else {
+                occurrences.insert(key.clone(), 1);
+                0
+            };
+            let _ = write!(key, "|{occurrence}");
             let mut id = hash_bytes(key.as_bytes());
             let mut salt = 0_u64;
             while id == 0 || !used.insert(id) {
                 salt = salt.wrapping_add(1);
-                id = hash_bytes(format!("{key}|collision:{salt}").as_bytes());
+                key.truncate(base);
+                let _ = write!(key, "|{occurrence}|collision:{salt}");
+                id = hash_bytes(key.as_bytes());
             }
             id
         })
@@ -996,30 +1280,20 @@ fn primitive_attrs(primitive: &Primitive) -> &DocAttrs {
     }
 }
 
-fn primitive_owner(primitive: &Primitive) -> Option<String> {
+fn primitive_owner(primitive: &Primitive) -> Option<OwnerKey<'_>> {
     let attrs = primitive_attrs(primitive);
     attrs
         .para_id
         .as_ref()
-        .map(|value| format!("para:{value}"))
-        .or_else(|| {
-            attrs
-                .block_key
-                .as_ref()
-                .map(|value| format!("block:{value}"))
-        })
-        .or_else(|| {
-            attrs
-                .block_id
-                .as_ref()
-                .map(|value| format!("block:{value}"))
-        })
+        .map(|value| OwnerKey::Para(value))
+        .or_else(|| attrs.block_key.as_ref().map(|value| OwnerKey::Block(value)))
+        .or_else(|| attrs.block_id.as_ref().map(OwnerKey::BlockId))
         .or_else(|| {
             attrs
                 .cell
                 .as_ref()
                 .and_then(|cell| cell.cell_id.as_ref())
-                .map(|value| format!("cell:{value}"))
+                .map(|value| OwnerKey::Cell(value))
         })
 }
 
@@ -1228,11 +1502,10 @@ fn encode_glyph_array(glyphs: &[Value], out: &mut Vec<u8>) -> Result<(), String>
 }
 
 /// A frame's string table, filled in first-use order while pages are encoded.
-/// The strings come from the document, so the table keeps std's randomized
-/// hashing.
+/// The strings come from the document, so the table hashes on a random seed.
 #[derive(Default)]
 pub(crate) struct StringTable {
-    ids: HashMap<String, (u32, u64)>,
+    ids: WordMap<String, (u32, u64)>,
     strings: Vec<String>,
 }
 
@@ -1248,17 +1521,6 @@ impl StringTable {
         self.ids.insert(value.to_owned(), entry);
         self.strings.push(value.to_owned());
         Ok(entry)
-    }
-
-    fn mark(&self) -> usize {
-        self.strings.len()
-    }
-
-    /// Forgets the strings interned since `mark`.
-    fn rollback(&mut self, mark: usize) {
-        for value in self.strings.drain(mark..) {
-            self.ids.remove(&value);
-        }
     }
 
     /// The strings indexed by their ids.
@@ -1702,7 +1964,7 @@ mod tests {
 
                 let mut table = StringTable::default();
                 let mut out = Vec::new();
-                encode_page(page, &mut table, &mut out).unwrap();
+                encode_page(page, &mut table, &mut out, &mut Vec::new()).unwrap();
                 let strings = table.into_strings();
                 let mut reference_strings = BTreeSet::new();
                 collect_strings(&value, &mut reference_strings);
@@ -1779,7 +2041,7 @@ mod tests {
         let page = &list.pages[0];
         let mut table = StringTable::default();
         let mut out = Vec::new();
-        encode_page(page, &mut table, &mut out).unwrap();
+        encode_page(page, &mut table, &mut out, &mut Vec::new()).unwrap();
         let strings = table.into_strings();
         let mut cursor = 0;
         let decoded = decode_typed(&out, &mut cursor, &strings);
@@ -1843,8 +2105,8 @@ mod tests {
         let alone = hash_page(&list.pages[1]).unwrap();
         let mut table = StringTable::default();
         let mut out = Vec::new();
-        encode_page(&list.pages[0], &mut table, &mut out).unwrap();
-        let after = encode_page(&list.pages[1], &mut table, &mut out).unwrap();
+        encode_page(&list.pages[0], &mut table, &mut out, &mut Vec::new()).unwrap();
+        let after = encode_page(&list.pages[1], &mut table, &mut out, &mut Vec::new()).unwrap();
         assert_eq!(alone.fingerprint, after.fingerprint);
         assert_eq!(alone.visual_fingerprint, after.visual_fingerprint);
     }
