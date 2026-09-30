@@ -1548,4 +1548,19 @@ mod tests {
         assert!(Arc::ptr_eq(&shared, &committed_body(&doc)));
         assert_eq!(doc.story_views.lock().unwrap().entries.len(), 1);
     }
+
+    #[test]
+    fn installing_source_metadata_retires_committed_story_views() {
+        let doc = EditingDoc::new(100);
+        crate::seed::seed_from_docx(
+            &doc,
+            include_bytes!("../tests/fixtures/footnote-anchor.docx"),
+        )
+        .unwrap();
+        let before = committed_body(&doc);
+        assert!(Arc::ptr_eq(&before, &committed_body(&doc)));
+        let metadata = doc.metadata.lock().unwrap().take().unwrap();
+        doc.install_source(Arc::into_inner(metadata).unwrap(), 1);
+        assert!(!Arc::ptr_eq(&before, &committed_body(&doc)));
+    }
 }
