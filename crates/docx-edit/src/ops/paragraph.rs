@@ -400,7 +400,17 @@ impl EditingDoc {
                 story: at.story.clone(),
                 index: at.index,
             })?;
-        let (first_para_id, props) = capture_pilcrow(&orig_map, &txn);
+        let (first_para_id, mut props) = capture_pilcrow(&orig_map, &txn);
+        // A mark kept before a pending block carries that block's revision; the new mark does not.
+        let block_revisions = snapshot_range(&story, &txn, orig_index + 1, orig_index + 2)
+            .first()
+            .and_then(|chunk| chunk.block_revisions(&txn))
+            .unwrap_or_default();
+        props.retain(|(key, value)| match key.as_str() {
+            PPR_INS => block_revisions[0].as_ref() != Some(value),
+            PPR_DEL => block_revisions[1].as_ref() != Some(value),
+            _ => true,
+        });
         let second_half_empty = orig_index == at.index;
 
         let ins = revision_id

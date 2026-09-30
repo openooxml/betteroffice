@@ -771,6 +771,35 @@ fn accepting_a_pending_table_deletion_keeps_a_suggested_split() {
 }
 
 #[test]
+fn splitting_a_retained_mark_leaves_the_block_revision_on_that_mark() {
+    for accept in [false, true] {
+        for suggest in [false, true] {
+            for (at, expected) in [(1, ["o", "ldtail"]), (3, ["old", "tail"])] {
+                let doc = EditingDoc::new(331);
+                let ids = seed_pending_block(&doc, "table", accept);
+                let resolve = |id: &String| {
+                    let target = ChangeTarget::Revision(id.clone());
+                    if accept {
+                        doc.accept_change(&local(), &target)
+                    } else {
+                        doc.reject_change(&local(), &target)
+                    }
+                    .unwrap();
+                };
+                resolve(&ids[0]);
+                assert_inherited_block_revision(&doc, &ids[1], !accept);
+                let ctx = if suggest { suggesting("Cy") } else { local() };
+                doc.split_paragraph(&ctx, Position::new("body", at), None)
+                    .unwrap();
+                resolve(&ids[1]);
+                assert_eq!(body_texts(&doc), expected);
+                assert_eq!(doc.list_revisions().unwrap().len(), usize::from(suggest));
+            }
+        }
+    }
+}
+
+#[test]
 fn inherited_block_stamps_and_resolution_undo_and_redo_together() {
     for kind in ["table", "blockSdt", "pageBreak", "columnBreak"] {
         for accept in [false, true] {
