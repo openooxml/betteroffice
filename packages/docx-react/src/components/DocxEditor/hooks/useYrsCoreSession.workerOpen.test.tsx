@@ -587,7 +587,7 @@ test.each([false, true])(
     expect(result.current.core.replicaReadyRef?.current).toBe(true);
     expect(result.current.mainOpens).toEqual([false]);
     expect(replicas).toEqual([session]);
-    expect(sourceVersionOf(result.current.renderer.displayList)).toBe(session.version());
+    await waitFor(() => expect(sourceVersionOf(result.current.renderer.queries)).toBe(session.version()));
     const direct = await createYrsSession();
     sessions.push(direct);
     direct.openDocx(bytes, true);
