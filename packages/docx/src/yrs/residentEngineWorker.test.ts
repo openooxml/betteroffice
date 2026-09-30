@@ -15,8 +15,10 @@ beforeAll(async () => {
   const frameDelta = resolve(import.meta.dir, '../layout/render/frameDelta.ts');
   const modules: Record<string, string> = {
     './residentEngineSession':
-      'export const createResidentEngineSession = async () => testHarness.session;',
-    '../layout/render/glyphCache': 'export class GlyphCache {}',
+      'export const createResidentEngineSession = async (heapLimitBytes) => ((testHarness.heapLimits ??= []).push(heapLimitBytes), testHarness.session);',
+    '../layout/render/glyphCache':
+      'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; } }',
+    '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.memories;',
     '../layout/render/frameDelta': `
       export { applyFrameDeltaOwned } from ${JSON.stringify(frameDelta)};
       export const decodeFrameDelta = () => testHarness.delta;
@@ -83,6 +85,7 @@ function worker() {
     presented: [] as number[],
     failRaster: null as number | null,
     failPresent: null as number | null,
+    memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
       loadState() {},
       setPartialDocument() {},
@@ -184,12 +187,13 @@ function worker() {
       harness.rasterized = [];
       harness.presented = [];
     },
-    async bootstrap(pageCount = 3) {
+    async bootstrap(pageCount = 3, heapLimitBytes?: number) {
       delta(Array.from({ length: pageCount }, (_, index) => index + 1), true, 100, pageCount);
       return send({
         type: 'bootstrap',
         expectedFrameEpoch: 0,
         extras: '',
+        ...(heapLimitBytes !== undefined ? { heapLimitBytes } : {}),
         snapshot: {
           clientId: 1,
           state: new Uint8Array(),
@@ -578,6 +582,99 @@ describe('resident worker layout ownership', () => {
   });
 });
 
+describe('resident worker memory', () => {
+  test('a bootstrap starts the session under its heap limit', async () => {
+    const w = worker();
+    await w.bootstrap(3, 1024);
+    await w.bootstrap();
+    expect((w.harness as { heapLimits?: unknown[] }).heapLimits).toEqual([1024, undefined]);
+  });
+
+  test('every reply carries the worker memory', async () => {
+    const w = worker();
+    const reply = await w.bootstrap();
+    expect(reply.memory).toEqual(w.harness.memories);
+  });
+
+  test('a trap after a failed allocation replies out of memory', async () => {
+    const w = worker();
+    await w.bootstrap();
+    w.harness.memories = [
+      { label: 'docx-edit', bufferBytes: 4294901760, liveBytes: 4172000000, peakBytes: 4172000000, failedAllocationBytes: 65536 },
+    ];
+    w.harness.session.buildDisplayListFrame = () => {
+      throw new WebAssembly.RuntimeError('unreachable');
+    };
+    const trapped = await w.build([1]);
+    expect(trapped.ok).toBe(false);
+    expect(!trapped.ok && trapped.terminal).toBe(true);
+    expect(!trapped.ok && trapped.outOfMemory).toBe(true);
+    expect(!trapped.ok && trapped.error).toBe(
+      'Resident engine worker ran out of memory allocating 65536 bytes: unreachable'
+    );
+    expect(trapped.memory).toEqual(w.harness.memories);
+  });
+
+  test('a trap that the raster paints past still answers the request as out of memory', async () => {
+    const w = worker();
+    await w.bootstrap();
+    w.harness.memories = [
+      { label: 'docx-edit', bufferBytes: 65536, liveBytes: 65000, peakBytes: 65000, failedAllocationBytes: 112 },
+    ];
+    Object.assign(w.harness.session, {
+      outlineGlyphJson: () => {
+        throw new WebAssembly.RuntimeError('unreachable');
+      },
+    });
+    const rasterize = w.harness.rasterize;
+    w.harness.rasterize = async (...args: Parameters<typeof rasterize>) => {
+      try {
+        (w.harness as { glyphs?: (fontId: number, glyphId: number) => string }).glyphs?.(1, 1);
+      } catch {
+        // painted with browser text instead
+      }
+      return rasterize(...args);
+    };
+    const attached = await w.attach([1]);
+    expect(!attached.ok && attached.terminal && attached.outOfMemory).toBe(true);
+    const next = await w.build([1]);
+    expect(!next.ok && next.terminal).toBe(true);
+  });
+
+  test('a trap the raster paints past without a failed allocation keeps the worker', async () => {
+    const w = worker();
+    await w.bootstrap();
+    Object.assign(w.harness.session, {
+      outlineGlyphJson: () => {
+        throw new WebAssembly.RuntimeError('unreachable');
+      },
+    });
+    const rasterize = w.harness.rasterize;
+    w.harness.rasterize = async (...args: Parameters<typeof rasterize>) => {
+      try {
+        (w.harness as { glyphs?: (fontId: number, glyphId: number) => string }).glyphs?.(1, 1);
+      } catch {
+        // painted with browser text instead
+      }
+      return rasterize(...args);
+    };
+    expect((await w.attach([1])).ok).toBe(true);
+    expect((await w.build([1])).ok).toBe(true);
+  });
+
+  test('a trap without a failed allocation is not reported as out of memory', async () => {
+    const w = worker();
+    await w.bootstrap();
+    w.harness.session.buildDisplayListFrame = () => {
+      throw new WebAssembly.RuntimeError('unreachable');
+    };
+    const trapped = await w.build([1]);
+    expect(!trapped.ok && trapped.terminal).toBe(true);
+    expect(!trapped.ok && trapped.outOfMemory).toBeUndefined();
+    expect(!trapped.ok && trapped.error).toBe('Resident engine worker trapped: unreachable');
+  });
+});
+
 describe('sliced layout completion', () => {
   const provisional = '{"layout":{"pages":[1]},"notesConverged":true,"provisional":true}';
   const full = '{"layout":{"pages":[1,2]},"notesConverged":true}';
@@ -715,6 +812,46 @@ describe('sliced layout completion', () => {
     expect(calls.filter((call) => call === 'begin')).toHaveLength(2);
     expect(calls.indexOf('update')).toBeLessThan(calls.lastIndexOf('begin'));
     expect(calls).not.toContain('whole');
+  });
+
+  test('a glyph trap while a frame request finishes the pass answers both requests once', async () => {
+    const { w, onResume, bootstrap } = steppedWorker(100);
+    await bootstrap();
+    await w.attach([1]);
+    // Presenting fails too once the trap is recorded; the trap still answers.
+    w.harness.failPresent = 1;
+    w.harness.memories = [
+      { label: 'docx-edit', bufferBytes: 65536, liveBytes: 65000, peakBytes: 65000, failedAllocationBytes: 112 },
+    ];
+    Object.assign(w.harness.session, {
+      outlineGlyphJson: () => {
+        throw new WebAssembly.RuntimeError('unreachable');
+      },
+    });
+    const rasterize = w.harness.rasterize;
+    w.harness.rasterize = async (...args: Parameters<typeof rasterize>) => {
+      try {
+        (w.harness as { glyphs?: (fontId: number, glyphId: number) => string }).glyphs?.(1, 1);
+      } catch {
+        // painted with browser text instead
+      }
+      return rasterize(...args);
+    };
+    let frame: Promise<ResidentEngineWorkerResponse> | undefined;
+    onResume.push(() => {
+      frame = w.send({ type: 'buildFrame', extras: 'given', expectedFrameEpoch: 2, paintCaret: false });
+    });
+    const completion = await w.send({
+      type: 'completeLayout',
+      expectedFrameEpoch: 1,
+      paintCaret: false,
+      sliceBlocks: 2,
+    });
+    const framed = await frame!;
+    expect(!completion.ok && completion.terminal && completion.outOfMemory).toBe(true);
+    expect(!framed.ok && framed.terminal && framed.outOfMemory).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(new Set(w.answered).size).toBe(w.answered.length);
   });
 
   test('a frame request finishes the pass first and answers it first', async () => {
@@ -878,6 +1015,7 @@ describe('sliced layout completion', () => {
 
 describe('resident worker opening', () => {
   const provisional = '{"layout":{"pages":[1]},"notesConverged":true,"provisional":true}';
+  const full = '{"layout":{"pages":[1,2]},"notesConverged":true}';
   const snapshot = {
     clientId: 1,
     state: new Uint8Array([5]),
@@ -894,9 +1032,10 @@ describe('resident worker opening', () => {
   function openingWorker() {
     const w = worker();
     const calls: string[] = [];
+    let epoch = 0;
     Object.assign(w.harness.session, {
-      openDocx: (bytes: Uint8Array, digest?: string) => {
-        calls.push(`open:${bytes.join(',')}:${digest}`);
+      openDocx: (bytes: Uint8Array, digest?: string, generation?: string) => {
+        calls.push(`open:${bytes.join(',')}:${digest}:${generation}`);
         return '{"host":1}';
       },
       layoutFontRequirementsJson: (input: string) => {
@@ -908,23 +1047,40 @@ describe('resident worker opening', () => {
         calls.push('font');
         return 1;
       },
-      layoutDocumentWithRegionsPrefixRetainedJson: (input: string) => {
-        calls.push(`prefix:${input}`);
+      layoutDocumentWithRegionsPrefixRetainedJson: (input: string, pages: number) => {
+        calls.push(`prefix:${input}:${pages}`);
         return provisional;
       },
-      encodeState: () => new Uint8Array([7, 8]),
+      beginRegionLayout: (input: string) => {
+        calls.push(`begin:${input}`);
+        return { measuredBlocks: 0, bodyBlocks: 2 };
+      },
+      resumeRegionLayout: (blocks: number) => {
+        calls.push(`resume:${blocks}`);
+        return { measuredBlocks: 2, bodyBlocks: 2, layoutJson: full };
+      },
+      residentCaretSnapshot: () => ({ frameEpoch: epoch, caretRect: null }),
+      buildDisplayListFrame: (_input: string, expectedFrameEpoch: number) => {
+        calls.push(`frame:${expectedFrameEpoch}`);
+        epoch += 1;
+        w.harness.delta = {
+          protocolVersion: 1,
+          full: true,
+          frameEpoch: epoch,
+          baseFrameEpoch: 0,
+          docEpoch: epoch,
+          layoutEpoch: epoch,
+          pageCount: 0,
+          operations: [],
+          bytes: new Uint8Array(),
+        };
+        return new Uint8Array([0]);
+      },
+      encodeState: () => {
+        calls.push('state');
+        return new Uint8Array([7, 8]);
+      },
     });
-    w.harness.delta = {
-      protocolVersion: 1,
-      full: true,
-      frameEpoch: 1,
-      baseFrameEpoch: 0,
-      docEpoch: 1,
-      layoutEpoch: 1,
-      pageCount: 0,
-      operations: [],
-      bytes: new Uint8Array(),
-    };
     return { w, calls };
   }
 
@@ -934,11 +1090,15 @@ describe('resident worker opening', () => {
       type: 'open',
       bytes: new Uint8Array([1, 2, 3]).buffer,
       digest: 'abc',
+      generation: 'opening',
+      heapLimitBytes: 1024,
     });
     expect(opened.ok && opened.hostJson).toBe('{"host":1}');
     expect(opened.ok && opened.stateVector).toBeDefined();
+    expect(opened.memory).toEqual(w.harness.memories);
     const requirements = await w.send({ type: 'fontRequirements', layoutInput: '{"request":1}' });
     expect(requirements.ok && requirements.requirementsJson).toBe('[{"key":"a"}]');
+    expect(requirements.memory).toEqual(w.harness.memories);
 
     const framed = await w.send({
       type: 'bootstrap',
@@ -949,17 +1109,86 @@ describe('resident worker opening', () => {
       expectedFrameEpoch: 0,
       provisionalPages: 3,
     });
+    expect(framed.ok && framed.layoutJson).toBe(provisional);
     expect(framed.ok && framed.layoutProvisional).toBe(true);
+    expect((w.harness as { heapLimits?: unknown[] }).heapLimits).toEqual([1024]);
     expect(calls).toEqual([
-      'open:1,2,3:abc',
+      'open:1,2,3:abc:opening',
       'requirements:{"request":1}',
       'font',
-      'prefix:{"request":1}',
+      'prefix:{"request":1}:3',
+      'frame:0',
     ]);
 
     const state = await w.send({ type: 'encodeState' });
     expect(state.ok && [...new Uint8Array(state.state!)]).toEqual([7, 8]);
+    expect(state.memory).toEqual(w.harness.memories);
+    expect(calls[calls.length - 1]).toBe('state');
+
+    const completed = await w.send({
+      type: 'completeLayout',
+      expectedFrameEpoch: 1,
+      paintCaret: false,
+      sliceBlocks: 2,
+    });
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(completed.ok && completed.layoutProvisional).toBeUndefined();
+    expect(calls.slice(-3)).toEqual(['begin:{"request":1}', 'resume:2', 'frame:1']);
   });
+
+  test('a snapshot bootstrap lays out the same provisional prefix after loading state', async () => {
+    const { w, calls } = openingWorker();
+    const framed = await w.send({
+      type: 'bootstrap',
+      snapshot,
+      extras: '',
+      layoutExtras: '{}',
+      expectedFrameEpoch: 0,
+      provisionalPages: 3,
+    });
+    expect(framed.ok && framed.layoutJson).toBe(provisional);
+    expect(framed.ok && framed.layoutProvisional).toBe(true);
+    expect(calls).toEqual(['loadState', 'font', 'prefix:{"request":1}:3', 'frame:0']);
+  });
+
+  for (const type of ['open', 'fontRequirements', 'encodeState'] as const) {
+    test(`${type} attributes an OOM trap and refuses queued requests`, async () => {
+      const { w, calls } = openingWorker();
+      if (type !== 'open') {
+        await w.send({ type: 'open', bytes: new Uint8Array([4]).buffer });
+      }
+      calls.length = 0;
+      w.harness.memories[0].failedAllocationBytes = 64;
+      const method = {
+        open: 'openDocx',
+        fontRequirements: 'layoutFontRequirementsJson',
+        encodeState: 'encodeState',
+      }[type];
+      Object.assign(w.harness.session, {
+        [method]: () => {
+          calls.push('trap');
+          throw new WebAssembly.RuntimeError('unreachable');
+        },
+      });
+      const failed = w.send(
+        type === 'open'
+          ? { type, bytes: new Uint8Array([4]).buffer }
+          : type === 'fontRequirements'
+            ? { type, layoutInput: snapshot.layoutInput }
+            : { type }
+      );
+      const queued = w.send({ type: 'encodeState' });
+      for (const reply of await Promise.all([failed, queued])) {
+        expect(!reply.ok && reply.terminal && reply.outOfMemory).toBe(true);
+        expect(!reply.ok && reply.error).toBe(
+          'Resident engine worker ran out of memory allocating 64 bytes: unreachable'
+        );
+        expect(reply.memory).toEqual(w.harness.memories);
+        expect(w.answered.filter((id) => id === reply.id)).toHaveLength(1);
+      }
+      expect(calls).toEqual(['trap']);
+    });
+  }
 
   test('a bootstrap of an opened document fails, and keeps the worker, when nothing was opened', async () => {
     const { w, calls } = openingWorker();
