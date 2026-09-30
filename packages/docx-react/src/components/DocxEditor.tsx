@@ -1232,7 +1232,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             openInWorker: canvasRenderer.openInWorker,
             renderedFrame: canvasRenderer.status === 'ready' ? canvasRenderer.displayList : null,
             pendingCompletion: canvasRenderer.pendingCompletion,
-            completingLayout: canvasRenderer.completingLayout,
             hydrateOnDemand: modeReadOnly && !collaboration,
           }
         : undefined,
@@ -2151,7 +2150,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     allSidebarItems.some((item) => !item.hidden) || (opening && showCommentsSidebar);
 
   const requestReplica = yrsCore.requestReplica;
-  const replicaPending = Boolean(experimentalWorkerOpen && yrsCore.session && !yrsCore.replicaReady);
+  const replicaPending = Boolean(
+    experimentalWorkerOpen && yrsCore.hydrateOnDemand && yrsCore.session && !yrsCore.replicaReady
+  );
   // Plugins, sidebars, the outline and geometry callbacks read the replica.
   const replicaWanted =
     (plugins?.length ?? 0) > 0 ||
@@ -2167,11 +2168,13 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   useEffect(() => {
     if (experimentalWorkerOpen && replicaReady && showOutlineRef.current) refreshHeadings();
   }, [experimentalWorkerOpen, replicaReady, refreshHeadings, showOutlineRef]);
-  // A pointer on a page needs the replica; plugin overlays do not. The input asks for itself.
+  // A mouse press on a page needs the replica; plugin overlays and touch pans do not. A tap asks
+  // through its gesture, the input for itself.
   useEffect(() => {
     const content = editorContentRef.current;
     if (!replicaPending || !content) return;
-    const onPointer = (event: Event) => {
+    const onPointer = (event: PointerEvent) => {
+      if (event.pointerType === 'touch' || event.pointerType === 'pen') return;
       if (event.target instanceof Element && event.target.closest('.canvas-page') !== null) {
         requestReplica();
       }

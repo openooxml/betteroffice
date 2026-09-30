@@ -62,6 +62,8 @@ export interface UsePagesPointerOptions {
   readOnly: boolean;
   replicaPending?: () => boolean;
   replicaReady?: boolean;
+  /** Asks for the replica a recorded gesture waits for. */
+  requestReplica?: () => void;
   /** the non-body part open for editing — the body is inert behind it */
   partEdit?: PartEdit | null;
   displayListQueries?: DisplayListQueries | null;
@@ -91,6 +93,8 @@ export interface UsePagesPointerOptions {
 
 export interface UsePagesPointerReturn {
   bumpInputEpoch: () => void;
+  /** Advances on every input that supersedes a pending gesture. */
+  inputEpoch: () => number;
   handlePagesMouseDown: (e: React.MouseEvent) => void;
   handlePagesMouseMove: (e: React.MouseEvent) => void;
   /** drops the hover cursor when the pointer leaves the pages */
@@ -185,6 +189,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     readOnly,
     replicaPending,
     replicaReady = true,
+    requestReplica,
     partEdit = null,
     displayListQueries,
     canvasHostRef,
@@ -224,6 +229,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       clearPendingGesture();
     }
   }, [clearPendingGesture]);
+  const inputEpoch = useCallback(() => inputEpochRef.current, []);
   const listenForOutsideInput = useCallback(() => {
     if (pendingGestureCleanupRef.current) return;
     const onInput = (event: Event) => {
@@ -409,11 +415,12 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
           epoch: inputEpochRef.current,
         };
         listenForOutsideInput();
+        requestReplica?.();
         beginTextDrag(position);
       }
       return true;
     },
-    [beginTextDrag, listenForOutsideInput, replicaPending]
+    [beginTextDrag, listenForOutsideInput, replicaPending, requestReplica]
   );
 
   const updatePendingGestureHead = useCallback((position: number): boolean => {
@@ -490,6 +497,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         yrsInputRef.current?.selectParagraphAtDisplay(target.displayPosition, target.story);
       }
     }
+    // The user may have scrolled away while it loaded; the replayed selection stays put.
+    yrsInputRef.current?.keepSelectionInPlace();
     const active = document.activeElement;
     if (!active || active === document.body || yrsInputRef.current?.isFocused()) focusInput();
   }, [
@@ -891,6 +900,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
                 epoch: inputEpochRef.current,
               };
               listenForOutsideInput();
+              requestReplica?.();
             }
             return;
           }
@@ -974,6 +984,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       partEdit,
       readOnly,
       replicaPending,
+      requestReplica,
       resolveCanvasHit,
       resolveTarget,
       scrollToPositionImpl,
@@ -1127,6 +1138,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   return {
     bumpInputEpoch,
+    inputEpoch,
     handlePagesMouseDown,
     handlePagesMouseMove,
     handlePagesMouseLeave,

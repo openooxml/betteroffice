@@ -69,6 +69,8 @@ export interface YrsInputRef {
   selectWordAtDisplay(position: number, story?: string): void;
   selectParagraphAtDisplay(position: number, story?: string): void;
   displaySelection(): YrsDisplaySelection | null;
+  /** The current selection stays where it is on screen rather than scrolling into view. */
+  keepSelectionInPlace(): void;
   applyStoredFormatting(action: YrsStoredFormattingAction): void;
   clearStoredFormatting(): void;
   storedFormatting(): YrsStoredFormatting | null;
@@ -97,6 +99,8 @@ export interface YrsInputProps {
   replicaReadyRef?: React.RefObject<boolean>;
   /** Asks for the replica when input reaches the textarea before it has loaded. */
   requestReplica?: () => void;
+  /** Whether a missing selection starts as a caret at the story start; input always starts one. */
+  seedSelection?: boolean;
   session: YrsSession | null;
   story?: string;
   isSuggesting?: boolean;
@@ -218,6 +222,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     readOnly,
     replicaReadyRef,
     requestReplica,
+    seedSelection = true,
     session,
     story = 'body',
     isSuggesting = false,
@@ -304,6 +309,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   // remote insert above the caret while sticky locs do not, so comparing locs is
   // what keeps a viewer's viewport still during someone else's edit.
   const lastCaretScrollSelectionRef = useRef<YrsSelection | null | undefined>(undefined);
+  // A selection the input shows without scrolling to it: a default caret, a replayed gesture.
+  const quietSelectionRef = useRef<YrsSelection | null>(null);
   displayListQueriesRef.current = displayListQueries;
   displayListFrameEpochRef.current = displayListFrameEpoch;
   resolveDisplayListQueriesRef.current = resolveDisplayListQueries;
@@ -342,7 +349,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [story]
   );
 
-  const ensureSelection = useCallback((): YrsSelection | null => {
+  const readSelection = useCallback((): YrsSelection | null => {
     if (!session) return null;
     const current = session.selection();
     const currentMap =
@@ -359,20 +366,28 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     ) {
       return current;
     }
+    return null;
+  }, [belongsToRootStory, inputPositionMap, session]);
+
+  const ensureSelection = useCallback((): YrsSelection | null => {
+    if (!session) return null;
+    const current = readSelection();
+    if (current) return current;
     const first = inputPositionMap(story)?.paragraphs[0];
     if (!first) return null;
     const loc = { story, paraId: first.paraId, offset: 0 };
     session.setSelection(loc);
+    quietSelectionRef.current = { anchor: loc, head: loc };
     return { anchor: loc, head: loc };
-  }, [belongsToRootStory, inputPositionMap, session, story]);
+  }, [inputPositionMap, readSelection, session, story]);
 
   const displaySelection = useCallback((): YrsDisplaySelection | null => {
-    const current = ensureSelection();
+    const current = seedSelection ? ensureSelection() : readSelection();
     if (!current) return null;
     const anchor = locToDisplayPosition(current.anchor);
     const head = locToDisplayPosition(current.head);
     return anchor == null || head == null ? null : { anchor, head };
-  }, [ensureSelection, locToDisplayPosition]);
+  }, [ensureSelection, locToDisplayPosition, readSelection, seedSelection]);
 
   const emitSelection = useCallback(
     (docChanged: boolean, residentLayoutReady = false, residentCaretReady = false): void => {
@@ -1290,6 +1305,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         setSelection({ ...loc, offset: 0 }, { ...loc, offset: paragraph.text.length });
       },
       displaySelection,
+      keepSelectionInPlace() {
+        quietSelectionRef.current = session?.selection() ?? null;
+      },
       applyStoredFormatting,
       clearStoredFormatting() {
         const current = ensureSelection();
@@ -1346,9 +1364,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   useEffect(() => {
     if (!enabled || !session || !replicaReady) return;
-    ensureSelection();
+    if (seedSelection) ensureSelection();
     emitSelection(false);
-  }, [emitSelection, enabled, ensureSelection, session, replicaReady]);
+  }, [emitSelection, enabled, ensureSelection, seedSelection, session, replicaReady]);
 
   useEffect(() => {
     if (!enabled || !session || readOnly || !replicaReady) return;
@@ -1405,9 +1423,14 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const stickySelection = session?.selection() ?? null;
     const previousStickySelection = lastCaretScrollSelectionRef.current;
     lastCaretScrollSelectionRef.current = stickySelection;
+    const quiet = quietSelectionRef.current;
+    quietSelectionRef.current = null;
+    // Read-only, the first selection is where the user already looks.
     const selectionChanged =
-      previousStickySelection === undefined ||
-      !sameYrsSelection(previousStickySelection, stickySelection);
+      (previousStickySelection === undefined
+        ? !readOnly
+        : !sameYrsSelection(previousStickySelection, stickySelection)) &&
+      !(quiet && stickySelection && sameYrsSelection(quiet, stickySelection));
     if (
       selection.anchor === selection.head &&
       shouldScrollCaretIntoView(layoutUpdateOrigin, selectionChanged, readOnly)

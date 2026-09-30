@@ -7,10 +7,16 @@ interface PendingReplica {
   fail(error: unknown): void;
   cancel(): void;
   pending: boolean;
-  onDemand?: () => boolean;
+  onDemand?: WorkerOpenReplicaDemand;
   initialVersion: string;
   readyVersion?: string;
   loadedVersion?: string;
+}
+
+/** Loads a replica only when asked: `request` starts it at the point its owner allows. */
+export interface WorkerOpenReplicaDemand {
+  active(): boolean;
+  request(): void;
 }
 
 const replicas = new WeakMap<YrsSession, PendingReplica>();
@@ -20,7 +26,7 @@ export function deferWorkerOpenReplica(
   hydrate: () => Promise<() => void>,
   fallback: () => void,
   onReady: () => void,
-  onDemand?: () => boolean
+  onDemand?: WorkerOpenReplicaDemand
 ): PendingReplica {
   let resolve!: () => void;
   let reject!: (error: unknown) => void;
@@ -102,13 +108,19 @@ export function requestWorkerOpenReplica(session: YrsSession): Promise<void> | u
 
 export function awaitWorkerOpenReplica(session: YrsSession): Promise<void> | undefined {
   const replica = replicas.get(session);
-  if (replica?.pending && replica.onDemand?.() === true) replica.start();
+  if (replica?.pending && replica.onDemand?.active() === true) replica.onDemand.request();
   return replica?.ready;
 }
 
 export function workerOpenReplicaOnDemand(session: YrsSession): boolean {
   const replica = replicas.get(session);
-  return replica?.pending === true && replica.onDemand?.() === true;
+  return replica?.pending === true && replica.onDemand?.active() === true;
+}
+
+/** Asks an on-demand replica of `session` to load; see {@link WorkerOpenReplicaDemand}. */
+export function requestOnDemandWorkerOpenReplica(session: YrsSession): void {
+  const replica = replicas.get(session);
+  if (replica?.pending && replica.onDemand?.active() === true) replica.onDemand.request();
 }
 
 /** The version `session` had when its replica loaded; a later version holds a newer change. */
