@@ -454,7 +454,7 @@ test('every page exposes text outside the window and range queries build full ch
     elements = context.findElementsForRange(300, 307);
   });
   expect(elements).toHaveLength(1);
-  expect(elements[0]).toBe(far.querySelector('span.layout-run-text[data-doc-start="300"]') ?? undefined);
+  expect(elements[0]).toBe(far.querySelector('span.layout-run-text[data-doc-start="300"]')!);
   expect(elements[0]!.textContent).toBe('Page 30');
   expect(elements[0]!.isConnected).toBe(true);
   expect(mirroredPages(host)).toContain(30);
