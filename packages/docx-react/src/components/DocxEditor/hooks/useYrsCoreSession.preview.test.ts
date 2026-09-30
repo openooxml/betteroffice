@@ -95,6 +95,48 @@ test('a first-page preview opens first, cannot save, and hands over once it has 
   unmount();
 });
 
+test("the renderer's layout keeps the preview alive past the handoff until it lets go", async () => {
+  const { result, rerender, unmount } = renderHook(
+    ({ held }: { held: unknown[] }) =>
+      useYrsCoreSession(
+        true,
+        null,
+        null,
+        PAGES,
+        1,
+        undefined,
+        { isCurrentLoad: () => true },
+        { previewFirstPage: true, heldEngines: held }
+      ),
+    { initialProps: { held: [null] as unknown[] } }
+  );
+  await waitFor(() => expect(result.current.previewing).toBe(true));
+  const preview = result.current.session!;
+  let destroyed = false;
+  const destroy = preview.destroy.bind(preview);
+  preview.destroy = () => {
+    destroyed = true;
+    destroy();
+  };
+  rerender({ held: [preview] });
+  await act(async () => {
+    result.current.notifyFramePresented(preview);
+  });
+  await waitFor(() => expect(result.current.previewing).toBe(false));
+  const full = result.current.session!;
+  await act(async () => {
+    result.current.notifyFramePresented(full);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(result.current.handoffFrom).toBeNull();
+  expect(destroyed).toBe(false);
+  expect(preview.paragraphs('body').length).toBeGreaterThan(0);
+
+  rerender({ held: [full] });
+  expect(destroyed).toBe(true);
+  unmount();
+});
+
 test('a tab that draws no frames still opens the full document', async () => {
   const requestFrame = globalThis.requestAnimationFrame;
   globalThis.requestAnimationFrame = () => 0;

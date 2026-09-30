@@ -232,9 +232,9 @@ const NO_HELD_ENGINES: readonly unknown[] = [];
 
 /**
  * Frees sessions the editor let go of. Consumers' effects in the commit that replaces a session
- * still run with the session they rendered, and the renderer keeps the engines in `held` (its
- * layout's) until the next document's layout replaces them, so `retire` keeps such a session
- * until neither renders with it; any other session is freed at once, and unmounting frees every
+ * still run with the session they rendered, and `held` names sessions still shown after it (a
+ * handed-off preview, the renderer's layout engine), so `retire` keeps such a session until
+ * nothing renders with it; any other session is freed at once, and unmounting frees every
  * retired one.
  */
 function useRetiredSessions(
@@ -317,15 +317,21 @@ export function useYrsCoreSession(
     options?.previewFirstPage === true && !collaboration && !collaborationInitialUpdate;
   const fullOpenTimeoutRef = useRef(FULL_OPEN_TIMEOUT_MS);
   fullOpenTimeoutRef.current = options?.fullOpenTimeoutMs ?? FULL_OPEN_TIMEOUT_MS;
-  const retire = useRetiredSessions(session, options?.heldEngines ?? NO_HELD_ENGINES);
-  // The preview leaves once components have let go of it, on the next commit.
-  const retirePreview = useCallback((retiring: YrsSession): void => {
-    if (retiringRef.current === retiring) {
-      retiringRef.current = null;
-      setHandoffFrom(null);
-    }
-    setTimeout(() => retiring.destroy(), 0);
-  }, []);
+  const retire = useRetiredSessions(session, [
+    handoffFrom,
+    ...(options?.heldEngines ?? NO_HELD_ENGINES),
+  ]);
+  // The handoff and the renderer's layout hold the preview until the full session replaces both.
+  const retirePreview = useCallback(
+    (retiring: YrsSession): void => {
+      if (retiringRef.current === retiring) {
+        retiringRef.current = null;
+        setHandoffFrom(null);
+      }
+      retire(retiring);
+    },
+    [retire]
+  );
 
   useEffect(() => {
     setSession(null);
@@ -374,7 +380,7 @@ export function useYrsCoreSession(
       abandoned = true;
       sessionRef.current = null;
       setSession(null);
-      setTimeout(() => full.destroy(), 0);
+      retire(full);
       retiringRef.current = null;
       setHandoffFrom(null);
       fail(error, { opened: true });
