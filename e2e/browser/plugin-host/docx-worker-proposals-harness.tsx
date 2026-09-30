@@ -21,7 +21,11 @@ interface OverlayState {
 
 type OverlayContext = DocxPluginContext<OverlayState>;
 type NavigationResult = Awaited<ReturnType<OverlayContext['navigation']['scrollToParagraph']>>;
-const readOnly = new URLSearchParams(window.location.search).get('readOnly') !== 'false';
+const options = new URLSearchParams(window.location.search);
+const readOnly = options.get('readOnly') !== 'false';
+const revisions = options.get('revisions') === '1';
+const keepSidebarClosed = options.get('sidebar') === 'closed';
+const reportChanges = options.get('onChange') === '1';
 setGoogleFontsEnabled(false);
 
 const probe = {
@@ -32,6 +36,9 @@ const probe = {
   hydratedBeforeSidebar: false,
   sidebarOpened: false,
   sidebarOpen: false,
+  sidebarOpenChanges: [] as boolean[],
+  renderedDomContextCalls: 0,
+  contentChanges: [] as { bodyContainsProposedText: boolean }[],
   load: null as { version: string; sessionVersion: string; snapshotVersion: string } | null,
   events: { load: 0, 'proposal-change': 0, 'layout-change': 0 },
   eventSerial: 0,
@@ -42,6 +49,9 @@ const probe = {
       captures: this.captures,
       hydratedBeforeSidebar: this.hydratedBeforeSidebar,
       sidebarOpen: this.sidebarOpen,
+      sidebarOpenChanges: [...this.sidebarOpenChanges],
+      renderedDomContextCalls: this.renderedDomContextCalls,
+      contentChanges: [...this.contentChanges],
       load: this.load,
       events: { ...this.events },
       errors: [...this.errors],
@@ -165,7 +175,7 @@ function Harness() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const editor = useRef<DocxEditorRef>(null);
   useEffect(() => {
-    void pagedDocx(6, 12).then(setBuffer);
+    void pagedDocx(6, 12, { trackedInsertion: revisions }).then(setBuffer);
   }, []);
   useEffect(() => {
     probe.editor = editor.current;
@@ -180,12 +190,27 @@ function Harness() {
         experimentalWorkerOpen
         readOnly={readOnly}
         allowHostProposals
-        commentsSidebarOpen={sidebarOpen}
-        onCommentsSidebarOpenChange={setSidebarOpen}
+        commentsSidebarOpen={keepSidebarClosed ? false : sidebarOpen}
+        onCommentsSidebarOpenChange={(open) => {
+          probe.sidebarOpenChanges.push(open);
+          if (!keepSidebarClosed) {
+            if (open) probe.sidebarOpened = true;
+            setSidebarOpen(open);
+          }
+        }}
         showHostProposalsInSidebar={sidebarOpen}
         plugins={PLUGINS}
         fonts={faces}
         measurementFontProvider={fonts}
+        onRenderedDomContextReady={() => { probe.renderedDomContextCalls += 1; }}
+        onChange={
+          reportChanges ? (document) => {
+            probe.contentChanges.push({
+              bodyContainsProposedText:
+                JSON.stringify(document.package.document).includes('Reviewed 1'),
+            });
+          } : undefined
+        }
         onError={(error) => probe.errors.push(error.message)}
         onPluginError={(error) => probe.errors.push(String(error.error))}
       />

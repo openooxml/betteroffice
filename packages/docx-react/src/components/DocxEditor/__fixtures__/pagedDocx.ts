@@ -2,7 +2,11 @@ import JSZip from 'jszip';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 
-export async function pagedDocx(pages: number, paragraphsPerPage = 1): Promise<ArrayBuffer> {
+export async function pagedDocx(
+  pages: number,
+  paragraphsPerPage = 1,
+  options: { trackedInsertion?: boolean } = {}
+): Promise<ArrayBuffer> {
   const body = Array.from({ length: pages }, (_, page) =>
     Array.from({ length: paragraphsPerPage }, (_, paragraph) => {
       const id = (page * paragraphsPerPage + paragraph + 1).toString(16).padStart(8, '0');
@@ -17,7 +21,12 @@ export async function pagedDocx(pages: number, paragraphsPerPage = 1): Promise<A
         paragraphsPerPage === 1
           ? ''
           : '<w:rPr><w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans"/></w:rPr>';
-      return `<w:p${identity}>${breakBefore}<w:r>${font}<w:t>${text}</w:t></w:r></w:p>`;
+      const insertion =
+        options.trackedInsertion && page === pages - 1 && paragraph === paragraphsPerPage - 1
+          ? '<w:ins w:id="1" w:author="Document reviewer" w:date="2026-09-29T00:00:00Z">' +
+            `<w:r>${font}<w:t xml:space="preserve"> Existing insertion.</w:t></w:r></w:ins>`
+          : '';
+      return `<w:p${identity}>${breakBefore}<w:r>${font}<w:t>${text}</w:t></w:r>${insertion}</w:p>`;
     }).join('')
   ).join('');
   const zip = new JSZip();

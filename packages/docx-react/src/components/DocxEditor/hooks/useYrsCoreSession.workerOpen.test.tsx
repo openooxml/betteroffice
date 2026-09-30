@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
@@ -91,7 +91,8 @@ function installWorker(options: {
   failState?: boolean;
   holdState?: boolean;
   holdOpen?: boolean;
-  oomStage?: 'open' | 'fontRequirements' | 'bootstrap' | 'encodeState';
+  oomStage?: 'open' | 'fontRequirements' | 'bootstrap' | 'encodeState' | 'proposal' |
+    'documentRead';
   holdRetryOpen?: boolean;
   revisionCount?: number;
   failRevisionCount?: boolean;
@@ -109,7 +110,8 @@ function installWorker(options: {
             (options.holdOpen && request.type === 'open') ||
             (options.holdRetryOpen && workers.length > 1 && request.type === 'open')) worker.hold();
         if (options.oomStage === request.type &&
-            (request.type !== 'encodeState' || workers.length === 1)) {
+            (!['encodeState', 'proposal', 'documentRead'].includes(request.type) ||
+              workers.length === 1)) {
           queueMicrotask(() => worker.onmessage?.({
             data: { id: request.id, ok: false, error: 'worker exhausted memory', terminal: true, outOfMemory: true },
           } as MessageEvent));
@@ -144,6 +146,8 @@ interface HarnessProps {
   collaboration?: DocxEditorCollaborationOptions;
   readOnly?: boolean;
   workerProposals?: boolean;
+  onWorkerRevisions?: () => void;
+  onWorkerContentChange?: () => void;
   allowHostProposals?: boolean;
   resolvedCommentIds?: ReadonlySet<number>;
   /** Holds the replica as while the shown engine's completion is still to be asked of the worker. */
@@ -199,6 +203,8 @@ function useHarness(props: HarnessProps) {
         completingLayout: renderer.completingLayout,
         ...(props.holdReplica ? { pendingCompletion: renderer.presentedEngine } : {}),
         hydrateOnDemand: props.hydrateOnDemand,
+        onWorkerRevisions: props.onWorkerRevisions,
+        onWorkerContentChange: props.onWorkerContentChange,
       } : undefined,
     }
   );
@@ -1232,11 +1238,239 @@ test('disabled worker open preserves main-thread open, projection and flush with
   }
 });
 
+const workerProposalProps: HarnessProps = {
+  ...initialProps,
+  source: longBytes,
+  readOnly: true,
+  hydrateOnDemand: true,
+  workerProposals: true,
+  allowHostProposals: true,
+};
+
+async function openWorkerProposals(props: HarnessProps = workerProposalProps) {
+  const harness = renderHook(useHarness, { initialProps: props });
+  await waitFor(() => expect(harness.result.current.core.workerProposalsReady).toBe(true));
+  await waitFor(() => expect(harness.result.current.renderer.completingLayout).toBeNull(), {
+    timeout: 5000,
+  });
+  return harness;
+}
+
+test('worker-held proposals reject proposal OOM without reopening source bytes', async () => {
+  const options: Parameters<typeof installWorker>[0] = {};
+  const { workers, posted } = installWorker(options);
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const api = result.current.ref.current!;
+    const identities = await api.getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    const initial = await api.getProposals();
+    await act(async () => {
+      expect(await api.proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'held-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Held ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    const held = await api.getProposals();
+    expect(held.proposals.map(({ id }) => id)).toEqual(['held-proposal']);
+    await waitFor(() => expect(
+      sourceVersionOf(result.current.renderer.queries)
+    ).toBe(held.version));
+    await waitFor(() => expect(result.current.renderer.completingLayout).toBeNull());
+    options.oomStage = 'proposal';
+    await act(async () => {
+      await expect(api.proposeChanges({
+        expectVersion: held.version,
+        proposals: [{
+          id: 'next-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'end', text: ' Next',
+        }],
+      })).rejects.toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    });
+    expect(await api.getProposals()).toEqual(held);
+    await expect(api.readParagraphs({ view: 'accepted' })).rejects.toThrow(
+      'The resident worker holding this document is gone'
+    );
+    expect(await api.getProposals()).toEqual(held);
+    expect(workers).toHaveLength(1);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
+    expect(posted.filter((request) => request.type === 'proposal' &&
+      request.operation.kind === 'propose')).toHaveLength(2);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
+test('a document read OOM before proposals reopens the source document once', async () => {
+  const { workers, posted } = installWorker({ oomStage: 'documentRead' });
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const initial = await result.current.ref.current!.getProposals();
+    expect(initial.proposals).toEqual([]);
+    const read = await result.current.ref.current!.readParagraphs({ view: 'accepted' });
+    expect(read).toMatchObject({ ok: true });
+    if (!read.ok) throw new Error(read.failure.message);
+    expect(read.paragraphs).toHaveLength(205);
+    expect(workers).toHaveLength(2);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(2);
+    expect(posted.filter((request) => request.type === 'documentRead')).toHaveLength(2);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
+test.each([true, false])(
+  'worker revisions wait for layout completion with onWorkerRevisions=%s',
+  async (withCallback) => {
+    let completing = () => false;
+    const asked: boolean[] = [];
+    const onWorkerRevisions = mock(() => {});
+    const { workers, posted } = installWorker({
+      holdState: true,
+      revisionCount: 1,
+      onRevisionCount: () => asked.push(completing()),
+    });
+    const frames = holdFrames();
+    const props = {
+      ...workerProposalProps,
+      holdReplica: true,
+      onWorkerRevisions: withCallback ? onWorkerRevisions : undefined,
+    };
+    const { result, rerender, unmount } = renderHook(useHarness, { initialProps: props });
+    completing = () => result.current.renderer.completingLayout !== null;
+    try {
+      await waitFor(() => expect(result.current.host).not.toBeNull());
+      const session = result.current.core.session!;
+      await waitFor(() => expect(result.current.renderer.completingLayout).toBe(session));
+      act(() => result.current.presentFrame());
+      act(() => frames.run());
+      act(() => frames.run());
+      expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
+      expect(onWorkerRevisions).not.toHaveBeenCalled();
+      rerender({ ...props, holdReplica: false });
+      await waitFor(() => expect(result.current.renderer.completingLayout).toBeNull(), {
+        timeout: 5000,
+      });
+      await waitFor(() => expect(posted.filter((request) =>
+        request.type === 'revisionCount'
+      )).toHaveLength(1));
+      expect(asked).toEqual([false]);
+      expect(posted.findIndex((request) => request.type === 'revisionCount')).toBeGreaterThan(
+        posted.findIndex((request) => request.type === 'completeLayout')
+      );
+      if (withCallback) {
+        await waitFor(() => expect(onWorkerRevisions).toHaveBeenCalledTimes(1));
+      } else {
+        await waitFor(() => expect(posted.filter((request) =>
+          request.type === 'encodeState'
+        )).toHaveLength(1));
+      }
+      rerender({ ...props, holdReplica: true });
+      rerender({ ...props, holdReplica: false });
+      act(() => frames.run());
+      act(() => frames.run());
+      await act(async () => {});
+      expect(onWorkerRevisions).toHaveBeenCalledTimes(withCallback ? 1 : 0);
+      expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
+      expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(
+        withCallback ? 0 : 1
+      );
+      expect(result.current.core.replicaReady).toBe(false);
+      expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(true);
+      expect(session.storyIds()).toEqual([]);
+      expect(result.current.mainOpens).toEqual([]);
+      if (!withCallback) {
+        await act(async () => {
+          workers[0].release();
+          await awaitWorkerOpenReplica(session);
+        });
+        await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+        expect(session.hasStory('body')).toBe(true);
+      }
+      expect(result.current.errors).toEqual([]);
+    } finally {
+      unmount();
+      frames.restore();
+    }
+  },
+  15_000
+);
+
+test('worker content callbacks skip preview states and refused proposals', async () => {
+  const onWorkerContentChange = mock(() => {});
+  const { posted } = installWorker();
+  const { result, unmount } = await openWorkerProposals({
+    ...workerProposalProps, onWorkerContentChange,
+  });
+  try {
+    const api = result.current.ref.current!;
+    const identities = await api.getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    const initial = await api.getProposals();
+    expect(onWorkerContentChange).not.toHaveBeenCalled();
+    await act(async () => {
+      expect(await api.proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'content-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Changed ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    expect(onWorkerContentChange).toHaveBeenCalledTimes(1);
+    const proposed = await api.getProposals();
+    expect(proposed.version).not.toBe(initial.version);
+    await act(async () => {
+      expect(await api.setProposalStates({
+        expectVersion: proposed.version,
+        expectPreviewVersion: proposed.previewVersion,
+        changes: [{ id: 'content-proposal', state: 'accepted' }],
+      })).toMatchObject({ ok: true });
+    });
+    const preview = await api.getProposals();
+    expect(preview.version).toBe(proposed.version);
+    expect(preview.previewVersion).toBe(proposed.previewVersion + 1);
+    expect(preview.proposals[0]!.state).toBe('accepted');
+    expect(onWorkerContentChange).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      expect(await api.proposeChanges({
+        expectVersion: initial.version, proposals: [],
+      })).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+    });
+    expect(await api.getProposals()).toEqual(preview);
+    expect(onWorkerContentChange).toHaveBeenCalledTimes(1);
+    expect(posted.filter((request) => request.type === 'proposal' &&
+      request.operation.kind === 'propose')).toHaveLength(2);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
 test('worker proposals reach the registry before hydration and survive hand-over', async () => {
   const { posted } = installWorker();
   const frames = holdFrames();
   const { result, unmount } = renderHook(useHarness, {
-    initialProps: { ...initialProps, workerProposals: true, allowHostProposals: true },
+    initialProps: workerProposalProps,
   });
   try {
     await waitFor(() => expect(result.current.host).not.toBeNull());
@@ -1326,7 +1560,7 @@ test('the host proposal gate refuses before initializing the worker authority', 
 test('a failed hand-over refuses to reseed worker proposals', async () => {
   installWorker({ failState: true });
   const { result } = renderHook(useHarness, {
-    initialProps: { ...initialProps, workerProposals: true, allowHostProposals: true },
+    initialProps: workerProposalProps,
   });
   await waitFor(() => expect(result.current.host).not.toBeNull());
   const session = result.current.core.session!;
@@ -1349,7 +1583,7 @@ test('a failed hand-over refuses to reseed worker proposals', async () => {
 test('a failed empty hand-over releases the mirror before using the main replica', async () => {
   installWorker({ failState: true });
   const { result } = renderHook(useHarness, {
-    initialProps: { ...initialProps, workerProposals: true, allowHostProposals: true },
+    initialProps: workerProposalProps,
   });
   await waitFor(() => expect(result.current.host).not.toBeNull());
   const session = result.current.core.session!;
