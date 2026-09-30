@@ -55,32 +55,22 @@ fn metrics(bytes: &[u8]) -> (f64, usize) {
         .as_array()
         .unwrap()
         .len();
-    let marker = display["pages"][0]["primitives"]
+    let runs: Vec<&Value> = display["pages"][0]["primitives"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|primitive| {
-            matches!(primitive["kind"].as_str(), Some("text" | "glyphRun"))
-                && primitive["text"]
-                    .as_str()
-                    .is_some_and(|text| text.trim_start().starts_with("MARKER"))
-        })
-        .unwrap_or_else(|| {
-            let texts: Vec<_> = display["pages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|page| {
-                    page["primitives"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .filter_map(|primitive| primitive["text"].as_str())
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-            panic!("MARKER HEADING on page one, page texts {texts:?}")
-        });
+        .filter(|primitive| matches!(primitive["kind"].as_str(), Some("text" | "glyphRun")))
+        .collect();
+    let mut text = String::new();
+    let mut starts = Vec::new();
+    for run in &runs {
+        starts.push(text.len());
+        text.push_str(run["text"].as_str().unwrap_or_default());
+    }
+    let at = text
+        .find("MARKER HEADING")
+        .unwrap_or_else(|| panic!("MARKER HEADING on page one, page text {text:?}"));
+    let marker = runs[starts.partition_point(|&start| start <= at) - 1];
     let baseline = marker["baselineY"]
         .as_f64()
         .or_else(|| marker["glyphs"][0]["y"].as_f64())
