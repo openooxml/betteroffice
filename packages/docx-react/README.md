@@ -463,11 +463,7 @@ const review = defineDocxPlugin<State>({
   show their tabs, and a tab opens its panel as a drawer over the document that
   Escape closes. Collapsing a panel keeps the plugin running.
 - **Geometry.** `context.geometry` is null until a rendered layout shows the
-  current version, and whenever it falls behind. Overlays stay mounted
-  meanwhile, with `context.geometry` and `context.snapshot.layout` null: their
-  `geometry` prop is the previous layout, whose `toOverlayRect` answers until
-  geometry for the new one exists, while its hit tests and anchors refuse.
-  `geometry.dom` answers in
+  current version, and whenever it falls behind. `geometry.dom` answers in
   pages-container units divided by zoom; `geometry.toOverlayRect(rect)` converts
   one of those rectangles into pixels of the unscaled overlay layer, once, or
   returns null after that layout stops being rendered.

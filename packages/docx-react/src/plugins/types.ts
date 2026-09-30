@@ -342,9 +342,8 @@ export interface DocxPluginDefinition<S> {
   onEvent?(context: DocxPluginContext<S>, event: DocxPluginEvent): MaybePromise<void>;
   panel?: DocxPluginPanel<S>;
   /**
-   * Stays mounted while an edit or preview change lays out, with `context.geometry` and
-   * `context.snapshot.layout` null: `geometry` is then the previous layout, whose `toOverlayRect`
-   * answers until geometry for the new one exists.
+   * May render during a pending layout with `context.geometry` and `context.snapshot.layout` null;
+   * `geometry` is then the previous layout's.
    */
   overlay?: ComponentType<{ context: DocxPluginContext<S>; geometry: DocxPluginGeometry }>;
   getSidebarItems?(context: DocxPluginContext<S>): readonly DocxPluginSidebarItem<S>[];
