@@ -998,10 +998,9 @@ mod tests {
         let mut layout = crate::place::layout_document(&mut input).unwrap();
         crate::regions::apply_document_regions(&mut layout, &regions);
         assert_eq!(layout.pages.len(), 2);
-        assert_eq!(
-            layout.pages[0].body_anchor_margins.as_ref(),
-            Some(&effective)
-        );
+        assert_eq!(layout.pages[0].margins, effective);
+        assert!(layout.pages[0].body_margins.is_none());
+        assert!(layout.pages[0].body_anchor_margins.is_none());
         let body_box = layout.pages[0]
             .fragments
             .iter()

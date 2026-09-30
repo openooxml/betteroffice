@@ -434,6 +434,13 @@ impl Paginator {
             .section_page_float_bands
             .sections
             .get(self.section_index)
+            .filter(|bands| {
+                !bands.default.is_empty()
+                    || [&bands.first, &bands.even]
+                        .into_iter()
+                        .flatten()
+                        .any(|bands| !bands.is_empty())
+            })
             .and_then(|bands| bands.anchor_margins.clone())
             .map(effective_margins)
             .unwrap_or_else(|| body_margins.clone());
