@@ -73,11 +73,13 @@ async function fontsLoadedFor(
   const fontScope = createFontLoadScope();
   const asked: string[] = [];
   fontScope.loadFontsWithMapping = async (families) => {
-    asked.push(...families);
+    asked.push(...new Set(families.map((family) => family.trim())));
   };
   const options = loaderOptions(fontScope);
   const { result } = renderHook(() => useDocumentLoader(options));
-  void result.current.loadBuffer(new ArrayBuffer(4));
+  act(() => {
+    void result.current.loadBuffer(new ArrayBuffer(4));
+  });
   await waitFor(() => expect(result.current.yrsSeedBytes).not.toBeNull());
   const document = {
     package: {
@@ -104,7 +106,6 @@ async function fontsLoadedFor(
     asked
   );
   await waitFor(() => expect(asked).toContain('Calibri'));
-  await new Promise((resolve) => setTimeout(resolve, 0));
   fontScope.dispose();
   return asked;
 }
@@ -128,26 +129,34 @@ test('the fonts skipped at open load once, after the document first changes', as
     accept(session);
     await waitFor(() => expect(asked).toContain('Calibri'));
     expect(asked).not.toContain('Batang');
-    session.update();
-    session.update();
+    expect(asked).not.toContain('바탕');
+    act(() => {
+      session.update();
+      session.update();
+    });
+    await waitFor(() => expect(asked).toContain('바탕'));
   });
   expect(loadCount(afterEdits, 'Batang')).toBe(1);
   expect(loadCount(afterEdits, '바탕')).toBe(1);
 
-  const editedBeforeOpenLoads = await fontsLoadedFor(skipped, (accept, asked) => {
+  const editedBeforeOpenLoads = await fontsLoadedFor(skipped, async (accept, asked) => {
     const session = updateSource();
     accept(session);
-    session.update();
+    act(() => session.update());
     expect(asked).toEqual([]);
+    await waitFor(() => expect(asked).toContain('바탕'));
   });
   expect(loadCount(editedBeforeOpenLoads, 'Batang')).toBe(1);
+  expect(loadCount(editedBeforeOpenLoads, '바탕')).toBe(1);
   expect(editedBeforeOpenLoads.indexOf('Batang')).toBeGreaterThan(
     editedBeforeOpenLoads.indexOf('Calibri')
   );
 
-  const replaced = await fontsLoadedFor(skipped, (accept) => {
+  const replaced = await fontsLoadedFor(skipped, async (accept, asked) => {
     accept(updateSource());
     accept(updateSource());
+    await waitFor(() => expect(asked).toContain('바탕'));
   });
   expect(loadCount(replaced, 'Batang')).toBe(1);
+  expect(loadCount(replaced, '바탕')).toBe(1);
 });
