@@ -1874,6 +1874,28 @@ fn inline_image_grows_the_line_box() {
 }
 
 #[test]
+fn a_multiple_rule_adds_its_room_below_an_image_alone_on_its_line() {
+    for multiple in [1.0, 1.5, 2.0] {
+        let measured = measure_with(
+            json!({
+                "kind": "paragraph",
+                "runs": [{ "kind": "image", "width": 50.0, "height": 100.0 }],
+                "attrs": { "spacing": { "line": multiple, "lineUnit": "multiplier", "lineRule": "auto" } }
+            }),
+            200.0,
+        )
+        .unwrap();
+        let line = &measured["lines"][0];
+        approx(line["ascent"].as_f64().unwrap(), 100.0, "image at the top");
+        approx(
+            line["lineHeight"].as_f64().unwrap(),
+            100.0 + (multiple - 1.0) * LH,
+            &format!("{multiple}x: image plus the rule's added room"),
+        );
+    }
+}
+
+#[test]
 fn inline_images_keep_the_same_top_with_or_without_text() {
     let image = json!({ "kind": "image", "width": 50.0, "height": 100.0 });
     for runs in [

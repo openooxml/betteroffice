@@ -306,7 +306,9 @@ test('a page leaving the window keeps the links it built', async () => {
   rerender(<CanvasPageMirror page={page} active={false} />);
   await act(async () => {});
   expect(container.querySelector('a[href="#kept"]')).toBe(built);
-  expect(container.textContent).not.toContain('plain words');
+  expect(container.textContent).toContain('plain words');
+  const root = container.firstElementChild!.firstElementChild as HTMLElement;
+  expect(root.style.contentVisibility).toBe('auto');
 });
 
 test('a rebuild keeps focus on the same link when links before it change', async () => {
@@ -454,7 +456,7 @@ test('every page exposes text outside the window and range queries build full ch
     elements = context.findElementsForRange(300, 307);
   });
   expect(elements).toHaveLength(1);
-  expect(elements[0]).toBe(far.querySelector('span.layout-run-text[data-doc-start="300"]'));
+  expect(elements[0]).toBe(far.querySelector('span.layout-run-text[data-doc-start="300"]')!);
   expect(elements[0]!.textContent).toBe('Page 30');
   expect(elements[0]!.isConnected).toBe(true);
   expect(mirroredPages(host)).toContain(30);

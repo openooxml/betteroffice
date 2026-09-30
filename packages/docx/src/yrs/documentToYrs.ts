@@ -1716,6 +1716,65 @@ function bindFieldResultBlocks(
   }
 }
 
+function opensWithFieldSeparator(block: BlockContent): boolean {
+  return (
+    !isRawXml(block) &&
+    block.type === 'paragraph' &&
+    (block.content?.some(
+      (content) =>
+        content.type === 'run' &&
+        content.content.some((item) => item.type === 'fieldChar' && item.charType === 'separate')
+    ) ?? false)
+  );
+}
+
+/** Binds each spanning field's hidden paragraphs and join target. */
+function bindFieldCodeBlocks(
+  units: readonly InlineUnit[],
+  storyId: string,
+  blocks: readonly BlockContent[],
+  owner: number,
+  afterOwner: BlockCursor
+): void {
+  for (const unit of units) {
+    if (unit.kind !== 'embed' || unit.embedKind !== 'field') continue;
+    const data = unit.payload.fieldData;
+    if (typeof data !== 'string' || !data.includes('"blocks"')) continue;
+    let parsed: ComplexField;
+    try {
+      parsed = JSON.parse(data) as ComplexField;
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== 'object') continue;
+    const codeBlocks = parsed.structuredCode?.blocks;
+    const resultBlocks = parsed.structuredResult?.blocks;
+    const code = Array.isArray(codeBlocks) ? codeBlocks.length : 0;
+    const hasResult = Array.isArray(resultBlocks) && resultBlocks.length > 0;
+    let hidden: number;
+    if (code === 0) {
+      const next = blocks[owner + 1];
+      if (!hasResult || !next || !opensWithFieldSeparator(next)) continue;
+      hidden = 0;
+    } else {
+      hidden = hasResult ? code : code - 1;
+    }
+    if (owner + 1 + hidden + 1 > blocks.length) continue;
+    const joined = blocks.slice(owner + 1, owner + 1 + hidden + 1);
+    if (joined.some((block) => isRawXml(block) || block.type !== 'paragraph')) continue;
+    const cursor = { ...afterOwner };
+    const ids: string[] = [];
+    for (const block of joined) {
+      const id = takeBlockId(cursor, storyId, block);
+      if (id !== null) ids.push(id);
+    }
+    const target = ids.pop();
+    if (target === undefined) continue;
+    unit.payload.fieldCodeMarks = ids;
+    unit.payload.fieldCodeTarget = target;
+  }
+}
+
 function visitStory(
   context: LoweringContext,
   storyId: string,
@@ -1755,6 +1814,7 @@ function visitStory(
         cursor,
         resultTableIds
       );
+      bindFieldCodeBlocks(paragraph.units, storyId, blocks, blockIndex, cursor);
       plan.units.push(...paragraph.units);
       plan.units.push(
         embedUnit('pilcrow', {

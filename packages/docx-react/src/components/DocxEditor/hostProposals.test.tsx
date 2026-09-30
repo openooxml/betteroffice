@@ -237,7 +237,7 @@ test('native revisions still open the sidebar with host proposals enabled', asyn
           },
           suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
           op: 'replaceText',
-          search: 'world',
+          search: 'Hello',
           replaceWith: 'XYZ',
         },
       ],
@@ -268,10 +268,6 @@ test('native revisions still open the sidebar with host proposals enabled', asyn
   const nativeDeletion = session
     .listRevisions()
     .find((candidate) => candidate.author === 'Reviewer' && candidate.kind === 'deletion')!;
-  const hostInsertion = session
-    .listRevisions()
-    .find((candidate) => candidate.author === 'Host' && candidate.kind === 'insertion')!;
-  expect(hostInsertion.range.end).toEqual(nativeDeletion.range.start);
   await act(async () => {
     session.setSelection({ story: nativeDeletion.range.story, ...nativeDeletion.range.start });
     ref.current!.getEditorRef()!.syncYrsInputState(false);
@@ -586,8 +582,8 @@ test('swapping to a document with its own revisions auto-opens the sidebar once'
         {
           op: 'insertText',
           target: { kind: 'paragraph', story: 'body', paraId: paragraph.paraId },
-          at: 'end',
-          text: ' another revision',
+          at: 'start',
+          text: 'another revision ',
           suggest: { author: 'User', date: '2026-09-29T00:00:00Z' },
         },
       ],

@@ -253,3 +253,50 @@ test('a resident delete does not merge a paragraph forward over a table', async 
   expect(accepted(main)).toEqual(before);
   expect(client.isReady()).toBe(true);
 });
+
+test('the worker lays a host batch out exactly as the main thread does', async () => {
+  const main = await createYrsSession({ clientId: 5110 });
+  sessions.push(main);
+  const filler = 'lorem ipsum dolor sit amet '.repeat(8);
+  const ids = main.loadStories([
+    {
+      storyId: 'body',
+      paragraphs: Array.from({ length: 240 }, (_, index) => ({ text: `${index} ${filler}` })),
+    },
+  ]).body!;
+  main.registerFont(new Uint8Array(readFileSync(FONT)));
+  main.adoptResidentWorkerLayout!(LAYOUT);
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  const layoutOptions = () => ({ layoutExtras: '{}', stateVector: main.encodeStateVector() });
+  const booted = await client.bootstrap(main.residentWorkerSnapshot()!, '', layoutOptions());
+
+  const sessionId = main.paragraphIdentities().sessionId;
+  const proposed = main.proposeChanges({
+    expectVersion: main.version(),
+    proposals: [0, 90, 200].map((index) => ({
+      id: `p${index}`,
+      paragraph: { kind: 'session', sessionId, story: 'body', paraId: ids[index]! },
+      suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+      op: 'replaceText',
+      search: 'dolor',
+      replaceWith: 'a replacement long enough to rewrap the paragraph',
+      occurrence: 'all',
+    })),
+  });
+  expect(proposed.ok).toBe(true);
+  main.adoptResidentWorkerLayout!(LAYOUT);
+  const synced = await client.sync(
+    main.residentWorkerSnapshot({
+      knownStateVector: client.remoteStateVector(),
+      knownFontsRevision: client.syncedFontsRevision(),
+    })!,
+    '',
+    booted.caret.frameEpoch,
+    false,
+    layoutOptions()
+  );
+  const inWorker = JSON.parse(synced.layoutJson!) as { layout: { pages: unknown[] } };
+  expect(inWorker.layout.pages.length).toBeGreaterThan(3);
+  expect(inWorker).toEqual(JSON.parse(main.layoutDocumentWithRegionsRetainedJson(LAYOUT)));
+});
