@@ -1,5 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, describe, expect, spyOn, test } from 'bun:test';
+import { StrictMode, useEffect } from 'react';
 
 import {
   configureDefaultFonts,
@@ -80,5 +81,90 @@ describe('useRustMeasurement default fonts', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  test('a font that loads after the editor let go of its engine registers nothing on it', async () => {
+    let finishLoad: (() => void) | undefined;
+    configureDefaultFonts({
+      load: () =>
+        Promise.resolve({
+          createFontProvider: () => ({
+            resolve: () => () =>
+              new Promise<ArrayBuffer>((resolve) => {
+                finishLoad = () => resolve(bytesOf('late'));
+              }),
+          }),
+        }),
+    });
+    const registered: Uint8Array[] = [];
+    const engine: RustTextEngine = {
+      registerFont(bytes) {
+        registered.push(bytes);
+        return registered.length;
+      },
+      clearFonts() {},
+    };
+    const regular: ResidentFontRequirement = {
+      key: 'regular',
+      family: 'Calibri',
+      bold: false,
+      italic: false,
+    };
+    const { result, unmount } = renderHook(() =>
+      useRustMeasurement({ document: null, textEngine: engine })
+    );
+    await waitFor(() => expect(result.current.deferLayoutPass()).toBe(false));
+    let passes = 0;
+    result.current.runLayoutPipelineRef.current = () => {
+      passes++;
+    };
+    expect(result.current.residentMeasurementConfig([regular])).toBeNull();
+    await waitFor(() => expect(finishLoad).toBeDefined());
+
+    unmount();
+    finishLoad!();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(registered).toEqual([]);
+    expect(passes).toBe(0);
+  });
+
+  test('a source replaced on the same engine loads the fonts its predecessor was loading', async () => {
+    configureDefaultFonts({
+      load: () =>
+        Promise.resolve({
+          createFontProvider: () => ({
+            resolve: () => () =>
+              new Promise<ArrayBuffer>((resolve) => setTimeout(() => resolve(bytesOf('font')), 5)),
+          }),
+        }),
+    });
+    let fonts = 0;
+    const engine: RustTextEngine = {
+      registerFont: () => ++fonts,
+      clearFonts() {},
+    };
+    const regular: ResidentFontRequirement = {
+      key: 'regular',
+      family: 'Calibri',
+      bold: false,
+      italic: false,
+    };
+    // StrictMode replays the mount: the first source's warmup starts, then the source is released.
+    const { result } = renderHook(
+      () => {
+        const measurement = useRustMeasurement({ document: null, textEngine: engine });
+        const { residentMeasurementConfig } = measurement;
+        useEffect(() => {
+          residentMeasurementConfig([regular]);
+        }, [residentMeasurementConfig]);
+        return measurement;
+      },
+      { wrapper: StrictMode }
+    );
+    await waitFor(() =>
+      expect(result.current.residentMeasurementConfig([regular])?.fontChains).toEqual({
+        regular: [fonts],
+      })
+    );
   });
 });

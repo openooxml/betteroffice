@@ -86,6 +86,7 @@ mod queries;
 mod raw;
 mod read_state;
 pub mod read_types;
+mod script_fonts;
 mod search;
 mod seed;
 mod segments;
@@ -529,6 +530,7 @@ pub struct EditingDoc {
     story_views: Mutex<EpochCache<target::StoryView>>,
     source: Mutex<Option<identity::SourcePackage>>,
     seen: identity::SeenCell,
+    scan_cache: identity::ScanCache,
     story_revisions: Arc<Mutex<StoryRevisions>>,
     _update_sub: Subscription,
     _story_revision_sub: Subscription,
@@ -579,6 +581,7 @@ impl EditingDoc {
             story_views: Mutex::default(),
             source: Mutex::new(None),
             seen,
+            scan_cache: identity::ScanCache::default(),
             story_revisions,
             _update_sub: update_sub,
             _story_revision_sub: story_revision_sub,

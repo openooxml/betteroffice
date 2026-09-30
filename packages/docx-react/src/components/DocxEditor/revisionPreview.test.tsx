@@ -64,6 +64,11 @@ function yrsCore(session: YrsSession): YrsCoreSession {
     publishDirectInput: () => {},
     scheduleCompatibilityWarm: () => {},
     cancelCompatibilityWarm: () => {},
+    previewing: false,
+    handoffFrom: null,
+    opening: false,
+    notifyFramePresented: () => {},
+    failOpening: () => false,
   };
 }
 

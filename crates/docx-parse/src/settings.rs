@@ -10,13 +10,17 @@ const MAX_TAB_STOP_TWIPS: f64 = 31_680.0;
 const MS_WORD_COMPAT_SETTING_URI: &str = "http://schemas.microsoft.com/office/word";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct CompatibilityFlags {
     pub compatibility_mode: u8,
     pub no_leading: bool,
     pub do_not_expand_shift_return: bool,
     pub use_word97_line_break_rules: bool,
     pub balance_single_byte_double_byte_width: bool,
+    #[serde(rename = "doNotUseHTMLParagraphAutoSpacing")]
+    pub do_not_use_html_paragraph_auto_spacing: bool,
+    pub suppress_sp_bf_after_pg_brk: bool,
+    pub allow_space_of_same_style_in_table: bool,
 }
 
 impl Default for CompatibilityFlags {
@@ -27,6 +31,9 @@ impl Default for CompatibilityFlags {
             do_not_expand_shift_return: false,
             use_word97_line_break_rules: false,
             balance_single_byte_double_byte_width: false,
+            do_not_use_html_paragraph_auto_spacing: false,
+            suppress_sp_bf_after_pg_brk: false,
+            allow_space_of_same_style_in_table: false,
         }
     }
 }
@@ -187,6 +194,15 @@ fn parse_compatibility_flags(root: &XmlElement) -> CompatibilityFlags {
         balance_single_byte_double_byte_width: compatibility
             .child("w", "balanceSingleByteDoubleByteWidth")
             .is_some_and(boolean_element),
+        do_not_use_html_paragraph_auto_spacing: compatibility
+            .child("w", "doNotUseHTMLParagraphAutoSpacing")
+            .is_some_and(boolean_element),
+        suppress_sp_bf_after_pg_brk: compatibility
+            .child("w", "suppressSpBfAfterPgBrk")
+            .is_some_and(boolean_element),
+        allow_space_of_same_style_in_table: compatibility
+            .child("w", "allowSpaceOfSameStyleInTable")
+            .is_some_and(boolean_element),
         ..CompatibilityFlags::default()
     };
     for setting in compatibility.children_named("w", "compatSetting") {
@@ -280,6 +296,36 @@ mod tests {
         assert_eq!(parsed.compatibility_flags.compatibility_mode, 15);
         assert!(parsed.compatibility_flags.no_leading);
         assert!(!parsed.compatibility_flags.do_not_expand_shift_return);
+    }
+
+    #[test]
+    fn parses_spacing_compatibility_flags_and_explicit_off_values() {
+        for (value, enabled) in [
+            ("", true),
+            (r#" w:val="1""#, true),
+            (r#" w:val="true""#, true),
+            (r#" w:val="on""#, true),
+            (r#" w:val="0""#, false),
+            (r#" w:val="false""#, false),
+            (r#" w:val="off""#, false),
+        ] {
+            let flags = parse(Some(&format!(
+                "<w:settings><w:compat><w:doNotUseHTMLParagraphAutoSpacing{value}/><w:suppressSpBfAfterPgBrk{value}/><w:allowSpaceOfSameStyleInTable{value}/></w:compat></w:settings>"
+            )))
+            .compatibility_flags;
+            assert_eq!(flags.do_not_use_html_paragraph_auto_spacing, enabled);
+            assert_eq!(flags.suppress_sp_bf_after_pg_brk, enabled);
+            assert_eq!(flags.allow_space_of_same_style_in_table, enabled);
+            let wire = serde_json::to_value(&flags).unwrap();
+            assert_eq!(wire["doNotUseHTMLParagraphAutoSpacing"], enabled);
+            assert_eq!(wire["suppressSpBfAfterPgBrk"], enabled);
+            assert_eq!(wire["allowSpaceOfSameStyleInTable"], enabled);
+        }
+        let flags: CompatibilityFlags = serde_json::from_str(
+            r#"{"compatibilityMode":12,"noLeading":false,"doNotExpandShiftReturn":false,"useWord97LineBreakRules":false,"balanceSingleByteDoubleByteWidth":false}"#,
+        )
+        .unwrap();
+        assert_eq!(flags, CompatibilityFlags::default());
     }
 
     #[test]
