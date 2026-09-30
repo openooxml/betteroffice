@@ -226,8 +226,8 @@ fn layout_table_with_position(
     'rows: while row_index < rows.len() {
         let state_idx = paginator.get_current();
         let is_first_fragment = row_index == 0 && consumed == 0.0;
-        let column_capacity =
-            paginator.state(state_idx).content_limit - paginator.state(state_idx).content_top;
+        // The tallest stretch a fresh column offers between float bands.
+        let column_capacity = paginator.get_column_capacity();
         let body_capacity = if header_row_count > 0 && header_rows_height <= column_capacity {
             column_capacity - header_rows_height
         } else {
@@ -395,8 +395,13 @@ fn layout_table_with_position(
                 && snap_row_break(&breaks.kept, cur, start_off, row_capacity) > 0.0
             {
                 // The paragraph rules allow a break that a whole column holds:
-                // start the fragment in the next one.
-                paginator.advance_for_overflow();
+                // start the fragment below a float band, else in the next column.
+                let slice = minimum_row_slice(block, measure, &breaks.kept, cur, start_off)
+                    + header_overhead
+                    + pending_spacing;
+                if !(paginator.has_float_bands() && fit_moved_cursor(paginator, slice)) {
+                    paginator.advance_for_overflow();
+                }
                 continue 'rows;
             } else {
                 // Paragraph rules that leave no break in a column yield to whole lines.
