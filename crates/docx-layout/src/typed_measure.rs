@@ -743,6 +743,8 @@ mod parity_tests {
             raw_type: None,
             instruction: None,
             fallback: Some("42".to_owned()),
+            locked: false,
+            nested_sequences: Vec::new(),
             pm_start: None,
             pm_end: None,
         })];

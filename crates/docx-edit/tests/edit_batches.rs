@@ -2111,3 +2111,160 @@ fn staged_batches_allocate_and_adopt_as_direct_edits_do() {
     }
     assert_eq!(identities(&batched), identities(&typed));
 }
+
+#[test]
+fn text_typed_into_a_run_less_paragraph_takes_its_mark_formatting() {
+    let marked = |id: &str| {
+        format!(
+            r#"<w:p w14:paraId="{id}"><w:pPr><w:rPr><w:b/><w:sz w:val="18"/></w:rPr></w:pPr></w:p>"#
+        )
+    };
+    let doc = open(&format!(
+        "{}{}{}{}",
+        marked("00000001"),
+        marked("00000002"),
+        p("00000003", ""),
+        p(
+            "00000004",
+            r#"<w:r><w:rPr><w:i/></w:rPr><w:t>Ital</w:t></w:r>"#
+        ),
+    ));
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![
+            suggested(
+                insert(
+                    TextTarget::Paragraph(body("00000001")),
+                    TargetEdge::Start,
+                    "Filled",
+                ),
+                "Ann",
+            ),
+            suggested(
+                replace(range("00000002", 0, 0, EditTextView::Accepted), "Replaced"),
+                "Ann",
+            ),
+            insert(
+                TextTarget::Paragraph(body("00000003")),
+                TargetEdge::Start,
+                "Plain",
+            ),
+            insert(
+                TextTarget::Paragraph(body("00000004")),
+                TargetEdge::End,
+                "ic",
+            ),
+        ],
+    );
+    for marker in ["Filled", "Replaced"] {
+        let attrs = marks(&doc, "body", marker);
+        assert!(active(&attrs, "bold"), "{marker}: {attrs:?}");
+        let Some(Any::Map(size)) = attrs.get("fontSize") else {
+            panic!("{marker} has no font size: {attrs:?}");
+        };
+        assert_eq!(number(size.get("size")), Some(18.0));
+    }
+    let plain = marks(&doc, "body", "Plain");
+    assert!(!active(&plain, "bold") && !active(&plain, "fontSize"));
+    let italic = marks(&doc, "body", "Italic");
+    assert!(active(&italic, "italic") && !active(&italic, "fontSize"));
+}
+
+#[test]
+fn settled_revisions_apply_outside_undo_history() {
+    let doc = basic();
+    let undo = UndoSession::new();
+    let mut proposed = request(
+        &doc,
+        vec![
+            suggested(replace(search("beta", "00000001"), "delta"), "Ann"),
+            suggested(
+                insert(
+                    TextTarget::Paragraph(body("00000004")),
+                    TargetEdge::End,
+                    "!",
+                ),
+                "Ann",
+            ),
+        ],
+    );
+    proposed.history = EditHistory::None;
+    let receipts = apply_request(&doc, &undo, &proposed).receipts;
+    let [replaced, inserted] = [&receipts[0].revision_ids, &receipts[1].revision_ids];
+    type_text(&doc, &undo, "00000002", "?");
+    assert!(undo.can_undo());
+    let version = doc.version();
+
+    let resolved = doc
+        .settle_revisions(
+            inserted,
+            &[replaced.clone(), vec!["404".to_owned()]].concat(),
+            &undo,
+        )
+        .unwrap();
+    assert_eq!(
+        resolved.iter().collect::<std::collections::BTreeSet<_>>(),
+        inserted
+            .iter()
+            .chain(replaced)
+            .collect::<std::collections::BTreeSet<_>>()
+    );
+    assert_ne!(doc.version(), version);
+    assert!(doc.list_revisions().unwrap().is_empty());
+    let settled = accepted(&doc);
+    assert_eq!(settled[0], "Alpha beta gamma");
+    assert!(settled[3].ends_with('!'));
+    assert_eq!(texts(&doc, "body", EditTextView::Original), settled);
+
+    assert!(undo.undo());
+    assert!(!undo.can_undo());
+    assert_eq!(accepted(&doc)[0], "Alpha beta gamma");
+    assert!(accepted(&doc)[3].ends_with('!'));
+    assert!(!accepted(&doc)[1].contains('?'));
+}
+
+#[test]
+fn settling_keeps_another_paragraphs_format_revision_undoable() {
+    let doc = basic();
+    let undo = UndoSession::new();
+    let mut proposed = request(
+        &doc,
+        vec![suggested(
+            replace(search("beta", "00000001"), "delta"),
+            "Ann",
+        )],
+    );
+    proposed.history = EditHistory::None;
+    let replaced = apply_request(&doc, &undo, &proposed).receipts[0]
+        .revision_ids
+        .clone();
+    undo.track(&doc);
+    let styled = doc
+        .set_paragraph_attrs(
+            &EditCtx::local("Ann", DATE).suggesting(),
+            &ParaSelector::One("00000002".to_owned()),
+            &ParaAttrDelta {
+                other: std::collections::BTreeMap::from([(
+                    "pStyle".to_owned(),
+                    Some(Any::from("Quote")),
+                )]),
+                ..ParaAttrDelta::default()
+            },
+        )
+        .unwrap()
+        .revision_ids;
+    assert_eq!(styled.len(), 1);
+
+    doc.settle_revisions(&[], &replaced, &undo).unwrap();
+    let ids = |doc: &EditingDoc| {
+        doc.list_revisions()
+            .unwrap()
+            .into_iter()
+            .map(|revision| revision.change.revision_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&doc), styled);
+    assert!(undo.undo());
+    assert!(ids(&doc).is_empty());
+}

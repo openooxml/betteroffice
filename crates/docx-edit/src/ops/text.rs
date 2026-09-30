@@ -4,13 +4,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use yrs::types::Attrs;
-use yrs::{Any, Map, MapPrelim, Text, TextRef, TransactionMut};
+use yrs::{Any, Map, MapPrelim, Out, ReadTxn, Text, TextRef, TransactionMut};
 
 use crate::format::{FormatPolicy, HYPERLINK, PROTECTED_ATTRS};
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
 use crate::ops::{
     Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
-    capture_pilcrow, last_pilcrow, snapshot_range, utf16_len,
+    block_embed_at, capture_pilcrow, last_pilcrow, paragraph_content_before, snapshot_range,
+    utf16_len,
 };
 use crate::{
     BREAK_KIND, DEL, EditCtx, EditingDoc, INS, KIND_KEY, Position, StoryRange, check_position,
@@ -81,6 +82,39 @@ fn policy_attrs(chunks: &[Chunk], at: u32, policy: &FormatPolicy) -> Vec<(String
             attrs
         }
     }
+}
+
+/// [`policy_attrs`], except that inheriting into a paragraph without content takes its mark's run
+/// formatting, as Word types into an empty paragraph.
+fn insertion_attrs<T: ReadTxn>(
+    chunks: &[Chunk],
+    at: u32,
+    policy: &FormatPolicy,
+    txn: &T,
+) -> Vec<(String, Any)> {
+    if matches!(policy, FormatPolicy::Inherit) {
+        let unit_at = |index: u32| {
+            chunks
+                .iter()
+                .find(|chunk| chunk.start <= index && index < chunk.end())
+        };
+        let opens_paragraph = at
+            .checked_sub(1)
+            .and_then(unit_at)
+            .is_none_or(|chunk| match &chunk.kind {
+                ChunkKind::Pilcrow(_) => true,
+                ChunkKind::Embed(Some(map)) => crate::map_string(map, txn, KIND_KEY)
+                    .is_some_and(|kind| crate::segments::is_block_embed(&kind)),
+                _ => false,
+            });
+        if opens_paragraph
+            && let Some(ChunkKind::Pilcrow(mark)) = unit_at(at).map(|chunk| &chunk.kind)
+            && let Some(Out::Any(defaults)) = mark.get(txn, "defaultTextFormatting")
+        {
+            return crate::seed::mark_run_attrs(&defaults);
+        }
+    }
+    policy_attrs(chunks, at, policy)
 }
 
 fn stamped_attrs(formatting: Vec<(String, Any)>, ins: Option<Any>) -> Attrs {
@@ -190,6 +224,7 @@ pub(crate) fn plain_delete(
     start: u32,
     end: u32,
     chunks: &[Chunk],
+    replacement_has_content: bool,
 ) -> DeleteOutcome {
     let pilcrows_in_range: Vec<(u32, yrs::MapRef)> = chunks
         .iter()
@@ -205,19 +240,31 @@ pub(crate) fn plain_delete(
         .first()
         .map(|(_, map)| capture_pilcrow(map, txn));
 
-    let final_in_range = final_pilcrow
+    let protected_pilcrow = final_pilcrow
         .as_ref()
         .filter(|(index, _)| *index >= start && *index < end)
-        .cloned();
-    let (removed, survivor) = if let Some((final_index, final_map)) = final_in_range {
-        // Keep the final pilcrow alive: remove around it.
-        if end > final_index + 1 {
-            story.remove_range(txn, final_index + 1, end - final_index - 1);
+        .cloned()
+        .or_else(|| {
+            pilcrows_in_range
+                .last()
+                .filter(|_| {
+                    block_embed_at(story, txn, end)
+                        && (replacement_has_content || paragraph_content_before(story, txn, start))
+                        && snapshot_range(story, txn, end, end.saturating_add(1))
+                            .first()
+                            .and_then(|chunk| chunk.block_revisions(txn))
+                            .is_none_or(|revisions| revisions.iter().all(Option::is_none))
+                })
+                .cloned()
+        });
+    let (removed, survivor) = if let Some((index, map)) = protected_pilcrow {
+        if end > index + 1 {
+            story.remove_range(txn, index + 1, end - index - 1);
         }
-        if final_index > start {
-            story.remove_range(txn, start, final_index - start);
+        if index > start {
+            story.remove_range(txn, start, index - start);
         }
-        ((end - start) - 1, Some(final_map))
+        ((end - start) - 1, Some(map))
     } else {
         story.remove_range(txn, start, end - start);
         let survivor = if pilcrows_in_range.is_empty() {
@@ -266,7 +313,7 @@ impl EditingDoc {
                 })
                 .unwrap_or_else(|| self.next_id())
         });
-        let formatting = policy_attrs(&chunks, at.index, &policy);
+        let formatting = insertion_attrs(&chunks, at.index, &policy, &txn);
         let ins = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
@@ -313,7 +360,7 @@ impl EditingDoc {
             );
             range.end - outcome.removed
         } else {
-            plain_delete(&mut txn, &story, range.start, range.end, &chunks);
+            plain_delete(&mut txn, &story, range.start, range.end, &chunks, false);
             range.start
         };
         let loc_range = loc_range_in_txn(&range.story, &story, &txn, range.start, result_end)?;
@@ -386,7 +433,7 @@ impl EditingDoc {
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect()
             })
-            .unwrap_or_else(|| policy_attrs(&chunks, range.start, &FormatPolicy::Inherit));
+            .unwrap_or_else(|| insertion_attrs(&chunks, range.start, &FormatPolicy::Inherit, &txn));
 
         let revision = revision_id
             .as_ref()
@@ -406,7 +453,14 @@ impl EditingDoc {
                     at -= outcome.removed;
                 }
             } else {
-                plain_delete(&mut txn, &story, range.start, range.end, &chunks);
+                plain_delete(
+                    &mut txn,
+                    &story,
+                    range.start,
+                    range.end,
+                    &chunks,
+                    !text.is_empty(),
+                );
             }
         }
         if !text.is_empty() {
@@ -491,7 +545,14 @@ impl EditingDoc {
                     at -= outcome.removed;
                 }
             } else {
-                plain_delete(&mut txn, &story, range.start, range.end, &chunks);
+                plain_delete(
+                    &mut txn,
+                    &story,
+                    range.start,
+                    range.end,
+                    &chunks,
+                    runs.iter().any(|run| !run.text.is_empty()),
+                );
             }
         }
         let mut cursor = at;

@@ -1,0 +1,333 @@
+import { GlobalRegistrator } from '@happy-dom/global-registrator';
+import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { useRef, type ReactNode } from 'react';
+import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
+import {
+  createYrsSession,
+  createYrsInputPositionMap,
+  displayPositionToYrsLoc,
+  yrsLocToDisplayPosition,
+  yrsToDocument,
+  type YrsSession,
+} from '@betteroffice/docx/yrs';
+import type { Document } from '@betteroffice/docx/types/document';
+import { createStyleResolver } from '@betteroffice/docx/styles';
+import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
+import type { DocxEditorRef } from '../../DocxEditor';
+import type { PagedEditorRef } from '../PagedEditor';
+import { YrsInput, type YrsInputRef } from '../YrsInput';
+import { createCommentIdAllocator } from '../commentFactories';
+import { deferWorkerOpenReplica } from '../internals/workerOpenReplica';
+import type { EditorMode } from '../internals/editing-modes';
+import { DOCX_REF_REPLICA_ACCESS, useDocxEditorRefApi } from './useDocxEditorRefApi';
+
+const ownsDom = !GlobalRegistrator.isRegistered;
+if (ownsDom) GlobalRegistrator.register();
+const { act, cleanup, renderHook } = await import('@testing-library/react');
+const ROOT = resolve(import.meta.dir, '../../../../../..');
+const bytes = new Uint8Array(readFileSync(resolve(ROOT, 'crates/docx-edit/tests/fixtures/page-fragments/pages.docx')));
+const sessions: YrsSession[] = [];
+
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(
+  ROOT, 'packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm'
+)))));
+afterEach(() => {
+  cleanup();
+  for (const session of sessions.splice(0)) session.destroy();
+});
+afterAll(async () => {
+  if (ownsDom) await GlobalRegistrator.unregister();
+});
+
+function apiFor(
+  session: YrsSession,
+  document: Document,
+  mode: EditorMode = 'viewing',
+  replicaReadyRef?: { current: boolean }
+) {
+  const events: string[] = [];
+  const inputRef = { current: null as YrsInputRef | null };
+  const project = () => {
+    const base = session.materializeDocx();
+    return base ? yrsToDocument(session, base) : null;
+  };
+  const editor = {
+    getYrsSession: () => session,
+    getDocument: project,
+    flushPendingInput: async () => {
+      events.push('flush');
+      await inputRef.current?.flushPendingInput();
+    },
+    insertText: (text: string) => inputRef.current?.insertText(text),
+    syncYrsInputState: () => { events.push('sync'); return true; },
+    getLayout: () => null,
+    getLayoutRequest: () => null,
+    scrollToPosition: () => {},
+    getPositionAtPoint: () => null,
+    displayPositionToYrsLoc: () => null,
+    scrollToParaId: () => session.hasStory('body'),
+    scrollToCommentId: () => false,
+    scrollToChangeId: () => false,
+    highlightRange: () => {},
+    focus: () => {},
+  } satisfies Partial<PagedEditorRef>;
+  const pagedEditorRef = { current: editor as unknown as PagedEditorRef | null };
+  const hook = renderHook(() => {
+    const ref = useRef<DocxEditorRef>(null);
+    useDocxEditorRefApi({
+      experimentalWorkerOpen: true,
+      ref,
+      document,
+      documentFromYrs: project,
+      historyStateRef: { current: document },
+      pagedEditorRef,
+      handleSave: async () => {
+        events.push('save');
+        return new TextEncoder().encode(session.paragraphs('body').map((paragraph) => paragraph.text).join('\n')).buffer;
+      },
+      zoom: 1,
+      setZoom: () => {},
+      scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
+      loadParsedDocument: () => {},
+      loadBuffer: async () => {},
+      comments: [],
+      setComments: () => {},
+      setShowCommentsSidebar: () => {},
+      contentChangeSubscribersRef: { current: new Set() },
+      selectionChangeSubscribersRef: { current: new Set() },
+      getCachedStyleResolver: createStyleResolver,
+      hostSearch: {
+        search: async () => ({ query: '', options: { caseSensitive: false }, total: 0, current: -1 }),
+        searchNext: () => null,
+        searchPrevious: () => null,
+        searchGoTo: () => null,
+        clearSearch: () => {},
+        getSearchState: () => null,
+        onSearchChange: () => () => {},
+      },
+      commentIdAllocator: createCommentIdAllocator(),
+      commands: UNAVAILABLE_DOCX_COMMANDS,
+      modeRef: { current: mode },
+      allowHostProposalsRef: { current: false },
+      settledDisplayList: async () => ({ pages: [] }),
+    });
+    return ref;
+  }, {
+    wrapper: replicaReadyRef ? ({ children }: { children: ReactNode }) => {
+      const map = () => createYrsInputPositionMap('body', session.paragraphSpans('body'));
+      return (
+        <div>
+          {children}
+          <YrsInput
+            ref={inputRef}
+            enabled
+            readOnly={mode === 'viewing'}
+            replicaReadyRef={replicaReadyRef}
+            session={session}
+            inputPositionMap={map}
+            displayPositionToLoc={(position) => displayPositionToYrsLoc(map(), position)}
+            locToDisplayPosition={(loc) => yrsLocToDisplayPosition(map(), loc)}
+            onStateChange={() => {}}
+            onDirectInput={() => {}}
+          />
+        </div>
+      );
+    } : undefined,
+  });
+  const api = hook.result.current.current;
+  if (!api) throw new Error('The ref API is not mounted');
+  return { api, events, pagedEditorRef };
+}
+
+async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false) {
+  const worker = await createYrsSession();
+  const session = await createYrsSession();
+  sessions.push(worker, session);
+  const { document } = worker.openDocx(bytes, true);
+  const state = worker.encodeState();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const opens: boolean[] = [];
+  const readiness = { current: false };
+  const replica = deferWorkerOpenReplica(
+    session,
+    async () => {
+      await held;
+      return () => {
+        opens.push(false);
+        session.openDocx(bytes, false);
+        session.loadState(state);
+      };
+    },
+    () => {
+      opens.push(true);
+      session.openDocx(bytes, true);
+    },
+    () => { readiness.current = true; }
+  );
+  const mounted = apiFor(session, document, mode, mountInput ? readiness : undefined);
+  return { ...mounted, session, worker, replica, release, opens };
+}
+
+test('every public ref API is classified for replica access', async () => {
+  const { api } = await pendingReplica();
+  expect(Object.keys(api).sort()).toEqual(Object.keys(DOCX_REF_REPLICA_ACCESS).sort());
+  expect(Object.keys(DOCX_REF_REPLICA_ACCESS).sort()).toEqual([
+    'addComment', 'applyEdits', 'applyFormatting', 'clearSearch', 'commands', 'exportStructuredWithPages',
+    'findContentControls', 'findInDocument', 'findText', 'flushPendingInput', 'focus',
+    'getComments', 'getCurrentPage', 'getDocument', 'getEditorRef', 'getMemoryStats', 'getPageContent',
+    'getPositionAtPoint', 'getProposals', 'getSearchState', 'getSelectionInfo', 'getTotalPages', 'getZoom',
+    'highlightRange', 'insertBreak', 'listContentControls', 'loadDocument', 'loadDocumentBuffer',
+    'onContentChange', 'onSearchChange', 'onSelectionChange', 'openPrintPreview', 'print', 'proposeChange',
+    'proposeChanges', 'readParagraphs', 'replyToComment', 'resolveComment', 'save',
+    'search', 'searchGoTo', 'searchNext', 'searchPrevious',
+    'scrollToChangeId', 'scrollToCommentId', 'scrollToPage', 'scrollToParaId', 'scrollToPosition',
+    'setParagraphStyle', 'setProposalStates', 'setZoom', 'validateEdits', 'whenLayoutComplete',
+    'withdrawProposals',
+  ].sort());
+});
+
+test('async reads, save, exports and write refusals wait for the main replica', async () => {
+  const { api, events, session, replica, release, opens } = await pendingReplica();
+  const search = { text: 'Page', within: { kind: 'story', story: 'body' }, view: 'accepted' } as const;
+  const edits = { expectVersion: 'before-ready', steps: [] };
+  const proposals = { expectVersion: 'before-ready', proposals: [] };
+  const states = { expectVersion: 'before-ready', expectPreviewVersion: 0, changes: [] };
+  const withdrawal = { expectVersion: 'before-ready', ids: [] };
+  const pending = Promise.all([
+    api.readParagraphs({ view: 'accepted' }),
+    api.listContentControls(),
+    api.findContentControls({ kind: 'tag', tag: 'missing' }),
+    api.findText(search),
+    api.getProposals(),
+    api.validateEdits(edits),
+    api.applyEdits(edits),
+    api.proposeChanges(proposals),
+    api.setProposalStates(states),
+    api.withdrawProposals(withdrawal),
+    api.save(),
+    api.flushPendingInput(),
+    api.exportStructuredWithPages({ revisionView: 'markup', expectLayoutVersion: 'before-ready' }),
+    api.whenLayoutComplete(),
+  ]);
+  const completed = { value: false };
+  void pending.then(() => { completed.value = true; });
+  replica.start();
+  await act(async () => {});
+  expect(completed.value).toBe(false);
+  expect(session.storyIds()).toEqual([]);
+  expect(events).toEqual([]);
+  expect(opens).toEqual([]);
+  let values!: Awaited<typeof pending>;
+  await act(async () => {
+    release();
+    values = await pending;
+  });
+  expect(opens).toEqual([false]);
+  expect(values[0]).toEqual(session.readParagraphs({ view: 'accepted' }));
+  expect(values[1]).toEqual(session.listContentControls());
+  expect(values[2]).toEqual(session.findContentControls({ kind: 'tag', tag: 'missing' }));
+  expect(values[3]).toEqual(session.findText(search));
+  expect(values[4]).toEqual(session.getProposals());
+  for (const result of values.slice(5, 10)) {
+    expect(result).toMatchObject({ ok: false, version: session.version(), failure: { code: 'read-only' } });
+  }
+  expect(new TextDecoder().decode(values[10]!)).toBe(session.paragraphs('body').map((paragraph) => paragraph.text).join('\n'));
+  expect(values[12]).toMatchObject({ ok: false, version: session.version(), failure: { code: 'layout-unavailable' } });
+  expect(values[13]).toBe(0);
+});
+
+test('synchronous reads finish the main open without changing their return types', async () => {
+  const { api, session, replica, opens } = await pendingReplica();
+  let document: Document | null = null;
+  act(() => { document = api.getDocument(); });
+  expect(document).not.toBeNull();
+  expect(opens).toEqual([true]);
+  expect(replica.pending).toBe(false);
+  expect(api.getEditorRef()?.getYrsSession()).toBe(session);
+  const first = session.paragraphs('body')[0]!;
+  expect(api.findInDocument(first.text)).toContainEqual({
+    paraId: first.paraId, match: first.text, before: '', after: '',
+  });
+  expect(api.scrollToParaId(first.paraId)).toBe(true);
+});
+
+test('a batch chained from an early read edits the hydrated document', async () => {
+  const { api, session, replica, release } = await pendingReplica('editing');
+  const edited = api.readParagraphs({ view: 'accepted' }).then((read) => {
+    if (!read.ok) throw new Error(read.failure.message);
+    return api.applyEdits({
+      expectVersion: read.version,
+      steps: [{
+        op: 'replaceText',
+        target: { kind: 'paragraph', story: 'body', paraId: read.paragraphs[0]!.paraId },
+        text: 'Written after opening',
+      }],
+    });
+  });
+  replica.start();
+  await act(async () => { release(); expect(await edited).toMatchObject({ ok: true, applied: true }); });
+  expect(session.paragraphs('body')[0]!.text).toBe('Written after opening');
+});
+
+test('a synchronous write during an in-flight handoff is not overwritten by its reply', async () => {
+  const { api, session, replica, release, opens } = await pendingReplica();
+  replica.start();
+  await act(async () => {});
+  act(() => expect(api.insertBreak({ paraId: '00000001', type: 'page' })).toBe(true));
+  const edited = session.encodeState();
+  await act(async () => { release(); await replica.ready; });
+  expect(opens).toEqual([true]);
+  expect(session.encodeState()).toEqual(edited);
+});
+
+test('replacing the document while a ref waits rejects the pending call', async () => {
+  const { api, replica, release, pagedEditorRef } = await pendingReplica();
+  const read = api.readParagraphs({ view: 'accepted' });
+  const rejected = read.then(
+    () => { throw new Error('The pending read should reject'); },
+    (error: unknown) => error
+  );
+  replica.start();
+  pagedEditorRef.current = null;
+  await act(async () => {
+    release();
+    const error = await rejected;
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toMatchObject({ message: expect.stringContaining('document changed') });
+  });
+});
+
+test('a layout deadline covers the wait for the main replica', async () => {
+  const { api, opens } = await pendingReplica();
+  const error = await api.whenLayoutComplete({ timeoutMs: 20 }).then(() => null, (failure: unknown) => failure);
+  expect(error).toMatchObject({ message: 'The document did not finish rendering' });
+  expect(opens).toEqual([]);
+});
+
+test('independent APIs do not start a replica open', async () => {
+  const { api, opens, replica } = await pendingReplica();
+  api.setZoom(2);
+  expect(api.getZoom()).toBe(1);
+  expect(api.getCurrentPage()).toBe(1);
+  expect(api.getTotalPages()).toBe(0);
+  expect(api.getComments()).toEqual([]);
+  const unsubscribe = api.onContentChange(() => {});
+  unsubscribe();
+  expect(opens).toEqual([]);
+  expect(replica.pending).toBe(true);
+});
+
+test('getEditorRef immediately inserts text after synchronously finishing the replica', async () => {
+  const { api, session, replica, opens } = await pendingReplica('editing', true);
+  expect(replica.pending).toBe(true);
+  await act(async () => {
+    api.getEditorRef()!.insertText('Immediate ');
+    await api.flushPendingInput();
+  });
+  expect(replica.pending).toBe(false);
+  expect(opens).toEqual([true]);
+  expect(session.paragraphs('body')[0]!.text).toStartWith('Immediate ');
+});

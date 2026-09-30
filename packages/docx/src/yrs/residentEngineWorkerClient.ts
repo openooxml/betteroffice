@@ -75,6 +75,15 @@ export interface ResidentEngineWorkerApplyResult extends ResidentEngineWorkerFra
   applied: true;
 }
 
+// Not `completeLayout`: page builds run between the steps of a sliced completion.
+const FRAME_REQUESTS = new Set<AwaitedRequest['type']>([
+  'bootstrap',
+  'sync',
+  'buildFrame',
+  'applyInput',
+  'applyDelete',
+]);
+
 type PendingRequest = {
   type: AwaitedRequest['type'];
   resolve(response: ResidentEngineWorkerResponse & { ok: true }): void;
@@ -127,11 +136,16 @@ export class ResidentEngineWorkerClient {
   private lastSnapshotId = 0;
   private keepSurfaces = false;
   private lastMemory: WasmModuleMemory[] | null = null;
+  private answeredFrameEpoch = 0;
+  private retainBuiltPages = false;
 
   constructor(private readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
     this.worker.onmessage = (event) => {
       const response = event.data;
       if (response.memory) this.lastMemory = response.memory;
+      if (response.ok && response.caret) {
+        this.answeredFrameEpoch = Math.max(this.answeredFrameEpoch, response.caret.frameEpoch);
+      }
       if (response.ok && response.stateVector && response.id >= this.lastSnapshotId) {
         this.remoteVector = new Uint8Array(response.stateVector);
       }
@@ -175,6 +189,24 @@ export class ResidentEngineWorkerClient {
 
   layoutRevision(): number {
     return this.revision;
+  }
+
+  /** @internal The newest frame epoch a reply carried; 0 before any frame. */
+  answeredFrame(): number {
+    return this.answeredFrameEpoch;
+  }
+
+  /** @internal */
+  setRetainBuiltPages(retain: boolean): void {
+    this.retainBuiltPages = retain;
+  }
+
+  /** @internal Whether a frame request other than `buildPages` awaits its reply. */
+  frameRequestPending(): boolean {
+    for (const { type } of this.pending.values()) {
+      if (FRAME_REQUESTS.has(type)) return true;
+    }
+    return false;
   }
 
   /** The worker replica's last reported yrs state vector (null before any). */
@@ -297,7 +329,12 @@ export class ResidentEngineWorkerClient {
         extras,
         expectedFrameEpoch: options.frameEpoch ?? 0,
         ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
-        ...(options.displayWindow ? { displayWindow: options.displayWindow } : {}),
+        ...(options.displayWindow
+          ? {
+              displayWindow: options.displayWindow,
+              ...(this.retainBuiltPages ? { retainBuiltPages: true } : {}),
+            }
+          : {}),
         ...(options.provisionalPages !== undefined
           ? { provisionalPages: options.provisionalPages }
           : {}),
@@ -343,7 +380,12 @@ export class ResidentEngineWorkerClient {
         expectedFrameEpoch,
         paintCaret,
         ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
-        ...(options.displayWindow ? { displayWindow: options.displayWindow } : {}),
+        ...(options.displayWindow
+          ? {
+              displayWindow: options.displayWindow,
+              ...(this.retainBuiltPages ? { retainBuiltPages: true } : {}),
+            }
+          : {}),
       },
       snapshotTransfers(snapshot)
     );
@@ -377,10 +419,19 @@ export class ResidentEngineWorkerClient {
   async buildFrame(
     extras: string,
     expectedFrameEpoch: number,
-    paintCaret = false
+    paintCaret = false,
+    displayWindow?: [number, number]
   ): Promise<ResidentEngineWorkerFrame> {
     const result = frameResult(
-      await this.request({ type: 'buildFrame', extras, expectedFrameEpoch, paintCaret })
+      await this.request({
+        type: 'buildFrame',
+        extras,
+        expectedFrameEpoch,
+        paintCaret,
+        ...(displayWindow
+          ? { displayWindow, ...(this.retainBuiltPages ? { retainBuiltPages: true } : {}) }
+          : {}),
+      })
     );
     return result;
   }
@@ -401,7 +452,8 @@ export class ResidentEngineWorkerClient {
     selection: YrsSelection,
     expectedFrameEpoch: number,
     profile = false,
-    paintCaret = false
+    paintCaret = false,
+    displayWindow?: [number, number]
   ): Promise<ResidentEngineWorkerApplyResult | { applied: false }> {
     if (!this.ready) return { applied: false };
     try {
@@ -413,6 +465,9 @@ export class ResidentEngineWorkerClient {
           expectedFrameEpoch,
           profile,
           paintCaret,
+          ...(displayWindow
+            ? { displayWindow, ...(this.retainBuiltPages ? { retainBuiltPages: true } : {}) }
+            : {}),
         })
       );
       return { applied: true, ...result };
@@ -428,7 +483,8 @@ export class ResidentEngineWorkerClient {
     expectedFrameEpoch: number,
     profile = false,
     paintCaret = false,
-    count = 1
+    count = 1,
+    displayWindow?: [number, number]
   ): Promise<ResidentEngineWorkerApplyResult | { applied: false }> {
     if (!this.ready) return { applied: false };
     try {
@@ -441,6 +497,9 @@ export class ResidentEngineWorkerClient {
           expectedFrameEpoch,
           profile,
           paintCaret,
+          ...(displayWindow
+            ? { displayWindow, ...(this.retainBuiltPages ? { retainBuiltPages: true } : {}) }
+            : {}),
         })
       );
       return { applied: true, ...result };

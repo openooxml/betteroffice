@@ -6,7 +6,11 @@ import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { ResidentEngineWorkerClient, type YrsSelection, type YrsSession } from '@betteroffice/docx/yrs';
 import type { ResidentEngineWorkerRequest, ResidentEngineWorkerResponse } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
-import { useCanvasRenderer, useRustDisplayList, type ResidentFrameApplyResult } from './useDisplayList';
+import {
+  useFrameImageResolver,
+  useRustDisplayList,
+  type ResidentFrameApplyResult,
+} from './useDisplayList';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -110,6 +114,67 @@ test('continues the frame epochs after a worker with a higher epoch fails', asyn
     unmount();
   } finally {
     errors.mockRestore();
+    native.free();
+  }
+});
+
+test('a layout published with a session that has not laid out yet waits for the session to lay out', async () => {
+  const request = JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Calibri' } },
+    renderEnv: {},
+  });
+  const previous = createEditSession(9401);
+  previous.create_story('body', 'Document A', 'Normal', 'left');
+  const layoutA = JSON.parse(previous.layout_document_with_regions_json(request));
+  const native = createEditSession(9402);
+  native.create_story('body', 'Document B', 'Normal', 'left');
+  let laidOut = false;
+  const engine = {
+    buildDisplayListJson: (input: string) => native.build_display_list_json(input),
+    resetFrameBase: () => native.reset_frame_base(),
+    buildDisplayListFrame: (input: string, epoch: number) =>
+      native.build_display_list_frame(input, epoch),
+    residentWorkerProbe: () => (laidOut ? { layoutRevision: 1 } : null),
+    residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    encodeStateVector: () => new Uint8Array(),
+    onUpdate: () => () => {},
+    selection: () => null,
+    applyUpdate: () => null,
+  } as unknown as YrsSession;
+  globalThis.Worker = undefined as unknown as typeof Worker;
+  let inputs = layoutA;
+  const overrides = { getInputs: () => inputs };
+  let layoutRequests = 0;
+  const requestLayout = () => {
+    layoutRequests += 1;
+  };
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const { result, unmount } = renderHook(
+      ({ layout }) =>
+        useRustDisplayList(layout, overrides, undefined, undefined, engine, requestLayout),
+      { initialProps: { layout: layoutA.layout as Layout } }
+    );
+    await waitFor(() => expect(layoutRequests).toBe(1));
+    expect(result.current.error).toBeNull();
+    expect(result.current.frame).toBeNull();
+
+    // The session lays out, but its layout is not published: the display tries again on its own.
+    inputs = JSON.parse(native.layout_document_with_regions_json(request));
+    laidOut = true;
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    expect(result.current.error).toBeNull();
+    expect(result.current.loading).toBe(false);
+    expect(layoutRequests).toBe(1);
+    expect(
+      errors.mock.calls.some(([message]) => String(message).includes('Rust display-list build failed'))
+    ).toBe(false);
+    unmount();
+  } finally {
+    errors.mockRestore();
+    previous.free();
     native.free();
   }
 });
@@ -1128,12 +1193,124 @@ test('unmounting while the worker applies input never replays it on the host eng
 });
 
 test('each session decodes its images into a cache of its own', () => {
-  const { result } = renderHook(() => useCanvasRenderer());
   const first = { name: 'first' } as unknown as YrsSession;
-  act(() => result.current.onLayoutComputed(null, first));
-  const firstImages = result.current.resolveImage;
-  act(() => result.current.onLayoutComputed(null, first));
-  expect(result.current.resolveImage).toBe(firstImages);
-  act(() => result.current.onLayoutComputed(null, { name: 'next' } as unknown as YrsSession));
-  expect(result.current.resolveImage).not.toBe(firstImages);
+  const { result, rerender } = renderHook(
+    ({ engine }: { engine: YrsSession | null }) => useFrameImageResolver(engine),
+    { initialProps: { engine: first } as { engine: YrsSession | null } }
+  );
+  const firstImages = result.current;
+  rerender({ engine: first });
+  expect(result.current).toBe(firstImages);
+  rerender({ engine: { name: 'next' } as unknown as YrsSession });
+  expect(result.current).not.toBe(firstImages);
+});
+
+test('the frame on screen keeps its session until a frame of the next one lands', async () => {
+  const first = { name: 'first' } as unknown as YrsSession;
+  const next = { name: 'next' } as unknown as YrsSession;
+  const firstList = { pages: [] };
+  const nextList = { pages: [] };
+  let finishNext!: () => void;
+  const nextBuilt = new Promise<void>((resolve) => {
+    finishNext = resolve;
+  });
+  const overrides = {
+    build: async (_inputs: unknown, engine?: unknown) => {
+      if (engine !== next) return firstList;
+      await nextBuilt;
+      return nextList;
+    },
+    getInputs: (): never | undefined => ({ measured: [], options: {} }) as never,
+  };
+  const layout = () => ({ pageSize: { w: 816, h: 1056 }, pages: [] }) as unknown as Layout;
+  const { result, rerender, unmount } = renderHook(
+    ({ layout, engine }: { layout: Layout | null; engine: YrsSession }) =>
+      useRustDisplayList(layout, overrides, undefined, undefined, engine),
+    {
+      initialProps: { layout: layout(), engine: first } as {
+        layout: Layout | null;
+        engine: YrsSession;
+      },
+    }
+  );
+  await waitFor(() => expect(result.current.displayList).toBe(firstList));
+  expect(result.current.presentedEngine).toBe(first);
+  await act(async () => {
+    rerender({ layout: layout(), engine: next });
+  });
+  expect(result.current.displayList).toBe(firstList);
+  expect(result.current.presentedEngine).toBe(first);
+  expect(result.current.shownFrameEngine()).toBe(first);
+  const settled = result.current.settledDisplayList(null, null).then((list) => ({
+    list,
+    engine: result.current.shownFrameEngine(),
+  }));
+  await act(async () => {
+    finishNext();
+  });
+  await waitFor(() => expect(result.current.displayList).toBe(nextList));
+  expect(result.current.presentedEngine).toBe(next);
+  expect(await settled).toEqual({ list: nextList, engine: next });
+  unmount();
+});
+
+test('an image resolver reads the media of the session its frame was built with', async () => {
+  const originalImage = globalThis.Image;
+  const originalCreate = URL.createObjectURL;
+  const originalRevoke = URL.revokeObjectURL;
+  const reads: string[] = [];
+  const blobs: Blob[] = [];
+  let scope = 1;
+  class FakeImage {
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    set src(_url: string) {
+      queueMicrotask(() => this.onload?.());
+    }
+  }
+  const session = (name: string, mediaScope: () => number, byte: () => number) =>
+    ({
+      mediaSource: (token: string) => {
+        reads.push(`${name}:${token}`);
+        return { bytes: new Uint8Array([byte()]), mimeType: 'image/png' };
+      },
+      mediaScope,
+    }) as unknown as YrsSession;
+  const first = session('first', () => 1, () => 1);
+  const next = session('next', () => scope, () => scope + 1);
+  globalThis.Image = FakeImage as unknown as typeof Image;
+  URL.createObjectURL = (blob: Blob) => {
+    blobs.push(blob);
+    return `blob:media-${blobs.length}`;
+  };
+  URL.revokeObjectURL = () => {};
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ engine }: { engine: YrsSession }) => useFrameImageResolver(engine),
+      { initialProps: { engine: first } }
+    );
+    const firstResolver = result.current;
+    const firstImage = await firstResolver('media:0');
+    expect(firstImage).toBeInstanceOf(FakeImage);
+    expect(await firstResolver('media:0')).toBe(firstImage);
+    rerender({ engine: next });
+    const nextResolver = result.current;
+    expect(nextResolver).not.toBe(firstResolver);
+    const nextImage = await nextResolver('media:0');
+    expect(nextImage).toBeInstanceOf(FakeImage);
+    expect(nextImage).not.toBe(firstImage);
+    await firstResolver('media:1');
+    scope += 1;
+    expect(await nextResolver('media:0')).not.toBe(nextImage);
+    expect(reads).toEqual(['first:media:0', 'next:media:0', 'first:media:1', 'next:media:0']);
+    const decoded = await Promise.all(
+      blobs.map(async (blob) => Array.from(new Uint8Array(await blob.arrayBuffer())))
+    );
+    expect(decoded).toEqual([[1], [2], [1], [3]]);
+    unmount();
+  } finally {
+    globalThis.Image = originalImage;
+    URL.createObjectURL = originalCreate;
+    URL.revokeObjectURL = originalRevoke;
+  }
 });
