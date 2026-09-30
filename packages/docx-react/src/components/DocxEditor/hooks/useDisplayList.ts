@@ -976,7 +976,7 @@ export function useRustDisplayList(
                     caret,
                     null,
                     previous,
-                    readSessionVersion(worker.engine),
+                    sourceVersionOf(previous.queries),
                     workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision)
                   )
                 : { displayList: nextFrame.displayList, frame: nextFrame, queries: null, caret };

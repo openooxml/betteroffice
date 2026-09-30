@@ -480,14 +480,17 @@ test('a layout of part of the document never settles, even after a full one did'
 });
 
 test('a layout the document moved past paints but settles no wait', async () => {
-  const { rerender, layout, settle } = settleHarness();
+  const { result, rerender, layout, settle, overrides } = settleHarness();
   const first = settle();
   await waitFor(() => expect(first.settled).toBe(true));
   const behind = layout(false);
+  const behindList = { pages: [] };
   markSupersededLayout(behind);
+  overrides.build = async () => behindList;
   await act(async () => {
     rerender({ layout: behind });
   });
+  await waitFor(() => expect(result.current.displayList).toBe(behindList));
   const waiting = settle();
   await act(async () => {});
   expect(waiting.settled).toBe(false);

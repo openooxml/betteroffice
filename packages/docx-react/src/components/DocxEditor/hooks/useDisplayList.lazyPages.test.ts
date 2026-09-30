@@ -9,7 +9,12 @@ import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
-import { revisionPreviewKey, revisionPreviewKeyOf } from '../internals/layoutProvenance';
+import {
+  revisionPreviewKey,
+  revisionPreviewKeyOf,
+  sourceVersionOf,
+  stampSourceVersion,
+} from '../internals/layoutProvenance';
 import { useRustDisplayList } from './useDisplayList';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -237,6 +242,32 @@ test('a worker frame builds only the pages near the viewport', async () => {
     expect(settled!.pages.map((page) => page.primitives.length)).toEqual(
       full.pages.map((page) => (page as { primitives: unknown[] }).primitives.length)
     );
+    unmount();
+  } finally {
+    engine.free();
+  }
+});
+
+test('a page build keeps the version of the layout it fills, not the session version', async () => {
+  const { engine, inputs, host } = lazyFixture();
+  try {
+    let version = 'v1';
+    Object.assign(host, { version: () => version });
+    stampSourceVersion(inputs.layout, 'v1');
+    const overrides = { getInputs: () => inputs };
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(inputs.layout as Layout, overrides, undefined, undefined, host)
+    );
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    expect(sourceVersionOf(result.current.queries)).toBe('v1');
+    version = 'v2';
+    const pages = () => result.current.frame!.displayList.pages;
+    const last = pages().length - 1;
+    await act(async () => {
+      result.current.setDisplayWindow(last, last + 1);
+    });
+    await waitFor(() => expect(pages()[last]?.unbuilt).toBeFalsy());
+    expect(sourceVersionOf(result.current.queries)).toBe('v1');
     unmount();
   } finally {
     engine.free();
