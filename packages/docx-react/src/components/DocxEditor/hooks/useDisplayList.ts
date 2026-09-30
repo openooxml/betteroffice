@@ -341,6 +341,7 @@ export function useRustDisplayList(
 ): UseRustDisplayListResult {
   const requestLayoutRef = useRef(requestLayout);
   requestLayoutRef.current = requestLayout;
+  const layoutRequestedEnginesRef = useRef(new WeakSet<YrsSession>());
   const workerHeapLimitRef = useRef(workerHeapLimitBytes);
   workerHeapLimitRef.current = workerHeapLimitBytes;
   // The engine whose layout the shown frame is of: another engine's frames
@@ -1830,6 +1831,17 @@ export function useRustDisplayList(
       }
       // A frame engine paints the pagination it retains, which a newer layout may have replaced.
       const retainedRevision = residentEngine?.residentWorkerProbe()?.layoutRevision;
+      // A layout published with a session that has laid nothing out yet (it
+      // replaced the session mid-pass) is another session's: ask once for its own.
+      if (
+        residentEngine &&
+        retainedRevision === undefined &&
+        requestLayoutRef.current &&
+        !layoutRequestedEnginesRef.current.has(residentEngine)
+      ) {
+        layoutRequestedEnginesRef.current.add(residentEngine);
+        return Promise.reject(new MainThreadLayoutPendingError());
+      }
       const base = frameBase(residentEngine ?? engine ?? null);
       return buildRustDisplayFrame(
         buildInputs,
