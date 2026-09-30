@@ -346,6 +346,34 @@ test('a text-only mirror reads every paragraph in order without run elements or 
   expect(mirror.style.contentVisibility).toBe('auto');
 });
 
+test('a text-only mirror keeps language changes and drops runs the full mirror hides', () => {
+  const page: DisplayPage = {
+    pageIndex: 0,
+    width: 200,
+    height: 200,
+    primitives: [
+      text({ blockKey: 'mixed', text: 'Hello ', lang: 'en-US' }),
+      text({ blockKey: 'mixed', text: 'שלום', lang: 'he-IL', bidiLevel: 1 }),
+      text({ blockKey: 'mixed', text: ' again', lang: 'en-US' }),
+      text({ blockKey: 'covered', text: 'Visible' }),
+      text({ blockKey: 'covered', text: ' covered' }),
+    ],
+  };
+  const mirror = buildMirrorPage(page);
+  const covered = Array.from(mirror.querySelectorAll('.layout-run')).find(
+    (run) => run.textContent === ' covered'
+  )!;
+  covered.setAttribute('aria-hidden', 'true');
+  reduceMirrorToText(mirror);
+  const [mixed, visible] = Array.from(mirror.querySelectorAll('[role="paragraph"]'));
+  expect(mixed!.textContent).toBe('Hello שלום again');
+  expect(
+    Array.from(mixed!.children, (child) => [child.getAttribute('lang'), child.textContent])
+  ).toEqual([['he-IL', 'שלום']]);
+  expect(visible!.textContent).toBe('Visible');
+  expect(mirror.querySelector('.layout-run')).toBeNull();
+});
+
 test('a text-only mirror keeps image names and table semantics and removes visual leaves', () => {
   const page: DisplayPage = {
     pageIndex: 0,

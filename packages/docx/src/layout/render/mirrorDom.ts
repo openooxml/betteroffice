@@ -227,6 +227,22 @@ const MIRROR_STRUCTURE = [
   MIRROR_CLASS_NAMES.blockSdt,
 ];
 
+/** A run's text, in a bare span only where its language or direction differs from its context. */
+function plainRun(run: Element, text: string): Node {
+  const doc = run.ownerDocument;
+  const lang = run.getAttribute('lang');
+  const dir = run.getAttribute('dir');
+  const context = run.parentElement;
+  const differs = (name: string, value: string | null): boolean =>
+    value !== null && context?.closest(`[${name}]`)?.getAttribute(name) !== value;
+  if (!differs('lang', lang) && !differs('dir', dir)) return doc.createTextNode(text);
+  const span = doc.createElement('span');
+  if (lang) span.setAttribute('lang', lang);
+  if (dir) span.setAttribute('dir', dir);
+  span.textContent = text;
+  return span;
+}
+
 /**
  * Reduces a `buildMirrorPage` tree, in place, to what a screen reader reads:
  * everything `reduceMirrorToLinks` keeps, unchanged, plus the text of every
@@ -246,9 +262,16 @@ export function reduceMirrorToText(mirror: HTMLElement): HTMLElement {
       }
     }
     const structural =
-      element === mirror || MIRROR_STRUCTURE.some((name) => element.classList.contains(name));
+      element === mirror ||
+      (!element.classList.contains('layout-run') &&
+        MIRROR_STRUCTURE.some((name) => element.classList.contains(name)));
     if (!structural && !onPath.has(element)) {
-      if (element.classList.contains(MIRROR_CLASS_NAMES.revisionPmarkGlyph)) {
+      if (
+        element.classList.contains(MIRROR_CLASS_NAMES.revisionPmarkGlyph) ||
+        element.getAttribute('aria-hidden') === 'true' ||
+        element.hasAttribute('inert') ||
+        (element as HTMLElement).style?.visibility === 'hidden'
+      ) {
         element.remove();
         return;
       }
@@ -256,7 +279,7 @@ export function reduceMirrorToText(mirror: HTMLElement): HTMLElement {
       const accessible = object || Boolean(element.getAttribute('aria-label'));
       if (element.children.length === 0) {
         if (element.textContent && !object) {
-          element.replaceWith(element.ownerDocument.createTextNode(element.textContent));
+          element.replaceWith(plainRun(element, element.textContent));
         } else if (!accessible) {
           element.remove();
         }
