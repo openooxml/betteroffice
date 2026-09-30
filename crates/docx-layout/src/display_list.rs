@@ -10859,15 +10859,7 @@ fn resident_build_input_for(
     extras: &str,
     pages: Option<&HashSet<usize>>,
 ) -> Result<BuildInput, String> {
-    let mut fields: serde_json::Map<String, Value> =
-        serde_json::from_str(extras).map_err(|e| format!("parse display extras: {e}"))?;
-    for key in ["measured", "options", "layout"] {
-        fields.remove(key);
-    }
-    let mut wire = Value::Object(fields);
-    normalize_integral_json_numbers(&mut wire);
-    let extras: ResidentExtrasWire =
-        serde_json::from_value(wire).map_err(|e| format!("parse resident display input: {e}"))?;
+    let extras = resident_extras(extras)?;
     let mut transcoder = crate::transcode::Transcoder::default();
     let layout: LayoutIn = transcoder
         .convert(layout)
@@ -11153,6 +11145,305 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_observed(
     Ok(true)
 }
 
+/// [`update_resident_display_list_incremental_partial_with_fonts_observed`] for
+/// a display-extras change: refreshes the extras fields and options of the
+/// retained input in place instead of re-transcoding the document. Dirtied
+/// pages refresh; a converged page `build` selects recompiles from the
+/// retained input and shifts when every position it places is exactly the
+/// block delta behind the fresh layout — anything else refreshes too, so each
+/// built page reads either fully current or fully stale positions.
+#[allow(clippy::too_many_arguments)]
+pub fn update_resident_display_list_extras_partial_with_fonts_observed(
+    pagination: &crate::types::Input,
+    layout: &crate::types::Layout,
+    extras: &str,
+    fonts: &ooxml_text::FontStore,
+    resident: &mut ResidentDisplayInput,
+    previous: &mut DisplayList,
+    selected_pages: &HashSet<usize>,
+    position_deltas: &HashMap<String, i64>,
+    build: &dyn Fn(usize) -> bool,
+    observe_phase: &mut impl FnMut(),
+) -> Result<bool, String> {
+    if previous.pages.len() != layout.pages.len()
+        || resident.input.layout.pages.len() != layout.pages.len()
+    {
+        return Ok(false);
+    }
+    if selected_pages
+        .iter()
+        .any(|&page| page >= layout.pages.len())
+    {
+        return Err("resident display extras page range is invalid".to_owned());
+    }
+    refresh_resident_input_extras(&mut resident.input, pagination, extras)?;
+
+    let built: HashSet<usize> = (0..layout.pages.len())
+        .filter(|&index| build(index))
+        .collect();
+    let source_blocks = source_blocks_by_key(pagination);
+    let measured_positions: HashMap<String, Option<i64>> = resident
+        .input
+        .measured
+        .iter()
+        .filter_map(|measured| {
+            measured_block_key(measured).map(|key| (key, block_in_pm_start(&measured.block)))
+        })
+        .collect();
+    let mut refresh: HashSet<usize> = selected_pages.intersection(&built).copied().collect();
+    let mut stale: HashSet<usize> = HashSet::new();
+    for &index in &built {
+        if refresh.contains(&index) {
+            continue;
+        }
+        if converged_page_shift_ok(
+            &resident.input.layout.pages[index],
+            &layout.pages[index],
+            &measured_positions,
+            &source_blocks,
+            position_deltas,
+        ) {
+            stale.insert(index);
+        } else {
+            refresh.insert(index);
+        }
+    }
+    let selected: HashSet<usize> = selected_pages.union(&refresh).copied().collect();
+    if refresh_resident_display_pages_reading(
+        &mut resident.input,
+        pagination,
+        layout,
+        selected.iter().copied(),
+        &refresh,
+    )
+    .is_err()
+    {
+        return Ok(false);
+    }
+    observe_phase();
+
+    let rebuilt = build_display_list_selected(&resident.input, fonts, Some(&built));
+    observe_phase();
+    previous.contract_version = rebuilt.contract_version;
+    for mut page in rebuilt.pages {
+        let page_index = page.page_index as usize;
+        if stale.contains(&page_index) {
+            shift_page_body_positions(&mut page, position_deltas);
+        }
+        previous.pages[page_index] = page;
+    }
+    for (page_index, page) in previous.pages.iter_mut().enumerate() {
+        if built.contains(&page_index) {
+            continue;
+        }
+        *page = unbuilt_page_with_span(
+            &resident.input.layout.pages[page_index],
+            page_index,
+            layout_page_position_span(&layout.pages[page_index], &source_blocks)?,
+        );
+    }
+    Ok(true)
+}
+
+fn resident_extras(extras: &str) -> Result<ResidentExtrasWire, String> {
+    let mut fields: serde_json::Map<String, Value> =
+        serde_json::from_str(extras).map_err(|e| format!("parse display extras: {e}"))?;
+    for key in ["measured", "options", "layout"] {
+        fields.remove(key);
+    }
+    let mut wire = Value::Object(fields);
+    normalize_integral_json_numbers(&mut wire);
+    serde_json::from_value(wire).map_err(|e| format!("parse resident display input: {e}"))
+}
+
+fn apply_resident_extras(input: &mut BuildInput, extras: ResidentExtrasWire) -> Result<(), String> {
+    input.contract_version = extras.contract_version;
+    input.headers_footers = extras
+        .headers_footers
+        .clone()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| format!("parse resident display input: {e}"))?;
+    input.headers_footers_content = extras
+        .headers_footers
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| format!("parse resident display input: {e}"))?;
+    input.font_chains = extras.font_chains;
+    input.resolved_comment_ids = extras.resolved_comment_ids;
+    input.comment_authors = extras.comment_authors;
+    input.comment_threads = extras.comment_threads;
+    Ok(())
+}
+
+fn refresh_resident_input_extras(
+    input: &mut BuildInput,
+    pagination: &crate::types::Input,
+    extras: &str,
+) -> Result<(), String> {
+    let extras = resident_extras(extras)?;
+    input.options = crate::transcode::transcode(&pagination.options)
+        .map_err(|e| format!("parse resident display input: {e}"))?;
+    apply_resident_extras(input, extras)
+}
+
+/// `retained` equals `current` shifted back by `delta`: the retained slot is
+/// exactly one edit behind and shifting it reproduces `current`.
+fn position_shifted_eq(retained: Option<i64>, current: Option<f64>, delta: i64) -> bool {
+    match (retained, current) {
+        (None, None) => true,
+        (Some(retained), Some(current)) => {
+            current.fract() == 0.0 && retained.checked_add(delta) == Some(current as i64)
+        }
+        _ => false,
+    }
+}
+
+/// First document position a transcode-input block places; table cells nest
+/// their own blocks.
+fn block_in_pm_start(block: &BlockIn) -> Option<i64> {
+    match block {
+        BlockIn::Paragraph(value) => value.pm_start,
+        BlockIn::Table(value) => value
+            .rows
+            .iter()
+            .flat_map(|row| row.cells.iter())
+            .flat_map(|cell| cell.blocks.iter())
+            .find_map(block_in_pm_start),
+        BlockIn::Image(value) => value.pm_start,
+        BlockIn::TextBox(value) => value.pm_start,
+        BlockIn::Shape(value) => value.pm_start,
+        BlockIn::Chart(value) => value.pm_start,
+        BlockIn::Unsupported => None,
+    }
+}
+
+/// [`block_in_pm_start`] for a pagination-side block.
+fn layout_block_pm_start(block: &crate::types::LayoutBlock) -> Option<f64> {
+    match block {
+        crate::types::LayoutBlock::Paragraph(value) => value.pm_start,
+        crate::types::LayoutBlock::Table(value) => value
+            .rows
+            .iter()
+            .flat_map(|row| row.cells.iter())
+            .flat_map(|cell| cell.blocks.iter())
+            .find_map(layout_block_pm_start),
+        crate::types::LayoutBlock::Image(value) => value.pm_start,
+        crate::types::LayoutBlock::TextBox(value) => value.pm_start,
+        crate::types::LayoutBlock::Shape(value) => value.pm_start,
+        crate::types::LayoutBlock::Chart(value) => value.pm_start,
+        _ => None,
+    }
+}
+
+/// A retained page's input reproduces the fresh layout page under the body
+/// shift: fragments and their blocks are pairwise equal except document
+/// positions, which are each exactly `delta` behind.
+fn converged_page_shift_ok(
+    page: &PageIn,
+    layout_page: &crate::types::Page,
+    measured_positions: &HashMap<String, Option<i64>>,
+    source_blocks: &HashMap<String, &crate::types::MeasuredBlock>,
+    position_deltas: &HashMap<String, i64>,
+) -> bool {
+    if page.fragments.len() != layout_page.fragments.len() {
+        return false;
+    }
+    for (fragment, layout_fragment) in page.fragments.iter().zip(&layout_page.fragments) {
+        let key = fragment_block_key(fragment);
+        if key != layout_fragment_block_key(layout_fragment) {
+            return false;
+        }
+        let Some(key) = key else { continue };
+        let Some(&retained) = measured_positions.get(&key) else {
+            return false;
+        };
+        let Some(source) = source_blocks.get(&key) else {
+            return false;
+        };
+        let delta = position_deltas.get(&key).copied().unwrap_or(0);
+        if !position_shifted_eq(retained, layout_block_pm_start(&source.block), delta)
+            || !shifted_fragment_eq(fragment, layout_fragment, delta)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// [`converged_page_shift_ok`] for a fragment pair: geometry and structure
+/// equal, document positions exactly `delta` behind.
+fn shifted_fragment_eq(
+    fragment: &FragmentIn,
+    layout_fragment: &crate::types::Fragment,
+    delta: i64,
+) -> bool {
+    use crate::types::Fragment;
+    match (fragment, layout_fragment) {
+        (FragmentIn::Paragraph(a), Fragment::Paragraph(b)) => {
+            a.x == b.x
+                && a.y == b.y
+                && a.width == b.width
+                && a.height == b.height
+                && a.from_line == b.from_line
+                && a.to_line == b.to_line
+                && a.carried_from_prev == b.carried_from_prev
+                && a.carried_to_next == b.carried_to_next
+                && position_shifted_eq(a.pm_start, b.pm_start, delta)
+                && position_shifted_eq(a.pm_end, b.pm_end, delta)
+        }
+        (FragmentIn::Table(a), Fragment::Table(b)) => {
+            a.x == b.x
+                && a.y == b.y
+                && a.height == b.height
+                && a.row_start == b.row_start
+                && a.row_end == b.row_end
+                && a.clip_top == b.clip_top
+                && a.clip_bottom == b.clip_bottom
+                && a.header_row_count.map(|count| count as f64) == b.header_row_count
+                && a.carried_from_prev == b.carried_from_prev
+                && a.carried_to_next == b.carried_to_next
+        }
+        (FragmentIn::Image(a), Fragment::Image(b)) => {
+            a.x == b.x
+                && a.y == b.y
+                && a.width == b.width
+                && a.height == b.height
+                && position_shifted_eq(a.pm_start, b.pm_start, delta)
+                && position_shifted_eq(a.pm_end, b.pm_end, delta)
+        }
+        (FragmentIn::TextBox(a), Fragment::TextBox(b)) => {
+            a.x == b.x
+                && a.y == b.y
+                && a.width == b.width
+                && a.height == b.height
+                && position_shifted_eq(a.pm_start, b.pm_start, delta)
+                && position_shifted_eq(a.pm_end, b.pm_end, delta)
+        }
+        (FragmentIn::Shape(a), Fragment::Shape(b)) => {
+            a.x == b.x
+                && a.y == b.y
+                && a.width == b.width
+                && a.height == b.height
+                && position_shifted_eq(a.pm_start, b.pm_start, delta)
+                && position_shifted_eq(a.pm_end, b.pm_end, delta)
+                && position_shifted_eq(a.doc_start, b.doc_start, delta)
+                && position_shifted_eq(a.doc_end, b.doc_end, delta)
+        }
+        (FragmentIn::Chart(a), Fragment::Chart(b)) => {
+            a.x == b.x
+                && a.y == b.y
+                && a.width == b.width
+                && a.height == b.height
+                && position_shifted_eq(a.pm_start, b.pm_start, delta)
+                && position_shifted_eq(a.pm_end, b.pm_end, delta)
+                && position_shifted_eq(a.doc_start, b.doc_start, delta)
+                && position_shifted_eq(a.doc_end, b.doc_end, delta)
+        }
+        _ => false,
+    }
+}
+
 fn refresh_resident_display_pages(
     input: &mut BuildInput,
     pagination: &crate::types::Input,
@@ -11284,6 +11575,18 @@ fn fragment_block_key(fragment: &FragmentIn) -> Option<String> {
         FragmentIn::Shape(value) => Some(block_key(&value.block_id)),
         FragmentIn::Chart(value) => Some(block_key(&value.block_id)),
         FragmentIn::Unsupported => None,
+    }
+}
+
+fn layout_fragment_block_key(fragment: &crate::types::Fragment) -> Option<String> {
+    use crate::types::Fragment;
+    match fragment {
+        Fragment::Paragraph(value) => Some(resident_block_id_key(&value.block_id).into_owned()),
+        Fragment::Table(value) => Some(resident_block_id_key(&value.block_id).into_owned()),
+        Fragment::Image(value) => Some(resident_block_id_key(&value.block_id).into_owned()),
+        Fragment::TextBox(value) => Some(resident_block_id_key(&value.block_id).into_owned()),
+        Fragment::Shape(value) => Some(resident_block_id_key(&value.block_id).into_owned()),
+        Fragment::Chart(value) => Some(resident_block_id_key(&value.block_id).into_owned()),
     }
 }
 

@@ -8,13 +8,14 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use yrs::types::{DeepObservable, Event, PathSegment};
-use yrs::{Assoc, IndexedSequence, ReadTxn, StickyIndex, Text, Transact};
+use yrs::{Assoc, ID, IndexScope, IndexedSequence, ReadTxn, StickyIndex, Text, Transact};
 
 use super::{Anchor, BreakType, Revision, StoryKind};
 use crate::control_source::{
     ControlSafety, ControlScan, SourceControl, classify_controls, may_hold_controls, safety_key,
     scan_controls,
 };
+use crate::raw::SeedRange;
 use crate::{COMMENTS, EditingDoc, story_ref};
 
 /// A header, footer or note story and the part it was read from.
@@ -59,7 +60,7 @@ impl Pin {
         }
     }
 
-    fn sticky<T: ReadTxn>(txn: &T, story: &str, unit: u32) -> Option<StickyIndex> {
+    pub(crate) fn sticky<T: ReadTxn>(txn: &T, story: &str, unit: u32) -> Option<StickyIndex> {
         story_ref(txn, story)
             .ok()
             .filter(|text| unit < text.len(txn))
@@ -215,8 +216,10 @@ impl Provenance {
     }
 
     /// Pins every recorded position to `doc`, which seeding just filled, each distinct one once.
-    /// Idempotent, so a deferred seed may call it after the source is already installed.
-    pub(crate) fn pin_positions(&self, doc: &EditingDoc) {
+    /// Seed ranges let positions that landed inside one seed batch resolve arithmetically instead
+    /// of walking the story. Idempotent, so a deferred seed may call it after the source is already
+    /// installed.
+    pub(crate) fn pin_positions(&self, doc: &EditingDoc, ranges: &HashMap<String, SeedRange>) {
         let txn = doc.yrs_doc().transact();
         let mut pinned: HashMap<(String, u32), Option<StickyIndex>> = HashMap::new();
         let pins = self
@@ -228,16 +231,32 @@ impl Provenance {
             pin.position.get_or_init(|| {
                 pinned
                     .entry((pin.story.clone(), pin.unit))
-                    .or_insert_with(|| Pin::sticky(&txn, &pin.story, pin.unit))
+                    .or_insert_with(|| {
+                        if let Some(range) = ranges.get(&pin.story)
+                            && story_ref(&txn, &pin.story).is_ok()
+                        {
+                            (pin.unit < range.len).then(|| {
+                                StickyIndex::new(
+                                    IndexScope::Relative(ID::new(
+                                        range.client,
+                                        range.clock + pin.unit,
+                                    )),
+                                    Assoc::After,
+                                )
+                            })
+                        } else {
+                            Pin::sticky(&txn, &pin.story, pin.unit)
+                        }
+                    })
                     .clone()
             });
         }
     }
 
     /// Indexes the records by story and pins every recorded position to `doc`.
-    pub(crate) fn pin(&mut self, doc: &EditingDoc) {
+    pub(crate) fn pin(&mut self, doc: &EditingDoc, ranges: &HashMap<String, SeedRange>) {
         self.index();
-        self.pin_positions(doc);
+        self.pin_positions(doc, ranges);
     }
 }
 
@@ -637,8 +656,8 @@ impl ReadSource {
 
     /// Pins every recorded position to `doc`, which seeding just filled. `provenance.index`
     /// must already have run, which seeding does when it builds the source.
-    pub(crate) fn pin(&self, doc: &EditingDoc) {
-        self.provenance.pin_positions(doc);
+    pub(crate) fn pin(&self, doc: &EditingDoc, ranges: &HashMap<String, SeedRange>) {
+        self.provenance.pin_positions(doc, ranges);
         self.pinned.store(true, Ordering::Relaxed);
     }
 

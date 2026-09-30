@@ -49,6 +49,9 @@
 //! must be minted only while serializing OOXML. A paragraph's Word `w14:paraId` is a separate
 //! binding on its pilcrow, never derived from its internal ID; see [`ParagraphIdentity`].
 
+#[cfg(test)]
+extern crate self as docx_edit;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -716,21 +719,22 @@ impl EditingDoc {
         let Some(pending) = self.pending_seed.lock().unwrap().take() else {
             return false;
         };
-        let applied = self
-            .apply_raw_story_batches(
-                pending.batches,
-                &EditCtx::local(String::new(), String::new()),
-            )
-            .is_ok();
-        if applied {
-            seed::seed_opaque_sequences(self, &pending.opaque_sequences);
-            if let Some(source) = self.source_metadata() {
-                source.read().pin(self);
-                source.read().comment_writes.arm();
+        let applied = self.apply_raw_seed_batches(
+            pending.batches,
+            &EditCtx::local(String::new(), String::new()),
+        );
+        match applied {
+            Ok(ranges) => {
+                seed::seed_opaque_sequences(self, &pending.opaque_sequences);
+                if let Some(source) = self.source_metadata() {
+                    source.read().pin(self, &ranges);
+                    source.read().comment_writes.arm();
+                }
+                seed::embed_safety_inventory(self);
+                true
             }
-            seed::embed_safety_inventory(self);
+            Err(_) => false,
         }
-        applied
     }
 
     /// Retains the package the stories were, or will be, seeded from.
