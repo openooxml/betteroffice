@@ -19,6 +19,7 @@ import type { OpenInWorker, WorkerOpenedDocument } from './useDisplayList';
 import {
   deferWorkerOpenReplica,
   ensureWorkerOpenReplica,
+  requestWorkerOpenReplica,
   workerOpenReplicaPending,
 } from '../internals/workerOpenReplica';
 
@@ -568,7 +569,7 @@ export function useYrsCoreSession(
                 clearTimeout(replicaWaitTimerRef.current);
                 replicaWaitTimerRef.current = null;
               }
-              pending.start();
+              requestWorkerOpenReplica(next);
             };
             replicaReadyRef.current = false;
             setReplicaReady(false);

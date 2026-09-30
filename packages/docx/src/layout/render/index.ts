@@ -174,6 +174,7 @@ export {
   yrsIdToNumericId,
   type YrsSidebarDisplayPoint,
   type YrsSidebarProjection,
+  type YrsStorySegmentSource,
 } from './yrsSidebarProjection';
 
 export { extractTrackedChangesFromYrs, type TrackedChangesResult } from './yrsTrackedChanges';

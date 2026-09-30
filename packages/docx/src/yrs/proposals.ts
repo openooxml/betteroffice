@@ -113,6 +113,7 @@ export interface DocxProposalSession {
   readParagraphs(request: DocxReadParagraphsRequest): DocxReadParagraphsResult;
   applyEdits(request: DocxEditRequest): DocxEditResult;
   listRevisions(): readonly { revisionId: string; kind: string }[];
+  revisionStamps?(ids: readonly string[]): Record<string, readonly { author: string; date: string }[]>;
   /** Accepts and rejects revisions for good, outside undo history; unknown ids are skipped. */
   settleRevisions(accept: readonly string[], reject: readonly string[]): void;
   /** Runs `read` with story projections shared across its reads; omitted, reads run unshared. */
@@ -261,6 +262,8 @@ export interface ProposalWithdrawal {
   accept: readonly string[];
   reject: readonly string[];
   proposalIds?: Readonly<Record<string, string>>;
+  /** Per owned revision, the stamp its proposal suggested; a revision holding another is refused. */
+  suggested?: Readonly<Record<string, { author: string; date: string }>>;
   /** Refuses as `stale-version` when the document is no longer at this version. */
   expectVersion?: string;
 }
@@ -499,7 +502,7 @@ export function executeProposalRound(
 /** @internal */
 export function executeProposalWithdrawal(
   session: DocxProposalSession,
-  { owned, accept, reject, proposalIds, expectVersion }: ProposalWithdrawal
+  { owned, accept, reject, proposalIds, suggested, expectVersion }: ProposalWithdrawal
 ): ProposalWithdrawalOutcome {
   if (expectVersion !== undefined && expectVersion !== session.version()) {
     return {
@@ -531,13 +534,41 @@ export function executeProposalWithdrawal(
       },
     };
   }
+  if (suggested && session.revisionStamps) {
+    const stamps = session.revisionStamps(owned);
+    for (const revisionId of owned) {
+      const suggest = suggested[revisionId];
+      if (
+        suggest &&
+        stamps[revisionId]?.some(
+          ({ author, date }) => author !== suggest.author || date !== suggest.date
+        )
+      ) {
+        const id = proposalIds?.[revisionId];
+        return {
+          ok: false,
+          failure: {
+            code: 'tracked-revision-conflict',
+            message:
+              id === undefined
+                ? `revision ${revisionId} holds changes made outside the proposals`
+                : `proposal ${id} shares revision ${revisionId} with changes made outside the proposals`,
+            ...(id === undefined ? {} : { proposalId: id }),
+          },
+        };
+      }
+    }
+  }
   if (accept.length > 0 || reject.length > 0) session.settleRevisions(accept, reject);
   return { ok: true };
 }
 
 /** The session holds update notifications until `propose` returns, so they see the round. */
 export function createProposalRegistry(session: DocxProposalSession): DocxProposalRegistry {
-  const records = new Map<string, { record: DocxProposalRecord; key: string }>();
+  const records = new Map<
+    string,
+    { record: DocxProposalRecord; key: string; suggest: { author: string; date: string } }
+  >();
   const listeners = new Set<(snapshot: DocxProposalSnapshot) => void>();
   let previewVersion = 0;
   let mirrored: { version: string; proposals: DocxProposalRegistryState } | null = null;
@@ -639,6 +670,7 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
       const receipts = result.receipts.slice(first, first + count);
       records.set(input.id, {
         key,
+        suggest: { author: input.suggest.author, date: input.suggest.date },
         record: {
           id: input.id,
           state: 'proposed',
@@ -770,6 +802,9 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
       accept,
       reject,
       proposalIds: Object.fromEntries(owners),
+      suggested: Object.fromEntries(
+        [...owners].map(([revisionId, id]) => [revisionId, records.get(id)!.suggest])
+      ),
     });
     if (!result.ok) return refuse(result.failure);
     let decided = false;
