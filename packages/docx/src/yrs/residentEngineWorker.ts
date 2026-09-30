@@ -67,31 +67,59 @@ interface LayoutRequest {
 }
 let incompleteLayout: (LayoutRequest & { layoutInput: string }) | null = null;
 let completedLayout: (LayoutRequest & { layoutJson: string }) | null = null;
+// A `completeLayout` measured a few blocks at a time, as operations queued
+// behind the requests that arrive meanwhile.
+interface SlicedCompletion {
+  id: number;
+  expectedFrameEpoch: number;
+  paintCaret: boolean;
+  /** Body blocks a step measures, tuned toward `COMPLETION_SLICE_MS`. */
+  blocks: number;
+  begun: boolean;
+  /** Times a change in between abandoned the pass. */
+  restarts: number;
+}
+let slicedCompletion: SlicedCompletion | null = null;
+const COMPLETION_SLICE_MS = 24;
+const COMPLETION_RESTARTS = 3;
+const ALL_BLOCKS = 2 ** 32 - 1;
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
+  enqueue(() => handle(event.data), event.data.id);
+};
+
+/** `current` drops an operation whose request was answered while it waited. */
+function enqueue(
+  operation: () => Promise<void> | void,
+  id: number,
+  current: () => boolean = () => true
+): void {
   operations = operations
     .then(() => {
+      if (!current()) return;
       if (trap) throw trap;
-      return handle(event.data);
+      return operation();
     })
-    .catch((error) => {
-      if (error instanceof WebAssembly.RuntimeError) {
-        trap = error;
-        reply({
-          id: event.data.id,
-          ok: false,
-          error: `Resident engine worker trapped: ${error.message}`,
-          terminal: true,
-        });
-        return;
-      }
-      reply({
-        id: event.data.id,
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
+    .catch((error) => replyFailure(id, error));
+}
+
+function replyFailure(id: number, error: unknown): void {
+  if (error instanceof WebAssembly.RuntimeError) {
+    trap = error;
+    reply({
+      id,
+      ok: false,
+      error: `Resident engine worker trapped: ${error.message}`,
+      terminal: true,
     });
-};
+    return;
+  }
+  reply({
+    id,
+    ok: false,
+    error: error instanceof Error ? error.message : String(error),
+  });
+}
 
 async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'destroy') {
@@ -166,6 +194,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'buildPages') {
+    // Pages of the provisional frame build between steps, as before a completion.
     pendingUpdates = [];
     const started = performance.now();
     const frame = session.buildDisplayPagesFrame(request.pages, request.expectedFrameEpoch);
@@ -182,34 +211,25 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'completeLayout') {
-    completeProvisionalLayout();
-    const completed = completedLayout;
-    completedLayout = null;
-    if (!completed) {
-      reply({ id: request.id, ok: true });
+    if (incompleteLayout && request.sliceBlocks) {
+      supersedeSlicedCompletion();
+      slicedCompletion = {
+        id: request.id,
+        expectedFrameEpoch: request.expectedFrameEpoch,
+        paintCaret: request.paintCaret,
+        blocks: request.sliceBlocks,
+        begun: false,
+        restarts: 0,
+      };
+      scheduleCompletionSlice(slicedCompletion);
       return;
     }
-    pendingUpdates = [];
-    const started = performance.now();
-    const frame = session.buildDisplayListFrame(
-      frameExtras(completed.extras, completed.layoutExtras, completed.layoutJson),
-      request.expectedFrameEpoch
-    );
-    await replyFrame(
-      request.id,
-      frame,
-      performance.now() - started,
-      pendingUpdates,
-      undefined,
-      started,
-      false,
-      request.paintCaret,
-      completed.layoutJson
-    );
+    await completeProvisionalLayout();
+    await replyCompletedLayout(request.id, request.expectedFrameEpoch, request.paintCaret);
     return;
   }
   if (request.type === 'buildFrame') {
-    completeProvisionalLayout();
+    await completeProvisionalLayout();
     pendingUpdates = [];
     const started = performance.now();
     const frame = session.buildDisplayListFrame(request.extras, request.expectedFrameEpoch);
@@ -263,7 +283,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     reply({ id: request.id, ok: true });
     return;
   }
-  completeProvisionalLayout();
+  await completeProvisionalLayout();
   session.setSelection(request.selection.anchor, request.selection.head);
   pendingUpdates = [];
   const started = performance.now();
@@ -329,6 +349,7 @@ function hydrate(
   provisionalPages?: number
 ): { layoutJson: string | null; provisional: boolean } {
   if (!session) throw new Error('Resident engine worker is not initialized');
+  supersedeSlicedCompletion();
   incompleteLayout = null;
   completedLayout = null;
   session.loadState(snapshot.state);
@@ -365,15 +386,154 @@ function hydrate(
   return { layoutJson, provisional };
 }
 
-/** Replaces a provisional layout with the full one before anything reads it. */
-function completeProvisionalLayout(): void {
+/**
+ * Replaces a provisional layout with the full one before anything reads it,
+ * finishing a sliced completion at once and answering its request first.
+ */
+async function completeProvisionalLayout(): Promise<void> {
   if (!session || !incompleteLayout) return;
+  const waiting = slicedCompletion;
+  slicedCompletion = null;
   const { layoutInput, ...request } = incompleteLayout;
   incompleteLayout = null;
-  completedLayout = {
-    ...request,
-    layoutJson: session.layoutDocumentWithRegionsRetainedJson(layoutInput),
-  };
+  try {
+    let layoutJson: string | undefined;
+    if (waiting?.begun) {
+      try {
+        layoutJson = session.resumeRegionLayout(ALL_BLOCKS).layoutJson;
+      } catch (error) {
+        if (error instanceof WebAssembly.RuntimeError) throw error;
+      }
+    }
+    completedLayout = {
+      ...request,
+      layoutJson: layoutJson ?? session.layoutDocumentWithRegionsRetainedJson(layoutInput),
+    };
+    if (waiting) {
+      await replyCompletedLayout(waiting.id, waiting.expectedFrameEpoch, waiting.paintCaret);
+    }
+  } catch (error) {
+    // The waiting completion is answered too, and the request that finished it fails.
+    if (waiting) replyFailure(waiting.id, error);
+    throw error;
+  }
+}
+
+/** Answers a `completeLayout` with the completed layout and its frame, or with none. */
+async function replyCompletedLayout(
+  id: number,
+  expectedFrameEpoch: number,
+  paintCaret: boolean
+): Promise<void> {
+  const completed = completedLayout;
+  completedLayout = null;
+  if (!session || !completed) {
+    reply({ id, ok: true });
+    return;
+  }
+  pendingUpdates = [];
+  const started = performance.now();
+  const frame = session.buildDisplayListFrame(
+    frameExtras(completed.extras, completed.layoutExtras, completed.layoutJson),
+    expectedFrameEpoch
+  );
+  await replyFrame(
+    id,
+    frame,
+    performance.now() - started,
+    pendingUpdates,
+    undefined,
+    started,
+    false,
+    paintCaret,
+    completed.layoutJson
+  );
+}
+
+// A zero-delay turn of the event loop, so requests that arrived meanwhile
+// queue ahead of the next step.
+const completionTurns = typeof MessageChannel === 'function' ? new MessageChannel() : null;
+const turnCallbacks: Array<() => void> = [];
+if (completionTurns) completionTurns.port1.onmessage = () => turnCallbacks.shift()?.();
+
+function nextTurn(callback: () => void): void {
+  if (!completionTurns) {
+    setTimeout(callback, 0);
+    return;
+  }
+  turnCallbacks.push(callback);
+  completionTurns.port2.postMessage(null);
+}
+
+/** Queues the next step of `completion`, which a later completion supersedes. */
+function scheduleCompletionSlice(completion: SlicedCompletion): void {
+  nextTurn(() => {
+    if (slicedCompletion !== completion) return;
+    enqueue(
+      async () => {
+        try {
+          await completionSlice(completion);
+        } catch (error) {
+          if (slicedCompletion === completion) slicedCompletion = null;
+          throw error;
+        }
+      },
+      completion.id,
+      () => slicedCompletion === completion
+    );
+  });
+}
+
+/** One bounded step of a sliced completion, which then queues the next. */
+async function completionSlice(completion: SlicedCompletion): Promise<void> {
+  if (!session || slicedCompletion !== completion || !incompleteLayout) return;
+  let progress;
+  if (!completion.begun) {
+    progress = session.beginRegionLayout(incompleteLayout.layoutInput);
+    completion.begun = true;
+  } else {
+    const started = performance.now();
+    try {
+      progress = session.resumeRegionLayout(completion.blocks);
+    } catch (error) {
+      if (error instanceof WebAssembly.RuntimeError) throw error;
+      // A change in between abandoned the pass: begin again on the new state,
+      // or finish in one step once changes keep coming.
+      completion.begun = false;
+      completion.restarts += 1;
+      if (completion.restarts > COMPLETION_RESTARTS) {
+        try {
+          await completeProvisionalLayout();
+        } catch {
+          // Answered as the completion's failure.
+        }
+        return;
+      }
+      scheduleCompletionSlice(completion);
+      return;
+    }
+    const elapsed = Math.max(1, performance.now() - started);
+    completion.blocks = Math.min(
+      8192,
+      Math.max(8, Math.round((completion.blocks * COMPLETION_SLICE_MS) / elapsed))
+    );
+  }
+  if (progress.layoutJson === undefined) {
+    scheduleCompletionSlice(completion);
+    return;
+  }
+  const { layoutInput: _input, ...request } = incompleteLayout;
+  incompleteLayout = null;
+  slicedCompletion = null;
+  completedLayout = { ...request, layoutJson: progress.layoutJson };
+  await replyCompletedLayout(completion.id, completion.expectedFrameEpoch, completion.paintCaret);
+}
+
+/** A snapshot or a new session replaces the layout a sliced completion was finishing. */
+function supersedeSlicedCompletion(): void {
+  const completion = slicedCompletion;
+  slicedCompletion = null;
+  if (completion) reply({ id: completion.id, ok: true });
 }
 
 /**
@@ -408,6 +568,7 @@ function destroySession(): void {
   pendingUpdates = [];
   layoutRevision = 0;
   fontsRevision = -1;
+  supersedeSlicedCompletion();
   incompleteLayout = null;
   completedLayout = null;
   retainedFrame = null;

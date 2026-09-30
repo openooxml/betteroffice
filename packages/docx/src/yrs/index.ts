@@ -445,6 +445,11 @@ export interface YrsRevisionReceipt {
   revisionId: string | null;
 }
 
+/** Where the replacement text landed; after the struck-out text when suggesting. */
+export interface YrsReplaceReceipt extends YrsRevisionReceipt {
+  range?: YrsStoryRange;
+}
+
 /**
  * Receipt of {@link YrsSession.splitParagraph}. The first half keeps the
  * original paraId and the second half is re-minted; suggesting
@@ -570,6 +575,14 @@ export function sameYrsSelection(left: YrsSelection | null, right: YrsSelection 
     left.head.paraId === right.head.paraId &&
     left.head.offset === right.head.offset
   );
+}
+
+/** How far a region layout begun with {@link YrsSession.beginRegionLayout} has come. */
+export interface YrsRegionLayoutProgress {
+  measuredBlocks: number;
+  bodyBlocks: number;
+  /** The retained region layout reply, once the pass is complete. */
+  layoutJson?: string;
 }
 
 /** Opt-in internal stage timings for one resident engine input. @internal */
@@ -842,6 +855,16 @@ export interface YrsSession extends CollaborationReplica {
   /** Same pass, but the reply omits the measured arena (fetch it on demand
    * through {@link YrsSession.retainedKernelInputsJson}). */
   layoutDocumentWithRegionsRetainedJson(input: string): string;
+  /**
+   * {@link YrsSession.layoutDocumentWithRegionsRetainedJson} a step at a time:
+   * this lowers the body, and each {@link YrsSession.resumeRegionLayout}
+   * measures up to `blocks` more body blocks. `layoutJson` arrives with the
+   * step that completes the pass, equal to the one-call reply. A document
+   * change, a font registration or another layout in between abandons the
+   * pass, and resuming it then throws.
+   */
+  beginRegionLayout(input: string): YrsRegionLayoutProgress;
+  resumeRegionLayout(blocks: number): YrsRegionLayoutProgress;
   /** Retained `{ measured, options }` for the main-thread display fallback. */
   retainedKernelInputsJson(expectedLayoutRevision: number): string;
   /**
@@ -1061,7 +1084,7 @@ export interface YrsSession extends CollaborationReplica {
    */
   deleteRange(range: YrsStoryRange, suggesting?: YrsAuthor): YrsRevisionReceipt;
   /** Replaces a range with text in one transaction (one shared revision when suggesting). */
-  replaceRange(range: YrsStoryRange, text: string, suggesting?: YrsAuthor): YrsRevisionReceipt;
+  replaceRange(range: YrsStoryRange, text: string, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /**
    * Splits a paragraph by inserting one pilcrow. The FIRST half keeps the
    * original paraId; the SECOND half is re-minted (`secondParaId`).
@@ -1463,6 +1486,18 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   let residentLayoutRevision = 0;
   // The current resident layout ran only in a resident worker replica.
   let layoutRanInWorker = false;
+  // The request of a region layout begun a step at a time.
+  let steppedLayoutInput: string | null = null;
+  const completedRegionLayout = (progress: YrsRegionLayoutProgress): YrsRegionLayoutProgress => {
+    if (progress.layoutJson !== undefined && steppedLayoutInput !== null) {
+      residentLayoutInput = steppedLayoutInput;
+      residentLayoutWithRegions = true;
+      residentLayoutRevision += 1;
+      layoutRanInWorker = false;
+      steppedLayoutInput = null;
+    }
+    return progress;
+  };
   let residentFontsRevision = 0;
   let docxSource: Uint8Array | null = null;
 
@@ -1663,6 +1698,16 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       layoutRanInWorker = false;
       return output;
     },
+    beginRegionLayout: (input) => {
+      steppedLayoutInput = input;
+      return completedRegionLayout(
+        JSON.parse(session.begin_region_layout(input)) as YrsRegionLayoutProgress
+      );
+    },
+    resumeRegionLayout: (blocks) =>
+      completedRegionLayout(
+        JSON.parse(session.resume_region_layout(blocks)) as YrsRegionLayoutProgress
+      ),
     adoptResidentWorkerLayout: (input) => {
       residentLayoutInput = input;
       residentLayoutWithRegions = true;
@@ -2092,7 +2137,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
               suggesting?.name,
               suggesting?.date
             )
-          ) as YrsRevisionReceipt
+          ) as YrsReplaceReceipt
       );
     },
     splitParagraph: (at, suggesting) => {

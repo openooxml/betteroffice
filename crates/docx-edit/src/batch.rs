@@ -618,6 +618,12 @@ enum Shape {
         start: u32,
         len: u32,
     },
+    /// `len` final units a replacement at captured index `start` inserted,
+    /// after whatever struck-out text it kept ahead of them.
+    Replacement {
+        start: u32,
+        len: u32,
+    },
     Paragraph(String),
     NewParagraphs,
     /// Every paragraph of the step's story.
@@ -1065,7 +1071,7 @@ fn plan_selection<T: ReadTxn>(
             (
                 vec![claim],
                 effect,
-                Shape::Raw {
+                Shape::Replacement {
                     start: raw_start,
                     len,
                 },
@@ -1093,7 +1099,7 @@ fn plan_selection<T: ReadTxn>(
             (
                 vec![claim],
                 effect,
-                Shape::Raw {
+                Shape::Replacement {
                     start: raw_start,
                     len,
                 },
@@ -2277,6 +2283,8 @@ struct Executed {
     delta: i64,
     new_ids: Vec<String>,
     revision_ids: Vec<String>,
+    /// Units between a replacement's start and the text it inserted.
+    inserted_offset: u32,
 }
 
 fn staging_error(index: u32, error: impl fmt::Display) -> EditError {
@@ -2340,10 +2348,11 @@ fn execute(stage: &EditingDoc, steps: &[Planned]) -> EditResult<Vec<Option<Execu
                 text,
                 ctx,
             }) => {
-                let receipt = stage
-                    .replace_range(ctx, StoryRange::new(story, *start, *end), text)
+                let (receipt, at) = stage
+                    .replace_range_placed(ctx, StoryRange::new(story, *start, *end), text)
                     .map_err(fail)?;
                 outcome.revision_ids = receipt.revision_ids;
+                outcome.inserted_offset = at - start;
             }
             Some(Effect::Delete { start, end, ctx }) => {
                 let receipt = stage
@@ -2357,10 +2366,11 @@ fn execute(stage: &EditingDoc, steps: &[Planned]) -> EditResult<Vec<Option<Execu
                 runs,
                 ctx,
             }) => {
-                let receipt = stage
-                    .replace_range_rich(ctx, StoryRange::new(story, *start, *end), runs)
+                let (receipt, at) = stage
+                    .replace_range_rich_placed(ctx, StoryRange::new(story, *start, *end), runs)
                     .map_err(fail)?;
                 outcome.revision_ids = receipt.revision_ids;
+                outcome.inserted_offset = at - start;
             }
             Some(Effect::Paragraphs { at, records }) => {
                 outcome.new_ids = stage
@@ -2420,6 +2430,13 @@ fn receipts<T: ReadTxn>(
             let range = story.as_deref().and_then(|story| match &planned.shape {
                 Shape::Raw { start, len } => {
                     let start = shifted(steps, executed, &planned.story, *start);
+                    story.range_of_raw(start, start + len)
+                }
+                Shape::Replacement { start, len } => {
+                    let offset = outcome
+                        .as_ref()
+                        .map_or(0, |outcome| outcome.inserted_offset);
+                    let start = shifted(steps, executed, &planned.story, *start) + offset;
                     story.range_of_raw(start, start + len)
                 }
                 Shape::Paragraph(para_id) => {

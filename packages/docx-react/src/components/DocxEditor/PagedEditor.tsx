@@ -40,6 +40,7 @@ import type { Layout } from '@betteroffice/docx/layout/pagination';
 import {
   computeAnchorPositionsFromYrs,
   displayPageCanvases,
+  effectiveZoom,
   resolveDisplayPageClientRect,
   type TrackedChangesResult,
   type DisplayList,
@@ -1113,13 +1114,18 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
               range.start.paraId === range.end.paraId && range.start.offset === range.end.offset;
             if ((collapsed || existing) && command.displayText) {
               const at = { story: range.story, ...range.start };
-              if (existing) session.replaceRange(range, command.displayText, structuralAuthor);
-              else session.insertText(at, command.displayText, structuralAuthor);
-              range = {
+              const insertedRange = {
                 story: at.story,
                 start: { paraId: at.paraId, offset: at.offset },
                 end: { paraId: at.paraId, offset: at.offset + command.displayText.length },
               };
+              if (existing) {
+                const receipt = session.replaceRange(range, command.displayText, structuralAuthor);
+                range = receipt.range ?? insertedRange;
+              } else {
+                session.insertText(at, command.displayText, structuralAuthor);
+                range = insertedRange;
+              }
             }
             if (
               range.start.paraId === range.end.paraId &&
@@ -1625,6 +1631,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         const target = canvasOverlayTarget ?? host?.parentElement ?? null;
         if (!target) return;
         const targetRect = target.getBoundingClientRect();
+        const targetZoom = effectiveZoom(target);
         const canvasByPage = new Map<number, HTMLCanvasElement>();
         for (const canvas of displayPageCanvases(host)) {
           const pageIndex = Number(canvas.dataset.pageIndex);
@@ -1636,7 +1643,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             resolveDisplayPageClientRect(host, displayListQueries, rect.pageIndex);
           const pageSize = displayListQueries.pageSize(rect.pageIndex);
           if (!pageRect || !pageSize || pageSize.height <= 0) return null;
-          return pageRect.top - targetRect.top + rect.y * (pageRect.height / pageSize.height);
+          return (
+            (pageRect.top - targetRect.top + rect.y * (pageRect.height / pageSize.height)) /
+            (zoom * targetZoom)
+          );
         };
         const { version, revisions } = sidebarReads.revisions(session);
         if (sidebarCommentIds.length === 0 && revisions.length === 0) {
@@ -1712,6 +1722,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       pagesContainerRef,
       sidebarCommentIds,
       yrsCore.session,
+      zoom,
     ]);
 
     // Canvas renderer (H2): re-back the plugin-facing RenderedDomContext with
