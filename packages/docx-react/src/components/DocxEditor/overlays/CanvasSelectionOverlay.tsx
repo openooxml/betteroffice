@@ -25,6 +25,7 @@ import {
   CANVAS_PAGE_GAP_PX,
   CANVAS_PAGES_PADDING_PX,
   displayPageCanvas,
+  effectiveZoom,
   type DisplayList,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
@@ -192,16 +193,17 @@ function ProjectedCanvasSelectionOverlay({
 
     const recompute = () => {
       const targetRect = overlayTarget.getBoundingClientRect();
+      const targetZoom = effectiveZoom(overlayTarget);
       const project = (pageIndex: number, x: number, y: number) => {
         const canvasEl = displayPageCanvas(host, pageIndex);
         const size = displayListQueries.pageSize(pageIndex);
         if (!canvasEl || !size) return null;
         const canvasRect = canvasEl.getBoundingClientRect();
-        const scaleX = size.width > 0 ? canvasRect.width / size.width : 1;
-        const scaleY = size.height > 0 ? canvasRect.height / size.height : 1;
+        const scaleX = (size.width > 0 ? canvasRect.width / size.width : 1) / targetZoom;
+        const scaleY = (size.height > 0 ? canvasRect.height / size.height : 1) / targetZoom;
         return {
-          left: canvasRect.left - targetRect.left + x * scaleX,
-          top: canvasRect.top - targetRect.top + y * scaleY,
+          left: (canvasRect.left - targetRect.left) / targetZoom + x * scaleX,
+          top: (canvasRect.top - targetRect.top) / targetZoom + y * scaleY,
           scaleX,
           scaleY,
         };

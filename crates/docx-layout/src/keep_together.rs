@@ -5,10 +5,11 @@
 //! once and returns each run keyed by its head, plus the interior members, so
 //! the placement walk can skip blocks a group already accounted for.
 //!
-//! [`measure_keep_with_next_group`] turns a group into the height the contract
-//! actually demands: every member paragraph in full (spacing before, measured
-//! height, spacing after) plus one witness slice of the follower — never the
-//! follower in full, since the binding is only to where it begins. The witness
+//! [`measure_keep_with_next_group_at`] turns a group into the height the
+//! contract actually demands below the cursor: every member paragraph in full
+//! plus one witness slice of the follower — never the follower in full, since
+//! the binding is only to where it begins — with the spacing between them
+//! collapsed as placement collapses it. The witness
 //! is a paragraph's shortest legally placeable leading slice
 //! ([`paragraph_min_leading_slice`]), a table's initial header/body slice, the
 //! height of an image or text box, and nothing at all for any other follower
@@ -18,9 +19,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::paragraph_spacing::{get_spacing_after, get_spacing_before, is_empty_paragraph};
+use crate::paragraph_spacing::{get_spacing_after, get_spacing_before};
 use crate::table_row_break::{build_table_row_break_info, first_table_fragment_height};
-use crate::types::{BlockExtent, LayoutBlock, MeasuredBlock, ParagraphBlock, ParagraphExtent};
+use crate::types::{
+    BlockExtent, LayoutBlock, MeasuredBlock, ParagraphBlock, ParagraphExtent, TableBlock,
+    TableExtent,
+};
 
 /// Lines below which widow/orphan control forbids every internal break, since
 /// each side of one needs two lines.
@@ -170,12 +174,52 @@ pub fn paragraph_min_leading_slice(block: &ParagraphBlock, measure: &ParagraphEx
 }
 
 /// Vertical space (px) the group needs for its keepNext contract to hold on a
-/// single page: the members in full plus the follower's witness slice.
+/// single page, measured from a fresh cursor; see
+/// [`measure_keep_with_next_group_at`].
 pub fn measure_keep_with_next_group(group: &KeepWithNextGroup, measured: &[MeasuredBlock]) -> f64 {
-    // follower's witness slice first: zero when there is no follower, or when
-    // it is not a laid-out paragraph
+    measure_keep_with_next_group_at(group, measured, |before| before, 0.0, f64::INFINITY)
+}
+
+/// Vertical space (px) the group needs below the cursor for its keepNext
+/// contract to hold on a single page: the members' lines plus the follower's
+/// witness slice, each gap collapsed to the larger of the space-after above
+/// it and the space-before below it, as placement collapses them.
+/// `leading` resolves the head's space-before at the cursor, `deferred` is
+/// the space-after the cursor still owes the block above it, and `capacity`
+/// is a blank page's content height, past which placement lets a table's
+/// keep-with-next row chain split.
+pub fn measure_keep_with_next_group_at(
+    group: &KeepWithNextGroup,
+    measured: &[MeasuredBlock],
+    leading: impl Fn(f64) -> f64,
+    deferred: f64,
+    capacity: f64,
+) -> f64 {
+    let mut budget = 0.0;
+    let mut owed = deferred;
+    for (position, &index) in group.members.iter().enumerate() {
+        let MeasuredBlock { block, measure } = &measured[index];
+        let (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) = (block, measure)
+        else {
+            continue;
+        };
+        let before = get_spacing_before(block);
+        let before = if position == 0 {
+            leading(before)
+        } else {
+            before
+        };
+        let lines: f64 = measure
+            .lines
+            .iter()
+            .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
+            .sum();
+        budget += before.max(owed) + lines;
+        owed = get_spacing_after(block);
+    }
+
     let follower = group.follower.and_then(|index| measured.get(index));
-    let witness_line = match follower.map(|mb| &mb.measure) {
+    let witness = match follower.map(|mb| &mb.measure) {
         Some(BlockExtent::Paragraph(p)) if !p.lines.is_empty() => {
             match follower.map(|mb| &mb.block) {
                 Some(LayoutBlock::Paragraph(block)) => paragraph_min_leading_slice(block, p),
@@ -183,36 +227,53 @@ pub fn measure_keep_with_next_group(group: &KeepWithNextGroup, measured: &[Measu
             }
         }
         Some(BlockExtent::Table(table)) => match follower.map(|mb| &mb.block) {
-            Some(LayoutBlock::Table(block)) => {
-                first_table_fragment_height(block, table, &build_table_row_break_info(block, table))
-            }
+            Some(LayoutBlock::Table(block)) => table_leading_slice(block, table, capacity),
             _ => 0.0,
         },
         Some(BlockExtent::Image(image)) => image.height,
         Some(BlockExtent::TextBox(text_box)) => text_box.height,
         _ => 0.0,
     };
-
-    let mut budget = witness_line;
-    for &index in &group.members {
-        let MeasuredBlock { block, measure } = &measured[index];
-        let (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) = (block, measure)
-        else {
-            continue;
-        };
-        let height = if is_empty_paragraph(block) {
-            measure
-                .lines
-                .iter()
-                .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
-                .sum()
-        } else {
-            measure.total_height
-        };
-        budget += get_spacing_before(block) + height + get_spacing_after(block);
+    match follower.map(|mb| &mb.block) {
+        Some(LayoutBlock::Paragraph(block)) => {
+            budget += get_spacing_before(block).max(owed) + witness
+        }
+        _ if witness > 0.0 => budget += owed + witness,
+        _ => {}
     }
-
     budget
+}
+
+/// Height (px) of the shortest first fragment placement gives a table: its
+/// header band and first body slice, extended to the end of any
+/// keep-with-next row chain starting in them that fits `capacity` along with
+/// the rows above it. A floating table keeps its flow slice, as it is not
+/// placed in the flow.
+fn table_leading_slice(block: &TableBlock, measure: &TableExtent, capacity: f64) -> f64 {
+    let first =
+        first_table_fragment_height(block, measure, &build_table_row_break_info(block, measure));
+    if block.floating.is_some() {
+        return first;
+    }
+    let headers = block
+        .rows
+        .iter()
+        .take_while(|row| row.is_header.unwrap_or(false))
+        .count();
+    let mut top = 0.0;
+    let mut slice = first;
+    for (row, keep) in measure
+        .rows
+        .iter()
+        .zip(crate::hooks::row_keep_heights(block, measure))
+        .take(headers + 1)
+    {
+        if keep > 0.0 && top + keep <= capacity {
+            slice = slice.max(top + keep);
+        }
+        top += row.height;
+    }
+    slice
 }
 
 /// Whether a paragraph forbids splitting its own lines across a page (keepLines).

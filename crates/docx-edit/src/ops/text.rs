@@ -106,6 +106,30 @@ fn boundary_chunks<T: yrs::ReadTxn>(story: &TextRef, txn: &T, index: u32) -> Vec
     snapshot_range(story, txn, index.saturating_sub(1), index.saturating_add(1))
 }
 
+/// Where a suggested replacement of `range` inserts, before its deletion runs:
+/// after the text it strikes out, as Word places it, and at most before the
+/// story's final unit. None in plain mode, and where that unit is a block embed,
+/// which only a paragraph boundary may precede: the text then goes at the start.
+fn after_struck_text(
+    story: &TextRef,
+    txn: &TransactionMut<'_>,
+    ctx: &EditCtx,
+    range: &StoryRange,
+    len: u32,
+) -> Option<u32> {
+    if !ctx.is_suggesting() || len == 0 {
+        return None;
+    }
+    let at = range.end.min(story.len(txn) - 1);
+    let block = snapshot_range(story, txn, at, at + 1).iter().any(|chunk| {
+        chunk.start == at
+            && matches!(&chunk.kind, ChunkKind::Embed(Some(map))
+                if crate::map_string(map, txn, KIND_KEY)
+                    .is_some_and(|kind| crate::segments::is_block_embed(&kind)))
+    });
+    (!block).then_some(at)
+}
+
 /// Stamps retained content, removes owned insertions, and protects the final pilcrow.
 pub(crate) fn suggest_delete(
     txn: &mut TransactionMut<'_>,
@@ -312,10 +336,22 @@ impl EditingDoc {
 
     /// Replaces a range with plain text in ONE transaction — the primitive behind
     /// type-over-selection, paste, find-replace, and agent proposeChange. In suggesting mode the
-    /// delete and insert stamps share one revision ID. The inserted text adopts the formatting of
-    /// the first replaced text unit (type-over keeps formatting); for a collapsed range it
+    /// delete and insert stamps share one revision ID; insertion follows the struck-out text,
+    /// as Word places it. The inserted text adopts the formatting of the first replaced text
+    /// unit (type-over keeps formatting); for a collapsed range it
     /// inherits like typing.
     pub fn replace_range(&self, ctx: &EditCtx, range: StoryRange, text: &str) -> OpResult<Receipt> {
+        self.replace_range_placed(ctx, range, text)
+            .map(|(receipt, _)| receipt)
+    }
+
+    /// [`EditingDoc::replace_range`], with the story index the text was inserted at.
+    pub(crate) fn replace_range_placed(
+        &self,
+        ctx: &EditCtx,
+        range: StoryRange,
+        text: &str,
+    ) -> OpResult<(Receipt, u32)> {
         validate_text(text)?;
         let len = crate::format::range_len(&range)?;
         if len == 0 && text.is_empty() {
@@ -324,8 +360,10 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
+        let after = after_struck_text(&story, &txn, ctx, &range, len);
+        let mut at = after.unwrap_or(range.start);
         if !text.is_empty() {
-            crate::identity::promote_at(self, &mut txn, &range.story, &story, range.start);
+            crate::identity::promote_at(self, &mut txn, &range.story, &story, at);
         }
 
         let chunks = snapshot_range(
@@ -365,7 +403,7 @@ impl EditingDoc {
             .map(|id| revision_value(id, &ctx.revision_author()));
         if len > 0 {
             if let Some(revision) = revision.as_ref() {
-                suggest_delete(
+                let outcome = suggest_delete(
                     &mut txn,
                     &story,
                     ctx,
@@ -374,6 +412,9 @@ impl EditingDoc {
                     range.end,
                     &chunks,
                 );
+                if after.is_some() {
+                    at -= outcome.removed;
+                }
             } else {
                 plain_delete(
                     &mut txn,
@@ -386,30 +427,40 @@ impl EditingDoc {
             }
         }
         if !text.is_empty() {
-            story.insert_with_attributes(
-                &mut txn,
-                range.start,
-                text,
-                stamped_attrs(formatting, revision),
-            );
+            story.insert_with_attributes(&mut txn, at, text, stamped_attrs(formatting, revision));
         }
-        let end = range.start + utf16_len(text);
-        let loc_range = loc_range_in_txn(&range.story, &story, &txn, range.start, end)?;
-        Ok(Receipt {
-            new_para_ids: Vec::new(),
-            revision_ids: revision_id.into_iter().collect(),
-            range: Some(loc_range),
-        })
+        let end = at + utf16_len(text);
+        let loc_range = loc_range_in_txn(&range.story, &story, &txn, at, end)?;
+        Ok((
+            Receipt {
+                new_para_ids: Vec::new(),
+                revision_ids: revision_id.into_iter().collect(),
+                range: Some(loc_range),
+            },
+            at,
+        ))
     }
 
     /// [`EditingDoc::replace_range`] with explicitly formatted runs (rich paste / proposeChange
-    /// with formatting). All runs and the delete share one revision ID in suggesting mode.
+    /// with formatting). All runs and the delete share one revision ID in suggesting mode;
+    /// insertion follows the struck-out text, as Word places it.
     pub fn replace_range_rich(
         &self,
         ctx: &EditCtx,
         range: StoryRange,
         runs: &[RichRun],
     ) -> OpResult<Receipt> {
+        self.replace_range_rich_placed(ctx, range, runs)
+            .map(|(receipt, _)| receipt)
+    }
+
+    /// [`EditingDoc::replace_range_rich`], with the story index the runs were inserted at.
+    pub(crate) fn replace_range_rich_placed(
+        &self,
+        ctx: &EditCtx,
+        range: StoryRange,
+        runs: &[RichRun],
+    ) -> OpResult<(Receipt, u32)> {
         for run in runs {
             validate_text(&run.text)?;
         }
@@ -421,8 +472,10 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
+        let after = after_struck_text(&story, &txn, ctx, &range, len);
+        let mut at = after.unwrap_or(range.start);
         if total > 0 {
-            crate::identity::promote_at(self, &mut txn, &range.story, &story, range.start);
+            crate::identity::promote_at(self, &mut txn, &range.story, &story, at);
         }
         let chunks = snapshot_range(
             &story,
@@ -442,7 +495,7 @@ impl EditingDoc {
             .map(|id| revision_value(id, &ctx.revision_author()));
         if len > 0 {
             if let Some(revision) = revision.as_ref() {
-                suggest_delete(
+                let outcome = suggest_delete(
                     &mut txn,
                     &story,
                     ctx,
@@ -451,6 +504,9 @@ impl EditingDoc {
                     range.end,
                     &chunks,
                 );
+                if after.is_some() {
+                    at -= outcome.removed;
+                }
             } else {
                 plain_delete(
                     &mut txn,
@@ -462,7 +518,7 @@ impl EditingDoc {
                 );
             }
         }
-        let mut cursor = range.start;
+        let mut cursor = at;
         for run in runs {
             if run.text.is_empty() {
                 continue;
@@ -481,12 +537,15 @@ impl EditingDoc {
             );
             cursor += utf16_len(&run.text);
         }
-        let loc_range = loc_range_in_txn(&range.story, &story, &txn, range.start, cursor)?;
-        Ok(Receipt {
-            new_para_ids: Vec::new(),
-            revision_ids: revision_id.into_iter().collect(),
-            range: Some(loc_range),
-        })
+        let loc_range = loc_range_in_txn(&range.story, &story, &txn, at, cursor)?;
+        Ok((
+            Receipt {
+                new_para_ids: Vec::new(),
+                revision_ids: revision_id.into_iter().collect(),
+                range: Some(loc_range),
+            },
+            at,
+        ))
     }
 
     /// Inserts a one-unit hard-break embed (`_kind: "break"`), inheriting run formatting like
