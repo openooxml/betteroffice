@@ -815,37 +815,52 @@ describe('DocxEditor plugins', () => {
     const retained = geometries.at(-1)!;
     expect(retained.toOverlayRect(unit)).not.toBeNull();
 
-    let next = '';
     const mounted = marker();
-    const frames: FrameRequestCallback[] = [];
-    const frame = spyOn(globalThis, 'requestAnimationFrame').mockImplementation((callback) => {
-      frames.push(callback);
-      return frames.length;
-    });
-    try {
-      await act(async () => {
-        const applied = await ref.current!.applyEdits(appendRequest(version, paragraph.paraId));
-        if (applied.ok) next = applied.version;
+    const heldEdit = async (
+      from: string,
+      superseded: readonly DocxPluginGeometry[]
+    ): Promise<string> => {
+      let applied = '';
+      const frames: FrameRequestCallback[] = [];
+      const frame = spyOn(globalThis, 'requestAnimationFrame').mockImplementation((callback) => {
+        frames.push(callback);
+        return frames.length;
       });
-      expect(next).not.toBe('');
+      try {
+        await act(async () => {
+          const result = await ref.current!.applyEdits(appendRequest(from, paragraph.paraId));
+          if (result.ok) applied = result.version;
+        });
+        expect(applied).not.toBe('');
+        expect(marker()).toBe(mounted);
+        expect(marker()!.dataset).toMatchObject({ version: from, snapshot: applied });
+        expect(geometries.at(-1)!.layout.version).toBe(from);
+        expect(geometries.at(-1)!.toOverlayRect(unit)).not.toBeNull();
+        expect(contexts.at(-1)!.geometry).toBeNull();
+        for (const old of superseded) expect(old.toOverlayRect(unit)).toBeNull();
+      } finally {
+        frame.mockRestore();
+      }
+      await act(async () => {
+        for (const callback of frames.splice(0)) callback(performance.now());
+      });
+      await until(() => marker()?.dataset.version === applied);
       expect(marker()).toBe(mounted);
-      expect(marker()!.dataset).toMatchObject({ version, snapshot: next });
-      expect(geometries.at(-1)!.layout.version).toBe(version);
-      expect(geometries.at(-1)!.toOverlayRect(unit)).not.toBeNull();
-      expect(contexts.at(-1)!.geometry).toBeNull();
-    } finally {
-      frame.mockRestore();
-    }
-    await act(async () => {
-      for (const callback of frames.splice(0)) callback(performance.now());
-    });
-    await until(() => marker()?.dataset.version === next);
-    expect(marker()).toBe(mounted);
+      return applied;
+    };
+    const next = await heldEdit(version, []);
     const afterEdit = layouts.slice(layouts.lastIndexOf(version) + 1);
     expect(afterEdit[0]).toBeNull();
     expect(afterEdit.at(-1)).toBe(next);
     expect(retained.toOverlayRect(unit)).toBeNull();
-    expect(geometries.at(-1)!.toOverlayRect(unit)).not.toBeNull();
+    const shown = geometries.at(-1)!;
+    expect(shown.toOverlayRect(unit)).not.toBeNull();
+
+    await act(async () => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    await until(() => geometries.at(-1) !== shown);
+    const last = await heldEdit(next, [retained, shown]);
 
     // happy-dom lays out no pixels, so the pages have no client geometry to scroll to.
     expect(
@@ -853,7 +868,7 @@ describe('DocxEditor plugins', () => {
         .at(-1)!
         .navigation.scrollToParagraph(
           { story: 'body', paraId: paragraph.paraId },
-          { expectVersion: next }
+          { expectVersion: last }
         )
     ).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
   });

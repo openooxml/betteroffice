@@ -104,8 +104,12 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   translateRef.current = translate;
   const geometryRef = useRef<DocxPluginGeometry | null>(null);
   const adoptedRef = useRef<{ session: YrsSession; geometry: DocxPluginGeometry } | null>(null);
-  const heldRef = useRef<DocxPluginGeometry | null>(null);
   const queriesCurrentRef = useRef(false);
+  const heldCandidate = (): DocxPluginGeometry | null => {
+    const held = adoptedRef.current;
+    const { session, layoutError } = latest.current;
+    return held && held.session === session && !layoutError ? held.geometry : null;
+  };
   const layoutRef = useRef<DocxPluginLayout | null>(null);
   const formattingRef = useRef<SelectionState | null>(null);
   const layoutListeners = useRef(new Set<() => void>());
@@ -292,64 +296,59 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   const currentLayout = layoutStable.current;
   layoutRef.current = currentLayout;
 
-  const geometry = useMemo(
-    () =>
-      currentLayout && dom && dom.queries === options.queries && layer
-        ? createPluginGeometry(
-            currentLayout,
-            dom.context,
-            layer,
-            () =>
-              host.layoutId() === currentLayout.id &&
-              host.previewVersion() === currentLayout.previewVersion &&
-              latest.current.zoom === currentLayout.zoom &&
-              domRef.current === dom &&
-              dom.context.pagesContainer.isConnected,
-            (hit) =>
-              resolvePointPosition(
-                latest.current.pagedEditorRef.current,
-                hit,
-                dom.context.pagesContainer,
-                dom.queries
-              ),
-            dom.queries,
-            () => {
-              const editor = latest.current.pagedEditorRef.current;
-              const session = editor?.getYrsSession();
-              return editor && session
-                ? {
-                    session,
-                    editor,
-                    presented: isPresented(dom.context.pagesContainer, dom.queries.displayList),
-                  }
-                : null;
-            },
-            () =>
-              heldRef.current?.layout === currentLayout &&
-              latest.current.zoom === currentLayout.zoom &&
-              dom.context.pagesContainer.isConnected &&
-              (isPresented(dom.context.pagesContainer, dom.queries.displayList) ||
-                queriesCurrentRef.current)
-          )
-        : null,
+  const geometry = useMemo(() => {
+    if (!currentLayout || !dom || dom.queries !== options.queries || !layer) return null;
+    const shownList = dom.queries.displayList;
+    const created: DocxPluginGeometry = createPluginGeometry(
+      currentLayout,
+      dom.context,
+      layer,
+      () =>
+        host.layoutId() === currentLayout.id &&
+        host.previewVersion() === currentLayout.previewVersion &&
+        latest.current.zoom === currentLayout.zoom &&
+        domRef.current === dom &&
+        dom.context.pagesContainer.isConnected,
+      (hit) =>
+        resolvePointPosition(
+          latest.current.pagedEditorRef.current,
+          hit,
+          dom.context.pagesContainer,
+          dom.queries
+        ),
+      dom.queries,
+      () => {
+        const editor = latest.current.pagedEditorRef.current;
+        const session = editor?.getYrsSession();
+        return editor && session
+          ? {
+              session,
+              editor,
+              presented: isPresented(dom.context.pagesContainer, dom.queries.displayList),
+            }
+          : null;
+      },
+      () =>
+        heldCandidate() === created &&
+        latest.current.zoom === currentLayout.zoom &&
+        dom.context.pagesContainer.isConnected &&
+        (isPresented(dom.context.pagesContainer, shownList) || queriesCurrentRef.current)
+    );
+    return created;
     // `moved` rebuilds the geometry when its elements move without a new frame.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [host, currentLayout, dom, options.queries, layer, moved]
-  );
+  }, [host, currentLayout, dom, options.queries, layer, moved]);
   geometryRef.current = geometry;
-  // Overlays keep the layout the host last adopted until geometry for the next one exists.
+  // Overlays keep the geometry the host last adopted until geometry for its next layout exists.
   const adopted = geometry && host.layoutId() === geometry.layout.id ? geometry : null;
-  if (adopted && options.session) {
-    adoptedRef.current = { session: options.session, geometry: adopted };
-  }
-  // Pages that already show a layout of the current version will get its geometry next.
-  queriesCurrentRef.current = layout !== null;
-  const lastAdopted =
-    !options.layoutError && adoptedRef.current?.session === options.session
-      ? adoptedRef.current.geometry
-      : null;
-  heldRef.current = adopted ? null : lastAdopted;
-  const heldGeometry = adopted ?? lastAdopted;
+  const heldGeometry = adopted ?? heldCandidate();
+  useLayoutEffect(() => {
+    if (adopted && options.session) {
+      adoptedRef.current = { session: options.session, geometry: adopted };
+    }
+    // Pages that show a layout of the current version get its geometry next.
+    queriesCurrentRef.current = layout !== null;
+  });
 
   useEffect(() => {
     host.layoutChanged(currentLayout);
