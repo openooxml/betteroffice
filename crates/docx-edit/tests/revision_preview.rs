@@ -594,8 +594,12 @@ fn a_preview_decision_paginates_incrementally_as_a_fresh_layout_would() {
             })
             .collect()
     };
-    let bytes = document(&format!("{}{PROPOSALS}{}", filler(0..90), filler(90..120)));
-    let blocks = 123;
+    let bytes = document(&format!(
+        "{}{PROPOSALS}{}",
+        filler(0..240),
+        filler(240..300)
+    ));
+    let blocks = 303;
     let layout = |engine: &EngineSession, ids: &[String; 3], env: &RenderEnv| {
         let mut output = engine
             .layout_document_with_regions_json(&layout_request(env, font))
