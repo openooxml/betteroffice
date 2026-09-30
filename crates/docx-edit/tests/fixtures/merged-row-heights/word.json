@@ -1,0 +1,30 @@
+{
+  "same-span": {
+    "mergedRowHeightsPt": [12.0, 12.0, 96.1],
+    "pages": [
+      {"page": 1, "rowStart": 0, "rowEnd": 23, "repeatedHeaderRows": 0}
+    ]
+  },
+  "same-span-reversed": {
+    "mergedRowHeightsPt": [12.0, 12.0, 96.1],
+    "pages": [
+      {"page": 1, "rowStart": 0, "rowEnd": 23, "repeatedHeaderRows": 0}
+    ]
+  },
+  "repeated-header": {
+    "mergedRowHeightsPt": [12.0, 12.0, 96.1],
+    "pages": [
+      {"page": 1, "rowStart": 0, "rowEnd": 24, "repeatedHeaderRows": 0},
+      {"page": 2, "rowStart": 24, "rowEnd": 45, "repeatedHeaderRows": 3},
+      {"page": 3, "rowStart": 45, "rowEnd": 63, "repeatedHeaderRows": 3}
+    ]
+  },
+  "repeated-header-reversed": {
+    "mergedRowHeightsPt": [12.0, 12.0, 96.1],
+    "pages": [
+      {"page": 1, "rowStart": 0, "rowEnd": 24, "repeatedHeaderRows": 0},
+      {"page": 2, "rowStart": 24, "rowEnd": 45, "repeatedHeaderRows": 3},
+      {"page": 3, "rowStart": 45, "rowEnd": 63, "repeatedHeaderRows": 3}
+    ]
+  }
+}

@@ -1013,6 +1013,56 @@ fn editor_only_paragraphs_are_not_persisted_until_authored() {
 }
 
 #[test]
+fn suggested_replacement_promotes_the_paragraph_where_text_lands() {
+    let bytes = fixture_with(|parts| {
+        replace(
+            parts,
+            "word/document.xml",
+            r#"<w:p w14:paraId="0A0B0C0D" w:rsidR="00A1B2C3"><w:r><w:t>Tail</w:t></w:r></w:p>"#,
+            r#"<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:p w14:paraId="0A0B0C0D"/></w:tc></w:tr></w:tbl>"#,
+        );
+    });
+    for rich in [false, true] {
+        for covers_mark in [false, true] {
+            let doc = seeded(&bytes);
+            let tail = doc
+                .paragraphs("body")
+                .unwrap()
+                .last()
+                .unwrap()
+                .para_id
+                .clone();
+            assert_eq!(identity(&doc, &tail).origin, ParagraphOrigin::Synthetic);
+            let mark = doc.paragraph_mark_position(&tail).unwrap().index;
+            let range = StoryRange::new("body", mark - 1, mark + u32::from(covers_mark));
+            let receipt = if rich {
+                doc.replace_range_rich(
+                    &ctx().suggesting(),
+                    range,
+                    &[RichRun {
+                        text: "typed".to_owned(),
+                        ..RichRun::default()
+                    }],
+                )
+            } else {
+                doc.replace_range(&ctx().suggesting(), range, "typed")
+            }
+            .unwrap();
+            let promoted = identity(&doc, &tail);
+            assert_eq!(promoted.origin, ParagraphOrigin::Authored);
+            assert_eq!(promoted.id_origin, Some(ParagraphIdOrigin::Authored));
+            let inserted = receipt.range.as_ref().unwrap();
+            assert_eq!(inserted.start.para, tail);
+            assert_eq!(
+                doc.locate_range(inserted).unwrap(),
+                StoryRange::new("body", mark, mark + 5)
+            );
+            assert_eq!(doc.text_between(inserted, TextView::Raw).unwrap(), "typed");
+        }
+    }
+}
+
+#[test]
 fn raw_ops_authoring_into_an_editor_only_paragraph_promote_it() {
     let bytes = fixture_with(|parts| {
         replace(
