@@ -10670,16 +10670,16 @@ pub fn build_resident_display_pages_with_fonts(
     Ok(wanted)
 }
 
-/// The pagination's measured blocks by key, first occurrence winning as in
-/// [`build_display_list_selected`].
+/// The pagination's rendered measured blocks by key, first occurrence winning
+/// as in [`build_display_list_selected`].
 fn source_blocks_by_key(
     pagination: &crate::types::Input,
 ) -> HashMap<String, &crate::types::MeasuredBlock> {
     let mut blocks = HashMap::new();
     for measured in &pagination.measured {
-        blocks
-            .entry(crate_block_key(&measured.block))
-            .or_insert(measured);
+        if let Some(key) = resident_block_key(&measured.block) {
+            blocks.entry(key).or_insert(measured);
+        }
     }
     blocks
 }
@@ -10749,7 +10749,7 @@ fn layout_page_position_span(
             Fragment::Shape(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
             Fragment::Chart(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
             Fragment::Table(fragment) => {
-                if let Some(measured) = blocks.get(&crate_block_id_key(&fragment.block_id))
+                if let Some(measured) = blocks.get(&resident_block_id_key(&fragment.block_id))
                     && let LayoutBlock::Table(table) = &measured.block
                 {
                     let end = fragment.row_end.min(table.rows.len());
@@ -10818,9 +10818,9 @@ fn resident_build_input_for(
         .measured
         .iter()
         .filter(|measured| {
-            placed
-                .as_ref()
-                .is_none_or(|keys| keys.contains(&crate_block_key(&measured.block)))
+            placed.as_ref().is_none_or(|keys| {
+                resident_block_key(&measured.block).is_some_and(|key| keys.contains(&key))
+            })
         })
         .map(|measured| transcoder.convert(measured))
         .collect::<Result<Vec<MeasuredBlockIn>, _>>()
@@ -11062,11 +11062,7 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_observed(
         previous.pages[page_index] = page;
     }
     if built.len() < selected.len() {
-        let blocks: HashMap<String, &crate::types::MeasuredBlock> = pagination
-            .measured
-            .iter()
-            .map(|measured| (crate_block_key(&measured.block), measured))
-            .collect();
+        let blocks = source_blocks_by_key(pagination);
         for &page_index in selected.difference(&built) {
             previous.pages[page_index] = unbuilt_page_with_span(
                 &resident.input.layout.pages[page_index],
@@ -11134,7 +11130,9 @@ fn refresh_resident_display_pages_reading(
         .collect();
     let mut pending_blocks = selected_blocks;
     for measured in &pagination.measured {
-        let key = crate_block_key(&measured.block);
+        let Some(key) = resident_block_key(&measured.block) else {
+            continue;
+        };
         if !pending_blocks.remove(&key) {
             continue;
         }
@@ -11159,25 +11157,31 @@ fn convert_resident_value<T: Serialize, U: DeserializeOwned>(
     crate::transcode::transcode(input).map_err(|error| format!("parse {label}: {error}"))
 }
 
-fn crate_block_key(block: &crate::types::LayoutBlock) -> String {
+/// [`measured_block_key`] of `block` once transcoded: none for the breaks and
+/// unsupported blocks the display input does not render.
+fn resident_block_key(block: &crate::types::LayoutBlock) -> Option<String> {
+    use crate::types::LayoutBlock;
     match block {
-        crate::types::LayoutBlock::Paragraph(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::Table(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::Image(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::TextBox(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::Shape(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::Chart(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::SectionBreak(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::PageBreak(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::ColumnBreak(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::Unsupported => "unsupported".to_owned(),
+        LayoutBlock::Paragraph(value) => Some(resident_block_id_key(&value.id)),
+        LayoutBlock::Table(value) => Some(resident_block_id_key(&value.id)),
+        LayoutBlock::Image(value) => Some(resident_block_id_key(&value.id)),
+        LayoutBlock::TextBox(value) => Some(resident_block_id_key(&value.id)),
+        LayoutBlock::Shape(value) => Some(resident_block_id_key(&value.id)),
+        LayoutBlock::Chart(value) => Some(resident_block_id_key(&value.id)),
+        LayoutBlock::SectionBreak(_)
+        | LayoutBlock::PageBreak(_)
+        | LayoutBlock::ColumnBreak(_)
+        | LayoutBlock::Unsupported => None,
     }
 }
 
-fn crate_block_id_key(id: &crate::types::BlockId) -> String {
+/// [`block_key`] of `id` once transcoded, which reads an integral number back
+/// as an integer.
+fn resident_block_id_key(id: &crate::types::BlockId) -> String {
     match id {
         crate::types::BlockId::Str(value) => value.clone(),
-        crate::types::BlockId::Num(value) => value.to_string(),
+        crate::types::BlockId::Num(value) => crate::transcode::transcode::<_, Value>(value)
+            .map_or_else(|_| value.to_string(), |value| block_key(&value)),
     }
 }
 
@@ -11444,6 +11448,104 @@ mod tests {
         assert!(
             fewer_blocks >= 3,
             "only {fewer_blocks} fixtures skipped blocks"
+        );
+    }
+
+    fn table_split_fixture() -> crate::types::Input {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/table-splits-with-repeated-header.input.json");
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    /// Builds page 0 alone, then the rest, as a list to compare with a full build.
+    fn partial_then_rest(
+        pagination: &crate::types::Input,
+        layout: &crate::types::Layout,
+    ) -> (DisplayList, DisplayList) {
+        let fonts = ooxml_text::FontStore::default();
+        let (mut resident, mut list) = build_resident_display_list_partial_with_fonts_observed(
+            pagination,
+            layout,
+            "{}",
+            &fonts,
+            &|index| index == 0,
+            &mut || {},
+        )
+        .unwrap();
+        let first = list.clone();
+        let rest: Vec<usize> = (1..layout.pages.len()).collect();
+        build_resident_display_pages_with_fonts(
+            pagination,
+            layout,
+            &fonts,
+            &mut resident,
+            &mut list,
+            &rest,
+        )
+        .unwrap();
+        (first, list)
+    }
+
+    #[test]
+    fn a_partial_resident_build_keys_numeric_block_ids_as_the_transcoder_does() {
+        for id in [-0.0, 1e21] {
+            let mut pagination = table_split_fixture();
+            let crate::types::LayoutBlock::Table(table) = &mut pagination.measured[0].block else {
+                panic!("the fixture opens with a table");
+            };
+            table.id = crate::types::BlockId::Num(id);
+            let layout = crate::compute_layout_input(&mut pagination).unwrap();
+            assert!(layout.pages.len() > 1);
+            let full = build_display_list(
+                &resident_build_input(&pagination, &layout, "{}").unwrap(),
+                &ooxml_text::FontStore::default(),
+            );
+            let (first, list) = partial_then_rest(&pagination, &layout);
+            assert_eq!(first.pages[0], full.pages[0], "{id}");
+            assert_eq!(list, full, "{id}");
+        }
+    }
+
+    #[test]
+    fn a_break_sharing_a_rendered_block_id_does_not_stand_in_for_it() {
+        let pagination = table_split_fixture();
+        let layout = crate::compute_layout_input(&mut pagination.clone()).unwrap();
+        let crate::types::LayoutBlock::Table(table) = &pagination.measured[0].block else {
+            panic!("the fixture opens with a table");
+        };
+        let mut shadowed = pagination.clone();
+        let page_break: crate::types::LayoutBlock = serde_json::from_value(serde_json::json!({
+            "kind": "pageBreak",
+            "id": serde_json::to_value(&table.id).unwrap(),
+        }))
+        .unwrap();
+        shadowed.measured.insert(
+            0,
+            crate::types::MeasuredBlock {
+                block: page_break,
+                ..pagination.measured[0].clone()
+            },
+        );
+        let unbuilt = |_: usize| false;
+        let fonts = ooxml_text::FontStore::default();
+        let spans = |pagination: &crate::types::Input| {
+            build_resident_display_list_partial_with_fonts_observed(
+                pagination,
+                &layout,
+                "{}",
+                &fonts,
+                &unbuilt,
+                &mut || {},
+            )
+            .unwrap()
+            .1
+        };
+        let expected = spans(&pagination);
+        assert!(expected.pages[1].position_span.is_some());
+        assert_eq!(spans(&shadowed), expected);
+        assert_eq!(
+            partial_then_rest(&shadowed, &layout),
+            partial_then_rest(&pagination, &layout)
         );
     }
 
