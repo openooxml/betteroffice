@@ -17,6 +17,7 @@
 import type { EditSession } from './wasm/index';
 import type { Document } from '../types/document';
 import type { CompatibilityFlags } from '../docx/settingsParser';
+import { resolveCommentMedia } from './hostMedia';
 import { registerSessionInternals } from './sessionInternals';
 import { noteYrsStoriesDirty } from './yrsToDocument';
 import type {
@@ -51,6 +52,7 @@ import {
   type DocxProposalResult,
   type DocxProposalSnapshot,
   type DocxProposalStateRequest,
+  type DocxProposalWithdrawRequest,
 } from './proposals';
 import type {
   DocxContentControlQuery,
@@ -114,6 +116,7 @@ export {
   type DocxProposalSnapshot,
   type DocxProposalState,
   type DocxProposalStateRequest,
+  type DocxProposalWithdrawRequest,
 } from './proposals';
 export {
   captureSessionSave,
@@ -240,6 +243,13 @@ export interface YrsOpeningOptions {
    * as one session. Each opening mints a fresh one by default.
    */
   generation?: string;
+  /**
+   * Seeds images as `media:{n}` tokens naming their part of the package,
+   * instead of `data:` URLs, keeping them out of the document state. Only a
+   * replica opened from the same package on a version that reads tokens
+   * shows them, so every client of a shared room must be one. Off by default.
+   */
+  mediaTokens?: boolean;
 }
 
 /** SHA-256 digests of the byte copies {@link prepareDocxBytes} made, by copy. */
@@ -530,6 +540,11 @@ export interface YrsRenderEnv {
   showHiddenText?: boolean;
   /** Revision id → decision shown in layout; unlisted revisions render as tracked changes. */
   revisionPreview?: Readonly<Record<string, 'accepted' | 'rejected'>>;
+  /**
+   * Lay the opened package's images out as `media:{n}` tokens, which a
+   * resolver given the session's `mediaSource` reads. @internal
+   */
+  mediaTokens?: boolean;
 }
 
 /** Receipt of {@link YrsSession.addComment}. */
@@ -654,6 +669,8 @@ export interface YrsResidentWorkerSnapshot {
   layoutRevision: number;
   /** The document is a preview's cut of a package: its layouts render NUMPAGES empty. */
   partialDocument?: boolean;
+  /** Which seeded `data:` image sources lay out as `media:{n}` tokens. @internal */
+  mediaSources?: string;
 }
 
 /**
@@ -846,6 +863,12 @@ export interface YrsSelectionText {
  * One live replica of the yrs editing model. Thin typed wrapper over the
  * wasm `EditSession` — no editing logic on this side of the boundary.
  */
+/** An embedded image's bytes, as its `media:{n}` source displays them. */
+export interface YrsMediaSource {
+  bytes: Uint8Array;
+  mimeType: string;
+}
+
 export interface YrsSession extends CollaborationReplica {
   /** The yrs client id this replica writes with. */
   readonly clientId: number;
@@ -995,6 +1018,20 @@ export interface YrsSession extends CollaborationReplica {
   beginOpening(generation?: string): void;
   /** Materializes the retained canonical package for compatibility APIs. */
   materializeDocx(): Document | null;
+  /**
+   * The displayed bytes and media type of the package part a `media:{n}`
+   * image source names, or `null` for any other source or a destroyed session.
+   */
+  mediaSource(token: string): YrsMediaSource | null;
+  /** Changes on package opening and session destruction. */
+  mediaScope(): number;
+  /** The `data:` URL a token stands for, or `null` when unavailable or destroyed. */
+  mediaDataUrl(token: string): string | null;
+  /**
+   * Lays this replica's `data:` image sources out as the `media:{n}` tokens a
+   * snapshot's `mediaSources` names. @internal
+   */
+  loadMediaSources(json: string): void;
   /**
    * Seeds stories and returns paragraph IDs in document order. Seeding a
    * document that has no opening yet starts one; see {@link beginOpening}.
@@ -1316,6 +1353,12 @@ export interface YrsSession extends CollaborationReplica {
    * history; each call that changes one increments `previewVersion`.
    */
   setProposalStates(request: DocxProposalStateRequest): DocxProposalResult;
+  /**
+   * Withdraws proposals, settling each as its decision previews it: accepted ones apply for good,
+   * rejected and undecided ones are removed. The settlement is one change against `expectVersion`
+   * outside undo history, so a later round resolves against the text the preview showed.
+   */
+  withdrawProposals(request: DocxProposalWithdrawRequest): DocxProposalResult;
   /** The proposals in the order they were made. */
   getProposals(): DocxProposalSnapshot;
   /** Listens for new proposals, decisions and a forgotten registry. Returns the unsubscribe. */
@@ -1628,6 +1671,14 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     observing = false;
   };
 
+  // `data:` URLs of the opened package's `media:{n}` sources.
+  const mediaDataUrls = new Map<string, string | null>();
+  let mediaScope = 0;
+  const resetMedia = (): void => {
+    mediaDataUrls.clear();
+    mediaScope += 1;
+  };
+
   const openDocx = (
     bytes: Uint8Array,
     seedStories: boolean,
@@ -1635,7 +1686,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   ): YrsDocxHost => {
     const source = bytes.slice();
     markDirty('all');
+    resetMedia();
     const json = mutate(() => {
+      session.set_media_tokens(options.mediaTokens === true);
       const opened = session.open_docx(
         source,
         seedStories,
@@ -1645,9 +1698,24 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       proposals.reset();
       return opened;
     });
-    const host = decodeDocxHost(json, source);
+    const host = withHostMedia(decodeDocxHost(json, source));
     docxSource = source;
     partialDocument = false;
+    return host;
+  };
+
+  const mediaDataUrl = (token: string): string | null => {
+    if (destroyed || !token.startsWith('media:')) return null;
+    let url = mediaDataUrls.get(token);
+    if (url === undefined) {
+      url = session.media_data_url(token) ?? null;
+      mediaDataUrls.set(token, url);
+    }
+    return url;
+  };
+
+  const withHostMedia = (host: YrsDocxHost): YrsDocxHost => {
+    resolveCommentMedia(host.document.package.document.comments, mediaDataUrl);
     return host;
   };
 
@@ -1655,7 +1723,14 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     version: () => facade.version(),
     resolveParagraphAnchor: (anchor) => facade.resolveParagraphAnchor(anchor),
     findText: (request) => facade.findText(request),
+    readParagraphs: (request) => facade.readParagraphs(request),
     applyEdits: (request) => facade.applyEdits(request),
+    listRevisions: () => facade.listRevisions(),
+    settleRevisions: (accept, reject) => {
+      const since = facade.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+      session.settle_revisions_json(JSON.stringify({ accept, reject }));
+      markDirty(facade.storiesChangedSince(since).stories);
+    },
     ...(typeof session.begin_shared_reads === 'function' &&
     typeof session.end_shared_reads === 'function'
       ? {
@@ -1675,11 +1750,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     clientId,
     openDocxPreview: (bytes, blocks) => {
       markDirty('all');
+      resetMedia();
       const json = mutate(() => session.open_docx_preview(bytes, blocks));
       if (json === undefined) return null;
       displayOnly = true;
       partialDocument = true;
-      return decodeDocxHost(json, bytes);
+      return withHostMedia(decodeDocxHost(json, bytes));
     },
     isDisplayOnly: () => displayOnly,
     setPartialDocument: (partial) => {
@@ -1815,6 +1891,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       if (!residentLayoutInput) return null;
       if (!residentLayoutWithRegions && residentRenderInputs.size === 0) return null;
       const selectionJson = session.selection();
+      const mediaSources = session.media_sources_json();
       const fontsCurrent = options?.knownFontsRevision === residentFontsRevision;
       let state: Uint8Array | null = null;
       if (options?.knownStateVector) {
@@ -1843,6 +1920,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         layoutWithRegions: residentLayoutWithRegions,
         layoutRevision: residentLayoutRevision,
         ...(partialDocument ? { partialDocument: true } : {}),
+        ...(mediaSources ? { mediaSources } : {}),
       };
     },
     residentWorkerProbe: () => {
@@ -1874,6 +1952,15 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         proposals.reset();
       });
     },
+    mediaSource: (token) => {
+      if (destroyed || !token.startsWith('media:')) return null;
+      const bytes = session.media_bytes(token);
+      const mimeType = bytes && session.media_type(token);
+      return bytes && mimeType ? { bytes, mimeType } : null;
+    },
+    loadMediaSources: (json) => session.load_media_sources(json),
+    mediaDataUrl,
+    mediaScope: () => mediaScope,
     materializeDocx: () => {
       const source = docxSource;
       const json = session.materialize_docx();
@@ -2543,6 +2630,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       }),
     proposeChanges: (request) => mutate(() => proposals.propose(request)),
     setProposalStates: (request) => proposals.setStates(request),
+    withdrawProposals: (request) => mutate(() => proposals.withdraw(request)),
     getProposals: () => proposals.snapshot(),
     onProposalChange: (listener) => {
       if (destroyed) throw new Error('yrs session is destroyed');
@@ -2583,6 +2671,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     destroy: () => {
       if (destroyed) return;
       destroyed = true;
+      resetMedia();
       listeners.clear();
       proposals.destroy();
       pendingUpdates.length = 0;

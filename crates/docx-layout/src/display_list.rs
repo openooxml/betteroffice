@@ -14,7 +14,8 @@
 //! A page's `primitives` are emitted back to front: watermark, behind-document
 //! floating images, the layout's fragments in order, in-front floating images,
 //! then column separators. Inside a fragment the order is shading, borders,
-//! then line content.
+//! then line content. The `watermark_primitive_count` prefix paints below the
+//! header and footer; the remaining body primitives paint above them.
 //!
 //! `background`, `page_borders`, `header`, `footer` and `note_areas` are
 //! separate fields rather than entries in that stream, so the consumer places
@@ -125,6 +126,9 @@ pub struct DisplayPage {
     pub page_label: Option<String>,
     /// paint order
     pub primitives: Vec<Primitive>,
+    /// Leading primitives painted beneath the header and footer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark_primitive_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2451,8 +2455,9 @@ struct ShapeFillIn {
     background_color: Option<String>,
     #[serde(default)]
     picture_rel_id: Option<String>,
-    /// resolved SAFE embedded picture source (`data:`/`blob:` minted by the
-    /// parser from embedded parts; never an external target)
+    /// resolved SAFE embedded picture source (`data:`/`blob:` or a `media:{n}`
+    /// part token, minted by the parser from embedded parts; never an external
+    /// target)
     #[serde(default)]
     picture_src: Option<String>,
     #[serde(default)]
@@ -4998,6 +5003,7 @@ fn build_display_list_selected(
         {
             emit_watermark(&mut prims, watermark, page);
         }
+        let watermark_primitive_count = (!prims.is_empty()).then_some(prims.len());
         if let Some(border) = page_border_primitive(
             &render_options,
             page,
@@ -5261,6 +5267,7 @@ fn build_display_list_selected(
             section_page_number: page.section_page_number,
             page_label: page.page_label.clone(),
             primitives: prims,
+            watermark_primitive_count,
             background: page.background.clone(),
             page_borders,
             header,
@@ -8107,12 +8114,12 @@ fn shape_fill_paint(fill: Option<&ShapeFillIn>) -> Option<Value> {
         }
     }
     // resolved picture-fill source: pass through only parser-minted embedded
-    // schemes (data:/blob:) so a hand-crafted input cannot smuggle an external
-    // URL to the canvas image resolver
+    // schemes (data:/blob:, or a media:{n} part token) so a hand-crafted input
+    // cannot smuggle an external URL to the canvas image resolver
     if let Some(src) = fill
         .picture_src
         .as_ref()
-        .filter(|src| src.starts_with("data:") || src.starts_with("blob:"))
+        .filter(|src| src.starts_with("data:") || src.starts_with("blob:") || is_media_token(src))
     {
         paint.insert("pictureSrc".to_string(), Value::String(src.clone()));
     }
@@ -8132,6 +8139,13 @@ fn shape_fill_paint(fill: Option<&ShapeFillIn>) -> Option<Value> {
         paint.insert("themeRefIndex".to_string(), Value::Number(index.into()));
     }
     (!paint.is_empty()).then_some(Value::Object(paint))
+}
+
+/// A `media:{n}` token naming a package part the host resolves.
+fn is_media_token(src: &str) -> bool {
+    src.strip_prefix("media:").is_some_and(|digits| {
+        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 fn shape_stroke_paint(stroke: Option<&ShapeStrokeIn>) -> Option<Value> {
@@ -10703,6 +10717,7 @@ fn unbuilt_page_with_span(
         section_page_number: page.section_page_number,
         page_label: page.page_label.clone(),
         primitives: Vec::new(),
+        watermark_primitive_count: None,
         background: page.background.clone(),
         page_borders: Vec::new(),
         header: None,

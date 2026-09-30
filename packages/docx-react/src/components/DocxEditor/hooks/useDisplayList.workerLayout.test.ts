@@ -1,16 +1,20 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { preloadDocxEngine } from '@betteroffice/docx/yrs';
-import { takePreloadedResidentEngineWorker, type YrsSession } from '@betteroffice/docx/yrs';
+import {
+  takePreloadedResidentEngineWorker,
+  type YrsSelection,
+  type YrsSession,
+} from '@betteroffice/docx/yrs';
 import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
-import { useRustDisplayList } from './useDisplayList';
+import { useRustDisplayList, type ResidentFrameApplyResult } from './useDisplayList';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -67,10 +71,10 @@ class FakeWorker {
   }
 }
 
-function setup() {
-  const native = createEditSession(9301);
-  native.create_story('body', 'Owned layout', 'Normal', 'left');
-  const layoutJson = native.layout_document_with_regions_retained_json(REQUEST);
+function setup(clientId = 9301, text = 'Owned layout', request = REQUEST) {
+  const native = createEditSession(clientId);
+  native.create_story('body', text, 'Normal', 'left');
+  const layoutJson = native.layout_document_with_regions_retained_json(request);
   const frame = native.build_display_list_frame(JSON.stringify({}), 0);
   const adopted: string[] = [];
   const engine = {
@@ -94,6 +98,31 @@ function setup() {
   } as unknown as YrsSession;
   globalThis.Worker = FakeWorker as unknown as typeof Worker;
   return { native, layoutJson, frame, engine, adopted };
+}
+
+function setupResidentInput() {
+  const document = setup();
+  const paragraphs = JSON.parse(document.native.paragraphs('body')) as Array<{
+    paraId: string;
+    text: string;
+  }>;
+  const para = paragraphs[0]!;
+  document.native.set_selection('body', para.paraId, para.text.length, para.paraId, para.text.length);
+  const applyInput = mock((text: string, frameEpoch: number) =>
+    document.native.apply_input(text, frameEpoch)
+  );
+  const applyDelete = mock((direction: 'backward' | 'forward', frameEpoch: number, count = 1) =>
+    document.native.apply_delete(direction, frameEpoch, count)
+  );
+  Object.assign(document.engine, {
+    resetFrameBase: () => document.native.reset_frame_base(),
+    selection: () => JSON.parse(document.native.selection()) as YrsSelection,
+    applyInput,
+    applyDelete,
+    residentDeletedUnits: () => document.native.resident_deleted_units(),
+    residentCaretSnapshot: () => JSON.parse(document.native.resident_caret_snapshot_json()),
+  });
+  return { ...document, applyInput, applyDelete };
 }
 
 test('workerFor adopts the spare once and the next session spawns fresh', async () => {
@@ -235,6 +264,669 @@ test('a worker-run layout arrives with its frame and needs no second worker pass
     unmount();
   } finally {
     native.free();
+  }
+});
+
+test('a retained worker query facade forwards within a document load but never to the next document', async () => {
+  const requestB = JSON.stringify({
+    ...JSON.parse(REQUEST),
+    regions: { sections: [{ sectionId: 'main', properties: { pageWidth: 14400 } }] },
+  });
+  const documentA = setup();
+  const documentB = setup(9302, 'Document B', requestB);
+  const engineQueriesB = {
+    displayHitTestRegionsJson: mock(() => 'null'),
+    displayVerticalMoveJson: mock(() => 'null'),
+    displayRangeRectsJson: mock(() => '[]'),
+    displayRangeRectsRegionJson: mock(() => '[]'),
+  };
+  Object.assign(documentB.engine, engineQueriesB);
+  try {
+    const { preloadLayoutWasm } = await import('@betteroffice/docx/wasm/layout');
+    await preloadLayoutWasm(
+      new Uint8Array(
+        readFileSync(
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+        )
+      )
+    );
+    let inputs = {
+      ...JSON.parse(documentA.native.retained_kernel_inputs_json()),
+      ...JSON.parse(documentA.layoutJson),
+    };
+    const overrides = { getInputs: () => inputs };
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) => useRustDisplayList(layout, overrides, undefined, undefined, source),
+      { initialProps: { layout: inputs.layout as Layout, source: documentA.engine } }
+    );
+    const publish = async (worker: FakeWorker, frame: Uint8Array, frameEpoch: number) => {
+      await act(async () => {
+        worker.reply({
+          id: worker.posted.at(-1)!.id,
+          ok: true,
+          frame: frame.slice().buffer,
+          caret: { frameEpoch, caretRect: null },
+          selection: null,
+          layoutRevision: 0,
+        });
+      });
+      await waitFor(() => {
+        if (result.current.error) throw result.current.error;
+        expect(result.current.frame?.frameEpoch).toBe(frameEpoch);
+        expect(result.current.queries).not.toBeNull();
+        expect(result.current.workerSurfacesActive).toBe(true);
+      });
+      return result.current.queries!;
+    };
+    const workerA = FakeWorker.last!;
+    expect(workerA.posted.at(-1)).toMatchObject({ type: 'bootstrap' });
+    const queriesA0 = await publish(workerA, documentA.frame, 1);
+    const displayListA0 = queriesA0.displayList;
+    const pageSizeA0 = queriesA0.pageSize(0);
+    expect(pageSizeA0).not.toBeNull();
+    await queriesA0.whenReady();
+    queriesA0.prime();
+
+    const layoutA1 = documentA.native.layout_document_with_regions_retained_json(REQUEST);
+    inputs = {
+      ...JSON.parse(documentA.native.retained_kernel_inputs_json()),
+      ...JSON.parse(layoutA1),
+    };
+    const frameA1 = documentA.native.build_display_list_frame('{}', 1);
+    await act(async () => {
+      rerender({ layout: inputs.layout, source: documentA.engine });
+    });
+    expect(workerA.posted.at(-1)).toMatchObject({ type: 'buildFrame', expectedFrameEpoch: 1 });
+    const queriesA1 = await publish(workerA, frameA1, 2);
+    await queriesA1.whenReady();
+    queriesA1.prime();
+    expect(queriesA1).not.toBe(queriesA0);
+    expect(queriesA1.displayList).not.toBe(displayListA0);
+    expect(queriesA1.displayList.pages[0]).toBe(displayListA0.pages[0]);
+    expect(queriesA0.displayList).toBe(queriesA1.displayList);
+    expect(queriesA0.pageSize(0)).toEqual(queriesA1.pageSize(0));
+
+    act(() => result.current.resetSettled());
+    expect(result.current.awaitingDocument()).toBe(true);
+    inputs = {
+      ...JSON.parse(documentB.native.retained_kernel_inputs_json()),
+      ...JSON.parse(documentB.layoutJson),
+    };
+    await act(async () => {
+      rerender({ layout: inputs.layout, source: documentB.engine });
+    });
+    const workerB = FakeWorker.last!;
+    expect(workerB).not.toBe(workerA);
+    expect(workerB.posted.at(-1)).toMatchObject({ type: 'bootstrap' });
+    const queriesB = await publish(workerB, documentB.frame, 1);
+    expect(result.current.awaitingDocument()).toBe(false);
+    expect(queriesB.pageSize(0)).not.toEqual(pageSizeA0);
+    expect(queriesB.pageSize(0)).not.toEqual(queriesA1.pageSize(0));
+    const requestsToB = workerB.posted.length;
+
+    expect(queriesA0.displayList).toBe(displayListA0);
+    expect(queriesA0.displayList).not.toBe(queriesB.displayList);
+    expect(queriesA0.pageSize(0)).toEqual(pageSizeA0);
+    expect(queriesA0.rangeRects(0, 10)).toEqual([]);
+    expect(queriesA0.hitTestRegions(0, 100, 100)).toBeNull();
+    expect(queriesA0.caretRect(1)).toBeNull();
+    for (const query of Object.values(engineQueriesB)) expect(query).not.toHaveBeenCalled();
+    expect(workerB.posted).toHaveLength(requestsToB);
+    queriesA0.dispose();
+    queriesA1.dispose();
+    queriesB.dispose();
+    unmount();
+  } finally {
+    documentA.native.free();
+    documentB.native.free();
+  }
+});
+
+test("a snapshot rebuilt after the next document starts loading keeps its own document's line", async () => {
+  const requestB = JSON.stringify({
+    ...JSON.parse(REQUEST),
+    regions: { sections: [{ sectionId: 'main', properties: { pageWidth: 14400 } }] },
+  });
+  const documentA = setup();
+  const documentB = setup(9302, 'Document B', requestB);
+  try {
+    const { preloadLayoutWasm } = await import('@betteroffice/docx/wasm/layout');
+    await preloadLayoutWasm(
+      new Uint8Array(
+        readFileSync(
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+        )
+      )
+    );
+    let inputs = {
+      ...JSON.parse(documentA.native.retained_kernel_inputs_json()),
+      ...JSON.parse(documentA.layoutJson),
+    };
+    const layoutA = inputs.layout as Layout;
+    const overrides = { getInputs: () => inputs };
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source, resolved }) =>
+        useRustDisplayList(layout, overrides, undefined, resolved, source),
+      {
+        initialProps: {
+          layout: layoutA,
+          source: documentA.engine,
+          resolved: undefined as ReadonlySet<number> | undefined,
+        },
+      }
+    );
+    const publish = async (worker: FakeWorker, frame: Uint8Array, frameEpoch: number) => {
+      await act(async () => {
+        worker.reply({
+          id: worker.posted.at(-1)!.id,
+          ok: true,
+          frame: frame.slice().buffer,
+          caret: { frameEpoch, caretRect: null },
+          selection: null,
+          layoutRevision: 0,
+        });
+      });
+      await waitFor(() => {
+        if (result.current.error) throw result.current.error;
+        expect(result.current.frame?.frameEpoch).toBe(frameEpoch);
+        expect(result.current.queries).not.toBeNull();
+        expect(result.current.workerSurfacesActive).toBe(true);
+      });
+      return result.current.queries!;
+    };
+    const workerA = FakeWorker.last!;
+    expect(workerA.posted.at(-1)).toMatchObject({ type: 'bootstrap' });
+    const queriesA0 = await publish(workerA, documentA.frame, 1);
+    const displayListA0 = queriesA0.displayList;
+    await queriesA0.whenReady();
+    queriesA0.prime();
+
+    act(() => result.current.resetSettled());
+    expect(result.current.awaitingDocument()).toBe(true);
+    const frameA1 = documentA.native.build_display_list_frame('{"resolvedCommentIds":[7]}', 1);
+    await act(async () => {
+      rerender({ layout: layoutA, source: documentA.engine, resolved: new Set([7]) });
+    });
+    expect(FakeWorker.last).toBe(workerA);
+    expect(workerA.posted.at(-1)).toMatchObject({ type: 'buildFrame', expectedFrameEpoch: 1 });
+    const queriesA1 = await publish(workerA, frameA1, 2);
+    await queriesA1.whenReady();
+    queriesA1.prime();
+    const displayListA1 = queriesA1.displayList;
+    const pageSizeA1 = queriesA1.pageSize(0);
+    const forwardedDisplayListA0 = queriesA0.displayList;
+    expect(queriesA1).not.toBe(queriesA0);
+    expect(displayListA1).not.toBe(displayListA0);
+    expect(pageSizeA1).not.toBeNull();
+    expect(result.current.awaitingDocument()).toBe(true);
+
+    inputs = {
+      ...JSON.parse(documentB.native.retained_kernel_inputs_json()),
+      ...JSON.parse(documentB.layoutJson),
+    };
+    await act(async () => {
+      rerender({ layout: inputs.layout, source: documentB.engine, resolved: undefined });
+    });
+    const workerB = FakeWorker.last!;
+    expect(workerB).not.toBe(workerA);
+    expect(workerB.posted.at(-1)).toMatchObject({ type: 'bootstrap' });
+    const queriesB = await publish(workerB, documentB.frame, 1);
+    expect(result.current.awaitingDocument()).toBe(false);
+    expect(queriesB.pageSize(0)).not.toEqual(pageSizeA1);
+
+    expect(queriesA1.displayList).toBe(displayListA1);
+    expect(queriesA1.displayList).not.toBe(queriesB.displayList);
+    expect(queriesA1.pageSize(0)).toEqual(pageSizeA1);
+    expect(forwardedDisplayListA0).toBe(displayListA1);
+    queriesA0.dispose();
+    queriesA1.dispose();
+    queriesB.dispose();
+    unmount();
+  } finally {
+    documentA.native.free();
+    documentB.native.free();
+  }
+});
+
+test('a new layout of the shown document after the next one starts loading keeps its own line', async () => {
+  const requestB = JSON.stringify({
+    ...JSON.parse(REQUEST),
+    regions: { sections: [{ sectionId: 'main', properties: { pageWidth: 14400 } }] },
+  });
+  const documentA = setup();
+  const documentB = setup(9302, 'Document B', requestB);
+  try {
+    const { preloadLayoutWasm } = await import('@betteroffice/docx/wasm/layout');
+    await preloadLayoutWasm(
+      new Uint8Array(
+        readFileSync(
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+        )
+      )
+    );
+    let inputs = {
+      ...JSON.parse(documentA.native.retained_kernel_inputs_json()),
+      ...JSON.parse(documentA.layoutJson),
+    };
+    const layoutA = inputs.layout as Layout;
+    const overrides = { getInputs: () => inputs };
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) => useRustDisplayList(layout, overrides, undefined, undefined, source),
+      { initialProps: { layout: layoutA, source: documentA.engine } }
+    );
+    const publish = async (worker: FakeWorker, frame: Uint8Array, frameEpoch: number) => {
+      await act(async () => {
+        worker.reply({
+          id: worker.posted.at(-1)!.id,
+          ok: true,
+          frame: frame.slice().buffer,
+          caret: { frameEpoch, caretRect: null },
+          selection: null,
+          layoutRevision: 0,
+        });
+      });
+      await waitFor(() => {
+        if (result.current.error) throw result.current.error;
+        expect(result.current.frame?.frameEpoch).toBe(frameEpoch);
+        expect(result.current.queries).not.toBeNull();
+        expect(result.current.workerSurfacesActive).toBe(true);
+      });
+      return result.current.queries!;
+    };
+    const workerA = FakeWorker.last!;
+    const queriesA0 = await publish(workerA, documentA.frame, 1);
+    await queriesA0.whenReady();
+    queriesA0.prime();
+
+    act(() => result.current.resetSettled());
+    expect(result.current.awaitingDocument()).toBe(true);
+    const layoutA1 = documentA.native.layout_document_with_regions_retained_json(REQUEST);
+    inputs = {
+      ...JSON.parse(documentA.native.retained_kernel_inputs_json()),
+      ...JSON.parse(layoutA1),
+    };
+    expect(inputs.layout).not.toBe(layoutA);
+    const frameA1 = documentA.native.build_display_list_frame('{}', 1);
+    await act(async () => {
+      rerender({ layout: inputs.layout, source: documentA.engine });
+    });
+    expect(FakeWorker.last).toBe(workerA);
+    expect(workerA.posted.at(-1)).toMatchObject({ type: 'buildFrame', expectedFrameEpoch: 1 });
+    const queriesA1 = await publish(workerA, frameA1, 2);
+    await queriesA1.whenReady();
+    queriesA1.prime();
+    const displayListA1 = queriesA1.displayList;
+    const pageSizeA1 = queriesA1.pageSize(0);
+    expect(queriesA1).not.toBe(queriesA0);
+    expect(pageSizeA1).not.toBeNull();
+
+    const layoutA2 = documentA.native.layout_document_with_regions_retained_json(REQUEST);
+    inputs = {
+      ...JSON.parse(documentA.native.retained_kernel_inputs_json()),
+      ...JSON.parse(layoutA2),
+    };
+    const frameA2 = documentA.native.build_display_list_frame('{}', 2);
+    await act(async () => {
+      rerender({ layout: inputs.layout, source: documentA.engine });
+    });
+    expect(workerA.posted.at(-1)).toMatchObject({ type: 'buildFrame', expectedFrameEpoch: 2 });
+    const queriesA2 = await publish(workerA, frameA2, 3);
+    await queriesA2.whenReady();
+    queriesA2.prime();
+    expect(queriesA2.displayList).not.toBe(displayListA1);
+    expect(queriesA1.displayList).toBe(queriesA2.displayList);
+
+    inputs = {
+      ...JSON.parse(documentB.native.retained_kernel_inputs_json()),
+      ...JSON.parse(documentB.layoutJson),
+    };
+    await act(async () => {
+      rerender({ layout: inputs.layout, source: documentB.engine });
+    });
+    const workerB = FakeWorker.last!;
+    expect(workerB).not.toBe(workerA);
+    expect(workerB.posted.at(-1)).toMatchObject({ type: 'bootstrap' });
+    const queriesB = await publish(workerB, documentB.frame, 1);
+    await queriesB.whenReady();
+    queriesB.prime();
+    expect(queriesB.pageSize(0)).not.toEqual(pageSizeA1);
+    expect(queriesA1.displayList).toBe(displayListA1);
+    expect(queriesA1.displayList).not.toBe(queriesB.displayList);
+    expect(queriesA1.pageSize(0)).toEqual(pageSizeA1);
+    queriesA0.dispose();
+    queriesA1.dispose();
+    queriesA2.dispose();
+    queriesB.dispose();
+    unmount();
+  } finally {
+    documentA.native.free();
+    documentB.native.free();
+  }
+});
+
+test('input that answers after the next document replaced its worker publishes nothing', async () => {
+  const requestB = JSON.stringify({
+    ...JSON.parse(REQUEST),
+    regions: { sections: [{ sectionId: 'main', properties: { pageWidth: 14400 } }] },
+  });
+  const documentA = setup();
+  const documentB = setup(9302, 'Document B', requestB);
+  const applyLocalUpdate = mock(() => {});
+  for (const document of [documentA, documentB]) {
+    const paragraphs = JSON.parse(document.native.paragraphs('body')) as Array<{
+      paraId: string;
+      text: string;
+    }>;
+    const para = paragraphs[0]!;
+    document.native.set_selection('body', para.paraId, para.text.length, para.paraId, para.text.length);
+    Object.assign(document.engine, {
+      selection: () => JSON.parse(document.native.selection()) as YrsSelection,
+      applyLocalUpdate,
+    });
+  }
+  try {
+    const { preloadLayoutWasm } = await import('@betteroffice/docx/wasm/layout');
+    await preloadLayoutWasm(
+      new Uint8Array(
+        readFileSync(
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+        )
+      )
+    );
+    let inputs = {
+      ...JSON.parse(documentA.native.retained_kernel_inputs_json()),
+      ...JSON.parse(documentA.layoutJson),
+    };
+    const overrides = { getInputs: () => inputs };
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) => useRustDisplayList(layout, overrides, undefined, undefined, source),
+      { initialProps: { layout: inputs.layout as Layout, source: documentA.engine } }
+    );
+    const workerA = FakeWorker.last!;
+    await act(async () => {
+      workerA.reply({
+        id: workerA.posted.at(-1)!.id,
+        ok: true,
+        frame: documentA.frame.slice().buffer,
+        caret: { frameEpoch: 1, caretRect: null },
+        selection: documentA.engine.selection(),
+        layoutRevision: 0,
+      });
+    });
+    await waitFor(() => {
+      if (result.current.error) throw result.current.error;
+      expect(result.current.frame?.frameEpoch).toBe(1);
+      expect(result.current.queries).not.toBeNull();
+    });
+    const queriesA = result.current.queries!;
+    const displayListA = result.current.displayList;
+
+    act(() => result.current.resetSettled());
+    const pendingInput = result.current.applyInput('!');
+    await act(async () => {
+      for (let i = 0; i < 25 && workerA.posted.at(-1)?.type !== 'applyInput'; i += 1) {
+        await Promise.resolve();
+      }
+      expect(workerA.posted.at(-1)).toMatchObject({ type: 'applyInput', expectedFrameEpoch: 1 });
+    });
+    const inputRequest = workerA.posted.at(-1)!;
+    const inputFrameA = documentA.native.apply_input('!', 1);
+    inputs = {
+      ...JSON.parse(documentB.native.retained_kernel_inputs_json()),
+      ...JSON.parse(documentB.layoutJson),
+    };
+    act(() => {
+      workerA.reply({
+        id: inputRequest.id,
+        ok: true,
+        frame: inputFrameA.slice().buffer,
+        updates: [new Uint8Array([7]).buffer],
+        deletedUnits: 0,
+        caret: { frameEpoch: 2, caretRect: null },
+        selection: documentA.engine.selection(),
+        layoutRevision: 0,
+      });
+      // Replace the worker before the input reply's continuation runs.
+      rerender({ layout: inputs.layout, source: documentB.engine });
+    });
+    const workerB = FakeWorker.last!;
+    expect(workerB).not.toBe(workerA);
+    expect(workerA.posted.at(-1)).toMatchObject({ type: 'destroy' });
+    expect(workerB.posted.at(-1)).toMatchObject({ type: 'bootstrap' });
+    const pendingQueries = result.current.resolveQueries();
+    const pendingDisplayList = result.current.settledDisplayList(null, null);
+    let outcome = null as ResidentFrameApplyResult | null;
+    await act(async () => {
+      outcome = await pendingInput;
+    });
+    expect(applyLocalUpdate).toHaveBeenCalledWith(new Uint8Array([7]));
+    expect(outcome).toMatchObject({ frameEpoch: null, caretSynchronized: false, deletedUnits: 0 });
+    expect(result.current.frame?.frameEpoch).toBe(1);
+    expect(result.current.displayList).toBe(displayListA);
+    expect(result.current.queries).toBe(queriesA);
+
+    await act(async () => {
+      workerB.reply({
+        id: workerB.posted.at(-1)!.id,
+        ok: true,
+        frame: documentB.frame.slice().buffer,
+        caret: { frameEpoch: 1, caretRect: null },
+        selection: documentB.engine.selection(),
+        layoutRevision: 0,
+      });
+    });
+    await waitFor(() => {
+      if (result.current.error) throw result.current.error;
+      expect(result.current.frame?.frameEpoch).toBe(1);
+      expect(result.current.queries).not.toBe(queriesA);
+      expect(result.current.queries).not.toBeNull();
+      expect(result.current.workerSurfacesActive).toBe(true);
+    });
+    const queriesB = result.current.queries!;
+    expect(JSON.stringify(queriesB.displayList)).toContain('Document B');
+    expect(queriesB.pageSize(0)).not.toEqual(queriesA.pageSize(0));
+    expect((await pendingQueries)?.queries).toBe(queriesB);
+    expect(await pendingDisplayList).toBe(queriesB.displayList);
+
+    await act(async () => {
+      const pending = result.current.applyInput('!');
+      for (let i = 0; i < 25 && workerB.posted.at(-1)?.type !== 'applyInput'; i += 1) {
+        await Promise.resolve();
+      }
+      expect(workerB.posted.at(-1)).toMatchObject({ type: 'applyInput', expectedFrameEpoch: 1 });
+      const inputFrameB = documentB.native.apply_input('!', 1);
+      workerB.reply({
+        id: workerB.posted.at(-1)!.id,
+        ok: true,
+        frame: inputFrameB.slice().buffer,
+        caret: { frameEpoch: 2, caretRect: null },
+        selection: documentB.engine.selection(),
+        layoutRevision: 0,
+      });
+      expect(await pending).toMatchObject({ frameEpoch: 2, caretSynchronized: false });
+    });
+    expect(result.current.frame?.frameEpoch).toBe(2);
+    expect(JSON.stringify(result.current.queries!.displayList)).toContain('Document B');
+    expect(JSON.stringify(result.current.queries!.displayList)).toContain('!');
+    queriesA.dispose();
+    queriesB.dispose();
+    result.current.queries!.dispose();
+    unmount();
+  } finally {
+    documentA.native.free();
+    documentB.native.free();
+  }
+});
+
+test('input a replaced worker rejects publishes nothing of its document', async () => {
+  const requestB = JSON.stringify({
+    ...JSON.parse(REQUEST),
+    regions: { sections: [{ sectionId: 'main', properties: { pageWidth: 14400 } }] },
+  });
+  const documentA = setupResidentInput();
+  const documentB = setup(9302, 'Document B', requestB);
+  try {
+    const { preloadLayoutWasm } = await import('@betteroffice/docx/wasm/layout');
+    await preloadLayoutWasm(
+      new Uint8Array(
+        readFileSync(
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+        )
+      )
+    );
+    let inputs = {
+      ...JSON.parse(documentA.native.retained_kernel_inputs_json()),
+      ...JSON.parse(documentA.layoutJson),
+    };
+    const overrides = { getInputs: () => inputs };
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) => useRustDisplayList(layout, overrides, undefined, undefined, source),
+      { initialProps: { layout: inputs.layout as Layout, source: documentA.engine } }
+    );
+    const workerA = FakeWorker.last!;
+    await act(async () => {
+      workerA.reply({
+        id: workerA.posted.at(-1)!.id,
+        ok: true,
+        frame: documentA.frame.slice().buffer,
+        caret: { frameEpoch: 1, caretRect: null },
+        selection: documentA.engine.selection(),
+        layoutRevision: 0,
+      });
+    });
+    await waitFor(() => {
+      if (result.current.error) throw result.current.error;
+      expect(result.current.frame?.frameEpoch).toBe(1);
+      expect(result.current.queries).not.toBeNull();
+    });
+    const queriesA = result.current.queries!;
+    const displayListA = result.current.displayList;
+
+    const pendingInput = result.current.applyInput('!');
+    await act(async () => {
+      for (let i = 0; i < 25 && workerA.posted.at(-1)?.type !== 'applyInput'; i += 1) {
+        await Promise.resolve();
+      }
+      expect(workerA.posted.at(-1)).toMatchObject({ type: 'applyInput', expectedFrameEpoch: 1 });
+    });
+    act(() => result.current.resetSettled());
+    inputs = {
+      ...JSON.parse(documentB.native.retained_kernel_inputs_json()),
+      ...JSON.parse(documentB.layoutJson),
+    };
+    act(() => {
+      rerender({ layout: inputs.layout, source: documentB.engine });
+    });
+    const workerB = FakeWorker.last!;
+    expect(workerB).not.toBe(workerA);
+    expect(workerA.posted.at(-1)).toMatchObject({ type: 'destroy' });
+    expect(workerB.posted.at(-1)).toMatchObject({ type: 'bootstrap' });
+    let outcome = null as ResidentFrameApplyResult | null;
+    await act(async () => {
+      outcome = await pendingInput;
+    });
+    expect(outcome).toEqual({ frameEpoch: null, caretSynchronized: false });
+    expect(documentA.applyInput).not.toHaveBeenCalled();
+    expect(documentA.applyDelete).not.toHaveBeenCalled();
+    expect(result.current.displayList).toBe(displayListA);
+    expect(result.current.queries).toBe(queriesA);
+    expect(result.current.error).toBeNull();
+
+    await act(async () => {
+      workerB.reply({
+        id: workerB.posted.at(-1)!.id,
+        ok: true,
+        frame: documentB.frame.slice().buffer,
+        caret: { frameEpoch: 1, caretRect: null },
+        selection: documentB.engine.selection(),
+        layoutRevision: 0,
+      });
+    });
+    await waitFor(() => {
+      if (result.current.error) throw result.current.error;
+      expect(result.current.frame?.frameEpoch).toBe(1);
+      expect(result.current.queries).not.toBe(queriesA);
+      expect(result.current.queries).not.toBeNull();
+      expect(result.current.workerSurfacesActive).toBe(true);
+    });
+    const queriesB = result.current.queries!;
+    expect(result.current.displayList).toBe(queriesB.displayList);
+    expect(result.current.displayList).not.toBe(displayListA);
+    expect(JSON.stringify(result.current.displayList)).toContain('Document B');
+    expect(JSON.stringify(queriesB.displayList)).toContain('Document B');
+    expect(queriesB.pageSize(0)).not.toEqual(queriesA.pageSize(0));
+    expect(documentA.applyInput).not.toHaveBeenCalled();
+    expect(documentA.applyDelete).not.toHaveBeenCalled();
+    expect(result.current.error).toBeNull();
+    queriesA.dispose();
+    queriesB.dispose();
+    unmount();
+  } finally {
+    documentA.native.free();
+    documentB.native.free();
+  }
+});
+
+test('input a failed worker rejects replays on the main thread for its own document', async () => {
+  const document = setupResidentInput();
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const { preloadLayoutWasm } = await import('@betteroffice/docx/wasm/layout');
+    await preloadLayoutWasm(
+      new Uint8Array(
+        readFileSync(
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+        )
+      )
+    );
+    const inputs = {
+      ...JSON.parse(document.native.retained_kernel_inputs_json()),
+      ...JSON.parse(document.layoutJson),
+    };
+    const overrides = { getInputs: () => inputs };
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(inputs.layout as Layout, overrides, undefined, undefined, document.engine)
+    );
+    const worker = FakeWorker.last!;
+    await act(async () => {
+      worker.reply({
+        id: worker.posted.at(-1)!.id,
+        ok: true,
+        frame: document.frame.slice().buffer,
+        caret: { frameEpoch: 1, caretRect: null },
+        selection: document.engine.selection(),
+        layoutRevision: 0,
+      });
+    });
+    await waitFor(() => {
+      if (result.current.error) throw result.current.error;
+      expect(result.current.frame?.frameEpoch).toBe(1);
+      expect(result.current.queries).not.toBeNull();
+    });
+    let outcome = null as ResidentFrameApplyResult | null;
+    await act(async () => {
+      const pendingInput = result.current.applyInput('!');
+      for (let i = 0; i < 25 && worker.posted.at(-1)?.type !== 'applyInput'; i += 1) {
+        await Promise.resolve();
+      }
+      expect(worker.posted.at(-1)).toMatchObject({ type: 'applyInput', expectedFrameEpoch: 1 });
+      worker.onerror?.({ message: 'worker crashed' } as ErrorEvent);
+      outcome = await pendingInput;
+    });
+    expect(document.applyInput).toHaveBeenCalledTimes(1);
+    expect(document.applyInput).toHaveBeenCalledWith('!', 1);
+    expect(document.applyDelete).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ frameEpoch: 2, caretSynchronized: false });
+    expect(result.current.frame?.frameEpoch).toBe(2);
+    expect(JSON.stringify(result.current.displayList)).toContain('!');
+    expect(JSON.stringify(result.current.queries!.displayList)).toContain('!');
+    expect(result.current.workerSurfacesActive).toBe(false);
+    expect(result.current.error).toBeNull();
+    result.current.queries!.dispose();
+    unmount();
+  } finally {
+    errors.mockRestore();
+    document.native.free();
   }
 });
 

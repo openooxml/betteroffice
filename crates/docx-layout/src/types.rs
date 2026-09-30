@@ -2544,6 +2544,8 @@ pub struct DisplayListContractMetadata {
 #[serde(rename_all = "camelCase")]
 pub struct DisplayPageContractMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark_primitive_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note_areas: Option<Vec<NoteAreaContract>>,
