@@ -193,7 +193,9 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   const pendingInWorkerRef = useRef<boolean | null>(null);
   // The worker pass in flight. A pass that may run in the worker waits for it,
   // so a burst of updates lays out their latest state once, not each in turn.
-  const workerPassRef = useRef<{ pass: number; session: YrsSession } | null>(null);
+  const workerPassRef = useRef<{ pass: number; session: YrsSession; opening: boolean } | null>(
+    null
+  );
   const queuedBehindWorkerRef = useRef(false);
   const schedulerRef = useRef<number | null>(null);
   const runRef = useRef<() => void>(() => {});
@@ -296,8 +298,15 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     (options?: { onHost?: boolean }) => {
       const onHost = options?.onHost === true || pendingOnHostRef.current;
       const inWorker = !onHost && pendingInWorkerRef.current === true;
-      if (inWorker && session && workerPassRef.current?.session === session) {
+      const inFlight = workerPassRef.current;
+      // A host batch waits for the worker pass in flight, and so does a pass no
+      // change asked to run here, such as a preview change, unless the pass in
+      // flight lays out the document as opened.
+      const waits =
+        inWorker || (!onHost && pendingInWorkerRef.current === null && !inFlight?.opening);
+      if (waits && session && inFlight?.session === session) {
         queuedBehindWorkerRef.current = true;
+        pendingLayoutOriginRef.current ??= 'local';
         return;
       }
       queuedBehindWorkerRef.current = false;
@@ -463,7 +472,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         syncCoordinator.onLayoutComplete(currentEpoch);
         return;
       }
-      workerPassRef.current = { pass, session };
+      workerPassRef.current = { pass, session, opening: !inWorker && !previewOnly };
       void workerPass
         .then(
           (computation) => {

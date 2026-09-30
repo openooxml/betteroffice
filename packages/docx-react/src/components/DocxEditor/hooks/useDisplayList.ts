@@ -29,6 +29,7 @@ import {
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
   ResidentWorkerOutOfMemoryError,
+  ResidentWorkerSupersededError,
   sameYrsSelection,
   type ResidentCaretPaintStyle,
   type ResidentEngineOffscreenPage,
@@ -348,6 +349,8 @@ export function useRustDisplayList(
   const pageBuildTimerRef = useRef<PageBuildTimer | null>(null);
   const schedulePageBuildsWhenIdleRef = useRef<() => void>(() => {});
   const workerLayoutFramesRef = useRef(new WeakMap<Layout, WorkerLayoutFrame>());
+  // The layout revision a worker pass is laying out, until it answers.
+  const workerLayoutInFlightRef = useRef<{ engine: YrsSession; revision: number } | null>(null);
   const completionGateRef = useRef<(() => void) | null>(null);
   const resolvedCommentIdsRef = useRef(resolvedCommentIds);
   resolvedCommentIdsRef.current = resolvedCommentIds;
@@ -1099,11 +1102,19 @@ export function useRustDisplayList(
       const reply = bootstrapping
         ? worker.bootstrap(snapshot, '', options)
         : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, options);
+      const inFlight = { engine: hostEngine, revision: adoptedRevision };
+      workerLayoutInFlightRef.current = inFlight;
+      const answered = () => {
+        if (workerLayoutInFlightRef.current === inFlight) workerLayoutInFlightRef.current = null;
+      };
+      reply.then(answered, answered);
       // A worker out of memory runs the pass again in a fresh worker; once
       // that one runs out too, the pass rejects and nothing lays out here.
       const unavailable = (
         cause: unknown
       ): Promise<WorkerLayoutComputation | null> | null => {
+        // Only a newer pass's sync supersedes this one, and that pass replaces it.
+        if (cause instanceof ResidentWorkerSupersededError) return null;
         if (cause instanceof ResidentWorkerOutOfMemoryError) {
           // A newer layout, here or in a worker, replaced this pass: the host
           // drops it, and a newer worker request recovers the worker it asks.
@@ -1424,6 +1435,18 @@ export function useRustDisplayList(
           !bootstrapping &&
           workerPresentationActiveRef.current &&
           paintedCaretMachine.shouldPaint(performance.now());
+        const inFlight = workerLayoutInFlightRef.current;
+        if (
+          !bootstrapping &&
+          worker.layoutRevision() !== probe.layoutRevision &&
+          inFlight?.engine === hostEngine &&
+          inFlight.revision === probe.layoutRevision
+        ) {
+          // The worker pass laying out this revision brings its own frame.
+          return Promise.reject(
+            new ResidentWorkerSupersededError('A worker pass lays out this revision')
+          );
+        }
         const snapshot =
           bootstrapping || worker.layoutRevision() !== probe.layoutRevision
             ? buildSnapshot()
@@ -1469,7 +1492,12 @@ export function useRustDisplayList(
             };
           })
           .catch((error) => {
-            if (error instanceof SupersededPreviewError) throw error;
+            if (
+              error instanceof SupersededPreviewError ||
+              error instanceof ResidentWorkerSupersededError
+            ) {
+              throw error;
+            }
             return fallback(error, owner);
           });
       };
@@ -1555,7 +1583,12 @@ export function useRustDisplayList(
           setTimeout(() => requestLayoutRef.current?.(), 0);
           return;
         }
-        if (error instanceof SupersededPreviewError) return;
+        if (
+          error instanceof SupersededPreviewError ||
+          error instanceof ResidentWorkerSupersededError
+        ) {
+          return;
+        }
         if (
           generation !== generationRef.current ||
           contentEpoch !== contentEpochRef.current

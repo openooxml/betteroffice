@@ -80,6 +80,7 @@ export {
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
   ResidentWorkerOutOfMemoryError,
+  ResidentWorkerSupersededError,
   canUseResidentEngineWorker,
   type ResidentEngineWorkerApplyResult,
   type ResidentEngineWorkerFrame,

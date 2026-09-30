@@ -10,7 +10,10 @@ import {
 import { preloadEditWasm } from '../wasm/edit';
 import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
 import { createYrsSession, type DocxEditRequest, type YrsSession } from './index';
-import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
+import {
+  ResidentEngineWorkerClient,
+  ResidentWorkerSupersededError,
+} from './residentEngineWorkerClient';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 const FONT = resolve(
@@ -299,4 +302,44 @@ test('the worker lays a host batch out exactly as the main thread does', async (
   const inWorker = JSON.parse(synced.layoutJson!) as { layout: { pages: unknown[] } };
   expect(inWorker.layout.pages.length).toBeGreaterThan(3);
   expect(inWorker).toEqual(JSON.parse(main.layoutDocumentWithRegionsRetainedJson(LAYOUT)));
+});
+
+test('a sync a layout sync waits behind loads its state and leaves the frame to that one', async () => {
+  const main = await createYrsSession({ clientId: 5120 });
+  sessions.push(main);
+  const { paraId } = main.createStory('body', 'Seed');
+  main.registerFont(new Uint8Array(readFileSync(FONT)));
+  main.adoptResidentWorkerLayout!(LAYOUT);
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  const layoutOptions = () => ({ layoutExtras: '{}', stateVector: main.encodeStateVector() });
+  const booted = await client.bootstrap(main.residentWorkerSnapshot()!, '', layoutOptions());
+  const sync = () => {
+    main.adoptResidentWorkerLayout!(LAYOUT);
+    return client.sync(
+      main.residentWorkerSnapshot({
+        knownStateVector: client.remoteStateVector(),
+        knownFontsRevision: client.syncedFontsRevision(),
+      })!,
+      '',
+      booted.caret.frameEpoch,
+      false,
+      layoutOptions()
+    );
+  };
+
+  main.insertText({ story: 'body', paraId, offset: 4 }, ' one');
+  const first = sync();
+  main.insertText({ story: 'body', paraId, offset: 8 }, ' two');
+  const second = sync();
+  await expect(first).rejects.toBeInstanceOf(ResidentWorkerSupersededError);
+  const latest = await second;
+  const frame = applyFrameDeltaOwned(
+    applyFrameDeltaOwned(null, decodeFrameDelta(booted.frame)),
+    decodeFrameDelta(latest.frame)
+  );
+  expect(frameText(frame)).toBe('Seed one two');
+  expect(JSON.parse(latest.layoutJson!)).toEqual(
+    JSON.parse(main.layoutDocumentWithRegionsRetainedJson(LAYOUT))
+  );
 });

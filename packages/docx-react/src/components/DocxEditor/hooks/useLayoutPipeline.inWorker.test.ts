@@ -173,6 +173,25 @@ test('updates that land while the worker lays out queue one pass for the latest 
   expect(errors).toEqual([]);
 });
 
+test('a pass no change asked to run here waits for the worker pass in flight', async () => {
+  const { doc, worker, errors, hook, frame, answer, shown } = await opened();
+
+  doc.version = 2;
+  act(() => hook.result.current.scheduleLayout('local', true));
+  await frame();
+  act(() => hook.result.current.runLayoutPipeline());
+  await frame();
+  expect(worker.map((pass) => pass.at)).toEqual([1, 2]);
+
+  await answer(1);
+  expect(shown()).toBe('2');
+  await frame();
+  expect(worker.map((pass) => pass.at)).toEqual([1, 2, 2]);
+  await answer(2);
+  expect(doc.laidOutHere).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
 test('a pass queued behind the worker never runs after unmount', async () => {
   const { doc, worker, errors, hook, frame, answer } = await opened();
   doc.version = 2;
