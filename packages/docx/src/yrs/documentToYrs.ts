@@ -69,7 +69,6 @@ interface TextUnit {
   attrs: YrsAttrs;
   /** Node width, used only for bookmark offsets. */
   pmSize: number;
-  commentId?: number;
   marks: MarkDescriptor[];
 }
 
@@ -79,15 +78,21 @@ interface EmbedUnit {
   payload: Attrs;
   attrs: YrsAttrs;
   pmSize: number;
-  commentId?: number;
   marks: MarkDescriptor[];
 }
 
 type InlineUnit = TextUnit | EmbedUnit;
 
+interface CommentMark {
+  unit: number;
+  start: boolean;
+  id: number;
+}
+
 interface StoryPlan {
   storyId: string;
   units: InlineUnit[];
+  commentMarks: CommentMark[];
   commentCoverage: Map<number, Array<[number, number]>>;
 }
 
@@ -296,13 +301,12 @@ function withMark(marks: readonly MarkDescriptor[], mark: MarkDescriptor): MarkD
   return [...marks.filter((candidate) => candidate.name !== mark.name), mark];
 }
 
-function textUnit(text: string, marks: readonly MarkDescriptor[], commentId?: number): TextUnit {
+function textUnit(text: string, marks: readonly MarkDescriptor[]): TextUnit {
   return {
     kind: 'text',
     text,
     attrs: marksToYrsAttrs(marks),
     pmSize: text.length,
-    ...(commentId !== undefined ? { commentId } : {}),
     marks: [...marks],
   };
 }
@@ -311,7 +315,6 @@ function embedUnit(
   embedKind: string,
   payload: Attrs,
   marks: readonly MarkDescriptor[] = [],
-  commentId?: number,
   pmSize = 1
 ): EmbedUnit {
   return {
@@ -320,7 +323,6 @@ function embedUnit(
     payload,
     attrs: marksToYrsAttrs(marks),
     pmSize,
-    ...(commentId !== undefined ? { commentId } : {}),
     marks: [...marks],
   };
 }
@@ -674,8 +676,7 @@ function fieldToUnits(
 function noteRefUnit(
   id: number,
   noteType: 'footnote' | 'endnote',
-  marks: readonly MarkDescriptor[],
-  commentId?: number
+  marks: readonly MarkDescriptor[]
 ): EmbedUnit {
   const noteMark: MarkDescriptor = {
     name: 'footnoteRef',
@@ -685,8 +686,7 @@ function noteRefUnit(
   return embedUnit(
     'noteRef',
     noteType === 'endnote' ? { endnoteRefId: id } : { footnoteRefId: id },
-    allMarks,
-    commentId
+    allMarks
   );
 }
 
@@ -698,8 +698,7 @@ function trackedMarks(marks: readonly MarkDescriptor[]): MarkDescriptor[] {
 function runContentToUnits(
   content: RunContent,
   marks: readonly MarkDescriptor[],
-  opaqueSequences: string[],
-  commentId?: number
+  opaqueSequences: string[]
 ): InlineUnit[] {
   if (
     (content.type === 'drawing' || content.type === 'shape' || content.type === 'chart') &&
@@ -711,17 +710,17 @@ function runContentToUnits(
   }
   switch (content.type) {
     case 'text':
-      return content.text ? [textUnit(content.text, marks, commentId)] : [];
+      return content.text ? [textUnit(content.text, marks)] : [];
     case 'tab':
-      return [textUnit('\t', marks, commentId)];
+      return [textUnit('\t', marks)];
     case 'break':
       return content.breakType === undefined || content.breakType === 'textWrapping'
-        ? [embedUnit('break', {}, marks, commentId)]
+        ? [embedUnit('break', {}, marks)]
         : [];
     case 'softHyphen':
-      return [textUnit('\u00ad', marks, commentId)];
+      return [textUnit('\u00ad', marks)];
     case 'noBreakHyphen':
-      return [textUnit('\u2011', marks, commentId)];
+      return [textUnit('\u2011', marks)];
     case 'symbol': {
       const codePoint = Number.parseInt(content.char, 16);
       if (!Number.isInteger(codePoint) || codePoint < 0 || codePoint > 0x10ffff) return [];
@@ -738,7 +737,7 @@ function runContentToUnits(
           csTheme: null,
         },
       };
-      return [textUnit(String.fromCodePoint(codePoint), withMark(marks, symbolMark), commentId)];
+      return [textUnit(String.fromCodePoint(codePoint), withMark(marks, symbolMark))];
     }
     case 'commentReference':
       return [
@@ -758,15 +757,15 @@ function runContentToUnits(
     case 'drawing':
       return [embedUnit('image', imagePayload(content.image), trackedMarks(marks))];
     case 'horizontalRule':
-      return [embedUnit('horizontalRule', { rule: content.rule }, marks, commentId)];
+      return [embedUnit('horizontalRule', { rule: content.rule }, marks)];
     case 'shape':
       return [embedUnit('shape', shapePayload(content.shape), trackedMarks(marks))];
     case 'chart':
       return [embedUnit('chart', chartPayload(content.chart), trackedMarks(marks))];
     case 'footnoteRef':
-      return [noteRefUnit(content.id, 'footnote', marks, commentId)];
+      return [noteRefUnit(content.id, 'footnote', marks)];
     case 'endnoteRef':
-      return [noteRefUnit(content.id, 'endnote', marks, commentId)];
+      return [noteRefUnit(content.id, 'endnote', marks)];
     default:
       return [];
   }
@@ -777,11 +776,10 @@ function runToUnits(
   styleFormatting: TextFormatting | undefined,
   styleResolver: StyleResolver | null,
   opaqueSequences: string[],
-  commentId?: number,
   extraMarks: readonly MarkDescriptor[] = []
 ): InlineUnit[] {
   const marks = [...runMarks(run, styleFormatting, styleResolver), ...extraMarks];
-  return run.content.flatMap((content) => runContentToUnits(content, marks, opaqueSequences, commentId));
+  return run.content.flatMap((content) => runContentToUnits(content, marks, opaqueSequences));
 }
 
 function hyperlinkToUnits(
@@ -828,7 +826,6 @@ function trackedToUnits(
   content: Extract<ParagraphContent, { type: 'insertion' | 'deletion' | 'moveFrom' | 'moveTo' }>,
   styleFormatting: TextFormatting | undefined,
   styleResolver: StyleResolver | null,
-  commentId: number | undefined,
   opaqueSequences: string[]
 ): InlineUnit[] {
   const kind = content.type === 'insertion' || content.type === 'moveTo' ? 'insertion' : 'deletion';
@@ -840,13 +837,10 @@ function trackedToUnits(
   const units: InlineUnit[] = [];
   for (const child of content.content) {
     if (child.type === 'run') {
-      units.push(...runToUnits(child, styleFormatting, styleResolver, opaqueSequences, commentId, [mark]));
+      units.push(...runToUnits(child, styleFormatting, styleResolver, opaqueSequences, [mark]));
     } else {
       opaqueSequences.push(...hyperlinkSequenceNames(child));
       const linked = hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences, [mark]);
-      for (const unit of linked) {
-        if (commentId !== undefined) unit.commentId = commentId;
-      }
       units.push(...linked);
     }
   }
@@ -1189,30 +1183,26 @@ function paragraphUnits(
   styleResolver: StyleResolver | null,
   extraRunFormatting?: TextFormatting,
   tableParagraphFormatting?: ParagraphFormatting
-): { units: InlineUnit[]; ppr: Attrs; opaqueSequences: string[] } {
+): { units: InlineUnit[]; commentMarks: CommentMark[]; ppr: Attrs; opaqueSequences: string[] } {
   const units: InlineUnit[] = [];
   const opaqueSequences: string[] = [];
-  const activeComments = new Set<number>();
+  const commentMarks: CommentMark[] = [];
   let boundaries: Attrs[] | undefined = [];
   const styleFormatting = paragraphStyleFormatting(paragraph, styleResolver, extraRunFormatting);
 
   for (const [contentIndex, content] of paragraph.content.entries()) {
     const start = units.length;
-    const commentId = activeComments.values().next().value as number | undefined;
-    if (content.type === 'commentRangeStart') activeComments.add(content.id);
-    else if (content.type === 'commentRangeEnd') activeComments.delete(content.id);
-    else if (content.type === 'run') {
+    if (content.type === 'commentRangeStart' || content.type === 'commentRangeEnd') {
+      commentMarks.push({ unit: start, start: content.type === 'commentRangeStart', id: content.id });
+    } else if (content.type === 'run') {
       const boundary = runBoundary(content, styleFormatting, styleResolver);
       if (boundary && boundaries) boundaries.push(boundary);
       else boundaries = undefined;
-      units.push(...runToUnits(content, styleFormatting, styleResolver, opaqueSequences, commentId));
+      units.push(...runToUnits(content, styleFormatting, styleResolver, opaqueSequences));
     } else if (content.type === 'hyperlink') {
       boundaries = undefined;
       opaqueSequences.push(...hyperlinkSequenceNames(content));
       const linked = hyperlinkToUnits(content, styleFormatting, styleResolver, opaqueSequences);
-      for (const unit of linked) {
-        if (commentId !== undefined) unit.commentId = commentId;
-      }
       units.push(...linked);
     } else if (content.type === 'simpleField' || content.type === 'complexField') {
       boundaries = undefined;
@@ -1220,7 +1210,7 @@ function paragraphUnits(
     } else if (content.type === 'inlineSdt') {
       boundaries = undefined;
       units.push(
-        embedUnit('sdt', sdtPayload(content, styleFormatting, styleResolver, opaqueSequences), [], undefined, 2)
+        embedUnit('sdt', sdtPayload(content, styleFormatting, styleResolver, opaqueSequences), [], 2)
       );
     } else if (
       content.type === 'insertion' ||
@@ -1229,7 +1219,7 @@ function paragraphUnits(
       content.type === 'moveTo'
     ) {
       boundaries = undefined;
-      units.push(...trackedToUnits(content, styleFormatting, styleResolver, commentId, opaqueSequences));
+      units.push(...trackedToUnits(content, styleFormatting, styleResolver, opaqueSequences));
     } else if (content.type === 'mathEquation') {
       boundaries = undefined;
       units.push(embedUnit('math', mathPayload(content)));
@@ -1239,7 +1229,7 @@ function paragraphUnits(
     paragraphContentUnitCounts.set(content as object, units.length - start);
   }
   const attrs = paragraphAttrs(paragraph, styleResolver, units, boundaries, tableParagraphFormatting);
-  return { units, ppr: paraAttrsToPpr(attrs), opaqueSequences };
+  return { units, commentMarks, ppr: paraAttrsToPpr(attrs), opaqueSequences };
 }
 
 type ParagraphToken = 'pageBreak' | 'visible';
@@ -1637,17 +1627,42 @@ function blockSdtAttrs(properties: SdtProperties): Attrs {
 }
 
 function addCommentCoverage(plan: StoryPlan): void {
+  const addRange = (id: number, start: number, end: number) => {
+    if (end <= start) return;
+    const intervals = plan.commentCoverage.get(id)!;
+    const previous = intervals[intervals.length - 1];
+    if (previous && previous[1] === start) previous[1] = end;
+    else intervals.push([start, end]);
+  };
+  const open: Array<{ id: number; start: number; paragraphEnd?: number }> = [];
   let offset = 0;
-  for (const unit of plan.units) {
-    const width = unit.kind === 'text' ? unit.text.length : 1;
-    if (unit.commentId !== undefined) {
-      const intervals = plan.commentCoverage.get(unit.commentId);
-      const previous = intervals?.[intervals.length - 1];
-      if (previous && previous[1] === offset) previous[1] = offset + width;
-      else if (intervals) intervals.push([offset, offset + width]);
-      else plan.commentCoverage.set(unit.commentId, [[offset, offset + width]]);
+  let markIndex = 0;
+  for (let unitIndex = 0; unitIndex <= plan.units.length; unitIndex += 1) {
+    while (plan.commentMarks[markIndex]?.unit === unitIndex) {
+      const mark = plan.commentMarks[markIndex++]!;
+      if (mark.start) {
+        if (open.some((range) => range.id === mark.id)) continue;
+        if (!plan.commentCoverage.has(mark.id)) plan.commentCoverage.set(mark.id, []);
+        open.push({ id: mark.id, start: offset });
+      } else {
+        const index = open.findIndex((range) => range.id === mark.id);
+        if (index !== -1) {
+          const [range] = open.splice(index, 1);
+          addRange(range!.id, range!.start, offset);
+        }
+      }
     }
-    offset += width;
+    const unit = plan.units[unitIndex];
+    if (unit) {
+      if (unit.kind === 'embed' && unit.embedKind === 'pilcrow') {
+        for (const range of open) range.paragraphEnd ??= offset;
+      }
+      offset += unit.kind === 'text' ? unit.text.length : 1;
+    }
+  }
+  for (const range of open) addRange(range.id, range.start, range.paragraphEnd ?? offset);
+  for (const [id, intervals] of plan.commentCoverage) {
+    if (intervals.length === 0) plan.commentCoverage.delete(id);
   }
 }
 
@@ -1784,6 +1799,7 @@ function visitStory(
   const plan: StoryPlan = {
     storyId,
     units: [],
+    commentMarks: [],
     commentCoverage: new Map(),
   };
   context.plans.push(plan);
@@ -1815,6 +1831,10 @@ function visitStory(
         resultTableIds
       );
       bindFieldCodeBlocks(paragraph.units, storyId, blocks, blockIndex, cursor);
+      const unitBase = plan.units.length;
+      plan.commentMarks.push(
+        ...paragraph.commentMarks.map((mark) => ({ ...mark, unit: unitBase + mark.unit }))
+      );
       plan.units.push(...paragraph.units);
       plan.units.push(
         embedUnit('pilcrow', {

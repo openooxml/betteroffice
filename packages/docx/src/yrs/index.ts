@@ -1207,7 +1207,10 @@ export interface YrsSession extends CollaborationReplica {
    * promotes an editor-only paragraph they author into.
    */
   applyRawOps(story: string, ops: readonly YrsRawOp[]): void;
-  /** Applies seed raw operations with deterministic item ordering. */
+  /**
+   * Applies seed raw operations with deterministic item ordering. A
+   * `setComment` for a comment already seeded adds its ranges to it.
+   */
   applySeedRawOps(story: string, ops: readonly YrsRawOp[]): void;
   /** Sets one paragraph property (any JSON value). `paraId` is reserved. */
   setParagraphAttr(paraId: string, key: string, value: unknown): void;

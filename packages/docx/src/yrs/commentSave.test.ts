@@ -487,3 +487,78 @@ it('keeps the ranges of comments inside a table cell and a content control after
     }
   }
 });
+
+it('keeps every range of a comment anchored in the body and a table cell across save and reopen', async () => {
+  const session = await open(docx(), 91083);
+  const cell = session.storyIds().find((story) => story !== 'body' && story.startsWith('body'))!;
+  const { paraId } = session.paragraphs(cell)[0]!;
+  session.setCommentRanges('1', [
+    range(session, 2, 0, 7),
+    { story: cell, start: { paraId, offset: 0 }, end: { paraId, offset: 4 } },
+  ]);
+  const ranges = session.resolveComment('1');
+  expect(ranges.map(({ story }) => story)).toEqual(['body', cell]);
+  let bytes = (await saveYrsDocx(session)).bytes;
+  for (let cycle = 0; cycle < 2; cycle += 1) {
+    const reopened = await open(bytes, 91084 + cycle);
+    expect(reopened.resolveComment('1')).toEqual(ranges);
+    const { paraId: after } = reopened.paragraphs('body')[3]!;
+    reopened.insertText({ story: 'body', paraId: after, offset: 0 }, '!');
+    bytes = (await saveYrsDocx(reopened)).bytes;
+  }
+});
+
+it('keeps overlapping and cross-paragraph comment ranges after an unrelated edit', async () => {
+  const body =
+    `<w:p w14:paraId="0F000001"><w:commentRangeStart w:id="3"/>${t('A')}` +
+    `<w:commentRangeStart w:id="4"/>${t('B')}<w:commentRangeEnd w:id="3"/>${t('C')}` +
+    '<w:commentRangeEnd w:id="4"/><w:r><w:commentReference w:id="3"/></w:r>' +
+    '<w:r><w:commentReference w:id="4"/></w:r></w:p>' +
+    `<w:p w14:paraId="0F000002">${t('Before ')}<w:commentRangeStart w:id="5"/>${t('first')}</w:p>` +
+    `<w:p w14:paraId="0F000003">${t('second')}<w:commentRangeEnd w:id="5"/>` +
+    `<w:r><w:commentReference w:id="5"/></w:r>${t(' after')}</w:p>` +
+    `<w:p w14:paraId="0F000004">${t('Later')}</w:p>`;
+  const session = await open(docx(body, [3, 4, 5]), 91090);
+  const { start } = range(session, 3, 0, 0);
+  session.insertText({ story: 'body', ...start }, 'QA ');
+  for (const [path, bytes] of await saves(session)) {
+    for (const [id, text] of [[3, 'AB'], [4, 'BC'], [5, 'firstsecond']] as const) {
+      expect([path, id, markers(bytes, id)]).toEqual([path, id, ['RangeStart', 'RangeEnd', 'Reference']]);
+      for (const reopened of [await open(bytes, 91091), await seeded(bytes, 91092)]) {
+        expect(anchored(reopened, String(id))).toBe(text);
+      }
+    }
+    const first = paragraphXml(bytes, '0F000002');
+    const second = paragraphXml(bytes, '0F000003');
+    expect(first).toContain('<w:commentRangeStart w:id="5"/>');
+    expect(first).not.toContain('<w:commentRangeEnd w:id="5"/>');
+    expect(second).toContain('<w:commentRangeEnd w:id="5"/>');
+    expect(second).not.toContain('<w:commentRangeStart w:id="5"/>');
+  }
+});
+
+it('keeps the body and table-cell ranges of a generated document after an edit to its title', async () => {
+  const parts = unzipContainer(
+    new Uint8Array(readFileSync(resolve(import.meta.dir, '__fixtures__/comment-ranges/structure.docx')))
+  );
+  for (const name of ['word/document.xml', 'word/comments.xml']) {
+    parts[name] = toBytes(new TextDecoder().decode(parts[name]).replaceAll('w:id="0"', 'w:id="2"'));
+  }
+  const session = await open(
+    new Uint8Array(rezipPartsToArrayBuffer(new Map(Object.entries(parts)))),
+    91100
+  );
+  const [title] = session.paragraphs('body');
+  session.insertText({ story: 'body', paraId: title!.paraId, offset: 0 }, 'QA ');
+  for (const [path, saved] of await saves(session)) {
+    for (const [id, text] of [
+      [2, 'Achado QA preservado. '],
+      [1, 'Preservar comentário na célula'],
+    ] as const) {
+      expect([path, id, markers(saved, id)]).toEqual([path, id, ['RangeStart', 'RangeEnd', 'Reference']]);
+      for (const reopened of [await open(saved, 91101), await seeded(saved, 91102)]) {
+        expect(anchored(reopened, String(id))).toBe(text);
+      }
+    }
+  }
+});
