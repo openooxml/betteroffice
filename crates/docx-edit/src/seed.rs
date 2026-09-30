@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value, json};
 use yrs::types::Attrs;
-use yrs::{Any, Transact};
+use yrs::{Any, Map as YrsMap, Out, ReadTxn, Transact};
 
 use crate::control_source::safety_key;
 use crate::identity::{
@@ -22,6 +22,35 @@ use crate::structured::{BreakType, Revision, RevisionKind, StoryKind};
 use crate::{EditCtx, EditingDoc, RawOp};
 
 type JsonObject = BTreeMap<String, Value>;
+
+pub(crate) const OPAQUE_SEQUENCES: &str = "opaqueSequences";
+
+pub(crate) fn seed_opaque_sequences(document: &EditingDoc, names: &[String]) {
+    if names.is_empty() {
+        return;
+    }
+    let mut txn = document.transact_for(&EditCtx::system(""));
+    let session = txn
+        .get_map(crate::identity::SESSION)
+        .expect("session root is declared by EditingDoc::new");
+    let mut opaque_sequences: BTreeSet<String> = names.iter().cloned().collect();
+    if let Some(Out::Any(Any::Array(previous))) = session.get(&txn, OPAQUE_SEQUENCES) {
+        opaque_sequences.extend(previous.iter().filter_map(|value| match value {
+            Any::String(name) => Some(name.to_string()),
+            _ => None,
+        }));
+    }
+    let names = Any::Array(
+        opaque_sequences
+            .into_iter()
+            .map(Any::from)
+            .collect::<Vec<_>>()
+            .into(),
+    );
+    if session.get(&txn, OPAQUE_SEQUENCES) != Some(Out::Any(names.clone())) {
+        session.insert(&mut txn, OPAQUE_SEQUENCES, names);
+    }
+}
 
 /// A parsed node's `w:p` occurrence in its part: read for identity, never seeded.
 const SOURCE_ORDINAL: &str = "sourceOrdinal";
@@ -137,7 +166,6 @@ struct SourceStructure {
 /// Package context retained after lowering, for planning host edits and exporting in Rust.
 pub(crate) struct SourceMetadata {
     styles: StyleResolver,
-    opaque_sequences: Vec<String>,
     structure: SourceStructure,
     read: ReadSource,
 }
@@ -267,10 +295,6 @@ impl SourceMetadata {
     /// The document's numbering definitions.
     pub(crate) fn numbering(&self) -> Arc<docx_parse::NumberingMap> {
         Arc::clone(&self.read.numbering)
-    }
-
-    pub(crate) fn opaque_sequences(&self) -> &[String] {
-        &self.opaque_sequences
     }
 
     /// Records the comment writes committed to `doc` from now on.
@@ -3013,12 +3037,7 @@ fn paragraph_units(
         }
         unit_counts.push(units.len() - start);
     }
-    let mut attrs = paragraph_attrs(paragraph, styles, &units, &unit_counts, boundaries);
-    if !opaque_sequences.is_empty() {
-        let mut seen = HashSet::new();
-        opaque_sequences.retain(|name| seen.insert(name.clone()));
-        attrs.insert("opaqueSequences".to_owned(), json!(opaque_sequences));
-    }
+    let attrs = paragraph_attrs(paragraph, styles, &units, &unit_counts, boundaries);
     ParagraphUnits {
         ppr: para_attrs_to_ppr(attrs),
         units,
@@ -4241,9 +4260,7 @@ fn visit_story(
                     breaks,
                     opaque_sequences,
                 } = paragraph_units(block, &context.styles, None, &context.source_json);
-                if context.root == "body" {
-                    context.opaque_sequences.extend(opaque_sequences);
-                }
+                context.opaque_sequences.extend(opaque_sequences);
                 let base = context.plans[plan_index].width();
                 let offsets: Vec<u32> = std::iter::once(0)
                     .chain(units.iter().scan(0, |width, unit| {
@@ -4820,6 +4837,7 @@ fn seed_lowered(
     document
         .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
         .map_err(|error| error.to_string())?;
+    seed_opaque_sequences(document, &context.opaque_sequences);
     read.pin(document);
     read.comment_writes = CommentWrites::watch(document);
     if let Some(index) = index {
@@ -4828,7 +4846,6 @@ fn seed_lowered(
     document.install_source(
         SourceMetadata {
             styles: context.styles,
-            opaque_sequences: context.opaque_sequences,
             structure: context.source,
             read,
         },
@@ -5006,7 +5023,6 @@ pub(crate) fn source_metadata(
     }
     Ok(SourceMetadata {
         styles: context.styles,
-        opaque_sequences: context.opaque_sequences,
         structure: context.source,
         read,
     })
@@ -5094,10 +5110,6 @@ fn lower_package(
             );
         }
     }
-    let mut seen = HashSet::new();
-    context
-        .opaque_sequences
-        .retain(|name| seen.insert(name.clone()));
     (context, roots)
 }
 
@@ -5493,6 +5505,27 @@ pub(crate) fn seed_stories(document: &EditingDoc, bytes: &[u8]) -> Result<(), St
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn opaque_sequence_names_accumulate_in_document_state() {
+        let doc = EditingDoc::new(1);
+        seed_opaque_sequences(&doc, &["table".into(), "figure".into(), "table".into()]);
+        seed_opaque_sequences(&doc, &["other".into(), "figure".into()]);
+        seed_opaque_sequences(&doc, &[]);
+        doc.begin_opening(Some("opening"));
+        let txn = doc.yrs_doc().transact();
+        assert_eq!(
+            txn.get_map(crate::identity::SESSION)
+                .unwrap()
+                .get(&txn, OPAQUE_SEQUENCES),
+            Some(Out::Any(Any::Array(
+                ["figure", "other", "table"]
+                    .map(Any::from)
+                    .to_vec()
+                    .into()
+            )))
+        );
+    }
+
     #[test]
     fn nested_sequence_names_keep_first_seen_order() {
         let field = json!({"type": "complexField", "instruction": "SEQ Outer",

@@ -2187,6 +2187,13 @@ impl EditSession {
         self.engine.doc().begin_opening(generation.as_deref());
     }
 
+    /// Unions seeded opaque sequence names into document state.
+    pub fn seed_opaque_sequences(&self, names_json: &str) -> Result<(), JsValue> {
+        let names: Vec<String> = serde_json::from_str(names_json).map_err(js_err)?;
+        crate::seed::seed_opaque_sequences(self.engine.doc(), &names);
+        Ok(())
+    }
+
     /// Parses a DOCX package, optionally seeds its editable stories into this
     /// replica, and retains the source bytes for
     /// [`EditSession::materialize_docx`] and paragraph identity reads.

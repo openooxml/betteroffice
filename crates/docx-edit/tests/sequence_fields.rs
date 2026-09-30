@@ -1,8 +1,8 @@
 use docx_edit::bridge::{RenderEnv, yrs_doc_to_layout_blocks};
-use docx_edit::{EditingDoc, seed_from_docx};
+use docx_edit::{EditCtx, EditingDoc, MergeDirection, StoryRange, seed_from_docx};
 use docx_layout::types::{LayoutBlock, Run};
 use serde_json::Value;
-use yrs::{Map, Out, ReadTxn, Text, Transact};
+use yrs::{Any, Map, Out, ReadTxn, Text, Transact};
 
 const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
@@ -110,6 +110,33 @@ fn sequence_results(body: &str) -> Vec<String> {
         .into_iter()
         .map(|(_, result)| result)
         .collect()
+}
+
+fn assert_sticky_caption(doc: &EditingDoc, cached: &str) {
+    let txn = doc.yrs_doc().transact();
+    assert_eq!(
+        txn.get_map("session").unwrap().get(&txn, "opaqueSequences"),
+        Some(Out::Any(Any::Array(vec![Any::from("figure")].into())))
+    );
+    drop(txn);
+    for paragraph in doc.paragraphs("body").unwrap() {
+        assert!(!paragraph.properties.contains_key("opaqueSequences"));
+    }
+    for show_hidden_text in [false, true] {
+        let blocks = yrs_doc_to_layout_blocks(
+            doc,
+            "body",
+            &RenderEnv {
+                show_hidden_text,
+                ..RenderEnv::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            boxed_sequence_results_in(&blocks),
+            [(false, cached.to_owned())]
+        );
+    }
 }
 
 /// Each instruction with the result Word 16 shows after updating fields
@@ -595,6 +622,60 @@ fn a_body_typed_hyperlink_sequence_in_an_sdt_keeps_cached_results() {
                 [(false, "2".to_owned())]
             );
         }
+    }
+}
+
+#[test]
+fn deleting_a_hyperlink_sequence_keeps_document_opacity_on_state_only_peers() {
+    let hyperlink = format!(
+        r#"<w:hyperlink w:anchor="top"><w:fldSimple w:instr="SEQ Figure" w:fldLock="true">{}</w:fldSimple></w:hyperlink>"#,
+        run("1")
+    );
+    let body = format!(
+        "<w:p>{}</w:p><w:p>{hyperlink}</w:p><w:p>{}</w:p>",
+        run("x"),
+        field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>9</w:t>", 1)
+    );
+    let doc = EditingDoc::new(1);
+    seed_from_docx(&doc, &document(&body)).unwrap();
+    let paragraphs = doc.paragraphs("body").unwrap();
+    let end = doc
+        .paragraph_mark_position(&paragraphs[1].para_id)
+        .unwrap()
+        .index;
+    doc.delete_range(&EditCtx::local("", ""), StoryRange::new("body", 1, end))
+        .unwrap();
+    let peer = EditingDoc::new(2);
+    peer.apply_update_v1(&doc.encode_state_as_update_v1())
+        .unwrap();
+    for doc in [&doc, &peer] {
+        assert_eq!(doc.paragraphs("body").unwrap()[0].text, "x");
+        assert_sticky_caption(doc, "9");
+    }
+}
+
+#[test]
+fn merging_a_hyperlink_sdt_keeps_document_opacity_on_state_only_peers() {
+    let hyperlink = format!(
+        r#"<w:hyperlink w:anchor="top"><w:sdt><w:sdtPr/><w:sdtContent>{}</w:sdtContent></w:sdt></w:hyperlink>"#,
+        field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>1</w:t>", 1)
+    );
+    let body = format!(
+        "<w:p>{}</w:p><w:p>{hyperlink}</w:p><w:p>{}</w:p>",
+        run("x"),
+        field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>2</w:t>", 1)
+    );
+    let doc = EditingDoc::new(1);
+    seed_from_docx(&doc, &document(&body)).unwrap();
+    let first = doc.paragraphs("body").unwrap()[0].para_id.clone();
+    doc.merge_paragraphs(&EditCtx::local("", ""), &first, MergeDirection::Forward)
+        .unwrap();
+    let peer = EditingDoc::new(2);
+    peer.apply_update_v1(&doc.encode_state_as_update_v1())
+        .unwrap();
+    for doc in [&doc, &peer] {
+        assert_eq!(doc.paragraphs("body").unwrap().len(), 2);
+        assert_sticky_caption(doc, "2");
     }
 }
 

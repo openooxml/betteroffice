@@ -121,6 +121,7 @@ interface LoweringContext {
   theme: Theme | null;
   plans: StoryPlan[];
   compatibilityMode: number;
+  opaqueSequences: string[];
 }
 
 function compatibilityModeFromDocument(document: Document): number {
@@ -1176,7 +1177,7 @@ function paragraphUnits(
   styleResolver: StyleResolver | null,
   extraRunFormatting?: TextFormatting,
   tableParagraphFormatting?: ParagraphFormatting
-): { units: InlineUnit[]; ppr: Attrs } {
+): { units: InlineUnit[]; ppr: Attrs; opaqueSequences: string[] } {
   const units: InlineUnit[] = [];
   const opaqueSequences: string[] = [];
   const activeComments = new Set<number>();
@@ -1226,8 +1227,7 @@ function paragraphUnits(
     paragraphContentUnitCounts.set(content as object, units.length - start);
   }
   const attrs = paragraphAttrs(paragraph, styleResolver, units, boundaries, tableParagraphFormatting);
-  if (opaqueSequences.length > 0) attrs.opaqueSequences = [...new Set(opaqueSequences)];
-  return { units, ppr: paraAttrsToPpr(attrs) };
+  return { units, ppr: paraAttrsToPpr(attrs), opaqueSequences };
 }
 
 type ParagraphToken = 'pageBreak' | 'visible';
@@ -1734,6 +1734,7 @@ function visitStory(
         options.extraRunFormatting,
         options.tableParagraphFormatting
       );
+      context.opaqueSequences.push(...paragraph.opaqueSequences);
       bindFieldResultBlocks(
         paragraph.units,
         storyId,
@@ -1897,6 +1898,7 @@ export function documentToYrs(
     theme: document.package.theme ?? null,
     plans: [],
     compatibilityMode: compatibilityModeFromDocument(document),
+    opaqueSequences: [],
   };
   visitStory(context, 'body', document.package.document.content, {
     includePageBreaks: true,
@@ -1935,5 +1937,6 @@ export function documentToYrs(
 
   for (const plan of context.plans) session.createStory(plan.storyId, '', 'Normal', 'left');
   for (const plan of context.plans) seedPlan(session, plan);
+  session.seedOpaqueSequences(context.opaqueSequences);
   session.beginOpening(options.generation);
 }

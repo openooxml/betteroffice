@@ -329,9 +329,13 @@ pub fn yrs_doc_to_mapped_layout_blocks(
     let txn = doc.yrs_doc().transact();
     let mut active_stories = BTreeSet::new();
     let mut map = LoweringMap::default();
-    let mut opaque_sequences: BTreeSet<String> = source
-        .as_ref()
-        .map(|source| source.opaque_sequences().iter().cloned().collect())
+    let mut opaque_sequences: BTreeSet<String> = txn
+        .get_map(crate::identity::SESSION)
+        .map(|session| {
+            any_strings(shared_any(&session, &txn, crate::seed::OPAQUE_SEQUENCES).as_ref())
+                .into_iter()
+                .collect()
+        })
         .unwrap_or_default();
     let (mut blocks, _) = lower_story(
         &txn,
@@ -2376,9 +2380,6 @@ fn flush_paragraph_parts<T: ReadTxn>(
     map.paragraphs.push((
         story_slot,
         shared_map_string(pilcrow, txn, "paraId").unwrap_or_default(),
-    ));
-    opaque_sequences.extend(any_strings(
-        shared_any(pilcrow, txn, "opaqueSequences").as_ref(),
     ));
     raw_runs.retain(|run| !run.revision_hidden);
     drawings.retain(|drawing| !drawing.revision_hidden);

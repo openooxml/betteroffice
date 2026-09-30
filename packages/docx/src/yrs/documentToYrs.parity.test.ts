@@ -4,10 +4,11 @@ import { resolve } from 'node:path';
 
 import { parseDocx } from '../docx';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
+import { unzipContainer } from '../docx/wasm';
 import type { LayoutBlock, Run as LayoutRun } from '../layout/pagination/types';
 import type { ComplexField, Document, Run, SimpleField } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
-import { createYrsSession, type YrsSession } from './index';
+import { createYrsSession, saveYrsDocx, type YrsSession } from './index';
 import { documentToYrs } from './documentToYrs';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
@@ -47,7 +48,10 @@ function sequenceRuns(blocks: readonly LayoutBlock[]): LayoutRun[] {
   });
 }
 
-async function seedSequenceSessions(bytes: Uint8Array<ArrayBuffer>) {
+async function seedSequenceSessions(
+  bytes: Uint8Array<ArrayBuffer>,
+  edit?: (session: YrsSession) => void
+) {
   const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
   const [engine, projected, plain, nativePeer, projectedPeer, hydrated] = await Promise.all([
     createYrsSession({ clientId: 47030 }),
@@ -62,6 +66,7 @@ async function seedSequenceSessions(bytes: Uint8Array<ArrayBuffer>) {
     engine.seedFromDocx(bytes);
     documentToYrs(projected, parsed);
     documentToYrs(plain, withoutSourceOrdinals(parsed) as Document);
+    for (const session of [engine, projected, plain]) edit?.(session);
     nativePeer.loadState(engine.encodeState());
     projectedPeer.loadState(projected.encodeState());
     hydrated.openDocx(bytes, false);
@@ -349,7 +354,64 @@ describe('DOCX engine seeding', () => {
     try {
       for (const session of [engine, projected, plain, nativePeer, projectedPeer, hydrated]) {
         const paragraph = session.storySegments('body').find((segment) => segment.kind === 'pilcrow');
-        expect(paragraph?.kind === 'pilcrow' && paragraph.properties.opaqueSequences).toEqual(['figure']);
+        expect(paragraph?.kind === 'pilcrow' && paragraph.properties).not.toHaveProperty('opaqueSequences');
+        for (const showHiddenText of [false, true]) {
+          const blocks = session.yrsBlocksForStory('body', { showHiddenText }) as LayoutBlock[];
+          const results = sequenceRuns(blocks)
+            .flatMap((run) => run.kind === 'field' && run.rawType === 'SEQ' ? [run.fallback] : []);
+          expect(results).toEqual(['2']);
+        }
+      }
+    } finally {
+      for (const session of sessions) session.destroy();
+    }
+  });
+
+  it('keeps document opacity after deleting a hyperlink SEQ across seed and hydration paths', async () => {
+    const hyperlink = '<w:hyperlink w:anchor="top"><w:fldSimple w:instr="SEQ Figure" w:fldLock="true"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:hyperlink>';
+    const bytes = sequencePackage(`<w:p><w:r><w:t>x</w:t></w:r></w:p><w:p>${hyperlink}</w:p><w:p><w:fldSimple w:instr="SEQ Figure"><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>`);
+    const { engine, hydrated, sessions } = await seedSequenceSessions(bytes, (session) => {
+      const [first, linked] = session.paragraphs('body');
+      session.deleteRange({
+        story: 'body',
+        start: { paraId: first.paraId, offset: 1 },
+        end: { paraId: linked.paraId, offset: 1 },
+      });
+    });
+    try {
+      for (const session of sessions) {
+        expect(session.paragraphs('body')[0].text).toBe('x');
+        for (const showHiddenText of [false, true]) {
+          const blocks = session.yrsBlocksForStory('body', { showHiddenText }) as LayoutBlock[];
+          const results = sequenceRuns(blocks)
+            .flatMap((run) => run.kind === 'field' && run.rawType === 'SEQ' ? [run.fallback] : []);
+          expect(results).toEqual(['9']);
+        }
+      }
+      for (const session of [engine, hydrated]) {
+        const saved = await saveYrsDocx(session);
+        for (const part of Object.values(unzipContainer(saved.bytes))) {
+          expect(new TextDecoder().decode(part)).not.toContain('opaqueSequences');
+        }
+      }
+    } finally {
+      for (const session of sessions) session.destroy();
+    }
+  });
+
+  it('keeps document opacity after merging a typed hyperlink SDT across seed and hydration paths', async () => {
+    const field = (cached: string): string => `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> SEQ Figure </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>${cached}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+    const bytes = sequencePackage(`<w:p><w:r><w:t>x</w:t></w:r></w:p><w:p><w:hyperlink w:anchor="top"><w:sdt><w:sdtPr/><w:sdtContent>${field('1')}</w:sdtContent></w:sdt></w:hyperlink></w:p><w:p>${field('2')}</w:p>`);
+    const { sessions } = await seedSequenceSessions(bytes, (session) => {
+      session.mergeParagraphs('body', session.paragraphs('body')[0].paraId);
+    });
+    try {
+      for (const session of sessions) {
+        const paragraphs = session.paragraphs('body');
+        expect(paragraphs).toHaveLength(2);
+        for (const paragraph of paragraphs) {
+          expect(paragraph.properties).not.toHaveProperty('opaqueSequences');
+        }
         for (const showHiddenText of [false, true]) {
           const blocks = session.yrsBlocksForStory('body', { showHiddenText }) as LayoutBlock[];
           const results = sequenceRuns(blocks)
