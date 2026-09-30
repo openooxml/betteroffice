@@ -369,7 +369,7 @@ test.each([
   const applying = new Promise<void>((resolve) => {
     started = resolve;
   });
-  const resident = mock(() => {
+  const resident = mock((..._args: unknown[]) => {
     started();
     return blocked;
   });
