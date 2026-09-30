@@ -2230,7 +2230,10 @@ fn settling_keeps_another_paragraphs_format_revision_undoable() {
     let undo = UndoSession::new();
     let mut proposed = request(
         &doc,
-        vec![suggested(replace(search("beta", "00000001"), "delta"), "Ann")],
+        vec![suggested(
+            replace(search("beta", "00000001"), "delta"),
+            "Ann",
+        )],
     );
     proposed.history = EditHistory::None;
     let replaced = apply_request(&doc, &undo, &proposed).receipts[0]
