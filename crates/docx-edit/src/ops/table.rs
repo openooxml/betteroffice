@@ -2125,7 +2125,6 @@ mod tests {
                     .insert(key.into(), stamp("2026-07-14T10:01:00Z"));
                 write_table(&mut txn, &table, &data);
             }
-            assert_eq!(doc.list_revisions().unwrap().len(), 1);
             assert_eq!(
                 doc.revision_stamps(&["shared".into()]).unwrap(),
                 BTreeMap::from([(

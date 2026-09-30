@@ -937,7 +937,7 @@ describe('YrsSession host proposals', () => {
       );
       session.addUndoBoundary();
       expect(record!.revisionIds).toHaveLength(1);
-      expect(typed.revisionIds).toEqual(record!.revisionIds);
+      expect(typed.revisionId).toBe(record!.revisionIds[0]!);
       expect(session.canUndo()).toBe(true);
       if (decision === 'rejected') snapshotOf(decide(session, [{ id: 'shared', state: decision }]));
       const unchanged = state(session);
@@ -967,7 +967,7 @@ describe('YrsSession host proposals', () => {
       ' typed',
       { name: SUGGEST.author, date: SUGGEST.date }
     );
-    expect(typed.revisionIds).toEqual(record!.revisionIds);
+    expect(typed.revisionId).toBe(record!.revisionIds[0]!);
     expect(
       snapshotOf(session.withdrawProposals({ expectVersion: session.version(), ids: ['same-stamp'] }))
         .proposals
@@ -988,16 +988,16 @@ describe('YrsSession host proposals', () => {
       { name: 'Other', date: '2026-09-29T12:01:00Z' }
     );
     session.addUndoBoundary();
-    expect(typed.revisionIds).toHaveLength(1);
-    expect(typed.revisionIds).not.toEqual(record!.revisionIds);
+    expect(typed.revisionId).not.toBeNull();
+    expect(typed.revisionId).not.toBe(record!.revisionIds[0]!);
     const withdrawn = snapshotOf(
       session.withdrawProposals({ expectVersion: session.version(), ids: ['separate'] })
     );
     expect(withdrawn.proposals).toEqual([]);
     expect(texts(session, 'accepted').at(-1)).toBe('Tail typed');
-    expect(session.listRevisions().map((revision) => revision.revisionId)).toEqual(
-      typed.revisionIds
-    );
+    expect(session.listRevisions().map((revision) => revision.revisionId)).toEqual([
+      typed.revisionId,
+    ]);
   });
 
   it('refuses to withdraw a proposal whose revision also marks a paragraph change', async () => {
