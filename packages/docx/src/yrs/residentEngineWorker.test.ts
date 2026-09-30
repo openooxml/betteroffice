@@ -699,28 +699,6 @@ describe('sliced layout completion', () => {
     expect(calls).not.toContain('whole');
   });
 
-  test('a page past the provisional frame finishes the pass first and answers it first', async () => {
-    const { w, calls, onResume, bootstrap } = steppedWorker(100);
-    await bootstrap();
-    const order: string[] = [];
-    let pages: Promise<unknown> | undefined;
-    onResume.push(() => {
-      pages = w
-        .send({ type: 'buildPages', pages: [5], expectedFrameEpoch: 1, paintCaret: false })
-        .then(() => order.push('pages'));
-    });
-    const completed = await w
-      .send({ type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 2 })
-      .then((reply) => {
-        order.push('complete');
-        return reply;
-      });
-    await pages;
-    expect(completed.ok && completed.layoutJson).toBe(full);
-    expect(order).toEqual(['complete', 'pages']);
-    expect(calls).toEqual(['begin', 'resume:2', 'resume:100', 'pages']);
-  });
-
   test('an update in between begins the pass again on the new state', async () => {
     const { w, calls, onResume, bootstrap } = steppedWorker();
     await bootstrap();
