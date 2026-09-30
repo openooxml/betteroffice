@@ -816,6 +816,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
               ? { queries: currentQueries, frameEpoch: displayListFrameEpochRef.current }
               : null
           : null;
+        if (!isCurrentInput(session)) return;
         if (
           verticalDirection &&
           interactionEpoch !== undefined &&
@@ -913,6 +914,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       enqueueInputOperation,
       ensureSelection,
       inputPositionMap,
+      isCurrentInput,
       locToDisplayPosition,
       resolveDisplayTarget,
       session,
