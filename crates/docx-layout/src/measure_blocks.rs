@@ -1,5 +1,6 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -104,11 +105,45 @@ pub fn collect_font_requirements_into<'a>(
     default_family: &str,
     requirements: &mut BTreeMap<String, FontRequirement>,
 ) {
+    let mut named = BTreeMap::new();
+    let mut used = HashSet::new();
     for block in blocks {
         walk_paragraphs(std::slice::from_ref(block), &mut |paragraph| {
             let scripts = paragraph_scripts(paragraph);
-            collect_paragraph_font_requirements(paragraph, &scripts, default_family, requirements);
+            collect_paragraph_font_requirements(
+                paragraph,
+                &scripts,
+                default_family,
+                &mut named,
+                &mut used,
+            );
         });
+    }
+    merge_used_font_requirements(named, &used, requirements);
+}
+
+/// Keeps the requirements measurement can reach, each with the scripts of every
+/// run naming it, in order, so dropping an unused slot keeps fallback order.
+fn merge_used_font_requirements(
+    named: BTreeMap<String, FontRequirement>,
+    used: &HashSet<String>,
+    requirements: &mut BTreeMap<String, FontRequirement>,
+) {
+    for (key, requirement) in named {
+        match requirements.entry(key) {
+            Entry::Occupied(mut kept) => {
+                let scripts = &mut kept.get_mut().scripts;
+                for script in requirement.scripts {
+                    if !scripts.contains(&script) {
+                        scripts.push(script);
+                    }
+                }
+            }
+            Entry::Vacant(slot) if used.contains(slot.key()) => {
+                slot.insert(requirement);
+            }
+            Entry::Vacant(_) => {}
+        }
     }
 }
 
@@ -120,6 +155,8 @@ pub fn collect_preview_font_requirements_into<'a>(
     requirements: &mut BTreeMap<String, FontRequirement>,
 ) -> bool {
     let blocks: Vec<&LayoutBlock> = blocks.into_iter().collect();
+    let mut named = BTreeMap::new();
+    let mut used = HashSet::new();
     // A preview hiding the drawings that split a paragraph joins its segments.
     let mut segment_scripts = HashMap::<String, Vec<String>>::new();
     for block in &blocks {
@@ -142,7 +179,13 @@ pub fn collect_preview_font_requirements_into<'a>(
                 BlockId::Str(id) if !id.is_empty() => segment_scripts[id].clone(),
                 _ => paragraph_scripts_with_han_fallback(paragraph, true),
             };
-            collect_paragraph_font_requirements(paragraph, &scripts, default_family, requirements);
+            collect_paragraph_font_requirements(
+                paragraph,
+                &scripts,
+                default_family,
+                &mut named,
+                &mut used,
+            );
             let Some(attrs) = &paragraph.attrs else {
                 return;
             };
@@ -189,11 +232,14 @@ pub fn collect_preview_font_requirements_into<'a>(
             {
                 let family = attrs.list_marker_font_family.as_deref().unwrap_or(family);
                 for &(bold, italic) in styles {
-                    add_font_requirement(family, bold, italic, &scripts, requirements);
+                    used.insert(add_font_requirement(
+                        family, bold, italic, &scripts, &mut named,
+                    ));
                 }
             }
         });
     }
+    merge_used_font_requirements(named, &used, requirements);
     requirements
         .values()
         .all(|requirement| requirement.scripts.is_empty())
@@ -281,7 +327,7 @@ fn add_font_requirement(
     italic: bool,
     scripts: &[String],
     requirements: &mut BTreeMap<String, FontRequirement>,
-) {
+) -> String {
     let key = format!(
         "{}|{}|{}",
         family.to_lowercase(),
@@ -291,7 +337,7 @@ fn add_font_requirement(
     let requirement = requirements
         .entry(key.clone())
         .or_insert_with(|| FontRequirement {
-            key,
+            key: key.clone(),
             family: family.to_owned(),
             bold,
             italic,
@@ -302,20 +348,30 @@ fn add_font_requirement(
             requirement.scripts.push(script.clone());
         }
     }
+    key
 }
 
+/// Adds every family and style `paragraph` names to `named`, and the keys of
+/// those measurement can reach to `used`.
 fn collect_paragraph_font_requirements(
     paragraph: &ParagraphBlock,
     scripts: &[String],
     fallback_family: &str,
-    requirements: &mut BTreeMap<String, FontRequirement>,
+    named: &mut BTreeMap<String, FontRequirement>,
+    used: &mut HashSet<String>,
 ) {
     let default_family = paragraph
         .attrs
         .as_ref()
         .and_then(|attrs| attrs.default_font_family.as_deref())
         .unwrap_or(fallback_family);
-    add_font_requirement(default_family, false, false, scripts, requirements);
+    used.insert(add_font_requirement(
+        default_family,
+        false,
+        false,
+        scripts,
+        named,
+    ));
     for run in &paragraph.runs {
         let (formatting, include_regular) = match run {
             Run::Text(text) => (&text.fmt, true),
@@ -323,49 +379,80 @@ fn collect_paragraph_font_requirements(
             Run::Field(field) => (&field.fmt, false),
             _ => continue,
         };
-        let family = formatting.font_family.as_deref().unwrap_or(default_family);
         let bold = formatting.bold.unwrap_or(false);
         let italic = formatting.italic.unwrap_or(false);
-        add_font_requirement(family, bold, italic, scripts, requirements);
-        if include_regular {
-            add_font_requirement(family, false, false, scripts, requirements);
-        }
+        let mut add = |family: &str, bold: bool, italic: bool, reached: bool| {
+            let key = add_font_requirement(family, bold, italic, scripts, named);
+            if reached {
+                used.insert(key);
+            }
+            if include_regular {
+                let key = add_font_requirement(family, false, false, scripts, named);
+                if reached {
+                    used.insert(key);
+                }
+            }
+        };
+        let family = formatting.font_family.as_deref().unwrap_or(default_family);
+        add(family, bold, italic, true);
         let Some(slots) = &formatting.font_slots else {
             continue;
         };
-        let slot_use = if let Run::Text(text) = run {
+        let text = match run {
+            Run::Text(text) => Some(text),
+            _ => None,
+        };
+        let slot_use = text.map_or_else(FontSlotUse::default, |text| {
             font_slot_use(
                 &text.text,
                 formatting.complex_script.unwrap_or(false),
                 slots.hint.as_deref(),
             )
-        } else {
-            FontSlotUse::default()
-        };
-        for family in [
-            slots.ascii.as_deref(),
-            slots.h_ansi.as_deref(),
-            slots.east_asia.as_deref().filter(|_| slot_use.east_asia),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            add_font_requirement(family, bold, italic, scripts, requirements);
-            if include_regular {
-                add_font_requirement(family, false, false, scripts, requirements);
+        });
+        let cs_bold = formatting.bold_cs.unwrap_or(bold);
+        let cs_italic = formatting.italic_cs.unwrap_or(italic);
+        for (family, bold, italic, reached) in [
+            (slots.ascii.as_deref(), bold, italic, true),
+            (slots.h_ansi.as_deref(), bold, italic, true),
+            (slots.east_asia.as_deref(), bold, italic, slot_use.east_asia),
+            (
+                slots.cs.as_deref(),
+                cs_bold,
+                cs_italic,
+                slot_use.complex_script,
+            ),
+        ] {
+            if let Some(family) = family {
+                add(family, bold, italic, reached);
             }
         }
-        if let Some(family) = slots.cs.as_deref().filter(|_| slot_use.complex_script) {
-            add_font_requirement(
-                family,
-                formatting.bold_cs.unwrap_or(bold),
-                formatting.italic_cs.unwrap_or(italic),
-                scripts,
-                requirements,
+        // What measurement takes a slot the run leaves unnamed from
+        // (`family_for_slot` in ooxml-text).
+        let run_family = formatting.font_family.as_deref().unwrap_or(fallback_family);
+        let unnamed = match text {
+            Some(_) => slots
+                .h_ansi
+                .as_deref()
+                .or(slots.ascii.as_deref())
+                .unwrap_or(run_family),
+            None => run_family,
+        };
+        add(unnamed, bold, italic, true);
+        if slot_use.east_asia {
+            add(
+                slots.east_asia.as_deref().unwrap_or(unnamed),
+                bold,
+                italic,
+                true,
             );
-            if include_regular {
-                add_font_requirement(family, false, false, scripts, requirements);
-            }
+        }
+        if slot_use.complex_script {
+            add(
+                slots.cs.as_deref().unwrap_or(unnamed),
+                cs_bold,
+                cs_italic,
+                true,
+            );
         }
     }
     if let Some(attrs) = &paragraph.attrs
@@ -379,7 +466,7 @@ fn collect_paragraph_font_requirements(
             Run::Text(text) => text.fmt.font_family.as_deref(),
             _ => None,
         });
-        add_font_requirement(
+        used.insert(add_font_requirement(
             attrs
                 .list_marker_font_family
                 .as_deref()
@@ -388,8 +475,8 @@ fn collect_paragraph_font_requirements(
             attrs.list_marker_bold.unwrap_or(false),
             attrs.list_marker_italic.unwrap_or(false),
             scripts,
-            requirements,
-        );
+            named,
+        ));
     }
 }
 
@@ -3808,6 +3895,34 @@ mod tests {
     }
 
     #[test]
+    fn preserves_script_order_from_unused_font_slots() {
+        let blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+            {
+                "kind": "paragraph", "id": "jp", "runs": [{
+                    "kind": "text", "text": "かな", "fontFamily": "Aptos",
+                    "boldCs": true, "fontSlots": {"cs": "Arial"}
+                }]
+            },
+            {
+                "kind": "paragraph", "id": "sc", "runs": [{
+                    "kind": "text", "text": "漢字", "fontFamily": "Arial"
+                }]
+            }
+        ]))
+        .unwrap();
+        let requirements = collect_font_requirements(&blocks, "Calibri");
+        let keys: Vec<_> = requirements
+            .iter()
+            .map(|requirement| requirement.key.as_str())
+            .collect();
+
+        assert_eq!(keys, ["aptos|0|0", "arial|0|0", "calibri|0|0"]);
+        assert_eq!(requirements[0].scripts, ["cjk-jp"]);
+        assert_eq!(requirements[1].scripts, ["cjk-jp", "cjk-sc"]);
+        assert_eq!(requirements[2].scripts, ["cjk-jp", "cjk-sc"]);
+    }
+
+    #[test]
     fn collects_east_asian_font_slots_only_for_east_asian_text() {
         for (text, expected) in [
             (
@@ -3880,6 +3995,46 @@ mod tests {
     }
 
     #[test]
+    fn collects_complex_script_face_without_a_cs_font_slot() {
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "p", "runs": [
+                {
+                    "kind": "text", "text": "Latin", "boldCs": true,
+                    "fontSlots": {"cs": "Arial", "ascii": "Arial", "hAnsi": "Arial"}
+                },
+                {
+                    "kind": "text", "text": "Latin", "complexScript": true, "boldCs": true,
+                    "fontSlots": {"ascii": "Arial", "hAnsi": "Arial"}
+                }
+            ]
+        }))
+        .unwrap();
+        let keys: Vec<_> = collect_font_requirements([&block], "Calibri")
+            .into_iter()
+            .map(|requirement| requirement.key)
+            .collect();
+
+        assert_eq!(keys, ["arial|0|0", "arial|1|0", "calibri|0|0"]);
+    }
+
+    #[test]
+    fn collects_document_default_for_an_unnamed_text_slot() {
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "p", "attrs": {"defaultFontFamily": "Arial"},
+            "runs": [{
+                "kind": "text", "text": "Latin", "fontSlots": {"cs": "Calibri"}
+            }]
+        }))
+        .unwrap();
+        let keys: Vec<_> = collect_font_requirements([&block], "Calibri")
+            .into_iter()
+            .map(|requirement| requirement.key)
+            .collect();
+
+        assert_eq!(keys, ["arial|0|0", "calibri|0|0"]);
+    }
+
+    #[test]
     fn tab_font_requirements_skip_script_slots() {
         for complex_script in [false, true] {
             let keys = font_requirement_keys(json!({
@@ -3900,6 +4055,21 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn collects_document_default_for_tab_runs_with_font_slots() {
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "p", "attrs": {"defaultFontFamily": "Arial"},
+            "runs": [{"kind": "tab", "fontSlots": {"cs": "Calibri"}}]
+        }))
+        .unwrap();
+        let keys: Vec<_> = collect_font_requirements([&block], "Calibri")
+            .into_iter()
+            .map(|requirement| requirement.key)
+            .collect();
+
+        assert_eq!(keys, ["arial|0|0", "calibri|0|0"]);
     }
 
     #[test]
