@@ -110,6 +110,21 @@ describe('createDisplayListQueries handle lifecycle', () => {
     expect(calls.rangeJson).toBe(0);
   });
 
+  test('a superseded generation reads page metadata from the live layout too', () => {
+    const { engine, calls } = fakeEngine();
+    const shared = page(0);
+    const first = createDisplayListQueries({ pages: [shared] }, engine);
+    first.rangeRects(0, 1);
+    const landscape = { ...page(1), width: 140 };
+    const second = createDisplayListQueries({ pages: [shared, landscape] }, engine, first);
+    expect(first.pageCount()).toBe(1);
+    second.rangeRects(0, 1);
+    expect(calls.update).toBe(1);
+    expect(first.pageCount()).toBe(2);
+    expect(first.pageSize(1)).toEqual({ width: 140, height: 100 });
+    expect(first.displayList).toBe(second.displayList);
+  });
+
   test('a superseded generation whose successor is gone answers nothing', () => {
     const { engine, calls } = fakeEngine();
     const first = createDisplayListQueries({ pages: [page(0)] }, engine);

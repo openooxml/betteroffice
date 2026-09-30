@@ -844,11 +844,21 @@ export function createDisplayListQueries(
    */
   const handedOff = (): DisplayListQueries | null | undefined => {
     if (resident || !superseded || handle !== null) return undefined;
+    // never names this facade: the finalizer's closure context must not retain it
     const newest = lineage.newest?.deref();
-    return newest && newest !== queries && !facadeDeltaSeeds.get(newest)?.disposed()
-      ? newest
-      : null;
+    return newest && !facadeDeltaSeeds.get(newest)?.disposed() ? newest : null;
   };
+
+  /** A list-only read, answered from the live facade once this one handed off its handle. */
+  const viaLive =
+    <A extends unknown[], R>(
+      local: (...args: A) => R,
+      remote: (live: DisplayListQueries, ...args: A) => R
+    ) =>
+    (...args: A): R => {
+      const live = handedOff();
+      return live ? remote(live, ...args) : local(...args);
+    };
 
   const residentQuery = (query: () => string, label: string): string | null => {
     if (isDead()) return null;
@@ -1339,7 +1349,9 @@ export function createDisplayListQueries(
   };
 
   const queries: DisplayListQueries = {
-    displayList: list,
+    get displayList() {
+      return handedOff()?.displayList ?? list;
+    },
     isReady: () => (resident !== null || eng !== null) && sourceError === null,
     sourceState: () =>
       sourceError
@@ -1348,24 +1360,37 @@ export function createDisplayListQueries(
           ? { status: 'ready' }
           : { status: 'loading' },
     whenReady: () => readyPromise,
-    pageCount: () => list.pages.length,
-    pageSize: (pageIndex: number) => {
-      const page = list.pages[pageIndex];
-      return page ? { width: page.width, height: page.height } : null;
-    },
-    pageBounds,
-    contentBounds,
-    columnBounds,
-    paragraphRects,
-    visualLines,
-    visualLinesOnPage,
-    visualLineExtent: (pageIndex: number) => {
-      const page = list.pages[pageIndex];
-      return page ? visualLineExtent(page) : null;
-    },
-    visualLineAtPosition,
-    imageAtPoint,
-    imageByPos,
+    pageCount: viaLive(
+      () => list.pages.length,
+      (live) => live.pageCount()
+    ),
+    pageSize: viaLive(
+      (pageIndex: number) => {
+        const page = list.pages[pageIndex];
+        return page ? { width: page.width, height: page.height } : null;
+      },
+      (live, pageIndex) => live.pageSize(pageIndex)
+    ),
+    pageBounds: viaLive(pageBounds, (live, pageIndex) => live.pageBounds(pageIndex)),
+    contentBounds: viaLive(contentBounds, (live, pageIndex) => live.contentBounds(pageIndex)),
+    columnBounds: viaLive(columnBounds, (live, pageIndex) => live.columnBounds(pageIndex)),
+    paragraphRects: viaLive(paragraphRects, (live, pos) => live.paragraphRects(pos)),
+    visualLines: viaLive(visualLines, (live) => live.visualLines()),
+    visualLinesOnPage: viaLive(visualLinesOnPage, (live, pageIndex) =>
+      live.visualLinesOnPage(pageIndex)
+    ),
+    visualLineExtent: viaLive(
+      (pageIndex: number) => {
+        const page = list.pages[pageIndex];
+        return page ? visualLineExtent(page) : null;
+      },
+      (live, pageIndex) => live.visualLineExtent(pageIndex)
+    ),
+    visualLineAtPosition: viaLive(visualLineAtPosition, (live, pos) =>
+      live.visualLineAtPosition(pos)
+    ),
+    imageAtPoint: viaLive(imageAtPoint, (live, ...args) => live.imageAtPoint(...args)),
+    imageByPos: viaLive(imageByPos, (live, ...args) => live.imageByPos(...args)),
     hitTestRegions,
     verticalMove,
     rangeRects,
