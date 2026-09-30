@@ -510,6 +510,7 @@ describe('resident worker layout ownership', () => {
     let epoch = 0;
     const provisional = '{"layout":{"pages":[1]},"notesConverged":true,"provisional":true}';
     const full = '{"layout":{"pages":[1,2]},"notesConverged":true}';
+    let headersFooters = '{"parts":["full"]}';
     Object.assign(w.harness.session, {
       layoutDocumentWithRegionsPrefixRetainedJson: (_input: string, pages: number) => {
         calls.push(`prefix:${pages}`);
@@ -519,6 +520,7 @@ describe('resident worker layout ownership', () => {
         calls.push('full');
         return full;
       },
+      retainedHeadersFootersJson: () => headersFooters,
       residentCaretSnapshot: () => ({ frameEpoch: epoch, caretRect: null }),
       buildDisplayListFrame: (input: string) => {
         extras.push(input);
@@ -580,8 +582,11 @@ describe('resident worker layout ownership', () => {
     });
     await w.send({ type: 'buildFrame', extras: 'given', expectedFrameEpoch: 3, paintCaret: false });
     expect(calls.slice(2)).toEqual(['prefix:3', 'full']);
+    // A later edit changes what the session retains; the completed layout's reply keeps its own.
+    headersFooters = '{"parts":["edited"]}';
     const late = await w.send({ type: 'completeLayout', expectedFrameEpoch: 4, paintCaret: false });
     expect(late.ok && late.layoutJson).toBe(full);
+    expect(extras.at(-1)).toBe('{"headersFooters":{"parts":["full"]}}');
     expect(calls).toHaveLength(4);
   });
 });

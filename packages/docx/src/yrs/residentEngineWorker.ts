@@ -66,7 +66,9 @@ interface LayoutRequest {
   layoutExtras?: string;
 }
 let incompleteLayout: (LayoutRequest & { layoutInput: string }) | null = null;
-let completedLayout: (LayoutRequest & { layoutJson: string }) | null = null;
+let completedLayout:
+  | (LayoutRequest & { layoutJson: string; headersFootersJson: string | undefined })
+  | null = null;
 // A `completeLayout` measured a few blocks at a time, as operations queued
 // behind the requests that arrive meanwhile.
 interface SlicedCompletion {
@@ -149,7 +151,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     subscribe();
     const started = performance.now();
     const frame = session.buildDisplayListFrame(
-      frameExtras(request.extras, request.layoutExtras, layoutJson !== null),
+      frameExtras(request.extras, request.layoutExtras, layoutJson),
       request.expectedFrameEpoch
     );
     await replyFrame(
@@ -181,7 +183,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     subscribe();
     const started = performance.now();
     const frame = session.buildDisplayListFrame(
-      frameExtras(request.extras, request.layoutExtras, layoutJson !== null),
+      frameExtras(request.extras, request.layoutExtras, layoutJson),
       request.expectedFrameEpoch
     );
     await replyFrame(
@@ -416,6 +418,7 @@ async function completeProvisionalLayout(): Promise<void> {
     completedLayout = {
       ...request,
       layoutJson: layoutJson ?? session.layoutDocumentWithRegionsRetainedJson(layoutInput),
+      headersFootersJson: session.retainedHeadersFootersJson(),
     };
     if (waiting) {
       await replyCompletedLayout(waiting.id, waiting.expectedFrameEpoch, waiting.paintCaret);
@@ -442,7 +445,7 @@ async function replyCompletedLayout(
   pendingUpdates = [];
   const started = performance.now();
   const frame = session.buildDisplayListFrame(
-    frameExtras(completed.extras, completed.layoutExtras, true),
+    frameExtras(completed.extras, completed.layoutExtras, null, completed.headersFootersJson),
     expectedFrameEpoch
   );
   await replyFrame(
@@ -533,7 +536,11 @@ async function completionSlice(completion: SlicedCompletion): Promise<void> {
   const { layoutInput: _input, ...request } = incompleteLayout;
   incompleteLayout = null;
   slicedCompletion = null;
-  completedLayout = { ...request, layoutJson: progress.layoutJson };
+  completedLayout = {
+    ...request,
+    layoutJson: progress.layoutJson,
+    headersFootersJson: session.retainedHeadersFootersJson(),
+  };
   await replyCompletedLayout(completion.id, completion.expectedFrameEpoch, completion.paintCaret);
 }
 
@@ -546,16 +553,20 @@ function supersedeSlicedCompletion(): void {
 
 /**
  * The extras a frame is built with. For a layout this worker owns, the host
- * sends them without the header/footer payload, which only this layout has.
+ * sends them without the header/footer payload, which only this layout has:
+ * the session retains it after a region layout (`layoutJson` is its reply),
+ * or a completed layout captured it.
  */
 function frameExtras(
   extras: string,
   layoutExtras: string | undefined,
-  regionLayout: boolean
+  layoutJson: string | null,
+  headersFootersJson?: string
 ): string {
   if (layoutExtras === undefined) return extras;
-  if (!session) throw new Error('Resident engine worker is not initialized');
-  const retained = regionLayout ? session.retainedHeadersFootersJson() : undefined;
+  const retained =
+    headersFootersJson ??
+    (layoutJson === null ? undefined : session?.retainedHeadersFootersJson());
   const headersFooters =
     retained === undefined
       ? undefined
