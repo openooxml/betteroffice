@@ -11,6 +11,7 @@ import {
   demoDisplayList,
   encodeDisplayListFrameExtras,
   isDisplayListQuerySourceDead,
+  RustDisplayListSourceError,
   type DisplayList,
   type DisplayListQueries,
   type GlyphOutlineProvider,
@@ -224,6 +225,16 @@ interface WorkerLayoutFrame {
 /** The display fallback needs a main-thread layout of a worker-run one. */
 class MainThreadLayoutPendingError extends Error {}
 
+/** What the engine reports when asked for a display of a session it never laid out. */
+const UNBUILT_PAGINATION = 'resident pagination input is not built';
+/** How often a display of a session that has not laid out yet tries again. */
+const SESSION_LAYOUT_RETRY_MS = 250;
+/** How long a display waits for a session's own layout before failing. */
+const SESSION_LAYOUT_WAIT_MS = 5000;
+
+/** The session has not laid out yet; the display tries again shortly. */
+class SessionLayoutPendingError extends Error {}
+
 /**
  * A newer layout reached the session, with another revision preview or from a
  * worker pass run again; its own pass shows it.
@@ -341,7 +352,8 @@ export function useRustDisplayList(
 ): UseRustDisplayListResult {
   const requestLayoutRef = useRef(requestLayout);
   requestLayoutRef.current = requestLayout;
-  const layoutRequestedEnginesRef = useRef(new WeakSet<YrsSession>());
+  const unbuiltSinceRef = useRef(new WeakMap<YrsSession, number>());
+  const [sessionLayoutRetry, setSessionLayoutRetry] = useState(0);
   const workerHeapLimitRef = useRef(workerHeapLimitBytes);
   workerHeapLimitRef.current = workerHeapLimitBytes;
   // The engine whose layout the shown frame is of: another engine's frames
@@ -1831,33 +1843,50 @@ export function useRustDisplayList(
       }
       // A frame engine paints the pagination it retains, which a newer layout may have replaced.
       const retainedRevision = residentEngine?.residentWorkerProbe()?.layoutRevision;
-      // A layout published with a session that has laid nothing out yet (it
-      // replaced the session mid-pass) is another session's: ask once for its own.
-      if (
-        residentEngine &&
-        retainedRevision === undefined &&
-        requestLayoutRef.current &&
-        !layoutRequestedEnginesRef.current.has(residentEngine)
-      ) {
-        layoutRequestedEnginesRef.current.add(residentEngine);
-        return Promise.reject(new MainThreadLayoutPendingError());
-      }
       const base = frameBase(residentEngine ?? engine ?? null);
       return buildRustDisplayFrame(
         buildInputs,
         engine ?? undefined,
         base,
         base?.frameEpoch ?? recoveryFrameEpochRef.current
-      ).then((result) => ({
-        ...result,
-        caret: null as YrsResidentCaretSnapshot | null,
-        queryEngine: engine,
-        workerProduced: false,
-        caretPainted: false,
-        ...(residentEngine && result.frame && retainedRevision !== inputs.layoutRevision
-          ? { previewKey: UNKNOWN_REVISION_PREVIEW_KEY }
-          : {}),
-      }));
+      ).then(
+        (result) => ({
+          ...result,
+          caret: null as YrsResidentCaretSnapshot | null,
+          queryEngine: engine,
+          workerProduced: false,
+          caretPainted: false,
+          ...(residentEngine && result.frame && retainedRevision !== inputs.layoutRevision
+            ? { previewKey: UNKNOWN_REVISION_PREVIEW_KEY }
+            : {}),
+        }),
+        (error: unknown) => {
+          // A layout published with a session that has laid nothing out yet (it
+          // replaced the session mid-pass) is another session's: ask for the
+          // session's own, and try again until it has one or the wait runs out.
+          if (
+            residentEngine &&
+            retainedRevision === undefined &&
+            error instanceof RustDisplayListSourceError &&
+            error.stage === 'build' &&
+            error.message.includes(UNBUILT_PAGINATION)
+          ) {
+            const now = performance.now();
+            const since = unbuiltSinceRef.current.get(residentEngine);
+            if (since === undefined) {
+              unbuiltSinceRef.current.set(residentEngine, now);
+              setTimeout(() => requestLayoutRef.current?.(), 0);
+            }
+            if (since === undefined || now - since < SESSION_LAYOUT_WAIT_MS) {
+              setTimeout(() => {
+                if (generationRef.current === generation) setSessionLayoutRetry((retry) => retry + 1);
+              }, SESSION_LAYOUT_RETRY_MS);
+              throw new SessionLayoutPendingError();
+            }
+          }
+          throw error;
+        }
+      );
     };
     const paintToken = paintedCaretMachine.token();
     let pending: Promise<BuiltDisplay>;
@@ -2133,7 +2162,9 @@ export function useRustDisplayList(
           setTimeout(() => requestLayoutRef.current?.(), 0);
           return;
         }
-        if (error instanceof SupersededPreviewError) return;
+        if (error instanceof SupersededPreviewError || error instanceof SessionLayoutPendingError) {
+          return;
+        }
         if (
           generation !== generationRef.current ||
           contentEpoch !== contentEpochRef.current
@@ -2152,6 +2183,7 @@ export function useRustDisplayList(
   }, [
     adoptHostEngine,
     layout,
+    sessionLayoutRetry,
     overrides,
     fontChainsProviderRef,
     resolvedCommentIds,
