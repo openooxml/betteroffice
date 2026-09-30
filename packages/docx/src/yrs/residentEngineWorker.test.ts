@@ -15,8 +15,10 @@ beforeAll(async () => {
   const frameDelta = resolve(import.meta.dir, '../layout/render/frameDelta.ts');
   const modules: Record<string, string> = {
     './residentEngineSession':
-      'export const createResidentEngineSession = async () => testHarness.session;',
-    '../layout/render/glyphCache': 'export class GlyphCache {}',
+      'export const createResidentEngineSession = async (heapLimitBytes) => ((testHarness.heapLimits ??= []).push(heapLimitBytes), testHarness.session);',
+    '../layout/render/glyphCache':
+      'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; } }',
+    '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.memories;',
     '../layout/render/frameDelta': `
       export { applyFrameDeltaOwned } from ${JSON.stringify(frameDelta)};
       export const decodeFrameDelta = () => testHarness.delta;
@@ -83,6 +85,7 @@ function worker() {
     presented: [] as number[],
     failRaster: null as number | null,
     failPresent: null as number | null,
+    memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
       loadState() {},
       setPartialDocument() {},
@@ -184,12 +187,13 @@ function worker() {
       harness.rasterized = [];
       harness.presented = [];
     },
-    async bootstrap(pageCount = 3) {
+    async bootstrap(pageCount = 3, heapLimitBytes?: number) {
       delta(Array.from({ length: pageCount }, (_, index) => index + 1), true, 100, pageCount);
       return send({
         type: 'bootstrap',
         expectedFrameEpoch: 0,
         extras: '',
+        ...(heapLimitBytes !== undefined ? { heapLimitBytes } : {}),
         snapshot: {
           clientId: 1,
           state: new Uint8Array(),
@@ -578,6 +582,99 @@ describe('resident worker layout ownership', () => {
   });
 });
 
+describe('resident worker memory', () => {
+  test('a bootstrap starts the session under its heap limit', async () => {
+    const w = worker();
+    await w.bootstrap(3, 1024);
+    await w.bootstrap();
+    expect((w.harness as { heapLimits?: unknown[] }).heapLimits).toEqual([1024, undefined]);
+  });
+
+  test('every reply carries the worker memory', async () => {
+    const w = worker();
+    const reply = await w.bootstrap();
+    expect(reply.memory).toEqual(w.harness.memories);
+  });
+
+  test('a trap after a failed allocation replies out of memory', async () => {
+    const w = worker();
+    await w.bootstrap();
+    w.harness.memories = [
+      { label: 'docx-edit', bufferBytes: 4294901760, liveBytes: 4172000000, peakBytes: 4172000000, failedAllocationBytes: 65536 },
+    ];
+    w.harness.session.buildDisplayListFrame = () => {
+      throw new WebAssembly.RuntimeError('unreachable');
+    };
+    const trapped = await w.build([1]);
+    expect(trapped.ok).toBe(false);
+    expect(!trapped.ok && trapped.terminal).toBe(true);
+    expect(!trapped.ok && trapped.outOfMemory).toBe(true);
+    expect(!trapped.ok && trapped.error).toBe(
+      'Resident engine worker ran out of memory allocating 65536 bytes: unreachable'
+    );
+    expect(trapped.memory).toEqual(w.harness.memories);
+  });
+
+  test('a trap that the raster paints past still answers the request as out of memory', async () => {
+    const w = worker();
+    await w.bootstrap();
+    w.harness.memories = [
+      { label: 'docx-edit', bufferBytes: 65536, liveBytes: 65000, peakBytes: 65000, failedAllocationBytes: 112 },
+    ];
+    Object.assign(w.harness.session, {
+      outlineGlyphJson: () => {
+        throw new WebAssembly.RuntimeError('unreachable');
+      },
+    });
+    const rasterize = w.harness.rasterize;
+    w.harness.rasterize = async (...args: Parameters<typeof rasterize>) => {
+      try {
+        (w.harness as { glyphs?: (fontId: number, glyphId: number) => string }).glyphs?.(1, 1);
+      } catch {
+        // painted with browser text instead
+      }
+      return rasterize(...args);
+    };
+    const attached = await w.attach([1]);
+    expect(!attached.ok && attached.terminal && attached.outOfMemory).toBe(true);
+    const next = await w.build([1]);
+    expect(!next.ok && next.terminal).toBe(true);
+  });
+
+  test('a trap the raster paints past without a failed allocation keeps the worker', async () => {
+    const w = worker();
+    await w.bootstrap();
+    Object.assign(w.harness.session, {
+      outlineGlyphJson: () => {
+        throw new WebAssembly.RuntimeError('unreachable');
+      },
+    });
+    const rasterize = w.harness.rasterize;
+    w.harness.rasterize = async (...args: Parameters<typeof rasterize>) => {
+      try {
+        (w.harness as { glyphs?: (fontId: number, glyphId: number) => string }).glyphs?.(1, 1);
+      } catch {
+        // painted with browser text instead
+      }
+      return rasterize(...args);
+    };
+    expect((await w.attach([1])).ok).toBe(true);
+    expect((await w.build([1])).ok).toBe(true);
+  });
+
+  test('a trap without a failed allocation is not reported as out of memory', async () => {
+    const w = worker();
+    await w.bootstrap();
+    w.harness.session.buildDisplayListFrame = () => {
+      throw new WebAssembly.RuntimeError('unreachable');
+    };
+    const trapped = await w.build([1]);
+    expect(!trapped.ok && trapped.terminal).toBe(true);
+    expect(!trapped.ok && trapped.outOfMemory).toBeUndefined();
+    expect(!trapped.ok && trapped.error).toBe('Resident engine worker trapped: unreachable');
+  });
+});
+
 describe('sliced layout completion', () => {
   const provisional = '{"layout":{"pages":[1]},"notesConverged":true,"provisional":true}';
   const full = '{"layout":{"pages":[1,2]},"notesConverged":true}';
@@ -715,6 +812,46 @@ describe('sliced layout completion', () => {
     expect(calls.filter((call) => call === 'begin')).toHaveLength(2);
     expect(calls.indexOf('update')).toBeLessThan(calls.lastIndexOf('begin'));
     expect(calls).not.toContain('whole');
+  });
+
+  test('a glyph trap while a frame request finishes the pass answers both requests once', async () => {
+    const { w, onResume, bootstrap } = steppedWorker(100);
+    await bootstrap();
+    await w.attach([1]);
+    // Presenting fails too once the trap is recorded; the trap still answers.
+    w.harness.failPresent = 1;
+    w.harness.memories = [
+      { label: 'docx-edit', bufferBytes: 65536, liveBytes: 65000, peakBytes: 65000, failedAllocationBytes: 112 },
+    ];
+    Object.assign(w.harness.session, {
+      outlineGlyphJson: () => {
+        throw new WebAssembly.RuntimeError('unreachable');
+      },
+    });
+    const rasterize = w.harness.rasterize;
+    w.harness.rasterize = async (...args: Parameters<typeof rasterize>) => {
+      try {
+        (w.harness as { glyphs?: (fontId: number, glyphId: number) => string }).glyphs?.(1, 1);
+      } catch {
+        // painted with browser text instead
+      }
+      return rasterize(...args);
+    };
+    let frame: Promise<ResidentEngineWorkerResponse> | undefined;
+    onResume.push(() => {
+      frame = w.send({ type: 'buildFrame', extras: 'given', expectedFrameEpoch: 2, paintCaret: false });
+    });
+    const completion = await w.send({
+      type: 'completeLayout',
+      expectedFrameEpoch: 1,
+      paintCaret: false,
+      sliceBlocks: 2,
+    });
+    const framed = await frame!;
+    expect(!completion.ok && completion.terminal && completion.outOfMemory).toBe(true);
+    expect(!framed.ok && framed.terminal && framed.outOfMemory).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(new Set(w.answered).size).toBe(w.answered.length);
   });
 
   test('a frame request finishes the pass first and answers it first', async () => {
