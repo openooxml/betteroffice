@@ -224,7 +224,7 @@ fn assert_pending_blocks_resolve_in_either_order(accept: bool) {
                     doc.reject_change(&local(), &target)
                 }
                 .unwrap();
-                assert_eq!(receipt.revision_ids, [id.clone()]);
+                assert_eq!(receipt.revision_ids, std::slice::from_ref(id));
                 assert!(receipt.range.is_none());
                 if slot == 0 && mark_first {
                     assert_inherited_block_revision(&doc, &expected_ids[1], !accept);
