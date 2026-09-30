@@ -833,6 +833,28 @@ describe('YrsSession host proposals', () => {
     expect(state(session)).toEqual(unchanged);
   });
 
+  it('settles a revision two withdrawn proposals share as the preview shows it', async () => {
+    const session = await open();
+    const original = texts(session, 'original');
+    const [first] = snapshotOf(propose(session, insert('first', '00000001', 'end', '!'))).proposals;
+    const second = snapshotOf(propose(session, insert('second', '00000001', 'end', '?')))
+      .proposals[1]!;
+    expect(second.revisionIds).toEqual(first!.revisionIds);
+    const decided = snapshotOf(
+      decide(session, [
+        { id: 'first', state: 'accepted' },
+        { id: 'second', state: 'rejected' },
+      ])
+    );
+    expect(proposalRevisionPreview(decided)).toEqual({ [first!.revisionIds[0]!]: 'rejected' });
+
+    snapshotOf(
+      session.withdrawProposals({ expectVersion: session.version(), ids: ['first', 'second'] })
+    );
+    expect(texts(session, 'accepted')).toEqual(original);
+    expect(session.listRevisions()).toEqual([]);
+  });
+
   it('forgets proposals when the session opens another document', async () => {
     const session = await open();
     snapshotOf(propose(session, replace('a', '00000003', 'this', 'that')));

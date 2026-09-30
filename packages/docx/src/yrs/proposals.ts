@@ -638,8 +638,6 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
       if (leaving.has(id)) continue;
       for (const revisionId of record.revisionIds) kept.set(revisionId, id);
     }
-    const accept: string[] = [];
-    const reject: string[] = [];
     const owners = new Map<string, string>();
     for (const id of withdrawn) {
       const { record } = records.get(id)!;
@@ -653,9 +651,12 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
           });
         }
         owners.set(revisionId, id);
-        (record.state === 'accepted' ? accept : reject).push(revisionId);
       }
     }
+    const shown = proposalRevisionPreview(snapshot()) ?? {};
+    const settling = [...owners.keys()];
+    const accept = settling.filter((revisionId) => shown[revisionId] === 'accepted');
+    const reject = settling.filter((revisionId) => shown[revisionId] !== 'accepted');
     const foreign = session
       .listRevisions()
       .find(
