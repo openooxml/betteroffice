@@ -686,6 +686,14 @@ impl EditingDoc {
         }
     }
 
+    #[cfg(all(test, feature = "wasm"))]
+    pub(crate) fn source_indexed(&self) -> bool {
+        matches!(
+            *self.source.lock().unwrap(),
+            Some(identity::SourcePackage::Ready(_))
+        )
+    }
+
     /// Retains the package the stories were, or will be, seeded from.
     pub(crate) fn retain_source(&self, source: identity::SourcePackage) {
         *self.media.lock().unwrap() = None;
@@ -733,12 +741,6 @@ impl EditingDoc {
     /// reserves the package's paragraph IDs. Indexed on first identity use.
     pub fn retain_source_docx(&self, bytes: impl Into<Arc<[u8]>>) {
         self.retain_source(identity::SourcePackage::Pending(bytes.into(), None));
-    }
-
-    /// [`Self::retain_source_docx`] with the bytes' known package digest.
-    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
-    pub(crate) fn retain_source_docx_with_digest(&self, bytes: Arc<[u8]>, digest: String) {
-        self.retain_source(identity::SourcePackage::Pending(bytes, Some(digest)));
     }
 
     /// Runs `f` over the identities this replica has seen, building them from

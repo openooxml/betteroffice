@@ -44,6 +44,53 @@ interface BuiltFor {
   t: TFunction;
 }
 
+const fallbackQueue: (() => void)[] = [];
+let cancelFallbackDrain: (() => void) | null = null;
+let drainingFallbacks = false;
+
+function scheduleFallbackDrain(): void {
+  if (cancelFallbackDrain || drainingFallbacks || fallbackQueue.length === 0) return;
+  const drain = (deadline?: IdleDeadline): void => {
+    cancelFallbackDrain = null;
+    drainingFallbacks = true;
+    try {
+      fallbackQueue.shift()?.();
+      while (
+        deadline &&
+        !deadline.didTimeout &&
+        deadline.timeRemaining() > 1 &&
+        fallbackQueue.length > 0
+      ) {
+        fallbackQueue.shift()!();
+      }
+    } finally {
+      drainingFallbacks = false;
+      scheduleFallbackDrain();
+    }
+  };
+  if (typeof requestIdleCallback === 'function') {
+    const id = requestIdleCallback(drain, { timeout: 5000 });
+    cancelFallbackDrain = () => cancelIdleCallback(id);
+  } else {
+    const id = setTimeout(() => drain(), 50);
+    cancelFallbackDrain = () => clearTimeout(id);
+  }
+}
+
+function enqueueFallback(work: () => void): () => void {
+  const queued = () => work();
+  fallbackQueue.push(queued);
+  scheduleFallbackDrain();
+  return () => {
+    const index = fallbackQueue.indexOf(queued);
+    if (index >= 0) fallbackQueue.splice(index, 1);
+    if (fallbackQueue.length === 0) {
+      cancelFallbackDrain?.();
+      cancelFallbackDrain = null;
+    }
+  };
+}
+
 const TAB_STOPS = 'a[href], button, input, select, textarea, [tabindex]';
 
 /** The elements under `root` that Tab stops at, in document order. */
@@ -190,7 +237,7 @@ export function usePageChrome(
         showFallback();
         return;
       }
-      return idle(showFallback);
+      return enqueueFallback(showFallback);
     }
     if (shows('chrome')) return;
     const built = builtForRef.current?.kind === 'chrome' ? builtForRef.current : null;

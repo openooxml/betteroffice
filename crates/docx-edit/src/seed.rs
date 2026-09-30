@@ -4861,17 +4861,6 @@ pub(crate) fn parse_docx_with_parts(
     Ok((envelope, SourceParts::new(parts)))
 }
 
-#[cfg(feature = "wasm")]
-pub(crate) fn referenced_fonts(
-    envelope: &docx_parse::S9WireEnvelope,
-) -> Result<Vec<String>, String> {
-    let mut fonts = BTreeSet::new();
-    collect_font_table_fonts(envelope, &mut fonts);
-    let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
-    collect_fonts_from_value(&parsed, &mut fonts);
-    Ok(fonts.into_iter().collect())
-}
-
 type SourceRoot = (String, SourceStoryKind, Option<String>);
 
 /// One package lowered into story plans, with what its identity index and structured reads
@@ -4889,8 +4878,18 @@ struct LoweredDocx {
 /// Lowers `envelope`, resolving source provenance against `parts` when the package's parts are
 /// at hand.
 fn lower_docx(
+    envelope: docx_parse::S9WireEnvelope,
+    parts: Option<&SourceParts>,
+) -> Result<LoweredDocx, String> {
+    lower_docx_with(envelope, parts, true)
+}
+
+/// [`lower_docx`], without the retained source JSON that only seeded payloads carry when
+/// `payloads` is `false`.
+fn lower_docx_with(
     mut envelope: docx_parse::S9WireEnvelope,
     parts: Option<&SourceParts>,
+    payloads: bool,
 ) -> Result<LoweredDocx, String> {
     envelope.document.package.media_entries.clear();
     let relationships = envelope.document.package.relationship_entries.clone();
@@ -4900,7 +4899,7 @@ fn lower_docx(
     script_fonts.font_table(&envelope.document.package.font_table.fonts);
     let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
     collect_fonts_from_value(&parsed, &mut referenced_fonts);
-    let source_json = if needs_source_json(&parsed) {
+    let source_json = if payloads && needs_source_json(&parsed) {
         let serialized =
             serde_json::to_string(&envelope.document).map_err(|error| error.to_string())?;
         let ordered: OrderedValue =
@@ -5183,29 +5182,43 @@ pub(crate) fn seed_blocks(
     Ok(provenance)
 }
 
-/// Source metadata for a package whose stories arrive another way, such as shared state.
+/// Source metadata, identity index and referenced fonts for a package whose stories arrive
+/// another way, such as shared state, from one lowering.
 #[cfg(feature = "wasm")]
-pub(crate) fn source_metadata(
-    envelope: &docx_parse::S9WireEnvelope,
-    parts: Option<&SourceParts>,
-) -> Result<SourceMetadata, String> {
-    let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
-    let package =
-        field(Some(&parsed), "package").ok_or_else(|| "parsed DOCX has no package".to_owned())?;
-    let mut read = read_source(package, &parsed, parts);
-    let (mut context, _) = lower_package(package, BTreeMap::new());
-    read.provenance = std::mem::take(&mut context.provenance);
-    read.seeded_comments = seeded_comments(&context.plans);
-    if let Some(parts) = parts {
-        let comment_raw = comment_raw_sources(&context.styles, &read);
-        let represented = represented_controls(&context.plans, &read);
-        read.resolve_sources(parts, comment_raw, &represented);
-    }
-    Ok(SourceMetadata {
-        styles: context.styles,
-        structure: context.source,
+pub(crate) fn replica_source(
+    envelope: docx_parse::S9WireEnvelope,
+    parts: Vec<(String, Vec<u8>)>,
+    bytes: Arc<[u8]>,
+    digest: String,
+) -> Result<(SourceMetadata, SourceIndex, Vec<String>), String> {
+    let ids = PackageIds::scan(&parts);
+    let parts = SourceParts::new(parts);
+    let LoweredDocx {
+        mut context,
+        referenced_fonts,
+        roots,
+        relationships,
         read,
-    })
+        ..
+    } = lower_docx_with(envelope, Some(&parts), false)?;
+    let index = build_source_index(
+        bytes,
+        digest,
+        &parts,
+        ids,
+        roots,
+        &relationships,
+        std::mem::take(&mut context.paragraphs),
+    );
+    Ok((
+        SourceMetadata {
+            styles: context.styles,
+            structure: context.source,
+            read,
+        },
+        index,
+        referenced_fonts.into_iter().collect(),
+    ))
 }
 
 fn lower_package(

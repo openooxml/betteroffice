@@ -345,14 +345,15 @@ pub(crate) fn play_wmf<const FULL: bool>(
     } else {
         player::SHAPES_LIMITS
     };
-    let records = wmf::wmf_records(bytes, limits.records, budget.as_deref()).ok_or_else(|| {
-        if budget.as_ref().is_some_and(|budget| budget.exceeded.get()) {
-            "the metafile draws more than the replay limits"
-        } else {
-            "the WMF is malformed"
-        }
-        .to_owned()
-    })?;
+    let records =
+        wmf::wmf_records(bytes, limits.records, budget.as_deref(), FULL).ok_or_else(|| {
+            if budget.as_ref().is_some_and(|budget| budget.exceeded.get()) {
+                "the metafile draws more than the replay limits"
+            } else {
+                "the WMF is malformed"
+            }
+            .to_owned()
+        })?;
     if FULL {
         if let Some(emf) = wmf::embedded_emf(bytes, &records.records)
             && let Ok(player) = play_emf::<FULL>(&emf, depth, false, budget.clone())
