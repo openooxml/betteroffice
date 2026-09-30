@@ -847,6 +847,7 @@ describe('provisional layout', () => {
 
     const complete = client.completeLayout(4);
     expect(worker.posted[1]).toMatchObject({ type: 'completeLayout', expectedFrameEpoch: 4 });
+    expect(client.frameRequestPending()).toBe(false);
     worker.reply({ ...frameReply(worker.lastId()), layoutJson: '{"full":1}' });
     expect(await complete).toMatchObject({ layoutJson: '{"full":1}' });
 

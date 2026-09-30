@@ -75,10 +75,10 @@ export interface ResidentEngineWorkerApplyResult extends ResidentEngineWorkerFra
   applied: true;
 }
 
+// Not `completeLayout`: page builds run between the steps of a sliced completion.
 const FRAME_REQUESTS = new Set<AwaitedRequest['type']>([
   'bootstrap',
   'sync',
-  'completeLayout',
   'buildFrame',
   'applyInput',
   'applyDelete',
