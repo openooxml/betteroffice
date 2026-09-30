@@ -41,7 +41,7 @@ chart typography can still differ from Excel.
 
 ## Manual CI and generated README
 
-After the [workflow](../../.github/workflows/visual-fidelity.yml) lands on `main`, use **Actions → Benchmarks → Run workflow**, or:
+Run the [workflow](../../.github/workflows/visual-fidelity.yml) from **Actions → Benchmarks → Run workflow**, or:
 
 ```sh
 gh workflow run visual-fidelity.yml --ref main -f branch=main
@@ -217,7 +217,7 @@ LibreOffice uses the bundled Python/UNO runtime from the same pinned Linux insta
 
 The README shows only parse success from these probes. Preservation counts, exact edit footprints, source/output hashes and diagnostics stay in `roundtrip_benchmark` and per-sample `roundtrip`/`roundtrip_probe` report fields. SSIM, recalculation accuracy and timing comparisons continue separately.
 
-Two native builds per selected format feed batches of at most 16 files, with four files processed concurrently per worker. Each file runs all three channels sequentially in fresh processes with independent 180-second limits. Probe selection and each preservation check run in separate processes with 30-second limits. Even if every engine and helper reaches its limit, one batch spends at most 44 minutes on those subprocesses, leaving room for installation, downloads and artifacts within the 90-minute job. Timeout cleanup kills the process group, including LibreOffice children; already recorded parse successes survive a later timeout. These probes do not contribute to timing metrics. The reconciler requires every planned shard and file, all three channels, matching source/build/checker/LibreOffice identities and explicit preservation evidence before publication. `roundtrip-diagnostics-*` retains saved documents, probe definitions and process logs for seven days. Runs remain manual; adding this harness does not refresh the current README numbers.
+Two native builds per selected format feed batches of at most 16 files, with four files processed concurrently per worker. Each file runs all three channels sequentially in fresh processes with independent 180-second limits. Probe selection and each preservation check run in separate processes with 30-second limits. Even if every engine and helper reaches its limit, one batch spends at most 44 minutes on those subprocesses, leaving room for installation, downloads and artifacts within the 90-minute job. Timeout cleanup kills the process group, including LibreOffice children; already recorded parse successes survive a later timeout. These probes do not contribute to timing metrics. The reconciler requires every planned shard and file, all three channels, matching source/build/checker/LibreOffice identities and explicit preservation evidence before publication. `roundtrip-diagnostics-*` retains saved documents, probe definitions and process logs for seven days. Runs remain manual.
 
 Compile-check a host without executing measurements:
 

@@ -8,7 +8,6 @@ is 14 so Word preserves spacing after authored page breaks.
 `compatibility-spacing/word.json` contains page indices and text baselines from
 Word 16.113.2 PDF exports, measured in points from the page top with
 `word_lines.py`.
-The PDF exports remain in `/tmp/sol-compatspacing-word`, outside git.
 `tests/compatibility_spacing.rs` compares relative advances and page starts,
 avoiding differences in font baseline metrics.
 

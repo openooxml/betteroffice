@@ -8,8 +8,6 @@
 
 With Liberation Sans registered as Arial and Liberation Mono as Courier New, slide 1's ten-item list draws `1.` and `10.` at x=320 px. Numbers use Courier New, 18 px, `#D02020`; the text stays at x=356 px, Arial, 24 px, `#147D40`. The first column resumes `2.` after six nested character bullets. The third column draws explicit `7. 8. 1. 2.` and inherited `7. 8.` sequences. The right column restarts after unnumbered paragraphs and new bullet parents.
 
-Main `2c90c17f` emits no automatic markers. This branch adds 29 marker runs on slide 1 and 10 on slide 2. Removing those runs restores byte-identical display lists, including line positions, caret stops, glyphs, text and paint. [PR #300](https://github.com/openooxml/betteroffice/pull/300) compares slide 1 before and after the fix with the same registered fonts.
-
 Decimal, Latin alphabetic and Roman schemes support period, closing-parenthesis, paired-parenthesis and plain suffixes. Unsupported schemes use decimal markers with a period. Initial values are bounded to 1–32767; subsequent markers can continue above 32767 within the text-body paragraph limit.
 
 Explicit `startAt` must survive even when its value is one; a missing attribute continues the sequence. Inherited starts initialize a level without restarting every paragraph. See [DrawingML automatic bullets](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.autonumberedbullet) and [LibreOffice's DrawingML restart handling](https://github.com/LibreOffice/core/blob/8e2e7e1dfd65f018266fa11093c8ab1e0a48e420/oox/source/drawingml/textparagraphpropertiescontext.cxx).
