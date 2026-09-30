@@ -269,7 +269,8 @@ fn a_metafile_part_with_a_damaged_signature_shows_a_placeholder_and_warns() {
 #[test]
 fn a_raster_or_svg_saved_under_a_metafile_name_passes_through() {
     let png: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
-    let svg: &[u8] = b"\xEF\xBB\xBF\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"4\" height=\"4\"/>";
+    let svg: &[u8] =
+        b"\xEF\xBB\xBF\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"4\" height=\"4\"/>";
     for (data, extension, mime) in [
         (png, "emf", "image/x-emf"),
         (svg, "emf", "image/x-emf"),
