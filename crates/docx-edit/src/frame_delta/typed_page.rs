@@ -43,6 +43,7 @@ use super::{
     VALUE_GLYPH_ARRAY, VALUE_I64, VALUE_NULL, VALUE_OBJECT, VALUE_STRING, VALUE_TRUE, VALUE_U64,
     checked_u32, mix, patch_u32, write_f64, write_u32, write_u64,
 };
+use crate::media::MediaSources;
 
 pub(super) struct PageHashes {
     /// Changes whenever the page's content changes, ignoring only its index.
@@ -79,6 +80,7 @@ pub(super) fn encode_page(
     ids: &mut StringTable,
     out: &mut Vec<u8>,
     slots: &mut Vec<u32>,
+    media: &MediaSources,
 ) -> Result<PageHashes, String> {
     let mut hashes = PageHashes {
         fingerprint: super::FNV_OFFSET,
@@ -95,6 +97,8 @@ pub(super) fn encode_page(
         },
         root: true,
         slot: Slot::None,
+        media,
+        media_key: false,
     })
     .map_err(|error| format!("encode display page: {error}"))?;
     Ok(hashes)
@@ -108,6 +112,17 @@ pub(super) fn hash_page(page: &DisplayPage) -> Result<PageHashes, String> {
         &mut StringTable::default(),
         &mut Vec::new(),
         &mut Vec::new(),
+        &MediaSources::default(),
+    )
+}
+
+/// Field keys whose string values can carry a `media:{n}` token, resolved
+/// back to the URL seeding wrote. Scoping resolution to these keys means
+/// body text that happens to spell a token is never rewritten.
+fn is_media_src_key(key: &str) -> bool {
+    matches!(
+        key,
+        "src" | "dataUrl" | "data_url" | "pictureSrc" | "relId" | "rel_id"
     )
 }
 
@@ -332,6 +347,10 @@ struct EmitSer<'a> {
     root: bool,
     /// The key this value sits under (drives the `inlineSdtWidget.pos` rule).
     slot: Slot,
+    /// Seeded media URLs `media:{n}` tokens under media-source keys resolve to.
+    media: &'a MediaSources,
+    /// True when this value sits under a media-source key.
+    media_key: bool,
 }
 
 impl EmitSer<'_> {
@@ -347,6 +366,13 @@ impl EmitSer<'_> {
     }
 
     fn string(mut self, value: &str) -> Result<(), SerError> {
+        let value = if self.media_key {
+            self.media
+                .url_of_token(value)
+                .map_or(value, |url| url.as_ref())
+        } else {
+            value
+        };
         let (id, hash) = self.ids.intern(value).map_err(SerError)?;
         self.tag(VALUE_STRING);
         self.slots.push(self.out.len() as u32);
@@ -374,6 +400,10 @@ struct EmitContainer<'a> {
     /// key — which a named field colliding with a `serde(flatten)` member
     /// produces.
     entries: Vec<(u32, usize)>,
+    media: &'a MediaSources,
+    /// True when this container sits under a media-source key; array
+    /// elements inherit it.
+    media_key: bool,
 }
 
 impl<'a> EmitContainer<'a> {
@@ -398,6 +428,8 @@ impl<'a> EmitContainer<'a> {
             count: 0,
             key_buf: String::new(),
             entries: Vec::new(),
+            media: ser.media,
+            media_key: ser.media_key,
         }
     }
 
@@ -465,6 +497,8 @@ impl<'a> EmitContainer<'a> {
             // Array elements inherit the array's slot, so an object in an
             // `inlineSdtWidget` array still counts as sitting under it.
             slot: self.slot,
+            media: self.media,
+            media_key: self.media_key,
         })
     }
 
@@ -508,6 +542,8 @@ impl<'a> EmitContainer<'a> {
             scope,
             root: false,
             slot,
+            media: self.media,
+            media_key: is_media_src_key(key),
         })
     }
 }

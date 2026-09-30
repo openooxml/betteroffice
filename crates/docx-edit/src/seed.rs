@@ -5776,7 +5776,7 @@ fn seed_stories_with(
         digest,
         SeedMedia::DataUrls {
             table: &media,
-            layout_tokens: false,
+            layout_tokens: true,
         },
         head,
     )?;
@@ -6736,7 +6736,7 @@ mod tests {
         .unwrap();
         let native = EditingDoc::new(6);
         seed_from_docx(&native, &bytes).unwrap();
-        assert!(native.media_sources().is_empty());
+        assert!(!native.media_sources().is_empty());
         let seeded = EditingDoc::new(7);
         seed_with_layout_tokens(&seeded, &bytes).unwrap();
         let image_src = |doc: &EditingDoc| {
@@ -6763,7 +6763,7 @@ mod tests {
         };
         assert_eq!(image_src(&seeded), "media:1");
         let data_url = "data:image/png;base64,iVBORwECAwQ=".to_owned();
-        assert_eq!(image_src(&native), data_url);
+        assert_eq!(image_src(&native), "media:1");
         assert_eq!(
             seeded.media_table().unwrap().resolve("media:1"),
             Some(data_url.clone())

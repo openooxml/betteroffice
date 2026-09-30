@@ -26,6 +26,8 @@ pub struct MediaSources(Arc<Sources>);
 struct Sources {
     key: (u64, u64),
     parts: HashMap<u64, u32>,
+    /// The `data:` URL seeding wrote for each part, by part index.
+    urls: Vec<Option<Arc<str>>>,
     seen: Mutex<Seen>,
 }
 
@@ -99,6 +101,49 @@ impl MediaSources {
             .map(|index| media_token(*index as usize))
     }
 
+    /// The URL `token` (`media:{n}`) resolves to, when seeding wrote it.
+    pub(crate) fn url_of_token(&self, token: &str) -> Option<&Arc<str>> {
+        media_token_index(token)
+            .and_then(|index| self.0.urls.get(index))?
+            .as_ref()
+    }
+
+    /// Whether `value` holds a `media:{n}` token this source resolves.
+    fn is_media_src_key(key: &str) -> bool {
+        matches!(
+            key,
+            "src" | "dataUrl" | "data_url" | "pictureSrc" | "relId" | "rel_id"
+        )
+    }
+
+    /// Rewrites `media:{n}` tokens under media-source keys in `value` back to
+    /// their `data:` URLs, for wire emissions that still ship URLs.
+    pub(crate) fn materialize_value(&self, value: &mut serde_json::Value) {
+        if self.is_empty() {
+            return;
+        }
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, entry) in map.iter_mut() {
+                    if let serde_json::Value::String(text) = entry
+                        && Self::is_media_src_key(key.as_str())
+                        && let Some(url) = self.url_of_token(text)
+                    {
+                        *text = url.to_string();
+                        continue;
+                    }
+                    self.materialize_value(entry);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    self.materialize_value(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn digest(&self, src: &str) -> u64 {
         digest(self.0.key, src)
     }
@@ -133,6 +178,7 @@ impl MediaSources {
                 .iter()
                 .map(|(digest, index)| Ok((hex(digest)?, *index)))
                 .collect::<Result<_, String>>()?,
+            urls: Vec::new(),
             seen: Mutex::default(),
         })))
     }
@@ -186,15 +232,21 @@ pub(crate) fn write_data_urls<'a>(
     let key = (k0, k1);
     let mut parts = HashMap::new();
     let mut seen = HashMap::new();
+    let mut urls = vec![None; table.len()];
     for (index, url) in writer.urls {
         if let Some(url) = url {
             parts.insert(digest(key, &url), index as u32);
-            seen.insert(Arc::as_ptr(&url) as *const u8 as usize, (url, index as u32));
+            seen.insert(
+                Arc::as_ptr(&url) as *const u8 as usize,
+                (url.clone(), index as u32),
+            );
+            urls[index] = Some(url);
         }
     }
     Ok(MediaSources(Arc::new(Sources {
         key,
         parts,
+        urls,
         seen: Mutex::new(Seen::new(seen)),
     })))
 }
@@ -335,6 +387,7 @@ mod tests {
                 .iter()
                 .map(|(src, index)| (digest(key, src), *index))
                 .collect(),
+            urls: Vec::new(),
             seen: Mutex::default(),
         }))
     }

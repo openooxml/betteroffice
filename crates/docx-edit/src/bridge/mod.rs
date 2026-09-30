@@ -356,7 +356,7 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
 
     let with_media;
     let env = match doc.media_sources() {
-        media if env.media_tokens && env.media.is_empty() && !media.is_empty() => {
+        media if env.media.is_empty() && !media.is_empty() => {
             with_media = RenderEnv {
                 media,
                 ..env.clone()
