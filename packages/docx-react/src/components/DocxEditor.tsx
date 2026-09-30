@@ -806,6 +806,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // the merged doc-wide font chains; the canvas display-list build reads it to
   // gate GlyphRun emission. Null until Rust measurement warms its first chains.
   const rustFontChainsProviderRef = useRef<RustFontChainsProvider | null>(null);
+  const mediaSessionRef = useRef<YrsSession | null>(null);
   // Assigned by CanvasA11yLiveRegion, called by useSelectionTracker.
   const canvasA11yNotifyRef = useRef<(() => void) | null>(null);
 
@@ -886,8 +887,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // Canvas renderer plumbing. `resolvedIdsForRender` reaches the Rust
   // display-list build so the canvas drops the comment wash of resolved
   // threads (and re-tints the one whose sidebar card is expanded).
-  const canvasRenderer = useCanvasRenderer(rustFontChainsProviderRef, resolvedIdsForRender, () =>
-    pagedEditorRef.current?.relayout()
+  const canvasRenderer = useCanvasRenderer(
+    rustFontChainsProviderRef,
+    resolvedIdsForRender,
+    () => pagedEditorRef.current?.relayout(),
+    mediaSessionRef
   );
   useEffect(() => {
     if (canvasRenderer.error) onError?.(canvasRenderer.error);
@@ -1079,6 +1083,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     mediaTokens
   );
   sessionGenerationRef.current = yrsCore.sessionGeneration;
+  mediaSessionRef.current = yrsCore.session;
   // Content listeners project the document on every edit; warm its base once
   // the first pages are on screen so neither opening nor the first key pays.
   useCompatibilityWarm(

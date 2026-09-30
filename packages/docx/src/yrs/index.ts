@@ -991,12 +991,12 @@ export interface YrsSession extends CollaborationReplica {
   materializeDocx(): Document | null;
   /**
    * The displayed bytes and media type of the package part a `media:{n}`
-   * image source names, or `null` for any other source.
+   * image source names, or `null` for any other source or a destroyed session.
    */
   mediaSource(token: string): YrsMediaSource | null;
-  /** Changes with every package opened, which `media:{n}` sources then name. */
+  /** Changes on package opening and session destruction. */
   mediaScope(): number;
-  /** The `data:` URL a `media:{n}` image source stands for, or `null`. */
+  /** The `data:` URL a token stands for, or `null` when unavailable or destroyed. */
   mediaDataUrl(token: string): string | null;
   /**
    * Lays this replica's `data:` image sources out as the `media:{n}` tokens a
@@ -1620,7 +1620,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   // `data:` URLs of the opened package's `media:{n}` sources.
   const mediaDataUrls = new Map<string, string | null>();
   let mediaScope = 0;
-  const openMedia = (): void => {
+  const resetMedia = (): void => {
     mediaDataUrls.clear();
     mediaScope += 1;
   };
@@ -1632,7 +1632,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   ): YrsDocxHost => {
     const source = bytes.slice();
     markDirty('all');
-    openMedia();
+    resetMedia();
     const json = mutate(() => {
       session.set_media_tokens(options.mediaTokens === true);
       const opened = session.open_docx(
@@ -1651,7 +1651,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   };
 
   const mediaDataUrl = (token: string): string | null => {
-    if (!token.startsWith('media:')) return null;
+    if (destroyed || !token.startsWith('media:')) return null;
     let url = mediaDataUrls.get(token);
     if (url === undefined) {
       url = session.media_data_url(token) ?? null;
@@ -1688,7 +1688,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     clientId,
     openDocxPreview: (bytes, blocks) => {
       markDirty('all');
-      openMedia();
+      resetMedia();
       const json = mutate(() => session.open_docx_preview(bytes, blocks));
       if (json === undefined) return null;
       partialDocument = true;
@@ -1889,7 +1889,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       });
     },
     mediaSource: (token) => {
-      if (!token.startsWith('media:')) return null;
+      if (destroyed || !token.startsWith('media:')) return null;
       const bytes = session.media_bytes(token);
       const mimeType = bytes && session.media_type(token);
       return bytes && mimeType ? { bytes, mimeType } : null;
@@ -2606,6 +2606,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     destroy: () => {
       if (destroyed) return;
       destroyed = true;
+      resetMedia();
       listeners.clear();
       proposals.destroy();
       pendingUpdates.length = 0;

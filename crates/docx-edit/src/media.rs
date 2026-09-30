@@ -15,6 +15,7 @@ use docx_parse::media::{MediaTable, media_token, media_token_index};
 use yrs::Any;
 
 use crate::raw::RawOp;
+use crate::{SegmentContent, StorySegment};
 
 /// Digests of the `data:` URLs seeding wrote, each to the index of the part
 /// it came from.
@@ -159,11 +160,7 @@ pub(crate) fn write_data_urls<'a>(
     table: &MediaTable,
     layout_tokens: bool,
 ) -> Result<MediaSources, String> {
-    let mut writer = DataUrls {
-        table,
-        urls: HashMap::new(),
-        error: None,
-    };
+    let mut writer = DataUrls::new(table);
     for op in ops {
         match op {
             RawOp::InsertEmbed { payload, .. } => {
@@ -202,13 +199,47 @@ pub(crate) fn write_data_urls<'a>(
     })))
 }
 
+pub(crate) fn write_segment_data_urls(
+    segments: &mut [StorySegment],
+    table: &MediaTable,
+) -> Result<(), String> {
+    let mut writer = DataUrls::new(table);
+    for segment in segments {
+        let payload = match &mut segment.content {
+            SegmentContent::Pilcrow(properties) => Some(&mut properties.values),
+            SegmentContent::OtherEmbed { payload, .. } => Some(payload),
+            SegmentContent::Text(_) => None,
+        };
+        if let Some(payload) = payload {
+            for (key, value) in payload.iter_mut() {
+                writer.any(key, value);
+            }
+        }
+        for (key, value) in segment.attributes.iter_mut() {
+            writer.any(key, value);
+        }
+    }
+    match writer.error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 struct DataUrls<'a> {
     table: &'a MediaTable,
     urls: HashMap<usize, Option<Arc<str>>>,
     error: Option<String>,
 }
 
-impl DataUrls<'_> {
+impl<'a> DataUrls<'a> {
+    fn new(table: &'a MediaTable) -> Self {
+        Self {
+            table,
+            urls: HashMap::new(),
+            error: None,
+        }
+    }
+
     fn url(&mut self, index: usize) -> Option<Arc<str>> {
         let table = self.table;
         let error = &mut self.error;
