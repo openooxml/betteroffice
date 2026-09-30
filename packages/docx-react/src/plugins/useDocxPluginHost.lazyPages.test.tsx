@@ -179,9 +179,7 @@ async function visibleProposal(editDuringScroll: boolean): Promise<void> {
               pages.append(canvas);
             }
           }
-          const paint = () => markPresented(pages, display.displayList!);
-          if (autoPresent) paint();
-          else present = paint;
+          // As in the editor, the context arrives before the frame paints.
           binding.onRenderedDomContext(
             createRenderedDomContext(pages, 1, {
               displayListQueries: queries,
@@ -189,6 +187,14 @@ async function visibleProposal(editDuringScroll: boolean): Promise<void> {
             }),
             queries
           );
+          const paint = () => markPresented(pages, display.displayList!);
+          if (autoPresent) {
+            requestAnimationFrame(() => {
+              if (active) paint();
+            });
+          } else {
+            present = paint;
+          }
         });
         return () => {
           active = false;

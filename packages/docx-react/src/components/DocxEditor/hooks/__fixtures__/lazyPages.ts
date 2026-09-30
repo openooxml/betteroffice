@@ -52,6 +52,13 @@ export class EngineWorker {
       );
       return;
     }
+    if (
+      request.type !== 'bootstrap' &&
+      request.type !== 'buildPages' &&
+      request.type !== 'applyInput'
+    ) {
+      return;
+    }
     let frame: Uint8Array;
     engine.set_windowed_incremental_builds(
       'displayWindow' in request && request.displayWindow !== undefined
@@ -64,13 +71,11 @@ export class EngineWorker {
         Uint32Array.from(request.pages),
         request.expectedFrameEpoch
       );
-    } else if (request.type === 'applyInput') {
+    } else {
       if (request.displayWindow) engine.set_display_window(...request.displayWindow);
       const { anchor, head } = request.selection;
       engine.set_selection(anchor.story, anchor.paraId, anchor.offset, head.paraId, head.offset);
       frame = engine.apply_input(request.text, request.expectedFrameEpoch);
-    } else {
-      return;
     }
     const caret = JSON.parse(engine.resident_caret_snapshot_json());
     const selection = JSON.parse(engine.selection());
