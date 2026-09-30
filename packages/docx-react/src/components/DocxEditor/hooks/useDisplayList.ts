@@ -1271,6 +1271,9 @@ export function useRustDisplayList(
             }
           } else {
             if (!isCurrentWorker(hostEngine, owner)) throw new SupersededPreviewError();
+            if (owner.client.hasFailed() && holdsWorkerProposals(hostEngine)) {
+              throw failWorkerDocument(hostEngine, error);
+            }
           }
           throw error;
         }

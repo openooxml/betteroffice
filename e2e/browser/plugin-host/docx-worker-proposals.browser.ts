@@ -92,7 +92,11 @@ async function view(page: Page) {
   }));
 }
 
-async function assertHydration(page: Page, before: ReturnType<WorkerProposalProbe['view']>) {
+async function assertHydration(
+  page: Page,
+  before: ReturnType<WorkerProposalProbe['view']>,
+  options: { checkLayoutOrder?: boolean } = {}
+) {
   await expect.poll(async () => {
     const current = await status(page);
     return { encodeState: current.encodeState, pending: current.pending };
@@ -100,7 +104,9 @@ async function assertHydration(page: Page, before: ReturnType<WorkerProposalProb
   const current = await status(page);
   expect(current.layoutComplete).not.toBeNull();
   expect(current.firstEncodeState).not.toBeNull();
-  expect(current.firstEncodeState!).toBeGreaterThan(current.layoutComplete!);
+  if (options.checkLayoutOrder !== false) {
+    expect(current.firstEncodeState!).toBeGreaterThan(current.layoutComplete!);
+  }
   const after = await view(page);
   expect(Math.abs(after.scrollTop - before.scrollTop)).toBeLessThanOrEqual(1);
   expect(after.selection).toEqual(before.selection);
@@ -339,9 +345,23 @@ async function flow(page: Page, readOnly: boolean, options = '') {
       await expect(page.locator('canvas[data-page-index="0"]')).toBeInViewport();
     }
     await expect.poll(async () => (await status(page)).scrollEvents).toBeGreaterThan(scrollEvents);
-    await page.evaluate(() => {
-      (window as unknown as ProbeWindow).__workerInstrumentation.deliberateScroll = false;
-    });
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      const scroller = document.querySelector<HTMLElement>('.docx-editor__scroll-container')!;
+      let previous = scroller.scrollTop;
+      let stableFrames = 0;
+      const sample = () => {
+        const current = scroller.scrollTop;
+        stableFrames = current === previous ? stableFrames + 1 : 0;
+        previous = current;
+        if (stableFrames < 10) {
+          requestAnimationFrame(sample);
+          return;
+        }
+        (window as unknown as ProbeWindow).__workerInstrumentation.deliberateScroll = false;
+        resolve();
+      };
+      requestAnimationFrame(sample);
+    }));
     const read = await getProposals(page);
     expect(read).toEqual(snapshot);
     await assertReplica(page, readOnly);
@@ -437,7 +457,10 @@ test('existing revisions open the sidebar and hydrate once', async ({ page }) =>
   await expect.poll(async () => (await status(page)).pending).toBe(false);
   const beforeHydration = (await status(page)).beforeSidebarOpen;
   expect(beforeHydration).not.toBeNull();
-  await assertHydration(page, beforeHydration!);
+  await assertHydration(page, beforeHydration!, { checkLayoutOrder: false });
+  const requests = await page.evaluate(() => (window as unknown as ProbeWindow).__workerRequests);
+  expect(requests.indexOf('revisionCount')).toBeGreaterThanOrEqual(0);
+  expect(requests.indexOf('encodeState')).toBeGreaterThan(requests.indexOf('revisionCount'));
   await expect(page.locator('.docx-unified-sidebar')).toBeVisible();
   await expect(page.locator('.docx-tracked-change-card')).toHaveCount(1);
   await expect(page.locator('.docx-tracked-change-card')).toContainText('Document reviewer');

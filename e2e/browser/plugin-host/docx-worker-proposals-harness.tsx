@@ -125,7 +125,7 @@ function ProposalOverlay({
       data-layout-preview-version={geometry.layout.previewVersion}
     >
       {snapshot?.proposals.map((proposal) => {
-        const result = context.geometry!.getAnchorGeometry({ kind: 'proposal', id: proposal.id });
+        const result = geometry.getAnchorGeometry({ kind: 'proposal', id: proposal.id });
         return (
           <div
             key={proposal.id}
