@@ -220,7 +220,10 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
           // A stretched picture inset from a side paints only part of the shape.
           const inset = paint.pictureStretchRect;
           const sides = [inset?.left, inset?.top, inset?.right, inset?.bottom];
-          if (paint.pictureFillMode !== 'tile' && sides.some((side) => (side ?? 0) > 0)) {
+          if (
+            paint.pictureFillMode !== 'tile' &&
+            (sides.some((side) => (side ?? 0) > 0) || !cropFillsFrame(paint.pictureSrcRect))
+          ) {
             return false;
           }
           break;
@@ -229,6 +232,8 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
         break;
       }
       case 'image':
+        if (!cropFillsFrame(primitive.crop)) return false;
+        break;
       case 'decoration':
         break;
       default:
@@ -255,6 +260,18 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
  * The rectangle a shape's fill paints, when its path is exactly an axis-aligned
  * rectangle turned by a multiple of 180 degrees; any other path covers nothing.
  */
+/** Whether a source crop draws over its whole frame: an outset side leaves a gutter. */
+function cropFillsFrame(
+  crop: { left?: number; top?: number; right?: number; bottom?: number } | undefined
+): boolean {
+  if (!crop) return true;
+  const side = (value: number | undefined) => (Number.isFinite(value) ? (value as number) : 0);
+  const [left, top, right, bottom] = [crop.left, crop.top, crop.right, crop.bottom].map(side);
+  return (
+    left >= 0 && top >= 0 && right >= 0 && bottom >= 0 && left + right < 1 && top + bottom < 1
+  );
+}
+
 function shapeFillRect(shape: ShapePrimitive): GeoRect | null {
   const rotation = shape.transform?.rotation ?? 0;
   if (!Number.isFinite(rotation) || rotation % 180 !== 0) return null;

@@ -1173,6 +1173,14 @@ fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
             !run.glyphs.is_empty() && !js_blank(&run.text) && !text_fill_none(attrs)
         }
         Primitive::Shape(shape) => shape_fill_paints(shape),
+        Primitive::Image(img) => img.crop.as_ref().is_none_or(|crop| {
+            crop_fills_frame(
+                crop.left.as_f64(),
+                crop.top.as_f64(),
+                crop.right.as_f64(),
+                crop.bottom.as_f64(),
+            )
+        }),
         _ => true,
     };
     if !paints {
@@ -1304,6 +1312,23 @@ fn shape_fill_rect(shape: &ShapePrimitive) -> Option<(f64, f64, f64, f64)> {
     Some((left, top, width, height))
 }
 
+/// Whether a source crop draws over its whole frame: an outset side leaves a gutter.
+fn crop_fills_frame(
+    left: Option<f64>,
+    top: Option<f64>,
+    right: Option<f64>,
+    bottom: Option<f64>,
+) -> bool {
+    let side = |value: Option<f64>| value.filter(|v| v.is_finite()).unwrap_or(0.0);
+    let (left, top, right, bottom) = (side(left), side(top), side(right), side(bottom));
+    left >= 0.0
+        && top >= 0.0
+        && right >= 0.0
+        && bottom >= 0.0
+        && left + right < 1.0
+        && top + bottom < 1.0
+}
+
 /// Whether a shape's fill paints its interior, as the overlay's occlusion check decides it.
 fn shape_fill_paints(shape: &ShapePrimitive) -> bool {
     let paint = shape.attrs.fill_paint.as_deref();
@@ -1331,7 +1356,10 @@ fn shape_fill_paints(shape: &ShapePrimitive) -> bool {
                             .is_some_and(|v| v > 0.0)
                     })
                 });
-            opaque && (field("pictureFillMode") == Some("tile") || !inset)
+            let crop = paint.and_then(|paint| paint.get("pictureSrcRect"));
+            let side = |key: &str| crop.and_then(|rect| rect.get(key)).and_then(Value::as_f64);
+            let fills = crop_fills_frame(side("left"), side("top"), side("right"), side("bottom"));
+            opaque && (field("pictureFillMode") == Some("tile") || (!inset && fills))
         }
         _ => paint
             .and_then(|paint| paint.get("color"))
@@ -2241,6 +2269,27 @@ mod tests {
     }
 
     #[test]
+    fn body_image_cropped_past_its_source_leaves_footer_clicks_to_the_footer() {
+        let cropped = |left: f64, right: f64| {
+            let mut image = image(100.0, 440.0, Some(10));
+            let crop = serde_json::json!({"top": 0, "right": right, "bottom": 0, "left": left});
+            image["crop"] = crop;
+            image
+        };
+        for image in [cropped(-0.5, 0.0), cropped(0.0, -0.1), cropped(0.6, 0.4)] {
+            let dl = band_page("footer", 420.0, vec![image]);
+            let hit = hit_test_regions(&dl, 0, 120.0, 455.0).unwrap();
+            assert_eq!(hit.region, HitRegion::Footer);
+            assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
+        }
+        let dl = band_page("footer", 420.0, vec![cropped(0.25, 0.25)]);
+        assert_eq!(
+            hit_test_regions(&dl, 0, 120.0, 455.0).unwrap().region,
+            HitRegion::Body
+        );
+    }
+
+    #[test]
     fn transparent_body_image_leaves_footer_clicks_to_the_footer() {
         let visible = band_page("footer", 420.0, vec![image(100.0, 440.0, Some(10))]);
         assert_eq!(
@@ -2425,6 +2474,16 @@ mod tests {
                     None,
                 ),
             ),
+            (
+                120.0,
+                shape(
+                    Some(serde_json::json!({
+                        "kind": "picture", "pictureRelId": "rId9",
+                        "pictureSrcRect": {"left": -1}
+                    })),
+                    None,
+                ),
+            ),
             (100.002, skewed),
             (120.0, half(Some(serde_json::json!({"flipH": true})))),
             (120.0, half(Some(serde_json::json!({"rotation": 180})))),
@@ -2450,6 +2509,20 @@ mod tests {
                 Some(serde_json::json!({
                     "kind": "picture", "pictureRelId": "rId9", "pictureFillMode": "tile",
                     "pictureStretchRect": {"left": 0.75}
+                })),
+                None,
+            ),
+            shape(
+                Some(serde_json::json!({
+                    "kind": "picture", "pictureRelId": "rId9",
+                    "pictureSrcRect": {"left": 0.25, "right": 0.25}
+                })),
+                None,
+            ),
+            shape(
+                Some(serde_json::json!({
+                    "kind": "picture", "pictureRelId": "rId9", "pictureFillMode": "tile",
+                    "pictureSrcRect": {"left": -1}
                 })),
                 None,
             ),

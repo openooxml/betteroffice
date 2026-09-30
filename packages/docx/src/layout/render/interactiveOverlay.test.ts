@@ -245,6 +245,32 @@ test('a stretched picture fill inset from a side hides no header control', () =>
   ]));
 });
 
+test('a picture cropped past its source hides no header control', () => {
+  const picture = (fillPaint: ShapePrimitive['fillPaint']): ShapePrimitive => ({
+    kind: 'shape', x: 100, y: 20, w: 20, h: 20, fillPaint,
+    geometryPath: [
+      { type: 'move', x: 100, y: 20 }, { type: 'line', x: 120, y: 20 },
+      { type: 'line', x: 120, y: 40 }, { type: 'line', x: 100, y: 40 }, { type: 'close' },
+    ],
+  });
+  const crop = (left: number, right: number) => ({ top: 0, right, bottom: 0, left });
+  expectActive(headerWidget([
+    picture({ kind: 'picture', pictureRelId: 'rId9', pictureSrcRect: { left: -1 } }),
+  ]));
+  expectActive(headerWidget([image({ crop: crop(-0.5, 0) })]));
+  expectActive(headerWidget([image({ crop: crop(0.6, 0.4) })]));
+  expectHidden(headerWidget([
+    picture({ kind: 'picture', pictureRelId: 'rId9', pictureSrcRect: { left: 0.25, right: 0.25 } }),
+  ]));
+  expectHidden(headerWidget([
+    picture({
+      kind: 'picture', pictureRelId: 'rId9', pictureFillMode: 'tile',
+      pictureSrcRect: { left: -1 },
+    }),
+  ]));
+  expectHidden(headerWidget([image({ crop: crop(0.25, 0.25) })]));
+});
+
 test('body picture fills with zero opacity do not hide header controls', () => {
   const shape: ShapePrimitive = {
     kind: 'shape', x: 100, y: 20, w: 20, h: 20,
