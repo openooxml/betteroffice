@@ -3791,6 +3791,26 @@ impl EditSession {
         Ok(json!({ "revisionIds": receipt.revision_ids }).to_string())
     }
 
+    /// Resolves tracked changes by revision id outside undo history:
+    /// `{"accept":[string, …],"reject":[string, …]}` -> `{"revisionIds":[string, …]}`, the ids
+    /// resolved. An id that matches nothing is skipped. See [`EditingDoc::settle_revisions`].
+    pub fn settle_revisions_json(&self, request: &str) -> Result<String, JsValue> {
+        #[derive(serde::Deserialize)]
+        struct Settle {
+            #[serde(default)]
+            accept: Vec<String>,
+            #[serde(default)]
+            reject: Vec<String>,
+        }
+        let request: Settle = serde_json::from_str(request).map_err(js_err)?;
+        let resolved = self
+            .engine
+            .doc()
+            .settle_revisions(&request.accept, &request.reject, &self.undo)
+            .map_err(js_err)?;
+        Ok(json!({ "revisionIds": resolved }).to_string())
+    }
+
     /// Applies a batch of raw story mutations in ONE transaction. Unlike every
     /// other op here these carry no user intent: indices are story-global
     /// UTF-16 units, not Locs, and nothing is inferred or stamped on the
