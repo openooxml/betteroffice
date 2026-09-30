@@ -4,4 +4,4 @@
 "@betteroffice/docx-react": patch
 ---
 
-With opt-in windowed builds on, full rebuilds keep only visible pages, the caret's page when known and pages selected with `set_display_kept_pages`. Focused widgets stay available, and pages outside the window rebuild when needed without stalling.
+With opt-in windowed builds, full rebuilds build only visible pages and the caret's page. `set_display_retain_built_pages` keeps every built page, and the editor sets it while a page widget has focus.

@@ -66,8 +66,9 @@ export class EngineWorker {
     );
     if ('displayWindow' in request && request.displayWindow) {
       engine.set_display_window(...request.displayWindow);
-      engine.set_display_kept_pages(Uint32Array.from(request.keptPages ?? []));
+      engine.set_display_retain_built_pages(request.retainBuiltPages === true);
     }
+    if (request.type === 'bootstrap') engine.reset_frame_base();
     if (request.type === 'bootstrap' || request.type === 'buildFrame') {
       frame = engine.build_display_list_frame(request.extras, request.expectedFrameEpoch);
     } else if (request.type === 'buildPages') {

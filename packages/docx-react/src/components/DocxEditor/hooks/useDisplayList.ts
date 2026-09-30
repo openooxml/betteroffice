@@ -122,7 +122,7 @@ export interface UseRustDisplayListResult {
    * other page arrives as geometry until it comes near.
    */
   setDisplayWindow(start: number, end: number): void;
-  setKeptPages?(pages: number[]): void;
+  setRetainBuiltPages?(retain: boolean): void;
   /** The resident worker's wasm memories as of its latest reply; null without a worker. */
   workerMemory(): WasmModuleMemory[] | null;
   /**
@@ -362,7 +362,7 @@ export function useRustDisplayList(
     /** The document load its session belongs to. */
     load: number;
   } | null>(null);
-  const keptPagesRef = useRef<number[]>([]);
+  const retainBuiltPagesRef = useRef(false);
   // The document load each session belongs to: the one under way when it was
   // created, as the editor records it, else when it was first laid out or shown.
   const sessionLoadsRef = useRef(new WeakMap<YrsSession, number>());
@@ -401,7 +401,7 @@ export function useRustDisplayList(
         client: spare ?? new ResidentEngineWorkerClient(),
         load,
       };
-      workerRef.current.client.setKeptPages(keptPagesRef.current);
+      workerRef.current.client.setRetainBuiltPages(retainBuiltPagesRef.current);
       return workerRef.current;
     },
     [handoffFromRef, sessionLoad]
@@ -1201,9 +1201,9 @@ export function useRustDisplayList(
     [schedulePageBuilds]
   );
 
-  const setKeptPages = useCallback((pages: number[]): void => {
-    keptPagesRef.current = [...pages];
-    workerRef.current?.client.setKeptPages(keptPagesRef.current);
+  const setRetainBuiltPages = useCallback((retain: boolean): void => {
+    retainBuiltPagesRef.current = retain;
+    workerRef.current?.client.setRetainBuiltPages(retain);
   }, []);
 
   useEffect(() => {
@@ -1894,7 +1894,7 @@ export function useRustDisplayList(
     shownFrameEngine,
     release,
     setDisplayWindow,
-    setKeptPages,
+    setRetainBuiltPages,
     workerMemory,
     workerSurfacesActive,
     workerPresentationActive,
@@ -2081,7 +2081,7 @@ export interface UseCanvasRendererResult {
   layoutInWorker: LayoutInWorker;
   /** The pages `[start, end)` near the viewport, built before the others. */
   setDisplayWindow(start: number, end: number): void;
-  setKeptPages?(pages: number[]): void;
+  setRetainBuiltPages?(retain: boolean): void;
   /** The resident worker's wasm memories as of its latest reply; null without a worker. */
   workerMemory(): WasmModuleMemory[] | null;
   setWorkerPresentationActive(active: boolean): void;
@@ -2173,7 +2173,7 @@ export function useCanvasRenderer(
     shownFrameEngine,
     release,
     setDisplayWindow,
-    setKeptPages,
+    setRetainBuiltPages,
     workerMemory,
     workerSurfacesActive,
     workerPresentationActive,
@@ -2304,7 +2304,7 @@ export function useCanvasRenderer(
     applyDelete,
     layoutInWorker,
     setDisplayWindow,
-    setKeptPages,
+    setRetainBuiltPages,
     workerMemory,
     setWorkerPresentationActive,
     offscreenReplay,

@@ -128,7 +128,7 @@ test('pages away from the viewport build in batches while the main thread idles'
   }
 });
 
-test('a full worker rebuild keeps selected pages and rebuilds evicted pages on demand', async () => {
+test('a full worker rebuild retains built pages until released and rebuilds evicted pages on demand', async () => {
   const { engine, inputs, host } = lazyFixture();
   try {
     const overrides = { getInputs: () => inputs };
@@ -146,23 +146,37 @@ test('a full worker rebuild keeps selected pages and rebuilds evicted pages on d
     }
     expect(pages().every((page) => !page.unbuilt)).toBe(true);
     const last = pages().length - 1;
-    const kept = last - 1;
-    expect(kept).toBeGreaterThanOrEqual(5);
+    expect(last).toBeGreaterThanOrEqual(5);
     const before = result.current.frame!.frameEpoch;
     const requestsBeforeRebuild = worker.posted.length;
     await act(async () => {
-      result.current.setKeptPages!([kept]);
+      result.current.setRetainBuiltPages!(true);
       rerender({ resolved: new Set([1]) });
     });
     await waitFor(() => expect(result.current.frame!.frameEpoch).toBeGreaterThan(before));
     expect(worker.posted[requestsBeforeRebuild]).toMatchObject({
       type: 'buildFrame',
       displayWindow: [0, 5],
-      keptPages: [kept],
+      retainBuiltPages: true,
       expectedFrameEpoch: before,
     });
-    expect(pages()[kept]!.unbuilt).toBeFalsy();
-    expect(pages()[kept]!.primitives.length).toBeGreaterThan(0);
+    expect(pages().every((page) => !page.unbuilt)).toBe(true);
+    expect(pages()[last]!.primitives.length).toBeGreaterThan(0);
+    const retained = result.current.frame!.frameEpoch;
+    const requestsBeforeRelease = worker.posted.length;
+    await act(async () => {
+      result.current.setRetainBuiltPages!(false);
+      rerender({ resolved: new Set([2]) });
+    });
+    await waitFor(() => expect(result.current.frame!.frameEpoch).toBeGreaterThan(retained));
+    expect(worker.posted[requestsBeforeRelease]).toMatchObject({
+      type: 'buildFrame',
+      displayWindow: [0, 5],
+      expectedFrameEpoch: retained,
+    });
+    expect(worker.posted[requestsBeforeRelease]).not.toHaveProperty('retainBuiltPages');
+    expect(pages().slice(0, 5).every((page) => !page.unbuilt)).toBe(true);
+    expect(pages().slice(5).every((page) => page.unbuilt)).toBe(true);
     expect(pages()[last]!.unbuilt).toBe(true);
     const adopted = result.current.frame!.frameEpoch;
     const requestsBeforeScroll = worker.posted.length;
@@ -290,7 +304,7 @@ test('page builds wait for the frame of an edit in flight', async () => {
 });
 
 test.each([false, true])(
-  'background pages recover after a newer worker frame stays unadopted (idle retry: %s)',
+  'background pages recover after a newer worker frame stays unadopted (idle retry: %p)',
   async (idle) => {
     const { engine, inputs, host } = lazyFixture();
     let now = performance.now();
@@ -325,11 +339,10 @@ test.each([false, true])(
       expect(result.current.frame!.frameEpoch).toBe(adopted);
       expect(pageBuilds()).toEqual([]);
       now += 2001;
-      if (!idle) {
-        await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
-        await act(async () => runIdleCallbacks());
-      }
-      await waitFor(() => expect(pageBuilds().length).toBeGreaterThan(0));
+      await waitFor(async () => {
+        if (!idle) await act(async () => runIdleCallbacks());
+        expect(pageBuilds().length).toBeGreaterThan(0);
+      });
       expect(pageBuilds()[0]).toMatchObject({ expectedFrameEpoch: adopted });
       await waitFor(() => expect(result.current.frame!.displayList.pages[5]!.unbuilt).toBeFalsy());
       expect(result.current.frame!.displayList.pages[5]!.primitives.length).toBeGreaterThan(0);
@@ -388,7 +401,7 @@ test('a page build out of memory restarts the worker once, then reports without 
     const first = EngineWorker.last!;
     const last = result.current.frame!.displayList.pages.length - 1;
     await act(async () => {
-      result.current.setKeptPages!([0]);
+      result.current.setRetainBuiltPages!(true);
       result.current.setDisplayWindow(last, last + 1);
     });
     await waitFor(() => expect(relayouts).toBe(1));
@@ -399,11 +412,12 @@ test('a page build out of memory restarts the worker once, then reports without 
     await act(async () => rerender({ layout: { ...inputs.layout } }));
     await waitFor(() => expect(EngineWorker.spawned).toBe(2));
     const second = EngineWorker.last!;
-    expect(second.posted[0]).toMatchObject({ type: 'bootstrap', keptPages: [0] });
+    expect(second.posted[0]).toMatchObject({ type: 'bootstrap', retainBuiltPages: true });
     await waitFor(() => expect(result.current.workerSurfacesActive).toBe(true));
     await act(async () => {
-      const middle = Math.floor(last / 2);
-      result.current.setDisplayWindow(middle, middle + 1);
+      const unbuilt = result.current.frame!.displayList.pages.findIndex((page) => page.unbuilt);
+      expect(unbuilt).toBeGreaterThanOrEqual(0);
+      result.current.setDisplayWindow(unbuilt, unbuilt + 1);
     });
     await waitFor(() => expect(result.current.error).toBeInstanceOf(ResidentWorkerOutOfMemoryError));
     expect(relayouts).toBe(1);

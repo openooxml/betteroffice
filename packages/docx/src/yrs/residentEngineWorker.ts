@@ -202,7 +202,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     }
     unsubscribe?.();
     unsubscribe = null;
-    setFrameDisplayWindow(session, request.displayWindow, request.keptPages);
+    setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     const { layoutJson, provisional } = hydrate(
       request.snapshot,
       request.provisionalPages,
@@ -261,7 +261,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'sync') {
     unsubscribe?.();
     unsubscribe = null;
-    setFrameDisplayWindow(session, request.displayWindow, request.keptPages);
+    setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     const { layoutJson } = hydrate(request.snapshot, undefined, request.layoutExtras !== undefined);
     subscribe();
     const started = performance.now();
@@ -321,7 +321,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'buildFrame') {
     await completeProvisionalLayout();
-    setFrameDisplayWindow(session, request.displayWindow, request.keptPages);
+    setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     pendingUpdates = [];
     const started = performance.now();
     const frame = session.buildDisplayListFrame(request.extras, request.expectedFrameEpoch);
@@ -378,7 +378,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   await completeProvisionalLayout();
   // The edit replaces the pagination a cached completion's frame would paint.
   completedLayout = null;
-  setFrameDisplayWindow(session, request.displayWindow, request.keptPages);
+  setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
   session.setSelection(request.selection.anchor, request.selection.head);
   pendingUpdates = [];
   const started = performance.now();
@@ -491,11 +491,11 @@ function hydrate(
 function setFrameDisplayWindow(
   engine: ResidentEngineSession,
   window?: [number, number],
-  keptPages?: number[]
+  retainBuiltPages?: boolean
 ): void {
   if (window) {
     engine.setDisplayWindow(...window);
-    engine.setDisplayKeptPages(keptPages ?? []);
+    engine.setDisplayRetainBuiltPages(retainBuiltPages === true);
   }
   engine.setWindowedIncrementalBuilds(window !== undefined);
 }

@@ -83,7 +83,7 @@ export function CanvasPagedArea({
           offscreenReplay={renderer.offscreenReplay}
           onWorkerPresentationChange={renderer.setWorkerPresentationActive}
           onPageWindowChange={renderer.setDisplayWindow}
-          onKeptPagesChange={renderer.setKeptPages}
+          onRetainBuiltPagesChange={renderer.setRetainBuiltPages}
         />
       ) : renderer.status === 'error' ? (
         <div data-testid="canvas-renderer-error" role="alert" style={{ minHeight: 240 }}>
@@ -231,7 +231,7 @@ export function CanvasPagesView({
   offscreenReplay,
   onWorkerPresentationChange,
   onPageWindowChange,
-  onKeptPagesChange,
+  onRetainBuiltPagesChange,
 }: {
   displayList: DisplayList;
   /** Binary retained-frame metadata used to scope page replay. */
@@ -264,7 +264,7 @@ export function CanvasPagesView({
   onWorkerPresentationChange?: (active: boolean) => void;
   /** The pages `[start, end)` that hold bitmaps, reported as the viewport moves. */
   onPageWindowChange?: (start: number, end: number) => void;
-  onKeptPagesChange?: (pages: number[]) => void;
+  onRetainBuiltPagesChange?: (retain: boolean) => void;
 }) {
   const canvasesRef = useRef(new Map<string, HTMLCanvasElement>());
   // Page lookups (pointer, overlays, caret) read this instead of searching
@@ -477,14 +477,14 @@ export function CanvasPagesView({
   );
   const pageKeysRef = useRef(pageKeys);
   pageKeysRef.current = pageKeys;
-  const reportedKeptPageRef = useRef<number | null>(null);
+  const reportedRetainBuiltPagesRef = useRef<boolean | null>(null);
   useEffect(() => {
-    if (!onKeptPagesChange) return;
-    const index = focusedPageKey === null ? -1 : pageKeys.indexOf(focusedPageKey);
-    if (reportedKeptPageRef.current === index) return;
-    reportedKeptPageRef.current = index;
-    onKeptPagesChange(index < 0 ? [] : [index]);
-  }, [focusedPageKey, onKeptPagesChange, pageKeys]);
+    if (!onRetainBuiltPagesChange) return;
+    const retain = focusedPageKey !== null;
+    if (reportedRetainBuiltPagesRef.current === retain) return;
+    reportedRetainBuiltPagesRef.current = retain;
+    onRetainBuiltPagesChange(retain);
+  }, [focusedPageKey, onRetainBuiltPagesChange]);
   const displayListRef = useRef(displayList);
   displayListRef.current = displayList;
   const chromeHandlesRef = useRef(new Map<string, ChromeHandles>());

@@ -1803,11 +1803,10 @@ impl EditSession {
             .set_display_window(Some(start as usize..(end.max(start)) as usize));
     }
 
-    /// Pages a windowed build keeps besides the window and the caret's page.
-    pub fn set_display_kept_pages(&self, pages: Vec<u32>) {
+    /// Keep every previously built page while windowed builds are on.
+    pub fn set_display_retain_built_pages(&self, retain: bool) {
         let _fonts = self.fonts.enter();
-        self.engine
-            .set_display_kept_pages(pages.into_iter().map(|page| page as usize).collect());
+        self.engine.set_display_retain_built_pages(retain);
     }
 
     /// Limit incremental rebuilds to the display window and caret pages. Off by default.

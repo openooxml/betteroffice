@@ -105,7 +105,7 @@ function worker() {
     delta: null as DecodedFrameDelta | null,
     caret: null as YrsResidentCaretRect | null,
     displayWindows: [] as [number, number][],
-    keptPages: [] as number[][],
+    retainBuiltPages: [] as boolean[],
     windowedIncrementalBuilds: [] as boolean[],
     rasterized: [] as number[],
     presented: [] as number[],
@@ -119,8 +119,8 @@ function worker() {
       setDisplayWindow(start: number, end: number) {
         harness.displayWindows.push([start, end]);
       },
-      setDisplayKeptPages(pages: number[]) {
-        harness.keptPages.push(pages);
+      setDisplayRetainBuiltPages(retain: boolean) {
+        harness.retainBuiltPages.push(retain);
       },
       setWindowedIncrementalBuilds(enabled: boolean) {
         harness.windowedIncrementalBuilds.push(enabled);
@@ -268,7 +268,8 @@ function worker() {
       upserts: number[],
       width = 100,
       caret: YrsResidentCaretRect | null = null,
-      displayWindow?: [number, number]
+      displayWindow?: [number, number],
+      retainBuiltPages?: boolean
     ) {
       delta(upserts, false, width);
       harness.caret = caret;
@@ -278,6 +279,7 @@ function worker() {
         expectedFrameEpoch: frameEpoch - 1,
         paintCaret: !!caret,
         displayWindow,
+        ...(retainBuiltPages ? { retainBuiltPages } : {}),
       });
     },
     attach(active: number[], zoom = 1, color = '#000') {
@@ -368,11 +370,16 @@ describe('resident worker page damage', () => {
     expect(w.harness.windowedIncrementalBuilds).toEqual([false]);
     expect((await w.build([], 100, null, [8, 11])).ok).toBe(true);
     expect(w.harness.displayWindows).toEqual([[8, 11]]);
-    expect(w.harness.keptPages).toEqual([[]]);
+    expect(w.harness.retainBuiltPages).toEqual([false]);
     expect(w.harness.windowedIncrementalBuilds).toEqual([false, true]);
     expect((await w.build([])).ok).toBe(true);
     expect(w.harness.displayWindows).toEqual([[8, 11]]);
+    expect(w.harness.retainBuiltPages).toEqual([false]);
     expect(w.harness.windowedIncrementalBuilds).toEqual([false, true, false]);
+    expect((await w.build([], 100, null, [8, 11], true)).ok).toBe(true);
+    expect(w.harness.retainBuiltPages).toEqual([false, true]);
+    expect((await w.build([], 100, null, [8, 11])).ok).toBe(true);
+    expect(w.harness.retainBuiltPages).toEqual([false, true, false]);
   });
 
   test('input and delete requests without a display window disable a previous opt-in', async () => {

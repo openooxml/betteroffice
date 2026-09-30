@@ -886,7 +886,7 @@ struct DisplayState {
     incremental_display_builds: u64,
     rebuilt_display_pages: u64,
     window: Option<std::ops::Range<usize>>,
-    kept_pages: Vec<usize>,
+    retain_built_pages: bool,
     windowed_incremental_builds: bool,
 }
 
@@ -1118,7 +1118,10 @@ fn window_build_pages(
     rebuilt_pages: &HashSet<usize>,
     caret: Option<CaretExtent>,
 ) -> Vec<bool> {
-    if !display.windowed_incremental_builds || display.window.is_none() {
+    if !display.windowed_incremental_builds
+        || display.window.is_none()
+        || display.retain_built_pages
+    {
         return full_build_pages(display, layout.pages.len());
     }
     layout
@@ -1148,14 +1151,13 @@ fn window_build_pages(
                 .window
                 .as_ref()
                 .is_some_and(|window| window.contains(&index))
-                || display.kept_pages.contains(&index)
                 || (rebuilt_pages.contains(&index) && caret_page())
         })
         .collect()
 }
 
-/// With windowed builds on, compile only the window, kept pages and a mapped
-/// caret's page; otherwise use [`full_build_pages`].
+/// With windowed builds on, compile the window and a mapped caret's page,
+/// or every built page while retained; otherwise use [`full_build_pages`].
 fn windowed_full_build_pages(
     display: &DisplayState,
     layout: &Layout,
@@ -3964,9 +3966,10 @@ impl EngineSession {
         self.display.borrow_mut().window = window;
     }
 
-    /// Pages a windowed build keeps besides the window and the caret's page.
-    pub fn set_display_kept_pages(&self, pages: Vec<usize>) {
-        self.display.borrow_mut().kept_pages = pages;
+    /// While set, windowed builds keep every page the previous list had built,
+    /// as with windowed builds off.
+    pub fn set_display_retain_built_pages(&self, retain: bool) {
+        self.display.borrow_mut().retain_built_pages = retain;
     }
 
     /// Limit incremental rebuilds to the display window and caret pages. Off by default.
@@ -8213,7 +8216,6 @@ mod tests {
             .unwrap();
         let epoch = engine.display.borrow().binary_frame_epoch;
         engine.apply_and_layout("body", epoch).unwrap();
-        engine.set_display_kept_pages(vec![4]);
         let before = engine.stats();
         let epoch = engine.display.borrow().binary_frame_epoch;
         engine
@@ -8226,7 +8228,7 @@ mod tests {
         let full = full_display_build(&engine, &extras);
         let windowed = engine.with_display_list(Clone::clone).unwrap();
         for (index, (page, full_page)) in windowed.pages.iter().zip(&full.pages).enumerate() {
-            if index == 0 || index == 4 || (8..11).contains(&index) {
+            if index == 0 || (8..11).contains(&index) {
                 assert_eq!(page, full_page, "page {index} is built");
             } else {
                 assert!(
@@ -8249,7 +8251,7 @@ mod tests {
         );
 
         let rest: Vec<usize> = (0..full.pages.len())
-            .filter(|index| *index != 0 && *index != 4 && !(8..11).contains(index))
+            .filter(|index| *index != 0 && !(8..11).contains(index))
             .collect();
         let epoch = engine.display.borrow().binary_frame_epoch;
         engine.build_display_pages_frame(&rest, epoch).unwrap();
@@ -8257,6 +8259,19 @@ mod tests {
             engine.with_display_list(Clone::clone).unwrap().pages,
             full.pages
         );
+        engine.set_display_retain_built_pages(true);
+        let before = engine.stats();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine
+            .build_display_list_frame(&format!("{extras}  "), epoch)
+            .unwrap();
+        assert_eq!(
+            engine.stats().incremental_display_builds,
+            before.incremental_display_builds
+        );
+        let retained = engine.with_display_list(Clone::clone).unwrap();
+        assert!(retained.pages.iter().all(|page| !page.unbuilt));
+        assert_eq!(retained.pages, full_display_build(&engine, &extras).pages);
         docx_layout::clear_measure_fonts();
     }
 
