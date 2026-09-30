@@ -52,11 +52,15 @@ describe('useRustMeasurement warm requirements', () => {
     loadWarm: () => Promise<ArrayBuffer>,
     loadLater: () => Promise<ArrayBuffer> = () => new Promise<ArrayBuffer>(() => {})
   ) {
-    let registered = 0;
+    const registered: string[][] = [];
     const calls = { warmLoads: 0, warmPasses: 0, requiredPasses: 0 };
-    const engine: RustTextEngine = {
-      registerFont: () => ++registered,
-      clearFonts() {},
+    const engineWith = (): RustTextEngine => {
+      const fonts: string[] = [];
+      registered.push(fonts);
+      return {
+        registerFont: (bytes) => fonts.push(new TextDecoder().decode(bytes)),
+        clearFonts() {},
+      };
     };
     const fontProvider = {
       resolve: (family: string) => () => {
@@ -66,8 +70,10 @@ describe('useRustMeasurement warm requirements', () => {
         return loadWarm();
       },
     };
-    const hook = renderHook(() =>
-      useRustMeasurement({ document: null, textEngine: engine, fontProvider })
+    const hook = renderHook(
+      ({ engine }: { engine: RustTextEngine }) =>
+        useRustMeasurement({ document: null, textEngine: engine, fontProvider }),
+      { initialProps: { engine: engineWith() } }
     );
     await waitFor(() =>
       expect(hook.result.current.residentMeasurementConfig([regular])?.fontChains).toEqual({
@@ -80,7 +86,15 @@ describe('useRustMeasurement warm requirements', () => {
     hook.result.current.runLayoutPipelineRef.current = () => {
       calls.requiredPasses++;
     };
-    return { ...hook, calls };
+    return { ...hook, calls, registered, engineWith };
+  }
+
+  function deferred() {
+    let finishLoad!: (bytes: ArrayBuffer) => void;
+    const pending = new Promise<ArrayBuffer>((resolve) => {
+      finishLoad = resolve;
+    });
+    return { pending, finishLoad };
   }
 
   test('pending warm fonts leave the current config ready and request one pass when ready', async () => {
@@ -147,6 +161,42 @@ describe('useRustMeasurement warm requirements', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  test('a warm font that loads after unmount registers nothing and requests no pass', async () => {
+    const { pending, finishLoad } = deferred();
+    const { result, unmount, calls, registered } = await prepared(() => pending);
+    result.current.residentMeasurementConfig([regular], [warm]);
+    await waitFor(() => expect(calls.warmLoads).toBe(1));
+
+    unmount();
+    finishLoad(bytesOf('Warm'));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(registered).toEqual([['Calibri']]);
+    expect(calls).toEqual({ warmLoads: 1, warmPasses: 0, requiredPasses: 0 });
+  });
+
+  test('a warm font the replaced source was loading registers nothing and requests no pass', async () => {
+    const { pending, finishLoad } = deferred();
+    const { result, rerender, calls, registered, engineWith } = await prepared(() => pending);
+    result.current.residentMeasurementConfig([regular], [warm]);
+    await waitFor(() => expect(calls.warmLoads).toBe(1));
+
+    rerender({ engine: engineWith() });
+    await waitFor(() =>
+      expect(result.current.residentMeasurementConfig([regular])?.fontChains).toEqual({
+        regular: [1],
+      })
+    );
+    // The new source's first load asks for one pass of its own.
+    expect(calls.requiredPasses).toBe(1);
+    finishLoad(bytesOf('Warm'));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(registered).toEqual([['Calibri'], ['Calibri']]);
+    expect(calls).toEqual({ warmLoads: 1, warmPasses: 0, requiredPasses: 1 });
+    expect(result.current.residentMeasurementConfig([regular])?.fontChains).toEqual({
+      regular: [1],
+    });
   });
 
   test('already-ready warm requirements add no keys and request no pass', async () => {

@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, expect, test } from 'bun:test';
+import { afterAll, expect, spyOn, test } from 'bun:test';
 import type { LayoutComputation } from '@betteroffice/docx/editor';
 import {
   LayoutSelectionGate,
@@ -24,6 +24,7 @@ interface WorkerPass {
   at: number;
   answer(): void;
   fail(): void;
+  reject(error: Error): void;
 }
 
 function fakeDocument() {
@@ -164,12 +165,13 @@ async function opened() {
       onError: (error) => errors.push(error),
       layoutInWorker: (asked) =>
         doc.workerAvailable
-          ? new Promise<LayoutComputation | null>((resolve) => {
+          ? new Promise<LayoutComputation | null>((resolve, reject) => {
               worker.push({
                 at: Number(asked.version()),
                 answer: () =>
                   resolve({ layout: { pages: [] } as unknown as Layout, notesConverged: true }),
                 fail: () => resolve(null),
+                reject,
               });
             })
           : null,
@@ -455,3 +457,33 @@ test('a direct run queued behind a worker pass is never a warm-up', async () => 
   expect(shown()).toBe('3');
   expect(errors).toEqual([]);
 });
+
+for (const ending of ['fails', 'throws'] as const) {
+  test(`a warm-up queued behind a worker pass that ${ending} still lays that pass out here`, async () => {
+    const { doc, worker, errors, hook, frame, shown } = await opened();
+    doc.version = 2;
+    act(() => hook.result.current.scheduleLayout('local', true));
+    await frame();
+    expect(worker.map((pass) => pass.at)).toEqual([1, 2]);
+
+    act(() => hook.result.current.scheduleWarmLayout());
+    await frame();
+    expect(worker).toHaveLength(2);
+    doc.workerAvailable = false;
+    const failure = new Error('worker lost');
+    const log = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await act(async () => {
+        if (ending === 'fails') worker[1]!.fail();
+        else worker[1]!.reject(failure);
+        await new Promise((done) => setTimeout(done, 0));
+      });
+      await frame();
+    } finally {
+      log.mockRestore();
+    }
+    expect(doc.laidOutHere).toEqual([2]);
+    expect(shown()).toBe('2');
+    expect(errors).toEqual(ending === 'fails' ? [] : [failure]);
+  });
+}

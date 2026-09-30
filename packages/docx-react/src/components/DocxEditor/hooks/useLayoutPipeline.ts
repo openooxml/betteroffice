@@ -599,6 +599,10 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           return;
         }
         workerPassRef.current = { pass, session, opening: !inWorker && !previewOnly };
+        // The pass queued behind this one lays out in its place, so it carries this pass's work.
+        const handOverToQueued = (): void => {
+          if (!warmOnly) pendingWarmOnlyRef.current = false;
+        };
         void workerPass
           .then(
             (computation) => {
@@ -615,7 +619,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                   ? workerOpenSourceVersion(session, sourceVersion)
                   : sourceVersion);
               if (!computation || (stale && !queued)) {
-                if (!queued && !warmOnly) layOutHere();
+                if (queued) handOverToQueued();
+                else if (!warmOnly) layOutHere();
                 return;
               }
               if (stale || queued) markSupersededLayout(computation.layout);
@@ -634,7 +639,9 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                     if (queuedBehindWorkerRef.current) markSupersededLayout(complete.layout);
                     // Nothing the user did changed: keep their viewport.
                     applyComputation(complete, 'remote');
-                  } else if (!queuedBehindWorkerRef.current && !warmOnly) {
+                  } else if (queuedBehindWorkerRef.current) {
+                    handOverToQueued();
+                  } else if (!warmOnly) {
                     layOutHere();
                   }
                 },
@@ -643,6 +650,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             },
             (error: unknown) => {
               if (pass !== passRef.current) return;
+              if (queuedBehindWorkerRef.current) handOverToQueued();
               // The display reports a worker out of memory; nothing lays out here.
               if (error instanceof ResidentWorkerOutOfMemoryError) return;
               console.error('[PagedEditor] Layout pipeline error:', error);
