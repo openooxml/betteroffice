@@ -73,6 +73,7 @@ export const editsession_insert_watermark: (a: number, b: number, c: number, d: 
 export const editsession_layout_document_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_layout_document_with_regions_prefix_retained_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const editsession_layout_document_with_regions_retained: (a: number, b: number, c: number) => [number, number];
 export const editsession_layout_document_with_regions_retained_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_layout_font_requirements_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_list_comments: (a: number) => [number, number, number, number];
@@ -109,6 +110,7 @@ export const editsession_resolve_encoded_selection: (a: number, b: number, c: nu
 export const editsession_resolve_paragraph_anchor: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_resolve_sticky_position: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_resume_region_layout: (a: number, b: number) => [number, number, number, number];
+export const editsession_retained_headers_footers_json: (a: number) => [number, number, number, number];
 export const editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
 export const editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
