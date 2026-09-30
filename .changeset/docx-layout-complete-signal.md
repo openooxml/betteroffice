@@ -2,4 +2,4 @@
 "@betteroffice/docx-react": patch
 ---
 
-Add `whenLayoutComplete()` to the editor ref, which resolves with the page count once the whole document is laid out, not just its first pages. Until then `getTotalPages()` returns 0 instead of 1.
+Adds `whenLayoutComplete()` to the editor ref, resolving with the page count once the whole document is laid out. Await it, not `onFirstPagePainted`, before reading page counts or content: until then `getTotalPages()` returns 0 and `getPageContent(n)` returns `null`, even for painted pages.

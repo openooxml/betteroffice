@@ -2,6 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import JSZip from 'jszip';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
@@ -40,6 +41,29 @@ const bytes = new Uint8Array(readFileSync(resolve(
   import.meta.dir,
   '../../../../../../crates/docx-edit/tests/fixtures/page-fragments/pages.docx'
 )));
+
+async function longFixture(): Promise<Uint8Array> {
+  const zip = new JSZip();
+  zip.file(
+    '[Content_Types].xml',
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
+  );
+  zip.file(
+    '_rels/.rels',
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'
+  );
+  const body = Array.from({ length: 205 }, (_, index) => {
+    const text = index === 0 ? 'First paragraph' : index === 204 ? 'Tail paragraph' : `Paragraph ${index}`;
+    return `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
+  }).join('');
+  zip.file(
+    'word/document.xml',
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr/></w:body></w:document>`
+  );
+  return zip.generateAsync({ type: 'uint8array' });
+}
+
+const longBytes = await longFixture();
 const font = new Uint8Array(readFileSync(resolve(
   import.meta.dir, '../../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
 )));
@@ -66,7 +90,7 @@ function installWorker(options: {
   failState?: boolean;
   holdState?: boolean;
   holdOpen?: boolean;
-  oomStage?: 'fontRequirements' | 'bootstrap' | 'encodeState';
+  oomStage?: 'open' | 'fontRequirements' | 'bootstrap' | 'encodeState';
   holdRetryOpen?: boolean;
 } = {}) {
   const workers: InProcessResidentWorker[] = [];
@@ -102,6 +126,7 @@ function installWorker(options: {
 interface HarnessProps {
   experimentalWorkerOpen: boolean;
   previewFirstPage?: boolean;
+  openInWorker?: OpenInWorker;
   source: Uint8Array;
   generation: number;
   collaboration?: DocxEditorCollaborationOptions;
@@ -111,12 +136,13 @@ interface HarnessProps {
 
 function useHarness(props: HarnessProps) {
   const relayout = useRef<(() => void) | null>(null);
+  const handoffFromRef = useRef<YrsSession | null>(null);
   const renderer = useCanvasRenderer(
     undefined,
     props.resolvedCommentIds,
     () => relayout.current?.(),
     undefined,
-    undefined,
+    handoffFromRef,
     props.experimentalWorkerOpen
   );
   useEffect(() => renderer.resetSettled(), [props.generation]);
@@ -125,8 +151,8 @@ function useHarness(props: HarnessProps) {
   const errors = useRef<Error[]>([]);
   const loadChecks = useRef<number[]>([]);
   const openInWorker = useCallback<OpenInWorker>((session, source, digest, generation) => {
-    return renderer.openInWorker(session, source, digest, generation);
-  }, [renderer.openInWorker]);
+    return (props.openInWorker ?? renderer.openInWorker)(session, source, digest, generation);
+  }, [props.openInWorker, renderer.openInWorker]);
   const core = useYrsCoreSession(
     true, host?.document ?? null, null, props.source, props.generation, props.collaboration,
     {
@@ -155,6 +181,7 @@ function useHarness(props: HarnessProps) {
       } : undefined,
     }
   );
+  handoffFromRef.current = core.handoffFrom;
   const syncCoordinator = useRef(new LayoutSelectionGate());
   const element = useRef<HTMLDivElement | null>(null);
   const registeredFont = useRef<{ session: YrsSession; id: number } | null>(null);
@@ -254,6 +281,7 @@ function useHarness(props: HarnessProps) {
   });
   return {
     core, renderer, pipeline, host, ref, bridgeRef,
+    presentFrame: () => core.notifyFramePresented(renderer.presentedEngine),
     loadChecks: loadChecks.current, mainOpens: mainOpens.current, errors: errors.current,
   };
 }
@@ -265,6 +293,249 @@ function texts(session: YrsSession) {
     story, session.paragraphs(story).map((paragraph) => paragraph.text),
   ]));
 }
+
+function holdFrames() {
+  const request = globalThis.requestAnimationFrame;
+  const cancel = globalThis.cancelAnimationFrame;
+  const frames = new Map<number, FrameRequestCallback>();
+  let nextId = 0;
+  globalThis.requestAnimationFrame = (callback) => {
+    frames.set(++nextId, callback);
+    return nextId;
+  };
+  globalThis.cancelAnimationFrame = (id) => { frames.delete(id); };
+  return {
+    run() {
+      const pending = [...frames.values()];
+      frames.clear();
+      for (const callback of pending) callback(performance.now());
+    },
+    restore() {
+      globalThis.requestAnimationFrame = request;
+      globalThis.cancelAnimationFrame = cancel;
+    },
+  };
+}
+
+test('a painted main preview hands off to the worker before hydrating the full replica', async () => {
+  const { workers, posted } = installWorker({ holdOpen: true, holdState: true });
+  const frames = holdFrames();
+  try {
+    const props = { ...initialProps, previewFirstPage: true, source: longBytes };
+    const { result, rerender, unmount } = renderHook(useHarness, { initialProps: props });
+    await waitFor(() => expect(result.current.core.previewing).toBe(true));
+    const preview = result.current.core.session!;
+    const destroyed = spyOn(preview, 'destroy');
+    expect(preview.isDisplayOnly()).toBe(true);
+    expect(preview.paragraphs('body').map((paragraph) => paragraph.text)).not.toContain('Tail paragraph');
+    expect(result.current.core.replicaReady).toBe(true);
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(preview));
+    expect(result.current.renderer.status).toBe('ready');
+    expect(workers).toHaveLength(0);
+    expect(posted).toEqual([]);
+    expect(result.current.mainOpens).toEqual([]);
+
+    act(() => result.current.presentFrame());
+    expect(posted).toEqual([]);
+    act(() => frames.run());
+    expect(posted).toEqual([]);
+    act(() => frames.run());
+    await waitFor(() => expect(posted.map((request) => request.type)).toEqual(['open']));
+    expect(result.current.core.session).toBe(preview);
+    expect(destroyed).not.toHaveBeenCalled();
+    const firstPreviewFrame = result.current.renderer.displayList;
+    rerender({ ...props, resolvedCommentIds: new Set([1]) });
+    await waitFor(() => expect(result.current.renderer.displayList).not.toBe(firstPreviewFrame));
+    expect(posted.map((request) => request.type)).toEqual(['open']);
+    await act(async () => { workers[0].release(); });
+    await waitFor(() => expect(result.current.core.previewing).toBe(false));
+    const full = result.current.core.session!;
+    expect(full).not.toBe(preview);
+    expect(full.isDisplayOnly()).toBe(false);
+    expect(full.storyIds()).toEqual([]);
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.core.replicaReadyRef?.current).toBe(false);
+    expect(result.current.core.handoffFrom).toBe(preview);
+    expect(result.current.core.opening).toBe(true);
+    act(() => frames.run());
+    act(() => frames.run());
+    expect(posted.map((request) => request.type)).toEqual(['open']);
+
+    const inheritedPreviewFrame = result.current.renderer.displayList;
+    rerender({ ...props, resolvedCommentIds: new Set([2]) });
+    await waitFor(() => expect(result.current.renderer.displayList).not.toBe(inheritedPreviewFrame));
+    expect(result.current.renderer.presentedEngine).toBe(preview);
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    expect(posted.map((request) => request.type)).toEqual(['open']);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.core.handoffFrom).toBe(preview);
+    expect(destroyed).not.toHaveBeenCalled();
+
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(full));
+    expect(posted.map((request) => request.type).slice(0, 3)).toEqual(['open', 'fontRequirements', 'bootstrap']);
+    expect(posted.find((request) => request.type === 'bootstrap')).toMatchObject({ opened: true });
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.core.handoffFrom).toBe(preview);
+    expect(destroyed).not.toHaveBeenCalled();
+    act(() => result.current.presentFrame());
+    expect(result.current.core.handoffFrom).toBeNull();
+    expect(result.current.core.opening).toBe(false);
+    expect(destroyed).toHaveBeenCalledTimes(1);
+    act(() => frames.run());
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    act(() => frames.run());
+    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.core.replicaReady).toBe(false);
+    await act(async () => {
+      workers[0].release();
+      await awaitWorkerOpenReplica(full);
+    });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(result.current.core.replicaReadyRef?.current).toBe(true);
+    expect(result.current.mainOpens).toEqual([false]);
+    const paragraphs = full.paragraphs('body');
+    expect(paragraphs).toHaveLength(205);
+    expect(paragraphs[0].text).toBe('First paragraph');
+    expect(paragraphs.at(-1)!.text).toBe('Tail paragraph');
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
+
+test.each(['null', 'throw'] as const)(
+  'a combined worker open keeps the preview through main fallback with outcome=%s',
+  async (outcome) => {
+    installWorker();
+    const frames = holdFrames();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    const openInWorker: OpenInWorker = async () => {
+      calls += 1;
+      await held;
+      if (outcome === 'throw') throw new Error('worker unavailable');
+      return null;
+    };
+    try {
+      const { result, unmount } = renderHook(useHarness, {
+        initialProps: { ...initialProps, previewFirstPage: true, source: longBytes, openInWorker },
+      });
+      await waitFor(() => expect(result.current.core.previewing).toBe(true));
+      const preview = result.current.core.session!;
+      const destroyed = spyOn(preview, 'destroy');
+      act(() => result.current.pipeline.runLayoutPipeline());
+      await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(preview));
+      expect(calls).toBe(0);
+      act(() => result.current.presentFrame());
+      act(() => frames.run());
+      act(() => frames.run());
+      await waitFor(() => expect(calls).toBe(1));
+      expect(result.current.core.session).toBe(preview);
+      expect(result.current.renderer.presentedEngine).toBe(preview);
+      expect(result.current.mainOpens).toEqual([]);
+      expect(destroyed).not.toHaveBeenCalled();
+      await act(async () => { release(); });
+      await waitFor(() => expect(result.current.core.previewing).toBe(false));
+      const full = result.current.core.session!;
+      expect(full).not.toBe(preview);
+      expect(result.current.mainOpens).toEqual([true]);
+      expect(result.current.core.replicaReady).toBe(true);
+      expect(result.current.core.handoffFrom).toBe(preview);
+      expect(result.current.renderer.presentedEngine).toBe(preview);
+      expect(destroyed).not.toHaveBeenCalled();
+      act(() => result.current.presentFrame());
+      expect(result.current.core.handoffFrom).toBe(preview);
+      act(() => result.current.pipeline.runLayoutPipeline());
+      await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(full));
+      expect(destroyed).not.toHaveBeenCalled();
+      act(() => result.current.presentFrame());
+      expect(result.current.core.handoffFrom).toBeNull();
+      expect(destroyed).toHaveBeenCalledTimes(1);
+      expect(result.current.errors).toEqual([]);
+      unmount();
+    } finally {
+      cleanup();
+      frames.restore();
+    }
+  }
+);
+
+test('terminal worker open OOM fails a previewing load once without a main seed', async () => {
+  const { workers, posted } = installWorker({ oomStage: 'open' });
+  const { result } = renderHook(useHarness, {
+    initialProps: { ...initialProps, previewFirstPage: true, source: longBytes },
+  });
+  await waitFor(() => expect(result.current.core.previewing).toBe(true));
+  act(() => result.current.pipeline.runLayoutPipeline());
+  await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(result.current.core.session));
+  act(() => result.current.presentFrame());
+  await waitFor(() => expect(result.current.errors).toHaveLength(1));
+  expect(result.current.errors[0]).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+  expect(workers).toHaveLength(2);
+  expect(posted.map((request) => request.type)).toEqual(['open', 'open']);
+  expect(result.current.mainOpens).toEqual([]);
+  expect(result.current.core.session).toBeNull();
+  expect(result.current.core.opening).toBe(false);
+  expect(result.current.core.handoffFrom).toBeNull();
+  expect(result.current.core.failOpening(new Error('later'))).toBe(false);
+  expect(result.current.errors).toHaveLength(1);
+});
+
+test('failure of the accepted full session before its frame cancels deferred hydration', async () => {
+  const { workers, posted } = installWorker();
+  const frames = holdFrames();
+  try {
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, previewFirstPage: true, source: longBytes },
+    });
+    await waitFor(() => expect(result.current.core.previewing).toBe(true));
+    const preview = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(preview));
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await waitFor(() => expect(result.current.core.previewing).toBe(false));
+    const full = result.current.core.session!;
+    expect(replicaHelpers.workerOpenReplicaPending(full)).toBe(true);
+    expect(result.current.core.handoffFrom).toBe(preview);
+    expect(result.current.renderer.presentedEngine).toBe(preview);
+    const destroyed = spyOn(workers[0], 'terminate');
+    const pending = awaitWorkerOpenReplica(full)!;
+    const failure = new Error('full frame failed');
+    expect(result.current.core.failOpening(new Error('late preview error'), preview)).toBe(false);
+    act(() => { expect(result.current.core.failOpening(failure, full)).toBe(true); });
+    const rejection = await pending.then(() => null, (error: unknown) => error);
+    expect(rejection).toMatchObject({ message: expect.stringContaining('document changed') });
+    expect(replicaHelpers.workerOpenReplicaPending(full)).toBe(false);
+    expect(destroyed).toHaveBeenCalledTimes(1);
+    expect(result.current.core.session).toBeNull();
+    expect(result.current.core.handoffFrom).toBeNull();
+    expect(result.current.core.opening).toBe(false);
+    act(() => frames.run());
+    act(() => frames.run());
+    expect(posted.map((request) => request.type)).toEqual(['open', 'destroy']);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.core.replicaReadyRef?.current).toBe(false);
+    expect(result.current.errors).toEqual([failure]);
+    expect(result.current.core.failOpening(new Error('later'), full)).toBe(false);
+    expect(result.current.errors).toHaveLength(1);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
 
 test('the default open calls no worker open, font preflight or state handoff', async () => {
   const { workers, posted } = installWorker();

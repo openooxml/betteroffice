@@ -1482,6 +1482,7 @@ export function useRustDisplayList(
         !canUseResidentEngineWorker() ||
         !isWorkerHostEngine(hostEngine) ||
         !hostEngine.adoptResidentWorkerLayout ||
+        (workerOpenEnabledRef.current && hostEngine.isDisplayOnly?.() === true) ||
         workerFallbackEngineRef.current === hostEngine ||
         handedOverEnginesRef.current.has(hostEngine)
       ),
@@ -1504,7 +1505,7 @@ export function useRustDisplayList(
     [canLayoutInWorker, handoffFromRef]
   );
 
-  const layoutInWorker = useCallback<LayoutInWorker>(
+  const layoutInWorker: LayoutInWorker = useCallback<LayoutInWorker>(
     (hostEngine, request) => {
       if (!canLayoutInWorker(hostEngine) || !hostEngine.adoptResidentWorkerLayout) {
         if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(hostEngine);
@@ -1681,7 +1682,7 @@ export function useRustDisplayList(
       workerFor,
     ]
   );
-  const layoutInWorkerRef = useRef<LayoutInWorker>(layoutInWorker);
+  const layoutInWorkerRef: { current: LayoutInWorker } = useRef<LayoutInWorker>(layoutInWorker);
   layoutInWorkerRef.current = layoutInWorker;
   const prewarmableLayoutInWorker = useMemo(
     () => Object.assign(layoutInWorker, { prewarm: prewarmLayoutWorker }),
@@ -1821,8 +1822,12 @@ export function useRustDisplayList(
         ? { resolvedCommentIds: [...resolvedCommentIds].sort((a, b) => a - b) }
         : {}),
     };
+    const previewOnMainThread =
+      workerOpenEnabledRef.current && residentEngine?.isDisplayOnly?.() === true;
     const workerEligible =
-      residentEngine !== null && workerFallbackEngineRef.current !== residentEngine;
+      residentEngine !== null &&
+      workerFallbackEngineRef.current !== residentEngine &&
+      !previewOnMainThread;
     // Cheap probe only: the full snapshot (document state, font bytes) is
     // built lazily below, and only for bootstrap/sync — steady-state frame
     // builds never encode state or copy fonts.
@@ -1853,7 +1858,9 @@ export function useRustDisplayList(
         (result) => ({
           ...result,
           caret: null as YrsResidentCaretSnapshot | null,
-          queryEngine: engine,
+          // The preview's session is retired after the handover; its retained
+          // queries answer from their own pages, as a worker preview's do.
+          queryEngine: previewOnMainThread ? null : engine,
           workerProduced: false,
           caretPainted: false,
           ...(residentEngine && result.frame && retainedRevision !== inputs.layoutRevision

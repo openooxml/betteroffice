@@ -92,9 +92,25 @@ test.each([false, true])(
       preview.insertText({ story: 'body', paraId: paragraph.paraId, offset: 0 }, 'x')
     ).toThrow(/display-only/);
 
-    await act(async () => {
-      result.current.notifyFramePresented(preview);
-    });
+    expect(workerOpens).toBe(0);
+    expect(mainOpens).toEqual([]);
+    const requestFrame = globalThis.requestAnimationFrame;
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (callback) => frames.push(callback);
+    try {
+      await act(async () => {
+        result.current.notifyFramePresented(preview);
+      });
+      expect(workerOpens).toBe(0);
+      expect(mainOpens).toEqual([]);
+      expect(frames).toHaveLength(1);
+      act(() => frames.shift()!(performance.now()));
+      expect(workerOpens).toBe(0);
+      expect(mainOpens).toEqual([]);
+      act(() => frames.shift()!(performance.now()));
+    } finally {
+      globalThis.requestAnimationFrame = requestFrame;
+    }
     await waitFor(() => expect(result.current.previewing).toBe(false));
     const full = result.current.session as YrsSession;
     expect(full).not.toBe(preview);
@@ -105,7 +121,7 @@ test.each([false, true])(
     expect(full.materializeDocx()).not.toBeNull();
     expect(full.isDisplayOnly()).toBe(false);
     expect(mainOpens).toEqual([true]);
-    expect(workerOpens).toBe(0);
+    expect(workerOpens).toBe(workerOpen ? 1 : 0);
     expect(result.current.replicaReady).toBe(true);
 
     await act(async () => {
@@ -272,7 +288,7 @@ test.each([false, true])(
     expect(result.current.previewing).toBe(false);
     expect(result.current.session!.isDisplayOnly()).toBe(false);
     expect(hosts).toEqual([false]);
-    expect(workerOpens).toBe(0);
+    expect(workerOpens).toBe(workerOpen ? 1 : 0);
     unmount();
   }
 );

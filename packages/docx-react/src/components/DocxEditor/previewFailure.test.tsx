@@ -15,7 +15,7 @@ const { act, cleanup, render, waitFor } = await import('@testing-library/react')
 // The second session a load creates is the full one, after its preview.
 const real = await import('@betteroffice/docx/yrs');
 // Mocking rebinds the module's live exports, `real`'s included.
-const { createYrsSession } = real;
+const { createYrsSession, ResidentWorkerOutOfMemoryError } = real;
 let created = 0;
 let fullSession: unknown = null;
 let shownPages = false;
@@ -63,6 +63,8 @@ mock.module('@betteroffice/docx/layout/render', () => ({
 const displayList = await import('./hooks/useDisplayList');
 const { useCanvasRenderer } = displayList;
 let renderer: ReturnType<typeof useCanvasRenderer> | null = null;
+let workerOpen: ReturnType<typeof useCanvasRenderer>['openInWorker'] | null = null;
+let workerFailure: { error: Error; errorEngine: YrsSession } | null = null;
 let holdCanvasReplay: 'full' | 'preview' | 'ordinary' | null = null;
 interface PendingCanvasReplay {
   displayList: NonNullable<ReturnType<typeof useCanvasRenderer>['displayList']>;
@@ -82,13 +84,24 @@ mock.module('./hooks/useDisplayList', () => ({
   useCanvasRenderer: (...args: Parameters<typeof useCanvasRenderer>) => {
     renderer = useCanvasRenderer(...args);
     if (renderer.displayList) shownPages = true;
+    if (workerOpen) renderer = { ...renderer, openInWorker: workerOpen };
+    if (workerFailure) return { ...renderer, ...workerFailure, status: 'error' as const };
     const error =
       failRender === 'full' && created >= 2
         ? renderFailure
-        : failRender === 'preview' && (created < 2 || renderer.presentedEngine !== fullSession)
+        : failRender === 'preview' &&
+            renderer.presentedEngine &&
+            (created < 2 || renderer.presentedEngine !== fullSession)
           ? previewFailure
           : null;
-    if (error) return { ...renderer, error, status: 'error' as const };
+    if (error) {
+      return {
+        ...renderer,
+        error,
+        errorEngine: failRender === 'preview' ? renderer.presentedEngine : renderer.errorEngine,
+        status: 'error' as const,
+      };
+    }
     return holdCanvasReplay ? { ...renderer, offscreenReplay: null } : renderer;
   },
 }));
@@ -155,6 +168,8 @@ beforeAll(async () => {
 });
 afterEach(() => {
   cleanup();
+  workerOpen = null;
+  workerFailure = null;
   holdCanvasReplay = null;
   for (const replay of pendingCanvasReplays) replay.resolve();
   pendingCanvasReplays = [];
@@ -172,8 +187,19 @@ const documentBuffer = () => {
   const bytes = readFileSync(PAGES);
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 };
-const load = (buffer: ArrayBuffer, onError: (error: Error) => void, ref = createRef<Editor>()) => (
-  <DocxEditor ref={ref} previewFirstPage documentBuffer={buffer} onError={onError} />
+const load = (
+  buffer: ArrayBuffer,
+  onError: (error: Error) => void,
+  ref = createRef<Editor>(),
+  experimentalWorkerOpen = false
+) => (
+  <DocxEditor
+    ref={ref}
+    previewFirstPage
+    experimentalWorkerOpen={experimentalWorkerOpen}
+    documentBuffer={buffer}
+    onError={onError}
+  />
 );
 
 /** A wait begun after a load failed rejects with it. */
@@ -221,6 +247,123 @@ test('a load whose full open fails after its preview painted keeps none of its p
   expect(ref.current!.getTotalPages()).toBe(0);
   expect(ref.current!.getDocument()).toBeNull();
   await expectWaitRejects(ref);
+}, 30_000);
+
+test('an untaken worker session whose render and open fail reports the error once', async () => {
+  created = 0;
+  fullSession = null;
+  shownPages = false;
+  fullOpen = 'open';
+  failRender = null;
+  const failure = new ResidentWorkerOutOfMemoryError('worker open ran out of memory', []);
+  let release = () => {};
+  const opening = new Promise<void>((done) => (release = done));
+  const openInWorker = mock(async (_session: YrsSession) => {
+    await opening;
+    throw failure;
+  });
+  workerOpen = openInWorker;
+  try {
+    const ref = createRef<Editor>();
+    const errors: Error[] = [];
+    const buffer = documentBuffer();
+    const onError = (error: Error) => errors.push(error);
+    const view = render(load(buffer, onError, ref, true));
+    await waitFor(() => expect(openInWorker).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+    const pendingSession = openInWorker.mock.calls[0][0];
+    expect(shownPages).toBe(true);
+    expect(pendingSession as unknown).toBe(fullSession);
+    expect(pendingSession.isDisplayOnly()).toBe(false);
+    expect(renderer!.layoutEngine).not.toBe(pendingSession);
+    expect((renderer!.layoutEngine as YrsSession).isDisplayOnly()).toBe(true);
+    expect(ref.current!.getDocument()).toBeNull();
+
+    workerFailure = { error: failure, errorEngine: pendingSession };
+    await act(async () => view.rerender(load(buffer, onError, ref, true)));
+    expect(errors).toEqual([]);
+
+    await act(async () => release());
+    await waitFor(() => expect(errors).toEqual([failure]), { timeout: 10_000 });
+    await act(async () => {
+      await new Promise((done) => setTimeout(done, 200));
+    });
+    expect(errors).toEqual([failure]);
+    expect(openInWorker).toHaveBeenCalledTimes(1);
+    expect(view.container.querySelector('.docx-editor-error')?.textContent).toContain(
+      failure.message
+    );
+    await expectWaitRejects(ref);
+  } finally {
+    release();
+  }
+}, 30_000);
+
+test('a stale worker open failure keeps the replacement preview read-only', async () => {
+  created = 0;
+  fullSession = null;
+  shownPages = false;
+  fullOpen = 'open';
+  failRender = null;
+  const failure = new ResidentWorkerOutOfMemoryError('worker open ran out of memory', []);
+  let releaseA = () => {};
+  let releaseB = () => {};
+  const openingA = new Promise<void>((done) => (releaseA = done));
+  const openingB = new Promise<void>((done) => (releaseB = done));
+  let opens = 0;
+  const openInWorker = mock(async (_session: YrsSession) => {
+    const first = ++opens === 1;
+    await (first ? openingA : openingB);
+    if (first) throw failure;
+    return null;
+  });
+  workerOpen = openInWorker;
+  const ref = createRef<Editor>();
+  const errors: Error[] = [];
+  const buffer = documentBuffer();
+  const onError = (error: Error) => errors.push(error);
+  const view = render(load(buffer, onError, ref, true));
+  try {
+    await waitFor(() => expect(openInWorker).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+    const previousPreview = renderer!.layoutEngine;
+
+    created = 0;
+    fullSession = null;
+    shownPages = false;
+    await act(async () => view.rerender(load(buffer.slice(0), onError, ref, true)));
+    await waitFor(
+      () => {
+        expect(openInWorker).toHaveBeenCalledTimes(2);
+        expect(renderer!.layoutEngine).not.toBeNull();
+        expect(renderer!.layoutEngine).not.toBe(previousPreview);
+        expect(renderer!.presentedEngine).toBe(renderer!.layoutEngine);
+        expect(renderer!.displayList).not.toBeNull();
+        expect(isPresented(renderer!.canvasHostRef.current, renderer!.displayList!)).toBe(true);
+      },
+      { timeout: 10_000 }
+    );
+    const preview = renderer!.layoutEngine as YrsSession;
+    expect(created).toBe(2);
+    expect(openInWorker.mock.calls[1][0] as unknown).toBe(fullSession);
+    expect(preview).not.toBe(fullSession);
+    expect(preview.isDisplayOnly()).toBe(true);
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+    expect(ref.current!.getDocument()).toBeNull();
+
+    await act(async () => {
+      releaseA();
+      await new Promise((done) => setTimeout(done, 200));
+    });
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+    expect(ref.current!.getDocument()).toBeNull();
+    expect(errors).toEqual([]);
+    expect(renderer!.layoutEngine).toBe(preview);
+    expect(renderer!.presentedEngine).toBe(preview);
+    expect(openInWorker).toHaveBeenCalledTimes(2);
+  } finally {
+    view.unmount();
+    releaseA();
+    releaseB();
+  }
 }, 30_000);
 
 test('a load whose full session fails to render fails, and leaves no session behind', async () => {
@@ -449,21 +592,25 @@ test('a load whose full session fails to lay out fails once, and leaves no sessi
   expect(ref.current!.getDocument()).toBeNull();
 }, 30_000);
 
-test("a preview's render error is reported once and does not fail the full session", async () => {
-  created = 0;
-  fullOpen = 'open';
-  failRender = 'preview';
-  const ref = createRef<Editor>();
-  const errors: string[] = [];
-  const buffer = documentBuffer();
-  const view = render(load(buffer, (error) => errors.push(error.message), ref));
-  await waitFor(() => expect(created).toBe(2), { timeout: 10_000 });
-  // A host passing a new callback while the full session opens.
-  view.rerender(load(buffer, (error) => errors.push(`again: ${error.message}`), ref));
-  await waitFor(() => expect(ref.current!.getDocument()).not.toBeNull(), { timeout: 10_000 });
-  expect(errors).toEqual(['preview render failed']);
-  expect(view.container.querySelector('.docx-editor-error')).toBeNull();
-}, 30_000);
+test.each([false, true])(
+  "a preview's render error is reported once and does not fail the full session (workerOpen=%p)",
+  async (workerOpen) => {
+    created = 0;
+    fullOpen = 'open';
+    failRender = 'preview';
+    const ref = createRef<Editor>();
+    const errors: string[] = [];
+    const buffer = documentBuffer();
+    const view = render(load(buffer, (error) => errors.push(error.message), ref, workerOpen));
+    await waitFor(() => expect(created).toBe(2), { timeout: 10_000 });
+    // A host passing a new callback while the full session opens.
+    view.rerender(load(buffer, (error) => errors.push(`again: ${error.message}`), ref, workerOpen));
+    await waitFor(() => expect(ref.current!.getDocument()).not.toBeNull(), { timeout: 10_000 });
+    expect(errors).toEqual(['preview render failed']);
+    expect(view.container.querySelector('.docx-editor-error')).toBeNull();
+  },
+  30_000
+);
 
 test('while its preview shows, a load has no page count and its layout is not complete', async () => {
   created = 0;
