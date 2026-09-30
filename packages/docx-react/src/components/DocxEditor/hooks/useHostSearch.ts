@@ -125,6 +125,9 @@ function firstOnPage(
   return -1;
 }
 
+/** How many candidate matches past the look-ahead have their page read. */
+const FALLBACK_PAGE_READS = 64;
+
 /** The first match on or after the page in view, wrapping to the first. */
 function firstInView(
   matches: readonly SearchMatch[],
@@ -141,16 +144,22 @@ function firstInView(
     const first = firstOnPage(matches, order, queries, index, pageIndex);
     if (first >= 0) return first;
   }
-  let nearest = -1;
-  let nearestPage = Number.POSITIVE_INFINITY;
-  for (let index = 0; index < matches.length; index += 1) {
-    const page = queries.anchorRect(matches[index].displayFrom)?.pageIndex;
-    if (page != null && page >= pageIndex && page < nearestPage) {
-      nearest = index;
-      nearestPage = page;
-    }
+  // Further on, the candidates are the matches from the first position painted on or after
+  // the page in view (or after the last one painted before it), in position order: their
+  // pages are read only until one is on or after that page.
+  let start: number | undefined;
+  for (let index = pageIndex; index < pages && start === undefined; index += 1) {
+    start = pagePositionIntervals(queries.displayList, { start: index, end: index })[0]?.from;
   }
-  return nearest >= 0 ? nearest : 0;
+  for (let index = Math.min(pageIndex, pages) - 1; index >= 0 && start === undefined; index -= 1) {
+    start = pagePositionIntervals(queries.displayList, { start: index, end: index }).at(-1)?.to;
+  }
+  const candidates = matchesInRange(matches, order, start ?? 0, Number.POSITIVE_INFINITY);
+  for (const index of candidates.slice(0, FALLBACK_PAGE_READS)) {
+    const page = queries.anchorRect(matches[index].displayFrom)?.pageIndex;
+    if (page == null || page >= pageIndex) return index;
+  }
+  return candidates[0] ?? 0;
 }
 
 function anchorOf(session: YrsSession, match: SearchMatch | undefined): YrsStickyPosition | null {

@@ -251,6 +251,41 @@ test('starts at the nearest later page beyond the look-ahead with non-monotonic 
   expect(reveals).toEqual([matches[1].displayFrom]);
 });
 
+test('a page in view past every match wraps to the first without reading every match page', async () => {
+  const { hook, host, queries } = await mount(3);
+  const displayListQueries = queries(0);
+  let pageReads = 0;
+  Object.assign(displayListQueries, {
+    displayList: {
+      pages: Array.from({ length: 41 }, (_, pageIndex) => ({
+        pageIndex,
+        primitives:
+          pageIndex === 0
+            ? [{ kind: 'text', docStart: 0, docEnd: 100000 }]
+            : pageIndex === 40
+              ? [{ kind: 'text', docStart: 100001, docEnd: 100010 }]
+              : [],
+      })),
+    },
+    anchorRect: () => {
+      pageReads += 1;
+      return { pageIndex: 0, x: 0, y: 0, width: 1, height: 1 };
+    },
+  });
+  const canvas = document.createElement('canvas');
+  canvas.dataset.pageIndex = '40';
+  canvas.getBoundingClientRect = () => new DOMRect(0, 10, 800, 990);
+  host.append(canvas);
+  expect(topPageInView(host)).toBe(40);
+
+  let state = null as DocxSearchState | null;
+  await act(async () => {
+    state = await hook.result.current.api.search('the');
+  });
+  expect(state).toMatchObject({ total: 5, current: 0 });
+  expect(pageReads).toBe(0);
+});
+
 test('a document change re-runs the search and keeps the current match', async () => {
   const { session, first, hook, events } = await mount();
   const api = () => hook.result.current.api;
