@@ -13,7 +13,7 @@ use docx_layout::footnotes::{
 };
 use docx_layout::header_footer::{
     HeaderFooterKind, HeaderFooterMetrics, HeaderFooterPayload, HeaderFooterType,
-    HeaderFooterVariant, extend_body_margins, measure_header_footer,
+    HeaderFooterVariant, extend_body_margins, header_footer_float_bands, measure_header_footer,
     resolve_header_footer_field_widths,
 };
 use docx_layout::hit::{CaretRect, VerticalDirection};
@@ -800,20 +800,37 @@ fn extend_input_for_header_footer(
                 }
                 None => fallback_margins.clone(),
             };
-            let height = |kind: HeaderFooterKind, hf_type: HeaderFooterType| {
-                variants
-                    .iter()
-                    .rfind(|variant| {
-                        variant.section_index == section_index
-                            && variant.kind == kind
-                            && variant.hf_type == hf_type
-                    })
-                    .map(|variant| variant.flow_height)
+            let variant = |kind: HeaderFooterKind, hf_type: HeaderFooterType| {
+                variants.iter().rfind(|variant| {
+                    variant.section_index == section_index
+                        && variant.kind == kind
+                        && variant.hf_type == hf_type
+                })
             };
             let extend = |hf_type: HeaderFooterType| {
-                let header = height(HeaderFooterKind::Header, hf_type).unwrap_or(0.0);
-                let footer = height(HeaderFooterKind::Footer, hf_type).unwrap_or(0.0);
+                let header = variant(HeaderFooterKind::Header, hf_type)
+                    .map_or(0.0, |variant| variant.flow_height);
+                let footer = variant(HeaderFooterKind::Footer, hf_type)
+                    .map_or(0.0, |variant| variant.flow_height);
                 extend_body_margins(&page_size, &margins, header, footer)
+            };
+            let float_bands = |hf_type: HeaderFooterType| {
+                let mut bands: Vec<_> = [HeaderFooterKind::Header, HeaderFooterKind::Footer]
+                    .into_iter()
+                    .filter_map(|kind| variant(kind, hf_type))
+                    .flat_map(|variant| {
+                        header_footer_float_bands(
+                            variant,
+                            HeaderFooterMetrics {
+                                kind: variant.kind,
+                                page_size: &page_size,
+                                margins: &margins,
+                            },
+                        )
+                    })
+                    .collect();
+                bands.sort_by(|a, b| a.top.total_cmp(&b.top));
+                bands
             };
             let even_and_odd =
                 regions.even_and_odd_headers || section.even_and_odd_headers == Some(true);
@@ -827,14 +844,34 @@ fn extend_input_for_header_footer(
                         .as_ref()
                         .and_then(|numbering| numbering.start),
                 },
+                docx_layout::types::SectionPageFloatBands {
+                    default: float_bands(HeaderFooterType::Default),
+                    first: section
+                        .title_pg
+                        .then(|| float_bands(HeaderFooterType::First)),
+                    even: even_and_odd.then(|| float_bands(HeaderFooterType::Even)),
+                    anchor_margins: Some(margins.clone()),
+                },
             )
         })
         .collect();
-    let (extended, page_margins): (Vec<_>, Vec<_>) = extended.into_iter().unzip();
+    let (extended, bands): (Vec<_>, Vec<_>) = extended
+        .into_iter()
+        .map(|(margins, page_margins, float_bands)| (margins, (page_margins, float_bands)))
+        .unzip();
+    let (page_margins, float_bands): (Vec<_>, Vec<_>) = bands.into_iter().unzip();
     input.options.section_page_margins = page_margins
         .iter()
         .any(|margins| *margins != SectionPageMargins::default())
         .then_some(page_margins);
+    input.options.section_page_float_bands = float_bands
+        .iter()
+        .any(|bands| {
+            !bands.default.is_empty()
+                || bands.first.as_ref().is_some_and(|bands| !bands.is_empty())
+                || bands.even.as_ref().is_some_and(|bands| !bands.is_empty())
+        })
+        .then_some(float_bands);
     input.options.margins = extended.first().cloned();
     input.options.final_margins = extended.last().cloned();
     let mut section_index = 0;

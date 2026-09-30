@@ -821,6 +821,8 @@ mod tests {
         Page {
             number,
             fragments: Vec::new(),
+            body_margins: None,
+            body_anchor_margins: None,
             margins: PageMargins {
                 top: 96.0,
                 right: 96.0,
@@ -839,6 +841,7 @@ mod tests {
             header_footer_refs: None,
             footnote_ids: None,
             footnote_reserved_height: None,
+            float_bands: Vec::new(),
             footnote_columns: None,
             columns: None,
             section_id: None,

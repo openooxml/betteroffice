@@ -230,7 +230,10 @@ pub fn place_layout<'a>(input: &PlacementInput<'a>) -> Placements<'a> {
                 Fragment::Table(fragment) => Some(fragment.y + fragment.height),
                 _ => None,
             })
-            .fold(page.margins.top, f64::max);
+            .fold(
+                page.body_margins.as_ref().unwrap_or(&page.margins).top,
+                f64::max,
+            );
         let mut regions: Vec<PlacedRegionContent<'a>> = if body.is_empty() {
             vec![PlacedRegionContent {
                 region: PlacedRegion::Body {
