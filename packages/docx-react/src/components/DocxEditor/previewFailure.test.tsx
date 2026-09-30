@@ -366,7 +366,7 @@ test('a preview whose canvas replay rejects during full-session handover does no
     expect(view.container.querySelector('.docx-editor-error')).toBeNull();
     expect(renderer!.layoutEngine).toBe(fullSession);
     expect(renderer!.presentedEngine).toBe(fullSession);
-    expect(ref.current!.getEditorRef()!.getYrsSession()).toBe(fullSession);
+    expect(ref.current!.getEditorRef()!.getYrsSession()).toBe(fullSession as YrsSession);
     expect(ref.current!.getDocument()).not.toBeNull();
     expect(ref.current!.getTotalPages()).toBeGreaterThan(0);
     expect(created).toBe(2);
