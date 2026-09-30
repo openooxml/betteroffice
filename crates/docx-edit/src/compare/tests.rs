@@ -312,7 +312,7 @@ fn text_differences_become_attributed_tracked_changes() {
             .iter()
             .map(|(key, text, _)| (key.as_str(), text.as_str()))
             .collect::<Vec<_>>(),
-        vec![(INS, "slow"), (DEL, "quick"), (DEL, "word "), (INS, " now")]
+        vec![(DEL, "quick"), (INS, "slow"), (DEL, "word "), (INS, " now")]
     );
     assert!(
         stamped
@@ -629,9 +629,9 @@ fn inserted_runs_carry_revised_formatting_and_deleted_runs_keep_theirs() {
         styled,
         vec![
             ("Keep ".to_owned(), false, false, false, false),
+            ("old".to_owned(), false, true, false, true),
             ("new".to_owned(), true, false, true, false),
             (" hue".to_owned(), true, false, false, false),
-            ("old".to_owned(), false, true, false, true),
         ]
     );
 }
