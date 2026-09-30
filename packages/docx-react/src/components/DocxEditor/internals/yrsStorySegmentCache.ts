@@ -22,6 +22,7 @@ export class YrsStorySegmentCache {
   private readonly units = new Map<string, { segments: YrsStorySegment[]; stories: number }>();
   private readonly undigested = new Set<string>();
   private cancelIdle: (() => void) | null = null;
+  private released = false;
 
   constructor(readonly session: YrsSession) {}
 
@@ -87,9 +88,19 @@ export class YrsStorySegmentCache {
     }
   }
 
+  /** Whether {@link YrsStorySegmentCache.dispose} ran; a disposed cache holds nothing. */
+  get disposed(): boolean {
+    return this.released;
+  }
+
   dispose(): void {
     this.cancelIdle?.();
     this.cancelIdle = null;
+    this.released = true;
+    this.stories.clear();
+    this.stale.clear();
+    this.units.clear();
+    this.undigested.clear();
   }
 
   /** Reads the digests of stories read whole that have not changed since. */
@@ -139,17 +150,16 @@ export class YrsStorySegmentCache {
 }
 
 /**
- * Serves `session`'s segments from the cache `current` holds, brought up to date on every read.
- * Once that cache belongs to another session, reads go to `session` itself.
+ * Serves `session`'s segments from `cache`, brought up to date on every read. Once the cache is
+ * disposed, as when its editor unmounts or opens another document, reads go to `session` itself.
  */
 export function storySegmentSource(
   session: YrsSession,
-  current: () => YrsStorySegmentCache | null
+  cache: YrsStorySegmentCache
 ): YrsStorySegmentSource {
   return {
     segments(story) {
-      const cache = current();
-      if (cache?.session !== session) return session.storySegments(story);
+      if (cache.disposed || cache.session !== session) return session.storySegments(story);
       cache.refresh();
       const segments = cache.segments(story);
       cache.scheduleDigests();

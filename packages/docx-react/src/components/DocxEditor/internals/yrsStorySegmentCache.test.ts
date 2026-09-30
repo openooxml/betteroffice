@@ -160,7 +160,7 @@ test('a sidebar projection read through the cache re-reads only the edited parag
     const { reads, clear } = counted(session);
     const paragraphs = session.paragraphs('body');
     const locations = paragraphs.map(({ paraId }) => ({ story: 'body', paraId, offset: 1 }));
-    const first = createYrsSidebarProjection(session, storySegmentSource(session, () => cache));
+    const first = createYrsSidebarProjection(session, storySegmentSource(session, cache));
     const firstDirect = createYrsSidebarProjection(direct);
     for (const loc of locations) {
       expect(first.locToDisplayPoint(loc)).toEqual(firstDirect.locToDisplayPoint(loc));
@@ -177,6 +177,23 @@ test('a sidebar projection read through the cache re-reads only the edited parag
     expect(edited).not.toBe(first);
     expect(reads.whole).toEqual([]);
     expect(reads.units).toEqual([[1]]);
+  } finally {
+    session.destroy();
+  }
+});
+
+test('a source whose cache was disposed reads the session directly and holds no segments', async () => {
+  const session = await createYrsSession({ clientId: 77004 });
+  try {
+    session.seedFromDocx(docx());
+    const cache = new YrsStorySegmentCache(session);
+    const source = storySegmentSource(session, cache);
+    source.segments('body');
+    cache.dispose();
+    const { reads } = counted(session);
+    expect(source.segments('body')).toEqual(session.storySegments('body'));
+    expect(reads.whole).toEqual(['body', 'body']);
+    expect(reads.digests).toEqual([]);
   } finally {
     session.destroy();
   }

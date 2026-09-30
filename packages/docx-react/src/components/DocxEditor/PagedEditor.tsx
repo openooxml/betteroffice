@@ -1405,7 +1405,13 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     } | null>(null);
     // Rebuilding a projection re-reads only the paragraphs that changed.
     const yrsStorySegmentsRef = useRef<YrsStorySegmentCache | null>(null);
-    useEffect(() => () => yrsStorySegmentsRef.current?.dispose(), []);
+    useEffect(
+      () => () => {
+        yrsStorySegmentsRef.current?.dispose();
+        yrsStorySegmentsRef.current = null;
+      },
+      []
+    );
     const currentStorySegments = useCallback((session: YrsSession): YrsStorySegmentCache => {
       let segments = yrsStorySegmentsRef.current;
       if (segments?.session !== session) {
@@ -1702,10 +1708,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           }
           return;
         }
-        currentStorySegments(session);
         const { tracked, projection } = sidebarReads.tracked(
           session,
-          storySegmentSource(session, () => yrsStorySegmentsRef.current)
+          storySegmentSource(session, currentStorySegments(session))
         );
         sidebarReads.deliver(onYrsTrackedChangesChange, tracked, session, version);
         const hfRegions = new Map<string, 'header' | 'footer'>();
