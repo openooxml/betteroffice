@@ -1430,7 +1430,7 @@ function docxSourceBuffer(bytes: Uint8Array): ArrayBuffer {
   ) {
     return bytes.buffer;
   }
-  return bytes.slice().buffer as ArrayBuffer;
+  return new Uint8Array(bytes).buffer as ArrayBuffer;
 }
 
 /**

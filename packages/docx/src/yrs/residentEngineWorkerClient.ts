@@ -119,7 +119,8 @@ export class ResidentEngineWorkerClient {
   private remoteVector: Uint8Array | null = null;
   private appliedFontsRevision: number | null = null;
   private bootstrapped = false;
-  private openSent = false;
+  /** Set once `open` is sent, with the heap limit it opened under. */
+  private openedHeapLimit: { bytes?: number } | null = null;
   /** Id of the last snapshot request sent; replies to earlier requests must
    * not replace the state it recorded. */
   private lastSnapshotId = 0;
@@ -193,10 +194,10 @@ export class ResidentEngineWorkerClient {
     bytes: Uint8Array,
     options: { digest?: string; generation?: string; heapLimitBytes?: number } = {}
   ): Promise<ResidentEngineWorkerOpened> {
-    if (this.openSent || this.bootstrapped) {
+    if (this.openedHeapLimit || this.bootstrapped) {
       throw new ResidentWorkerFailureError('Resident engine worker already holds a document');
     }
-    this.openSent = true;
+    this.openedHeapLimit = { bytes: options.heapLimitBytes };
     const copy = new Uint8Array(bytes);
     const response = await this.request(
       {
@@ -237,6 +238,15 @@ export class ResidentEngineWorkerClient {
     extras: string,
     options: ResidentEngineWorkerLayoutOptions & ResidentEngineWorkerSnapshotOptions = {}
   ): Promise<ResidentEngineWorkerFrame> {
+    if (
+      options.opened &&
+      options.heapLimitBytes !== undefined &&
+      options.heapLimitBytes !== this.openedHeapLimit?.bytes
+    ) {
+      throw new ResidentWorkerFailureError(
+        'Resident engine worker opened its document under another heap limit'
+      );
+    }
     const fontsRevision = snapshot.fontsRevision;
     this.bootstrapped = true;
     const pending = this.request(

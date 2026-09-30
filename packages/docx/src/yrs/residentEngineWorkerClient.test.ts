@@ -17,10 +17,12 @@ class FakeWorker implements ResidentEngineWorkerPort {
   onerror: ResidentEngineWorkerPort['onerror'] = null;
   onmessageerror: ResidentEngineWorkerPort['onmessageerror'] = null;
   readonly posted: ResidentEngineWorkerRequest[] = [];
+  readonly transfers: Transferable[][] = [];
   terminated = false;
 
-  postMessage(message: ResidentEngineWorkerRequest): void {
+  postMessage(message: ResidentEngineWorkerRequest, transfer: Transferable[] = []): void {
     this.posted.push(message);
+    this.transfers.push(transfer);
   }
 
   terminate(): void {
@@ -253,15 +255,28 @@ describe('worker failure', () => {
 });
 
 describe('resident worker opening', () => {
+  test('an opened bootstrap under another heap limit fails before touching its bookkeeping', async () => {
+    const { worker, client } = setup();
+    void client.open(new Uint8Array([1]), { heapLimitBytes: 1024 });
+    await expect(
+      client.bootstrap(snapshot, '', { opened: true, heapLimitBytes: 2048 })
+    ).rejects.toThrow('another heap limit');
+    expect(client.bootstrapSent()).toBe(false);
+    expect(worker.posted).toHaveLength(1);
+  });
+
   test('opens one document per worker and sends only the bytes of the view it gets', async () => {
     const { worker, client } = setup();
-    const backing = new Uint8Array([9, 1, 2, 3, 9]);
-    void client.open(backing.subarray(1, 4));
+    // A pooled Buffer: its `slice` shares the pool rather than copying.
+    const pooled = Buffer.from([1, 2, 3]);
+    expect(pooled.buffer.byteLength).toBeGreaterThan(3);
+    void client.open(pooled);
     const request = worker.posted[0];
     if (request.type !== 'open') throw new Error('open request missing');
+    expect(request.bytes).not.toBe(pooled.buffer);
     expect(request.bytes.byteLength).toBe(3);
     expect(new Uint8Array(request.bytes)).toEqual(new Uint8Array([1, 2, 3]));
-    expect(backing).toEqual(new Uint8Array([9, 1, 2, 3, 9]));
+    expect(worker.transfers[0]).toEqual([request.bytes]);
     await expect(client.open(new Uint8Array([4]))).rejects.toThrow('already holds a document');
     expect(worker.posted).toHaveLength(1);
   });
