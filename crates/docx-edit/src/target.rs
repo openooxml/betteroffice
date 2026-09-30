@@ -734,11 +734,13 @@ fn story_view_key(story: &str, view: EditTextView) -> String {
 }
 
 impl<'a, 'doc> Views<'a, yrs::Transaction<'doc>> {
-    /// Shares projections of this committed transaction's epoch.
+    /// Shares projections of this committed transaction's epoch inside a shared-read scope.
     pub fn committed(doc: &'a EditingDoc, txn: &'a yrs::Transaction<'doc>) -> Self {
         let mut views = Self::new(doc, txn);
         // The read transaction is already open, so no commit can land while it is held.
-        views.epoch = Some(doc.epoch.load(Ordering::Relaxed));
+        if doc.shared_read_depth.load(Ordering::Relaxed) > 0 {
+            views.epoch = Some(doc.epoch.load(Ordering::Relaxed));
+        }
         views
     }
 }
@@ -775,7 +777,9 @@ impl<'a, T: ReadTxn> Views<'a, T> {
                         return Some(built);
                     }
                     let built = Arc::new(StoryView::build(doc, txn, story, view)?);
-                    cache.insert(&key, epoch, Arc::clone(&built));
+                    if doc.shared_read_depth.load(Ordering::Relaxed) > 0 {
+                        cache.insert(&key, epoch, Arc::clone(&built));
+                    }
                     Some(built)
                 } else {
                     StoryView::build(doc, txn, story, view).map(Arc::new)
@@ -1444,6 +1448,7 @@ mod tests {
 
         let doc = EditingDoc::new(100);
         let para_id = doc.create_story("body", "Alpha", "Normal", "left").unwrap();
+        doc.begin_shared_reads();
         let read = || {
             doc.read_scope(|views| Ok(views.story("body", EditTextView::Accepted).unwrap()))
                 .unwrap()
@@ -1497,12 +1502,14 @@ mod tests {
         let merged = committed_body(&doc);
         assert!(!Arc::ptr_eq(&undone, &merged));
         assert_eq!(texts(&merged), ["Remote Alpha"]);
+        doc.end_shared_reads();
     }
 
     #[test]
     fn committed_story_views_separate_views_and_reuse_complete_projections() {
         let doc = EditingDoc::new(100);
         doc.create_story("body", "Alpha", "Normal", "left").unwrap();
+        doc.begin_shared_reads();
         let accepted = committed_body(&doc);
         let txn = doc.yrs_doc().transact();
         let mut views = Views::committed(&doc, &txn);
@@ -1521,12 +1528,47 @@ mod tests {
         assert!(Arc::ptr_eq(&accepted, &within));
         assert!(views.story("missing", EditTextView::Accepted).is_none());
         assert_eq!(doc.story_views.lock().unwrap().entries.len(), 2);
+        doc.end_shared_reads();
+    }
+
+    #[test]
+    fn committed_story_views_share_only_inside_nested_scopes() {
+        let doc = EditingDoc::new(100);
+        doc.create_story("body", "Alpha", "Normal", "left").unwrap();
+        doc.end_shared_reads();
+        let first = committed_body(&doc);
+        let second = committed_body(&doc);
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(doc.story_views.lock().unwrap().entries.is_empty());
+
+        doc.begin_shared_reads();
+        let shared = committed_body(&doc);
+        assert!(Arc::ptr_eq(&shared, &committed_body(&doc)));
+        assert_eq!(doc.story_views.lock().unwrap().entries.len(), 1);
+        doc.end_shared_reads();
+        assert!(doc.story_views.lock().unwrap().entries.is_empty());
+        assert!(!Arc::ptr_eq(&shared, &committed_body(&doc)));
+        assert!(doc.story_views.lock().unwrap().entries.is_empty());
+
+        doc.begin_shared_reads();
+        doc.begin_shared_reads();
+        let nested = committed_body(&doc);
+        assert!(!Arc::ptr_eq(&shared, &nested));
+        assert!(Arc::ptr_eq(&nested, &committed_body(&doc)));
+        doc.end_shared_reads();
+        assert_eq!(doc.story_views.lock().unwrap().entries.len(), 1);
+        assert!(Arc::ptr_eq(&nested, &committed_body(&doc)));
+        doc.end_shared_reads();
+        assert!(doc.story_views.lock().unwrap().entries.is_empty());
+        assert!(!Arc::ptr_eq(&nested, &committed_body(&doc)));
+        assert!(doc.story_views.lock().unwrap().entries.is_empty());
     }
 
     #[test]
     fn transaction_local_story_views_leave_the_shared_cache_untouched() {
         let doc = EditingDoc::new(100);
         doc.create_story("body", "Alpha", "Normal", "left").unwrap();
+        doc.begin_shared_reads();
         let local = {
             let txn = doc.yrs_doc().transact_mut();
             let mut views = Views::new(&doc, &txn);
@@ -1547,6 +1589,7 @@ mod tests {
         assert!(!Arc::ptr_eq(&local, &shared));
         assert!(Arc::ptr_eq(&shared, &committed_body(&doc)));
         assert_eq!(doc.story_views.lock().unwrap().entries.len(), 1);
+        doc.end_shared_reads();
     }
 
     #[test]
@@ -1557,10 +1600,12 @@ mod tests {
             include_bytes!("../tests/fixtures/footnote-anchor.docx"),
         )
         .unwrap();
+        doc.begin_shared_reads();
         let before = committed_body(&doc);
         assert!(Arc::ptr_eq(&before, &committed_body(&doc)));
         let metadata = doc.metadata.lock().unwrap().take().unwrap();
         doc.install_source(Arc::into_inner(metadata).unwrap(), 1);
         assert!(!Arc::ptr_eq(&before, &committed_body(&doc)));
+        doc.end_shared_reads();
     }
 }

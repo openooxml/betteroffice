@@ -1618,6 +1618,14 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     resolveParagraphAnchor: (anchor) => facade.resolveParagraphAnchor(anchor),
     findText: (request) => facade.findText(request),
     applyEdits: (request) => facade.applyEdits(request),
+    sharedReads: (read) => {
+      session.begin_shared_reads();
+      try {
+        return read();
+      } finally {
+        session.end_shared_reads();
+      }
+    },
   });
 
   const facade: YrsSession = {

@@ -93,6 +93,8 @@ export interface DocxProposalSession {
   resolveParagraphAnchor(anchor: DocxParagraphAnchor): DocxParagraphAnchorResult;
   findText(request: DocxFindTextRequest): DocxFindTextResult;
   applyEdits(request: DocxEditRequest): DocxEditResult;
+  /** Runs `read` with story projections shared across its reads; omitted, reads run unshared. */
+  sharedReads?<R>(read: () => R): R;
 }
 
 /** @internal */
@@ -570,7 +572,10 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
   };
 
   return {
-    propose,
+    propose(request) {
+      const read = () => propose(request);
+      return session.sharedReads ? session.sharedReads(read) : read();
+    },
     setStates,
     snapshot,
     subscribe(listener) {
