@@ -58,6 +58,7 @@ export const DOCX_REF_REPLICA_ACCESS = {
   applyEdits: 'await',
   proposeChanges: 'await',
   setProposalStates: 'await',
+  withdrawProposals: 'await',
   getProposals: 'await',
   exportStructuredWithPages: 'await',
   getPositionAtPoint: 'sync',
