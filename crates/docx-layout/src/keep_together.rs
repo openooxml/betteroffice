@@ -246,11 +246,11 @@ pub fn measure_keep_with_next_group_at(
 
 /// Height (px) of the shortest first fragment placement gives a table: its
 /// header band and first body slice (its first line when the paragraph rules
-/// leave that row no break in the room under the band), or a headerless
-/// table's first row (its smallest slice when the row is taller than
-/// `capacity`), extended to the end of any keep-with-next row chain starting
-/// in them that fits `capacity` along with the rows above it. A floating
-/// table keeps its line slice, as it is not placed in the flow.
+/// leave that row no break in the room under the band), or the smallest slice
+/// of a headerless table's first row (the whole row when it cannot split),
+/// extended to the end of any keep-with-next row chain starting in them that
+/// fits `capacity` along with the rows above it. A floating table keeps its
+/// line slice, as it is not placed in the flow.
 fn table_leading_slice(block: &TableBlock, measure: &TableExtent, capacity: f64) -> f64 {
     let breaks = RowBreaks::new(block, measure);
     if block.floating.is_some() {
@@ -262,16 +262,7 @@ fn table_leading_slice(block: &TableBlock, measure: &TableExtent, capacity: f64)
         .iter()
         .take_while(|row| row.is_header.unwrap_or(false))
         .count();
-    if headers == 0
-        && measure
-            .rows
-            .first()
-            .is_some_and(|row| row.height > capacity)
-        && !block
-            .rows
-            .first()
-            .is_some_and(|row| row.cant_split.unwrap_or(false) || row.is_exact_height())
-    {
+    if headers == 0 && !measure.rows.is_empty() {
         first = breaks.fresh_slice(0, 0.0, capacity);
     } else if headers > 0
         && headers < measure.rows.len()
