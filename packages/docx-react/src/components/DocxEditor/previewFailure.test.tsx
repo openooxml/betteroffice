@@ -17,7 +17,6 @@ const real = await import('@betteroffice/docx/yrs');
 const { createYrsSession } = real;
 let created = 0;
 let fullSession: unknown = null;
-let previewSession: unknown = null;
 let shownPages = false;
 let fullOpen: 'fail' | 'open' | 'layout-fail' = 'fail';
 let holdFullOpen: Promise<void> | null = null;
@@ -35,7 +34,6 @@ mock.module('@betteroffice/docx/yrs', () => ({
       throw new Error('full open failed');
     }
     const session = await createYrsSession(options);
-    if (created === 1) previewSession = session;
     if (created === 1 && failPreviewLayout) {
       session.layoutFontRequirementsJson = () => {
         throw new Error('preview layout failed');
@@ -54,29 +52,22 @@ const displayList = await import('./hooks/useDisplayList');
 const { useCanvasRenderer } = displayList;
 let renderer: ReturnType<typeof useCanvasRenderer> | null = null;
 // Once the full session exists, its pages fail to render; or, until the full
-// session's first frame shows, the preview's error stays set; or a build of
-// the preview fails once the handover has begun.
+// session's first frame shows, the preview's error stays set.
 const renderFailure = new Error('render failed');
 const previewFailure = new Error('preview render failed');
-const latePreviewFailure = new Error('late preview render failed');
-let failRender: 'full' | 'preview' | 'late-preview' | null = null;
+let failRender: 'full' | 'preview' | null = null;
 mock.module('./hooks/useDisplayList', () => ({
   ...displayList,
   useCanvasRenderer: (...args: Parameters<typeof useCanvasRenderer>) => {
     renderer = useCanvasRenderer(...args);
     if (renderer.displayList) shownPages = true;
-    const handingOver = args[3]?.current != null;
     const error =
       failRender === 'full' && created >= 2
         ? renderFailure
         : failRender === 'preview' && (created < 2 || renderer.presentedEngine !== fullSession)
           ? previewFailure
-          : failRender === 'late-preview' && handingOver && renderer.presentedEngine !== fullSession
-            ? latePreviewFailure
-            : null;
-    if (!error) return renderer;
-    const errorEngine = error === latePreviewFailure ? previewSession : renderer.errorEngine;
-    return { ...renderer, error, errorEngine, status: 'error' as const };
+          : null;
+    return error ? { ...renderer, error, status: 'error' as const } : renderer;
   },
 }));
 const { DocxEditor } = await import('../../index');
@@ -280,20 +271,4 @@ test("a preview's layout error is reported and fails no wait for the document", 
   } finally {
     failPreviewLayout = false;
   }
-}, 30_000);
-
-test("a preview's render error during the handover does not fail the full session", async () => {
-  created = 0;
-  fullSession = null;
-  previewSession = null;
-  shownPages = false;
-  fullOpen = 'open';
-  failRender = 'late-preview';
-  const ref = createRef<Editor>();
-  const errors: string[] = [];
-  const view = render(load(documentBuffer(), (error) => errors.push(error.message), ref));
-  await waitFor(() => expect(errors).toContain('late preview render failed'), { timeout: 10_000 });
-  await waitFor(() => expect(ref.current!.getDocument()).not.toBeNull(), { timeout: 10_000 });
-  expect(renderer!.presentedEngine).toBe(fullSession);
-  expect(view.container.querySelector('.docx-editor-error')).toBeNull();
 }, 30_000);

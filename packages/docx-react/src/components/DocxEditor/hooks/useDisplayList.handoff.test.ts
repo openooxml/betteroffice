@@ -547,6 +547,8 @@ test("a display-only preview's failed build fails no wait for the document", asy
       let failed = false;
       void result.current.settledDisplayList(null, null).catch(() => (failed = true));
       await waitFor(() => expect(result.current.error).toBe(failure));
+      // The editor fails the load only for its full session's own errors.
+      expect(result.current.errorEngine).toBe(engine);
       await act(async () => {});
       expect(failed).toBe(!displayOnly);
       unmount();
