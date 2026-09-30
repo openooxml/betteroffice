@@ -578,12 +578,14 @@ fn autofit_column_widths(
         for grid_cell in cells {
             let (floor, _) = cell_shrink_floor(table_block, &grid_cell, content_widths);
             below_cell_floor |= span_width(&widths, &grid_cell) < floor;
-            add_span_constraint(
-                &mut column_floors,
-                grid_cell.column_index,
-                grid_cell.col_span,
-                floor,
-            );
+            if floor.is_finite() {
+                add_span_constraint(
+                    &mut column_floors,
+                    grid_cell.column_index,
+                    grid_cell.col_span,
+                    floor,
+                );
+            }
         }
         if below_cell_floor && content_width >= column_floors.iter().sum::<f64>() {
             return None;
