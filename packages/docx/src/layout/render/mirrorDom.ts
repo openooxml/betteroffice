@@ -13,6 +13,7 @@ import type {
   TableCellRef,
 } from './displayList';
 import { textRunRect, glyphRunRect, lineRect, type GeoRect } from './displayListGeometry';
+import { collectInteractiveOverlayLayers, hideOccludedControl } from './interactiveOverlay';
 
 export const MIRROR_CLASS_NAMES = {
   page: 'layout-page layout-page-mirror',
@@ -75,6 +76,7 @@ export interface MirrorLabels {
 /** per-page build state threaded through the mirror walk */
 interface MirrorBuildCtx {
   labels?: MirrorLabels;
+  occludedWidgets: ReadonlySet<DisplayPrimitive>;
   /**
    * note-ref anchor ids already assigned on this page: a reference mark split
    * into several primitives (bidi/font subranges) must yield exactly one
@@ -261,7 +263,12 @@ export function buildMirrorPage(
 ): HTMLElement {
   const doc = options.document ?? document;
   const labels = options.labels;
-  const ctx: MirrorBuildCtx = { labels, noteRefIds: new Set() };
+  const occludedWidgets = new Set(
+    collectInteractiveOverlayLayers(page).flatMap((layer) =>
+      layer.widgets.filter((widget) => widget.occluded).flatMap((widget) => widget.primitives)
+    )
+  );
+  const ctx: MirrorBuildCtx = { labels, noteRefIds: new Set(), occludedWidgets };
 
   const pageEl = doc.createElement('div');
   pageEl.className = MIRROR_CLASS_NAMES.page;
@@ -796,6 +803,17 @@ function findStructuralRevision(
 }
 
 function renderMirrorPrimitive(
+  p: DisplayPrimitive,
+  doc: Document,
+  offsetY: number,
+  ctx: MirrorBuildCtx
+): HTMLElement {
+  const el = createMirrorPrimitive(p, doc, offsetY, ctx);
+  if (ctx.occludedWidgets.has(p)) hideOccludedControl(el);
+  return el;
+}
+
+function createMirrorPrimitive(
   p: DisplayPrimitive,
   doc: Document,
   offsetY: number,

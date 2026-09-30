@@ -250,6 +250,10 @@ describe('FrameDelta wire round-trip', () => {
         options: output.options,
         layout: output.layout,
         fontChains: { 'calibri|0|0': [fontId] },
+        headersFooters: {
+          variants: [],
+          watermark: { kind: 'text', text: 'DRAFT', font: 'Calibri' },
+        },
       });
     };
 
@@ -258,6 +262,7 @@ describe('FrameDelta wire round-trip', () => {
     const fullFrame = session.build_display_list_frame(first, 0);
     const retained = applyFrameDelta(null, decodeFrameDelta(fullFrame));
     expect(retained.displayList).toEqual(jsonList);
+    expect(retained.displayList.pages[0].watermarkPrimitiveCount).toBe(1);
 
     session.insert_text('body', paraId, 5, ' typed', undefined, undefined);
     const second = envelopeFor();
@@ -904,6 +909,27 @@ describe('FrameDelta typed values', () => {
       ['primitives', []],
       ['meta', { entries: meta }],
     ],
+  });
+
+  it('accepts a missing or zero watermark prefix on legacy pages', () => {
+    for (const count of [undefined, 0]) {
+      const payload = page([]);
+      if (count !== undefined) payload.entries.push(['watermarkPrimitiveCount', count]);
+      const decoded = decodeFrameDelta(encodeSinglePageFrame(payload));
+      const upsert = decoded.operations[0];
+      if (upsert?.kind !== 'upsert') throw new Error('expected an upsert');
+      expect(upsert.page.watermarkPrimitiveCount).toBe(count);
+    }
+  });
+
+  it('rejects an invalid watermark prefix', () => {
+    for (const count of [-1, 1, '1']) {
+      const payload = page([]);
+      payload.entries.push(['watermarkPrimitiveCount', count]);
+      expect(() => decodeFrameDelta(encodeSinglePageFrame(payload))).toThrow(
+        'watermark primitive count is invalid'
+      );
+    }
   });
 
   it('decodes a __proto__ key as an own property without touching the prototype', () => {

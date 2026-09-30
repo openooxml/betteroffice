@@ -14,7 +14,8 @@
 //! A page's `primitives` are emitted back to front: watermark, behind-document
 //! floating images, the layout's fragments in order, in-front floating images,
 //! then column separators. Inside a fragment the order is shading, borders,
-//! then line content.
+//! then line content. The `watermark_primitive_count` prefix paints below the
+//! header and footer; the remaining body primitives paint above them.
 //!
 //! `background`, `page_borders`, `header`, `footer` and `note_areas` are
 //! separate fields rather than entries in that stream, so the consumer places
@@ -125,6 +126,9 @@ pub struct DisplayPage {
     pub page_label: Option<String>,
     /// paint order
     pub primitives: Vec<Primitive>,
+    /// Leading primitives painted beneath the header and footer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark_primitive_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -4999,6 +5003,7 @@ fn build_display_list_selected(
         {
             emit_watermark(&mut prims, watermark, page);
         }
+        let watermark_primitive_count = (!prims.is_empty()).then_some(prims.len());
         if let Some(border) = page_border_primitive(
             &render_options,
             page,
@@ -5262,6 +5267,7 @@ fn build_display_list_selected(
             section_page_number: page.section_page_number,
             page_label: page.page_label.clone(),
             primitives: prims,
+            watermark_primitive_count,
             background: page.background.clone(),
             page_borders,
             header,
@@ -10711,6 +10717,7 @@ fn unbuilt_page_with_span(
         section_page_number: page.section_page_number,
         page_label: page.page_label.clone(),
         primitives: Vec::new(),
+        watermark_primitive_count: None,
         background: page.background.clone(),
         page_borders: Vec::new(),
         header: None,

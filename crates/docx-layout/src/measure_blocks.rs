@@ -11,10 +11,10 @@ use crate::table_grid::{
     resolve_table_column_widths, resolve_table_width_px,
 };
 use crate::types::{
-    BlockExtent, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition, LayoutBlock,
-    ParagraphBlock, ParagraphExtent, ParagraphSpacing, Run, ShapeBlock, ShapeExtent, TableBlock,
-    TableCellExtent, TableExtent, TableRowExtent, TextBoxBlock, TextBoxExtent, TypesetBidiSlice,
-    TypesetClusterAdvance, TypesetRow, TypesetRowSegment, TypesetRunAdvance,
+    BlockExtent, BlockId, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition,
+    LayoutBlock, ParagraphBlock, ParagraphExtent, ParagraphSpacing, Run, ShapeBlock, ShapeExtent,
+    TableBlock, TableCellExtent, TableExtent, TableRowExtent, TextBoxBlock, TextBoxExtent,
+    TypesetBidiSlice, TypesetClusterAdvance, TypesetRow, TypesetRowSegment, TypesetRunAdvance,
 };
 use ooxml_text::{LineBox, LineSpacingRule, apply_spacing_rule};
 
@@ -110,6 +110,93 @@ pub fn collect_font_requirements_into<'a>(
             collect_paragraph_font_requirements(paragraph, &scripts, default_family, requirements);
         });
     }
+}
+
+/// Fonts any revision preview may need. Returns false when any of them needs a
+/// script fallback, whose chain order a superset cannot keep exact.
+pub fn collect_preview_font_requirements_into<'a>(
+    blocks: impl IntoIterator<Item = &'a LayoutBlock>,
+    default_family: &str,
+    requirements: &mut BTreeMap<String, FontRequirement>,
+) -> bool {
+    let blocks: Vec<&LayoutBlock> = blocks.into_iter().collect();
+    // A preview hiding the drawings that split a paragraph joins its segments.
+    let mut segment_scripts = HashMap::<String, Vec<String>>::new();
+    for block in &blocks {
+        walk_paragraphs(std::slice::from_ref(*block), &mut |paragraph| {
+            if let BlockId::Str(id) = &paragraph.id
+                && !id.is_empty()
+            {
+                let scripts = segment_scripts.entry(id.clone()).or_default();
+                for script in paragraph_scripts_with_han_fallback(paragraph, true) {
+                    if !scripts.contains(&script) {
+                        scripts.push(script);
+                    }
+                }
+            }
+        });
+    }
+    for block in blocks {
+        walk_paragraphs(std::slice::from_ref(block), &mut |paragraph| {
+            let scripts = match &paragraph.id {
+                BlockId::Str(id) if !id.is_empty() => segment_scripts[id].clone(),
+                _ => paragraph_scripts_with_han_fallback(paragraph, true),
+            };
+            collect_paragraph_font_requirements(paragraph, &scripts, default_family, requirements);
+            let Some(attrs) = &paragraph.attrs else {
+                return;
+            };
+            if attrs.num_pr.is_none()
+                && attrs.list_marker.is_none()
+                && attrs.list_is_bullet.is_none()
+                && attrs.list_marker_hidden.is_none()
+                && attrs.list_marker_font_family.is_none()
+                && attrs.list_marker_font_size.is_none()
+                && attrs.list_marker_bold.is_none()
+                && attrs.list_marker_italic.is_none()
+                && attrs.list_marker_color.is_none()
+                && attrs.list_marker_suffix.is_none()
+                && attrs.list_marker_revision.is_none()
+            {
+                return;
+            }
+            let default_family = attrs
+                .default_font_family
+                .as_deref()
+                .unwrap_or(default_family);
+            let marker_style = (
+                attrs.list_marker_bold.unwrap_or(false),
+                attrs.list_marker_italic.unwrap_or(false),
+            );
+            let styles = if attrs.list_marker.is_none() {
+                &[(false, false), (true, false), (false, true), (true, true)][..]
+            } else {
+                std::slice::from_ref(&marker_style)
+            };
+            for family in paragraph
+                .runs
+                .iter()
+                .filter_map(|run| {
+                    let formatting = match run {
+                        Run::Text(text) => &text.fmt,
+                        Run::Tab(tab) => &tab.fmt,
+                        Run::Field(field) => &field.fmt,
+                        _ => return None,
+                    };
+                    formatting.font_family.as_deref()
+                })
+                .chain(std::iter::once(default_family))
+            {
+                let family = attrs.list_marker_font_family.as_deref().unwrap_or(family);
+                for &(bold, italic) in styles {
+                    add_font_requirement(family, bold, italic, &scripts, requirements);
+                }
+            }
+        });
+    }
+    requirements
+        .values()
+        .all(|requirement| requirement.scripts.is_empty())
 }
 
 /// The family measurement gives text naming none: `defaults.fontFamily`, else Calibri.
@@ -298,6 +385,13 @@ fn collect_paragraph_font_requirements(
 }
 
 fn paragraph_scripts(paragraph: &ParagraphBlock) -> Vec<String> {
+    paragraph_scripts_with_han_fallback(paragraph, false)
+}
+
+fn paragraph_scripts_with_han_fallback(
+    paragraph: &ParagraphBlock,
+    include_han_fallback: bool,
+) -> Vec<String> {
     let mut han = false;
     let mut kana = false;
     let mut hangul = false;
@@ -340,7 +434,7 @@ fn paragraph_scripts(paragraph: &ParagraphBlock) -> Vec<String> {
     if hangul {
         scripts.push("cjk-kr".to_owned());
     }
-    if han && !kana && !hangul {
+    if han && (include_han_fallback || (!kana && !hangul)) {
         scripts.push("cjk-sc".to_owned());
     }
     if arabic {

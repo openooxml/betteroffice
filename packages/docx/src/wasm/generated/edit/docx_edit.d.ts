@@ -165,6 +165,10 @@ export class EditSession {
      */
     begin_region_layout(input: string): string;
     /**
+     * Until the matching `end_shared_reads`, committed reads share story projections of each document state.
+     */
+    begin_shared_reads(): void;
+    /**
      * Display-only input JSON in, one binary `FrameDelta` v1 out (exposed as
      * a transferable `Uint8Array`). `expected_frame_epoch` is the epoch of the
      * frame the caller currently holds; pass `0` for the first frame. A
@@ -358,6 +362,10 @@ export class EditSession {
      * with [`EditSession::resolve_encoded_selection`].
      */
     encoded_selection(): string;
+    /**
+     * Ends a shared-read scope, dropping shared story projections when the last scope ends.
+     */
+    end_shared_reads(): void;
     /**
      * [`EditSession::export_structured_json`] rendered as Markdown from the same read:
      * `{"ok":true,"version","content":{"markdown","anchors","diagnostics","truncated"}}`.
@@ -1463,12 +1471,6 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
-    readonly wasm_failed_allocation_bytes: () => number;
-    readonly wasm_heap_counted: () => number;
-    readonly wasm_live_bytes: () => number;
-    readonly wasm_peak_bytes: () => number;
-    readonly set_wasm_heap_limit: (a: number) => void;
-    readonly reset_wasm_peak_bytes: () => void;
     readonly __wbg_editsession_free: (a: number, b: number) => void;
     readonly editsession_accept_change: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_add_comment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
@@ -1487,6 +1489,7 @@ export interface InitOutput {
     readonly editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_begin_opening: (a: number, b: number, c: number) => void;
     readonly editsession_begin_region_layout: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_begin_shared_reads: (a: number) => void;
     readonly editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_build_display_list_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_build_display_pages_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -1517,6 +1520,7 @@ export interface InitOutput {
     readonly editsession_encode_state_vector: (a: number) => [number, number];
     readonly editsession_encode_sticky_position: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly editsession_encoded_selection: (a: number) => [number, number, number, number];
+    readonly editsession_end_shared_reads: (a: number) => void;
     readonly editsession_export_markdown_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_export_snapshot_with_private_fonts_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_export_structured_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -1639,6 +1643,12 @@ export interface InitOutput {
     readonly list_docx_content_controls_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly render_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly render_docx_markdown_with_pages_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly wasm_failed_allocation_bytes: () => number;
+    readonly wasm_heap_counted: () => number;
+    readonly wasm_live_bytes: () => number;
+    readonly wasm_peak_bytes: () => number;
+    readonly set_wasm_heap_limit: (a: number) => void;
+    readonly reset_wasm_peak_bytes: () => void;
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
     readonly clear_measure_fonts: () => void;
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
