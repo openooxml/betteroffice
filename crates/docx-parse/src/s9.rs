@@ -15,7 +15,7 @@ use crate::comments::remove_orphan_comment_ranges;
 use crate::document::{DocumentBody, extract_all_template_variables, parse_document_body_compact};
 use crate::fonts::{FontTable, parse_font_table};
 use crate::header_footer::{HeaderFooter, parse_related_header_footers};
-use crate::media::{MediaFile, MediaTable, build_media_map_with_warnings, is_media_path};
+use crate::media::{MediaFile, MediaTable, build_media_map_with_warnings};
 use crate::notes::Note;
 use crate::numbering::{NumberingDefinitions, parse_numbering};
 use crate::paragraph::{HexIdAllocator, Paragraph};
@@ -208,9 +208,9 @@ pub fn parse_docx_s9_wire_parts_with_limits(
 
 /// [`parse_docx_s9_wire_parts_with_limits`] leaving the media in the package:
 /// an image names its part by a [`MediaTable`] token where it would carry a
-/// `data:` URL, and the envelope lists no media entries. Watermarks and
-/// comments, which reach the host, keep their `data:` URLs. Returns the
-/// package's other parts and its media table.
+/// `data:` URL, and the envelope lists no media entries. Watermarks keep
+/// their `data:` URLs. Returns the parts the parse inflated and the media
+/// table.
 pub fn parse_docx_s9_wire_with_media_table(
     data: Arc<[u8]>,
     options: S9ParseOptions,
@@ -226,19 +226,17 @@ pub fn parse_docx_s9_wire_with_media_table(
 pub fn media_table_parts(
     data: &Arc<[u8]>,
 ) -> Result<(Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
-    let parts =
-        ooxml_opc::unzip_parts_where(data, ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES, |path| {
-            !is_media_path(path) || is_xml_part(path)
-        })
-        .map_err(ParseError::Container)?;
-    let inflated = parts
-        .iter()
-        .filter(|(path, _)| !is_media_path(path))
-        .map(|(_, bytes)| bytes.len() as u64)
-        .sum();
     let package =
         ooxml_opc::RetainedPackage::new(Arc::clone(data)).map_err(ParseError::Container)?;
-    let table = MediaTable::new(package, inflated).map_err(ParseError::Container)?;
+    let table = MediaTable::new(package).map_err(ParseError::Container)?;
+    let parts =
+        ooxml_opc::unzip_parts_where(data, ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES, |path| {
+            !table.keeps_compressed(path)
+        })
+        .map_err(ParseError::Container)?;
+    table
+        .check_budget(parts.iter().map(|(_, bytes)| bytes.len() as u64).sum())
+        .map_err(ParseError::Container)?;
     Ok((parts, table))
 }
 
@@ -783,15 +781,8 @@ fn ordered_map<T: Serialize>(entries: &[(String, T)]) -> Result<CanonicalValue, 
         .map(CanonicalValue::OrderedMap)
 }
 
-/// Whether the parser may read `path` as markup, wherever it sits.
-fn is_xml_part(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    lower.ends_with(".xml") || lower.ends_with(".rels")
-}
-
-/// Gives the watermarks and comments of a package parsed against `table`
-/// the `data:` URLs their tokens stand for, since both reach the host as
-/// parsed.
+/// Gives the watermarks of a package parsed against `table` the `data:` URLs
+/// their tokens stand for, since they reach the host as parsed.
 fn resolve_host_media(package: &mut S9PackageWire, table: &MediaTable) -> Result<(), ParseError> {
     for (_, story) in package
         .header_entries
@@ -803,64 +794,13 @@ fn resolve_host_media(package: &mut S9PackageWire, table: &MediaTable) -> Result
             data_url: Some(data_url),
             ..
         }) = story.watermark.as_mut()
-            && let Some(resolved) = resolve_token(data_url, table)?
+            && let Some(index) =
+                crate::media::media_token_index(data_url).filter(|index| *index < table.len())
         {
-            *data_url = resolved;
-        }
-    }
-    for comment in package.document.comments.iter_mut().flatten() {
-        let mut value = serde_json::to_value(&*comment)
-            .map_err(|error| ParseError::Canonical(error.to_string()))?;
-        if resolve_value_media(&mut value, table)? {
-            *comment = serde_json::from_value(value)
-                .map_err(|error| ParseError::Canonical(error.to_string()))?;
+            *data_url = table.data_url(index).map_err(ParseError::Container)?;
         }
     }
     Ok(())
-}
-
-/// The `data:` URL a token names, or `None` for any other string.
-fn resolve_token(src: &str, table: &MediaTable) -> Result<Option<String>, ParseError> {
-    match crate::media::media_token_index(src).filter(|index| *index < table.len()) {
-        Some(index) => table
-            .data_url(index)
-            .map(Some)
-            .map_err(ParseError::Container),
-        None => Ok(None),
-    }
-}
-
-/// Replaces every token under a `src` key in `value`; whether any was.
-fn resolve_value_media(
-    value: &mut serde_json::Value,
-    table: &MediaTable,
-) -> Result<bool, ParseError> {
-    Ok(match value {
-        serde_json::Value::Object(fields) => {
-            let mut changed = false;
-            for (key, field) in fields.iter_mut() {
-                if key == "src"
-                    && let serde_json::Value::String(src) = field
-                {
-                    if let Some(resolved) = resolve_token(src, table)? {
-                        *src = resolved;
-                        changed = true;
-                    }
-                } else {
-                    changed |= resolve_value_media(field, table)?;
-                }
-            }
-            changed
-        }
-        serde_json::Value::Array(items) => {
-            let mut changed = false;
-            for item in items {
-                changed |= resolve_value_media(item, table)?;
-            }
-            changed
-        }
-        _ => false,
-    })
 }
 
 fn canonical_media(entries: &[(String, Arc<MediaFile>)]) -> Result<CanonicalValue, ParseError> {
