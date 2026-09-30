@@ -30,7 +30,7 @@ use yrs::types::text::YChange;
 use yrs::types::{Delta, EntryChange, Event};
 use yrs::{
     Any, BranchID, DeepObservable, Doc, Map, MapRef, Observable, Out, ReadTxn, Subscription, Text,
-    TextRef, Transact, TransactionMut,
+    TextRef, Transact, Transaction, TransactionMut,
 };
 
 use crate::{
@@ -519,7 +519,7 @@ struct StoryState {
 fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
     let (scan, mut comments) = {
         let txn = doc.yrs_doc().transact();
-        let scan = Scan::new(&txn);
+        let scan = doc.committed_scan(&txn);
         let comments: HashMap<String, BTreeMap<String, Vec<(u32, u32)>>> = scan
             .stories
             .iter()
@@ -650,7 +650,7 @@ impl Pilcrow {
 }
 
 /// Every story and pilcrow, stories in sorted order, plus each nested story's parent.
-struct Scan {
+pub(crate) struct Scan {
     stories: Vec<String>,
     pilcrows: Vec<Pilcrow>,
     parents: HashMap<String, String>,
@@ -729,6 +729,10 @@ impl Scan {
         story
     }
 }
+
+/// The [`Scan`] of the last committed state read, with the epoch it was read at.
+#[derive(Default)]
+pub(crate) struct ScanCache(Mutex<Option<(u64, Arc<Scan>)>>);
 
 struct Claim {
     owner: String,
@@ -1365,6 +1369,22 @@ impl Repairs {
 }
 
 impl EditingDoc {
+    /// [`Scan::new`] over the committed state `txn` reads, shared by every
+    /// read-only query until the next committed change.
+    fn committed_scan(&self, txn: &Transaction<'_>) -> Arc<Scan> {
+        // No commit lands while `txn` is open, so this is the epoch of what it reads.
+        let epoch = self.epoch.load(Ordering::Relaxed);
+        let mut cache = self.scan_cache.0.lock().unwrap();
+        if let Some((cached, scan)) = cache.as_ref()
+            && *cached == epoch
+        {
+            return Arc::clone(scan);
+        }
+        let scan = Arc::new(Scan::new(txn));
+        *cache = Some((epoch, Arc::clone(&scan)));
+        scan
+    }
+
     /// Starts a new opening of this document: writes its generation into
     /// replicated state, identical on every replica that syncs it, so session
     /// anchors from any other opening never resolve here, even one seeded
@@ -1900,12 +1920,12 @@ impl EditingDoc {
             let claims = claims(&txn);
             let assignments = source_assignments(&txn);
             let mut current: HashMap<String, u32> = HashMap::new();
-            for pilcrow in Scan::new(&txn).pilcrows {
+            for pilcrow in &self.committed_scan(&txn).pilcrows {
                 if let Some(id) = pilcrow
                     .saved_id(source.as_deref())
                     .and_then(|(id, _)| parse_paragraph_id(&id))
                 {
-                    current.insert(pilcrow.key, id);
+                    current.insert(pilcrow.key.clone(), id);
                 }
             }
             if let Some(source) = source.as_deref() {
@@ -1984,7 +2004,7 @@ impl EditingDoc {
         let txn = self.yrs_doc().transact();
         let claims = claims(&txn);
         let assignments = source_assignments(&txn);
-        let scan = Scan::new(&txn);
+        let scan = self.committed_scan(&txn);
         let id_origin = |id: &str, owner: &str| {
             claim(&claims, id, owner).map_or(ParagraphIdOrigin::Source, |claim| claim.origin)
         };
@@ -2068,7 +2088,7 @@ impl EditingDoc {
         }
         let source = self.source_index();
         let txn = self.yrs_doc().transact();
-        let scan = Scan::new(&txn);
+        let scan = self.committed_scan(&txn);
         let by_key = |key: &str, story: Option<&str>| -> Vec<ParagraphRef> {
             scan.pilcrows
                 .iter()
@@ -2157,7 +2177,7 @@ impl EditingDoc {
         };
         let txn = self.yrs_doc().transact();
         let assignments = source_assignments(&txn);
-        let scan = Scan::new(&txn);
+        let scan = self.committed_scan(&txn);
         drop(txn);
         let mut plan = ParagraphSavePlan {
             assignments: source
@@ -2326,6 +2346,129 @@ mod tests {
         let restored = &doc.paragraph_identities().paragraphs[1];
         assert_eq!(restored.paragraph, session("body", &split.second_para_id));
         assert_eq!(restored.ooxml_para_id.as_deref(), Some(second.as_str()));
+    }
+
+    fn scan_view(scan: &Scan) -> (Vec<String>, Vec<String>, BTreeMap<String, String>) {
+        let pilcrows = scan.pilcrows.iter().map(|pilcrow| {
+            format!(
+                "{} {} {:?} {:?} {} {} {:?}",
+                pilcrow.story,
+                pilcrow.key,
+                pilcrow.allocated,
+                pilcrow.source,
+                pilcrow.synthetic,
+                pilcrow.content,
+                AsRef::<Branch>::as_ref(&pilcrow.map).id(),
+            )
+        });
+        (
+            scan.stories.clone(),
+            pilcrows.collect(),
+            scan.parents.clone().into_iter().collect(),
+        )
+    }
+
+    /// The cached scan, checked against a fresh one of the same state.
+    fn checked_scan(doc: &EditingDoc) -> Arc<Scan> {
+        let txn = doc.yrs_doc().transact();
+        let cached = doc.committed_scan(&txn);
+        assert_eq!(scan_view(&cached), scan_view(&Scan::new(&txn)));
+        cached
+    }
+
+    /// Every read-only identity query, answered from the cache and cold.
+    fn queries_agree(doc: &EditingDoc) {
+        let answers = |cold: bool| {
+            let forget = || {
+                if cold {
+                    *doc.scan_cache.0.lock().unwrap() = None;
+                }
+            };
+            forget();
+            let identities = doc.paragraph_identities();
+            let anchors: Vec<_> = identities
+                .paragraphs
+                .iter()
+                .map(|identity| {
+                    let ParagraphRef::Session { story, para_id } = &identity.paragraph else {
+                        unreachable!("no source package is retained");
+                    };
+                    forget();
+                    doc.resolve_paragraph_anchor(&ParagraphAnchor::Session {
+                        session_id: identities.session_id.clone(),
+                        story: story.clone(),
+                        para_id: para_id.clone(),
+                    })
+                })
+                .collect();
+            (format!("{identities:?}"), format!("{anchors:?}"))
+        };
+        checked_scan(doc);
+        assert_eq!(answers(false), answers(true));
+    }
+
+    #[test]
+    fn the_cached_scan_matches_a_fresh_one_across_edits_undo_and_remote_updates() {
+        let doc = EditingDoc::new(7);
+        doc.create_story("body", "abcd", "Normal", "left").unwrap();
+        doc.create_story("hf:rIdHeader", "head", "Normal", "left")
+            .unwrap();
+        let mut undo = doc.undo_manager();
+        let opened = checked_scan(&doc);
+        assert!(Arc::ptr_eq(&opened, &checked_scan(&doc)));
+        queries_agree(&doc);
+
+        doc.split_paragraph(&ctx(), Position::new("body", 2), None)
+            .unwrap();
+        let split = checked_scan(&doc);
+        assert!(!Arc::ptr_eq(&opened, &split));
+        assert_eq!(split.pilcrows.len(), 3);
+        queries_agree(&doc);
+
+        doc.persist_paragraph_ids().unwrap();
+        let persisted = checked_scan(&doc);
+        assert!(!Arc::ptr_eq(&split, &persisted));
+        assert!(persisted.pilcrows[0].allocated.is_some());
+        queries_agree(&doc);
+
+        assert!(undo.undo());
+        assert_eq!(checked_scan(&doc).pilcrows.len(), 2);
+        queries_agree(&doc);
+        assert!(undo.redo());
+        assert_eq!(checked_scan(&doc).pilcrows.len(), 3);
+        queries_agree(&doc);
+
+        let remote = EditingDoc::new(9);
+        remote
+            .apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        remote
+            .split_paragraph(&ctx(), Position::new("body", 1), None)
+            .unwrap();
+        remote
+            .insert_text(
+                &ctx(),
+                Position::new("hf:rIdHeader", 0),
+                "x",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+        let before = checked_scan(&doc);
+        doc.apply_update_v1(
+            &remote
+                .encode_diff_v1(&doc.encode_state_vector_v1())
+                .unwrap(),
+        )
+        .unwrap();
+        let merged = checked_scan(&doc);
+        assert!(!Arc::ptr_eq(&before, &merged));
+        assert_eq!(merged.pilcrows.len(), 4);
+        queries_agree(&doc);
+
+        doc.delete_range(&ctx(), StoryRange::new("body", 0, 2))
+            .unwrap();
+        assert!(!Arc::ptr_eq(&merged, &checked_scan(&doc)));
+        queries_agree(&doc);
     }
 
     #[test]

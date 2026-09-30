@@ -16,6 +16,7 @@
 
 import type { EditSession } from './wasm/index';
 import type { Document } from '../types/document';
+import type { CompatibilityFlags } from '../docx/settingsParser';
 import { registerSessionInternals } from './sessionInternals';
 import { noteYrsStoriesDirty } from './yrsToDocument';
 import type {
@@ -81,10 +82,13 @@ export {
   ResidentWorkerFailureError,
   ResidentWorkerOutOfMemoryError,
   canUseResidentEngineWorker,
+  retainPreloadedResidentEngineWorker,
+  takePreloadedResidentEngineWorker,
   type ResidentEngineWorkerApplyResult,
   type ResidentEngineWorkerFrame,
   type ResidentEngineOffscreenPage,
 } from './residentEngineWorkerClient';
+export { preloadDocxEngine } from './preloadDocxEngine';
 export {
   residentCaretSnapshotForFrame,
   residentCaretDeviceRect,
@@ -496,6 +500,7 @@ export type YrsRawOp =
 
 /** Host context for {@link YrsSession.yrsBlocksForStory} (theme + list numbering). */
 export interface YrsRenderEnv {
+  compatibilityFlags?: Partial<CompatibilityFlags>;
   tocStyleIds?: string[];
   paragraphSpacingLinePx?: number;
   /** Section document-grid snap pitch in px (w:docGrid). The engine derives this from sections; hosts may omit it. */

@@ -1660,6 +1660,22 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// [`Self::layout_document_with_regions_retained_json`] without the reply,
+    /// for a caller that reads only the retained state.
+    pub fn layout_document_with_regions_retained(&self, input: &str) -> Result<(), JsValue> {
+        let _fonts = self.fonts.enter();
+        self.engine
+            .layout_document_with_regions_retained(input)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// The retained region layout's `headersFooters` JSON, when it has any.
+    pub fn retained_headers_footers_json(&self) -> Result<Option<String>, JsValue> {
+        self.engine
+            .retained_headers_footers_json()
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// The retained region layout of the first `pages` pages only; see
     /// `EngineSession::layout_document_with_regions_prefix_retained_json`.
     pub fn layout_document_with_regions_prefix_retained_json(
