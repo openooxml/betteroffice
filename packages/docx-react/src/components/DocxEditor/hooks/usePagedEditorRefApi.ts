@@ -63,6 +63,7 @@ export interface PagedEditorCommandBridge {
 }
 
 interface RefApiInputs {
+  bumpInputEpochRef: React.RefObject<(() => void) | undefined>;
   workerOpenEnabledRef: React.RefObject<boolean>;
   yrsInputRef: React.RefObject<YrsInputRef | null>;
   layout: Layout | null;
@@ -110,6 +111,7 @@ function storyOffsetToLoc(session: YrsSession, story: string, offset: number): Y
 
 function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
   const {
+    bumpInputEpochRef,
     yrsInputRef,
     workerOpenEnabledRef,
     layout,
@@ -184,10 +186,16 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     },
     canUndo: () => yrsSessionRef.current?.canUndo() ?? false,
     canRedo: () => yrsSessionRef.current?.canRedo() ?? false,
-    setSelection: setDisplaySelection,
+    setSelection: (anchor, head) => {
+      bumpInputEpochRef.current?.();
+      setDisplaySelection(anchor, head);
+    },
     insertText: (text) => yrsInputRef.current?.insertText(text),
     deleteSelection: () => yrsInputRef.current?.deleteSelection(),
-    selectAll: () => yrsInputRef.current?.selectAll(),
+    selectAll: () => {
+      bumpInputEpochRef.current?.();
+      yrsInputRef.current?.selectAll();
+    },
     getSelectionRange: () => {
       const selection = yrsInputRef.current?.displaySelection();
       return selection
@@ -223,11 +231,24 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     getLayout: () => layout,
     getLayoutRequest,
     relayout: runLayoutPipeline,
-    scrollToPosition: scrollToPositionImpl,
-    revealDisplayPosition: revealPositionImpl,
-    scrollToParaId: scrollToParaIdImpl,
-    scrollToPage: scrollToPageImpl,
+    scrollToPosition: (position) => {
+      bumpInputEpochRef.current?.();
+      scrollToPositionImpl(position);
+    },
+    revealDisplayPosition: (position, signal) => {
+      bumpInputEpochRef.current?.();
+      return revealPositionImpl(position, signal);
+    },
+    scrollToParaId: (paraId, options) => {
+      bumpInputEpochRef.current?.();
+      return scrollToParaIdImpl(paraId, options);
+    },
+    scrollToPage: (pageNumber) => {
+      bumpInputEpochRef.current?.();
+      scrollToPageImpl(pageNumber);
+    },
     highlightRange: (from, to) => {
+      bumpInputEpochRef.current?.();
       const projection = getYrsPositionProjectionRef.current();
       if (!projection || !Number.isFinite(from) || !Number.isFinite(to) || from < 0 || from > to)
         return;
@@ -237,6 +258,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
       scrollToPositionImpl(from, true);
     },
     scrollToCommentId: (commentId) => {
+      bumpInputEpochRef.current?.();
       const session = yrsSessionRef.current;
       if (!session) return false;
       try {
@@ -250,6 +272,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
       }
     },
     scrollToChangeId: (revisionId) => {
+      bumpInputEpochRef.current?.();
       const revision = yrsSessionRef.current
         ?.listRevisions()
         .find((candidate) => candidate.revisionId === String(revisionId));
@@ -264,6 +287,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
 }
 
 export interface UsePagedEditorRefApiOptions {
+  bumpInputEpoch?: () => void;
   ref: React.Ref<PagedEditorRef>;
   yrsInputRef: React.RefObject<YrsInputRef | null>;
   layout: Layout | null;
@@ -294,6 +318,7 @@ export interface UsePagedEditorRefApiOptions {
 
 export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   const {
+    bumpInputEpoch,
     ref,
     yrsInputRef,
     layout,
@@ -317,6 +342,8 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     displayPositionToYrsLoc,
     getPositionAtPoint,
   } = opts;
+  const bumpInputEpochRef = useRef(bumpInputEpoch);
+  bumpInputEpochRef.current = bumpInputEpoch;
   const workerOpenEnabledRef = useRef(experimentalWorkerOpen);
   workerOpenEnabledRef.current = experimentalWorkerOpen;
   const documentFromYrsRef = useRef(documentFromYrs);
@@ -339,6 +366,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   getPositionAtPointRef.current = getPositionAtPoint;
 
   const inputs = {
+    bumpInputEpochRef,
     workerOpenEnabledRef,
     yrsInputRef,
     layout,
@@ -376,6 +404,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
 }
 
 export interface UsePagedEditorCommandBridgeOptions {
+  bumpInputEpoch?: () => void;
   experimentalWorkerOpen?: boolean;
   bridgeRef: React.MutableRefObject<PagedEditorCommandBridge | null> | undefined;
   yrsInputRef: React.RefObject<YrsInputRef | null>;
@@ -486,6 +515,7 @@ export function usePagedEditorCommandBridge(options: UsePagedEditorCommandBridge
       },
       select(start, end) {
         const current = latest.current;
+        current.bumpInputEpoch?.();
         const session = current.session;
         if (!session || start.story !== end.story) return false;
         session.setSelection(start, end);

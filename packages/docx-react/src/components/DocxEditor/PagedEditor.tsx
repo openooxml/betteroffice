@@ -1471,6 +1471,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // header/footer double-clicks, word/paragraph multi-click, and
     // right-click → host context-menu.
     const {
+      bumpInputEpoch,
       handlePagesContextMenu,
       handleTableInsertClick,
       tableInsertButton,
@@ -1486,6 +1487,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       applyYrsCommand,
       syncYrsInputState,
       readOnly,
+      replicaPending: () =>
+        yrsCore.experimentalWorkerOpen === true &&
+        !(yrsCore.replicaReadyRef?.current ?? yrsCore.replicaReady),
+      replicaReady: yrsCore.replicaReady,
       partEdit,
       displayListQueries,
       canvasHostRef,
@@ -1568,6 +1573,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
      */
     const handleKeyDown = useCallback(
       (e: React.KeyboardEvent) => {
+        bumpInputEpoch();
         if (readOnly) return;
         // The hidden textarea owns every keyboard/IME event for both body and
         // header/footer roots. Do not re-interpret its bubbled events.
@@ -1603,7 +1609,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           if (sc) sc.scrollTop = sc.scrollHeight;
         }
       },
-      [cancelPendingScrollRestore, readOnly, getScrollContainer, focusBodyInput]
+      [bumpInputEpoch, cancelPendingScrollRestore, readOnly, getScrollContainer, focusBodyInput]
     );
 
     /**
@@ -1827,6 +1833,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
 
     // Imperative-handle setup — exposes PagedEditorRef + mirrors via onReady.
     usePagedEditorRefApi({
+      bumpInputEpoch,
       ref,
       yrsInputRef,
       layout,
@@ -1865,6 +1872,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     });
 
     usePagedEditorCommandBridge({
+      bumpInputEpoch,
       bridgeRef: commandBridgeRef,
       experimentalWorkerOpen: yrsCore.experimentalWorkerOpen,
       yrsInputRef,

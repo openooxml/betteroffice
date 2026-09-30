@@ -59,6 +59,8 @@ export interface UsePagesPointerOptions {
   applyYrsCommand: (command: YrsEditorCommand) => boolean;
   syncYrsInputState: (docChanged: boolean) => boolean;
   readOnly: boolean;
+  replicaPending?: () => boolean;
+  replicaReady?: boolean;
   /** the non-body part open for editing — the body is inert behind it */
   partEdit?: PartEdit | null;
   displayListQueries?: DisplayListQueries | null;
@@ -87,6 +89,7 @@ export interface UsePagesPointerOptions {
 }
 
 export interface UsePagesPointerReturn {
+  bumpInputEpoch: () => void;
   handlePagesMouseDown: (e: React.MouseEvent) => void;
   handlePagesMouseMove: (e: React.MouseEvent) => void;
   /** drops the hover cursor when the pointer leaves the pages */
@@ -179,6 +182,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     applyYrsCommand,
     syncYrsInputState,
     readOnly,
+    replicaPending,
+    replicaReady = true,
     partEdit = null,
     displayListQueries,
     canvasHostRef,
@@ -196,6 +201,25 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   const isDraggingRef = useRef(false);
   const dragAnchorRef = useRef<number | null>(null);
+  const inputEpochRef = useRef(0);
+  const pendingGestureRef = useRef<{
+    kind: 'caret' | 'word' | 'paragraph' | 'range';
+    anchor: number;
+    head: number;
+    epoch: number;
+  } | null>(null);
+  const bumpInputEpoch = useCallback(() => {
+    inputEpochRef.current += 1;
+    if (pendingGestureRef.current) {
+      isDraggingRef.current = false;
+      dragAnchorRef.current = null;
+    }
+  }, []);
+  useEffect(() => {
+    pendingGestureRef.current = null;
+    isDraggingRef.current = false;
+    dragAnchorRef.current = null;
+  }, [yrsSession]);
   const pendingPartCaretRef = useRef<{
     session: YrsSession;
     story: string;
@@ -318,18 +342,66 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   const focusInput = useCallback(() => yrsInputRef.current?.focus(), [yrsInputRef]);
 
+  useEffect(() => {
+    if (!replicaReady) return;
+    const pending = pendingGestureRef.current;
+    pendingGestureRef.current = null;
+    if (!pending || pending.epoch !== inputEpochRef.current) return;
+    if (pending.kind === 'caret') {
+      setTextSelection(pending.anchor);
+    } else if (pending.kind === 'range') {
+      setTextSelection(pending.anchor, pending.head);
+    } else {
+      const target = resolveTarget(pending.anchor);
+      if (!target) return;
+      if (pending.kind === 'word') {
+        yrsInputRef.current?.selectWordAtDisplay(target.displayPosition, target.story);
+      } else {
+        yrsInputRef.current?.selectParagraphAtDisplay(target.displayPosition, target.story);
+      }
+    }
+    focusInput();
+  }, [focusInput, replicaReady, resolveTarget, setTextSelection, yrsInputRef]);
+
   const beginTextDrag = useCallback(
     (position: number): void => {
       yrsCellDragAnchorRef.current = resolveTarget(position)?.cell ?? null;
       yrsCellDraggingRef.current = false;
       isDraggingRef.current = true;
       dragAnchorRef.current = position;
-      setTextSelection(position);
+      if (!replicaPending?.()) setTextSelection(position);
       focusInput();
       if (!partEdit) setIsFocused(true);
     },
-    [focusInput, partEdit, resolveTarget, setIsFocused, setTextSelection]
+    [focusInput, partEdit, replicaPending, resolveTarget, setIsFocused, setTextSelection]
   );
+
+  const beginPendingGesture = useCallback(
+    (position: number | null, detail: number): boolean => {
+      if (!replicaPending?.()) return false;
+      if (position != null) {
+        pendingGestureRef.current = {
+          kind: detail === 3 ? 'paragraph' : detail === 2 ? 'word' : 'caret',
+          anchor: position,
+          head: position,
+          epoch: inputEpochRef.current,
+        };
+        beginTextDrag(position);
+      }
+      return true;
+    },
+    [beginTextDrag, replicaPending]
+  );
+
+  const updatePendingGestureHead = useCallback((position: number): boolean => {
+    const pending = pendingGestureRef.current;
+    if (!pending) return false;
+    if (pending.epoch === inputEpochRef.current) {
+      pending.head = position;
+      if (position !== pending.anchor) pending.kind = 'range';
+    }
+    return true;
+  }, []);
 
   const extendCellSelection = useCallback(
     (pmPos: number): boolean => {
@@ -352,6 +424,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   const handlePagesMouseDown = useCallback(
     (e: React.MouseEvent) => {
+      bumpInputEpoch();
+      pendingGestureRef.current = null;
       pendingPartCaretRef.current = null;
       if (e.button === 2) {
         e.preventDefault();
@@ -363,6 +437,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       e.preventDefault();
       if (readOnly) {
         const position = getPositionFromMouse(e.clientX, e.clientY);
+        if (beginPendingGesture(position, e.detail)) return;
         if (position != null) beginTextDrag(position);
         return;
       }
@@ -407,6 +482,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         return;
       }
 
+      if (beginPendingGesture(getPositionFromMouse(e.clientX, e.clientY), e.detail)) return;
+
       const projection = getYrsPositionProjection(yrsRootStory);
       if (!projection) return;
 
@@ -435,6 +512,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     },
     [
       beginTextDrag,
+      beginPendingGesture,
+      bumpInputEpoch,
       clearTableInsertTimer,
       displayListQueries,
       focusInput,
@@ -484,7 +563,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
   dragExtendRef.current = (cx, cy) => {
     if (!isDraggingRef.current || dragAnchorRef.current == null) return;
     const pmPos = getPositionFromMouse(cx, cy);
-    if (pmPos == null || extendCellSelection(pmPos)) return;
+    if (pmPos == null || updatePendingGestureHead(pmPos) || extendCellSelection(pmPos)) return;
     setTextSelection(dragAnchorRef.current, pmPos);
   };
 
@@ -501,6 +580,11 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     (e: MouseEvent) => {
       if (!isDraggingRef.current || dragAnchorRef.current == null) return;
       updateDragScroll(e.clientX, e.clientY);
+      if (pendingGestureRef.current) {
+        const position = getPositionFromMouse(e.clientX, e.clientY);
+        if (position != null) updatePendingGestureHead(position);
+        return;
+      }
       pendingDragPointRef.current = { x: e.clientX, y: e.clientY };
       dragRafRef.current ??= requestAnimationFrame(() => {
         dragRafRef.current = null;
@@ -511,12 +595,22 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         setTextSelection(dragAnchorRef.current, pmPos);
       });
     },
-    [extendCellSelection, getPositionFromMouse, setTextSelection, updateDragScroll]
+    [
+      extendCellSelection,
+      getPositionFromMouse,
+      setTextSelection,
+      updateDragScroll,
+      updatePendingGestureHead,
+    ]
   );
 
   const handleMouseUp = useCallback(
     (e: MouseEvent) => {
       const wasDragging = isDraggingRef.current || yrsCellDraggingRef.current;
+      if (isDraggingRef.current && pendingGestureRef.current) {
+        const position = getPositionFromMouse(e.clientX, e.clientY);
+        if (position != null) updatePendingGestureHead(position);
+      }
       isDraggingRef.current = false;
       yrsCellDragAnchorRef.current = null;
       yrsCellDraggingRef.current = false;
@@ -525,7 +619,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       // gets its answer here
       if (wasDragging) resolveHoverCursor(e.clientX, e.clientY);
     },
-    [resolveHoverCursor, stopDragAutoScroll]
+    [getPositionFromMouse, resolveHoverCursor, stopDragAutoScroll, updatePendingGestureHead]
   );
 
   useEffect(() => {
@@ -672,7 +766,12 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       const host = canvasHostRef?.current ?? pagesContainerRef.current;
       const point = resolveCanvasHit(e.clientX, e.clientY, false);
       // read-only selection wins over a link: a drag that ends on one, or a double or triple click
-      const selecting = readOnly && (e.detail > 1 || selectionUnder(e.clientX, e.clientY));
+      const pending = pendingGestureRef.current;
+      const selecting =
+        readOnly &&
+        (e.detail > 1 ||
+          (pending?.epoch === inputEpochRef.current && pending.kind === 'range') ||
+          selectionUnder(e.clientX, e.clientY));
       // An external link needs only the display list, so it opens before the replica has loaded.
       if (queries && host && point && !selecting) {
         // Hyperlink primitives are indexed by band, so an open note — whose
@@ -695,6 +794,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
           : null;
         const href = sanitizeHref(displayHit?.href ?? '');
         if (href && (projection || !href.startsWith('#'))) {
+          if (pendingGestureRef.current?.kind !== 'caret') pendingGestureRef.current = null;
           e.preventDefault();
           const linkPosition = getPositionFromMouse(e.clientX, e.clientY);
           if (linkPosition != null) setTextSelection(linkPosition);
@@ -740,6 +840,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       if (e.detail === 2 && !partEdit && onHeaderFooterDoubleClick) {
         const region = point?.hit?.region;
         if (region === 'header' || region === 'footer') {
+          pendingGestureRef.current = null;
           e.preventDefault();
           e.stopPropagation();
           onHeaderFooterDoubleClick(region, (point?.pageIndex ?? 0) + 1);
@@ -922,6 +1023,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
   }, [canvasHostRef, displayListQueries]);
 
   return {
+    bumpInputEpoch,
     handlePagesMouseDown,
     handlePagesMouseMove,
     handlePagesMouseLeave,
