@@ -72,7 +72,20 @@ export function findImagePrimitiveByDocPos(
   return null;
 }
 
-/** Topmost positioned image under a page-local point, or null. */
+/** Whether `primitive`'s clip, as the canvas painter applies it, paints the page-local point. */
+function clipPaintsPoint(primitive: ImagePrimitive, x: number, y: number): boolean {
+  const clip = primitive.clipGroup?.clip;
+  if (!clip) return true;
+  const finite = (value: number | undefined): number =>
+    value !== undefined && Number.isFinite(value) ? value : 0;
+  const left = finite(clip.x);
+  const top = finite(clip.y);
+  const width = Math.max(0, finite(clip.w));
+  const height = Math.max(0, finite(clip.h));
+  return width > 0 && height > 0 && x >= left && x <= left + width && y >= top && y <= top + height;
+}
+
+/** Topmost positioned image painted under a page-local point, or null. */
 export function findImagePrimitiveAtPoint(
   list: DisplayList,
   pageIndex: number,
@@ -89,6 +102,7 @@ export function findImagePrimitiveAtPoint(
     const primitive = images[index];
     if (x < primitive.x || x > primitive.x + primitive.w) continue;
     if (y < primitive.y || y > primitive.y + primitive.h) continue;
+    if (!clipPaintsPoint(primitive, x, y)) continue;
     return {
       primitive,
       pageIndex: page.pageIndex,
