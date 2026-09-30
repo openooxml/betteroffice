@@ -648,7 +648,7 @@ fn table_width_budget(table_block: &TableBlock, content_width: f64) -> f64 {
 ///
 /// Word sizes exactly these columns from their content, so the declared
 /// `w:gridCol` is only a hint and goes stale whenever the content changes.
-/// Empty for fixed and autofit layouts, and whenever the declared
+/// Empty under `w:tblLayout w:type="fixed"`, and whenever the declared
 /// geometry already decides the answer.
 pub fn content_sized_columns(
     table_block: &TableBlock,
@@ -662,7 +662,7 @@ pub fn content_sized_columns(
         .width_algorithm
         .as_deref()
         .or(table_block.layout_mode.as_deref())
-        .is_some_and(|algorithm| matches!(algorithm, "fixed" | "autofit"))
+        == Some("fixed")
     {
         return Vec::new();
     }
@@ -752,6 +752,16 @@ pub(crate) fn resolve_table_column_widths_with_content(
     content_width: f64,
     content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
 ) -> Vec<f64> {
+    resolve_content_fitted_column_widths(table_block, content_width, content_widths).0
+}
+
+/// Like [`resolve_table_column_widths_with_content`], also reporting whether
+/// autofit sized the columns from `content_widths` rather than falling back.
+pub(crate) fn resolve_content_fitted_column_widths(
+    table_block: &TableBlock,
+    content_width: f64,
+    content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
+) -> (Vec<f64>, bool) {
     let mut column_widths: Vec<f64> = table_block.column_widths.clone().unwrap_or_default();
     let explicit_width_px = preferred_width_px(
         table_block.preferred_width.as_ref(),
@@ -769,11 +779,9 @@ pub(crate) fn resolve_table_column_widths_with_content(
         .or(table_block.layout_mode.as_deref())
         .unwrap_or("legacy");
     if !table_block.rows.is_empty() && algorithm == "fixed" {
-        return resolve_fixed_column_widths(
-            table_block,
-            content_width,
-            col_count,
-            explicit_width_px,
+        return (
+            resolve_fixed_column_widths(table_block, content_width, col_count, explicit_width_px),
+            false,
         );
     }
     if !table_block.rows.is_empty() && algorithm == "autofit" {
@@ -784,7 +792,7 @@ pub(crate) fn resolve_table_column_widths_with_content(
             explicit_width_px,
             content_widths,
         ) {
-            return widths;
+            return (widths, true);
         }
         if column_widths.is_empty() {
             column_widths = table_block.grid_widths.clone().unwrap_or_default();
@@ -806,7 +814,7 @@ pub(crate) fn resolve_table_column_widths_with_content(
         }
     }
 
-    column_widths
+    (column_widths, false)
 }
 
 /// Total pixel width: the resolved columns, else the explicit table width,

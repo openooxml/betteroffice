@@ -8,7 +8,7 @@ use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offs
 use crate::floating_objects::MIN_WRAP_SEGMENT_WIDTH;
 use crate::table_grid::{
     content_sized_columns, count_table_columns, grow_content_sized_columns, preferred_width_px,
-    resolve_cell_grid, resolve_table_column_widths_with_content,
+    resolve_cell_grid, resolve_content_fitted_column_widths,
 };
 use crate::types::{
     BlockExtent, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition, LayoutBlock,
@@ -1983,13 +1983,23 @@ fn table_content_widths(
     )
 }
 
+#[cfg(test)]
 fn measure_table_column_widths(
     table: &TableBlock,
     content_width: f64,
     config: &MeasurementConfig,
 ) -> Vec<f64> {
+    fitted_table_column_widths(table, content_width, config).0
+}
+
+/// The resolved column widths, and whether autofit sized them from content.
+fn fitted_table_column_widths(
+    table: &TableBlock,
+    content_width: f64,
+    config: &MeasurementConfig,
+) -> (Vec<f64>, bool) {
     let content_widths = table_content_widths(table, content_width, config);
-    resolve_table_column_widths_with_content(table, content_width, content_widths.as_deref())
+    resolve_content_fitted_column_widths(table, content_width, content_widths.as_deref())
 }
 
 fn measure_table(
@@ -2004,8 +2014,13 @@ fn measure_table(
         content_width,
         None,
     );
-    let mut column_widths = measure_table_column_widths(table, content_width, config);
-    let content_sized = content_sized_columns(table, content_width, &column_widths);
+    let (mut column_widths, content_fitted) =
+        fitted_table_column_widths(table, content_width, config);
+    let content_sized = if content_fitted {
+        Vec::new()
+    } else {
+        content_sized_columns(table, content_width, &column_widths)
+    };
     if !content_sized.is_empty() {
         let maximums = column_content_maximums(table, &content_sized, content_width, config)?;
         grow_content_sized_columns(table, content_width, &maximums, &mut column_widths);
@@ -2936,9 +2951,9 @@ mod tests {
                 authoritative_shaping: true,
                 ..MeasurementConfig::default()
             };
-            for (text, preferred, expected) in [
-                ("W".repeat(100), None, 100.0),
-                ("hello world ".repeat(3), Some(1500), 100.0),
+            for (text, preferred, expected, laid_out) in [
+                ("W".repeat(100), None, 100.0, 600.0),
+                ("hello world ".repeat(3), Some(1500), 100.0, 100.0),
             ] {
                 let mut table: TableBlock = serde_json::from_value(json!({
                     "id": "table", "layoutMode": "autofit", "gridWidths": [100],
@@ -2965,7 +2980,7 @@ mod tests {
                     vec![expected]
                 );
                 let measured = measure_table(&mut table, 600.0, &config).unwrap();
-                assert_eq!(measured.rows[0].cells[0].width, expected);
+                assert!((measured.rows[0].cells[0].width - laid_out).abs() < 1e-6);
                 let BlockExtent::Paragraph(paragraph) = &measured.rows[0].cells[0].blocks[0] else {
                     panic!()
                 };
