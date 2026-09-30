@@ -1226,7 +1226,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     displayList: canvasRenderer.displayList,
     engine: canvasRenderer.presentedEngine,
   };
-  useEffect(
+  // Layout cleanup runs in the unmount commit, before a queued frame could fire the callback.
+  useLayoutEffect(
     () => () => {
       firstPageGenerationRef.current += 1;
     },
