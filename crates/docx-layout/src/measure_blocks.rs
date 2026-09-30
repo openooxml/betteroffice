@@ -100,8 +100,8 @@ pub fn collect_font_requirements<'a>(
 
 /// [`collect_font_requirements`] into `requirements`, keyed as it keys them,
 /// for callers gathering several block runs without copying them. It keeps
-/// every family the blocks name, since a later call may reach one; gather with
-/// a [`FontRequirementCollector`] to drop the unused ones.
+/// every family the blocks name and only those, since a later call may reach
+/// one; gather with a [`FontRequirementCollector`] to drop the unused ones.
 pub fn collect_font_requirements_into<'a>(
     blocks: impl IntoIterator<Item = &'a LayoutBlock>,
     default_family: &str,
@@ -246,8 +246,11 @@ impl FontRequirementCollector {
         requirements
     }
 
+    /// Merges every named requirement and nothing else, as main collects them:
+    /// an implicit entry kept here would lead the scripts a later call names.
     fn merge_named_into(mut self, requirements: &mut BTreeMap<String, FontRequirement>) {
         self.used.extend(self.named.keys().cloned());
+        self.implicit.clear();
         self.merge_into(requirements);
     }
 
@@ -3996,8 +3999,13 @@ mod tests {
             .iter()
             .find(|requirement| requirement.key == "arial|1|0")
             .unwrap();
+        let mut split = BTreeMap::new();
+        for block in &blocks {
+            collect_font_requirements_into([block], "Calibri", &mut split);
+        }
 
         assert_eq!(arial_bold.scripts, ["cjk-sc", "cjk-jp"]);
+        assert_eq!(split["arial|1|0"].scripts, ["cjk-sc", "cjk-jp"]);
     }
 
     #[test]
