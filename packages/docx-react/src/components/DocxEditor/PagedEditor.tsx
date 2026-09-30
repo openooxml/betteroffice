@@ -1726,7 +1726,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         onAnchorPositionsChange(positions);
       };
       const scheduleEmit = (): void => {
-        if (anchorEmitTimerRef.current !== null) return;
+        // A superseded run's whenReady() may resolve late; its timer would block the live emit.
+        if (cancelled || anchorEmitTimerRef.current !== null) return;
         if (performance.now() - lastAnchorEmitAtRef.current >= SIDEBAR_ANCHOR_STALE_MS) {
           lastAnchorEmitAtRef.current = performance.now();
           emit();
