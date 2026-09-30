@@ -127,10 +127,17 @@ describe('createDisplayListQueries handle lifecycle', () => {
 
   test('a superseded generation whose successor is gone answers nothing', () => {
     const { engine, calls } = fakeEngine();
-    const first = createDisplayListQueries({ pages: [page(0)] }, engine);
+    engine.rangeRectsByHandle = () => {
+      calls.rangeByHandle += 1;
+      return '[{"pageIndex":0,"x":1,"y":0,"width":1,"height":1}]';
+    };
+    const shared = page(0);
+    const first = createDisplayListQueries({ pages: [shared] }, engine);
     first.rangeRects(0, 1);
-    const second = createDisplayListQueries({ pages: [page(0)] }, engine, first);
-    second.rangeRects(0, 1);
+    const second = createDisplayListQueries({ pages: [shared] }, engine, first);
+    expect(second.rangeRects(0, 1)).toHaveLength(1);
+    expect(calls.update).toBe(1);
+    expect(first.rangeRects(0, 1)).toHaveLength(1);
     second.dispose();
     expect(first.rangeRects(0, 1)).toEqual([]);
     expect(first.hitTestRegions(0, 1, 1)).toBeNull();

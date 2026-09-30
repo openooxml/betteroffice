@@ -325,15 +325,21 @@ interface FacadeDeltaSeed {
 
 /** Shared by a facade and every facade built from it; weak, so no layout outlives its holders. */
 interface FacadeLineage {
-  newest: { deref(): DisplayListQueries | undefined } | null;
+  newest: WeakTo<DisplayListQueries> | null;
 }
 
-function weakly(queries: DisplayListQueries): { deref(): DisplayListQueries | undefined } {
-  const Ref = (globalThis as { WeakRef?: new (target: object) => { deref(): object | undefined } })
-    .WeakRef;
-  if (!Ref) return { deref: () => queries };
-  const ref = new Ref(queries);
-  return { deref: () => ref.deref() as DisplayListQueries | undefined };
+type WeakTo<T> = { deref(): T | undefined };
+
+const WeakRefCtor = (globalThis as { WeakRef?: new <T extends object>(target: T) => WeakTo<T> })
+  .WeakRef;
+
+/** A native WeakRef: a wrapping closure would share a context that keeps the target alive. */
+function weakly(queries: DisplayListQueries): WeakTo<DisplayListQueries> {
+  return WeakRefCtor ? new WeakRefCtor(queries) : strongly(queries);
+}
+
+function strongly(queries: DisplayListQueries): WeakTo<DisplayListQueries> {
+  return { deref: () => queries };
 }
 
 const facadeDeltaSeeds = new WeakMap<DisplayListQueries, FacadeDeltaSeed>();
