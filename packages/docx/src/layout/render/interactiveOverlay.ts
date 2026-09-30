@@ -217,6 +217,12 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
         if (paint?.kind === 'gradient' || paint?.kind === 'pattern') break;
         if (paint?.kind === 'picture' && (paint.pictureSrc || paint.pictureRelId)) {
           if ((paint.pictureOpacity ?? 1) <= 0) return false;
+          // A stretched picture inset from a side paints only part of the shape.
+          const inset = paint.pictureStretchRect;
+          const sides = [inset?.left, inset?.top, inset?.right, inset?.bottom];
+          if (paint.pictureFillMode !== 'tile' && sides.some((side) => (side ?? 0) > 0)) {
+            return false;
+          }
           break;
         }
         if (!fill || fill === 'transparent' || fill === 'none') return false;

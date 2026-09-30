@@ -1231,6 +1231,16 @@ fn js_blank(text: &str) -> bool {
         .all(|c| c == '\u{feff}' || (c.is_whitespace() && c != '\u{85}'))
 }
 
+/// A run with no glyph fill: whether its outline paints differs by canvas path, so it covers nothing.
+fn text_fill_none(attrs: &DocAttrs) -> bool {
+    attrs
+        .modern_effects
+        .as_deref()
+        .and_then(|effects| effects.pointer("/textFill/kind"))
+        .and_then(Value::as_str)
+        == Some("none")
+}
+
 /// The rectangle (left, top, width, height) a shape's fill paints, when its path is
 /// exactly an axis-aligned rectangle turned by a multiple of 180 degrees; any other
 /// path covers nothing.
@@ -1307,10 +1317,21 @@ fn shape_fill_paints(shape: &ShapePrimitive) -> bool {
         Some("none") => false,
         Some("gradient" | "pattern") => true,
         Some("picture") if field("pictureSrc").is_some() || field("pictureRelId").is_some() => {
-            paint
+            let opaque = paint
                 .and_then(|paint| paint.get("pictureOpacity"))
                 .and_then(Value::as_f64)
-                .is_none_or(|opacity| opacity > 0.0)
+                .is_none_or(|opacity| opacity > 0.0);
+            // A stretched picture inset from a side paints only part of the shape.
+            let inset = paint
+                .and_then(|paint| paint.get("pictureStretchRect"))
+                .is_some_and(|rect| {
+                    ["left", "top", "right", "bottom"].iter().any(|side| {
+                        rect.get(side)
+                            .and_then(Value::as_f64)
+                            .is_some_and(|v| v > 0.0)
+                    })
+                });
+            opaque && (field("pictureFillMode") == Some("tile") || !inset)
         }
         _ => paint
             .and_then(|paint| paint.get("color"))
@@ -2394,6 +2415,16 @@ mod tests {
             (140.0, triangle),
             (140.0, bowtie),
             (100.0055, narrow_bowtie),
+            (
+                120.0,
+                shape(
+                    Some(serde_json::json!({
+                        "kind": "picture", "pictureRelId": "rId9",
+                        "pictureStretchRect": {"left": 0.75}
+                    })),
+                    None,
+                ),
+            ),
             (100.002, skewed),
             (120.0, half(Some(serde_json::json!({"flipH": true})))),
             (120.0, half(Some(serde_json::json!({"rotation": 180})))),
@@ -2408,6 +2439,20 @@ mod tests {
             shape(None, Some("#ff0000")),
             turned,
             half(None),
+            shape(
+                Some(serde_json::json!({
+                    "kind": "picture", "pictureRelId": "rId9",
+                    "pictureStretchRect": {"left": -0.1, "top": 0}
+                })),
+                None,
+            ),
+            shape(
+                Some(serde_json::json!({
+                    "kind": "picture", "pictureRelId": "rId9", "pictureFillMode": "tile",
+                    "pictureStretchRect": {"left": 0.75}
+                })),
+                None,
+            ),
             half(Some(serde_json::json!({"flipH": true, "rotation": 180}))),
             shape(
                 Some(serde_json::json!({"kind": "solid", "color": "#00ff00"})),

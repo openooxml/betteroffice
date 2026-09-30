@@ -223,6 +223,28 @@ test('a filled body shape hides header controls only where its path is its own b
   }
 });
 
+test('a stretched picture fill inset from a side hides no header control', () => {
+  const picture = (fillPaint: ShapePrimitive['fillPaint']): ShapePrimitive => ({
+    kind: 'shape', x: 100, y: 20, w: 20, h: 20, fillPaint,
+    geometryPath: [
+      { type: 'move', x: 100, y: 20 }, { type: 'line', x: 120, y: 20 },
+      { type: 'line', x: 120, y: 40 }, { type: 'line', x: 100, y: 40 }, { type: 'close' },
+    ],
+  });
+  expectActive(headerWidget([
+    picture({ kind: 'picture', pictureRelId: 'rId9', pictureStretchRect: { left: 0.75 } }),
+  ]));
+  expectHidden(headerWidget([
+    picture({ kind: 'picture', pictureRelId: 'rId9', pictureStretchRect: { left: -0.1, top: 0 } }),
+  ]));
+  expectHidden(headerWidget([
+    picture({
+      kind: 'picture', pictureRelId: 'rId9', pictureFillMode: 'tile',
+      pictureStretchRect: { left: 0.75 },
+    }),
+  ]));
+});
+
 test('body picture fills with zero opacity do not hide header controls', () => {
   const shape: ShapePrimitive = {
     kind: 'shape', x: 100, y: 20, w: 20, h: 20,
