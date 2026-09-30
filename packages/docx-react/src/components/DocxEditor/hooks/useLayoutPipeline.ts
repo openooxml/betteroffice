@@ -14,11 +14,12 @@ import type {
   ResidentFontRequirement,
   ResidentMeasurementConfig,
 } from '@betteroffice/docx/layout';
-import type {
-  YrsLoc,
-  YrsRenderEnv,
-  YrsSession,
-  YrsStickyPosition,
+import {
+  ResidentWorkerOutOfMemoryError,
+  type YrsLoc,
+  type YrsRenderEnv,
+  type YrsSession,
+  type YrsStickyPosition,
 } from '@betteroffice/docx/yrs';
 
 import type { LayoutSelectionGate } from '../internals/LayoutSelectionGate';
@@ -290,9 +291,10 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         try {
           const request = buildResidentRegionLayoutRequest(document, pageGap, renderEnv);
           const input = JSON.stringify(request);
-          const pendingRequirements = workerRequirements === undefined
-            ? fontRequirementsInWorkerRef.current?.(session, input)
-            : null;
+          const pendingRequirements =
+            workerRequirements === undefined
+              ? fontRequirementsInWorkerRef.current?.(session, input)
+              : null;
           if (pendingRequirements) {
             void pendingRequirements.then(
               (requirements) => {
@@ -441,24 +443,35 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             (computation) => {
               if (pass !== passRef.current || sessionRef.current !== session) return;
               // A change that landed meanwhile makes the worker's layout stale.
-              if (!computation || readSessionVersion(session) !== workerOpenSourceVersion(session, sourceVersion)) {
+              if (
+                !computation ||
+                readSessionVersion(session) !== workerOpenSourceVersion(session, sourceVersion)
+              ) {
                 layOutHere();
                 return;
               }
               applyComputation(computation);
               // The first pages paint now; the full layout replaces them.
-              void computation.complete?.then((complete) => {
-                if (pass !== passRef.current || sessionRef.current !== session) return;
-                if (complete && readSessionVersion(session) === workerOpenSourceVersion(session, sourceVersion)) {
-                  // Nothing the user did changed: keep their viewport.
-                  applyComputation(complete, 'remote');
-                } else {
-                  layOutHere();
-                }
-              });
+              void computation.complete?.then(
+                (complete) => {
+                  if (pass !== passRef.current || sessionRef.current !== session) return;
+                  if (
+                    complete &&
+                    readSessionVersion(session) === workerOpenSourceVersion(session, sourceVersion)
+                  ) {
+                    // Nothing the user did changed: keep their viewport.
+                    applyComputation(complete, 'remote');
+                  } else {
+                    layOutHere();
+                  }
+                },
+                () => {}
+              );
             },
             (error: unknown) => {
               if (pass !== passRef.current) return;
+              // The display reports a worker out of memory; nothing lays out here.
+              if (error instanceof ResidentWorkerOutOfMemoryError) return;
               console.error('[PagedEditor] Layout pipeline error:', error);
               onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
             }
@@ -629,9 +642,11 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     });
   }, [scrollRestoreController]);
 
-  // Clean up pending rAF on unmount
+  // Clean up pending rAF on unmount. A worker pass answering later must not
+  // touch the session, which its owner frees on unmount.
   useEffect(() => {
     return () => {
+      passRef.current += 1;
       if (schedulerRef.current != null) cancelAnimationFrame(schedulerRef.current);
     };
   }, []);

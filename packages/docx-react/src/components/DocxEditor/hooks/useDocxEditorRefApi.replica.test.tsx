@@ -128,7 +128,7 @@ test('every public ref API is classified for replica access', async () => {
   expect(Object.keys(DOCX_REF_REPLICA_ACCESS).sort()).toEqual([
     'addComment', 'applyEdits', 'applyFormatting', 'commands', 'exportStructuredWithPages',
     'findContentControls', 'findInDocument', 'findText', 'flushPendingInput', 'focus',
-    'getComments', 'getCurrentPage', 'getDocument', 'getEditorRef', 'getPageContent',
+    'getComments', 'getCurrentPage', 'getDocument', 'getEditorRef', 'getMemoryStats', 'getPageContent',
     'getPositionAtPoint', 'getProposals', 'getSelectionInfo', 'getTotalPages', 'getZoom',
     'highlightRange', 'insertBreak', 'listContentControls', 'loadDocument', 'loadDocumentBuffer',
     'onContentChange', 'onSelectionChange', 'openPrintPreview', 'print', 'proposeChange',

@@ -5,6 +5,7 @@ import type {
   YrsSelection,
 } from './index';
 import type { ResidentCaretPaintStyle } from './residentCaret';
+import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 
 export type ResidentEngineWorkerRequest =
   | {
@@ -23,6 +24,8 @@ export type ResidentEngineWorkerRequest =
       provisionalPages?: number;
       /** Lay out the document `open` seeded here, not the snapshot's state. */
       opened?: boolean;
+      /** The most the worker's editing core may allocate at once. */
+      heapLimitBytes?: number;
     }
   | {
       id: number;
@@ -32,6 +35,8 @@ export type ResidentEngineWorkerRequest =
       /** The package's SHA-256, when the caller already took it. */
       digest?: string;
       generation?: string;
+      /** The most the worker's editing core may allocate at once. */
+      heapLimitBytes?: number;
     }
   | { id: number; type: 'fontRequirements'; layoutInput: string }
   | { id: number; type: 'encodeState' }
@@ -118,7 +123,7 @@ export type ResidentEngineWorkerRequestWithoutId = ResidentEngineWorkerRequest e
     : never
   : never;
 
-export type ResidentEngineWorkerResponse =
+export type ResidentEngineWorkerResponse = (
   | {
       id: number;
       ok: true;
@@ -157,4 +162,10 @@ export type ResidentEngineWorkerResponse =
       residentUnavailable?: boolean;
       /** A wasm trap poisoned the worker; it refuses every later request. */
       terminal?: boolean;
-    };
+      /** The trap followed an allocation the worker's memory could not satisfy. */
+      outOfMemory?: boolean;
+    }
+) & {
+  /** The worker's wasm memories as the reply left. */
+  memory?: WasmModuleMemory[];
+};

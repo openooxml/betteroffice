@@ -4,6 +4,7 @@ import {
   RESIDENT_WORKER_SILENCE_MS,
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
+  ResidentWorkerOutOfMemoryError,
   type ResidentEngineWorkerPort,
 } from './residentEngineWorkerClient';
 import type {
@@ -215,6 +216,32 @@ describe('worker failure', () => {
     expect(worker.terminated).toBe(false);
   });
 
+  test('a bootstrap carries the heap limit and the frame epoch to follow', () => {
+    const { worker, client } = setup();
+    void client.bootstrap(snapshot, '', { heapLimitBytes: 2048, frameEpoch: 7 });
+    expect(worker.posted[0]).toMatchObject({
+      type: 'bootstrap',
+      heapLimitBytes: 2048,
+      expectedFrameEpoch: 7,
+    });
+    const other = setup();
+    void other.client.bootstrap(snapshot, '');
+    expect('heapLimitBytes' in other.worker.posted[0]).toBe(false);
+  });
+
+  test('memory() is the memory of the latest reply that carried one', async () => {
+    const { worker, client } = setup();
+    expect(client.memory()).toBeNull();
+    const bootstrap = client.bootstrap(snapshot, '');
+    worker.reply({ ...frameReply(worker.lastId()), memory: [{ label: 'docx-edit', bufferBytes: 2 }] });
+    await bootstrap;
+    expect(client.memory()).toEqual([{ label: 'docx-edit', bufferBytes: 2 }]);
+    const frame = client.buildFrame('', 0);
+    worker.reply(frameReply(worker.lastId()));
+    await frame;
+    expect(client.memory()).toEqual([{ label: 'docx-edit', bufferBytes: 2 }]);
+  });
+
   test('onmessageerror is terminal too', async () => {
     const { worker, client } = setup();
     const frame = client.buildFrame('', 0);
@@ -223,6 +250,94 @@ describe('worker failure', () => {
     expect(worker.terminated).toBe(true);
     await expect(client.buildFrame('', 0)).rejects.toThrow('unreadable message');
   });
+});
+
+describe('resident worker opening', () => {
+  test('open, font requirements, and state handover report memory before an opened bootstrap', async () => {
+    const { worker, client } = setup();
+    const bytes = new Uint8Array([1, 2, 3]);
+    const opened = client.open(bytes, { digest: 'abc', generation: 'opening', heapLimitBytes: 2048 });
+    const request = worker.posted[0];
+    expect(request).toMatchObject({
+      type: 'open',
+      digest: 'abc',
+      generation: 'opening',
+      heapLimitBytes: 2048,
+    });
+    if (request.type !== 'open') throw new Error('open request missing');
+    expect(request.bytes).not.toBe(bytes.buffer);
+    expect(new Uint8Array(request.bytes)).toEqual(bytes);
+    const stateVector = new Uint8Array([5]);
+    worker.reply({
+      id: request.id,
+      ok: true,
+      hostJson: '{"host":1}',
+      stateVector: stateVector.buffer,
+      memory: [{ label: 'docx-edit', bufferBytes: 1 }],
+    });
+    expect(await opened).toEqual({ hostJson: '{"host":1}', stateVector });
+    expect(client.remoteStateVector()).toEqual(stateVector);
+    expect(client.memory()).toEqual([{ label: 'docx-edit', bufferBytes: 1 }]);
+
+    const requirements = client.fontRequirements('{}');
+    expect(worker.posted[1]).toMatchObject({ type: 'fontRequirements', layoutInput: '{}' });
+    worker.reply({
+      id: worker.lastId(),
+      ok: true,
+      requirementsJson: '[]',
+      memory: [{ label: 'docx-edit', bufferBytes: 2 }],
+    });
+    expect(await requirements).toBe('[]');
+    expect(client.memory()).toEqual([{ label: 'docx-edit', bufferBytes: 2 }]);
+
+    const state = client.encodeState();
+    expect(worker.posted[2]).toMatchObject({ type: 'encodeState' });
+    worker.reply({
+      id: worker.lastId(),
+      ok: true,
+      state: new Uint8Array([7, 8]).buffer,
+      memory: [{ label: 'docx-edit', bufferBytes: 3 }],
+    });
+    expect(await state).toEqual(new Uint8Array([7, 8]));
+    expect(client.memory()).toEqual([{ label: 'docx-edit', bufferBytes: 3 }]);
+
+    const bootstrap = client.bootstrap(snapshot, '', { opened: true, frameEpoch: 7 });
+    expect(worker.posted[3]).toMatchObject({ type: 'bootstrap', opened: true, expectedFrameEpoch: 7 });
+    worker.reply(frameReply(worker.lastId()));
+    await bootstrap;
+    expect(client.isReady()).toBe(true);
+  });
+
+  for (const type of ['open', 'fontRequirements', 'encodeState'] as const) {
+    test(`${type} propagates the worker's OOM error and memory`, async () => {
+      const { worker, client } = setup();
+      const pending =
+        type === 'open'
+          ? client.open(new Uint8Array([1]))
+          : type === 'fontRequirements'
+            ? client.fontRequirements('{}')
+            : client.encodeState();
+      const memory = [{ label: 'docx-edit', bufferBytes: 65536, failedAllocationBytes: 64 }];
+      worker.reply({
+        id: worker.lastId(),
+        ok: false,
+        error: 'Resident engine worker ran out of memory allocating 64 bytes: unreachable',
+        terminal: true,
+        outOfMemory: true,
+        memory,
+      });
+      const failure = await pending.then(
+        () => { throw new Error('trapped request resolved'); },
+        (error: Error) => error
+      );
+      expect(failure).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+      expect((failure as ResidentWorkerOutOfMemoryError).memory).toEqual(memory);
+      expect(client.memory()).toEqual(memory);
+      expect(worker.terminated).toBe(true);
+      await expect(client.encodeState()).rejects.toBe(failure);
+      expect(worker.posted).toHaveLength(1);
+    });
+  }
 });
 
 describe('wasm trap', () => {
@@ -234,6 +349,48 @@ describe('wasm trap', () => {
     expect(worker.terminated).toBe(true);
     await expect(client.sync(snapshot, '', 0)).rejects.toThrow('trapped: unreachable');
     expect(worker.posted).toHaveLength(1);
+  });
+
+  test('an out-of-memory trap rejects with the memory the worker reported', async () => {
+    const { worker, client } = setup();
+    const frame = client.buildFrame('', 0);
+    const memory = [
+      { label: 'docx-edit', bufferBytes: 4294901760, liveBytes: 4172000000, peakBytes: 4172000000, failedAllocationBytes: 65536 },
+    ];
+    worker.reply({
+      id: worker.lastId(),
+      ok: false,
+      error: 'Resident engine worker ran out of memory allocating 65536 bytes: unreachable',
+      terminal: true,
+      outOfMemory: true,
+      memory,
+    });
+    const failure = await frame.then(
+      () => { throw new Error('trapped frame resolved'); },
+      (error: Error) => error
+    );
+    expect(failure).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    expect(failure).not.toBeInstanceOf(ResidentWorkerFailureError);
+    expect((failure as ResidentWorkerOutOfMemoryError).memory).toEqual(memory);
+    expect(client.memory()).toEqual(memory);
+    expect(worker.terminated).toBe(true);
+  });
+
+  test('input that runs the worker out of memory rejects instead of reporting not applied', async () => {
+    const { worker, client } = setup();
+    const bootstrap = client.bootstrap(snapshot, '');
+    worker.reply(frameReply(worker.lastId()));
+    await bootstrap;
+    const input = client.applyInput('x', selection, 1);
+    worker.reply({
+      id: worker.lastId(),
+      ok: false,
+      error: 'Resident engine worker ran out of memory allocating 64 bytes: unreachable',
+      terminal: true,
+      outOfMemory: true,
+    });
+    await expect(input).rejects.toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    expect(await client.applyDelete('backward', selection, 1)).toEqual({ applied: false });
   });
 
   test('input is reported as not applied after a trap', async () => {
