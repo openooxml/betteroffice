@@ -387,9 +387,7 @@ export function useYrsCoreSession(
       abandoned ||
       callbacksRef.current?.isCurrentLoad?.(seedGeneration) === false;
     const previewFirstPage = previewFirstPageRef.current;
-    // A previewing load keeps its full open on the main thread.
-    const openWorker = previewFirstPage ? undefined : openInWorker;
-    if (openWorker) inheritedFrameRef.current = renderedFrameRef.current;
+    const openWorker = openInWorker;
     // A failed full open takes the preview down with it, as a failed open
     // without one would leave no session.
     const dropPreview = (preview: YrsSession): void => {
@@ -417,6 +415,10 @@ export function useYrsCoreSession(
       if (!shown || stale() || !full || full === shown.session) return false;
       if (session !== undefined && session !== full) return false;
       abandoned = true;
+      pendingReplicaRef.current?.cancel();
+      pendingReplicaRef.current = null;
+      openedWorker?.destroy();
+      openedWorker = null;
       sessionRef.current = null;
       setSession(null);
       retire(full);
@@ -433,8 +435,7 @@ export function useYrsCoreSession(
         const prepared = seedBytes ? yrs.prepareDocxBytes(seedBytes) : Promise.resolve(null);
         // Awaited below unless the load ends first.
         prepared.catch(() => {});
-        // A preview paints the first pages first; the full open, which
-        // blocks this thread for the whole package, waits until they have.
+        // A preview paints the first pages before the full open begins.
         const opened =
           previewFirstPage && seedBytes
             ? await openPreview(yrs, seedBytes, collaborationClientId)
@@ -462,7 +463,7 @@ export function useYrsCoreSession(
           await painted;
           if (paintWaitRef.current?.session === opened.session) paintWaitRef.current = null;
           // Two frames: a worker canvas's commit can reach the screen a frame
-          // after the presentation, and the full open blocks this thread.
+          // after the presentation, and a main-thread full open blocks this thread.
           await new Promise<void>((resolve) => {
             const bound = setTimeout(resolve, PREVIEW_FRAME_WAIT_MS);
             requestAnimationFrame(() =>
@@ -519,6 +520,7 @@ export function useYrsCoreSession(
             return;
           }
           if (openedWorker && bytes) {
+            inheritedFrameRef.current = renderedFrameRef.current;
             const worker = openedWorker;
             const source = bytes;
             const pending = deferWorkerOpenReplica(
@@ -628,6 +630,7 @@ export function useYrsCoreSession(
     const frame = workerOpen?.renderedFrame;
     const pending = pendingReplicaRef.current;
     if (!session || !frame || frame === inheritedFrameRef.current || !pending?.pending) return;
+    if (previewing || (handoffFrom && options?.shownEngine !== session)) return;
     if (typeof requestAnimationFrame !== 'function') {
       const timer = setTimeout(() => pending.start(), 0);
       return () => clearTimeout(timer);
@@ -636,7 +639,7 @@ export function useYrsCoreSession(
       frameId = requestAnimationFrame(() => pending.start());
     });
     return () => cancelAnimationFrame(frameId);
-  }, [openInWorker, session, workerOpen?.renderedFrame]);
+  }, [openInWorker, session, workerOpen?.renderedFrame, previewing, handoffFrom, options?.shownEngine]);
 
   const notifyFramePresented = useCallback((engine: unknown): void => {
     const waiting = paintWaitRef.current;
