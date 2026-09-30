@@ -1803,6 +1803,18 @@ impl EditSession {
             .set_display_window(Some(start as usize..(end.max(start)) as usize));
     }
 
+    /// Keep every previously built page while windowed builds are on.
+    pub fn set_display_retain_built_pages(&self, retain: bool) {
+        let _fonts = self.fonts.enter();
+        self.engine.set_display_retain_built_pages(retain);
+    }
+
+    /// Limit incremental rebuilds to the display window and caret pages. Off by default.
+    pub fn set_windowed_incremental_builds(&self, enabled: bool) {
+        let _fonts = self.fonts.enter();
+        self.engine.set_windowed_incremental_builds(enabled);
+    }
+
     /// Build the listed pages that are still unbuilt and return a FrameDelta
     /// v1 carrying them; `expected_frame_epoch` works as for
     /// [`Self::build_display_list_frame`].
@@ -2233,6 +2245,13 @@ impl EditSession {
         self.engine.doc().begin_opening(generation.as_deref());
     }
 
+    /// Unions seeded opaque sequence names into document state.
+    pub fn seed_opaque_sequences(&self, names_json: &str) -> Result<(), JsValue> {
+        let names: Vec<String> = serde_json::from_str(names_json).map_err(js_err)?;
+        crate::seed::seed_opaque_sequences(self.engine.doc(), &names);
+        Ok(())
+    }
+
     /// Parses a DOCX package, optionally seeds its editable stories into this
     /// replica, and retains the source bytes for
     /// [`EditSession::materialize_docx`] and paragraph identity reads.
@@ -2644,6 +2663,10 @@ impl EditSession {
             .sticky_index(&txn, head_index, Assoc::After)
             .ok_or_else(|| js_err("selection head could not be made sticky"))?;
         drop(txn);
+        self.engine.set_resident_caret_head(
+            (story == "body" || story.starts_with("body:"))
+                .then(|| (story.to_owned(), head.clone())),
+        );
         *self.selection.borrow_mut() = Some(LocalSelection {
             story: story.to_owned(),
             anchor,
@@ -3872,6 +3895,16 @@ impl EditSession {
     pub fn read_paragraphs_json(&self, request: &str) -> Result<String, JsValue> {
         let request: ReadParagraphsRequest = serde_json::from_str(request).map_err(js_err)?;
         outcome_json(&self.engine.doc().read_paragraphs(&request)).map_err(js_err)
+    }
+
+    /// Until the matching `end_shared_reads`, committed reads share story projections of each document state.
+    pub fn begin_shared_reads(&self) {
+        self.engine.doc().begin_shared_reads();
+    }
+
+    /// Ends a shared-read scope, dropping shared story projections when the last scope ends.
+    pub fn end_shared_reads(&self) {
+        self.engine.doc().end_shared_reads();
     }
 
     /// Exact, case-sensitive, paragraph-local search:

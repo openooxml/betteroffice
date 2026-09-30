@@ -121,6 +121,7 @@ interface LoweringContext {
   theme: Theme | null;
   plans: StoryPlan[];
   compatibilityMode: number;
+  opaqueSequences: string[];
 }
 
 function compatibilityModeFromDocument(document: Document): number {
@@ -505,6 +506,105 @@ function fieldPayload(
   };
 }
 
+function nestedSequenceNames(model: SimpleField | ComplexField | Image | Shape | Chart): string[] {
+  const names = new Set<string>();
+  const pending: Array<[unknown, boolean]> = [[model, false]];
+  while (pending.length > 0) {
+    const [value, scannedHyperlink] = pending.pop()!;
+    if (Array.isArray(value)) {
+      for (let index = value.length - 1; index >= 0; index--) {
+        pending.push([value[index], scannedHyperlink]);
+      }
+    } else if (value !== null && typeof value === 'object') {
+      const node = value as Attrs;
+      if (
+        value !== model &&
+        (node.type === 'complexField' || node.type === 'simpleField') &&
+        typeof node.instruction === 'string'
+      ) {
+        const name = sequenceName(node.instruction);
+        if (name !== undefined) names.add(name);
+      }
+      if (node.type === 'hyperlink' && !scannedHyperlink) {
+        for (const name of hyperlinkSequenceNames(value as Hyperlink)) names.add(name);
+      }
+      const insideScannedHyperlink = scannedHyperlink || node.type === 'hyperlink';
+      for (const key of Object.keys(node).sort().reverse()) {
+        pending.push([node[key], insideScannedHyperlink]);
+      }
+    }
+  }
+  return [...names];
+}
+
+function hyperlinkSequenceNames(hyperlink: Hyperlink): string[] {
+  const pending: ParagraphContent[] = [hyperlink];
+  const instructions: Array<string | undefined> = [];
+  const names: string[] = [];
+  const push = (children: readonly ParagraphContent[] | undefined): void => {
+    if (!Array.isArray(children)) return;
+    for (let index = children.length - 1; index >= 0; index--) pending.push(children[index]);
+  };
+  while (pending.length > 0) {
+    const node = pending.pop()!;
+    if (!node) continue;
+    if (
+      (node.type === 'simpleField' || node.type === 'complexField') &&
+      typeof node.instruction === 'string'
+    ) {
+      const name = sequenceName(node.instruction);
+      if (name !== undefined) names.push(name);
+    }
+    switch (node.type) {
+      case 'hyperlink':
+        push(node.structuredChildren ?? node.children);
+        break;
+      case 'inlineSdt':
+        push(node.content);
+        break;
+      case 'simpleField':
+        push(node.structuredResult?.inline ?? node.fieldTree?.result?.inline ?? node.content);
+        break;
+      case 'complexField':
+        push(node.structuredResult?.inline ?? node.fieldTree?.result?.inline ?? node.fieldResult);
+        push(node.structuredCode?.inline ?? node.fieldTree?.code?.inline ?? node.fieldCode);
+        break;
+      case 'run':
+        if (!Array.isArray(node.content)) break;
+        for (const content of node.content) {
+          if (!content) continue;
+          let instruction: string | undefined;
+          if (content.type === 'fieldChar') {
+            if (content.charType === 'begin') instructions.push('');
+            else if (content.charType === 'separate' && instructions.length > 0) {
+              instruction = instructions[instructions.length - 1];
+              instructions[instructions.length - 1] = undefined;
+            } else if (content.charType === 'end') instruction = instructions.pop();
+          } else if (content.type === 'instrText') {
+            const index = instructions.length - 1;
+            if (instructions[index] !== undefined) {
+              instructions[index] += typeof content.text === 'string' ? content.text : '';
+            }
+          }
+          const name = instruction === undefined ? undefined : sequenceName(instruction);
+          if (name !== undefined) names.push(name);
+        }
+        break;
+    }
+  }
+  return names;
+}
+
+function sequenceName(instruction: string): string | undefined {
+  const tokens = instruction.matchAll(/"([^"]*)(?:"|$)|([^\p{White_Space}]+)/gu);
+  const first = tokens.next().value;
+  const second = tokens.next().value;
+  const kind = first?.[1] ?? first?.[2];
+  const name = second?.[1] ?? second?.[2];
+  if (!kind || !/^[sS][eE][qQ]$/.test(kind) || name === undefined || name.startsWith('\\')) return undefined;
+  return name.toLowerCase();
+}
+
 function mathPayload(math: MathEquation): Attrs {
   return {
     display: math.display,
@@ -528,7 +628,8 @@ function fieldToUnits(
   value: SimpleField | ComplexField,
   styleFormatting: TextFormatting | undefined,
   styleResolver: StyleResolver | null,
-  projectionId: number
+  projectionId: number,
+  opaqueSequences: string[]
 ): InlineUnit[] {
   const result = value.structuredResult?.inline ?? [];
   const code = value.type === 'complexField' ? value.structuredCode?.inline ?? [] : [];
@@ -537,6 +638,7 @@ function fieldToUnits(
     ...result.map((child, index) => ({ child, index })),
   ];
   if (value.type !== 'complexField' || !projectedChildren.some(({ child }) => child.type === 'hyperlink' || child.type === 'simpleField')) {
+    opaqueSequences.push(...nestedSequenceNames(value));
     const field = fieldPayload(value, styleFormatting);
     return [embedUnit('field', field.payload, field.marks)];
   }
@@ -544,9 +646,12 @@ function fieldToUnits(
   const children: Attrs[] = [];
   projectedChildren.forEach(({ child, index }) => {
     if (child.type !== 'hyperlink' && child.type !== 'simpleField') return;
+    opaqueSequences.push(
+      ...(child.type === 'hyperlink' ? hyperlinkSequenceNames(child) : nestedSequenceNames(child))
+    );
     const nested = child.type === 'simpleField' ? fieldPayload(child, styleFormatting) : null;
     const projected = child.type === 'hyperlink'
-      ? hyperlinkToUnits(child, styleFormatting, styleResolver)
+      ? hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences)
       : [embedUnit('field', nested!.payload, nested!.marks)];
     children.push({ index, items: projected.map((unit) => unit.kind === 'text'
       ? { kind: 'text', text: unit.text, attributes: unit.attrs }
@@ -556,6 +661,9 @@ function fieldToUnits(
   });
   const visible = { ...value, fieldResult: result.filter((child): child is Run => child.type === 'run') };
   const field = fieldPayload(visible, styleFormatting);
+  opaqueSequences.push(
+    ...nestedSequenceNames(sequenceName(value.instruction ?? '') === undefined ? visible : value)
+  );
   field.payload.fieldData = JSON.stringify(value);
   field.payload.resultProjection = { id: projectionId, children };
   units.push(embedUnit('field', field.payload, field.marks));
@@ -589,8 +697,17 @@ function trackedMarks(marks: readonly MarkDescriptor[]): MarkDescriptor[] {
 function runContentToUnits(
   content: RunContent,
   marks: readonly MarkDescriptor[],
+  opaqueSequences: string[],
   commentId?: number
 ): InlineUnit[] {
+  if (
+    (content.type === 'drawing' || content.type === 'shape' || content.type === 'chart') &&
+    marks.some((mark) => mark.name === 'hidden')
+  ) {
+    const model = content.type === 'drawing' ? content.image
+      : content.type === 'shape' ? content.shape : content.chart;
+    opaqueSequences.push(...nestedSequenceNames(model));
+  }
   switch (content.type) {
     case 'text':
       return content.text ? [textUnit(content.text, marks, commentId)] : [];
@@ -658,17 +775,19 @@ function runToUnits(
   run: Run,
   styleFormatting: TextFormatting | undefined,
   styleResolver: StyleResolver | null,
+  opaqueSequences: string[],
   commentId?: number,
   extraMarks: readonly MarkDescriptor[] = []
 ): InlineUnit[] {
   const marks = [...runMarks(run, styleFormatting, styleResolver), ...extraMarks];
-  return run.content.flatMap((content) => runContentToUnits(content, marks, commentId));
+  return run.content.flatMap((content) => runContentToUnits(content, marks, opaqueSequences, commentId));
 }
 
 function hyperlinkToUnits(
   hyperlink: Hyperlink,
   styleFormatting: TextFormatting | undefined,
   styleResolver: StyleResolver | null,
+  opaqueSequences: string[],
   extraMarks: readonly MarkDescriptor[] = []
 ): InlineUnit[] {
   const units: InlineUnit[] = [];
@@ -676,8 +795,9 @@ function hyperlinkToUnits(
   for (const child of hyperlink.structuredChildren ?? hyperlink.children) {
     if (child.type === 'run') {
       const marks = [...runMarks(child, styleFormatting, styleResolver), ...extraMarks, link];
-      for (const content of child.content) units.push(...runContentToUnits(content, marks));
+      for (const content of child.content) units.push(...runContentToUnits(content, marks, opaqueSequences));
     } else if (child.type === 'simpleField' || child.type === 'complexField') {
+      opaqueSequences.push(...nestedSequenceNames(child));
       const field = fieldPayload(child, styleFormatting);
       units.push(embedUnit('field', field.payload, [...field.marks, ...extraMarks, link]));
     } else if (child.type === 'mathEquation') {
@@ -707,7 +827,8 @@ function trackedToUnits(
   content: Extract<ParagraphContent, { type: 'insertion' | 'deletion' | 'moveFrom' | 'moveTo' }>,
   styleFormatting: TextFormatting | undefined,
   styleResolver: StyleResolver | null,
-  commentId?: number
+  commentId: number | undefined,
+  opaqueSequences: string[]
 ): InlineUnit[] {
   const kind = content.type === 'insertion' || content.type === 'moveTo' ? 'insertion' : 'deletion';
   const mark = trackedMark(
@@ -718,9 +839,10 @@ function trackedToUnits(
   const units: InlineUnit[] = [];
   for (const child of content.content) {
     if (child.type === 'run') {
-      units.push(...runToUnits(child, styleFormatting, styleResolver, commentId, [mark]));
+      units.push(...runToUnits(child, styleFormatting, styleResolver, opaqueSequences, commentId, [mark]));
     } else {
-      const linked = hyperlinkToUnits(child, styleFormatting, styleResolver, [mark]);
+      opaqueSequences.push(...hyperlinkSequenceNames(child));
+      const linked = hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences, [mark]);
       for (const unit of linked) {
         if (commentId !== undefined) unit.commentId = commentId;
       }
@@ -733,7 +855,8 @@ function trackedToUnits(
 function sdtPayload(
   sdt: InlineSdt,
   styleFormatting: TextFormatting | undefined,
-  styleResolver: StyleResolver | null
+  styleResolver: StyleResolver | null,
+  opaqueSequences: string[]
 ): Attrs {
   const content: Array<
     | { kind: 'text'; text: string; attrs: YrsAttrs }
@@ -764,14 +887,16 @@ function sdtPayload(
 
   for (const child of sdt.content) {
     if (child.type === 'run') {
-      runToUnits(child, styleFormatting, styleResolver).forEach(append);
+      runToUnits(child, styleFormatting, styleResolver, opaqueSequences).forEach(append);
     } else if (child.type === 'hyperlink') {
-      hyperlinkToUnits(child, styleFormatting, styleResolver).forEach(append);
+      opaqueSequences.push(...hyperlinkSequenceNames(child));
+      hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences).forEach(append);
     } else if (child.type === 'simpleField' || child.type === 'complexField') {
+      opaqueSequences.push(...nestedSequenceNames(child));
       const field = fieldPayload(child, styleFormatting);
       append(embedUnit('field', field.payload, field.marks));
     } else if (child.type === 'inlineSdt') {
-      append(embedUnit('sdt', sdtPayload(child, styleFormatting, styleResolver)));
+      append(embedUnit('sdt', sdtPayload(child, styleFormatting, styleResolver, opaqueSequences)));
     } else if (child.type === 'mathEquation') {
       append(embedUnit('math', mathPayload(child)));
     }
@@ -840,7 +965,7 @@ function flowBreakOffsets(run: Run): Array<{ offset: number; type: 'page' | 'col
       breaks.push({ offset, type });
       continue;
     }
-    offset += unitsText(runContentToUnits(content, [])).length;
+    offset += unitsText(runContentToUnits(content, [], [])).length;
   }
   return breaks;
 }
@@ -850,7 +975,7 @@ function runBoundary(
   styleFormatting: TextFormatting | undefined,
   styleResolver: StyleResolver | null
 ): Attrs | null {
-  const units = runToUnits(run, styleFormatting, styleResolver);
+  const units = runToUnits(run, styleFormatting, styleResolver, []);
   if (units.some((unit) => unit.kind !== 'text' && unit.embedKind !== 'noteRef')) return null;
   const keys = units.map((unit) => marksKey(unit.marks));
   if (keys.some((key) => key !== keys[0])) return null;
@@ -1063,8 +1188,9 @@ function paragraphUnits(
   styleResolver: StyleResolver | null,
   extraRunFormatting?: TextFormatting,
   tableParagraphFormatting?: ParagraphFormatting
-): { units: InlineUnit[]; ppr: Attrs } {
+): { units: InlineUnit[]; ppr: Attrs; opaqueSequences: string[] } {
   const units: InlineUnit[] = [];
+  const opaqueSequences: string[] = [];
   const activeComments = new Set<number>();
   let boundaries: Attrs[] | undefined = [];
   const styleFormatting = paragraphStyleFormatting(paragraph, styleResolver, extraRunFormatting);
@@ -1078,21 +1204,22 @@ function paragraphUnits(
       const boundary = runBoundary(content, styleFormatting, styleResolver);
       if (boundary && boundaries) boundaries.push(boundary);
       else boundaries = undefined;
-      units.push(...runToUnits(content, styleFormatting, styleResolver, commentId));
+      units.push(...runToUnits(content, styleFormatting, styleResolver, opaqueSequences, commentId));
     } else if (content.type === 'hyperlink') {
       boundaries = undefined;
-      const linked = hyperlinkToUnits(content, styleFormatting, styleResolver);
+      opaqueSequences.push(...hyperlinkSequenceNames(content));
+      const linked = hyperlinkToUnits(content, styleFormatting, styleResolver, opaqueSequences);
       for (const unit of linked) {
         if (commentId !== undefined) unit.commentId = commentId;
       }
       units.push(...linked);
     } else if (content.type === 'simpleField' || content.type === 'complexField') {
       boundaries = undefined;
-      units.push(...fieldToUnits(content, styleFormatting, styleResolver, contentIndex));
+      units.push(...fieldToUnits(content, styleFormatting, styleResolver, contentIndex, opaqueSequences));
     } else if (content.type === 'inlineSdt') {
       boundaries = undefined;
       units.push(
-        embedUnit('sdt', sdtPayload(content, styleFormatting, styleResolver), [], undefined, 2)
+        embedUnit('sdt', sdtPayload(content, styleFormatting, styleResolver, opaqueSequences), [], undefined, 2)
       );
     } else if (
       content.type === 'insertion' ||
@@ -1101,7 +1228,7 @@ function paragraphUnits(
       content.type === 'moveTo'
     ) {
       boundaries = undefined;
-      units.push(...trackedToUnits(content, styleFormatting, styleResolver, commentId));
+      units.push(...trackedToUnits(content, styleFormatting, styleResolver, commentId, opaqueSequences));
     } else if (content.type === 'mathEquation') {
       boundaries = undefined;
       units.push(embedUnit('math', mathPayload(content)));
@@ -1111,7 +1238,7 @@ function paragraphUnits(
     paragraphContentUnitCounts.set(content as object, units.length - start);
   }
   const attrs = paragraphAttrs(paragraph, styleResolver, units, boundaries, tableParagraphFormatting);
-  return { units, ppr: paraAttrsToPpr(attrs) };
+  return { units, ppr: paraAttrsToPpr(attrs), opaqueSequences };
 }
 
 type ParagraphToken = 'pageBreak' | 'visible';
@@ -1618,6 +1745,7 @@ function visitStory(
         options.extraRunFormatting,
         options.tableParagraphFormatting
       );
+      context.opaqueSequences.push(...paragraph.opaqueSequences);
       bindFieldResultBlocks(
         paragraph.units,
         storyId,
@@ -1781,6 +1909,7 @@ export function documentToYrs(
     theme: document.package.theme ?? null,
     plans: [],
     compatibilityMode: compatibilityModeFromDocument(document),
+    opaqueSequences: [],
   };
   visitStory(context, 'body', document.package.document.content, {
     includePageBreaks: true,
@@ -1819,5 +1948,6 @@ export function documentToYrs(
 
   for (const plan of context.plans) session.createStory(plan.storyId, '', 'Normal', 'left');
   for (const plan of context.plans) seedPlan(session, plan);
+  session.seedOpaqueSequences(context.opaqueSequences);
   session.beginOpening(options.generation);
 }

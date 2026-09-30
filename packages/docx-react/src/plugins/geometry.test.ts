@@ -22,6 +22,7 @@ import {
   stampSourceVersion,
   UNKNOWN_REVISION_PREVIEW_KEY,
 } from '../components/DocxEditor/internals/layoutProvenance';
+import { bindDisplayWindow } from '../components/DocxEditor/internals/displayWindow';
 import { createPluginGeometry, pluginLayout, toOverlayRect } from './geometry';
 import * as proposalPreview from './proposalPreview';
 import type { DocxProposalSnapshot } from './proposalPreview';
@@ -409,6 +410,70 @@ function textLine(source: DisplayListQueries, hidden: number[] = [], rtl = false
 }
 
 describe('semantic anchor geometry', () => {
+  test('a proposal keeps its offscreen placeholder anchor and refuses it when the window moves', () => {
+    const { geometry, source } = semanticGeometry();
+    Object.assign(source, {
+      displayList: {
+        pages: [
+          { pageIndex: 0, ...PAGE, primitives: [] },
+          { pageIndex: 1, ...PAGE, primitives: [], unbuilt: true },
+        ],
+      },
+    });
+    source.rangeRects = () => [];
+    source.anchorRect = () => ({ ...RANGE, pageIndex: 1, width: 0, height: 0 });
+    let window: [number, number] = [0, 1];
+    bindDisplayWindow(source, { read: () => window, subscribe: () => () => {} });
+    const target: DocxGeometryTarget = { kind: 'proposal', id: 'proposal' };
+    expect(anchored(geometry.getAnchorGeometry(target))).toMatchObject({
+      rects: [],
+      anchor: { pageIndex: 1, width: 0, height: 0 },
+    });
+    window = [1, 2];
+    refused(geometry.getAnchorGeometry(target), 'layout-unavailable');
+    source.rangeRects = () => [{ ...RANGE, pageIndex: 1 }];
+    refused(geometry.getAnchorGeometry(target), 'layout-unavailable');
+  });
+
+  test('a proposal spanning a visible placeholder waits even when another page has rectangles', () => {
+    const { geometry, source } = semanticGeometry();
+    Object.assign(source, {
+      displayList: {
+        pages: [
+          { pageIndex: 0, ...PAGE, primitives: [] },
+          { pageIndex: 1, ...PAGE, primitives: [], unbuilt: true, positionSpan: [2, 4] },
+        ],
+      },
+    });
+    bindDisplayWindow(source, { read: () => [1, 2], subscribe: () => () => {} });
+    refused(geometry.getAnchorGeometry({ kind: 'proposal', id: 'proposal' }), 'layout-unavailable');
+  });
+
+  test('a hidden proposal on a visible placeholder does not use a neighbouring caret', () => {
+    const { geometry, source, setSnapshot } = semanticGeometry();
+    setSnapshot({
+      proposals: [
+        {
+          id: 'proposal',
+          state: 'rejected',
+          paragraph: PARAGRAPH,
+          revisionIds: ['r2'],
+          changed: true,
+        },
+      ],
+    });
+    Object.assign(source, {
+      displayList: {
+        pages: [
+          { pageIndex: 0, ...PAGE, primitives: [] },
+          { pageIndex: 1, ...PAGE, primitives: [], unbuilt: true, positionSpan: [2, 4] },
+        ],
+      },
+    });
+    bindDisplayWindow(source, { read: () => [1, 2], subscribe: () => () => {} });
+    refused(geometry.getAnchorGeometry({ kind: 'proposal', id: 'proposal' }), 'layout-unavailable');
+  });
+
   test('resolves every target kind and returns versioned, page-aware fragments', () => {
     const { geometry } = semanticGeometry();
     const targets: DocxGeometryTarget[] = [

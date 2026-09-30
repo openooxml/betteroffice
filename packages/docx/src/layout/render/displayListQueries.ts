@@ -346,6 +346,18 @@ function strongly(queries: DisplayListQueries): WeakTo<DisplayListQueries> {
 
 const facadeDeltaSeeds = new WeakMap<DisplayListQueries, FacadeDeltaSeed>();
 
+/** One lineage per named document line, so a facade built after a gap in the chain rejoins it. */
+const lineages = new WeakMap<object, FacadeLineage>();
+
+/**
+ * Ends `line`: its superseded facades answer nothing until a facade of the same
+ * line is built. Call it when the session behind the line goes away.
+ */
+export function endDisplayListQueriesLine(line: object): void {
+  const lineage = lineages.get(line);
+  if (lineage) lineage.newest = null;
+}
+
 type DisplayListQuerySource = RustDisplayListQueryEngine | ResidentDisplayListQueryEngine;
 
 /**
@@ -568,7 +580,8 @@ function pagesTouchingPositions(
  *
  * `line` names the document the list lays out, such as its load. A facade of another
  * document starts a new line and ends the previous one, so a facade of the
- * replaced document never answers from the new one.
+ * replaced document never answers from the new one. Without `line` a superseded
+ * facade answers from its own list.
  */
 export function createDisplayListQueries(
   list: DisplayList,
@@ -624,9 +637,12 @@ export function createDisplayListQueries(
     donorFacade = previousSeed.hasHandle() ? previous! : previousSeed.donor();
     previousSeed.supersede();
   }
-  const sameLine = previousSeed !== undefined && previousSeed.line === (line ?? null);
-  if (previousSeed && !sameLine) previousSeed.lineage.newest = null;
-  const lineage: FacadeLineage = sameLine ? previousSeed.lineage : { newest: null };
+  if (previousSeed && previousSeed.line !== (line ?? null)) previousSeed.lineage.newest = null;
+  let lineage: FacadeLineage = { newest: null };
+  if (line) {
+    lineage = lineages.get(line) ?? lineage;
+    lineages.set(line, lineage);
+  }
 
   const source = (): DisplayListQuerySource | null => resident ?? eng;
 
@@ -858,7 +874,7 @@ export function createDisplayListQueries(
    * answers itself; null when no live facade is left, which answers nothing.
    */
   const handedOff = (): DisplayListQueries | null | undefined => {
-    if (resident || !superseded || handle !== null) return undefined;
+    if (resident || !superseded || handle !== null || !line) return undefined;
     // never names this facade: the finalizer's closure context must not retain it
     const newest = lineage.newest?.deref();
     return newest && !facadeDeltaSeeds.get(newest)?.disposed() ? newest : null;

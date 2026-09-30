@@ -104,6 +104,9 @@ function worker() {
     },
     delta: null as DecodedFrameDelta | null,
     caret: null as YrsResidentCaretRect | null,
+    displayWindows: [] as [number, number][],
+    retainBuiltPages: [] as boolean[],
+    windowedIncrementalBuilds: [] as boolean[],
     rasterized: [] as number[],
     presented: [] as number[],
     failRaster: null as number | null,
@@ -113,6 +116,15 @@ function worker() {
       loadState() {},
       loadMediaSources(_json: string) {},
       setPartialDocument() {},
+      setDisplayWindow(start: number, end: number) {
+        harness.displayWindows.push([start, end]);
+      },
+      setDisplayRetainBuiltPages(retain: boolean) {
+        harness.retainBuiltPages.push(retain);
+      },
+      setWindowedIncrementalBuilds(enabled: boolean) {
+        harness.windowedIncrementalBuilds.push(enabled);
+      },
       clearFonts() {},
       layoutDocumentJson() {},
       layoutDocumentWithRegionsRetained() {},
@@ -124,6 +136,18 @@ function worker() {
       },
       buildDisplayListFrame() {
         return new Uint8Array([frameEpoch]);
+      },
+      setSelection() {},
+      applyInput() {
+        delta([1]);
+        return new Uint8Array([frameEpoch]);
+      },
+      applyDelete() {
+        delta([1]);
+        return new Uint8Array([frameEpoch]);
+      },
+      residentDeletedUnits() {
+        return 1;
       },
       residentCaretSnapshot() {
         return { frameEpoch, caretRect: harness.caret };
@@ -240,7 +264,13 @@ function worker() {
         },
       });
     },
-    build(upserts: number[], width = 100, caret: YrsResidentCaretRect | null = null) {
+    build(
+      upserts: number[],
+      width = 100,
+      caret: YrsResidentCaretRect | null = null,
+      displayWindow?: [number, number],
+      retainBuiltPages?: boolean
+    ) {
       delta(upserts, false, width);
       harness.caret = caret;
       return send({
@@ -248,6 +278,8 @@ function worker() {
         extras: '',
         expectedFrameEpoch: frameEpoch - 1,
         paintCaret: !!caret,
+        displayWindow,
+        ...(retainBuiltPages ? { retainBuiltPages } : {}),
       });
     },
     attach(active: number[], zoom = 1, color = '#000') {
@@ -332,6 +364,59 @@ describe('resident worker warmup', () => {
 });
 
 describe('resident worker page damage', () => {
+  test('frame requests opt into windowed incremental builds only with a display window', async () => {
+    const w = worker();
+    expect((await w.bootstrap()).ok).toBe(true);
+    expect(w.harness.windowedIncrementalBuilds).toEqual([false]);
+    expect((await w.build([], 100, null, [8, 11])).ok).toBe(true);
+    expect(w.harness.displayWindows).toEqual([[8, 11]]);
+    expect(w.harness.retainBuiltPages).toEqual([false]);
+    expect(w.harness.windowedIncrementalBuilds).toEqual([false, true]);
+    expect((await w.build([])).ok).toBe(true);
+    expect(w.harness.displayWindows).toEqual([[8, 11]]);
+    expect(w.harness.retainBuiltPages).toEqual([false]);
+    expect(w.harness.windowedIncrementalBuilds).toEqual([false, true, false]);
+    expect((await w.build([], 100, null, [8, 11], true)).ok).toBe(true);
+    expect(w.harness.retainBuiltPages).toEqual([false, true]);
+    expect((await w.build([], 100, null, [8, 11])).ok).toBe(true);
+    expect(w.harness.retainBuiltPages).toEqual([false, true, false]);
+  });
+
+  test('input and delete requests without a display window disable a previous opt-in', async () => {
+    const w = worker();
+    await w.bootstrap();
+    const loc = { story: 'body', paraId: 'p1', offset: 1 };
+    const options = {
+      selection: { anchor: loc, head: loc },
+      profile: false,
+      paintCaret: false,
+    };
+    expect((await w.build([], 100, caret(1), [8, 11])).ok).toBe(true);
+    expect(
+      (
+        await w.send({
+          type: 'applyInput',
+          text: 'x',
+          expectedFrameEpoch: 2,
+          ...options,
+        })
+      ).ok
+    ).toBe(true);
+    expect((await w.build([], 100, caret(1), [8, 11])).ok).toBe(true);
+    expect(
+      (
+        await w.send({
+          type: 'applyDelete',
+          direction: 'backward',
+          count: 1,
+          expectedFrameEpoch: 4,
+          ...options,
+        })
+      ).ok
+    ).toBe(true);
+    expect(w.harness.windowedIncrementalBuilds).toEqual([false, true, false, true, false]);
+  });
+
   test('a bootstrap that keeps surfaces paints the next document into the attached canvases', async () => {
     const w = worker();
     await w.bootstrap(3);

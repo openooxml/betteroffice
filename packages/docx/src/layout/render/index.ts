@@ -111,6 +111,7 @@ export {
 
 export {
   createDisplayListQueries,
+  endDisplayListQueriesLine,
   isDisplayListQuerySourceDead,
   onDisplayListQuerySourceFailure,
   type DisplayListHitRegion,

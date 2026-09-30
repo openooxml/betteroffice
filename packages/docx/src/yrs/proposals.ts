@@ -108,6 +108,8 @@ export interface DocxProposalSession {
   listRevisions(): readonly { revisionId: string; kind: string }[];
   /** Accepts and rejects revisions for good, outside undo history; unknown ids are skipped. */
   settleRevisions(accept: readonly string[], reject: readonly string[]): void;
+  /** Runs `read` with story projections shared across its reads; omitted, reads run unshared. */
+  sharedReads?<R>(read: () => R): R;
 }
 
 /** @internal */
@@ -683,7 +685,10 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
   };
 
   return {
-    propose,
+    propose(request) {
+      const read = () => propose(request);
+      return session.sharedReads ? session.sharedReads(read) : read();
+    },
     setStates,
     withdraw,
     snapshot,

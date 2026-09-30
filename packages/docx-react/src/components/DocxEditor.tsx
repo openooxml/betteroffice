@@ -9,7 +9,7 @@
  * - Loading states
  */
 
-import { useRef, useCallback, useState, useEffect, useMemo, forwardRef } from 'react';
+import { useRef, useCallback, useState, useEffect, useLayoutEffect, useMemo, forwardRef } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import type { Document, Theme } from '@betteroffice/docx/types/document';
 import type {
@@ -185,6 +185,11 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   downloadOnSave?: boolean;
   /** Configure the Yrs collaboration replica used by the editor. */
   collaboration?: DocxEditorCollaborationOptions;
+  /**
+   * Open DOCX files in the resident worker. Off by default.
+   * @experimental
+   */
+  experimentalWorkerOpen?: boolean;
   /**
    * Opens images as `media:{n}` tokens read from the document file instead of
    * `data:` URLs, keeping them out of the document state and its updates.
@@ -374,6 +379,11 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   onCommentsSidebarOpenChange?: (open: boolean) => void;
   /** Receives the editor's rendered-DOM context whenever a new frame or zoom rebuilds it. */
   onRenderedDomContextReady?: (context: RenderedDomContext) => void;
+  /**
+   * Called once per document, when its first pages are painted on screen, by the first-page
+   * preview or the full document, whichever shows first. The document may still be opening.
+   */
+  onFirstPagePainted?: () => void;
   /**
    * Unmanaged overlay content, drawn under managed plugin overlays.
    * @deprecated Contribute an `overlay` through `plugins` instead.
@@ -808,6 +818,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onSaveRequest,
     downloadOnSave = true,
     collaboration,
+    experimentalWorkerOpen = false,
     mediaTokens,
     onOpen,
     author = 'User',
@@ -860,6 +871,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     commentsSidebarOpen,
     onCommentsSidebarOpenChange,
     onRenderedDomContextReady,
+    onFirstPagePainted,
     pluginOverlays,
     pluginSidebarItems,
     pluginRenderedDomContext,
@@ -967,7 +979,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     resolvedIdsForRender,
     () => pagedEditorRef.current?.relayout(),
     memoryBudget?.workerLimitBytes,
-    handoffFromRef
+    handoffFromRef,
+    experimentalWorkerOpen
   );
   // The full session failing to lay out or render as it opens fails the
   // load, which reports it. Each render error is handled once: one the
@@ -1106,8 +1119,24 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     cleanOrphanedCommentsTimerRef,
   });
   const { resetSettled, awaitingDocument } = canvasRenderer;
+  const shownListRef = useRef(canvasRenderer.displayList);
+  // Pages shown while a load is under way belong to the document it replaces.
+  const replacedListsRef = useRef(new WeakSet<object>());
+  if (canvasRenderer.displayList && awaitingDocument()) {
+    replacedListsRef.current.add(canvasRenderer.displayList);
+  }
+  const firstPagePendingRef = useRef(true);
+  const firstPageGenerationRef = useRef(0);
+  const onFirstPagePaintedRef = useRef(onFirstPagePainted);
+  useLayoutEffect(() => {
+    shownListRef.current = canvasRenderer.displayList;
+    onFirstPagePaintedRef.current = onFirstPagePainted;
+  });
   const resetForNewDocument = useCallback(() => {
     beginPluginLoadRef.current();
+    if (shownListRef.current) replacedListsRef.current.add(shownListRef.current);
+    firstPagePendingRef.current = true;
+    firstPageGenerationRef.current += 1;
     resetEditorState();
     resetSettled();
   }, [resetEditorState, resetSettled]);
@@ -1172,11 +1201,20 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       onSession: canvasRenderer.recordSession,
       onHostDocument: acceptHostDocument,
       onError: failHostDocument,
+      onReplicaError: (error, generation) => {
+        if (isCurrentLoad(generation)) reportLayoutError(error);
+      },
     },
     {
       previewFirstPage,
       heldEngine: canvasRenderer.layoutEngine,
       shownEngine: canvasRenderer.presentedEngine,
+      workerOpen: experimentalWorkerOpen
+        ? {
+            openInWorker: canvasRenderer.openInWorker,
+            renderedFrame: canvasRenderer.status === 'ready' ? canvasRenderer.displayList : null,
+          }
+        : undefined,
       mediaTokens,
     }
   );
@@ -1204,10 +1242,39 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     displayList: canvasRenderer.displayList,
     engine: canvasRenderer.presentedEngine,
   };
+  // Layout cleanup runs in the unmount commit, before a queued frame could fire the callback.
+  useLayoutEffect(
+    () => () => {
+      firstPageGenerationRef.current += 1;
+    },
+    []
+  );
   useEffect(() => {
-    const offPresented = onPresented((displayList) => {
+    const offPresented = onPresented((displayList, options) => {
       const shown = shownRef.current;
-      if (shown.engine && displayList === shown.displayList) notifyFramePresented(shown.engine);
+      if (displayList !== shown.displayList) return;
+      if (shown.engine) notifyFramePresented(shown.engine);
+      if (
+        firstPagePendingRef.current &&
+        !awaitingDocument() &&
+        !replacedListsRef.current.has(displayList) &&
+        shown.displayList?.pages.length
+      ) {
+        firstPagePendingRef.current = false;
+        // The callback of the document whose pages presented, not of one committed since.
+        const callback = onFirstPagePaintedRef.current;
+        const generation = firstPageGenerationRef.current;
+        const fire = () => {
+          if (generation !== firstPageGenerationRef.current) return;
+          try {
+            callback?.();
+          } catch (error) {
+            console.error('[DocxEditor] onFirstPagePainted threw', error);
+          }
+        };
+        if (options?.worker) requestAnimationFrame(() => requestAnimationFrame(fire));
+        else fire();
+      }
     });
     // Pages of the opening session that fail to paint fail the load, as its render errors do.
     const offFailed = onReplayFailed((displayList, error) => {
@@ -1222,14 +1289,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       offPresented();
       offFailed();
     };
-  }, [notifyFramePresented]);
+  }, [awaitingDocument, notifyFramePresented]);
   sessionGenerationRef.current = yrsCore.sessionGeneration;
   // Content listeners project the document on every edit; warm its base once
   // the first pages are on screen so neither opening nor the first key pays.
   useCompatibilityWarm(
     yrsCore.session,
     canvasRenderer.status === 'ready' ? canvasRenderer.displayList : null,
-    Boolean(onChange) || contentSubscriberCount > 0,
+    yrsCore.replicaReady && (Boolean(onChange) || contentSubscriberCount > 0),
     yrsCore.scheduleCompatibilityWarm,
     yrsCore.cancelCompatibilityWarm
   );
@@ -1267,6 +1334,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   }, []);
 
   const commands = useDocxCommandBinding({
+    experimentalWorkerOpen,
     pagedEditorRef,
     bridgeRef: commandBridgeRef,
     isLoading: state.isLoading || opening,
@@ -1659,6 +1727,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     session:
       yrsCore.session &&
       !opening &&
+      yrsCore.replicaReady &&
       yrsCore.sessionGeneration === yrsSeedGeneration &&
       history.state &&
       !state.isLoading &&
@@ -1772,6 +1841,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   });
 
   useDocxEditorRefApi({
+    experimentalWorkerOpen,
     ref,
     document: history.state,
     documentFromYrs: yrsCore.documentFromYrs,
@@ -2272,7 +2342,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           sectionProps: history.state?.package.document?.finalSectionProperties,
           zoom: state.zoom,
           unit: rulerUnit,
-          editable: !readOnly,
+          editable: !readOnly && yrsCore.replicaReady,
           onLeftMarginChange: handleLeftMarginChange,
           onRightMarginChange: handleRightMarginChange,
           indentLeft: state.paragraphIndentLeft,
@@ -2289,7 +2359,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           sectionProps: initialSectionProperties,
           zoom: state.zoom,
           unit: rulerUnit,
-          editable: !readOnly,
+          editable: !readOnly && yrsCore.replicaReady,
           onTopMarginChange: handleTopMarginChange,
           onBottomMarginChange: handleBottomMarginChange,
         }}
@@ -2325,7 +2395,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             }}
             sidebarOpen={sidebarOpen}
             zoom={state.zoom}
-            interactive={!readOnly}
+            interactive={!readOnly && yrsCore.replicaReady}
             fontFamilies={fontAliases}
           >
             <DocxEditorPagedArea
@@ -2394,6 +2464,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               }}
               onLayoutComputed={canvasRenderer.onLayoutComputed}
               layoutInWorker={canvasRenderer.layoutInWorker}
+              fontRequirementsInWorker={
+                experimentalWorkerOpen ? canvasRenderer.fontRequirementsInWorker : undefined
+              }
               applyResidentInput={canvasRenderer.applyInput}
               applyResidentDelete={canvasRenderer.applyDelete}
               displayListQueries={canvasRenderer.queries}
@@ -2414,7 +2487,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               setIsAddingComment={setIsAddingComment}
               setFloatingCommentBtn={setFloatingCommentBtn}
             />
-            {!readOnly && (
+            {!readOnly && yrsCore.replicaReady && (
               <ContentControlWidgets
                 containerRef={containerRef}
                 applyYrsValue={(pmPos, value, embedId) =>

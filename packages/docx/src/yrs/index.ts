@@ -84,10 +84,12 @@ export {
   ResidentWorkerFailureError,
   ResidentWorkerOutOfMemoryError,
   canUseResidentEngineWorker,
+  preloadResidentEngineWorker,
   retainPreloadedResidentEngineWorker,
   takePreloadedResidentEngineWorker,
   type ResidentEngineWorkerApplyResult,
   type ResidentEngineWorkerFrame,
+  type ResidentEngineWorkerOpened,
   type ResidentEngineOffscreenPage,
 } from './residentEngineWorkerClient';
 export { preloadDocxEngine } from './preloadDocxEngine';
@@ -925,6 +927,8 @@ export interface YrsSession extends CollaborationReplica {
    * built; the rest stay unbuilt placeholders carrying their geometry. @internal
    */
   setDisplayWindow(start: number, end: number): void;
+  /** Keep every previously built page while windowed builds are on. @internal */
+  setDisplayRetainBuiltPages(retain: boolean): void;
   /** Build the listed unbuilt pages into a FrameDelta v1. @internal */
   buildDisplayPagesFrame(pages: readonly number[], expectedFrameEpoch: number): Uint8Array;
   /** Make the next frame a full one, for a host taking over from another engine; no-op once destroyed. */
@@ -1016,6 +1020,8 @@ export interface YrsSession extends CollaborationReplica {
    * point calls it; call it after building a document another way.
    */
   beginOpening(generation?: string): void;
+  /** Unions seeded opaque sequence names into document state. @internal */
+  seedOpaqueSequences(names: readonly string[]): void;
   /** Materializes the retained canonical package for compatibility APIs. */
   materializeDocx(): Document | null;
   /**
@@ -1731,6 +1737,19 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       session.settle_revisions_json(JSON.stringify({ accept, reject }));
       markDirty(facade.storiesChangedSince(since).stories);
     },
+    ...(typeof session.begin_shared_reads === 'function' &&
+    typeof session.end_shared_reads === 'function'
+      ? {
+          sharedReads: <R>(read: () => R): R => {
+            session.begin_shared_reads();
+            try {
+              return read();
+            } finally {
+              session.end_shared_reads();
+            }
+          },
+        }
+      : {}),
   });
 
   const facade: YrsSession = {
@@ -1843,6 +1862,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
     setDisplayWindow: (start, end) => session.set_display_window(start, end),
+    setDisplayRetainBuiltPages: (retain) => session.set_display_retain_built_pages(retain),
     buildDisplayPagesFrame: (pages, expectedFrameEpoch) =>
       session.build_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch),
     residentCaretSnapshot: () =>
@@ -1938,6 +1958,10 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         session.begin_opening(generation);
         proposals.reset();
       });
+    },
+    seedOpaqueSequences: (names) => {
+      markDirty('all');
+      mutate(() => session.seed_opaque_sequences(JSON.stringify(names)));
     },
     mediaSource: (token) => {
       if (destroyed || !token.startsWith('media:')) return null;
