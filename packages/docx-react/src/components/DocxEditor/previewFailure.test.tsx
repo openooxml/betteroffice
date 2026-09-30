@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, expect, mock, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
+import type { YrsSession } from '@betteroffice/docx/yrs';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -48,10 +49,21 @@ mock.module('@betteroffice/docx/yrs', () => ({
     return session;
   },
 }));
+const layoutRender = await import('@betteroffice/docx/layout/render');
+const { buildRustDisplayFrame } = layoutRender;
+let holdFullDisplayList: Promise<void> | null = null;
+mock.module('@betteroffice/docx/layout/render', () => ({
+  ...layoutRender,
+  buildRustDisplayFrame: async (...args: Parameters<typeof buildRustDisplayFrame>) => {
+    const result = await buildRustDisplayFrame(...args);
+    if (holdFullDisplayList && args[1] === fullSession) await holdFullDisplayList;
+    return result;
+  },
+}));
 const displayList = await import('./hooks/useDisplayList');
 const { useCanvasRenderer } = displayList;
 let renderer: ReturnType<typeof useCanvasRenderer> | null = null;
-let holdCanvasReplay: 'full' | 'ordinary' | null = null;
+let holdCanvasReplay: 'full' | 'preview' | 'ordinary' | null = null;
 interface PendingCanvasReplay {
   displayList: NonNullable<ReturnType<typeof useCanvasRenderer>['displayList']>;
   layoutEngine: unknown;
@@ -91,7 +103,8 @@ mock.module('./canvasReplay', () => ({
       !holdCanvasReplay ||
       !shown?.displayList ||
       (holdCanvasReplay === 'full' &&
-        (fullSession === null || shown.presentedEngine !== fullSession))
+        (fullSession === null || shown.presentedEngine !== fullSession)) ||
+      (holdCanvasReplay === 'preview' && shown.presentedEngine === fullSession)
     ) {
       return presentCanvasReplay(...args);
     }
@@ -111,7 +124,7 @@ mock.module('./canvasReplay', () => ({
     );
   },
 }));
-const { isPresented } = await import('./internals/layoutProvenance');
+const { isPresented, onReplayFailed } = await import('./internals/layoutProvenance');
 const { DocxEditor } = await import('../../index');
 type Editor = import('../../index').DocxEditorRef;
 
@@ -274,6 +287,94 @@ test('a full session whose canvas replay rejects during preview handover fails t
   expect(ref.current!.getTotalPages()).toBe(0);
   expect(ref.current!.getDocument()).toBeNull();
   await expectWaitRejects(ref);
+}, 30_000);
+
+test('a preview whose canvas replay rejects during full-session handover does not fail the load', async () => {
+  created = 0;
+  fullSession = null;
+  shownPages = false;
+  fullOpen = 'open';
+  failRender = null;
+  holdCanvasReplay = 'preview';
+  let releaseFullDisplayList = () => {};
+  holdFullDisplayList = new Promise((done) => (releaseFullDisplayList = done));
+  let offReplayFailed = () => {};
+  try {
+    const ref = createRef<Editor>();
+    const errors: Error[] = [];
+    const replayError = new Error('preview canvas replay failed');
+    const view = render(load(documentBuffer(), (error) => errors.push(error), ref));
+    await waitFor(
+      () => {
+        expect(fullSession).not.toBeNull();
+        expect(renderer!.layoutEngine).toBe(fullSession);
+      },
+      { timeout: 20_000 }
+    );
+    const replay = await currentCanvasReplay();
+    const previewEngine = renderer!.presentedEngine;
+
+    expect(created).toBe(2);
+    expect(previewEngine).not.toBeNull();
+    expect(previewEngine).not.toBe(fullSession);
+    expect((previewEngine as YrsSession).isDisplayOnly()).toBe(true);
+    expect(renderer!.layoutEngine).toBe(fullSession);
+    expect(renderer!.displayList).toBe(replay.displayList);
+    expect(isPresented(renderer!.canvasHostRef.current, replay.displayList)).toBe(false);
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+    expect(ref.current!.getDocument()).toBeNull();
+    expect(errors).toEqual([]);
+
+    const replayFailed = mock((_displayList: object, _error: unknown) => {});
+    offReplayFailed = onReplayFailed(replayFailed);
+    await act(async () => {
+      expect(replay.isCurrent()).toBe(true);
+      replay.reject(replayError);
+    });
+    await waitFor(() => expect(replayFailed).toHaveBeenCalledWith(replay.displayList, replayError));
+    await act(async () => {});
+    expect(errors).toEqual([]);
+    expect(view.container.querySelector('.docx-editor-error')).toBeNull();
+    expect(renderer!.layoutEngine).toBe(fullSession);
+    expect(renderer!.presentedEngine).toBe(previewEngine);
+    expect(renderer!.displayList).toBe(replay.displayList);
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+    expect(ref.current!.getDocument()).toBeNull();
+
+    holdCanvasReplay = 'full';
+    await act(async () => releaseFullDisplayList());
+    await waitFor(() => expect(renderer!.presentedEngine).toBe(fullSession), { timeout: 10_000 });
+    const fullReplay = await currentCanvasReplay();
+    expect(fullReplay.layoutEngine).toBe(fullSession);
+    expect(fullReplay.displayList).not.toBe(replay.displayList);
+    expect(renderer!.displayList).toBe(fullReplay.displayList);
+    expect(isPresented(renderer!.canvasHostRef.current, fullReplay.displayList)).toBe(false);
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+    expect(ref.current!.getDocument()).toBeNull();
+
+    await act(async () => {
+      expect(fullReplay.isCurrent()).toBe(true);
+      fullReplay.resolve();
+    });
+    await waitFor(() =>
+      expect(isPresented(renderer!.canvasHostRef.current, fullReplay.displayList)).toBe(true)
+    );
+    await waitFor(() =>
+      expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(false)
+    );
+    expect(errors).toEqual([]);
+    expect(view.container.querySelector('.docx-editor-error')).toBeNull();
+    expect(renderer!.layoutEngine).toBe(fullSession);
+    expect(renderer!.presentedEngine).toBe(fullSession);
+    expect(ref.current!.getEditorRef()!.getYrsSession()).toBe(fullSession);
+    expect(ref.current!.getDocument()).not.toBeNull();
+    expect(ref.current!.getTotalPages()).toBeGreaterThan(0);
+    expect(created).toBe(2);
+  } finally {
+    offReplayFailed();
+    releaseFullDisplayList();
+    holdFullDisplayList = null;
+  }
 }, 30_000);
 
 test('an ordinary editor logs a canvas replay rejection without failing the load', async () => {
