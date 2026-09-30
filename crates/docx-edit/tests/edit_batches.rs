@@ -2223,3 +2223,45 @@ fn settled_revisions_apply_outside_undo_history() {
     assert!(accepted(&doc)[3].ends_with('!'));
     assert!(!accepted(&doc)[1].contains('?'));
 }
+
+#[test]
+fn settling_keeps_another_paragraphs_format_revision_undoable() {
+    let doc = basic();
+    let undo = UndoSession::new();
+    let mut proposed = request(
+        &doc,
+        vec![suggested(replace(search("beta", "00000001"), "delta"), "Ann")],
+    );
+    proposed.history = EditHistory::None;
+    let replaced = apply_request(&doc, &undo, &proposed).receipts[0]
+        .revision_ids
+        .clone();
+    undo.track(&doc);
+    let styled = doc
+        .set_paragraph_attrs(
+            &EditCtx::local("Ann", DATE).suggesting(),
+            &ParaSelector::One("00000002".to_owned()),
+            &ParaAttrDelta {
+                other: std::collections::BTreeMap::from([(
+                    "pStyle".to_owned(),
+                    Some(Any::from("Quote")),
+                )]),
+                ..ParaAttrDelta::default()
+            },
+        )
+        .unwrap()
+        .revision_ids;
+    assert_eq!(styled.len(), 1);
+
+    doc.settle_revisions(&[], &replaced, &undo).unwrap();
+    let ids = |doc: &EditingDoc| {
+        doc.list_revisions()
+            .unwrap()
+            .into_iter()
+            .map(|revision| revision.change.revision_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&doc), styled);
+    assert!(undo.undo());
+    assert!(ids(&doc).is_empty());
+}
