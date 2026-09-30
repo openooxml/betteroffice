@@ -1554,14 +1554,12 @@ fn table_floating_zone(
             _ => 0.0,
         }
     };
-    let mut zone = table_floating_zone_at_x(floating, measure, content_width, x);
-    let (left_space, right_space) =
-        table_wrap_gaps(floating, measure.total_width, content_width, x);
-    if left_space < MIN_WRAP_SEGMENT_WIDTH && right_space < MIN_WRAP_SEGMENT_WIDTH {
-        zone.left_margin = 0.0;
-        zone.right_margin = 0.0;
-    }
-    Some(zone)
+    Some(table_floating_zone_at_x(
+        floating,
+        measure,
+        content_width,
+        x,
+    ))
 }
 
 fn table_floating_zone_at_x(
@@ -1572,7 +1570,8 @@ fn table_floating_zone_at_x(
 ) -> FloatingZone {
     let (left_space, right_space) =
         table_wrap_gaps(floating, measure.total_width, content_width, x);
-    let text_on_right = if measure.total_width <= content_width / 2.0
+    let text_on_right = if floating.horz_anchor.as_deref() == Some("page")
+        || measure.total_width <= content_width / 2.0
         || (left_space < MIN_WRAP_SEGMENT_WIDTH && right_space < MIN_WRAP_SEGMENT_WIDTH)
     {
         x < content_width / 2.0
@@ -2268,7 +2267,7 @@ mod tests {
     }
 
     #[test]
-    fn floating_tables_with_two_small_gaps_leave_clearance_to_placement() {
+    fn floating_tables_with_two_small_gaps_keep_their_margins() {
         let measure = TableExtent {
             rows: Vec::new(),
             column_widths: vec![540.0],
@@ -2276,14 +2275,10 @@ mod tests {
             total_height: 160.0,
         };
         for (floating, expected) in [
-            (json!({"tblpXSpec": "center"}), (0.0, 0.0)),
+            (json!({"tblpXSpec": "center"}), (582.0, 0.0)),
             (
                 json!({"tblpXSpec": "center", "leftFromText": 7, "rightFromText": 7}),
-                (0.0, 0.0),
-            ),
-            (
-                json!({"tblpXSpec": "center", "leftFromText": 6, "rightFromText": 6}),
-                (576.0, 0.0),
+                (577.0, 0.0),
             ),
         ] {
             let table = serde_json::from_value(json!({
@@ -2292,8 +2287,26 @@ mod tests {
             .unwrap();
             let zone = table_floating_zone(&table, &measure, 600.0).unwrap();
             assert_eq!((zone.left_margin, zone.right_margin), expected);
-            assert!(!zone.full_width_block);
         }
+    }
+
+    #[test]
+    fn page_anchored_wide_floating_tables_keep_their_margins() {
+        let measure = TableExtent {
+            rows: Vec::new(),
+            column_widths: vec![360.0],
+            total_width: 360.0,
+            total_height: 160.0,
+        };
+        let table = serde_json::from_value(json!({
+            "id": "float", "rows": [],
+            "floating": {
+                "horzAnchor": "page", "tblpX": 150, "leftFromText": 12, "rightFromText": 12
+            }
+        }))
+        .unwrap();
+        let zone = table_floating_zone(&table, &measure, 600.0).unwrap();
+        assert_eq!((zone.left_margin, zone.right_margin), (522.0, 0.0));
     }
 
     #[test]

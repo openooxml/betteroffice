@@ -8,7 +8,6 @@
 
 use crate::LayoutError;
 use crate::cell_layout::table_compat_leading_shift;
-use crate::floating_objects::{MIN_WRAP_SEGMENT_WIDTH, table_wrap_gaps};
 use crate::page_flow::Paginator;
 use crate::prescan::SectionLayoutConfig;
 use crate::table_row_break::{
@@ -540,9 +539,11 @@ pub fn layout_floating_table(
     }
 
     let finite = |value: Option<f64>| value.filter(|v| v.is_finite()).unwrap_or(0.0);
-    let (left_space, right_space) =
-        table_wrap_gaps(floating, measure.total_width, column_width, x - column_x);
-    let full_width = left_space < MIN_WRAP_SEGMENT_WIDTH && right_space < MIN_WRAP_SEGMENT_WIDTH;
+    let exclusion_left = x - finite(floating.left_from_text);
+    let exclusion_right = x + measure.total_width + finite(floating.right_from_text);
+    let left_space = exclusion_left - column_x;
+    let right_space = column_x + column_width - exclusion_right;
+    let full_width = left_space < 24.0 && right_space < 24.0;
     let bottom = y + measure.total_height;
     if full_width
         && vertical == "page"
