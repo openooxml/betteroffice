@@ -451,7 +451,7 @@ impl EditingDoc {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::sync::Arc;
 
     use super::*;
@@ -769,6 +769,110 @@ mod tests {
             .insert_text(&local(), Position::new("body", 5), "!", FormatPolicy::Plain)
             .unwrap();
         assert!(plain.list_revisions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn revision_stamps_include_dates_from_adjacent_same_author_insertions() {
+        let doc = seed("alpha");
+        let first = doc
+            .insert_text(
+                &suggesting("Alice"),
+                Position::new("body", 5),
+                " first",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+        let later = "2026-07-14T12:01:00Z";
+        let second = doc
+            .insert_text(
+                &EditCtx::local("Alice", later).suggesting(),
+                Position::new("body", 11),
+                " second",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+        assert_eq!(second.revision_ids, first.revision_ids);
+        let listed = doc.list_revisions().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].change.date, DATE);
+        let id = first.revision_ids[0].clone();
+        assert_eq!(
+            doc.revision_stamps(&[id.clone(), "missing".into()])
+                .unwrap(),
+            BTreeMap::from([(
+                id,
+                BTreeSet::from([
+                    ("Alice".into(), DATE.into()),
+                    ("Alice".into(), later.into()),
+                ]),
+            )])
+        );
+    }
+
+    #[test]
+    fn revision_stamps_collect_text_and_paragraph_stamps_across_stories() {
+        let doc = seed("alpha");
+        doc.create_story("header", "x", "Normal", "left").unwrap();
+        let stamp = |author: &str| {
+            Any::Map(Arc::new(HashMap::from([
+                ("id".into(), Any::from("shared")),
+                ("author".into(), Any::from(author)),
+                ("date".into(), Any::from(DATE)),
+            ])))
+        };
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::Format {
+                index: 0,
+                len: 5,
+                attrs: yrs::types::Attrs::from([
+                    (crate::INS.into(), stamp("Insert")),
+                    (crate::DEL.into(), stamp("Delete")),
+                ]),
+            }],
+            &local(),
+        )
+        .unwrap();
+        doc.apply_raw_ops(
+            "header",
+            vec![
+                RawOp::SetEmbedAttr {
+                    index: 1,
+                    key: crate::PPR_INS.into(),
+                    value: stamp("Mark insert"),
+                },
+                RawOp::SetEmbedAttr {
+                    index: 1,
+                    key: crate::PPR_DEL.into(),
+                    value: stamp("Mark delete"),
+                },
+                RawOp::SetEmbedAttr {
+                    index: 1,
+                    key: crate::PPR_CHANGE.into(),
+                    value: Any::Array(Arc::from(vec![
+                        stamp("Properties"),
+                        stamp("Properties again"),
+                    ])),
+                },
+            ],
+            &local(),
+        )
+        .unwrap();
+        let expected: BTreeSet<(String, String)> = [
+            "Insert",
+            "Delete",
+            "Mark insert",
+            "Mark delete",
+            "Properties",
+            "Properties again",
+        ]
+        .into_iter()
+        .map(|author| (author.to_owned(), DATE.to_owned()))
+        .collect();
+        assert_eq!(
+            doc.revision_stamps(&["shared".into()]).unwrap(),
+            BTreeMap::from([("shared".into(), expected)])
+        );
     }
 
     #[test]

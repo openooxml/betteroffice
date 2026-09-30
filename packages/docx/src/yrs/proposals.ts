@@ -106,6 +106,7 @@ export interface DocxProposalSession {
   readParagraphs(request: DocxReadParagraphsRequest): DocxReadParagraphsResult;
   applyEdits(request: DocxEditRequest): DocxEditResult;
   listRevisions(): readonly { revisionId: string; kind: string }[];
+  revisionStamps?(ids: readonly string[]): Record<string, readonly { author: string; date: string }[]>;
   /** Accepts and rejects revisions for good, outside undo history; unknown ids are skipped. */
   settleRevisions(accept: readonly string[], reject: readonly string[]): void;
   /** Runs `read` with story projections shared across its reads; omitted, reads run unshared. */
@@ -236,7 +237,10 @@ type Planned = { steps: DocxEditStep[] } | { failure: DocxProposalFailure };
 
 /** The session holds update notifications until `propose` returns, so they see the round. */
 export function createProposalRegistry(session: DocxProposalSession): DocxProposalRegistry {
-  const records = new Map<string, { record: DocxProposalRecord; key: string }>();
+  const records = new Map<
+    string,
+    { record: DocxProposalRecord; key: string; suggest: { author: string; date: string } }
+  >();
   const listeners = new Set<(snapshot: DocxProposalSnapshot) => void>();
   let previewVersion = 0;
   let notifying = false;
@@ -535,6 +539,7 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
       const receipts = result.receipts.slice(first, first + count);
       records.set(input.id, {
         key,
+        suggest: { author: input.suggest.author, date: input.suggest.date },
         record: {
           id: input.id,
           state: 'proposed',
@@ -672,6 +677,24 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
         message: `proposal ${id} shares revision ${foreign.revisionId} with a ${foreign.kind} change made outside the proposals`,
         proposalId: id,
       });
+    }
+    if (session.revisionStamps) {
+      const stamps = session.revisionStamps(settling);
+      for (const revisionId of settling) {
+        const id = owners.get(revisionId)!;
+        const { suggest } = records.get(id)!;
+        if (
+          stamps[revisionId]?.some(
+            ({ author, date }) => author !== suggest.author || date !== suggest.date
+          )
+        ) {
+          return refuse({
+            code: 'tracked-revision-conflict',
+            message: `proposal ${id} shares revision ${revisionId} with changes made outside the proposals`,
+            proposalId: id,
+          });
+        }
+      }
     }
     if (accept.length > 0 || reject.length > 0) session.settleRevisions(accept, reject);
     let decided = false;

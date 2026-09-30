@@ -922,6 +922,66 @@ describe('YrsSession host proposals', () => {
     expect(() => session.withdrawProposals({ expectVersion: before } as never)).toThrow(TypeError);
   });
 
+  for (const decision of ['proposed', 'rejected'] as const) {
+    it(`refuses to withdraw a ${decision} proposal joined by later same-author typing`, async () => {
+      const session = await open();
+      const [record] = snapshotOf(
+        propose(session, insert('shared', '00000006', 'end', ' proposed'))
+      ).proposals;
+      session.beginUndoCapture();
+      session.addUndoBoundary();
+      const typed = session.insertText(
+        { story: 'body', paraId: '00000006', offset: 'Tail proposed'.length },
+        ' typed',
+        { name: SUGGEST.author, date: '2026-09-29T12:01:00Z' }
+      );
+      session.addUndoBoundary();
+      expect(record!.revisionIds).toHaveLength(1);
+      expect(typed.revisionIds).toEqual(record!.revisionIds);
+      expect(session.canUndo()).toBe(true);
+      if (decision === 'rejected') snapshotOf(decide(session, [{ id: 'shared', state: decision }]));
+      const unchanged = state(session);
+      expect(
+        session.withdrawProposals({ expectVersion: session.version(), ids: ['shared'] })
+      ).toMatchObject({
+        ok: false,
+        failure: {
+          code: 'tracked-revision-conflict',
+          proposalId: 'shared',
+          message: `proposal shared shares revision ${record!.revisionIds[0]} with changes made outside the proposals`,
+        },
+      });
+      expect(texts(session, 'accepted').at(-1)).toBe('Tail proposed typed');
+      expect(session.getProposals().proposals.map((proposal) => proposal.id)).toEqual(['shared']);
+      expect(state(session)).toEqual(unchanged);
+    });
+  }
+
+  it('withdraws a proposal beside later typing by a different author', async () => {
+    const session = await open();
+    const [record] = snapshotOf(
+      propose(session, insert('separate', '00000006', 'end', ' proposed'))
+    ).proposals;
+    session.beginUndoCapture();
+    session.addUndoBoundary();
+    const typed = session.insertText(
+      { story: 'body', paraId: '00000006', offset: 'Tail proposed'.length },
+      ' typed',
+      { name: 'Other', date: '2026-09-29T12:01:00Z' }
+    );
+    session.addUndoBoundary();
+    expect(typed.revisionIds).toHaveLength(1);
+    expect(typed.revisionIds).not.toEqual(record!.revisionIds);
+    const withdrawn = snapshotOf(
+      session.withdrawProposals({ expectVersion: session.version(), ids: ['separate'] })
+    );
+    expect(withdrawn.proposals).toEqual([]);
+    expect(texts(session, 'accepted').at(-1)).toBe('Tail typed');
+    expect(session.listRevisions().map((revision) => revision.revisionId)).toEqual(
+      typed.revisionIds
+    );
+  });
+
   it('refuses to withdraw a proposal whose revision also marks a paragraph change', async () => {
     const session = await open();
     const [record] = snapshotOf(
