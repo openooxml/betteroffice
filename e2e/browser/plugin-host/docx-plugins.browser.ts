@@ -8,8 +8,9 @@ async function open(page: Page) {
 
 async function offsets(page: Page) {
   return page.evaluate(() => {
-    const canvas = document.querySelector('canvas[data-page-index="0"]')!.getBoundingClientRect();
-    const box = document.querySelector('[data-probe-page="0"]')!.getBoundingClientRect();
+    const canvas = document.querySelector('canvas[data-page-index="0"]')?.getBoundingClientRect();
+    const box = document.querySelector('[data-probe-page="0"]')?.getBoundingClientRect();
+    if (!canvas || !box) return [Infinity];
     return [
       box.left - canvas.left,
       box.top - canvas.top,

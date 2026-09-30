@@ -109,6 +109,10 @@ export async function createResidentEngineSession(
       JSON.parse(session.apply_edits_json(JSON.stringify(request))) as DocxEditResult,
     listRevisions: () =>
       JSON.parse(session.list_revisions()) as ReturnType<DocxProposalSession['listRevisions']>,
+    revisionStamps: (ids) =>
+      JSON.parse(session.revision_stamps_json(JSON.stringify(ids))) as ReturnType<
+        NonNullable<DocxProposalSession['revisionStamps']>
+      >,
     settleRevisions: (accept, reject) => {
       session.settle_revisions_json(JSON.stringify({ accept, reject }));
     },

@@ -1,3 +1,4 @@
+import type { YrsStorySegmentSource } from '@betteroffice/docx/layout/render';
 import type { YrsSession, YrsStorySegment } from '@betteroffice/docx/yrs';
 
 interface CachedStory {
@@ -21,6 +22,7 @@ export class YrsStorySegmentCache {
   private readonly units = new Map<string, { segments: YrsStorySegment[]; stories: number }>();
   private readonly undigested = new Set<string>();
   private cancelIdle: (() => void) | null = null;
+  private released = false;
 
   constructor(readonly session: YrsSession) {}
 
@@ -30,9 +32,10 @@ export class YrsStorySegmentCache {
    * after that.
    */
   refresh(): void {
+    const { revision, stories } = this.session.storiesChangedSince(this.revision);
+    if (revision === this.revision && stories.length === 0) return;
     for (const replaced of this.stale.values()) this.release(replaced.digests ?? []);
     this.stale.clear();
-    const { revision, stories } = this.session.storiesChangedSince(this.revision);
     this.revision = revision;
     for (const story of stories) {
       const cached = this.stories.get(story);
@@ -85,9 +88,19 @@ export class YrsStorySegmentCache {
     }
   }
 
+  /** Whether {@link YrsStorySegmentCache.dispose} ran; a disposed cache holds nothing. */
+  get disposed(): boolean {
+    return this.released;
+  }
+
   dispose(): void {
     this.cancelIdle?.();
     this.cancelIdle = null;
+    this.released = true;
+    this.stories.clear();
+    this.stale.clear();
+    this.units.clear();
+    this.undigested.clear();
   }
 
   /** Reads the digests of stories read whole that have not changed since. */
@@ -134,6 +147,25 @@ export class YrsStorySegmentCache {
       if (unit && --unit.stories === 0) this.units.delete(digest);
     }
   }
+}
+
+/**
+ * Serves `session`'s segments from `cache`, brought up to date on every read. Once the cache is
+ * disposed, as when its editor unmounts or opens another document, reads go to `session` itself.
+ */
+export function storySegmentSource(
+  session: YrsSession,
+  cache: YrsStorySegmentCache
+): YrsStorySegmentSource {
+  return {
+    segments(story) {
+      if (cache.disposed || cache.session !== session) return session.storySegments(story);
+      cache.refresh();
+      const segments = cache.segments(story);
+      cache.scheduleDigests();
+      return segments;
+    },
+  };
 }
 
 /** Segments split after each pilcrow, as the session's paragraph digests split them. */

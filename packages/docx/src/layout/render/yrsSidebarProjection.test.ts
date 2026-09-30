@@ -1,8 +1,8 @@
-import { beforeAll, expect, test } from 'bun:test';
+import { beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { preloadEditWasm } from '../../wasm/edit';
-import { createYrsSession } from '../../yrs';
+import { createYrsSession, type YrsSession } from '../../yrs';
 import { createYrsSidebarProjection } from './yrsSidebarProjection';
 
 beforeAll(() =>
@@ -67,6 +67,57 @@ test('a projection reads body segments once for multiple paragraphs', async () =
     });
     expect(calls.filter((story) => story === 'body')).toHaveLength(1);
   } finally {
+    session.destroy();
+  }
+});
+
+test('a projection reads only its source and remembers it after an edit', async () => {
+  const session = await createYrsSession({ clientId: 80013 });
+  const read = session.storySegments.bind(session);
+  const direct = Object.create(session) as YrsSession;
+  direct.storySegments = read;
+  const segmentReads = spyOn(session, 'storySegments');
+  try {
+    const paragraphs = session.loadStories([
+      { storyId: 'body', paragraphs: [{ text: 'alpha beta' }, { text: 'gamma' }] },
+      { storyId: 'hf:header', paragraphs: [{ text: 'heading' }] },
+      { storyId: 'footnote:1', paragraphs: [{ text: 'note' }] },
+    ]);
+    const segments = new Map(session.storyIds().map((story) => [story, read(story)]));
+    const calls: string[] = [];
+    const source = {
+      segments(story: string) {
+        calls.push(story);
+        return segments.get(story)!;
+      },
+    };
+    const locations = Object.entries(paragraphs).flatMap(([story, ids]) =>
+      ids.map((paraId) => ({ story, paraId, offset: 1 }))
+    );
+    const projection = createYrsSidebarProjection(session, source);
+    const baseline = createYrsSidebarProjection(direct);
+    for (const loc of locations) {
+      expect(projection.locToDisplayPoint(loc)).toEqual(baseline.locToDisplayPoint(loc));
+      expect(projection.storyOffsetToDisplayPoint(loc.story, 1)).toEqual(
+        baseline.storyOffsetToDisplayPoint(loc.story, 1)
+      );
+    }
+    expect(calls).toEqual(session.storyIds());
+    expect(segmentReads).not.toHaveBeenCalled();
+
+    session.insertText({ story: 'body', paraId: paragraphs.body[0]!, offset: 5 }, ' one');
+    for (const story of session.storyIds()) segments.set(story, read(story));
+    calls.length = 0;
+    const changed = createYrsSidebarProjection(session);
+    const changedBaseline = createYrsSidebarProjection(direct);
+    expect(changed).not.toBe(projection);
+    for (const loc of locations) {
+      expect(changed.locToDisplayPoint(loc)).toEqual(changedBaseline.locToDisplayPoint(loc));
+    }
+    expect(calls).toEqual(session.storyIds());
+    expect(segmentReads).not.toHaveBeenCalled();
+  } finally {
+    segmentReads.mockRestore();
     session.destroy();
   }
 });
