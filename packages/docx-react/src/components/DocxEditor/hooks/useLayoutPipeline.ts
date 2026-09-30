@@ -655,12 +655,15 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         }
         // The spare warmed while fonts loaded has been adopted by now, or is not needed.
         releaseWorkerPrewarm(session);
-        if (!warmOnly) warmDecisionFonts(session, { ...request, measurement: undefined });
         if (!workerPass) {
-          if (!warmOnly) layOutHere();
+          if (!warmOnly) {
+            layOutHere();
+            warmDecisionFonts(session, { ...request, measurement: undefined });
+          }
           syncCoordinator.onLayoutComplete(currentEpoch);
           return;
         }
+        if (!warmOnly) warmDecisionFonts(session, { ...request, measurement: undefined });
         workerPassRef.current = { pass, session, opening: !inWorker && !previewOnly };
         void workerPass
           .then(
