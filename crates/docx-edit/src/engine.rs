@@ -17,6 +17,7 @@ use docx_layout::header_footer::{
     resolve_header_footer_field_widths,
 };
 use docx_layout::hit::{CaretRect, VerticalDirection};
+use docx_layout::measure_blocks::FontRequirement;
 use docx_layout::paragraph_spacing::resolve_doc_grid_pitch;
 use docx_layout::paragraph_spacing::resolve_line_unit_spacing;
 use docx_layout::place::LayoutCheckpoint;
@@ -26,7 +27,7 @@ use docx_layout::regions::{
 };
 use docx_layout::types::{
     BlockExtent, BlockId, ColumnLayout, Input as LayoutInput, Layout, LayoutBlock, MeasuredBlock,
-    NoteAreaContract, ParagraphExtent, Run, SectionPageMargins,
+    NoteAreaContract, ParagraphBlock, ParagraphExtent, Run, SectionPageMargins, ShapeBlock,
 };
 use serde::Serialize;
 use yrs::Subscription;
@@ -61,6 +62,13 @@ struct RenderState {
     stories: HashMap<String, LoweredStory>,
     cache_hits: u64,
     cache_misses: u64,
+}
+
+#[derive(Debug)]
+struct PreviewFontRequirements {
+    doc_epoch: u64,
+    request_fingerprint: u64,
+    json: String,
 }
 
 #[derive(Debug)]
@@ -876,6 +884,7 @@ pub struct EngineSession {
     // observer before the Rc epoch source is released.
     _doc_epoch_observer: Subscription,
     render: RefCell<RenderState>,
+    preview_font_requirements: RefCell<Option<PreviewFontRequirements>>,
     measurement: RefCell<MeasurementState>,
     regions: RefCell<Option<ResidentRegionState>>,
     pagination: RefCell<PaginationState>,
@@ -935,6 +944,18 @@ fn layout_options_fingerprint(mut request: serde_json::Value) -> String {
         }
     }
     pages::sha256_hex(canonical_json(&request).as_bytes())
+}
+
+fn font_requirements_fingerprint(mut request: serde_json::Value) -> Result<u64, String> {
+    if let Some(env) = request
+        .get_mut("renderEnv")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        env.remove("revisionPreview");
+    }
+    serde_json::to_vec(&request)
+        .map(|bytes| hash_bytes(&bytes))
+        .map_err(|error| format!("fingerprint font requirements: {error}"))
 }
 
 /// `value` as JSON with object keys sorted, whatever order they were read in.
@@ -1113,6 +1134,68 @@ fn block_key(id: &BlockId) -> Cow<'_, str> {
         BlockId::Num(value) if value.fract() == 0.0 => Cow::Owned(format!("{}", *value as i64)),
         BlockId::Num(value) => Cow::Owned(value.to_string()),
         BlockId::Str(value) => Cow::Borrowed(value),
+    }
+}
+
+fn walk_font_paragraphs(blocks: &[LayoutBlock], visit: &mut impl FnMut(&ParagraphBlock)) {
+    for block in blocks {
+        match block {
+            LayoutBlock::Paragraph(paragraph) => visit(paragraph),
+            LayoutBlock::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        walk_font_paragraphs(&cell.blocks, visit);
+                    }
+                }
+            }
+            LayoutBlock::TextBox(textbox) => {
+                for paragraph in &textbox.content {
+                    visit(paragraph);
+                }
+            }
+            LayoutBlock::Shape(shape) => walk_shape_font_paragraphs(shape, visit),
+            _ => {}
+        }
+    }
+}
+
+fn walk_shape_font_paragraphs(shape: &ShapeBlock, visit: &mut impl FnMut(&ParagraphBlock)) {
+    if let Some(inner_text) = &shape.inner_text {
+        for paragraph in inner_text {
+            visit(paragraph);
+        }
+    }
+    for child in &shape.children {
+        walk_shape_font_paragraphs(child, visit);
+    }
+}
+
+fn collect_hidden_list_marker_font_requirements<'a>(
+    blocks: impl IntoIterator<Item = &'a LayoutBlock>,
+    default_family: &str,
+    requirements: &mut BTreeMap<String, FontRequirement>,
+) {
+    for block in blocks {
+        walk_font_paragraphs(std::slice::from_ref(block), &mut |paragraph| {
+            let Some(attrs) = &paragraph.attrs else {
+                return;
+            };
+            if attrs.list_marker_hidden != Some(true)
+                || !attrs
+                    .list_marker
+                    .as_deref()
+                    .is_some_and(|marker| !marker.is_empty())
+            {
+                return;
+            }
+            let mut paragraph = paragraph.clone();
+            paragraph.attrs.as_mut().unwrap().list_marker_hidden = None;
+            docx_layout::measure_blocks::collect_font_requirements_into(
+                [&LayoutBlock::Paragraph(paragraph)],
+                default_family,
+                requirements,
+            );
+        });
     }
 }
 
@@ -1368,6 +1451,7 @@ impl EngineSession {
             doc_epoch,
             _doc_epoch_observer: observer,
             render: RefCell::new(RenderState::default()),
+            preview_font_requirements: RefCell::new(None),
             measurement: RefCell::new(MeasurementState::default()),
             regions: RefCell::new(None),
             pagination: RefCell::new(PaginationState::default()),
@@ -1602,6 +1686,22 @@ impl EngineSession {
         let request: RegionLayoutInput =
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
         let (input, regions, notes, measurement, render_env, body_story) = request.split();
+        let cache_key =
+            if !RenderEnv::parse_revision_preview(&render_env["revisionPreview"]).is_empty() {
+                let request =
+                    serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
+                let fingerprint = font_requirements_fingerprint(request)?;
+                let epoch = self.doc_epoch();
+                if let Some(cached) = self.preview_font_requirements.borrow().as_ref()
+                    && cached.doc_epoch == epoch
+                    && cached.request_fingerprint == fingerprint
+                {
+                    return Ok(cached.json.clone());
+                }
+                Some((epoch, fingerprint))
+            } else {
+                None
+            };
         let default_family =
             docx_layout::measure_blocks::default_font_family(&measurement.defaults);
         let mut requirements = BTreeMap::new();
@@ -1610,9 +1710,19 @@ impl EngineSession {
             default_family,
             &mut requirements,
         );
+        if cache_key.is_some() {
+            collect_hidden_list_marker_font_requirements(
+                input.measured.iter().map(|measured| &measured.block),
+                default_family,
+                &mut requirements,
+            );
+        }
         if let Some(body_story) = body_story {
-            let render_env: RenderEnv = serde_json::from_value(render_env)
+            let mut render_env: RenderEnv = serde_json::from_value(render_env)
                 .map_err(|error| format!("parse render environment: {error}"))?;
+            if cache_key.is_some() {
+                render_env.revision_preview.clear();
+            }
             let mut stories = BTreeSet::from([body_story]);
             for section_index in 0..regions.sections.len() {
                 let Some(refs) = effective_header_footer_refs(&regions, section_index) else {
@@ -1646,12 +1756,28 @@ impl EngineSession {
                         default_family,
                         &mut requirements,
                     );
+                    if cache_key.is_some() {
+                        collect_hidden_list_marker_font_requirements(
+                            blocks,
+                            default_family,
+                            &mut requirements,
+                        );
+                    }
                 })
                 .map_err(|error| error.to_string())?;
             }
         }
-        serde_json::to_string(&requirements.into_values().collect::<Vec<_>>())
-            .map_err(|error| format!("serialize: {error}"))
+        let json = serde_json::to_string(&requirements.into_values().collect::<Vec<_>>())
+            .map_err(|error| format!("serialize: {error}"))?;
+        if let Some((doc_epoch, request_fingerprint)) = cache_key {
+            self.preview_font_requirements
+                .replace(Some(PreviewFontRequirements {
+                    doc_epoch,
+                    request_fingerprint,
+                    json: json.clone(),
+                }));
+        }
+        Ok(json)
     }
 
     /// Full-document pagination with section/page region orchestration owned
@@ -5519,6 +5645,196 @@ mod tests {
         assert!(requirements[0].get("blocks").is_none());
         assert_eq!(engine.stats().layout_epoch, 0);
         assert_eq!(engine.stats().retained_measured_blocks, 0);
+    }
+
+    #[test]
+    fn preview_font_preflight_reuses_markup_until_the_document_changes() {
+        let engine = EngineSession::new(1361);
+        crate::seed::seed_from_docx(
+            engine.doc(),
+            &docx_bytes(
+                "",
+                r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/></w:rPr><w:t>Alpha</w:t></w:r><w:r><w:t>Beta</w:t></w:r></w:p>"#,
+            ),
+        )
+        .unwrap();
+        let deletion = engine
+            .doc()
+            .delete_range(
+                &crate::EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
+                crate::StoryRange::new("body", 0, 5),
+            )
+            .unwrap();
+        let id = &deletion.revision_ids[0];
+        let mut request = serde_json::json!({"bodyStory": "body", "renderEnv": {}});
+        let markup = engine
+            .layout_font_requirements_json(&request.to_string())
+            .unwrap();
+        request["renderEnv"]["revisionPreview"] = serde_json::json!({id: "accepted"});
+        let first = engine
+            .layout_font_requirements_json(&request.to_string())
+            .unwrap();
+        assert_eq!(first, markup);
+        let requirements: Vec<serde_json::Value> = serde_json::from_str(&first).unwrap();
+        assert!(
+            requirements
+                .iter()
+                .any(|requirement| requirement["key"] == "courier new|0|0")
+        );
+
+        let before = engine.stats();
+        request["renderEnv"]["revisionPreview"] = serde_json::json!({id: "rejected"});
+        assert_eq!(
+            engine
+                .layout_font_requirements_json(&request.to_string())
+                .unwrap(),
+            first
+        );
+        assert_eq!(engine.stats().lower_cache_misses, before.lower_cache_misses);
+        assert_eq!(engine.stats().lower_cache_hits, before.lower_cache_hits);
+
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 0),
+                "New",
+                crate::FormatPolicy::Explicit(BTreeMap::from([(
+                    "fontFamily".to_owned(),
+                    Any::from("Times New Roman"),
+                )])),
+            )
+            .unwrap();
+        assert_ne!(engine.doc_epoch(), before.doc_epoch);
+        let updated = engine
+            .layout_font_requirements_json(&request.to_string())
+            .unwrap();
+        assert_ne!(updated, first);
+        let requirements: Vec<serde_json::Value> = serde_json::from_str(&updated).unwrap();
+        assert!(
+            requirements
+                .iter()
+                .any(|requirement| requirement["key"] == "times new roman|0|0")
+        );
+        assert_eq!(
+            engine.stats().lower_cache_misses,
+            before.lower_cache_misses + 1
+        );
+        request["renderEnv"] = serde_json::json!({});
+        assert_eq!(
+            updated,
+            engine
+                .layout_font_requirements_json(&request.to_string())
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn preview_font_preflight_keys_the_remaining_request() {
+        let engine = EngineSession::new(1362);
+        engine
+            .doc()
+            .create_story("body", "Text", "Normal", "left")
+            .unwrap();
+        let mut request = serde_json::json!({
+            "bodyStory": "body",
+            "renderEnv": {"revisionPreview": {"id": "accepted"}},
+            "measurement": {"defaults": {"fontFamily": "Calibri"}}
+        });
+        let first = engine
+            .layout_font_requirements_json(&request.to_string())
+            .unwrap();
+        request["measurement"]["defaults"]["fontFamily"] = "Courier New".into();
+        let second = engine
+            .layout_font_requirements_json(&request.to_string())
+            .unwrap();
+        assert_ne!(second, first);
+        assert_eq!(
+            engine
+                .preview_font_requirements
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .json,
+            second
+        );
+    }
+
+    #[test]
+    fn preview_font_preflight_covers_a_hidden_list_marker_before_a_page_break() {
+        let engine = EngineSession::new(1363);
+        let para_id = engine
+            .doc()
+            .create_story("body", "", "Normal", "left")
+            .unwrap();
+        for (key, value) in [
+            ("numPr", Any::from_json(r#"{"numId":1,"ilvl":0}"#).unwrap()),
+            ("listMarkerFontFamily", Any::from("Courier New")),
+            ("listMarkerBold", Any::Bool(true)),
+        ] {
+            engine
+                .doc()
+                .set_paragraph_attr(&para_id, key, value)
+                .unwrap();
+        }
+        let page_break = engine
+            .doc()
+            .insert_embed(
+                &crate::EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
+                crate::Position::new("body", 1),
+                "pageBreak",
+                Vec::new(),
+            )
+            .unwrap();
+        let markup = engine
+            .layout_font_requirements_json(r#"{"bodyStory":"body","renderEnv":{}}"#)
+            .unwrap();
+        let requirements: Vec<serde_json::Value> = serde_json::from_str(&markup).unwrap();
+        assert!(
+            !requirements
+                .iter()
+                .any(|requirement| requirement["key"] == "courier new|1|0")
+        );
+        for render_env in [
+            serde_json::json!({"revisionPreview": {}}),
+            serde_json::json!({"revisionPreview": {"id": "proposed"}}),
+        ] {
+            assert_eq!(
+                engine
+                    .layout_font_requirements_json(
+                        &serde_json::json!({"bodyStory": "body", "renderEnv": render_env})
+                            .to_string(),
+                    )
+                    .unwrap(),
+                markup
+            );
+        }
+
+        let id = &page_break.revision_ids[0];
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "renderEnv": {"revisionPreview": {id: "rejected"}}
+        });
+        let env: RenderEnv = serde_json::from_value(request["renderEnv"].clone()).unwrap();
+        let blocks = crate::bridge::yrs_doc_to_layout_blocks(engine.doc(), "body", &env).unwrap();
+        assert!(
+            !blocks
+                .iter()
+                .any(|block| matches!(block, LayoutBlock::PageBreak(_)))
+        );
+        let exact = docx_layout::measure_blocks::collect_font_requirements(&blocks, "Calibri");
+        assert!(
+            exact
+                .iter()
+                .any(|requirement| requirement.key == "courier new|1|0")
+        );
+        let superset = engine
+            .layout_font_requirements_json(&request.to_string())
+            .unwrap();
+        let requirements: Vec<serde_json::Value> = serde_json::from_str(&superset).unwrap();
+        for requirement in exact {
+            assert!(requirements.contains(&serde_json::to_value(requirement).unwrap()));
+        }
     }
 
     #[test]
