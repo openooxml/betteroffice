@@ -996,6 +996,8 @@ export interface YrsSession extends CollaborationReplica {
    * with {@link openDocx}. @internal
    */
   openDocxPreview(bytes: Uint8Array, blocks: number): YrsDocxHost | null;
+  /** Opened by {@link openDocxPreview}: its document refuses every change. @internal */
+  isDisplayOnly(): boolean;
   /**
    * Marks whether the document is a preview's, as a replica of one is: its
    * layouts render NUMPAGES empty. @internal
@@ -1588,9 +1590,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     }
   };
 
+  // A preview session refuses every change to its document.
+  let displayOnly = false;
   // A preview's cut of a package, whose layouts count only its own pages.
   let partialDocument = false;
   const mutate = <T>(operation: () => T): T => {
+    if (displayOnly) throw new Error('A document preview is display-only');
     invalidateReadCaches();
     wasmCallDepth += 1;
     try {
@@ -1720,9 +1725,11 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       resetMedia();
       const json = mutate(() => session.open_docx_preview(bytes, blocks));
       if (json === undefined) return null;
+      displayOnly = true;
       partialDocument = true;
       return withHostMedia(decodeDocxHost(json, bytes));
     },
+    isDisplayOnly: () => displayOnly,
     setPartialDocument: (partial) => {
       partialDocument = partial;
       session.set_partial_document(partial);

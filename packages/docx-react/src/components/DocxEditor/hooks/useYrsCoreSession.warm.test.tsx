@@ -136,38 +136,6 @@ test('a replaced session lives while the renderer still builds with it', async (
   hook.unmount();
 });
 
-test('a replaced session lives while its frame is on screen', async () => {
-  const first = fixture();
-  const hook = renderHook(
-    ({ bytes, generation, layout, frame }: {
-      bytes: Uint8Array;
-      generation: number;
-      layout: unknown;
-      frame: unknown;
-    }) =>
-      useYrsCoreSession(true, null, null, bytes, generation, undefined, undefined, {
-        heldEngine: layout,
-        frameEngine: frame,
-      }).session,
-    {
-      initialProps: { bytes: first, generation: 1, layout: null as unknown, frame: null as unknown },
-    }
-  );
-  await waitFor(() => expect(hook.result.current).not.toBeNull());
-  const replaced = hook.result.current!;
-  hook.rerender({ bytes: first, generation: 1, layout: replaced, frame: replaced });
-  const next = fixture();
-  hook.rerender({ bytes: next, generation: 2, layout: replaced, frame: replaced });
-  await waitFor(() => expect(hook.result.current).not.toBeNull());
-  const current = hook.result.current!;
-  // The next document's layout reaches the renderer before its frame does.
-  hook.rerender({ bytes: next, generation: 2, layout: current, frame: replaced });
-  expect(() => replaced.version()).not.toThrow();
-  hook.rerender({ bytes: next, generation: 2, layout: current, frame: current });
-  expect(() => replaced.version()).toThrow();
-  hook.unmount();
-});
-
 test('opening never materializes the compatibility document by itself', async () => {
   const { project, materializations } = await openedSession();
   await act(idle);

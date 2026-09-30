@@ -38,7 +38,7 @@ import { ParseError } from '../DocxEditorHelpers';
 import { displayListNeedsHostImages } from './canvasPresentation';
 import { CanvasReplayState, presentCanvasReplay, type CanvasReplayPreparation } from './canvasReplay';
 import { resolveCaretPaintColor } from './paintedCaret';
-import { clearPresented, markPresented } from './internals/layoutProvenance';
+import { clearPresented, markPresented, markReplayFailed } from './internals/layoutProvenance';
 import { viewportColumnBand } from './internals/viewportBand';
 import { DEFAULT_CARET_WIDTH } from './overlays/SelectionOverlay';
 
@@ -771,6 +771,7 @@ export function CanvasPagesView({
       (error) => {
         if (replayGeneration === replayGenerationRef.current) {
           console.error('[CanvasRenderer] Canvas replay failed', error);
+          markReplayFailed(displayList, error);
         }
       }
     );

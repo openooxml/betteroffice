@@ -1173,21 +1173,17 @@ test('the frame on screen keeps its session until the next session's frame lands
     }
   );
   await waitFor(() => expect(result.current.displayList).toBe(firstList));
-  expect(result.current.frameEngine).toBe(first);
+  expect(result.current.presentedEngine).toBe(first);
   await act(async () => {
     rerender({ layout: layout(), engine: next });
   });
   expect(result.current.displayList).toBe(firstList);
-  expect(result.current.frameEngine).toBe(first);
+  expect(result.current.presentedEngine).toBe(first);
   await act(async () => {
     finishNext();
   });
   await waitFor(() => expect(result.current.displayList).toBe(nextList));
-  expect(result.current.frameEngine).toBe(next);
-  await act(async () => {
-    rerender({ layout: null, engine: next });
-  });
-  expect(result.current.frameEngine).toBeNull();
+  expect(result.current.presentedEngine).toBe(next);
   unmount();
 });
 

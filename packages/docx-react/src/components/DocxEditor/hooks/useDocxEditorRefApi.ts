@@ -1,4 +1,4 @@
-import { useImperativeHandle } from 'react';
+import { useImperativeHandle, useMemo } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { Document } from '@betteroffice/docx/types/document';
 import type {
@@ -167,7 +167,7 @@ export function useDocxEditorRefApi({
   document,
   documentFromYrs,
   historyStateRef,
-  pagedEditorRef,
+  pagedEditorRef: hostEditorRef,
   handleSave,
   zoom,
   setZoom,
@@ -185,6 +185,7 @@ export function useDocxEditorRefApi({
   commentIdAllocator,
   commands,
   modeRef,
+  openingRef,
   allowHostProposalsRef,
   workerMemory = noWorkerMemory,
   settledDisplayList,
@@ -216,6 +217,8 @@ export function useDocxEditorRefApi({
   commands: DocxCommandStore;
   /** The editor's current write mode; `viewing` also stands for a read-only editor. */
   modeRef: React.RefObject<EditorMode>;
+  /** While the document opens, the API has no editor and no document, as during a load. */
+  openingRef?: React.RefObject<boolean>;
   /** Whether proposal methods run while the editor is read-only. */
   allowHostProposalsRef: React.RefObject<boolean>;
   /** The resident worker's wasm memories as of its latest reply. */
@@ -225,24 +228,36 @@ export function useDocxEditorRefApi({
   /** Whether a document load has not yet produced its first layout. */
   awaitingDocument?: () => boolean;
 }) {
+  const opening = (): boolean => openingRef?.current === true;
+  const pagedEditorRef = useMemo<React.RefObject<PagedEditorRef | null>>(
+    () => ({
+      get current() {
+        return openingRef?.current === true ? null : hostEditorRef.current;
+      },
+    }),
+    [hostEditorRef, openingRef]
+  );
   const hostProposalsAllowed = () =>
     modeRef.current !== 'viewing' || allowHostProposalsRef.current === true;
   useImperativeHandle(
     ref,
     () => ({
       commands,
-      getDocument: () => pagedEditorRef.current?.getDocument() ?? documentFromYrs() ?? document,
+      getDocument: () =>
+        opening() ? null : (pagedEditorRef.current?.getDocument() ?? documentFromYrs() ?? document),
       getEditorRef: () => pagedEditorRef.current,
       flushPendingInput: async () => {
         await flushedSession(pagedEditorRef);
       },
-      save: handleSave,
+      save: async () => (opening() ? null : handleSave()),
       setZoom,
       getZoom: () => zoom,
       focus: () => pagedEditorRef.current?.focus(),
       getCurrentPage: () => readCurrentPage?.() ?? scrollPageInfo.currentPage,
+      // A preview's layouts are partial, so the count is the full document's even
+      // before its pages replace the preview's, as `whenLayoutComplete` reports it.
       getTotalPages: () =>
-        awaitingDocument?.() ? 0 : documentPageCount(pagedEditorRef.current?.getLayout()),
+        awaitingDocument?.() ? 0 : documentPageCount(hostEditorRef.current?.getLayout()),
       whenLayoutComplete: async (options) => {
         if (!settledDisplayList) throw new Error('This editor paints no display list');
         return (await settledDisplayList(null, options?.timeoutMs ?? null)).pages.length;
@@ -309,13 +324,14 @@ export function useDocxEditorRefApi({
       },
 
       replyToComment: (commentId, text, authorName) => {
-        if (!comments.some((comment) => comment.id === commentId)) return null;
+        if (opening() || !comments.some((comment) => comment.id === commentId)) return null;
         const reply = createComment(commentIdAllocator, text, authorName, commentId);
         setComments((previous) => [...previous, reply]);
         return reply.id;
       },
 
       resolveComment: (commentId) => {
+        if (opening()) return;
         setComments((previous) =>
           previous.map((comment) =>
             comment.id === commentId ? { ...comment, done: true } : comment
@@ -485,7 +501,7 @@ export function useDocxEditorRefApi({
         }
       },
 
-      getComments: () => comments,
+      getComments: () => (opening() ? [] : comments),
 
       onContentChange: (listener) => {
         const subscribers = contentChangeSubscribersRef.current;

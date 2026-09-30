@@ -125,6 +125,7 @@ export class ResidentEngineWorkerClient {
   /** Id of the last snapshot request sent; replies to earlier requests must
    * not replace the state it recorded. */
   private lastSnapshotId = 0;
+  private keepSurfaces = false;
   private lastMemory: WasmModuleMemory[] | null = null;
 
   constructor(private readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
@@ -189,6 +190,22 @@ export class ResidentEngineWorkerClient {
   /** A bootstrap was sent; later snapshots go as syncs queued behind it. */
   bootstrapSent(): boolean {
     return this.bootstrapped;
+  }
+
+  /**
+   * Starts over with another document in the same worker: the next request
+   * is a bootstrap, which keeps the page surfaces already attached so the
+   * new document's pages paint where the old ones were.
+   */
+  rebootstrap(): void {
+    this.bootstrapped = false;
+    this.remoteVector = null;
+    this.appliedFontsRevision = null;
+    this.lastSnapshotId = 0;
+    this.revision = 0;
+    this.keepSurfaces = true;
+    // The bootstrap it asks for frees the worker's document, opened there or not.
+    this.openedHeapLimit = null;
   }
 
   /**
@@ -270,6 +287,8 @@ export class ResidentEngineWorkerClient {
     }
     const fontsRevision = snapshot.fontsRevision;
     this.bootstrapped = true;
+    const keepSurfaces = this.keepSurfaces;
+    this.keepSurfaces = false;
     const generation = ++this.bootstraps;
     const pending = this.request(
       {
@@ -282,6 +301,7 @@ export class ResidentEngineWorkerClient {
         ...(options.provisionalPages !== undefined
           ? { provisionalPages: options.provisionalPages }
           : {}),
+        ...(keepSurfaces ? { keepSurfaces: true } : {}),
         ...(options.opened ? { opened: true } : {}),
         ...(options.heapLimitBytes !== undefined ? { heapLimitBytes: options.heapLimitBytes } : {}),
       },
