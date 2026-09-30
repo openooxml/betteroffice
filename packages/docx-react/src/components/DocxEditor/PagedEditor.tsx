@@ -1114,13 +1114,18 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
               range.start.paraId === range.end.paraId && range.start.offset === range.end.offset;
             if ((collapsed || existing) && command.displayText) {
               const at = { story: range.story, ...range.start };
-              if (existing) session.replaceRange(range, command.displayText, structuralAuthor);
-              else session.insertText(at, command.displayText, structuralAuthor);
-              range = {
+              const insertedRange = {
                 story: at.story,
                 start: { paraId: at.paraId, offset: at.offset },
                 end: { paraId: at.paraId, offset: at.offset + command.displayText.length },
               };
+              if (existing) {
+                const receipt = session.replaceRange(range, command.displayText, structuralAuthor);
+                range = receipt.range ?? insertedRange;
+              } else {
+                session.insertText(at, command.displayText, structuralAuthor);
+                range = insertedRange;
+              }
             }
             if (
               range.start.paraId === range.end.paraId &&

@@ -503,20 +503,29 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           // structural contract by splitting those instead of inserting pilcrows.
           const pieces = inputText.replace(/\r\n?/g, '\n').split('\n');
           let caret = at;
+          const storedKey = (loc: YrsLoc): string => `${loc.story}\u0000${loc.paraId}`;
+          // A suggested replacement's text lands after the struck-out text, possibly
+          // in another paragraph: the head's stored formatting goes with it.
+          const carried = hasSelection && isSuggesting ? stored : undefined;
           for (let i = 0; i < pieces.length; i += 1) {
             const piece = pieces[i];
             if (piece || (i === 0 && hasSelection)) {
-              const insertedAt = caret;
+              let insertedAt = caret;
               if (i === 0 && hasSelection) {
-                session.replaceRange(selectedRange, piece, suggestingAuthor());
+                const receipt = session.replaceRange(selectedRange, piece, suggestingAuthor());
+                if (receipt.range) {
+                  insertedAt = { story: receipt.range.story, ...receipt.range.start };
+                  caret = { story: receipt.range.story, ...receipt.range.end };
+                } else {
+                  caret = { ...caret, offset: caret.offset + piece.length };
+                }
               } else {
                 session.insertText(caret, piece, suggestingAuthor());
+                caret = { ...caret, offset: caret.offset + piece.length };
               }
-              caret = { ...caret, offset: caret.offset + piece.length };
-              const insertedStored = storedFormattingByParagraphRef.current.get(
-                `${insertedAt.story}\u0000${insertedAt.paraId}`
-              );
-              if (insertedStored) {
+              const insertedStored =
+                carried ?? storedFormattingByParagraphRef.current.get(storedKey(insertedAt));
+              if (insertedStored && piece) {
                 const insertedRange: YrsStoryRange = {
                   story: insertedAt.story,
                   start: { paraId: insertedAt.paraId, offset: insertedAt.offset },
@@ -532,6 +541,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
               const receipt = session.splitParagraph(caret, suggestingAuthor());
               caret = { story: caret.story, paraId: receipt.secondParaId, offset: 0 };
             }
+          }
+          if (carried && !storedFormattingByParagraphRef.current.has(storedKey(caret))) {
+            storedFormattingByParagraphRef.current.set(storedKey(caret), carried);
           }
           session.setSelection(caret);
           finishMutation();
@@ -1327,7 +1339,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       !sameYrsSelection(previousStickySelection, stickySelection);
     if (
       selection.anchor === selection.head &&
-      shouldScrollCaretIntoView(layoutUpdateOrigin, selectionChanged)
+      shouldScrollCaretIntoView(layoutUpdateOrigin, selectionChanged, readOnly)
     ) {
       const scroller = findVerticalScrollParentOrRoot(host);
       const delta = scrollIntoViewDelta(scrollViewport(scroller), nextTop, nextTop + nextHeight, 24);
@@ -1341,6 +1353,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     enabled,
     layoutUpdateOrigin,
     onStateChange,
+    readOnly,
     residentCaret,
     residentCaretAuthoritative,
     selectionEpoch,
