@@ -119,7 +119,8 @@ export interface YrsDocxHost {
   /**
    * The `referencedFonts` a document seeded from its package names only for
    * East Asian or complex-script text it does not contain, so no text is
-   * measured or drawn with them. Empty when its stories were not seeded.
+   * measured or drawn with them. Empty when its stories were not seeded; a
+   * preview's cover only its own first pages.
    */
   unusedScriptFonts?: string[];
   embeddedFonts: Map<string, ArrayBuffer>;

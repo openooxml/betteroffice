@@ -1203,7 +1203,8 @@ struct UpdateEventObserver {
 struct DocxHostWire {
     envelope: docx_parse::S9WireEnvelope,
     referenced_fonts: Vec<String>,
-    /// Empty unless the stories were seeded from the whole package.
+    /// Empty unless the stories were seeded from the package (a preview's
+    /// from its cut).
     unused_script_fonts: Vec<String>,
 }
 
@@ -1374,13 +1375,13 @@ impl EditSession {
             return Ok(None);
         };
         let host_envelope = thin_docx_envelope(&envelope);
-        let referenced_fonts = crate::seed::seed_preview_envelope(self.engine.doc(), envelope)?;
+        let fonts = crate::seed::seed_preview_envelope(self.engine.doc(), envelope)?;
         self.engine.set_partial_document(true);
         self.engine.doc().rotate_version(js_entropy());
         serde_json::to_string(&DocxHostWire {
             envelope: host_envelope,
-            referenced_fonts,
-            unused_script_fonts: Vec::new(),
+            referenced_fonts: fonts.referenced,
+            unused_script_fonts: fonts.unused_script,
         })
         .map(Some)
         .map_err(|error| error.to_string())
@@ -2228,7 +2229,9 @@ impl EditSession {
 
     /// Opens `bytes` for display only, seeded from the body's first `blocks`
     /// blocks (see `seed::seed_docx_preview`): the reply is the host metadata
-    /// of that parse. The session keeps no source package, so it cannot save.
+    /// of that parse, as [`EditSession::open_docx`] replies, with the
+    /// `unusedScriptFonts` of its cut. The session keeps no source package, so
+    /// it cannot save.
     /// Opens nothing and replies with nothing for a document the preview
     /// refuses, which opens with [`EditSession::open_docx`] instead.
     pub fn open_docx_preview(&self, bytes: &[u8], blocks: u32) -> Result<Option<String>, JsValue> {
@@ -5270,6 +5273,25 @@ mod tests {
             unused_script_fonts(&latin(text_box), "", true),
             json!(["Batang", "Times New Roman", "宋体"])
         );
+    }
+
+    #[test]
+    fn a_preview_names_the_script_fonts_its_cut_does_not_use() {
+        let paragraph = |text: &str| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+        let unused = |body: String| -> Value {
+            let session = EditSession::new(79.0).unwrap();
+            let host = session
+                .open_preview(&script_fonts_docx(&body, ""), 1)
+                .unwrap()
+                .unwrap();
+            serde_json::from_str::<Value>(&host).unwrap()["unusedScriptFonts"].clone()
+        };
+        let body = |first: &str, second: &str| format!("{}{}", paragraph(first), paragraph(second));
+        let all = json!(["Batang", "SimSun", "Times New Roman", "宋体"]);
+        assert_eq!(unused(body("Latin", "More")), all);
+        assert_eq!(unused(body("漢字", "Latin")), json!(["Times New Roman"]));
+        // The CJK text lies past the preview's cut.
+        assert_eq!(unused(body("Latin", "漢字")), all);
     }
 
     #[test]

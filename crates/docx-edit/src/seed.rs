@@ -5185,15 +5185,15 @@ pub(crate) fn parse_docx_preview(
     parse(&parts)
 }
 
-/// Seeds a preview parse; returns the fonts it references.
+/// Seeds a preview parse; returns the fonts it references, and those of them
+/// it names only for East Asian or complex-script text its cut does not contain.
 pub(crate) fn seed_preview_envelope(
     document: &EditingDoc,
     envelope: docx_parse::S9WireEnvelope,
-) -> Result<Vec<String>, String> {
+) -> Result<SeededFonts, String> {
     let mut lowered = lower_docx(envelope, None)?;
     retain_referenced_body_stories(&mut lowered.context.plans);
-    lowered.script_fonts = None;
-    seed_lowered(document, lowered, None).map(|fonts| fonts.referenced)
+    seed_lowered(document, lowered, None)
 }
 
 /// The seed for IDs a preview's parse generates. A preview is never saved,

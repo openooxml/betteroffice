@@ -640,7 +640,9 @@ export class EditSession {
     /**
      * Opens `bytes` for display only, seeded from the body's first `blocks`
      * blocks (see `seed::seed_docx_preview`): the reply is the host metadata
-     * of that parse. The session keeps no source package, so it cannot save.
+     * of that parse, as [`EditSession::open_docx`] replies, with the
+     * `unusedScriptFonts` of its cut. The session keeps no source package, so
+     * it cannot save.
      * Opens nothing and replies with nothing for a document the preview
      * refuses, which opens with [`EditSession::open_docx`] instead.
      */
