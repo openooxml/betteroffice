@@ -7,6 +7,7 @@ import type { Translations } from '@betteroffice/docx-i18n';
 import { useImageContextMenu } from '../../ImageContextMenu';
 import { type TextContextAction, type TextContextMenuItem } from '../../TextContextMenu';
 import {
+  effectiveZoom,
   resolveDisplayPageClientRect,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
@@ -377,10 +378,11 @@ export function useContextMenus({
             anchor && displayListQueries ? displayListQueries.pageSize(anchor.pageIndex) : null;
           const targetRect = target?.getBoundingClientRect();
           const yPos =
-            anchor && pageRect && pageSize && targetRect
-              ? pageRect.top -
-                targetRect.top +
-                anchor.y * (pageSize.height > 0 ? pageRect.height / pageSize.height : 1)
+            anchor && pageRect && pageSize && target && targetRect
+              ? (pageRect.top -
+                  targetRect.top +
+                  anchor.y * (pageSize.height > 0 ? pageRect.height / pageSize.height : 1)) /
+                effectiveZoom(target)
               : null;
           onAddComment({ from, to, yPos });
           break;

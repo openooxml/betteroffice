@@ -263,7 +263,7 @@ test('a provisional layout paints first and settles only once the full layout fo
       'attachCanvases',
       'completeLayout',
     ]);
-    expect(worker.posted[2]).toMatchObject({ expectedFrameEpoch: 1 });
+    expect(worker.posted[2]).toMatchObject({ expectedFrameEpoch: 1, sliceBlocks: 64 });
     let settled = false;
     void result.current.settledDisplayList(() => {}).then(() => {
       settled = true;
