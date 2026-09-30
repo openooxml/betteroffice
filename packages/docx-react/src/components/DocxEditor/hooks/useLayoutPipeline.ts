@@ -367,6 +367,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
               },
               (error: unknown) => {
                 if (pass !== passRef.current || sessionRef.current !== session) return;
+                markLayoutQueued(session, false);
                 onErrorRef.current?.(
                   error instanceof Error ? error : new Error(String(error)),
                   session
