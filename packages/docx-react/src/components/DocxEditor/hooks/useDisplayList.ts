@@ -1095,6 +1095,7 @@ export function useRustDisplayList(
             });
         }
         const owner = workerRef.current;
+        if (!owner) throw new SupersededPreviewError();
         onOwner?.(owner);
         try {
           await owner.opening;
