@@ -1067,7 +1067,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       isCurrentLoad,
       onHostDocument: acceptHostDocument,
       onError: failHostDocument,
-    }
+    },
+    { heldEngines: [canvasRenderer.layoutEngine] }
   );
   sessionGenerationRef.current = yrsCore.sessionGeneration;
   // Content listeners project the document on every edit; warm its base once

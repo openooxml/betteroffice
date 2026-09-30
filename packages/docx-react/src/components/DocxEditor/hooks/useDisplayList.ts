@@ -1294,12 +1294,16 @@ export function useRustDisplayList(
               return {
                 displayList: nextFrame.displayList,
                 frame: nextFrame,
-                caret: residentCaretForSelection(
-                  result.caret,
-                  result.selection,
-                  hostEngine.selection(),
-                  nextFrame
-                ),
+                // A replaced build is dropped below; its engine may be gone by now.
+                caret:
+                  generation === generationRef.current
+                    ? residentCaretForSelection(
+                        result.caret,
+                        result.selection,
+                        hostEngine.selection(),
+                        nextFrame
+                      )
+                    : null,
                 queryEngine: null,
                 workerProduced: true,
                 caretPainted: result.caretPainted,
@@ -1589,6 +1593,8 @@ export interface UseCanvasRendererResult {
   status: 'loading' | 'ready' | 'error';
   /** fatal display-list error; non-null exactly while status is `error` */
   error: Error | null;
+  /** The engine of the layout the display list is built from; it lags a replaced session. */
+  layoutEngine: unknown;
   /** feed PagedEditor's per-pass Layout into the interaction query source */
   onLayoutComputed: (
     layout: Layout | null,
@@ -1775,6 +1781,7 @@ export function useCanvasRenderer(
     // canvas and forcing a full replay.
     status,
     error,
+    layoutEngine: engine,
     onLayoutComputed,
     resolveImage,
     queries: geometryReady ? snapshotQueries : null,
