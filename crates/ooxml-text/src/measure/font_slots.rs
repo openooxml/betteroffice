@@ -72,6 +72,9 @@ pub struct FontSlotUse {
 /// The slots measurement takes `text`'s faces from, for a run marked `w:cs`
 /// when `complex_script` and with the `w:rFonts/@w:hint` `hint`.
 pub fn font_slot_use(text: &str, complex_script: bool, hint: Option<&str>) -> FontSlotUse {
+    if !complex_script && text.is_ascii() {
+        return FontSlotUse::default();
+    }
     let east_asia_hint = hint == Some("eastAsia");
     let mut used = FontSlotUse::default();
     let mut slot = FontSlot::HAnsi;

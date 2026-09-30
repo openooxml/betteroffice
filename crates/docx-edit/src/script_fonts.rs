@@ -1,7 +1,7 @@
 //! The fonts a seeded document names only for East Asian or complex-script
 //! text it does not contain.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, HashSet};
 
 use ooxml_text::{FontSlotUse, font_slot_use};
 use serde_json::Value;
@@ -22,10 +22,10 @@ const BUILT_IN_FONTS: [&str; 2] = ["calibri", "cambria math"];
 /// any short string in a payload may name the font something is drawn with.
 #[derive(Default)]
 pub(crate) struct ScriptFontUse {
-    /// Lowercased names some text may be measured or drawn with whatever its script.
-    latin: BTreeSet<String>,
-    east_asian: BTreeSet<String>,
-    complex: BTreeSet<String>,
+    /// Trimmed names some text may be measured or drawn with whatever its script.
+    latin: HashSet<String>,
+    east_asian: HashSet<String>,
+    complex: HashSet<String>,
     measured: FontSlotUse,
     /// Text of runs with no fonts of their own, measured without and with an
     /// `eastAsia` hint from the paragraph.
@@ -39,6 +39,18 @@ pub(crate) struct ScriptFontUse {
 fn lowercase(name: &str) -> Option<String> {
     let name = name.trim();
     (!name.is_empty()).then(|| name.to_lowercase())
+}
+
+/// Adds `name`, trimmed, allocating only for a name not seen yet.
+fn note(names: &mut HashSet<String>, name: &str) {
+    let name = name.trim();
+    if !name.is_empty() && !names.contains(name) {
+        names.insert(name.to_owned());
+    }
+}
+
+fn lowercased(names: &HashSet<String>) -> HashSet<String> {
+    names.iter().map(|name| name.to_lowercase()).collect()
 }
 
 fn slot<'a>(fonts: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a str> {
@@ -85,8 +97,8 @@ impl ScriptFontUse {
                     &mut self.unfonted,
                     font_slot_use(text, complex_script, None),
                 );
-                self.unfonted_hinted_east_asia |=
-                    font_slot_use(text, complex_script, Some("eastAsia")).east_asia;
+                self.unfonted_hinted_east_asia = self.unfonted_hinted_east_asia
+                    || font_slot_use(text, complex_script, Some("eastAsia")).east_asia;
             }
         }
     }
@@ -119,8 +131,8 @@ impl ScriptFontUse {
                     &mut self.unfonted,
                     font_slot_use(text, complex_script, None),
                 );
-                self.unfonted_hinted_east_asia |=
-                    font_slot_use(text, complex_script, Some("eastAsia")).east_asia;
+                self.unfonted_hinted_east_asia = self.unfonted_hinted_east_asia
+                    || font_slot_use(text, complex_script, Some("eastAsia")).east_asia;
             }
         }
     }
@@ -135,7 +147,7 @@ impl ScriptFontUse {
                 _ => continue,
             };
             for name in std::iter::once(font.name.as_str()).chain(font.alt_name.as_deref()) {
-                target.extend(lowercase(name));
+                note(target, name);
             }
         }
     }
@@ -151,15 +163,18 @@ impl ScriptFontUse {
             || (self.default_hint && self.unfonted_hinted_east_asia);
         let complex_text =
             self.measured.complex_script || self.unfonted.complex_script || self.default_cs;
+        let latin = lowercased(&self.latin);
+        let east_asian_names = lowercased(&self.east_asian);
+        let complex_names = lowercased(&self.complex);
         referenced
             .into_iter()
             .filter(|name| {
                 let Some(key) = lowercase(name) else {
                     return false;
                 };
-                let east_asian = self.east_asian.contains(&key);
-                let complex = self.complex.contains(&key);
-                !self.latin.contains(&key)
+                let east_asian = east_asian_names.contains(&key);
+                let complex = complex_names.contains(&key);
+                !latin.contains(&key)
                     && !BUILT_IN_FONTS.contains(&key.as_str())
                     && (east_asian || complex)
                     && !(east_asian && east_asian_text)
@@ -197,10 +212,10 @@ impl ScriptFontUse {
                 }
                 ("cs" | "complexScript", Value::Bool(true)) => embedded.complex_script = true,
                 ("hint", Value::String(hint)) => embedded.hinted |= hint == "eastAsia",
-                ("eastAsia" | "ea", Value::String(name)) => self.east_asian.extend(lowercase(name)),
-                ("cs", Value::String(name)) => self.complex.extend(lowercase(name)),
+                ("eastAsia" | "ea", Value::String(name)) => note(&mut self.east_asian, name),
+                ("cs", Value::String(name)) => note(&mut self.complex, name),
                 (_, Value::String(name)) if name.len() <= MAX_FONT_NAME_BYTES => {
-                    self.latin.extend(lowercase(name));
+                    note(&mut self.latin, name);
                 }
                 _ => {}
             }
@@ -245,7 +260,7 @@ impl ScriptFontUse {
     /// `ascii`, `hAnsi`, `eastAsia` and `cs` fonts.
     fn fonts(&mut self, value: &Value, rtl: bool) {
         match value {
-            Value::String(name) => self.latin.extend(lowercase(name)),
+            Value::String(name) => note(&mut self.latin, name),
             Value::Object(fonts) => {
                 let ascii = slot(fonts, "ascii");
                 let h_ansi = slot(fonts, "hAnsi");
@@ -257,10 +272,14 @@ impl ScriptFontUse {
                     .or(east_asia)
                     .or(cs);
                 for name in [ascii, h_ansi, family].into_iter().flatten() {
-                    self.latin.extend(lowercase(name));
+                    note(&mut self.latin, name);
                 }
-                self.east_asian.extend(east_asia.and_then(lowercase));
-                self.complex.extend(cs.and_then(lowercase));
+                if let Some(name) = east_asia {
+                    note(&mut self.east_asian, name);
+                }
+                if let Some(name) = cs {
+                    note(&mut self.complex, name);
+                }
             }
             _ => {}
         }
