@@ -50,6 +50,7 @@ async function mount(page = 1) {
   session.createStory('hdr1', 'the header');
 
   const reveals: number[] = [];
+  let placeable = () => true;
   const editor = {
     getYrsSession: () => session,
     hasPendingInput: () => false,
@@ -58,7 +59,7 @@ async function mount(page = 1) {
       createYrsPositionProjection(session, 'body')!.positionForLoc(loc),
     revealDisplayPosition: (position: number) => {
       reveals.push(position);
-      return 'scrolled' as const;
+      return placeable() ? ('scrolled' as const) : ('unsupported' as const);
     },
   } as unknown as PagedEditorRef;
   // two pages: the first paragraph, then the table and the rest
@@ -68,21 +69,27 @@ async function mount(page = 1) {
     paraId: session.paragraphs(firstCell)[0].paraId,
     offset: 0,
   })!;
-  const queries = (version: number) =>
-    ({
-      version,
-      anchorRect: (position: number) => ({
-        pageIndex: position < splitAt ? 0 : 1,
-        x: 0,
-        y: 0,
-        width: 1,
-        height: 1,
-      }),
-    }) as unknown as DisplayListQueries;
+  // one display list per version, as the renderer publishes them
+  const lists = new Map<number, DisplayListQueries>();
+  const queries = (version: number) => {
+    if (!lists.has(version)) {
+      lists.set(version, {
+        anchorRect: (position: number) => ({
+          pageIndex: position < splitAt ? 0 : 1,
+          x: 0,
+          y: 0,
+          width: 1,
+          height: 1,
+        }),
+      } as unknown as DisplayListQueries);
+    }
+    return lists.get(version)!;
+  };
+  const pagedEditorRef: { current: PagedEditorRef | null } = { current: editor };
   const hook = renderHook(
     ({ version }) =>
       useHostSearch({
-        pagedEditorRef: { current: editor },
+        pagedEditorRef,
         displayListQueries: queries(version),
         currentPage: () => page,
       }),
@@ -90,7 +97,18 @@ async function mount(page = 1) {
   );
   const events: Array<DocxSearchState | null> = [];
   hook.result.current.api.onSearchChange((state) => events.push(state));
-  return { session, first, last, hook, reveals, events };
+  return {
+    session,
+    first,
+    last,
+    hook,
+    reveals,
+    events,
+    pagedEditorRef,
+    layOut: (canPlace: () => boolean) => {
+      placeable = canPlace;
+    },
+  };
 }
 
 test('finds every body and table match in reading order and walks them', async () => {
@@ -155,11 +173,72 @@ test('a document change re-runs the search and keeps the current match', async (
   expect(api().getSearchState()).toMatchObject({ total: 6, current: 4 });
   expect(events.at(-1)).toMatchObject({ total: 6, current: 4 });
 
+  // a new match lands at the current match's old offset in its own paragraph
+  act(() => {
+    api().searchGoTo(1);
+  });
+  const current = hook.result.current.highlight!.matches[1];
+  session.insertText({ story: 'body', paraId: first, offset: 0 }, 'the ');
+  hook.rerender({ version: 3 });
+  expect(api().getSearchState()).toMatchObject({ total: 7, current: 2 });
+  expect(hook.result.current.highlight!.matches[2].displayFrom).toBe(current.displayFrom + 4);
+  events.splice(0, events.length - 1);
+
   act(() => {
     api().searchGoTo(0);
   });
+  hook.rerender({ version: 4 });
+  expect(events).toHaveLength(2);
+});
+
+test('a match past the laid-out pages is revealed once the layout reaches it', async () => {
+  const { hook, reveals, layOut } = await mount();
+  layOut(() => false);
+  await act(async () => {
+    await hook.result.current.api.search('the');
+  });
+  expect(reveals).toHaveLength(1);
+  hook.rerender({ version: 1 });
+  expect(reveals).toHaveLength(2);
+  layOut(() => true);
   hook.rerender({ version: 2 });
-  expect(events).toHaveLength(4);
+  hook.rerender({ version: 3 });
+  expect(reveals).toHaveLength(3);
+});
+
+test('clearing wins over a search still flushing input', async () => {
+  const { hook, pagedEditorRef } = await mount();
+  let release!: () => void;
+  const flushed = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const editor = pagedEditorRef.current!;
+  pagedEditorRef.current = {
+    ...editor,
+    hasPendingInput: () => true,
+    flushPendingInput: () => flushed,
+  } as PagedEditorRef;
+  let searched!: Promise<unknown>;
+  act(() => {
+    searched = hook.result.current.api.search('the');
+  });
+  act(() => hook.result.current.api.clearSearch());
+  await act(async () => {
+    release();
+    await searched;
+  });
+  expect(hook.result.current.api.getSearchState()).toBeNull();
+  expect(hook.result.current.highlight).toBeNull();
+});
+
+test('a search ends with its editor or document', async () => {
+  const { hook, pagedEditorRef, events } = await mount();
+  await act(async () => {
+    await hook.result.current.api.search('the');
+  });
+  pagedEditorRef.current = null;
+  expect(hook.result.current.api.searchNext()).toBeNull();
+  expect(events.at(-1)).toBeNull();
 });
 
 test('an empty query clears', async () => {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
-import type { YrsSession } from '@betteroffice/docx/yrs';
+import type { YrsSession, YrsStickyPosition } from '@betteroffice/docx/yrs';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { CanvasFindMatch } from '../overlays/CanvasFindHighlightOverlay';
 
@@ -32,6 +32,7 @@ export interface DocxHostSearch {
 }
 
 interface SearchMatch extends CanvasFindMatch {
+  story: string;
   paraId: string;
   start: number;
 }
@@ -43,6 +44,8 @@ interface SearchRun {
   version: string;
   matches: SearchMatch[];
   current: number;
+  /** Where the current match starts, carried across document changes. */
+  anchor: YrsStickyPosition | null;
 }
 
 function isBodyStory(story: string): boolean {
@@ -63,7 +66,7 @@ function collectMatches(
     const displayFrom = editor.yrsLocToDisplayPosition({ ...loc, offset: hit.start });
     const displayTo = editor.yrsLocToDisplayPosition({ ...loc, offset: hit.end });
     if (displayFrom == null || displayTo == null || displayFrom >= displayTo) continue;
-    matches.push({ displayFrom, displayTo, paraId: hit.paraId, start: hit.start });
+    matches.push({ displayFrom, displayTo, story: hit.story, paraId: hit.paraId, start: hit.start });
   }
   // Rust walks block content controls after the body; display order puts them in place.
   return matches.sort((a, b) => a.displayFrom - b.displayFrom);
@@ -99,6 +102,39 @@ function firstInView(
   return low < matches.length ? low : 0;
 }
 
+function anchorOf(session: YrsSession, match: SearchMatch | undefined): YrsStickyPosition | null {
+  if (!match) return null;
+  try {
+    return session.encodeStickyPosition({ story: match.story, paraId: match.paraId, offset: match.start });
+  } catch {
+    return null;
+  }
+}
+
+/** The match that starts at the carried anchor, else the first one after it, else the last. */
+function carriedCurrent(
+  editor: PagedEditorRef,
+  session: YrsSession,
+  matches: readonly SearchMatch[],
+  anchor: YrsStickyPosition | null
+): number {
+  if (matches.length === 0) return -1;
+  let loc = null;
+  try {
+    loc = anchor ? session.resolveStickyPosition(anchor) : null;
+  } catch {
+    loc = null;
+  }
+  if (!loc) return 0;
+  const exact = matches.findIndex(
+    (match) => match.story === loc.story && match.paraId === loc.paraId && match.start === loc.offset
+  );
+  if (exact >= 0) return exact;
+  const position = editor.yrsLocToDisplayPosition(loc);
+  const after = position == null ? -1 : matches.findIndex((match) => match.displayFrom >= position);
+  return after >= 0 ? after : matches.length - 1;
+}
+
 /**
  * Host-driven find over the live session: every body match is highlighted, the
  * current one is revealed without moving selection or focus, and a document
@@ -120,6 +156,10 @@ export function useHostSearch({
   queriesRef.current = displayListQueries;
   const currentPageRef = useRef(currentPage);
   currentPageRef.current = currentPage;
+  // Bumped by every search and clear; a search that resumes after another started stops.
+  const generationRef = useRef(0);
+  // A reveal the layout could not place yet, retried as the layout grows.
+  const pendingRevealRef = useRef<number | null>(null);
   const [highlight, setHighlight] = useState<{
     matches: readonly CanvasFindMatch[];
     current: number;
@@ -138,32 +178,56 @@ export function useHostSearch({
     }
   }, []);
 
-  const goTo = useCallback(
-    (index: number): DocxSearchState | null => {
-      const run = runRef.current;
-      if (!run) return null;
-      if (run.matches.length === 0 || !Number.isInteger(index)) return stateOf(run);
-      const current = ((index % run.matches.length) + run.matches.length) % run.matches.length;
-      pagedEditorRef.current?.revealDisplayPosition(run.matches[current].displayFrom);
-      publish({ ...run, current });
-      return stateOf(runRef.current);
+  const reveal = useCallback(
+    (position: number) => {
+      const outcome = pagedEditorRef.current?.revealDisplayPosition(position);
+      pendingRevealRef.current = outcome === 'scrolled' ? null : position;
     },
-    [pagedEditorRef, publish]
+    [pagedEditorRef]
   );
 
   const clearSearch = useCallback(() => {
+    generationRef.current += 1;
+    pendingRevealRef.current = null;
     if (runRef.current) publish(null);
   }, [publish]);
+
+  /** The run, or null after clearing it when its editor or document is gone. */
+  const liveRun = useCallback((): SearchRun | null => {
+    const run = runRef.current;
+    if (run && pagedEditorRef.current?.getYrsSession() !== run.session) {
+      clearSearch();
+      return null;
+    }
+    return run;
+  }, [clearSearch, pagedEditorRef]);
+
+  const goTo = useCallback(
+    (index: number): DocxSearchState | null => {
+      const run = liveRun();
+      if (!run) return null;
+      if (run.matches.length === 0 || !Number.isInteger(index)) return stateOf(run);
+      const current = ((index % run.matches.length) + run.matches.length) % run.matches.length;
+      reveal(run.matches[current].displayFrom);
+      publish({ ...run, current, anchor: anchorOf(run.session, run.matches[current]) });
+      return stateOf(runRef.current);
+    },
+    [liveRun, publish, reveal]
+  );
 
   const search = useCallback(
     async (query: string, options: DocxSearchOptions = {}): Promise<DocxSearchState> => {
       const normalized = { caseSensitive: options.caseSensitive === true };
+      const generation = (generationRef.current += 1);
+      const empty = { query, options: normalized, total: 0, current: -1 };
       const editor = pagedEditorRef.current;
       if (editor?.hasPendingInput()) await editor.flushPendingInput();
+      if (generation !== generationRef.current) return stateOf(runRef.current) ?? empty;
       const session = editor?.getYrsSession();
+      pendingRevealRef.current = null;
       if (!editor || !session || query === '') {
         publish(null);
-        return { query, options: normalized, total: 0, current: -1 };
+        return empty;
       }
       const matches = collectMatches(editor, session, query, normalized);
       const current = firstInView(matches, queriesRef.current, currentPageRef.current() - 1);
@@ -174,55 +238,59 @@ export function useHostSearch({
         version: session.version(),
         matches,
         current,
+        anchor: anchorOf(session, matches[current]),
       };
-      if (current >= 0) editor.revealDisplayPosition(matches[current].displayFrom);
+      if (current >= 0) reveal(matches[current].displayFrom);
       publish(run);
       return stateOf(run)!;
     },
-    [pagedEditorRef, publish]
+    [pagedEditorRef, publish, reveal]
   );
 
-  // A new display list follows every document change; the matches move with it.
+  // A new display list follows every document change, and every page the layout adds.
   useEffect(() => {
     const run = runRef.current;
+    if (!run) return;
     const editor = pagedEditorRef.current;
-    if (!run || !editor) return;
-    const session = editor.getYrsSession();
-    if (session !== run.session) {
-      publish(null);
+    const session = editor?.getYrsSession();
+    if (!editor || session !== run.session) {
+      clearSearch();
       return;
     }
-    if (!session || session.version() === run.version) return;
-    const previous = run.matches[run.current];
-    const matches = collectMatches(editor, session, run.query, run.options);
-    let current = previous
-      ? matches.findIndex((match) => match.paraId === previous.paraId && match.start === previous.start)
-      : -1;
-    if (current < 0 && previous) {
-      current = matches.findIndex((match) => match.displayFrom >= previous.displayFrom);
-      if (current < 0) current = matches.length - 1;
+    if (session.version() !== run.version) {
+      pendingRevealRef.current = null;
+      const matches = collectMatches(editor, session, run.query, run.options);
+      const current = carriedCurrent(editor, session, matches, run.anchor);
+      publish({
+        ...run,
+        version: session.version(),
+        matches,
+        current,
+        anchor: anchorOf(session, matches[current]),
+      });
+    } else if (pendingRevealRef.current !== null) {
+      reveal(pendingRevealRef.current);
     }
-    publish({ ...run, version: session.version(), matches, current: matches.length ? Math.max(0, current) : -1 });
-  }, [displayListQueries, pagedEditorRef, publish]);
+  }, [clearSearch, displayListQueries, pagedEditorRef, publish, reveal]);
 
   const api = useMemo<DocxHostSearch>(
     () => ({
       search,
       searchNext: () => {
-        const run = runRef.current;
+        const run = liveRun();
         return run ? goTo(run.current + 1) : null;
       },
       searchPrevious: () => {
-        const run = runRef.current;
+        const run = liveRun();
         return run ? goTo(run.current - 1) : null;
       },
       searchGoTo: (index) => {
-        const run = runRef.current;
+        const run = liveRun();
         if (!run) return null;
         return index >= 0 && index < run.matches.length ? goTo(index) : stateOf(run);
       },
       clearSearch,
-      getSearchState: () => stateOf(runRef.current),
+      getSearchState: () => stateOf(liveRun()),
       onSearchChange: (listener) => {
         listenersRef.current.add(listener);
         return () => {
@@ -230,7 +298,7 @@ export function useHostSearch({
         };
       },
     }),
-    [clearSearch, goTo, search]
+    [clearSearch, goTo, liveRun, search]
   );
 
   return { api, highlight };

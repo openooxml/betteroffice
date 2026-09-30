@@ -1,10 +1,15 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, describe, expect, test } from 'bun:test';
-import type { DisplayListQueries, DisplayListRect } from '@betteroffice/docx/layout/render';
+import type {
+  DisplayList,
+  DisplayListQueries,
+  DisplayListRect,
+} from '@betteroffice/docx/layout/render';
 import {
   CanvasFindHighlightOverlay,
   displayOrder,
   matchesInRange,
+  pagePositionIntervals,
 } from './CanvasFindHighlightOverlay';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -36,6 +41,24 @@ describe('matchesInRange', () => {
     const shuffled = [matches[3], matches[0], matches[2], matches[1]];
     expect(matchesInRange(shuffled, displayOrder(shuffled), 0, 32)).toEqual([1, 3, 2]);
   });
+});
+
+test('a page repeating table header rows paints two position intervals', () => {
+  const text = (docStart: number, docEnd: number) => ({ kind: 'text', docStart, docEnd });
+  const displayList = {
+    pages: [
+      { pageIndex: 0, primitives: [text(10, 20), text(21, 30), text(31, 40)] },
+      { pageIndex: 1, primitives: [text(10, 20), text(900, 950), text(951, 990)] },
+    ],
+  } as unknown as DisplayList;
+  expect(pagePositionIntervals(displayList, { start: 1, end: 1 })).toEqual([
+    { from: 10, to: 20 },
+    { from: 900, to: 990 },
+  ]);
+  expect(pagePositionIntervals(displayList, { start: 0, end: 1 })).toEqual([
+    { from: 10, to: 40 },
+    { from: 900, to: 990 },
+  ]);
 });
 
 const PAGES = 20;

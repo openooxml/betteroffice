@@ -21,13 +21,14 @@ import { createPortal } from 'react-dom';
 import {
   displayPageCanvas,
   effectiveZoom,
+  type DisplayList,
   type DisplayListQueries,
   type DisplayListRect,
 } from '@betteroffice/docx/layout/render';
 import { observePageWindow } from './pageWindowObserver';
 import {
   buildRemotePresencePageMetrics,
-  remotePresencePagePositionRange,
+  type RemotePresencePageWindow,
 } from './remotePresenceGeometry';
 
 /** One find match, addressed by its live display range. */
@@ -100,6 +101,37 @@ export function matchesInRange(
   return found;
 }
 
+/**
+ * The document positions the pages of `pageWindow` paint, as sorted disjoint
+ * intervals. A table page repeating its header rows paints them again, far
+ * from the rest of the page's positions.
+ */
+export function pagePositionIntervals(
+  displayList: DisplayList,
+  pageWindow: RemotePresencePageWindow
+): Array<{ from: number; to: number }> {
+  const spans: Array<{ from: number; to: number }> = [];
+  for (let pageIndex = pageWindow.start; pageIndex <= pageWindow.end; pageIndex += 1) {
+    for (const primitive of displayList.pages[pageIndex]?.primitives ?? []) {
+      if (primitive.kind !== 'text' && primitive.kind !== 'glyphRun' && primitive.kind !== 'image') {
+        continue;
+      }
+      const from = primitive.docStart;
+      const to = primitive.docEnd;
+      if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to)) continue;
+      spans.push({ from: from!, to: Math.max(to!, from! + 1) });
+    }
+  }
+  spans.sort((a, b) => a.from - b.from);
+  const merged: Array<{ from: number; to: number }> = [];
+  for (const span of spans) {
+    const last = merged.at(-1);
+    if (last && span.from <= last.to + 1) last.to = Math.max(last.to, span.to);
+    else merged.push({ ...span });
+  }
+  return merged;
+}
+
 export function CanvasFindHighlightOverlay({
   matches,
   currentIndex,
@@ -125,8 +157,8 @@ export function CanvasFindHighlightOverlay({
       const key = pageWindow ? `${pageWindow.start}:${pageWindow.end}` : '';
       if (!moved && key === shown) return;
       shown = key;
-      const range = pageWindow ? remotePresencePagePositionRange(displayList, pageWindow) : null;
-      if (!pageWindow || !range) {
+      const intervals = pageWindow ? pagePositionIntervals(displayList, pageWindow) : [];
+      if (!pageWindow || intervals.length === 0) {
         setRects([]);
         return;
       }
@@ -152,7 +184,11 @@ export function CanvasFindHighlightOverlay({
         };
       };
       const next: ProjectedRect[] = [];
-      for (const index of matchesInRange(matches, order, range.from, range.to)) {
+      const visible = new Set<number>();
+      for (const { from, to } of intervals) {
+        for (const index of matchesInRange(matches, order, from, to)) visible.add(index);
+      }
+      for (const index of visible) {
         const m = matches[index];
         for (const r of displayListQueries.rangeRects(m.displayFrom, m.displayTo)) {
           const p = project(r, index === currentIndex);
