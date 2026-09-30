@@ -42,7 +42,8 @@ function setup() {
     pagedEditorRef: { current: null },
     writeMode: () => 'viewing',
     commands: () => null,
-    settledLayout: async () => true,
+    layout: () => ({ queries: null, complete: false, failed: false }),
+    subscribeLayout: () => () => {},
     geometry: () => null,
     translate: (key) => key,
   });

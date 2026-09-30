@@ -149,6 +149,11 @@ export class ResidentEngineWorkerClient {
     return this.ready;
   }
 
+  /** @internal */
+  hasFailed(): boolean {
+    return this.terminalError !== null;
+  }
+
   /** The worker's wasm memories as of its latest reply; null before one. */
   memory(): WasmModuleMemory[] | null {
     return this.lastMemory;
@@ -171,6 +176,10 @@ export class ResidentEngineWorkerClient {
   /** A bootstrap was sent; later snapshots go as syncs queued behind it. */
   bootstrapSent(): boolean {
     return this.bootstrapped;
+  }
+
+  async warm(): Promise<void> {
+    await this.request({ type: 'warm' });
   }
 
   async bootstrap(
@@ -501,4 +510,91 @@ function frameResult(
 
 export function canUseResidentEngineWorker(): boolean {
   return typeof Worker !== 'undefined';
+}
+
+interface PreloadedWorker {
+  client: ResidentEngineWorkerClient;
+  factory: typeof Worker;
+  ready: Promise<void>;
+  owners: number;
+  idleTimer: ReturnType<typeof setTimeout> | null;
+  releaseTimer: ReturnType<typeof setTimeout> | null;
+}
+
+let preloadedWorker: PreloadedWorker | null = null;
+
+function clearPreloadedWorkerTimers(worker: PreloadedWorker): void {
+  if (worker.idleTimer !== null) clearTimeout(worker.idleTimer);
+  if (worker.releaseTimer !== null) clearTimeout(worker.releaseTimer);
+  worker.idleTimer = null;
+  worker.releaseTimer = null;
+}
+
+function discardPreloadedWorker(worker: PreloadedWorker): void {
+  if (preloadedWorker !== worker) return;
+  preloadedWorker = null;
+  clearPreloadedWorkerTimers(worker);
+  worker.client.destroy();
+}
+
+/** @internal */
+export function preloadResidentEngineWorker(): Promise<void> {
+  if (!canUseResidentEngineWorker()) return Promise.resolve();
+  if (
+    preloadedWorker &&
+    (preloadedWorker.factory !== Worker || preloadedWorker.client.hasFailed())
+  ) {
+    discardPreloadedWorker(preloadedWorker);
+  }
+  if (!preloadedWorker) {
+    const worker: PreloadedWorker = {
+      client: new ResidentEngineWorkerClient(),
+      factory: Worker,
+      ready: Promise.resolve(),
+      owners: 0,
+      idleTimer: null,
+      releaseTimer: null,
+    };
+    preloadedWorker = worker;
+    worker.ready = worker.client.warm().catch((error: unknown) => {
+      discardPreloadedWorker(worker);
+      throw error;
+    });
+  }
+  const worker = preloadedWorker;
+  clearPreloadedWorkerTimers(worker);
+  if (worker.owners === 0) {
+    worker.idleTimer = setTimeout(() => discardPreloadedWorker(worker), RESIDENT_WORKER_SILENCE_MS);
+  }
+  return worker.ready;
+}
+
+/** @internal */
+export function retainPreloadedResidentEngineWorker(): () => void {
+  const worker = preloadedWorker;
+  if (!worker) return () => {};
+  clearPreloadedWorkerTimers(worker);
+  worker.owners += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    worker.owners -= 1;
+    if (worker.owners === 0 && preloadedWorker === worker) {
+      worker.releaseTimer = setTimeout(() => discardPreloadedWorker(worker), 0);
+    }
+  };
+}
+
+/** @internal */
+export function takePreloadedResidentEngineWorker(): ResidentEngineWorkerClient | null {
+  const worker = preloadedWorker;
+  if (!worker) return null;
+  if (!canUseResidentEngineWorker() || worker.factory !== Worker || worker.client.hasFailed()) {
+    discardPreloadedWorker(worker);
+    return null;
+  }
+  preloadedWorker = null;
+  clearPreloadedWorkerTimers(worker);
+  return worker.client;
 }
