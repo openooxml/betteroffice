@@ -14,6 +14,12 @@ export interface YrsSidebarProjection {
   storyOffsetToDisplayPoint(story: string, offset: number): YrsSidebarDisplayPoint | null;
 }
 
+/**
+ * Where a sidebar projection reads story segments. `segments` must answer for the session's
+ * current state on every call, as `YrsSession.storySegments` does; the arrays it returns are shared
+ * and never mutated. A projection remembers the last source given for a session and reads
+ * through it for the session's lifetime.
+ */
 export interface YrsStorySegmentSource {
   segments(story: string): YrsStorySegment[];
 }

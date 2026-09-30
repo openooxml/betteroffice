@@ -1,3 +1,4 @@
+import type { YrsStorySegmentSource } from '@betteroffice/docx/layout/render';
 import type { YrsSession, YrsStorySegment } from '@betteroffice/docx/yrs';
 
 interface CachedStory {
@@ -135,6 +136,26 @@ export class YrsStorySegmentCache {
       if (unit && --unit.stories === 0) this.units.delete(digest);
     }
   }
+}
+
+/**
+ * Serves `session`'s segments from the cache `current` holds, brought up to date on every read.
+ * Once that cache belongs to another session, reads go to `session` itself.
+ */
+export function storySegmentSource(
+  session: YrsSession,
+  current: () => YrsStorySegmentCache | null
+): YrsStorySegmentSource {
+  return {
+    segments(story) {
+      const cache = current();
+      if (cache?.session !== session) return session.storySegments(story);
+      cache.refresh();
+      const segments = cache.segments(story);
+      cache.scheduleDigests();
+      return segments;
+    },
+  };
 }
 
 /** Segments split after each pilcrow, as the session's paragraph digests split them. */

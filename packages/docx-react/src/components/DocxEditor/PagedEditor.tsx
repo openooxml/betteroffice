@@ -137,7 +137,7 @@ import {
   type YrsPositionProjection,
 } from './internals/yrsPositionProjection';
 import { SidebarRevisionReads } from './internals/sidebarRevisionReads';
-import { YrsStorySegmentCache } from './internals/yrsStorySegmentCache';
+import { storySegmentSource, YrsStorySegmentCache } from './internals/yrsStorySegmentCache';
 import { partEditStory, type NoteEdit, type PartEdit } from './partEdit';
 import type { DocxEditorCollaborationOptions, DocxPointPosition } from './types';
 import { positionAtClientPoint } from './internals/pointPosition';
@@ -1695,16 +1695,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           }
           return;
         }
-        const { tracked, projection } = sidebarReads.tracked(session, {
-          segments(story) {
-            const held = yrsStorySegmentsRef.current;
-            if (held && held.session !== session) return session.storySegments(story);
-            const segments = currentStorySegments(session);
-            const result = segments.segments(story);
-            segments.scheduleDigests();
-            return result;
-          },
-        });
+        currentStorySegments(session);
+        const { tracked, projection } = sidebarReads.tracked(
+          session,
+          storySegmentSource(session, () => yrsStorySegmentsRef.current)
+        );
         sidebarReads.deliver(onYrsTrackedChangesChange, tracked, session, version);
         const hfRegions = new Map<string, 'header' | 'footer'>();
         for (const rId of document?.package?.headers?.keys() ?? []) {
