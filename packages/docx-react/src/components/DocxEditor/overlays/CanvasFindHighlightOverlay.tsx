@@ -196,7 +196,7 @@ export function CanvasFindHighlightOverlay({
         }
       }
       setRects(next);
-    }, 8);
+    });
   }, [
     matches,
     order,

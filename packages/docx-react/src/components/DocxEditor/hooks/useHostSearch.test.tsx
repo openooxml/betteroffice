@@ -309,6 +309,25 @@ test('a reveal against a layout of an older version waits for the current one', 
   expect(reveals).toHaveLength(2);
 });
 
+test('navigating right after an edit steps from the carried match', async () => {
+  const { session, first, hook, reveals } = await mount();
+  const api = () => hook.result.current.api;
+  await act(async () => {
+    await api().search('the');
+  });
+  act(() => {
+    api().searchGoTo(1);
+  });
+  session.insertText({ story: 'body', paraId: first, offset: 0 }, 'the ');
+  let state = null as DocxSearchState | null;
+  act(() => {
+    state = api().searchNext();
+  });
+  // "The" moved to the third match; the next one is the paragraph's "the"
+  expect(state).toMatchObject({ total: 6, current: 3 });
+  expect(reveals.at(-1)).toBe(hook.result.current.highlight!.matches[3].displayFrom);
+});
+
 test('an empty query clears', async () => {
   const { hook } = await mount();
   await act(async () => {

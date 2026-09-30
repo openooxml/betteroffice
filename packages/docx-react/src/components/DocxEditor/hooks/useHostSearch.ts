@@ -49,6 +49,8 @@ interface SearchRun {
   current: number;
   /** Where the current match starts, carried across document changes. */
   anchor: YrsStickyPosition | null;
+  /** Whether a layout of `version` was shown when the display ranges were mapped. */
+  placed: boolean;
 }
 
 function isBodyStory(story: string): boolean {
@@ -196,7 +198,9 @@ export function useHostSearch({
     (position: number, version: string) => {
       const outcome = pagedEditorRef.current?.revealDisplayPosition(position);
       const shown = sourceVersionOf(queriesRef.current);
-      const placed = outcome === 'scrolled' && (shown === null || shown === version);
+      const placed =
+        outcome === 'scrolled' &&
+        (shown === null ? runRef.current?.placed !== false : shown === version);
       pendingRevealRef.current = placed ? null : position;
     },
     [pagedEditorRef]
@@ -208,15 +212,46 @@ export function useHostSearch({
     if (runRef.current) publish(null);
   }, [publish]);
 
-  /** The run, or null after clearing it when its editor or document is gone. */
+  /**
+   * `run` against the session as it is now, keeping its current match. `fresh` says whether a
+   * layout of an unknown version counts as showing the current one.
+   */
+  const refreshed = useCallback(
+    (run: SearchRun, editor: PagedEditorRef, session: YrsSession, fresh: boolean): SearchRun => {
+      const matches = collectMatches(editor, session, run.query, run.options);
+      const current = carriedCurrent(editor, session, matches, run.anchor);
+      const version = session.version();
+      const shown = sourceVersionOf(queriesRef.current);
+      return {
+        ...run,
+        version,
+        matches,
+        current,
+        anchor: anchorOf(session, matches[current]),
+        placed: shown === null ? fresh : shown === version,
+      };
+    },
+    []
+  );
+
+  /**
+   * The run as of the current document, or null after clearing it when its editor or document
+   * is gone.
+   */
   const liveRun = useCallback((): SearchRun | null => {
     const run = runRef.current;
-    if (run && pagedEditorRef.current?.getYrsSession() !== run.session) {
+    if (!run) return null;
+    const editor = pagedEditorRef.current;
+    const session = editor?.getYrsSession();
+    if (!editor || session !== run.session) {
       clearSearch();
       return null;
     }
-    return run;
-  }, [clearSearch, pagedEditorRef]);
+    if (session.version() === run.version) return run;
+    const next = refreshed(run, editor, session, false);
+    publish(next);
+    return next;
+  }, [clearSearch, pagedEditorRef, publish, refreshed]);
 
   const goTo = useCallback(
     (index: number): DocxSearchState | null => {
@@ -224,8 +259,8 @@ export function useHostSearch({
       if (!run) return null;
       if (run.matches.length === 0 || !Number.isInteger(index)) return stateOf(run);
       const current = ((index % run.matches.length) + run.matches.length) % run.matches.length;
-      reveal(run.matches[current].displayFrom, run.version);
       publish({ ...run, current, anchor: anchorOf(run.session, run.matches[current]) });
+      reveal(run.matches[current].displayFrom, run.version);
       return stateOf(runRef.current);
     },
     [liveRun, publish, reveal]
@@ -247,6 +282,7 @@ export function useHostSearch({
       }
       const matches = collectMatches(editor, session, query, normalized);
       const current = firstInView(matches, queriesRef.current, topPageInView(canvasHostRef.current));
+      const shown = sourceVersionOf(queriesRef.current);
       const run: SearchRun = {
         query,
         options: normalized,
@@ -255,9 +291,10 @@ export function useHostSearch({
         matches,
         current,
         anchor: anchorOf(session, matches[current]),
+        placed: shown === null || shown === session.version(),
       };
-      if (current >= 0) reveal(matches[current].displayFrom, run.version);
       publish(run);
+      if (current >= 0) reveal(matches[current].displayFrom, run.version);
       return stateOf(run)!;
     },
     [canvasHostRef, pagedEditorRef, publish, reveal]
@@ -273,23 +310,16 @@ export function useHostSearch({
       clearSearch();
       return;
     }
-    if (session.version() !== run.version) {
+    if (session.version() !== run.version || !run.placed) {
       const revealing = pendingRevealRef.current !== null;
       pendingRevealRef.current = null;
-      const matches = collectMatches(editor, session, run.query, run.options);
-      const current = carriedCurrent(editor, session, matches, run.anchor);
-      if (revealing && current >= 0) reveal(matches[current].displayFrom, session.version());
-      publish({
-        ...run,
-        version: session.version(),
-        matches,
-        current,
-        anchor: anchorOf(session, matches[current]),
-      });
+      const next = refreshed(run, editor, session, true);
+      publish(next);
+      if (revealing && next.current >= 0) reveal(next.matches[next.current].displayFrom, next.version);
     } else if (pendingRevealRef.current !== null) {
       reveal(pendingRevealRef.current, run.version);
     }
-  }, [clearSearch, displayListQueries, pagedEditorRef, publish, reveal]);
+  }, [clearSearch, displayListQueries, pagedEditorRef, publish, refreshed, reveal]);
 
   useEffect(() => clearSearch, [clearSearch]);
 
