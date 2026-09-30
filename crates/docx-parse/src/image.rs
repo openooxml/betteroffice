@@ -381,7 +381,10 @@ fn apply_common_image_fields(
     }
     image.outline = parse_picture_outline(container);
     image.rotation_bounds = rotation_bounds(&image.size, image.transform.as_ref());
-    if padding.as_ref().is_some_and(|padding| !is_zero_padding(padding)) {
+    if padding
+        .as_ref()
+        .is_some_and(|padding| !is_zero_padding(padding))
+    {
         image.effect_extent = padding;
     }
     if let (Some(relationship_id), Some(relationships)) = (properties.hyperlink_id, relationships) {

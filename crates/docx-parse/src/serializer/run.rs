@@ -1292,7 +1292,10 @@ mod tests {
         let image = crate::image::parse_drawing(&drawing_root(&source), None, None).unwrap();
         let xml = serialize_drawing_content(&image, &mut context()).unwrap();
         let anchor = start_tag(&xml, "wp:anchor");
-        assert!(anchor.starts_with(r#"<wp:anchor distL="114300" simplePos="0""#), "{anchor}");
+        assert!(
+            anchor.starts_with(r#"<wp:anchor distL="114300" simplePos="0""#),
+            "{anchor}"
+        );
         assert!(!xml.contains("wp:effectExtent"), "{xml}");
     }
 
@@ -1309,8 +1312,7 @@ mod tests {
             let source = format!(
                 r#"<w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/>{effect}<wp:docPr id="7" name="Shape 7"/>{graphic}</wp:inline></w:drawing>"#
             );
-            let shape =
-                crate::shape::parse_shape_from_drawing(&drawing_root(&source)).unwrap();
+            let shape = crate::shape::parse_shape_from_drawing(&drawing_root(&source)).unwrap();
             let xml = serialize_shape_content(&shape, &mut context()).unwrap();
             assert_eq!(
                 start_tag(&xml, "wp:inline"),
