@@ -75,6 +75,16 @@ export interface DocxProposalSnapshot {
   proposals: readonly DocxProposalRecord[];
 }
 
+/** @internal */
+export interface DocxProposalRegistryState {
+  previewVersion: number;
+  entries: {
+    record: DocxProposalRecord;
+    key: string;
+    suggest: { author: string; date: string };
+  }[];
+}
+
 export type DocxProposalFailure = Omit<DocxEditFailure, 'code'> & {
   code: DocxEditFailureCode | 'stale-preview' | 'unknown-proposal' | 'proposal-id-conflict';
   proposalId?: string;
@@ -120,6 +130,10 @@ export interface DocxProposalRegistry {
   setStates(request: DocxProposalStateRequest): DocxProposalResult;
   withdraw(request: DocxProposalWithdrawRequest): DocxProposalResult;
   snapshot(): DocxProposalSnapshot;
+  /** @internal */
+  exportState(): DocxProposalRegistryState;
+  /** @internal */
+  mirror(mirror: { version: string; proposals: DocxProposalRegistryState } | null): void;
   subscribe(listener: (snapshot: DocxProposalSnapshot) => void): () => void;
   /** Forgets every proposal, as when the session opens another document. */
   reset(): void;
@@ -253,7 +267,7 @@ export interface ProposalWithdrawal {
   reject: readonly string[];
   proposalIds?: Readonly<Record<string, string>>;
   /** Per owned revision, the stamp its proposal suggested; a revision holding another is refused. */
-  suggested?: Readonly<Record<string, { author: string; date: string }>>;
+  suggested: Readonly<Record<string, { author: string; date: string }>>;
   /** Refuses as `stale-version` when the document is no longer at this version. */
   expectVersion?: string;
 }
@@ -524,7 +538,7 @@ export function executeProposalWithdrawal(
       },
     };
   }
-  if (suggested && session.revisionStamps) {
+  if (session.revisionStamps) {
     const stamps = session.revisionStamps(owned);
     for (const revisionId of owned) {
       const suggest = suggested[revisionId];
@@ -555,19 +569,17 @@ export function executeProposalWithdrawal(
 
 /** The session holds update notifications until `propose` returns, so they see the round. */
 export function createProposalRegistry(session: DocxProposalSession): DocxProposalRegistry {
-  const records = new Map<
-    string,
-    { record: DocxProposalRecord; key: string; suggest: { author: string; date: string } }
-  >();
+  const records = new Map<string, DocxProposalRegistryState['entries'][number]>();
   const listeners = new Set<(snapshot: DocxProposalSnapshot) => void>();
   let previewVersion = 0;
+  let mirrored: { version: string; proposals: DocxProposalRegistryState } | null = null;
   let notifying = false;
   let renotify = false;
 
   const snapshot = (): DocxProposalSnapshot => ({
-    version: session.version(),
-    previewVersion,
-    proposals: [...records.values()].map(({ record }) => ({
+    version: mirrored?.version ?? session.version(),
+    previewVersion: mirrored?.proposals.previewVersion ?? previewVersion,
+    proposals: (mirrored?.proposals.entries ?? [...records.values()]).map(({ record }) => ({
       ...record,
       paragraph: { ...record.paragraph },
       revisionIds: [...record.revisionIds],
@@ -608,7 +620,12 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     failure,
   });
 
+  const ensureOwned = (): void => {
+    if (mirrored) throw new Error('proposals are held by the resident worker');
+  };
+
   const propose = (request: DocxProposalRequest): DocxProposalResult => {
+    ensureOwned();
     if (!request || typeof request !== 'object' || !Array.isArray(request.proposals)) {
       throw new TypeError('a proposal request needs a proposals array');
     }
@@ -674,6 +691,7 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
   };
 
   const setStates = (request: DocxProposalStateRequest): DocxProposalResult => {
+    ensureOwned();
     if (!request || typeof request !== 'object' || !Array.isArray(request.changes)) {
       throw new TypeError('a proposal state request needs a changes array');
     }
@@ -740,6 +758,7 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
    * preview did: accepted revisions apply, rejected and undecided ones are removed.
    */
   const withdraw = (request: DocxProposalWithdrawRequest): DocxProposalResult => {
+    ensureOwned();
     if (!request || typeof request !== 'object' || !Array.isArray(request.ids)) {
       throw new TypeError('a withdrawal request needs an ids array');
     }
@@ -807,6 +826,30 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     setStates,
     withdraw,
     snapshot,
+    exportState() {
+      return structuredClone(
+        mirrored?.proposals ?? { previewVersion, entries: [...records.values()] }
+      );
+    },
+    mirror(mirror) {
+      // A new mirrored version alone, such as a pending-change marker, notifies no one; ending the
+      // mirror notifies when the session's own version differs from the mirrored one.
+      const ending = mirror === null;
+      const visible = () => {
+        const { version, ...rest } = snapshot();
+        return JSON.stringify(canonical(ending ? { version, ...rest } : rest));
+      };
+      const before = visible();
+      if (mirror) {
+        mirrored = structuredClone(mirror);
+      } else if (mirrored) {
+        records.clear();
+        for (const entry of mirrored.proposals.entries) records.set(entry.record.id, entry);
+        previewVersion = mirrored.proposals.previewVersion;
+        mirrored = null;
+      }
+      if (visible() !== before) notify();
+    },
     subscribe(listener) {
       if (typeof listener !== 'function')
         throw new TypeError('proposal listener must be a function');
@@ -816,13 +859,14 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
       };
     },
     reset() {
-      if (records.size === 0) return;
+      if (mirrored || records.size === 0) return;
       if ([...records.values()].some(({ record }) => record.state !== 'proposed'))
         previewVersion += 1;
       records.clear();
       notify();
     },
     destroy() {
+      mirrored = null;
       records.clear();
       listeners.clear();
     },

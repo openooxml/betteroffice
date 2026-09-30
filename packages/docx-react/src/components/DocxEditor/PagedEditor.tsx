@@ -66,7 +66,7 @@ import type {
 } from '@betteroffice/docx/types/document';
 import type { WrapType } from '@betteroffice/docx/docx/wrapTypes';
 import {
-  yrsLocToDisplayPosition as yrsLocToLocalDisplayPosition,
+  yrsLocToProjectedDisplayPosition,
   type YrsInlineFormatDelta,
   type YrsLoc,
   type YrsRenderEnv,
@@ -613,16 +613,17 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     );
     const yrsLocToDisplayPosition = useCallback(
       (loc: YrsLoc): number | null => {
-        const map = yrsCore.inputPositionMap(loc.story);
-        if (!map) return null;
-        const rootStory =
-          loc.story === 'body' || loc.story.startsWith('body:') ? 'body' : activeYrsRootStory;
-        return (
-          getYrsPositionProjectionRef.current(rootStory)?.positionForLoc(loc) ??
-          (loc.story === rootStory ? yrsLocToLocalDisplayPosition(map, loc) : null)
+        const session = yrsCore.session;
+        if (!session) return null;
+        return yrsLocToProjectedDisplayPosition(
+          session,
+          getYrsPositionProjectionRef.current,
+          loc,
+          activeYrsRootStory,
+          yrsCore.inputPositionMap
         );
       },
-      [activeYrsRootStory, yrsCore.inputPositionMap]
+      [activeYrsRootStory, yrsCore.session, yrsCore.inputPositionMap]
     );
     const displayPositionToViewportLoc = useCallback(
       (position: number): YrsLoc | null => {

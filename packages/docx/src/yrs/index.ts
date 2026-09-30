@@ -48,6 +48,7 @@ import type {
 import type { DocxParagraphHeading } from './readTypes';
 import {
   createProposalRegistry,
+  type DocxProposalRegistryState,
   type DocxProposalRequest,
   type DocxProposalResult,
   type DocxProposalSnapshot,
@@ -90,6 +91,7 @@ export {
   type ResidentEngineWorkerApplyResult,
   type ResidentEngineWorkerFrame,
   type ResidentEngineWorkerOpened,
+  type ResidentProposalReply,
   type ResidentEngineOffscreenPage,
 } from './residentEngineWorkerClient';
 export { preloadDocxEngine } from './preloadDocxEngine';
@@ -113,6 +115,7 @@ export {
   type DocxProposalFailure,
   type DocxProposalInput,
   type DocxProposalRecord,
+  type DocxProposalRegistryState,
   type DocxProposalRequest,
   type DocxProposalResult,
   type DocxProposalSnapshot,
@@ -128,6 +131,8 @@ export {
   type DocxSavedParagraph,
   type DocxSessionSave,
 } from './saveYrsDocx';
+export * from './yrsPositionProjection';
+export * from './proposalGeometry';
 
 export interface YrsDocxHost {
   document: Document;
@@ -654,6 +659,8 @@ export type YrsResidentFontRegistration =
   | { substituteOf: number; family: string };
 
 export interface YrsResidentWorkerSnapshot {
+  /** @internal */
+  workerAuthoritative?: true;
   clientId: number;
   /** Full document state, or a state-vector diff when the caller supplied
    * the worker's known vector — both apply through the same merge path. */
@@ -871,6 +878,12 @@ export interface YrsMediaSource {
   mimeType: string;
 }
 
+/** @internal */
+export interface YrsWorkerDocumentMirror {
+  version: string;
+  proposals: DocxProposalRegistryState;
+}
+
 export interface YrsSession extends CollaborationReplica {
   /** The yrs client id this replica writes with. */
   readonly clientId: number;
@@ -1054,7 +1067,7 @@ export interface YrsSession extends CollaborationReplica {
   /** Apply a same-user worker update under the local undo origin. @internal */
   applyLocalUpdate(update: Uint8Array): void;
   /** Adopt another replica's host batch outside undo history. @internal */
-  applyHostUpdate(update: Uint8Array): void;
+  applyHostUpdate(update: Uint8Array, stories?: readonly string[]): void;
   /**
    * Subscribes to every committed transaction's v1 update (local AND
    * applied-remote). Returns an unsubscribe function.
@@ -1371,6 +1384,10 @@ export interface YrsSession extends CollaborationReplica {
   withdrawProposals(request: DocxProposalWithdrawRequest): DocxProposalResult;
   /** The proposals in the order they were made. */
   getProposals(): DocxProposalSnapshot;
+  /** @internal */
+  mirrorWorkerDocument(mirror: YrsWorkerDocumentMirror | null): void;
+  /** @internal */
+  workerDocumentMirrored(): boolean;
   /** Listens for new proposals, decisions and a forgotten registry. Returns the unsubscribe. */
   onProposalChange(listener: (snapshot: DocxProposalSnapshot) => void): () => void;
 
@@ -1729,8 +1746,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     return host;
   };
 
+  let workerDocumentVersion: string | null = null;
   const proposals = createProposalRegistry({
-    version: () => facade.version(),
+    version: () => session.version(),
     resolveParagraphAnchor: (anchor) => facade.resolveParagraphAnchor(anchor),
     findText: (request) => facade.findText(request),
     readParagraphs: (request) => facade.readParagraphs(request),
@@ -1902,11 +1920,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     residentWorkerSnapshot: (options) => {
       if (!residentLayoutInput) return null;
       if (!residentLayoutWithRegions && residentRenderInputs.size === 0) return null;
-      const selectionJson = session.selection();
-      const mediaSources = session.media_sources_json();
+      const mirrored = workerDocumentVersion !== null;
+      const selectionJson = mirrored ? 'null' : session.selection();
+      const mediaSources = mirrored ? undefined : session.media_sources_json();
       const fontsCurrent = options?.knownFontsRevision === residentFontsRevision;
       let state: Uint8Array | null = null;
-      if (options?.knownStateVector) {
+      if (!mirrored && options?.knownStateVector) {
         try {
           state = session.encode_diff(options.knownStateVector.slice());
         } catch {
@@ -1915,7 +1934,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       }
       return {
         clientId,
-        state: state ?? session.encode_state(),
+        ...(mirrored ? { workerAuthoritative: true as const } : {}),
+        state: mirrored ? new Uint8Array(0) : (state ?? session.encode_state()),
         selection: JSON.parse(selectionJson) as YrsSelection | null,
         fonts: fontsCurrent
           ? []
@@ -2009,8 +2029,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       markDirty('all');
       mutate(() => session.apply_local_update(update));
     },
-    applyHostUpdate: (update) => {
-      markDirty('all');
+    applyHostUpdate: (update, stories) => {
+      markDirty(stories ?? 'all');
       mutate(() => session.apply_host_update(update));
     },
     onUpdate: (listener) => {
@@ -2634,7 +2654,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         session.find_content_controls_json(JSON.stringify(query), JSON.stringify(options))
       ) as DocxContentControlsResult,
 
-    version: () => session.version(),
+    version: () => workerDocumentVersion ?? session.version(),
     readParagraphs: (request) =>
       JSON.parse(session.read_paragraphs_json(JSON.stringify(request))) as DocxReadParagraphsResult,
     findText: (request) =>
@@ -2653,6 +2673,11 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     setProposalStates: (request) => proposals.setStates(request),
     withdrawProposals: (request) => mutate(() => proposals.withdraw(request)),
     getProposals: () => proposals.snapshot(),
+    mirrorWorkerDocument: (mirror) => {
+      workerDocumentVersion = mirror?.version ?? null;
+      proposals.mirror(mirror);
+    },
+    workerDocumentMirrored: () => workerDocumentVersion !== null,
     onProposalChange: (listener) => {
       if (destroyed) throw new Error('yrs session is destroyed');
       return proposals.subscribe(listener);
