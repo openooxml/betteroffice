@@ -962,9 +962,11 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       const target = pmPos != null ? resolveTarget(pmPos) : null;
       if (!target) return;
       if (e.detail === 2) {
+        clearPendingGesture();
         yrsInputRef.current?.selectWordAtDisplay(target.displayPosition, target.story);
         focusInput();
       } else if (e.detail === 3) {
+        clearPendingGesture();
         yrsInputRef.current?.selectParagraphAtDisplay(target.displayPosition, target.story);
         focusInput();
       }

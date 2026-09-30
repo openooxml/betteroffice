@@ -197,6 +197,21 @@ test.each(['click', 'double-click', 'drag'])('a replayed %s keeps its selection 
   expect(kept).toEqual([1]);
 });
 
+test.each([2, 3])('a %s-click handled after the replica lands consumes the pending gesture', (detail) => {
+  const { opts, selections, words, paragraphs } = options();
+  const view = renderHook(() => usePagesPointer(opts));
+
+  mouse('mousedown', 200, 400, detail);
+  mouse('mousemove', 230);
+  opts.replicaReady = true;
+  mouse('mouseup', 230, 400, detail);
+  mouse('click', 230, 400, detail);
+  view.rerender();
+  expect(detail === 2 ? words : paragraphs).toEqual([[23, 'body']]);
+  expect(detail === 2 ? paragraphs : words).toEqual([]);
+  expect(selections).toEqual([]);
+});
+
 test('a recorded gesture asks for the replica', () => {
   const requestReplica = mock(() => {});
   const { opts } = options({ requestReplica });
