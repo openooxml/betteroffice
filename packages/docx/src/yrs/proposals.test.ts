@@ -278,7 +278,7 @@ describe('YrsSession host proposals', () => {
     }
     expect(propose(missing, replace('empty', '00000002', '', 'b'))).toMatchObject({
       ok: false,
-      failure: { code: 'invalid-step', proposalId: 'empty' },
+      failure: { code: 'missing-target', proposalId: 'empty' },
     });
     expect(state(missing)).toEqual(unchanged);
   });
@@ -678,10 +678,11 @@ describe('YrsSession host proposals', () => {
   it('fills an empty paragraph through an empty search in its mark formatting', async () => {
     const session = await open(fixture(FILLABLE));
     const snapshot = snapshotOf(
-      propose(session, replace('cell', '0000F001', '', 'Cell fill'), {
-        ...replace('body', '0000F002', '', 'Body fill'),
-        occurrence: 1,
-      })
+      propose(
+        session,
+        replace('cell', '0000F001', '', 'Cell fill'),
+        replace('body', '0000F002', '', 'Body fill', 1)
+      )
     );
     const story = snapshot.proposals[0]!.paragraph.story;
     expect(story).toBe('body:t0:r0c0');
