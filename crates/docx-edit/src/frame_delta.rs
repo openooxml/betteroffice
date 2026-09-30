@@ -1548,7 +1548,9 @@ mod tests {
 
     #[test]
     fn typed_emission_matches_the_value_reference() {
-        for list in [list("hello"), list_at_position(2), rich_list()] {
+        let mut watermark = list("watermark");
+        watermark.pages[0].watermark_primitive_count = Some(1);
+        for list in [list("hello"), list_at_position(2), rich_list(), watermark] {
             for page in &list.pages {
                 let value = serde_json::to_value(page).unwrap();
 
@@ -1571,6 +1573,34 @@ mod tests {
                 assert_eq!(decoded, expected, "typed stream decodes differently");
             }
         }
+    }
+
+    #[test]
+    fn changing_the_watermark_prefix_requires_a_page_upsert() {
+        let before = list("watermark");
+        let mut after = before.clone();
+        after.pages[0].watermark_primitive_count = Some(1);
+        let epochs = FrameEpochs {
+            doc_epoch: 1,
+            layout_epoch: 1,
+            frame_epoch: 1,
+            base_frame_epoch: 0,
+        };
+        let mut next_id = 0;
+        let (_, snapshot) = encode_frame_delta(&before, &[], epochs, true, &mut next_id).unwrap();
+        let (bytes, _) = encode_frame_delta(
+            &after,
+            &snapshot,
+            FrameEpochs {
+                frame_epoch: 2,
+                base_frame_epoch: 1,
+                ..epochs
+            },
+            false,
+            &mut next_id,
+        )
+        .unwrap();
+        assert_eq!(bytes[FRAME_HEADER_LEN], PAGE_OP_UPSERT);
     }
 
     #[test]

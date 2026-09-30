@@ -28,6 +28,7 @@ import type {
   DocxProposalResult,
   DocxProposalSnapshot,
   DocxProposalStateRequest,
+  DocxProposalWithdrawRequest,
   DocxReadParagraphsRequest,
   DocxReadParagraphsResult,
   DocxValidationResult,
@@ -452,6 +453,11 @@ export interface DocxEditorRef {
    * Gated like {@link proposeChanges}.
    */
   setProposalStates: (request: DocxProposalStateRequest) => Promise<DocxProposalResult>;
+  /**
+   * Flushes pending input, then withdraws proposals, settling each as its decision previews it;
+   * see `YrsSession.withdrawProposals`. Gated like {@link proposeChanges}.
+   */
+  withdrawProposals: (request: DocxProposalWithdrawRequest) => Promise<DocxProposalResult>;
   /** Flushes pending input, then reads the proposals of the loaded document. */
   getProposals: () => Promise<DocxProposalSnapshot>;
   /**

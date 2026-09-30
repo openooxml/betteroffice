@@ -329,6 +329,27 @@ pub fn yrs_doc_to_mapped_layout_blocks(
     story_id: &str,
     env: &RenderEnv,
 ) -> Result<(Vec<LayoutBlock>, LoweringMap), BridgeError> {
+    yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut None)
+}
+
+/// [`yrs_doc_to_mapped_layout_blocks`] plus the blocks it leaves out that a revision
+/// preview can reveal: suppressed field results and drawing-only paragraphs.
+pub(crate) fn yrs_doc_to_mapped_layout_blocks_with_revealable(
+    doc: &EditingDoc,
+    story_id: &str,
+    env: &RenderEnv,
+) -> Result<(Vec<LayoutBlock>, LoweringMap, Vec<LayoutBlock>), BridgeError> {
+    let mut revealable = Some(Vec::new());
+    let (blocks, map) = yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut revealable)?;
+    Ok((blocks, map, revealable.unwrap_or_default()))
+}
+
+fn yrs_doc_to_mapped_layout_blocks_inner(
+    doc: &EditingDoc,
+    story_id: &str,
+    env: &RenderEnv,
+    revealable: &mut Option<Vec<LayoutBlock>>,
+) -> Result<(Vec<LayoutBlock>, LoweringMap), BridgeError> {
     if doc.yrs_doc().offset_kind() != OffsetKind::Utf16 {
         return Err(BridgeError::WrongOffsetKind);
     }
@@ -369,6 +390,7 @@ pub fn yrs_doc_to_mapped_layout_blocks(
         CellEdges::default(),
         &mut map,
         &mut opaque_sequences,
+        revealable,
     )?;
     // Word numbers SEQ fields in the main text only.
     if story_id == "body" && has_sequence_metadata {
@@ -398,6 +420,7 @@ fn lower_story<T: ReadTxn>(
     cell_edges: CellEdges,
     map: &mut LoweringMap,
     opaque_sequences: &mut BTreeSet<String>,
+    revealable: &mut Option<Vec<LayoutBlock>>,
 ) -> Result<(Vec<LayoutBlock>, u64), BridgeError> {
     if !active_stories.insert(story_id.to_owned()) {
         return Err(BridgeError::RecursiveStory(story_id.to_owned()));
@@ -458,6 +481,7 @@ fn lower_story<T: ReadTxn>(
                         list_state,
                         (map, story_slot),
                         opaque_sequences,
+                        revealable,
                     );
                     let values = pilcrow_values(&pilcrow, txn);
                     suppress_cell_edge_spacing(
@@ -473,6 +497,8 @@ fn lower_story<T: ReadTxn>(
                         .is_some_and(|id| hidden_field_blocks.contains(&id))
                     {
                         blocks.extend(paragraph_blocks);
+                    } else if let Some(revealed) = revealable {
+                        revealed.extend(paragraph_blocks);
                     }
                     // The field's own paragraph is the one just closed, so the
                     // range it suppresses opens with the next block.
@@ -522,9 +548,12 @@ fn lower_story<T: ReadTxn>(
                         unnumbered.as_mut().unwrap_or(&mut *list_state),
                         map,
                         opaque_sequences,
+                        revealable,
                     )?;
                     if !hidden {
                         blocks.push(LayoutBlock::Table(lowered));
+                    } else if !previewed_out && let Some(revealed) = revealable {
+                        revealed.push(LayoutBlock::Table(lowered));
                     }
                     story_index += 1;
                     paragraph_start = story_index;
@@ -626,10 +655,13 @@ fn lower_story<T: ReadTxn>(
                         },
                         map,
                         opaque_sequences,
+                        revealable,
                     )?;
                     stamp_sdt_group(&mut child_blocks, group);
                     if !previewed_out && !hidden_field_blocks.contains(&child_story) {
                         blocks.extend(child_blocks);
+                    } else if !previewed_out && let Some(revealed) = revealable {
+                        revealed.extend(child_blocks);
                     }
                     story_index += 1;
                     paragraph_start = story_index;
@@ -1080,6 +1112,7 @@ fn lower_table<T: ReadTxn>(
     list_state: &mut ListState,
     map: &mut LoweringMap,
     opaque_sequences: &mut BTreeSet<String>,
+    revealable: &mut Option<Vec<LayoutBlock>>,
 ) -> Result<(TableBlock, u64), BridgeError> {
     let tbl_pr_value = shared_any(table, txn, "tblPr")
         .ok_or_else(|| malformed_table(parent_story, story_index, "missing tblPr"))?;
@@ -1193,6 +1226,7 @@ fn lower_table<T: ReadTxn>(
                 },
                 map,
                 opaque_sequences,
+                revealable,
             )?;
 
             if env.compatibility_flags.allow_space_of_same_style_in_table {
@@ -2406,6 +2440,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
     list_state: &mut ListState,
     (map, story_slot): (&mut LoweringMap, u32),
     opaque_sequences: &mut BTreeSet<String>,
+    revealable: &mut Option<Vec<LayoutBlock>>,
 ) -> Vec<LayoutBlock> {
     let source = map.paragraphs.len() as u32;
     map.paragraphs.push((
@@ -2536,6 +2571,25 @@ fn flush_paragraph_parts<T: ReadTxn>(
             paragraph_pm_units - segment_start,
             list_state,
             (map, source),
+        )));
+    }
+    if let Some(revealed) = revealable
+        && !blocks
+            .iter()
+            .any(|block| matches!(block, LayoutBlock::Paragraph(_)))
+    {
+        // A preview that hides every drawing leaves the paragraph itself.
+        revealed.push(LayoutBlock::Paragraph(flush_paragraph(
+            Vec::new(),
+            pilcrow,
+            pilcrow_attributes,
+            txn,
+            story_id,
+            env,
+            paragraph_pm_start,
+            0,
+            &mut list_state.clone(),
+            (&mut LoweringMap::default(), 0),
         )));
     }
     blocks

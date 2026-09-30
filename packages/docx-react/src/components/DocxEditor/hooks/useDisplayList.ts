@@ -317,8 +317,20 @@ export function useRustDisplayList(
   layoutRef.current = layout;
   // The layout shown when another document started loading. What becomes of
   // it settles no wait: waits are for the document being loaded.
-  const replacedLayoutRef = useRef<{ layout: Layout | null } | null>(null);
+  const replacedLayoutRef = useRef<{ layout: Layout | null; line: object } | null>(null);
   const documentLoadsRef = useRef(0);
+  // Layouts without a source engine share a line only within a document load.
+  const documentLineRef = useRef<object>({});
+  const sourceLinesRef = useRef(new WeakMap<object, object>());
+  const sourceLine = useCallback((source: RustDisplayListEngine | null | undefined): object => {
+    if (!source) return replacedLayoutRef.current?.line ?? documentLineRef.current;
+    let line = sourceLinesRef.current.get(source);
+    if (!line) {
+      line = {};
+      sourceLinesRef.current.set(source, line);
+    }
+    return line;
+  }, []);
   const markSettled = useCallback(
     (epoch: number | null, failure: Error | null = null, authoritative = false): void => {
       if (replacedLayoutRef.current && !authoritative) return;
@@ -733,7 +745,8 @@ export function useRustDisplayList(
           null,
           { ...previous, queries: null },
           readSessionVersion(hostEngine),
-          UNKNOWN_REVISION_PREVIEW_KEY
+          UNKNOWN_REVISION_PREVIEW_KEY,
+          sourceLine(hostEngine)
         );
         generationRef.current += 1;
         snapshotRef.current = nextSnapshot;
@@ -763,6 +776,7 @@ export function useRustDisplayList(
         ) {
           return null;
         }
+        const line = sourceLine(worker.engine);
         const selection = worker.engine.selection();
         if (!selection) return null;
         const dispatchedEpoch = contentEpochRef.current;
@@ -807,7 +821,10 @@ export function useRustDisplayList(
             return null;
           }
           if (!(error instanceof ResidentWorkerFailureError)) throw error;
-          if (dropped()) return { frameEpoch: null, caretSynchronized: false };
+          // A worker another document's load replaced rejects the input it held for its own.
+          if (dropped() || worker.load !== documentLoadsRef.current) {
+            return { frameEpoch: null, caretSynchronized: false };
+          }
           console.error(
             '[CanvasRenderer] Resident engine worker unavailable; falling back to the main-thread engine',
             error
@@ -829,6 +846,9 @@ export function useRustDisplayList(
           for (const update of result.updates) worker.engine.applyLocalUpdate(update);
         } finally {
           suppressWorkerInvalidationRef.current -= 1;
+        }
+        if (workerRef.current !== worker) {
+          return { frameEpoch: null, caretSynchronized: false, deletedUnits: result.deletedUnits };
         }
         const previous = snapshotRef.current;
         if (previous.frame && delta.frameEpoch <= previous.frame.frameEpoch) {
@@ -871,7 +891,8 @@ export function useRustDisplayList(
           null,
           previous,
           readSessionVersion(worker.engine),
-          workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision)
+          workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
+          line
         );
         // Supersede an older async compatibility build before publishing the
         // frame produced by the edit transaction.
@@ -928,6 +949,7 @@ export function useRustDisplayList(
       queryEpochGate,
       replaceOutOfMemoryWorker,
       requestSettleRelayout,
+      sourceLine,
     ]
   );
 
@@ -976,7 +998,10 @@ export function useRustDisplayList(
   const shownFrameEngine = useCallback((): unknown => frameEngineRef.current, []);
   const release = useCallback((): void => {
     // A failed load's failure holds for later waits until the next load.
-    replacedLayoutRef.current = { layout: null };
+    replacedLayoutRef.current = {
+      layout: null,
+      line: replacedLayoutRef.current?.line ?? documentLineRef.current,
+    };
     cancelPageBuilds(pageBuildTimerRef);
     workerRef.current?.client.destroy();
     workerRef.current = null;
@@ -1028,6 +1053,7 @@ export function useRustDisplayList(
       }
       pageBuildInFlightRef.current = true;
       const dispatchedEpoch = contentEpochRef.current;
+      const line = sourceLine(worker.engine);
       const paintToken = paintedCaretMachine.token();
       const paintCaret =
         workerPresentationActiveRef.current && paintedCaretMachine.shouldPaint(performance.now());
@@ -1074,7 +1100,8 @@ export function useRustDisplayList(
                     null,
                     previous,
                     readSessionVersion(worker.engine),
-                    workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision)
+                    workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
+                    line
                   )
                 : { displayList: nextFrame.displayList, frame: nextFrame, queries: null, caret };
             snapshotRef.current = nextSnapshot;
@@ -1099,6 +1126,7 @@ export function useRustDisplayList(
       paintedCaretMachine,
       publishQuerySnapshot,
       replaceOutOfMemoryWorker,
+      sourceLine,
     ]
   );
 
@@ -1373,6 +1401,7 @@ export function useRustDisplayList(
     }
     if (previewKey !== null) layoutPreviewKeyRef.current = previewKey;
     const contentEpoch = contentEpochRef.current;
+    const line = sourceLine(engine);
     const sourceVersion = sourceVersionOf(layout);
     const inputs = (overrides?.getInputs ?? getLayoutKernelInputs)(layout);
     const generation = ++generationRef.current;
@@ -1648,7 +1677,8 @@ export function useRustDisplayList(
           result.queryEngine,
           snapshotRef.current,
           sourceVersion,
-          result.previewKey === undefined ? previewKey : result.previewKey
+          result.previewKey === undefined ? previewKey : result.previewKey,
+          line
         );
         snapshotRef.current = nextSnapshot;
         publishQuerySnapshot(nextSnapshot, contentEpoch);
@@ -1708,6 +1738,7 @@ export function useRustDisplayList(
     replaceOutOfMemoryWorker,
     requestSettleRelayout,
     sessionLoad,
+    sourceLine,
     workerFor,
   ]);
 
@@ -1716,7 +1747,12 @@ export function useRustDisplayList(
       if (!failure) {
         contentEpochRef.current += 1;
         documentLoadsRef.current += 1;
-        replacedLayoutRef.current = { layout: layoutRef.current };
+        // Until the next document's layout arrives, what is built is the shown document's.
+        replacedLayoutRef.current = {
+          layout: layoutRef.current,
+          line: replacedLayoutRef.current?.line ?? documentLineRef.current,
+        };
+        documentLineRef.current = {};
       }
       markSettled(null, failure, true);
     },
@@ -1838,7 +1874,7 @@ function rememberWorkerPreview(
 
 /**
  * `sourceVersion` and `previewKey`: the document version and revision preview the frame's pixels
- * and queries show.
+ * and queries show; `line`, the document load it lays out.
  */
 function createRustDisplayListSnapshot(
   displayList: DisplayList,
@@ -1847,10 +1883,11 @@ function createRustDisplayListSnapshot(
   engine: RustDisplayListEngine | null | undefined,
   previous: RustDisplayListSnapshot,
   sourceVersion: string | null,
-  previewKey: string | null
+  previewKey: string | null,
+  line: object
 ): RustDisplayListSnapshot {
   const residentQueries = residentDisplayListQueryEngine(engine);
-  const queries = createDisplayListQueries(displayList, residentQueries, previous.queries);
+  const queries = createDisplayListQueries(displayList, residentQueries, previous.queries, line);
   stampSourceVersion(queries, sourceVersion);
   if (previewKey !== null) stampRevisionPreviewKey(queries, previewKey);
   return { displayList, frame, queries, caret };

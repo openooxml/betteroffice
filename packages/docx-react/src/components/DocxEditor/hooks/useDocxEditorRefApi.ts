@@ -298,6 +298,10 @@ export function useDocxEditorRefApi({
         applyProposalCall(pagedEditorRef, hostProposalsAllowed, (session) =>
           session.setProposalStates(request)
         ),
+      withdrawProposals: (request) =>
+        applyProposalCall(pagedEditorRef, hostProposalsAllowed, (session) =>
+          session.withdrawProposals(request)
+        ),
       getProposals: async () => (await flushedSession(pagedEditorRef)).session.getProposals(),
 
       exportStructuredWithPages: (options) => exportWithPages(pagedEditorRef, options),
