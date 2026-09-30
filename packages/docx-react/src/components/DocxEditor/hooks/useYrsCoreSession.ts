@@ -171,9 +171,9 @@ export function dirtyProjectionStory(activeStory: string): string {
 /**
  * Frees sessions the editor let go of. Consumers' effects in the commit that replaces a session
  * still run with the session they rendered, and the renderer keeps the engines in `held` (its
- * layout's) until the next document's layout replaces them, so `retire` keeps such a session
- * until neither renders with it; any other session is freed at once, and unmounting frees every
- * retired one.
+ * layout's and its frame's) until the next document's replace them, so `retire` keeps such a
+ * session until neither renders with it; any other session is freed at once, and unmounting frees
+ * every retired one.
  */
 function useRetiredSessions(
   session: YrsSession | null,
@@ -225,6 +225,8 @@ export function useYrsCoreSession(
   options?: {
     /** The engine the renderer still builds with; a replaced session it names lives on. */
     heldEngine?: unknown;
+    /** The engine of the frame on screen; a replaced session it names lives on. */
+    frameEngine?: unknown;
     mediaTokens?: boolean;
   }
 ): YrsCoreSession {
@@ -248,7 +250,10 @@ export function useYrsCoreSession(
   enabledRef.current = enabled;
   const [session, setSession] = useState<YrsSession | null>(null);
   const [sessionGeneration, setSessionGeneration] = useState<number | null>(null);
-  const retire = useRetiredSessions(session, [options?.heldEngine ?? null]);
+  const retire = useRetiredSessions(session, [
+    options?.heldEngine ?? null,
+    options?.frameEngine ?? null,
+  ]);
 
   useEffect(() => {
     setSession(null);

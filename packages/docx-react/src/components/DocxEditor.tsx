@@ -1117,7 +1117,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       onHostDocument: acceptHostDocument,
       onError: failHostDocument,
     },
-    { heldEngine: canvasRenderer.layoutEngine, mediaTokens }
+    {
+      heldEngine: canvasRenderer.layoutEngine,
+      frameEngine: canvasRenderer.frameEngine,
+      mediaTokens,
+    }
   );
   sessionGenerationRef.current = yrsCore.sessionGeneration;
   // A failed load has nothing to build: the renderer lets go of the previous document.

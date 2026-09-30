@@ -6,7 +6,11 @@ import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { ResidentEngineWorkerClient, type YrsSelection, type YrsSession } from '@betteroffice/docx/yrs';
 import type { ResidentEngineWorkerRequest, ResidentEngineWorkerResponse } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
-import { useCanvasRenderer, useRustDisplayList, type ResidentFrameApplyResult } from './useDisplayList';
+import {
+  useFrameImageResolver,
+  useRustDisplayList,
+  type ResidentFrameApplyResult,
+} from './useDisplayList';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -1128,17 +1132,66 @@ test('unmounting while the worker applies input never replays it on the host eng
 });
 
 test('each session decodes its images into a cache of its own', () => {
-  const { result } = renderHook(() => useCanvasRenderer());
   const first = { name: 'first' } as unknown as YrsSession;
-  act(() => result.current.onLayoutComputed(null, first));
-  const firstImages = result.current.resolveImage;
-  act(() => result.current.onLayoutComputed(null, first));
-  expect(result.current.resolveImage).toBe(firstImages);
-  act(() => result.current.onLayoutComputed(null, { name: 'next' } as unknown as YrsSession));
-  expect(result.current.resolveImage).not.toBe(firstImages);
+  const { result, rerender } = renderHook(
+    ({ engine }: { engine: YrsSession | null }) => useFrameImageResolver(engine),
+    { initialProps: { engine: first } as { engine: YrsSession | null } }
+  );
+  const firstImages = result.current;
+  rerender({ engine: first });
+  expect(result.current).toBe(firstImages);
+  rerender({ engine: { name: 'next' } as unknown as YrsSession });
+  expect(result.current).not.toBe(firstImages);
 });
 
-test('an image resolver reads the media of the session its layout was built with', async () => {
+test('the frame on screen keeps its session until the next session's frame lands', async () => {
+  const first = { name: 'first' } as unknown as YrsSession;
+  const next = { name: 'next' } as unknown as YrsSession;
+  const firstList = { pages: [] };
+  const nextList = { pages: [] };
+  let finishNext!: () => void;
+  const nextBuilt = new Promise<void>((resolve) => {
+    finishNext = resolve;
+  });
+  const overrides = {
+    build: async (_inputs: unknown, engine?: unknown) => {
+      if (engine !== next) return firstList;
+      await nextBuilt;
+      return nextList;
+    },
+    getInputs: (): never | undefined => ({ measured: [], options: {} }) as never,
+  };
+  const layout = () => ({ pageSize: { w: 816, h: 1056 }, pages: [] }) as unknown as Layout;
+  const { result, rerender, unmount } = renderHook(
+    ({ layout, engine }: { layout: Layout | null; engine: YrsSession }) =>
+      useRustDisplayList(layout, overrides, undefined, undefined, engine),
+    {
+      initialProps: { layout: layout(), engine: first } as {
+        layout: Layout | null;
+        engine: YrsSession;
+      },
+    }
+  );
+  await waitFor(() => expect(result.current.displayList).toBe(firstList));
+  expect(result.current.frameEngine).toBe(first);
+  await act(async () => {
+    rerender({ layout: layout(), engine: next });
+  });
+  expect(result.current.displayList).toBe(firstList);
+  expect(result.current.frameEngine).toBe(first);
+  await act(async () => {
+    finishNext();
+  });
+  await waitFor(() => expect(result.current.displayList).toBe(nextList));
+  expect(result.current.frameEngine).toBe(next);
+  await act(async () => {
+    rerender({ layout: null, engine: next });
+  });
+  expect(result.current.frameEngine).toBeNull();
+  unmount();
+});
+
+test('an image resolver reads the media of the session its frame was built with', async () => {
   const originalImage = globalThis.Image;
   const originalCreate = URL.createObjectURL;
   const originalRevoke = URL.revokeObjectURL;
@@ -1169,14 +1222,16 @@ test('an image resolver reads the media of the session its layout was built with
   };
   URL.revokeObjectURL = () => {};
   try {
-    const { result, unmount } = renderHook(() => useCanvasRenderer());
-    act(() => result.current.onLayoutComputed(null, first));
-    const firstResolver = result.current.resolveImage;
+    const { result, rerender, unmount } = renderHook(
+      ({ engine }: { engine: YrsSession }) => useFrameImageResolver(engine),
+      { initialProps: { engine: first } }
+    );
+    const firstResolver = result.current;
     const firstImage = await firstResolver('media:0');
     expect(firstImage).toBeInstanceOf(FakeImage);
     expect(await firstResolver('media:0')).toBe(firstImage);
-    act(() => result.current.onLayoutComputed(null, next));
-    const nextResolver = result.current.resolveImage;
+    rerender({ engine: next });
+    const nextResolver = result.current;
     expect(nextResolver).not.toBe(firstResolver);
     const nextImage = await nextResolver('media:0');
     expect(nextImage).toBeInstanceOf(FakeImage);

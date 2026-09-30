@@ -77,6 +77,8 @@ export interface UseRustDisplayListResult {
   frame: RetainedFrame | null;
   /** Query facade built from the same display list as `frame`. */
   queries: DisplayListQueries | null;
+  /** The engine of the session whose document `displayList` shows; its media resolve the frame. */
+  frameEngine: RustDisplayListEngine | null;
   /** Resolve the newest query facade after pending document/frame changes. */
   resolveQueries: ResolveDisplayListQueries;
   /**
@@ -227,6 +229,7 @@ interface RustDisplayListSnapshot {
   frame: RetainedFrame | null;
   queries: DisplayListQueries | null;
   caret: YrsResidentCaretSnapshot | null;
+  engine: RustDisplayListEngine | null;
 }
 
 const EMPTY_DISPLAY_LIST_SNAPSHOT: RustDisplayListSnapshot = {
@@ -234,6 +237,7 @@ const EMPTY_DISPLAY_LIST_SNAPSHOT: RustDisplayListSnapshot = {
   frame: null,
   queries: null,
   caret: null,
+  engine: null,
 };
 
 interface BuiltDisplay {
@@ -700,7 +704,8 @@ export function useRustDisplayList(
           null,
           { ...previous, queries: null },
           readSessionVersion(hostEngine),
-          UNKNOWN_REVISION_PREVIEW_KEY
+          UNKNOWN_REVISION_PREVIEW_KEY,
+          hostEngine
         );
         generationRef.current += 1;
         snapshotRef.current = nextSnapshot;
@@ -809,6 +814,7 @@ export function useRustDisplayList(
             frame: nextFrame,
             queries: null,
             caret,
+            engine: worker.engine,
           };
           snapshotRef.current = overtaken;
           setSnapshot(overtaken);
@@ -830,7 +836,8 @@ export function useRustDisplayList(
           null,
           previous,
           readSessionVersion(worker.engine),
-          workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision)
+          workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
+          worker.engine
         );
         // Supersede an older async compatibility build before publishing the
         // frame produced by the edit transaction.
@@ -1005,9 +1012,16 @@ export function useRustDisplayList(
                     null,
                     previous,
                     readSessionVersion(worker.engine),
-                    workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision)
+                    workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
+                    worker.engine
                   )
-                : { displayList: nextFrame.displayList, frame: nextFrame, queries: null, caret };
+                : {
+                    displayList: nextFrame.displayList,
+                    frame: nextFrame,
+                    queries: null,
+                    caret,
+                    engine: worker.engine,
+                  };
             snapshotRef.current = nextSnapshot;
             publishQuerySnapshot(nextSnapshot, contentEpochRef.current);
             setSnapshot(nextSnapshot);
@@ -1561,7 +1575,8 @@ export function useRustDisplayList(
           result.queryEngine,
           snapshotRef.current,
           sourceVersion,
-          result.previewKey === undefined ? previewKey : result.previewKey
+          result.previewKey === undefined ? previewKey : result.previewKey,
+          engine ?? null
         );
         snapshotRef.current = nextSnapshot;
         publishQuerySnapshot(nextSnapshot, contentEpoch);
@@ -1689,6 +1704,7 @@ export function useRustDisplayList(
     loading,
     frame: snapshot.frame,
     queries: snapshot.queries,
+    frameEngine: snapshot.engine,
     resolveQueries,
     settledDisplayList,
     resetSettled,
@@ -1753,13 +1769,14 @@ function createRustDisplayListSnapshot(
   engine: RustDisplayListEngine | null | undefined,
   previous: RustDisplayListSnapshot,
   sourceVersion: string | null,
-  previewKey: string | null
+  previewKey: string | null,
+  owner: RustDisplayListEngine | null
 ): RustDisplayListSnapshot {
   const residentQueries = residentDisplayListQueryEngine(engine);
   const queries = createDisplayListQueries(displayList, residentQueries, previous.queries);
   stampSourceVersion(queries, sourceVersion);
   if (previewKey !== null) stampRevisionPreviewKey(queries, previewKey);
-  return { displayList, frame, queries, caret };
+  return { displayList, frame, queries, caret, engine: owner };
 }
 
 function residentCaretForSelection(
@@ -1835,6 +1852,8 @@ export interface UseCanvasRendererResult {
   error: Error | null;
   /** The engine of the layout the display list is built from; it lags a replaced session. */
   layoutEngine: unknown;
+  /** The engine of the frame on screen; it lags the layout's until the next frame lands. */
+  frameEngine: unknown;
   /** feed PagedEditor's per-pass Layout into the interaction query source */
   onLayoutComputed: (
     layout: Layout | null,
@@ -1896,6 +1915,22 @@ export interface UseCanvasRendererResult {
   notifyCaretInterrupt(): void;
 }
 
+/**
+ * Decoded images of one session's document; the next session starts empty. A frame's replay
+ * reads the images of the session that built it, which the renderer holds until another
+ * session's frame replaces it.
+ */
+export function useFrameImageResolver(engine: RustDisplayListEngine | null): ImageResolver {
+  return useMemo(
+    () =>
+      createCanvasImageResolver({
+        media: (token) => engine?.mediaSource?.(token) ?? null,
+        mediaScope: () => engine?.mediaScope?.() ?? 0,
+      }),
+    [engine]
+  );
+}
+
 // bundles the canvas-renderer host wiring for DocxEditor: collects each
 // layout pass and rebuilds the display list through the rust engine. Canvas is
 // the only visible renderer: the first build has an explicit loading state and
@@ -1932,6 +1967,7 @@ export function useCanvasRenderer(
     loading,
     frame,
     queries: snapshotQueries,
+    frameEngine,
     resolveQueries,
     settledDisplayList,
     resetSettled,
@@ -1960,17 +1996,7 @@ export function useCanvasRenderer(
     requestLayout,
     workerHeapLimitBytes
   );
-  // Decoded images of one session's document; the next session starts empty.
-  // A replay of a replaced session's frame reads that session's images, which
-  // it keeps while the renderer holds it.
-  const resolveImage = useMemo(
-    () =>
-      createCanvasImageResolver({
-        media: (token) => engine?.mediaSource?.(token) ?? null,
-        mediaScope: () => engine?.mediaScope?.() ?? 0,
-      }),
-    [engine]
-  );
+  const resolveImage = useFrameImageResolver(frameEngine);
   const status: UseCanvasRendererResult['status'] = error
     ? 'error'
     : loading || displayList == null
@@ -2040,6 +2066,7 @@ export function useCanvasRenderer(
     status,
     error,
     layoutEngine: engine,
+    frameEngine,
     onLayoutComputed,
     resolveImage,
     queries: geometryReady ? snapshotQueries : null,
