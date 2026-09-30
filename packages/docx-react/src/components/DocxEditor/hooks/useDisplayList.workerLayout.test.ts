@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
+import { decodeFrameDelta } from '@betteroffice/docx/layout/render';
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import type {
@@ -65,7 +66,7 @@ class FakeWorker {
 
 function setup() {
   const native = createEditSession(9301);
-  native.create_story('body', 'Owned layout', 'Normal', 'left');
+  const paraId = native.create_story('body', 'Owned layout', 'Normal', 'left');
   const layoutJson = native.layout_document_with_regions_retained_json(REQUEST);
   const frame = native.build_display_list_frame(JSON.stringify({}), 0);
   const adopted: string[] = [];
@@ -89,7 +90,7 @@ function setup() {
     applyUpdate: () => null,
   } as unknown as YrsSession;
   globalThis.Worker = FakeWorker as unknown as typeof Worker;
-  return { native, layoutJson, frame, engine, adopted };
+  return { native, paraId, layoutJson, frame, engine, adopted };
 }
 
 test('a worker-run layout arrives with its frame and needs no second worker pass', async () => {
@@ -131,6 +132,69 @@ test('a worker-run layout arrives with its frame and needs no second worker pass
     });
     expect(result.current.workerSurfacesActive).toBe(true);
     expect(worker.posted).toHaveLength(1);
+    unmount();
+  } finally {
+    native.free();
+  }
+});
+
+test('after a worker layout the host dropped, the next one paints the current text', async () => {
+  const { native, paraId, layoutJson, frame, engine } = setup();
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) => useRustDisplayList(layout, undefined, undefined, undefined, source),
+      { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+    );
+    const worker = () => FakeWorker.last!;
+    const pass = async (built: Uint8Array, laidOut: string) => {
+      const pending = result.current.layoutInWorker(engine, REQUEST)!;
+      const request = worker().posted.at(-1)!;
+      const epoch = decodeFrameDelta(built.slice().buffer).frameEpoch;
+      worker().reply({
+        id: request.id,
+        ok: true,
+        frame: built.slice().buffer,
+        caret: { frameEpoch: epoch, caretRect: null },
+        selection: null,
+        layoutRevision: 1,
+        layoutJson: laidOut,
+      });
+      return { request, computation: (await pending)! };
+    };
+    const opened = await pass(frame, layoutJson);
+    await act(async () => {
+      rerender({ layout: opened.computation.layout, source: engine });
+    });
+    await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(1));
+
+    native.insert_text('body', paraId, 0, 'Dropped ');
+    const dropped = await pass(
+      native.build_display_list_frame(JSON.stringify({}), 1),
+      native.layout_document_with_regions_retained_json(REQUEST)
+    );
+    expect(dropped.request).toMatchObject({ type: 'sync', expectedFrameEpoch: 1 });
+
+    native.insert_text('body', paraId, 0, 'Shown ');
+    const shown = await pass(
+      native.build_display_list_frame(JSON.stringify({}), 1),
+      native.layout_document_with_regions_retained_json(REQUEST)
+    );
+    expect(shown.request).toMatchObject({ type: 'sync', expectedFrameEpoch: 1 });
+    await act(async () => {
+      rerender({ layout: shown.computation.layout, source: engine });
+    });
+    await waitFor(() => {
+      if (result.current.error) throw result.current.error;
+      expect(result.current.frame?.frameEpoch).toBeGreaterThan(1);
+    });
+    const text = result.current
+      .frame!.displayList.pages.flatMap((page) => page.primitives)
+      .map((primitive) =>
+        primitive.kind === 'glyphRun' || primitive.kind === 'text' ? primitive.text : ''
+      )
+      .join('');
+    expect(text).toContain('Shown Dropped Owned layout');
+    expect(worker().posted).toHaveLength(3);
     unmount();
   } finally {
     native.free();

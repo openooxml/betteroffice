@@ -54,7 +54,8 @@ async function opened() {
           ? new Promise<LayoutComputation | null>((resolve) => {
               worker.push({
                 at: doc.version,
-                answer: () => resolve({ layout: { pages: [] } as unknown as Layout }),
+                answer: () =>
+                  resolve({ layout: { pages: [] } as unknown as Layout, notesConverged: true }),
               });
             })
           : null,

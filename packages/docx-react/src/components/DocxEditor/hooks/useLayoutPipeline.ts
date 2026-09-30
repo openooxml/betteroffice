@@ -192,7 +192,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   const pendingInWorkerRef = useRef<boolean | null>(null);
   // The worker pass in flight. A pass that may run in the worker waits for it,
   // so a burst of updates lays out their latest state once, not each in turn.
-  const workerPassRef = useRef<number | null>(null);
+  const workerPassRef = useRef<{ pass: number; session: YrsSession } | null>(null);
   const queuedBehindWorkerRef = useRef(false);
   const schedulerRef = useRef<number | null>(null);
   const runRef = useRef<() => void>(() => {});
@@ -295,7 +295,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     (options?: { onHost?: boolean }) => {
       const onHost = options?.onHost === true || pendingOnHostRef.current;
       const inWorker = !onHost && pendingInWorkerRef.current === true;
-      if (inWorker && workerPassRef.current !== null) {
+      if (inWorker && session && workerPassRef.current?.session === session) {
         queuedBehindWorkerRef.current = true;
         return;
       }
@@ -462,7 +462,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         syncCoordinator.onLayoutComplete(currentEpoch);
         return;
       }
-      workerPassRef.current = pass;
+      workerPassRef.current = { pass, session };
       void workerPass
         .then(
           (computation) => {
@@ -502,7 +502,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         )
         .finally(() => {
           if (pass === passRef.current) syncCoordinator.onLayoutComplete(currentEpoch);
-          if (workerPassRef.current !== pass) return;
+          if (workerPassRef.current?.pass !== pass) return;
           workerPassRef.current = null;
           if (queuedBehindWorkerRef.current && sessionRef.current === session) {
             requestPass();
