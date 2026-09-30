@@ -21,14 +21,16 @@ class FakeWorker implements ResidentEngineWorkerPort {
   onerror: ResidentEngineWorkerPort['onerror'] = null;
   onmessageerror: ResidentEngineWorkerPort['onmessageerror'] = null;
   readonly posted: ResidentEngineWorkerRequest[] = [];
+  readonly transfers: Transferable[][] = [];
   terminated = false;
 
   constructor(readonly url?: string | URL, readonly options?: WorkerOptions) {
     FakeWorker.instances.push(this);
   }
 
-  postMessage(message: ResidentEngineWorkerRequest): void {
+  postMessage(message: ResidentEngineWorkerRequest, transfer: Transferable[] = []): void {
     this.posted.push(message);
+    this.transfers.push(transfer);
   }
 
   terminate(): void {
@@ -422,6 +424,204 @@ describe('worker failure', () => {
     expect(worker.terminated).toBe(true);
     await expect(client.buildFrame('', 0)).rejects.toThrow('unreadable message');
   });
+});
+
+describe('resident worker opening', () => {
+  test('an opened bootstrap under another heap limit fails before touching its bookkeeping', async () => {
+    const { worker, client } = setup();
+    void client.open(new Uint8Array([1]), { heapLimitBytes: 1024 });
+    await expect(
+      client.bootstrap(snapshot, '', { opened: true, heapLimitBytes: 2048 })
+    ).rejects.toThrow('another heap limit');
+    expect(client.bootstrapSent()).toBe(false);
+    expect(worker.posted).toHaveLength(1);
+  });
+
+  test('opens one document per worker and sends only the bytes of the view it gets', async () => {
+    const { worker, client } = setup();
+    // A Buffer view into a larger store: its `slice` shares that store rather than copying.
+    const view = Buffer.from(new Uint8Array([0, 1, 2, 3, 4]).buffer, 1, 3);
+    expect(view.buffer.byteLength).toBeGreaterThan(3);
+    void client.open(view);
+    const request = worker.posted[0];
+    if (request.type !== 'open') throw new Error('open request missing');
+    expect(request.bytes).not.toBe(view.buffer);
+    expect(request.bytes.byteLength).toBe(3);
+    expect(new Uint8Array(request.bytes)).toEqual(new Uint8Array([1, 2, 3]));
+    expect(worker.transfers[0]).toEqual([request.bytes]);
+    await expect(client.open(new Uint8Array([4]))).rejects.toThrow('already holds a document');
+    expect(worker.posted).toHaveLength(1);
+  });
+
+  test('open, font requirements, and state handover report memory before an opened bootstrap', async () => {
+    const { worker, client } = setup();
+    const bytes = new Uint8Array([1, 2, 3]);
+    const opened = client.open(bytes, { digest: 'abc', generation: 'opening', heapLimitBytes: 2048 });
+    const request = worker.posted[0];
+    expect(request).toMatchObject({
+      type: 'open',
+      digest: 'abc',
+      generation: 'opening',
+      heapLimitBytes: 2048,
+    });
+    if (request.type !== 'open') throw new Error('open request missing');
+    expect(request.bytes).not.toBe(bytes.buffer);
+    expect(new Uint8Array(request.bytes)).toEqual(bytes);
+    const stateVector = new Uint8Array([5]);
+    worker.reply({
+      id: request.id,
+      ok: true,
+      hostJson: '{"host":1}',
+      stateVector: stateVector.buffer,
+      memory: [{ label: 'docx-edit', bufferBytes: 1 }],
+    });
+    expect(await opened).toEqual({ hostJson: '{"host":1}', stateVector });
+    expect(client.remoteStateVector()).toEqual(stateVector);
+    expect(client.memory()).toEqual([{ label: 'docx-edit', bufferBytes: 1 }]);
+
+    const requirements = client.fontRequirements('{}');
+    expect(worker.posted[1]).toMatchObject({ type: 'fontRequirements', layoutInput: '{}' });
+    worker.reply({
+      id: worker.lastId(),
+      ok: true,
+      requirementsJson: '[]',
+      memory: [{ label: 'docx-edit', bufferBytes: 2 }],
+    });
+    expect(await requirements).toBe('[]');
+    expect(client.memory()).toEqual([{ label: 'docx-edit', bufferBytes: 2 }]);
+
+    const state = client.encodeState();
+    expect(worker.posted[2]).toMatchObject({ type: 'encodeState' });
+    worker.reply({
+      id: worker.lastId(),
+      ok: true,
+      state: new Uint8Array([7, 8]).buffer,
+      memory: [{ label: 'docx-edit', bufferBytes: 3 }],
+    });
+    expect(await state).toEqual(new Uint8Array([7, 8]));
+    expect(client.memory()).toEqual([{ label: 'docx-edit', bufferBytes: 3 }]);
+
+    const bootstrap = client.bootstrap(snapshot, '', { opened: true, frameEpoch: 7 });
+    expect(worker.posted[3]).toMatchObject({ type: 'bootstrap', opened: true, expectedFrameEpoch: 7 });
+    worker.reply(frameReply(worker.lastId()));
+    await bootstrap;
+    expect(client.isReady()).toBe(true);
+  });
+
+  test('a package that fails to open leaves the client able to open another', async () => {
+    const { worker, client } = setup();
+    const failed = client.open(new Uint8Array([1]));
+    worker.reply({ id: worker.lastId(), ok: false, error: 'not a package' });
+    await expect(failed).rejects.toThrow('not a package');
+    const opened = client.open(new Uint8Array([2]));
+    expect(worker.posted).toHaveLength(2);
+    worker.reply({
+      id: worker.lastId(),
+      ok: true,
+      hostJson: '{}',
+      stateVector: new Uint8Array([5]).buffer,
+    });
+    expect((await opened).hostJson).toBe('{}');
+    await expect(client.open(new Uint8Array([3]))).rejects.toThrow('already holds a document');
+  });
+
+  test('an opened bootstrap queued behind a failed open leaves the client able to open again', async () => {
+    const { worker, client } = setup();
+    const failed = client.open(new Uint8Array([1]));
+    const bootstrap = client.bootstrap(snapshot, '', { opened: true });
+    expect(worker.posted).toHaveLength(2);
+    worker.reply({ id: worker.posted[0].id, ok: false, error: 'not a package' });
+    await expect(failed).rejects.toThrow('not a package');
+    worker.reply({
+      id: worker.posted[1].id,
+      ok: false,
+      error: 'Resident engine worker has no opened document',
+    });
+    await expect(bootstrap).rejects.toThrow('no opened document');
+    expect(client.bootstrapSent()).toBe(false);
+    expect(client.remoteStateVector()).toBeNull();
+    const opened = client.open(new Uint8Array([2]));
+    expect(worker.posted).toHaveLength(3);
+    worker.reply({
+      id: worker.lastId(),
+      ok: true,
+      hostJson: '{}',
+      stateVector: new Uint8Array([5]).buffer,
+    });
+    expect((await opened).hostJson).toBe('{}');
+  });
+
+  test('a failed opened bootstrap leaves a later bootstrap in place', async () => {
+    const { worker, client } = setup();
+    const failed = client.open(new Uint8Array([1]));
+    const opened = client.bootstrap(snapshot, '', { opened: true });
+    worker.reply({ id: worker.posted[0].id, ok: false, error: 'not a package' });
+    await expect(failed).rejects.toThrow('not a package');
+    const recovery = client.bootstrap(snapshot, '');
+    worker.reply({
+      id: worker.posted[1].id,
+      ok: false,
+      error: 'Resident engine worker has no opened document',
+    });
+    await expect(opened).rejects.toThrow('no opened document');
+    worker.reply(frameReply(worker.posted[2].id));
+    await recovery;
+    expect(client.bootstrapSent()).toBe(true);
+    await expect(client.open(new Uint8Array([2]))).rejects.toThrow('already holds a document');
+  });
+
+  test('an opened bootstrap without an open fails before touching its bookkeeping', async () => {
+    const { worker, client } = setup();
+    await expect(client.bootstrap(snapshot, '', { opened: true })).rejects.toThrow(
+      'no opened document'
+    );
+    expect(client.bootstrapSent()).toBe(false);
+    expect(worker.posted).toHaveLength(0);
+  });
+
+  test('bytes that cannot be copied leave the client able to open another', async () => {
+    const { worker, client } = setup();
+    const unreadable = {
+      get length(): number {
+        throw new TypeError('detached');
+      },
+    } as unknown as Uint8Array;
+    await expect(client.open(unreadable)).rejects.toThrow('detached');
+    expect(worker.posted).toHaveLength(0);
+    void client.open(new Uint8Array([2]));
+    expect(worker.posted).toHaveLength(1);
+  });
+
+  for (const type of ['open', 'fontRequirements', 'encodeState'] as const) {
+    test(`${type} propagates the worker's OOM error and memory`, async () => {
+      const { worker, client } = setup();
+      const pending =
+        type === 'open'
+          ? client.open(new Uint8Array([1]))
+          : type === 'fontRequirements'
+            ? client.fontRequirements('{}')
+            : client.encodeState();
+      const memory = [{ label: 'docx-edit', bufferBytes: 65536, failedAllocationBytes: 64 }];
+      worker.reply({
+        id: worker.lastId(),
+        ok: false,
+        error: 'Resident engine worker ran out of memory allocating 64 bytes: unreachable',
+        terminal: true,
+        outOfMemory: true,
+        memory,
+      });
+      const failure = await pending.then(
+        () => { throw new Error('trapped request resolved'); },
+        (error: Error) => error
+      );
+      expect(failure).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+      expect((failure as ResidentWorkerOutOfMemoryError).memory).toEqual(memory);
+      expect(client.memory()).toEqual(memory);
+      expect(worker.terminated).toBe(true);
+      await expect(client.encodeState()).rejects.toBe(failure);
+      expect(worker.posted).toHaveLength(1);
+    });
+  }
 });
 
 describe('wasm trap', () => {
