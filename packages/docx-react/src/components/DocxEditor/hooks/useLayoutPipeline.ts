@@ -24,7 +24,8 @@ import {
 
 import type { LayoutSelectionGate } from '../internals/LayoutSelectionGate';
 import { documentPageCount } from './documentPageCount';
-import type { LayoutInWorker } from './useDisplayList';
+import type { FontRequirementsInWorker, LayoutInWorker } from './useDisplayList';
+import { ensureWorkerOpenReplica, workerOpenSourceVersion } from '../internals/workerOpenReplica';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { viewportMinHeightPx } from '../internals/scrollUtils';
 import {
@@ -100,6 +101,8 @@ export interface UseLayoutPipelineOptions {
   onLayoutComputed?: (layout: Layout | null) => void;
   /** Hands passes to the resident worker, which then runs the only layout. */
   layoutInWorker?: LayoutInWorker;
+  fontRequirementsInWorker?: FontRequirementsInWorker;
+  experimentalWorkerOpen?: boolean;
   onAnchorPositionsChange?: (positions: Map<string, number>) => void;
 }
 
@@ -141,6 +144,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     onTotalPagesChange,
     onLayoutComputed,
     layoutInWorker,
+    fontRequirementsInWorker,
+    experimentalWorkerOpen = false,
     onAnchorPositionsChange,
   } = opts;
 
@@ -164,6 +169,10 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   const yrsLocToDisplayPositionRef = useRef(yrsLocToDisplayPosition);
   const layoutInWorkerRef = useRef(layoutInWorker);
   layoutInWorkerRef.current = layoutInWorker;
+  const fontRequirementsInWorkerRef = useRef(fontRequirementsInWorker);
+  fontRequirementsInWorkerRef.current = fontRequirementsInWorker;
+  const workerOpenEnabledRef = useRef(experimentalWorkerOpen);
+  workerOpenEnabledRef.current = experimentalWorkerOpen;
   // Bumped by every pass, so a worker pass answering late never overwrites a
   // newer layout.
   const passRef = useRef(0);
@@ -282,173 +291,216 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         return;
       }
 
-      let measurement: ResidentMeasurementConfig | null = null;
-      try {
-        const request = buildResidentRegionLayoutRequest(document, pageGap, renderEnv);
-        const requirements = JSON.parse(
-          session.layoutFontRequirementsJson(JSON.stringify(request))
-        ) as ResidentFontRequirement[];
-        measurement = residentMeasurementConfig(requirements);
-      } catch (error) {
-        console.error('[PagedEditor] Resident font preflight error:', error);
-        onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
-        syncCoordinator.onLayoutComplete(currentEpoch);
-        return;
-      }
-      if (!measurement) {
-        pendingLayoutOriginRef.current = mergeLayoutUpdateOrigin(
-          pendingLayoutOriginRef.current,
-          layoutUpdateOrigin
-        );
-        pendingOnHostRef.current = onHost;
-        syncCoordinator.onLayoutComplete(currentEpoch);
-        return;
-      }
-      pendingOnHostRef.current = false;
-
-      const computeInputs = { document, pageGap, session, renderEnv, measurement };
-      const sourceVersion = readSessionVersion(session);
-      const previewKey = revisionPreviewKey(renderEnv.revisionPreview);
-
-      // Step 4+: paint + scroll/events with the computed values.
-      const applyComputation = (
-        computation: LayoutComputation,
-        origin: LayoutUpdateOrigin = layoutUpdateOrigin,
-        version = sourceVersion
-      ) => {
-        const { layout: newLayout } = computation;
-        stampSourceVersion(newLayout, version);
-        stampRevisionPreviewKey(newLayout, previewKey);
-
-        const pagesEl = pagesContainerRef.current;
-        const scrollParent =
-          getScrollContainer() ?? (pagesEl ? findVerticalScrollParentOrRoot(pagesEl) : null);
-        const interactionHost = interactionPageHostRef?.current ?? pagesEl;
-        const queries = displayListQueriesRef.current;
-        const currentViewportAnchor = currentViewportAnchorRef.current;
-        const anchor =
-          scrollParent?.isConnected && interactionHost && queries
-            ? origin === 'remote'
-              ? currentViewportAnchor?.navigationEpoch === navigationEpochRef.current
-                ? {
-                    kind: 'viewport' as const,
-                    anchor: currentViewportAnchor.anchor,
-                  }
-                : null
-              : {
-                  kind: 'selection' as const,
-                  anchor: captureDisplayListScrollAnchor(
-                    queries,
-                    interactionHost,
-                    scrollParent,
-                    getSelectionHead?.() ?? 0
-                  ),
-                }
-            : null;
-
-        viewportAnchorCaptureReadyRef.current = false;
-        layoutUpdateOriginRef.current = origin;
-        setLayout(newLayout);
-
-        const vp = viewportLayoutRef.current;
-        if (vp) {
-          const mh = viewportMinHeightPx(newLayout, pageGap);
-          vp.style.minHeight = `${mh}px`;
-          vp.style.marginBottom = zoom !== 1 ? `${mh * (zoom - 1)}px` : '';
-        }
-        if (scrollParent?.isConnected && anchor) {
-          scrollRestoreController.capture(anchor);
-        } else {
-          scrollRestoreController.cancel();
-        }
-      };
-
-      const layOutHere = (): void => {
+      const run = (workerRequirements?: string | null): void => {
+        let measurement: ResidentMeasurementConfig | null = null;
         try {
-          // An edit may have landed since the pass began.
-          const version = readSessionVersion(session);
-          const computation = computeLayout(computeInputs);
-          applyComputation(computation, layoutUpdateOrigin, version);
-          const totalTime = performance.now() - pipelineStart;
-          if (totalTime > 2000) {
-            console.warn(
-              `[PagedEditor] Layout pipeline took ${Math.round(totalTime)}ms total ` +
-                `(${computation.layout.pages.length} pages)`
-            );
-          }
-        } catch (error) {
-          console.error('[PagedEditor] Layout pipeline error:', error);
-          onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
-        }
-      };
-
-      // A resident worker, when one can take the pass, runs the only layout
-      // and answers with it and its first frame.
-      // The document as opened is laid out by the resident worker alone: that
-      // pass also builds its first frame, so the main thread runs no layout
-      // before the first paint. Once the document changes, passes run here.
-      if (openedVersionRef.current?.session !== session) {
-        openedVersionRef.current = { session, version: sourceVersion };
-      }
-      let workerPass: ReturnType<LayoutInWorker> = null;
-      if (
-        !onHost &&
-        sourceVersion !== null &&
-        sourceVersion === openedVersionRef.current.version
-      ) {
-        try {
-          workerPass =
-            layoutInWorkerRef.current?.(
-              session,
-              JSON.stringify({
-                ...buildResidentRegionLayoutRequest(document, pageGap, renderEnv),
-                measurement,
-              })
-            ) ?? null;
-        } catch (error) {
-          console.error('[PagedEditor] Resident worker layout could not start:', error);
-        }
-      }
-      if (!workerPass) {
-        layOutHere();
-        syncCoordinator.onLayoutComplete(currentEpoch);
-        return;
-      }
-      void workerPass
-        .then(
-          (computation) => {
-            if (pass !== passRef.current || sessionRef.current !== session) return;
-            // A change that landed meanwhile makes the worker's layout stale.
-            if (!computation || readSessionVersion(session) !== sourceVersion) {
-              layOutHere();
-              return;
-            }
-            applyComputation(computation);
-            // The first pages paint now; the full layout replaces them.
-            void computation.complete?.then(
-              (complete) => {
-                if (pass !== passRef.current || sessionRef.current !== session) return;
-                if (complete && readSessionVersion(session) === sourceVersion) {
-                  // Nothing the user did changed: keep their viewport.
-                  applyComputation(complete, 'remote');
-                } else {
-                  layOutHere();
-                }
+          const request = buildResidentRegionLayoutRequest(document, pageGap, renderEnv);
+          const input = JSON.stringify(request);
+          const pendingRequirements =
+            workerOpenEnabledRef.current && workerRequirements === undefined
+              ? fontRequirementsInWorkerRef.current?.(session, input)
+              : null;
+          if (pendingRequirements) {
+            void pendingRequirements.then(
+              (requirements) => {
+                if (pass === passRef.current && sessionRef.current === session) run(requirements);
               },
-              () => {}
+              (error: unknown) => {
+                if (pass !== passRef.current || sessionRef.current !== session) return;
+                onErrorRef.current?.(
+                  error instanceof Error ? error : new Error(String(error)),
+                  session
+                );
+                syncCoordinator.onLayoutComplete(currentEpoch);
+              }
             );
-          },
-          (error: unknown) => {
-            if (pass !== passRef.current) return;
-            // The display reports a worker out of memory; nothing lays out here.
-            if (error instanceof ResidentWorkerOutOfMemoryError) return;
+            return;
+          }
+          const requirements = JSON.parse(
+            workerRequirements ?? session.layoutFontRequirementsJson(input)
+          ) as ResidentFontRequirement[];
+          measurement = residentMeasurementConfig(requirements);
+        } catch (error) {
+          console.error('[PagedEditor] Resident font preflight error:', error);
+          onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
+          syncCoordinator.onLayoutComplete(currentEpoch);
+          return;
+        }
+        if (!measurement) {
+          pendingLayoutOriginRef.current = mergeLayoutUpdateOrigin(
+            pendingLayoutOriginRef.current,
+            layoutUpdateOrigin
+          );
+          pendingOnHostRef.current = onHost;
+          syncCoordinator.onLayoutComplete(currentEpoch);
+          return;
+        }
+        pendingOnHostRef.current = false;
+
+        const computeInputs = { document, pageGap, session, renderEnv, measurement };
+        const sourceVersion = readSessionVersion(session);
+        const previewKey = revisionPreviewKey(renderEnv.revisionPreview);
+
+        // Step 4+: paint + scroll/events with the computed values.
+        const applyComputation = (
+          computation: LayoutComputation,
+          origin: LayoutUpdateOrigin = layoutUpdateOrigin,
+          version = sourceVersion
+        ) => {
+          const { layout: newLayout } = computation;
+          stampSourceVersion(
+            newLayout,
+            workerOpenEnabledRef.current ? workerOpenSourceVersion(session, version) : version
+          );
+          stampRevisionPreviewKey(newLayout, previewKey);
+
+          const pagesEl = pagesContainerRef.current;
+          const scrollParent =
+            getScrollContainer() ?? (pagesEl ? findVerticalScrollParentOrRoot(pagesEl) : null);
+          const interactionHost = interactionPageHostRef?.current ?? pagesEl;
+          const queries = displayListQueriesRef.current;
+          const currentViewportAnchor = currentViewportAnchorRef.current;
+          const anchor =
+            scrollParent?.isConnected && interactionHost && queries
+              ? origin === 'remote'
+                ? currentViewportAnchor?.navigationEpoch === navigationEpochRef.current
+                  ? {
+                      kind: 'viewport' as const,
+                      anchor: currentViewportAnchor.anchor,
+                    }
+                  : null
+                : {
+                    kind: 'selection' as const,
+                    anchor: captureDisplayListScrollAnchor(
+                      queries,
+                      interactionHost,
+                      scrollParent,
+                      getSelectionHead?.() ?? 0
+                    ),
+                  }
+              : null;
+
+          viewportAnchorCaptureReadyRef.current = false;
+          layoutUpdateOriginRef.current = origin;
+          setLayout(newLayout);
+
+          const vp = viewportLayoutRef.current;
+          if (vp) {
+            const mh = viewportMinHeightPx(newLayout, pageGap);
+            vp.style.minHeight = `${mh}px`;
+            vp.style.marginBottom = zoom !== 1 ? `${mh * (zoom - 1)}px` : '';
+          }
+          if (scrollParent?.isConnected && anchor) {
+            scrollRestoreController.capture(anchor);
+          } else {
+            scrollRestoreController.cancel();
+          }
+        };
+
+        const layOutHere = (): void => {
+          try {
+            // An edit may have landed since the pass began.
+            if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(session);
+            const version = readSessionVersion(session);
+            const computation = computeLayout(computeInputs);
+            applyComputation(computation, layoutUpdateOrigin, version);
+            const totalTime = performance.now() - pipelineStart;
+            if (totalTime > 2000) {
+              console.warn(
+                `[PagedEditor] Layout pipeline took ${Math.round(totalTime)}ms total ` +
+                  `(${computation.layout.pages.length} pages)`
+              );
+            }
+          } catch (error) {
             console.error('[PagedEditor] Layout pipeline error:', error);
             onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
           }
-        )
-        .finally(() => {
-          if (pass === passRef.current) syncCoordinator.onLayoutComplete(currentEpoch);
-        });
+        };
+
+        // A resident worker, when one can take the pass, runs the only layout
+        // and answers with it and its first frame.
+        // The document as opened is laid out by the resident worker alone: that
+        // pass also builds its first frame, so the main thread runs no layout
+        // before the first paint. Once the document changes, passes run here.
+        if (openedVersionRef.current?.session !== session) {
+          openedVersionRef.current = { session, version: sourceVersion };
+        }
+        let workerPass: ReturnType<LayoutInWorker> = null;
+        if (
+          !onHost &&
+          sourceVersion !== null &&
+          sourceVersion ===
+            (workerOpenEnabledRef.current
+              ? workerOpenSourceVersion(session, openedVersionRef.current.version)
+              : openedVersionRef.current.version)
+        ) {
+          try {
+            workerPass =
+              layoutInWorkerRef.current?.(
+                session,
+                JSON.stringify({
+                  ...buildResidentRegionLayoutRequest(document, pageGap, renderEnv),
+                  measurement,
+                })
+              ) ?? null;
+          } catch (error) {
+            console.error('[PagedEditor] Resident worker layout could not start:', error);
+          }
+        }
+        if (!workerPass) {
+          layOutHere();
+          syncCoordinator.onLayoutComplete(currentEpoch);
+          return;
+        }
+        void workerPass
+          .then(
+            (computation) => {
+              if (pass !== passRef.current || sessionRef.current !== session) return;
+              // A change that landed meanwhile makes the worker's layout stale.
+              if (
+                !computation ||
+                readSessionVersion(session) !==
+                  (workerOpenEnabledRef.current
+                    ? workerOpenSourceVersion(session, sourceVersion)
+                    : sourceVersion)
+              ) {
+                layOutHere();
+                return;
+              }
+              applyComputation(computation);
+              // The first pages paint now; the full layout replaces them.
+              void computation.complete?.then(
+                (complete) => {
+                  if (pass !== passRef.current || sessionRef.current !== session) return;
+                  if (
+                    complete &&
+                    readSessionVersion(session) ===
+                      (workerOpenEnabledRef.current
+                        ? workerOpenSourceVersion(session, sourceVersion)
+                        : sourceVersion)
+                  ) {
+                    // Nothing the user did changed: keep their viewport.
+                    applyComputation(complete, 'remote');
+                  } else {
+                    layOutHere();
+                  }
+                },
+                () => {}
+              );
+            },
+            (error: unknown) => {
+              if (pass !== passRef.current) return;
+              // The display reports a worker out of memory; nothing lays out here.
+              if (error instanceof ResidentWorkerOutOfMemoryError) return;
+              console.error('[PagedEditor] Layout pipeline error:', error);
+              onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
+            }
+          )
+          .finally(() => {
+            if (pass === passRef.current) syncCoordinator.onLayoutComplete(currentEpoch);
+          });
+      };
+      run();
     },
     [
       pageGap,

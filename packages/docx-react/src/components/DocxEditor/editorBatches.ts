@@ -8,6 +8,7 @@ import type {
 } from '@betteroffice/docx/yrs';
 import type { PagedEditorRef } from './PagedEditor';
 import type { EditorMode } from './internals/editing-modes';
+import { awaitWorkerOpenReplica } from './internals/workerOpenReplica';
 
 export type EditorFlush =
   | { ok: true; editor: PagedEditorRef; session: YrsSession }
@@ -20,7 +21,8 @@ export type EditorFlushFailure = Extract<EditorFlush, { ok: false }>;
  * the document the flush started on.
  */
 export async function flushEditorInput(
-  pagedEditorRef: React.RefObject<PagedEditorRef | null>
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  experimentalWorkerOpen = false
 ): Promise<EditorFlush> {
   const editor = pagedEditorRef.current;
   const session = editor?.getYrsSession();
@@ -32,6 +34,13 @@ export async function flushEditorInput(
     };
   }
   try {
+    const ready = experimentalWorkerOpen ? awaitWorkerOpenReplica(session) : undefined;
+    if (ready) {
+      await ready;
+      if (pagedEditorRef.current?.getYrsSession() !== session) {
+        throw new Error('The document changed while opening the replica');
+      }
+    }
     await editor.flushPendingInput();
   } catch (error) {
     return {
@@ -54,9 +63,10 @@ export async function flushEditorInput(
 
 /** Flushes pending input and returns the current handle; throws when that fails. */
 export async function flushedSession(
-  pagedEditorRef: React.RefObject<PagedEditorRef | null>
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  experimentalWorkerOpen = false
 ): Promise<{ editor: PagedEditorRef; session: YrsSession }> {
-  const flushed = await flushEditorInput(pagedEditorRef);
+  const flushed = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen);
   if (!flushed.ok) throw flushed.error;
   return flushed;
 }
@@ -95,7 +105,8 @@ export async function applyEditBatch<Refusal = never>(
   mode: () => EditorMode,
   request: DocxEditRequest,
   authorize?: () => Refusal | null,
-  commit: <T>(write: () => T) => T = (write) => write()
+  commit: <T>(write: () => T) => T = (write) => write(),
+  experimentalWorkerOpen = false
 ): Promise<{ flush: EditorFlushFailure } | { result: DocxEditResult | Refusal }> {
   const session = pagedEditorRef.current?.getYrsSession();
   if (!session) {
@@ -107,9 +118,32 @@ export async function applyEditBatch<Refusal = never>(
       },
     };
   }
+  const ready = experimentalWorkerOpen ? awaitWorkerOpenReplica(session) : undefined;
+  if (ready) {
+    try {
+      await ready;
+    } catch (error) {
+      return {
+        flush: {
+          ok: false,
+          code: pagedEditorRef.current?.getYrsSession() === session ? 'input-failed' : 'document-replaced',
+          error: error instanceof Error ? error : new Error(String(error)),
+        },
+      };
+    }
+    if (pagedEditorRef.current?.getYrsSession() !== session) {
+      return {
+        flush: {
+          ok: false,
+          code: 'document-replaced',
+          error: new Error('The document changed while opening the replica'),
+        },
+      };
+    }
+  }
   const early = modeRefusal(session, mode(), request);
   if (early) return { result: early };
-  const flushed = await flushEditorInput(pagedEditorRef);
+  const flushed = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen);
   if (!flushed.ok) return { flush: flushed };
   if (flushed.session !== session || pagedEditorRef.current?.getYrsSession() !== session) {
     return {
@@ -143,7 +177,8 @@ export async function applyEditBatch<Refusal = never>(
 export async function applyProposalCall(
   pagedEditorRef: React.RefObject<PagedEditorRef | null>,
   allowed: () => boolean,
-  call: (session: YrsSession) => DocxProposalResult
+  call: (session: YrsSession) => DocxProposalResult,
+  experimentalWorkerOpen = false
 ): Promise<DocxProposalResult> {
   const denied = (session: YrsSession): DocxProposalResult => ({
     ok: false,
@@ -152,8 +187,15 @@ export async function applyProposalCall(
   });
   const session = pagedEditorRef.current?.getYrsSession();
   if (!session) throw new Error('The editor input is unavailable');
+  const ready = experimentalWorkerOpen ? awaitWorkerOpenReplica(session) : undefined;
+  if (ready) {
+    await ready;
+    if (pagedEditorRef.current?.getYrsSession() !== session) {
+      throw new Error('The document changed while opening the replica');
+    }
+  }
   if (!allowed()) return denied(session);
-  const flushed = await flushEditorInput(pagedEditorRef);
+  const flushed = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen);
   if (!flushed.ok) throw flushed.error;
   if (flushed.session !== session || pagedEditorRef.current?.getYrsSession() !== session) {
     throw new Error('The document changed while flushing input');

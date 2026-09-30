@@ -256,6 +256,8 @@ fn measure_field_text(
             raw_type: None,
             instruction: None,
             fallback: Some(text.to_owned()),
+            locked: false,
+            nested_sequences: Vec::new(),
             pm_start: None,
             pm_end: None,
         })],

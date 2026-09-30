@@ -5,9 +5,11 @@ import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import { preloadDocxEngine } from '@betteroffice/docx/yrs';
 import {
+  preloadDocxEngine,
+  ResidentEngineWorkerClient,
   takePreloadedResidentEngineWorker,
+  type ResidentEngineWorkerFrame,
   type YrsSelection,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
@@ -262,6 +264,47 @@ test('a worker-run layout arrives with its frame and needs no second worker pass
     });
     expect(result.current.workerSurfacesActive).toBe(true);
     expect(worker.posted).toHaveLength(1);
+    unmount();
+  } finally {
+    native.free();
+  }
+});
+
+test('a worker-opened document reuses its worker for the first layout', async () => {
+  const { native, layoutJson, frame, engine } = setup();
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) => useRustDisplayList(
+        layout, undefined, undefined, undefined, source, undefined, undefined, undefined, true
+      ),
+      { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+    );
+    const opening = result.current.openInWorker(engine, Uint8Array.of(1, 2, 3), 'digest', 7);
+    const worker = FakeWorker.last!;
+    expect(worker.posted[0]).toMatchObject({ type: 'open', digest: 'digest', generation: '7' });
+    worker.reply({ id: worker.posted[0].id, ok: true, hostJson: '{}', stateVector: Uint8Array.of(9).buffer });
+    const opened = await opening;
+    expect(opened?.hostJson).toBe('{}');
+    const pending = result.current.layoutInWorker(engine, REQUEST);
+    expect(FakeWorker.last).toBe(worker);
+    expect(worker.posted[1]).toMatchObject({ type: 'bootstrap', opened: true });
+    worker.reply({
+      id: worker.posted[1].id,
+      ok: true,
+      frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null },
+      selection: null,
+      layoutRevision: 1,
+      layoutJson,
+    });
+    const computation = await pending!;
+    await act(async () => { rerender({ layout: computation!.layout, source: engine }); });
+    await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(1));
+    expect(worker.posted.map((request) => request.type)).toEqual(['open', 'bootstrap']);
+    const encoded = opened!.encodeState();
+    await waitFor(() => expect(worker.posted[2]?.type).toBe('encodeState'));
+    worker.reply({ id: worker.posted[2].id, ok: true, state: Uint8Array.of(4, 5).buffer });
+    expect(await encoded).toEqual(Uint8Array.of(4, 5));
     unmount();
   } finally {
     native.free();
@@ -1342,4 +1385,94 @@ test('a reset waits for the next layout and a failure rejects', async () => {
   act(() => result.current.resetSettled(new Error('parse failed')));
   const failed = settle();
   await waitFor(() => expect(failed.failure?.message).toBe('parse failed'));
+});
+
+test('a rejected completion after reload preserves the new session frame, queries and surfaces', async () => {
+  const { native, layoutJson, frame, engine } = setup();
+  const next = { ...engine } as YrsSession;
+  const deferred = { reject: null as ((error: Error) => void) | null };
+  const completion = spyOn(ResidentEngineWorkerClient.prototype, 'completeLayout').mockImplementation(
+    () => new Promise<ResidentEngineWorkerFrame | null>((_, reject) => { deferred.reject = reject; })
+  );
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) => useRustDisplayList(
+        layout, undefined, undefined, undefined, source, undefined, undefined, undefined, true
+      ),
+      { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+    );
+    const opening = result.current.openInWorker(engine, Uint8Array.of(1));
+    const oldWorker = FakeWorker.last!;
+    oldWorker.reply({ id: oldWorker.posted[0]!.id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0) });
+    const opened = (await opening)!;
+    const layout = result.current.layoutInWorker(engine, REQUEST)!;
+    oldWorker.reply({
+      id: oldWorker.posted[1]!.id,
+      ok: true,
+      frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null },
+      selection: null,
+      layoutRevision: 1,
+      layoutJson,
+      layoutProvisional: true,
+    });
+    const provisional = (await layout)!;
+    await act(async () => { rerender({ layout: provisional.layout, source: engine }); });
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    await act(async () => {
+      const attaching = result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
+      oldWorker.reply({ id: oldWorker.posted.at(-1)!.id, ok: true });
+      await attaching;
+    });
+    await waitFor(() => expect(deferred.reject).not.toBeNull());
+    const previousFrame = result.current.frame;
+    const previousQueries = result.current.queries;
+    act(() => {
+      result.current.resetSettled();
+      opened.destroy();
+      result.current.recordSession(next);
+    });
+    const replacement = result.current.layoutInWorker(next, REQUEST)!;
+    const newWorker = FakeWorker.last!;
+    newWorker.reply({
+      id: newWorker.posted[0]!.id,
+      ok: true,
+      frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null },
+      selection: null,
+      layoutRevision: 1,
+      layoutJson,
+    });
+    const computation = (await replacement)!;
+    await act(async () => { rerender({ layout: computation.layout, source: next }); });
+    await waitFor(() => {
+      expect(result.current.presentedEngine).toBe(next);
+      expect(result.current.frame).not.toBe(previousFrame);
+      expect(result.current.queries).not.toBe(previousQueries);
+      expect(result.current.queries?.isReady()).toBe(true);
+    });
+    const currentFrame = result.current.frame;
+    const currentQueries = result.current.queries;
+    expect(result.current.workerSurfacesActive).toBe(true);
+    act(() => result.current.setWorkerPresentationActive(true));
+    await act(async () => {
+      deferred.reject!(new Error('old completion failed'));
+      expect(await provisional.complete!).toBeNull();
+    });
+    expect(result.current.frame).toBe(currentFrame);
+    expect(result.current.queries).toBe(currentQueries);
+    expect(currentQueries!.pageBounds(0)).not.toBeNull();
+    expect(await result.current.resolveQueries()).toMatchObject({ queries: currentQueries });
+    expect(result.current.workerSurfacesActive).toBe(true);
+    expect(result.current.workerPresentationActive).toBe(true);
+    expect(result.current.error).toBeNull();
+    expect(errors).not.toHaveBeenCalled();
+    expect(newWorker.posted).toHaveLength(1);
+    unmount();
+  } finally {
+    completion.mockRestore();
+    errors.mockRestore();
+    native.free();
+  }
 });

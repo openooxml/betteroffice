@@ -88,6 +88,7 @@ export {
   takePreloadedResidentEngineWorker,
   type ResidentEngineWorkerApplyResult,
   type ResidentEngineWorkerFrame,
+  type ResidentEngineWorkerOpened,
   type ResidentEngineOffscreenPage,
 } from './residentEngineWorkerClient';
 export { preloadDocxEngine } from './preloadDocxEngine';
@@ -1018,6 +1019,8 @@ export interface YrsSession extends CollaborationReplica {
    * point calls it; call it after building a document another way.
    */
   beginOpening(generation?: string): void;
+  /** Unions seeded opaque sequence names into document state. @internal */
+  seedOpaqueSequences(names: readonly string[]): void;
   /** Materializes the retained canonical package for compatibility APIs. */
   materializeDocx(): Document | null;
   /**
@@ -1954,6 +1957,10 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         session.begin_opening(generation);
         proposals.reset();
       });
+    },
+    seedOpaqueSequences: (names) => {
+      markDirty('all');
+      mutate(() => session.seed_opaque_sequences(JSON.stringify(names)));
     },
     mediaSource: (token) => {
       if (destroyed || !token.startsWith('media:')) return null;

@@ -44,56 +44,78 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-test('a first-page preview opens first, cannot save, and hands over once it has painted', async () => {
-  const hosts: Array<boolean> = [];
-  const { result, unmount } = renderHook(() =>
-    useYrsCoreSession(
-      true,
-      null,
-      null,
-      PAGES,
-      1,
-      undefined,
-      {
-        isCurrentLoad: () => true,
-        onHostDocument: (_host, _generation, _session, options) => hosts.push(options?.preview === true),
-      },
-      { previewFirstPage: true }
-    )
-  );
-  await waitFor(() => expect(result.current.previewing).toBe(true));
-  const preview = result.current.session!;
-  expect(result.current.opening).toBe(true);
-  expect(hosts).toEqual([true]);
-  expect(preview.materializeDocx()).toBeNull();
-  await expect(saveYrsDocx(preview)).rejects.toThrow();
-  expect(preview.isDisplayOnly()).toBe(true);
-  expect(result.current.documentFromYrs(null)).toBeNull();
-  const paragraph = preview.paragraphs('body')[0]!;
-  expect(() =>
-    preview.insertText({ story: 'body', paraId: paragraph.paraId, offset: 0 }, 'x')
-  ).toThrow(/display-only/);
+test.each([false, true])(
+  'a first-page preview opens first and hands over after paint with workerOpen=%s',
+  async (workerOpen) => {
+    const hosts: Array<boolean> = [];
+    const mainOpens: boolean[] = [];
+    let workerOpens = 0;
+    const openInWorker = async () => {
+      workerOpens += 1;
+      return null;
+    };
+    const { result, unmount } = renderHook(() =>
+      useYrsCoreSession(
+        true,
+        null,
+        null,
+        PAGES,
+        1,
+        undefined,
+        {
+          isCurrentLoad: () => true,
+          onSession: (session) => {
+            const open = session.openDocx.bind(session);
+            session.openDocx = (bytes, seed, options) => {
+              mainOpens.push(seed);
+              return open(bytes, seed, options);
+            };
+          },
+          onHostDocument: (_host, _generation, _session, options) => hosts.push(options?.preview === true),
+        },
+        {
+          previewFirstPage: true,
+          workerOpen: workerOpen ? { openInWorker, renderedFrame: null } : undefined,
+        }
+      )
+    );
+    await waitFor(() => expect(result.current.previewing).toBe(true));
+    const preview = result.current.session!;
+    expect(result.current.opening).toBe(true);
+    expect(hosts).toEqual([true]);
+    expect(preview.materializeDocx()).toBeNull();
+    await expect(saveYrsDocx(preview)).rejects.toThrow();
+    expect(preview.isDisplayOnly()).toBe(true);
+    expect(result.current.documentFromYrs(null)).toBeNull();
+    const paragraph = preview.paragraphs('body')[0]!;
+    expect(() =>
+      preview.insertText({ story: 'body', paraId: paragraph.paraId, offset: 0 }, 'x')
+    ).toThrow(/display-only/);
 
-  await act(async () => {
-    result.current.notifyFramePresented(preview);
-  });
-  await waitFor(() => expect(result.current.previewing).toBe(false));
-  const full = result.current.session as YrsSession;
-  expect(full).not.toBe(preview);
-  expect(hosts).toEqual([true, false]);
-  expect(result.current.handoffFrom).toBe(preview);
-  // Still showing the preview's pages: nothing edits until the full session's are shown.
-  expect(result.current.opening).toBe(true);
-  expect(full.materializeDocx()).not.toBeNull();
-  expect(full.isDisplayOnly()).toBe(false);
+    await act(async () => {
+      result.current.notifyFramePresented(preview);
+    });
+    await waitFor(() => expect(result.current.previewing).toBe(false));
+    const full = result.current.session as YrsSession;
+    expect(full).not.toBe(preview);
+    expect(hosts).toEqual([true, false]);
+    expect(result.current.handoffFrom).toBe(preview);
+    // Still showing the preview's pages: nothing edits until the full session's are shown.
+    expect(result.current.opening).toBe(true);
+    expect(full.materializeDocx()).not.toBeNull();
+    expect(full.isDisplayOnly()).toBe(false);
+    expect(mainOpens).toEqual([true]);
+    expect(workerOpens).toBe(0);
+    expect(result.current.replicaReady).toBe(true);
 
-  await act(async () => {
-    result.current.notifyFramePresented(full);
-  });
-  expect(result.current.handoffFrom).toBeNull();
-  expect(result.current.opening).toBe(false);
-  unmount();
-});
+    await act(async () => {
+      result.current.notifyFramePresented(full);
+    });
+    expect(result.current.handoffFrom).toBeNull();
+    expect(result.current.opening).toBe(false);
+    unmount();
+  }
+);
 
 test.each(['heldEngine', 'shownEngine'] as const)(
   "the renderer's %s keeps the preview alive past the handoff until it lets go",
@@ -219,29 +241,41 @@ test('without the option the document opens in full at once', async () => {
   unmount();
 });
 
-test('a document the preview refuses opens in full at once', async () => {
-  const hosts: Array<boolean> = [];
-  const { result, unmount } = renderHook(() =>
-    useYrsCoreSession(
-      true,
-      null,
-      null,
-      COLUMNS,
-      1,
-      undefined,
-      {
-        isCurrentLoad: () => true,
-        onHostDocument: (_host, _generation, _session, options) => hosts.push(options?.preview === true),
-      },
-      { previewFirstPage: true }
-    )
-  );
-  await waitFor(() => expect(result.current.session).not.toBeNull());
-  expect(result.current.previewing).toBe(false);
-  expect(result.current.session!.isDisplayOnly()).toBe(false);
-  expect(hosts).toEqual([false]);
-  unmount();
-});
+test.each([false, true])(
+  'a document the preview refuses opens in full on the main thread with workerOpen=%s',
+  async (workerOpen) => {
+    const hosts: Array<boolean> = [];
+    let workerOpens = 0;
+    const openInWorker = async () => {
+      workerOpens += 1;
+      return null;
+    };
+    const { result, unmount } = renderHook(() =>
+      useYrsCoreSession(
+        true,
+        null,
+        null,
+        COLUMNS,
+        1,
+        undefined,
+        {
+          isCurrentLoad: () => true,
+          onHostDocument: (_host, _generation, _session, options) => hosts.push(options?.preview === true),
+        },
+        {
+          previewFirstPage: true,
+          workerOpen: workerOpen ? { openInWorker, renderedFrame: null } : undefined,
+        }
+      )
+    );
+    await waitFor(() => expect(result.current.session).not.toBeNull());
+    expect(result.current.previewing).toBe(false);
+    expect(result.current.session!.isDisplayOnly()).toBe(false);
+    expect(hosts).toEqual([false]);
+    expect(workerOpens).toBe(0);
+    unmount();
+  }
+);
 
 test('changing the preview option keeps the open session', async () => {
   const { result, rerender, unmount } = renderHook(

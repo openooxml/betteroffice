@@ -121,6 +121,7 @@ export const editsession_retained_headers_footers_json: (a: number) => [number, 
 export const editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
 export const editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+export const editsession_seed_opaque_sequences: (a: number, b: number, c: number) => [number, number];
 export const editsession_select_story: (a: number, b: number, c: number) => void;
 export const editsession_selection: (a: number) => [number, number, number, number];
 export const editsession_selection_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
