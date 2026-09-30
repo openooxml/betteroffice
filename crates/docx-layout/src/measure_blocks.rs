@@ -551,34 +551,71 @@ fn measure_float_flow(
     zones_by_anchor: &AnchorZones,
     section_break_marks: &[bool],
 ) -> Result<Vec<BlockExtent>, String> {
-    let mut cumulative_y = 0.0;
-    let mut active_zones = Vec::new();
+    let mut flow = FlowState::default();
     let mut measured = Vec::with_capacity(blocks.len());
     for (index, block) in blocks.iter_mut().enumerate() {
+        measured.push(flow.measure(
+            index,
+            block,
+            widths,
+            default_width,
+            config,
+            paragraph_zones,
+            zones_by_anchor,
+            section_break_marks,
+        )?);
+    }
+    Ok(measured)
+}
+
+/// Where the float flow stands between two blocks.
+#[derive(Default)]
+struct FlowState {
+    cumulative_y: f64,
+    active_zones: Vec<FloatingZone>,
+}
+
+impl FlowState {
+    #[allow(clippy::too_many_arguments)]
+    fn measure(
+        &mut self,
+        index: usize,
+        block: &mut LayoutBlock,
+        widths: &[f64],
+        default_width: f64,
+        config: &MeasurementConfig,
+        paragraph_zones: &ParagraphZones,
+        zones_by_anchor: &AnchorZones,
+        section_break_marks: &[bool],
+    ) -> Result<BlockExtent, String> {
+        let Self {
+            cumulative_y,
+            active_zones,
+        } = self;
         if resets_float_flow(block) {
             active_zones.clear();
-            cumulative_y = 0.0;
+            *cumulative_y = 0.0;
         }
         if let Some(zones) = paragraph_zones.get(&index) {
             // A paragraph-anchored band hangs off its own anchor, which sits at
             // `cumulative_y` in the frame the earlier bands were measured in.
             if active_zones.len() + zones.len() <= MAX_ACTIVE_ZONES {
                 active_zones.extend(zones.iter().map(|zone| FloatingZone {
-                    top_y: zone.top_y + cumulative_y,
-                    bottom_y: zone.bottom_y + cumulative_y,
+                    top_y: zone.top_y + *cumulative_y,
+                    bottom_y: zone.bottom_y + *cumulative_y,
                     ..zone.clone()
                 }));
             } else {
-                cumulative_y = 0.0;
+                *cumulative_y = 0.0;
                 active_zones.clone_from(zones);
             }
         }
         if let Some(zones) = zones_by_anchor.get(&index) {
             // Anchors the flow has not advanced past share one origin.
-            if cumulative_y == 0.0 && active_zones.len() + zones.len() <= MAX_ACTIVE_ZONES {
+            if *cumulative_y == 0.0 && active_zones.len() + zones.len() <= MAX_ACTIVE_ZONES {
                 active_zones.extend(zones.iter().cloned());
             } else {
-                cumulative_y = 0.0;
+                *cumulative_y = 0.0;
                 active_zones.clone_from(zones);
             }
         }
@@ -597,17 +634,94 @@ fn measure_float_flow(
                 width,
                 config,
                 (!active_zones.is_empty()).then_some(active_zones.as_slice()),
-                cumulative_y,
+                *cumulative_y,
             )?
         };
         if !matches!(block, LayoutBlock::Table(table) if table.floating.is_some())
             && !matches!(block, LayoutBlock::Shape(shape) if anchored_shape(shape))
         {
-            cumulative_y += extent_height(&extent);
+            *cumulative_y += extent_height(&extent);
         }
-        measured.push(extent);
+        Ok(extent)
     }
-    Ok(measured)
+}
+
+/// [`measure_blocks_with_floats`] a few blocks at a time. The floating zones
+/// are found once up front; [`Self::measure_until`] then measures the blocks in
+/// order and can stop after any of them, and the extents equal one call's.
+pub struct FloatFlow {
+    default_width: f64,
+    paragraph_zones: ParagraphZones,
+    zones_by_anchor: AnchorZones,
+    marks: Vec<bool>,
+    state: FlowState,
+    measured: Vec<BlockExtent>,
+}
+
+impl FloatFlow {
+    pub fn new(
+        blocks: &[LayoutBlock],
+        widths: &[f64],
+        config: &MeasurementConfig,
+        page_geometry: Option<&FloatPageGeometry>,
+    ) -> Result<Self, String> {
+        let default_width = widths.first().copied().unwrap_or(0.0);
+        let extracted = extract_floating_zones(
+            blocks,
+            default_width,
+            config,
+            page_geometry,
+            &BTreeMap::new(),
+        )?;
+        let (paragraph_zones, zones_by_anchor) = group_floating_zones(extracted);
+        Ok(Self {
+            default_width,
+            paragraph_zones,
+            zones_by_anchor,
+            marks: section_break_marks(blocks),
+            state: FlowState::default(),
+            measured: Vec::with_capacity(blocks.len()),
+        })
+    }
+
+    /// Blocks measured so far.
+    pub fn measured(&self) -> usize {
+        self.measured.len()
+    }
+
+    /// The extents of the blocks measured so far.
+    pub fn extents(&self) -> &[BlockExtent] {
+        &self.measured
+    }
+
+    /// Measures the next blocks up to `end`, exclusive. `blocks` and `widths`
+    /// are the ones the flow was created for.
+    pub fn measure_until(
+        &mut self,
+        blocks: &mut [LayoutBlock],
+        widths: &[f64],
+        config: &MeasurementConfig,
+        end: usize,
+    ) -> Result<(), String> {
+        for index in self.measured.len()..end.min(blocks.len()) {
+            let extent = self.state.measure(
+                index,
+                &mut blocks[index],
+                widths,
+                self.default_width,
+                config,
+                &self.paragraph_zones,
+                &self.zones_by_anchor,
+                &self.marks,
+            )?;
+            self.measured.push(extent);
+        }
+        Ok(())
+    }
+
+    pub fn into_extents(self) -> Vec<BlockExtent> {
+        self.measured
+    }
 }
 
 pub fn measure_block(
@@ -1979,7 +2093,7 @@ fn measure_table(
         };
     }
 
-    let natural: Vec<f64> = rows.iter().map(|row| row.height).collect();
+    let mut spanning_cells = Vec::new();
     for row_index in 0..rows.len() {
         for cell_index in 0..table.rows[row_index].cells.len() {
             let source_cell = &table.rows[row_index].cells[cell_index];
@@ -1989,18 +2103,25 @@ fn measure_table(
             }
             let last = (row_index + row_span - 1).min(rows.len() - 1);
             let needed = rows[row_index].cells[cell_index].height + cell_border_height(source_cell);
-            let spanned = natural[row_index..=last].iter().sum::<f64>();
-            let deficit = needed - spanned;
-            if deficit <= 0.0 {
-                continue;
-            }
-            let mut target = last;
-            while target > row_index && exact[target] {
-                target -= 1;
-            }
-            if !exact[target] {
-                rows[target].height += deficit;
-            }
+            spanning_cells.push((row_index, last, needed));
+        }
+    }
+    spanning_cells.sort_unstable_by_key(|&(row_index, last, _)| (last, row_index));
+    for (row_index, last, needed) in spanning_cells {
+        let spanned = rows[row_index..=last]
+            .iter()
+            .map(|row| row.height)
+            .sum::<f64>();
+        let deficit = needed - spanned;
+        if deficit <= 0.0 {
+            continue;
+        }
+        let mut target = last;
+        while target > row_index && exact[target] {
+            target -= 1;
+        }
+        if !exact[target] {
+            rows[target].height += deficit;
         }
     }
 
@@ -2788,6 +2909,116 @@ mod tests {
             let measured = measure_table(&mut table, 100.0, &MeasurementConfig::default()).unwrap();
             assert_eq!(measured.rows[0].height, expected);
             assert_eq!(measured.total_height, expected);
+        }
+    }
+
+    #[test]
+    fn merged_cells_share_row_growth_without_changing_exact_rows() {
+        for (heights, exact, expected) in [
+            ([128.0, 160.0], [false, false, false], [16.0, 16.0, 128.0]),
+            ([160.0, 128.0], [false, false, false], [16.0, 16.0, 128.0]),
+            ([160.0, 160.0], [false, false, false], [16.0, 16.0, 128.0]),
+            ([16.0, 32.0], [false, false, false], [16.0, 16.0, 16.0]),
+            ([128.0, 160.0], [false, false, true], [16.0, 128.0, 16.0]),
+            ([160.0, 128.0], [true, false, true], [16.0, 128.0, 16.0]),
+            ([128.0, 160.0], [false, true, true], [128.0, 16.0, 16.0]),
+            ([128.0, 160.0], [true, true, true], [16.0, 16.0, 16.0]),
+        ] {
+            let cell = |id: &str, height: f64, row_span: usize| {
+                json!({
+                    "id":id, "rowSpan":row_span,
+                    "padding":{"top":0,"bottom":0,"left":0,"right":0},
+                    "blocks":[{"kind":"image","id":id,"src":"","width":10,"height":height}]
+                })
+            };
+            let rows: Vec<_> = exact
+                .iter()
+                .enumerate()
+                .map(|(index, exact)| {
+                    let mut cells = Vec::new();
+                    if index == 0 {
+                        cells.push(cell("left", heights[0], 3));
+                        cells.push(cell("right", heights[1], 3));
+                    }
+                    cells.push(cell(&format!("marker{index}"), 16.0, 1));
+                    json!({
+                        "id":format!("row{index}"), "height":16,
+                        "heightRule":if *exact { "exact" } else { "atLeast" }, "cells":cells
+                    })
+                })
+                .collect();
+            let mut table: TableBlock = serde_json::from_value(json!({
+                "id":"table", "columnWidths":[100,100,100], "rows":rows
+            }))
+            .unwrap();
+            let measured = measure_table(&mut table, 300.0, &MeasurementConfig::default()).unwrap();
+            let actual: Vec<_> = measured.rows.iter().map(|row| row.height).collect();
+            assert_eq!(actual, expected, "heights {heights:?}, exact {exact:?}");
+            assert_eq!(measured.total_height, expected.iter().sum::<f64>());
+        }
+    }
+
+    #[test]
+    fn overlapping_merged_cells_use_growth_in_their_shared_rows() {
+        let cell = |id: &str, height: f64, row_span: usize, column: usize| {
+            json!({
+                "id":id, "rowSpan":row_span, "gridStart":column,
+                "padding":{"top":0,"bottom":0,"left":0,"right":0},
+                "blocks":[{"kind":"image","id":id,"src":"","width":10,"height":height}]
+            })
+        };
+        let mut table: TableBlock = serde_json::from_value(json!({
+            "id":"table", "columnWidths":[100,100,100], "rows":[
+                {"id":"row0", "cells":[cell("left", 80.0, 3, 0), cell("marker0", 16.0, 1, 2)]},
+                {"id":"row1", "cells":[cell("right", 96.0, 3, 1), cell("marker1", 16.0, 1, 2)]},
+                {"id":"row2", "cells":[cell("marker2", 16.0, 1, 2)]},
+                {"id":"row3", "cells":[cell("marker3", 16.0, 1, 2)]}
+            ]
+        }))
+        .unwrap();
+        let measured = measure_table(&mut table, 300.0, &MeasurementConfig::default()).unwrap();
+        let actual: Vec<_> = measured.rows.iter().map(|row| row.height).collect();
+        assert_eq!(actual, [16.0, 16.0, 48.0, 32.0]);
+        assert_eq!(measured.total_height, 112.0);
+    }
+
+    #[test]
+    fn unequal_merged_spans_share_growth_in_either_column_order() {
+        let cell = |id: &str, height: f64, row_span: usize, column: usize| {
+            json!({
+                "id":id, "rowSpan":row_span, "gridStart":column,
+                "padding":{"top":0,"bottom":0,"left":0,"right":0},
+                "blocks":[{"kind":"image","id":id,"src":"","width":10,"height":height}]
+            })
+        };
+        for spans in [[(96.0, 3), (80.0, 2)], [(80.0, 2), (96.0, 3)]] {
+            let mut table: TableBlock = serde_json::from_value(json!({
+                "id":"table", "columnWidths":[100,100,100], "rows":[
+                    {"id":"row0", "cantSplit":true, "cells":[
+                        cell("left", spans[0].0, spans[0].1, 0),
+                        cell("right", spans[1].0, spans[1].1, 1),
+                        cell("marker0", 16.0, 1, 2)
+                    ]},
+                    {"id":"row1", "cantSplit":true, "cells":[cell("marker1", 16.0, 1, 2)]},
+                    {"id":"row2", "cantSplit":true, "cells":[cell("marker2", 16.0, 1, 2)]}
+                ]
+            }))
+            .unwrap();
+            let measured = measure_table(&mut table, 300.0, &MeasurementConfig::default()).unwrap();
+            let actual: Vec<_> = measured.rows.iter().map(|row| row.height).collect();
+            assert_eq!(actual, [16.0, 64.0, 16.0], "spans {spans:?}");
+            assert_eq!(measured.total_height, 96.0);
+            let mut input = crate::types::Input {
+                measured: vec![crate::types::MeasuredBlock {
+                    block: LayoutBlock::Table(table),
+                    measure: BlockExtent::Table(measured),
+                }],
+                options: serde_json::from_value(json!({"pageSize":{"w":300,"h":120},
+                    "margins":{"top":0,"bottom":0,"left":0,"right":0}}))
+                .unwrap(),
+            };
+            let layout = crate::compute_layout_input(&mut input).unwrap();
+            assert_eq!(layout.pages.len(), 1, "spans {spans:?}");
         }
     }
 
