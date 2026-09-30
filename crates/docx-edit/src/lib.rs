@@ -668,11 +668,11 @@ impl EditingDoc {
     /// Ends a shared-read scope, dropping shared story projections when the last scope ends.
     pub fn end_shared_reads(&self) {
         let mut views = self.story_views.lock().unwrap();
-        let previous = self
-            .shared_read_depth
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |depth| {
-                depth.checked_sub(1)
-            });
+        let previous =
+            self.shared_read_depth
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |depth| {
+                    depth.checked_sub(1)
+                });
         if previous == Ok(1) {
             *views = EpochCache::default();
         }
