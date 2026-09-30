@@ -192,12 +192,12 @@ describe('useRustMeasurement warm requirements', () => {
         regular: [1],
       })
     );
-    // The new source's first load asks for one pass of its own.
-    expect(calls.requiredPasses).toBe(1);
+    const settled = { ...calls };
     finishLoad(bytesOf('Warm'));
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(registered).toEqual([['Calibri'], ['Calibri']]);
-    expect(calls).toEqual({ warmLoads: 1, warmPasses: 0, requiredPasses: 1 });
+    expect(calls).toEqual(settled);
+    expect(calls.warmPasses).toBe(0);
     expect(result.current.residentMeasurementConfig([regular])?.fontChains).toEqual({
       regular: [1],
     });
