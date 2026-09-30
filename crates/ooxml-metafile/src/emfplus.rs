@@ -1305,7 +1305,12 @@ fn parse_region(
             let start = at.checked_add(8)?;
             let end = start.checked_add(length)?;
             let (path, _) = parse_path(data.get(start..end)?, limit)?;
-            (Region::Path(Arc::new(path)), end)
+            let region = if path.figures.is_empty() {
+                Region::Empty
+            } else {
+                Region::Path(Arc::new(path))
+            };
+            (region, end)
         }
         0x1000_0002 => (Region::Empty, at + 4),
         0x1000_0003 => (Region::Infinite, at + 4),
@@ -1346,34 +1351,39 @@ fn extent(region: &Region) -> Option<bool> {
     }
 }
 
-/// A region as clip regions to intersect; `false` when it had to be
-/// approximated. `spent` counts every path command built, kept or not.
+/// Clip intersections; `Some(false)` when approximated.
+/// `spent` counts every command built, kept or not.
 fn region_clips<const FULL: bool>(
     state: &State,
-    player: &Player<FULL>,
+    player: &mut Player<FULL>,
     region: &Region,
     out: &mut Vec<ClipRegion>,
     spent: &mut usize,
-) -> bool {
-    let empty = || ClipRegion {
-        path: rect_path([0.0; 4]),
-        even_odd: false,
-        exclude: false,
+) -> Option<bool> {
+    player.charge(1, 0)?;
+    let empty = |spent: &mut usize| {
+        let path = rect_path([0.0; 4]);
+        *spent = spent.saturating_add(path.len());
+        ClipRegion {
+            path,
+            even_odd: false,
+            exclude: false,
+        }
     };
     if let Region::Combine(..) = region {
         match extent(region) {
-            Some(true) => return true,
+            Some(true) => return Some(true),
             Some(false) => {
-                out.push(empty());
-                return true;
+                out.push(empty(spent));
+                return Some(true);
             }
             None => {}
         }
     }
-    match region {
+    Some(match region {
         Region::Infinite => true,
         Region::Empty => {
-            out.push(empty());
+            out.push(empty(spent));
             true
         }
         Region::Path(path) => {
@@ -1390,14 +1400,14 @@ fn region_clips<const FULL: bool>(
             true
         }
         Region::Combine(1, left, right, _) => {
-            let a = region_clips(state, player, left, out, spent);
-            region_clips(state, player, right, out, spent) && a
+            let a = region_clips(state, player, left, out, spent)?;
+            region_clips(state, player, right, out, spent)? && a
         }
         Region::Combine(2 | 3, left, right, _) if extent(left) == Some(false) => {
-            region_clips(state, player, right, out, spent)
+            region_clips(state, player, right, out, spent)?
         }
         Region::Combine(2 | 3, left, right, _) if extent(right) == Some(false) => {
-            region_clips(state, player, left, out, spent)
+            region_clips(state, player, left, out, spent)?
         }
         Region::Combine(mode @ 3..=5, left, right, _)
             if *mode != 3 || extent(left) == Some(true) || extent(right) == Some(true) =>
@@ -1408,9 +1418,9 @@ fn region_clips<const FULL: bool>(
                 _ if extent(left) == Some(true) => (left, right),
                 _ => (right, left),
             };
-            let exact = region_clips(state, player, keep, out, spent);
+            let exact = region_clips(state, player, keep, out, spent)?;
             let mut cuts = Vec::new();
-            let simple = region_clips(state, player, cut, &mut cuts, spent) && cuts.len() <= 1;
+            let simple = region_clips(state, player, cut, &mut cuts, spent)? && cuts.len() <= 1;
             for mut cut in cuts {
                 cut.exclude = !cut.exclude;
                 out.push(cut);
@@ -1419,10 +1429,10 @@ fn region_clips<const FULL: bool>(
         }
         Region::Combine(mode, left, right, _) => {
             let (mut a, mut b) = (Vec::new(), Vec::new());
-            region_clips(state, player, left, &mut a, spent);
-            region_clips(state, player, right, &mut b, spent);
+            region_clips(state, player, left, &mut a, spent)?;
+            region_clips(state, player, right, &mut b, spent)?;
             if a.is_empty() || b.is_empty() {
-                return false;
+                return Some(false);
             }
             let mut path = Vec::new();
             for region in a.into_iter().chain(b) {
@@ -1437,7 +1447,7 @@ fn region_clips<const FULL: bool>(
             });
             false
         }
-    }
+    })
 }
 
 /// The region's area as one path, for filling; `false` when approximated.
@@ -1449,9 +1459,10 @@ fn region_path<const FULL: bool>(
     out: &mut Vec<PathCommand>,
 ) -> Option<bool> {
     let (mut clips, mut spent) = (Vec::new(), 0);
-    let exact = region_clips(state, player, region, &mut clips, &mut spent);
+    let exact = region_clips(state, player, region, &mut clips, &mut spent)?;
     let simple = clips.len() == 1 && !clips[0].exclude;
     if clips.is_empty() {
+        player.charge(spent, 0)?;
         let (w, h) = player.unit;
         out.extend(rect_path([0.0, 0.0, w, h]));
         return Some(exact);
@@ -1471,7 +1482,7 @@ fn set_clip<const FULL: bool>(
     mode: u32,
 ) -> Option<()> {
     let (mut clips, mut spent) = (Vec::new(), 0);
-    let mut exact = region_clips(state, player, region, &mut clips, &mut spent);
+    let mut exact = region_clips(state, player, region, &mut clips, &mut spent)?;
     player.charge(spent, 0)?;
     let kept = if mode == 1 || mode == 4 {
         ClipChain::depth(&state.graphics.clip)
@@ -1486,11 +1497,14 @@ fn set_clip<const FULL: bool>(
         1 => state.graphics.clip.clone(),
         4 => {
             let mut excluded = match clips.len() {
-                0 => ClipRegion {
-                    path: rect_path([0.0; 4]),
-                    even_odd: false,
-                    exclude: false,
-                },
+                0 => {
+                    player.charge(5, 0)?;
+                    ClipRegion {
+                        path: rect_path([0.0; 4]),
+                        even_odd: false,
+                        exclude: false,
+                    }
+                }
                 1 => {
                     let mut clip = clips.pop()?;
                     clip.exclude = !clip.exclude;
@@ -1513,6 +1527,7 @@ fn set_clip<const FULL: bool>(
                 player.omit("EMF+ clip regions approximated")?;
             }
             if excluded.path.is_empty() {
+                player.charge(5, 0)?;
                 excluded.path = rect_path([0.0; 4]);
                 excluded.exclude = false;
             }

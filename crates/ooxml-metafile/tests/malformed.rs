@@ -153,6 +153,67 @@ fn region_geometry_filled_away_spends_the_budget() {
     assert!(to_svg(&bytes).is_err());
 }
 
+fn intersect_region_tree(depth: u32, leaf: &[u8], out: &mut Vec<u8>) {
+    if depth == 0 {
+        out.extend_from_slice(leaf);
+        return;
+    }
+    out.extend(u32s(&[1]));
+    intersect_region_tree(depth - 1, leaf, out);
+    intersect_region_tree(depth - 1, leaf, out);
+}
+
+fn region_fills(region: &[u8], fills: usize) -> Vec<u8> {
+    let mut records = vec![plus_header(false), (0x4008, 0x0400, region.to_vec())];
+    records.extend((0..fills).map(|_| (0x4013, 0x8000, u32s(&[0xff00_0000]))));
+    records.push(plus_eof());
+    Emf::new(10, 10).rec(70, &plus(&records).1).bytes()
+}
+
+#[test]
+fn zero_point_region_paths_are_empty() {
+    let path = plus_path(0, &[]).2;
+    let mut region = u32s(&[0xDBC0_1002, 0, 0x1000_0001, path.len() as u32]);
+    region.extend(path);
+    let empty = u32s(&[0xDBC0_1002, 0, 0x1000_0002]);
+    assert_eq!(
+        to_svg(&region_fills(&region, 1)).unwrap(),
+        to_svg(&region_fills(&empty, 1)).unwrap()
+    );
+}
+
+#[test]
+fn repeated_fills_of_a_wide_zero_point_region_tree_spend_the_budget() {
+    let keep = plus_path(0, &[(0.0, 0.0)]).2;
+    let path = plus_path(0, &[]).2;
+    let mut leaf = u32s(&[4, 0x1000_0001, keep.len() as u32]);
+    leaf.extend(keep);
+    leaf.extend(u32s(&[0x1000_0001, path.len() as u32]));
+    leaf.extend(path);
+    let mut region = u32s(&[0xDBC0_1002, (1 << 14) - 2]);
+    intersect_region_tree(12, &leaf, &mut region);
+    assert!(to_svg(&region_fills(&region, 3)).is_ok());
+    assert_eq!(
+        to_svg(&region_fills(&region, 100)).unwrap_err().0,
+        "the metafile draws more than the replay limits"
+    );
+}
+
+#[test]
+fn empty_region_rectangles_filled_away_spend_the_budget() {
+    let path = plus_path(0, &[(0.0, 0.0)]).2;
+    let mut leaf = u32s(&[4, 0x1000_0001, path.len() as u32]);
+    leaf.extend(path);
+    leaf.extend(u32s(&[0x1000_0002]));
+    let mut region = u32s(&[0xDBC0_1002, (1 << 12) - 2]);
+    intersect_region_tree(10, &leaf, &mut region);
+    assert!(to_svg(&region_fills(&region, 3)).is_ok());
+    assert_eq!(
+        to_svg(&region_fills(&region, 400)).unwrap_err().0,
+        "the metafile draws more than the replay limits"
+    );
+}
+
 #[test]
 fn a_string_drawn_many_times_spends_the_text_budget_once_per_draw() {
     let units = vec![b'a' as u16; 100_000];
