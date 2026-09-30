@@ -747,10 +747,10 @@ function imageRunFromPayload(payload: Attrs): Run {
   if (attrs.allowOverlap != null) image.allowOverlap = attrs.allowOverlap;
 
   const padding: NonNullable<Image['padding']> = {};
-  if (attrs.effectExtentTop) padding.top = pixelsToEmu(attrs.effectExtentTop);
-  if (attrs.effectExtentBottom) padding.bottom = pixelsToEmu(attrs.effectExtentBottom);
-  if (attrs.effectExtentLeft) padding.left = pixelsToEmu(attrs.effectExtentLeft);
-  if (attrs.effectExtentRight) padding.right = pixelsToEmu(attrs.effectExtentRight);
+  if (attrs.effectExtentTop != null) padding.top = pixelsToEmu(attrs.effectExtentTop);
+  if (attrs.effectExtentBottom != null) padding.bottom = pixelsToEmu(attrs.effectExtentBottom);
+  if (attrs.effectExtentLeft != null) padding.left = pixelsToEmu(attrs.effectExtentLeft);
+  if (attrs.effectExtentRight != null) padding.right = pixelsToEmu(attrs.effectExtentRight);
   if (Object.keys(padding).length > 0) image.padding = padding;
 
   return { type: 'run', content: [{ type: 'drawing', image }] };
