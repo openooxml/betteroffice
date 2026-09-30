@@ -49,6 +49,9 @@
 //! must be minted only while serializing OOXML. A paragraph's Word `w14:paraId` is a separate
 //! binding on its pilcrow, never derived from its internal ID; see [`ParagraphIdentity`].
 
+#[cfg(test)]
+extern crate self as docx_edit;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
