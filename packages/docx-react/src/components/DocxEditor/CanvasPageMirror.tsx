@@ -10,19 +10,45 @@
  * Focus never lands here: the hidden input remains the editing surface.
  */
 
-import { useEffect, useRef } from 'react';
+import { useMemo, useRef } from 'react';
 import {
   buildMirrorPage,
-  displayPageRevision,
+  buildMirrorPageLinks,
+  mirrorPageHasHeaderCells,
+  mirrorPageHasTabStops,
+  reduceMirrorToLinks,
   type DisplayPage,
 } from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
 import { useTranslation } from '../../i18n';
+import { usePageChrome, type PageChromeHandle } from './usePageChrome';
+
+const mirrorLabels = (page: DisplayPage, t: TFunction) => ({
+  labels: {
+    page: t('a11y.pageLabel', { number: page.pageIndex + 1 }),
+    header: t('a11y.headerLabel'),
+    footer: t('a11y.footerLabel'),
+  },
+});
+const makeMirror = (page: DisplayPage, t: TFunction): HTMLElement =>
+  buildMirrorPage(page, mirrorLabels(page, t));
+// A page outside the window keeps its links, for Tab, link lists and targets,
+// and its header cells, which cells on other pages may name; reduced from its
+// built mirror when it has one.
+const makeMirrorLinks = (
+  page: DisplayPage,
+  t: TFunction,
+  mirror: HTMLElement | null
+): HTMLElement =>
+  mirror ? reduceMirrorToLinks(mirror) : buildMirrorPageLinks(page, mirrorLabels(page, t));
 
 export function CanvasPageMirror({
   page,
   zoom = 1,
+  active = true,
   defer = false,
+  visible = true,
+  register,
   noteAnchorRevision = 0,
 }: {
   page: DisplayPage;
@@ -32,46 +58,32 @@ export function CanvasPageMirror({
    */
   noteAnchorRevision?: number;
   zoom?: number;
-  /** Off-window pages build at idle time instead of inside the mount flush. */
+  /** Holds the mirror; an inactive page keeps only its empty host. */
+  active?: boolean;
+  /** The first build may wait for idle time. */
   defer?: boolean;
+  /** In the page window: a rebuild after a content change never waits. */
+  visible?: boolean;
+  /** Receives the handle that builds the mirror at once. */
+  register?: (handle: PageChromeHandle | null) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
-  // Position-shift deltas mutate primitives in place — identity alone is stale.
-  const builtForRef = useRef<{ page: DisplayPage; revision: number; t: TFunction } | null>(null);
   const { t } = useTranslation();
-
-  useEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
-    const built = builtForRef.current;
-    if (built?.page === page && built.revision === displayPageRevision(page) && built.t === t) {
-      return;
-    }
-    const build = (): void => {
-      const mirror = buildMirrorPage(page, {
-        labels: {
-          page: t('a11y.pageLabel', { number: page.pageIndex + 1 }),
-          header: t('a11y.headerLabel'),
-          footer: t('a11y.footerLabel'),
-        },
-      });
-      // Keep the previous mirror connected until this replacement is ready.
-      // Clearing in effect cleanup creates a detached-DOM window on every page
-      // update; unmounting already removes the host and its complete subtree.
-      host.replaceChildren(mirror);
-      builtForRef.current = { page, revision: displayPageRevision(page), t };
-    };
-    if (!defer) {
-      build();
-      return;
-    }
-    if (typeof requestIdleCallback === 'function') {
-      const id = requestIdleCallback(build, { timeout: 1500 });
-      return () => cancelIdleCallback(id);
-    }
-    const id = setTimeout(build, 150);
-    return () => clearTimeout(id);
-  }, [page, t, defer, noteAnchorRevision]);
+  const fallback = useMemo(
+    () => (mirrorPageHasTabStops(page) || mirrorPageHasHeaderCells(page) ? makeMirrorLinks : null),
+    [page]
+  );
+  usePageChrome(hostRef, {
+    page,
+    t,
+    active,
+    defer,
+    rebuildAtOnce: visible,
+    urgentRevision: noteAnchorRevision,
+    register,
+    make: makeMirror,
+    fallback,
+  });
 
   return (
     <div

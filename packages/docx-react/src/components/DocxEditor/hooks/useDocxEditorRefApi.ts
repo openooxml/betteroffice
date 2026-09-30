@@ -17,6 +17,7 @@ import type {
 } from '@betteroffice/docx/yrs';
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import type { DocxInput, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
+import type { DisplayList } from '@betteroffice/docx/layout/render';
 import type { DocxEditorRef } from '../../DocxEditor';
 import type { DocxCommandStore } from '../../../commands/types';
 import type { PagedEditorRef } from '../PagedEditor';
@@ -26,6 +27,7 @@ import { applyEditBatch, applyProposalCall, flushedSession, modeRefusal } from '
 import type { EditorMode } from '../internals/editing-modes';
 import type { SelectionState } from '../types';
 import { readMemoryStats } from '../memoryStats';
+import { documentPageCount } from './documentPageCount';
 
 const noWorkerMemory = (): null => null;
 
@@ -184,6 +186,8 @@ export function useDocxEditorRefApi({
   modeRef,
   allowHostProposalsRef,
   workerMemory = noWorkerMemory,
+  settledDisplayList,
+  awaitingDocument,
 }: {
   ref: React.ForwardedRef<DocxEditorRef>;
   document: Document | null;
@@ -213,6 +217,10 @@ export function useDocxEditorRefApi({
   allowHostProposalsRef: React.RefObject<boolean>;
   /** The resident worker's wasm memories as of its latest reply. */
   workerMemory?: () => WasmModuleMemory[] | null;
+  /** The renderer's display list once it shows the whole current document. */
+  settledDisplayList?: (relayout: null, timeoutMs: number | null) => Promise<DisplayList>;
+  /** Whether a document load has not yet produced its first layout. */
+  awaitingDocument?: () => boolean;
 }) {
   const hostProposalsAllowed = () =>
     modeRef.current !== 'viewing' || allowHostProposalsRef.current === true;
@@ -230,7 +238,12 @@ export function useDocxEditorRefApi({
       getZoom: () => zoom,
       focus: () => pagedEditorRef.current?.focus(),
       getCurrentPage: () => scrollPageInfo.currentPage,
-      getTotalPages: () => scrollPageInfo.totalPages,
+      getTotalPages: () =>
+        awaitingDocument?.() ? 0 : documentPageCount(pagedEditorRef.current?.getLayout()),
+      whenLayoutComplete: async (options) => {
+        if (!settledDisplayList) throw new Error('This editor paints no display list');
+        return (await settledDisplayList(null, options?.timeoutMs ?? null)).pages.length;
+      },
       getMemoryStats: () => readMemoryStats(workerMemory),
       scrollToPage: (pageNumber) => pagedEditorRef.current?.scrollToPage(pageNumber),
       scrollToPosition: (displayPosition) =>
@@ -498,6 +511,8 @@ export function useDocxEditorRefApi({
       comments,
       commands,
       workerMemory,
+      settledDisplayList,
+      awaitingDocument,
     ]
   );
 }
