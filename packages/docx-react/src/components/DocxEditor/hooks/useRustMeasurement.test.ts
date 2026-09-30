@@ -124,6 +124,55 @@ describe('useRustMeasurement default fonts', () => {
     expect(result.current.residentMeasurementConfig([regular])).toEqual(both);
   });
 
+  test('a replaced text engine forgets the fonts earlier passes asked for', async () => {
+    configureDefaultFonts({
+      load: () =>
+        Promise.resolve({
+          createFontProvider: () => ({
+            resolve: (family: string) => () => Promise.resolve(bytesOf(family)),
+          }),
+        }),
+    });
+    const engineWith = (): RustTextEngine => {
+      let registered = 0;
+      return {
+        registerFont() {
+          registered += 1;
+          return registered;
+        },
+        clearFonts() {},
+      };
+    };
+    const regular: ResidentFontRequirement = {
+      key: 'regular',
+      family: 'Calibri',
+      bold: false,
+      italic: false,
+    };
+    const symbol: ResidentFontRequirement = {
+      key: 'symbol',
+      family: 'Symbol',
+      bold: false,
+      italic: false,
+    };
+    const { result, rerender } = renderHook(
+      ({ engine }: { engine: RustTextEngine }) =>
+        useRustMeasurement({ document: null, textEngine: engine }),
+      { initialProps: { engine: engineWith() } }
+    );
+    await waitFor(() =>
+      expect(
+        Object.keys(result.current.residentMeasurementConfig([regular, symbol])?.fontChains ?? {})
+      ).toEqual(['regular', 'symbol'])
+    );
+    rerender({ engine: engineWith() });
+    await waitFor(() =>
+      expect(result.current.residentMeasurementConfig([regular])?.fontChains).toEqual({
+        regular: [1],
+      })
+    );
+  });
+
   test('a font an earlier pass is still loading holds back no later pass', async () => {
     configureDefaultFonts({
       load: () =>
