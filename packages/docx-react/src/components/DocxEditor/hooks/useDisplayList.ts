@@ -94,6 +94,8 @@ export interface UseRustDisplayListResult {
   resetSettled(failure?: Error | null): void;
   /** True from a document load until the loaded document's first layout arrives. */
   awaitingDocument(): boolean;
+  /** Ties a new editing session to the document load now under way. */
+  recordSession(session: YrsSession | null): void;
   /** Worker-computed caret tagged to `frame`. */
   caret: YrsResidentCaretSnapshot | null;
   /** Apply a plain-text edit through the resident engine and publish its frame. */
@@ -320,7 +322,8 @@ export function useRustDisplayList(
     /** The document load its session belongs to. */
     load: number;
   } | null>(null);
-  // The document load each session was first laid out or displayed in.
+  // The document load each session belongs to: the one under way when the
+  // editor recorded it, else when it was first laid out or displayed.
   const sessionLoadsRef = useRef(new WeakMap<YrsSession, number>());
   const sessionLoad = useCallback((session: YrsSession): number => {
     let load = sessionLoadsRef.current.get(session);
@@ -1587,6 +1590,12 @@ export function useRustDisplayList(
     [markSettled]
   );
   const awaitingDocument = useCallback((): boolean => replacedLayoutRef.current !== null, []);
+  const recordSession = useCallback(
+    (session: YrsSession | null): void => {
+      if (session) sessionLoad(session);
+    },
+    [sessionLoad]
+  );
 
   const settledDisplayList = useCallback(
     (relayout: (() => void) | null, timeoutMs: number | null = 15_000): Promise<DisplayList> =>
@@ -1641,6 +1650,7 @@ export function useRustDisplayList(
     settledDisplayList,
     resetSettled,
     awaitingDocument,
+    recordSession,
     caret: snapshot.caret,
     applyInput,
     applyDelete,
@@ -1797,6 +1807,8 @@ export interface UseCanvasRendererResult {
   resetSettled: UseRustDisplayListResult['resetSettled'];
   /** See {@link UseRustDisplayListResult.awaitingDocument}. */
   awaitingDocument: UseRustDisplayListResult['awaitingDocument'];
+  /** See {@link UseRustDisplayListResult.recordSession}. */
+  recordSession: UseRustDisplayListResult['recordSession'];
   /** Worker caret from the same atomic renderer snapshot. */
   caret: YrsResidentCaretSnapshot | null;
   /** Whether worker-presented pixels make `caret` authoritative. */
@@ -1879,6 +1891,7 @@ export function useCanvasRenderer(
     settledDisplayList,
     resetSettled,
     awaitingDocument,
+    recordSession,
     caret,
     applyInput,
     applyDelete,
@@ -1979,6 +1992,7 @@ export function useCanvasRenderer(
     settledDisplayList,
     resetSettled,
     awaitingDocument,
+    recordSession,
     caret,
     authoritativeCaretActive,
     canvasHostRef,

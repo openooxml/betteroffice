@@ -1097,6 +1097,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       onError: failHostDocument,
     }
   );
+  // A session starts after its load's reset, before its first worker.
+  canvasRenderer.recordSession(yrsCore.session);
   sessionGenerationRef.current = yrsCore.sessionGeneration;
   // Content listeners project the document on every edit; warm its base once
   // the first pages are on screen so neither opening nor the first key pays.

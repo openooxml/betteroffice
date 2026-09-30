@@ -576,6 +576,35 @@ test("a replaced document's worker started again for its display fails nothing o
   }
 });
 
+test("a replaced session's first worker, started after the next load began, fails nothing of it", async () => {
+  const { native, engine } = setup();
+  const warnings = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(null, undefined, undefined, undefined, null)
+    );
+    // The editor records each session as it starts, before its first layout.
+    act(() => result.current.recordSession(engine));
+    act(() => result.current.resetSettled());
+    let waited: unknown = 'pending';
+    void result.current.settledDisplayList(null, null).then(
+      () => (waited = 'settled'),
+      (error: unknown) => (waited = error)
+    );
+    await act(async () => {
+      void result.current.layoutInWorker(engine, REQUEST);
+      FakeWorker.spawned[0]!.outOfMemory();
+    });
+    expect(FakeWorker.spawned).toHaveLength(1);
+    expect(waited).toBe('pending');
+    expect(result.current.error).toBeNull();
+    unmount();
+  } finally {
+    warnings.mockRestore();
+    native.free();
+  }
+});
+
 test("an out-of-memory failure from a replaced document's worker leaves the new worker alone", async () => {
   const { native, inputs, frame, engine } = setup();
   const other = { ...engine } as YrsSession;
