@@ -505,3 +505,29 @@ it('keeps overlapping and cross-paragraph comment ranges after an unrelated edit
     expect(second).not.toContain('<w:commentRangeStart w:id="5"/>');
   }
 });
+
+it('keeps the body and table-cell ranges of a generated document after an edit to its title', async () => {
+  const parts = unzipContainer(
+    new Uint8Array(readFileSync(resolve(import.meta.dir, '__fixtures__/comment-ranges/structure.docx')))
+  );
+  for (const name of ['word/document.xml', 'word/comments.xml']) {
+    parts[name] = toBytes(new TextDecoder().decode(parts[name]).replaceAll('w:id="0"', 'w:id="2"'));
+  }
+  const session = await open(
+    new Uint8Array(rezipPartsToArrayBuffer(new Map(Object.entries(parts)))),
+    91100
+  );
+  const [title] = session.paragraphs('body');
+  session.insertText({ story: 'body', paraId: title!.paraId, offset: 0 }, 'QA ');
+  for (const [path, saved] of await saves(session)) {
+    for (const [id, text] of [
+      [2, 'Achado QA preservado. '],
+      [1, 'Preservar comentário na célula'],
+    ] as const) {
+      expect([path, id, markers(saved, id)]).toEqual([path, id, ['RangeStart', 'RangeEnd', 'Reference']]);
+      for (const reopened of [await open(saved, 91101), await seeded(saved, 91102)]) {
+        expect(anchored(reopened, String(id))).toBe(text);
+      }
+    }
+  }
+});
