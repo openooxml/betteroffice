@@ -450,8 +450,6 @@ export function useRustDisplayList(
   );
 
   const residentEngine = isWorkerHostEngine(engine) ? engine : null;
-  const residentEngineRef = useRef(residentEngine);
-  residentEngineRef.current = residentEngine;
 
   // Rendering moves to the host engine for good: its frames start from a fresh
   // base, numbered after the worker's last frame.
@@ -566,15 +564,16 @@ export function useRustDisplayList(
   // thread never takes over its work: its memory has the same limit and
   // already holds the document. `retry` asks the caller to use the current
   // worker, `stale` means the failed worker no longer serves this engine.
+  // `load` is the document load the failed request began in: a request of a
+  // document another load replaced fails nothing of the new one.
   const replaceOutOfMemoryWorker = useCallback(
     (
       hostEngine: YrsSession,
       client: ResidentEngineWorkerClient | null,
-      failure: ResidentWorkerOutOfMemoryError
+      failure: ResidentWorkerOutOfMemoryError,
+      load: number
     ): 'retry' | 'stale' | 'failed' => {
-      // The worker of a document another load replaced fails nothing of the one shown now.
-      const shown = residentEngineRef.current;
-      if (shown && shown !== hostEngine) return 'stale';
+      if (load !== documentLoadsRef.current) return 'stale';
       const previous = outOfMemoryRef.current.has(hostEngine);
       if (outOfMemoryRef.current.get(hostEngine)) return 'failed';
       if (unmountedRef.current || workerFallbackEngineRef.current === hostEngine) return 'stale';
@@ -599,7 +598,7 @@ export function useRustDisplayList(
       queryEpochGate.clear();
       setError(failure);
       setLoading(false);
-      markSettled(null, failure, hostEngine === shown);
+      markSettled(null, failure, true);
       return 'failed';
     },
     [markSettled, queryEpochGate, setWorkerPresentationActive]
@@ -719,7 +718,7 @@ export function useRustDisplayList(
           if (error instanceof ResidentWorkerOutOfMemoryError) {
             // The edit never reached the host: it takes the structural path there,
             // and the next frame comes from a fresh worker, or reports the failure.
-            replaceOutOfMemoryWorker(worker.engine, worker.client, error);
+            replaceOutOfMemoryWorker(worker.engine, worker.client, error, documentLoad);
             return null;
           }
           if (!(error instanceof ResidentWorkerFailureError)) throw error;
@@ -918,13 +917,16 @@ export function useRustDisplayList(
       }
       pageBuildInFlightRef.current = true;
       const dispatchedEpoch = contentEpochRef.current;
+      const documentLoad = documentLoadsRef.current;
       const paintToken = paintedCaretMachine.token();
       const paintCaret =
         workerPresentationActiveRef.current && paintedCaretMachine.shouldPaint(performance.now());
       const failed = (cause: unknown): void => {
         if (workerRef.current !== worker) return;
         if (cause instanceof ResidentWorkerOutOfMemoryError) {
-          if (replaceOutOfMemoryWorker(worker.engine, worker.client, cause) === 'retry') {
+          if (
+            replaceOutOfMemoryWorker(worker.engine, worker.client, cause, documentLoad) === 'retry'
+          ) {
             requestLayoutRef.current?.();
           }
           return;
@@ -1043,6 +1045,7 @@ export function useRustDisplayList(
       const worker = workerRef.current.client;
       const bootstrapping = !worker.bootstrapSent();
       const previousFrame = bootstrapping ? null : snapshotRef.current.frame;
+      const documentLoad = documentLoadsRef.current;
       const adoptedRevision = hostEngine.adoptResidentWorkerLayout(request);
       const snapshot = hostEngine.residentWorkerSnapshot(
         bootstrapping
@@ -1089,7 +1092,7 @@ export function useRustDisplayList(
           // A newer layout, here or in a worker, replaced this pass: the host
           // drops it, and a newer worker request recovers the worker it asks.
           if (hostEngine.residentWorkerProbe()?.layoutRevision !== adoptedRevision) return null;
-          const outcome = replaceOutOfMemoryWorker(hostEngine, worker, cause);
+          const outcome = replaceOutOfMemoryWorker(hostEngine, worker, cause, documentLoad);
           if (outcome === 'failed') return Promise.reject(cause);
           if (outcome === 'stale') return null;
           return layoutInWorkerRef.current?.(hostEngine, request) ?? null;
@@ -1172,6 +1175,7 @@ export function useRustDisplayList(
       caretStyle: ResidentCaretPaintStyle
     ): Promise<boolean> => {
       const current = workerRef.current;
+      const documentLoad = documentLoadsRef.current;
       // Queue even while the worker is mid-invalidation: requests are handled
       // FIFO, so an attach lands after the sync that follows and the worker
       // rasters the newly attached surfaces itself. Refusing here would strand
@@ -1192,7 +1196,8 @@ export function useRustDisplayList(
         if (!(error instanceof ResidentWorkerOutOfMemoryError)) throw error;
         if (
           workerRef.current === current &&
-          replaceOutOfMemoryWorker(current.engine, current.client, error) === 'retry'
+          replaceOutOfMemoryWorker(current.engine, current.client, error, documentLoad) ===
+            'retry'
         ) {
           requestLayoutRef.current?.();
         }
@@ -1242,6 +1247,7 @@ export function useRustDisplayList(
     const sourceVersion = sourceVersionOf(layout);
     const inputs = (overrides?.getInputs ?? getLayoutKernelInputs)(layout);
     const generation = ++generationRef.current;
+    const documentLoad = documentLoadsRef.current;
     if (!inputs) {
       const failure = new Error('No display-list inputs were recorded for the current layout.');
       queryEpochGate.clear();
@@ -1325,14 +1331,14 @@ export function useRustDisplayList(
       ): Promise<BuiltDisplay> => {
         const latest = generation === generationRef.current;
         if (cause instanceof ResidentWorkerOutOfMemoryError) {
-          // A newer build recovers the worker it asks.
-          if (!latest) return Promise.reject(cause);
+          // A newer build recovers the worker it asks, and another load's build nothing.
+          if (!latest || documentLoad !== documentLoadsRef.current) return Promise.reject(cause);
           // So does a layout adopted since this build began, such as a worker
           // pass running again, whose frame this build's snapshot would erase.
           if (hostEngine.residentWorkerProbe()?.layoutRevision !== probe.layoutRevision) {
             return Promise.reject(new SupersededPreviewError());
           }
-          const outcome = replaceOutOfMemoryWorker(hostEngine, client, cause);
+          const outcome = replaceOutOfMemoryWorker(hostEngine, client, cause, documentLoad);
           if (outcome === 'retry') {
             try {
               return requestWorkerFrame();

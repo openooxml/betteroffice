@@ -421,8 +421,9 @@ test("a loading document's worker that runs out of memory twice fails the wait f
   const warnings = spyOn(console, 'warn').mockImplementation(() => {});
   const errors = spyOn(console, 'error').mockImplementation(() => {});
   try {
+    // The renderer learns the session from its first layout.
     const { result, unmount } = renderHook(() =>
-      useRustDisplayList(null, undefined, undefined, undefined, engine)
+      useRustDisplayList(null, undefined, undefined, undefined, null)
     );
     act(() => result.current.resetSettled());
     let waited: unknown = 'pending';
@@ -442,6 +443,58 @@ test("a loading document's worker that runs out of memory twice fails the wait f
   } finally {
     warnings.mockRestore();
     errors.mockRestore();
+    native.free();
+  }
+});
+
+test("a loading document's worker recovers while the previous document is still shown", async () => {
+  const { native, engine, frame, layoutJson } = setup();
+  const shown = { ...engine } as YrsSession;
+  const warnings = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(null, undefined, undefined, undefined, shown)
+    );
+    act(() => result.current.resetSettled());
+    await act(async () => {
+      void result.current.layoutInWorker(engine, REQUEST);
+      FakeWorker.spawned[0]!.outOfMemory();
+    });
+    expect(FakeWorker.spawned).toHaveLength(2);
+    expect(FakeWorker.spawned[1]!.last()).toMatchObject({ type: 'bootstrap' });
+    await act(async () => FakeWorker.spawned[1]!.replyFrame(frame(1), 1, { layoutJson }));
+    unmount();
+  } finally {
+    warnings.mockRestore();
+    native.free();
+  }
+});
+
+test('a replaced document whose worker runs out of memory again fails nothing of the next one', async () => {
+  const { native, engine } = setup();
+  const warnings = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(null, undefined, undefined, undefined, null)
+    );
+    await act(async () => {
+      void result.current.layoutInWorker(engine, REQUEST);
+      FakeWorker.spawned[0]!.outOfMemory();
+    });
+    expect(FakeWorker.spawned).toHaveLength(2);
+    act(() => result.current.resetSettled());
+    let waited: unknown = 'pending';
+    void result.current.settledDisplayList(null, null).then(
+      () => (waited = 'settled'),
+      (error: unknown) => (waited = error)
+    );
+    await act(async () => FakeWorker.spawned[1]!.outOfMemory());
+    expect(waited).toBe('pending');
+    expect(result.current.error).toBeNull();
+    expect(FakeWorker.spawned).toHaveLength(2);
+    unmount();
+  } finally {
+    warnings.mockRestore();
     native.free();
   }
 });
