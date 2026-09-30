@@ -176,10 +176,10 @@ fn body_text_flows_above_and_below_a_top_and_bottom_footer_float() {
     let pages = body_boxes(&fixture("footer-float-top-and-bottom"));
     for page in &pages[..pages.len() - 1] {
         assert!((page[0].0 - 72.0).abs() < 0.1);
-        assert!((page.last().unwrap().0 - 750.0).abs() < 0.1);
+        assert!((page.last().unwrap().0 - 750.25).abs() < 0.1);
         assert!(
             page.iter()
-                .all(|&(top, bottom)| bottom <= 650.0 || top >= 750.0)
+                .all(|&(top, bottom)| bottom <= 650.25 || top >= 750.25)
         );
     }
 }

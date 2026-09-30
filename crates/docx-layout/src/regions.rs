@@ -838,6 +838,7 @@ mod tests {
             header_footer_refs: None,
             footnote_ids: None,
             footnote_reserved_height: None,
+            float_bands: Vec::new(),
             footnote_columns: None,
             columns: None,
             section_id: None,

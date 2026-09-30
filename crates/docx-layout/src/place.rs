@@ -906,6 +906,10 @@ fn build_resolved_lines(
     resolved
 }
 
+fn paragraph_fragment_height(before: f64, lines_height: f64) -> f64 {
+    before + lines_height
+}
+
 /// Places a paragraph's measured lines, splitting into carried fragments
 /// whenever the page or column runs out of room.
 ///
@@ -997,11 +1001,11 @@ fn layout_paragraph(
             } else {
                 0.0
             };
-            paginator.ensure_fits(
-                before
-                    + lines[current_line_index].line_height
+            paginator.ensure_fits(paragraph_fragment_height(
+                before,
+                lines[current_line_index].line_height
                     + lines[current_line_index].float_skip_before.unwrap_or(0.0),
-            );
+            ));
         }
         let state_idx = paginator.get_current();
         let deferred_spacing = paginator.state(state_idx).deferred_spacing;
@@ -1015,7 +1019,13 @@ fn layout_paragraph(
         } else {
             0.0
         };
-        let available_for_lines = paginator.get_available_height() - reserved_before;
+        let available_height = paginator.get_available_height();
+        let has_float_bands = paginator.has_float_bands();
+        let (fit_before, available_for_lines) = if has_float_bands {
+            (reserved_before, available_height)
+        } else {
+            (0.0, available_height - reserved_before)
+        };
 
         // greedy fit; a fragment always takes at least one line
         let mut lines_height = 0.0f64;
@@ -1027,7 +1037,9 @@ fn layout_paragraph(
             let line_height = line.line_height + line.float_skip_before.unwrap_or(0.0);
             let total_with_line = lines_height + line_height;
 
-            if total_with_line <= available_for_lines || fitting_lines == 0 {
+            if paragraph_fragment_height(fit_before, total_with_line) <= available_for_lines
+                || fitting_lines == 0
+            {
                 lines_height = total_with_line;
                 fitting_lines += 1;
             } else {
@@ -1040,15 +1052,27 @@ fn layout_paragraph(
             if current_line_index == 0 && fitting_lines == 1 {
                 let capacity = paginator.get_column_capacity();
                 let first_two_height = lines.iter().take(2).fold(0.0, |sum, line| {
-                    sum + line.line_height + line.float_skip_before.unwrap_or(0.0)
-                });
-                if reserved_before + first_two_height <= capacity {
-                    if paginator.has_float_bands() {
-                        paginator.ensure_fits(reserved_before + first_two_height);
+                    if has_float_bands {
+                        sum + (line.line_height + line.float_skip_before.unwrap_or(0.0))
                     } else {
-                        paginator.advance_for_overflow();
+                        sum + line.line_height + line.float_skip_before.unwrap_or(0.0)
                     }
-                    continue;
+                });
+                let required = paragraph_fragment_height(reserved_before, first_two_height);
+                if required <= capacity {
+                    let pen_y = paginator.state(state_idx).pen_y;
+                    let next_idx = if has_float_bands {
+                        paginator.ensure_fits(required)
+                    } else {
+                        paginator.advance_for_overflow()
+                    };
+                    let next = paginator.state(next_idx);
+                    if next_idx != state_idx
+                        || next.column_index != column_index
+                        || next.pen_y > pen_y
+                    {
+                        continue;
+                    }
                 }
             }
             if remaining_after == 1 && fitting_lines > 2 {
@@ -1411,6 +1435,101 @@ mod pagination_rule_tests {
             },
         }))
         .unwrap()
+    }
+
+    fn widow_rounding_input(
+        page_height: f64,
+        top: f64,
+        bottom: f64,
+        before: f64,
+        heights: &[f64],
+    ) -> Input {
+        let mut measured = paragraph(
+            1,
+            heights.len(),
+            heights[0],
+            json!({
+                "spacing": {"before": before},
+            }),
+        );
+        measured["measure"]["lines"] = json!(heights.iter().copied().map(line).collect::<Vec<_>>());
+        serde_json::from_value(json!({
+            "measured": [measured],
+            "options": {
+                "pageSize": {"w": 500, "h": page_height},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "sectionPageFloatBands": [{"default": [{"top": top, "bottom": bottom}]}],
+            },
+        }))
+        .unwrap()
+    }
+
+    fn assert_all_paragraph_lines(value: &mut Input, count: usize) -> Layout {
+        let result = layout_document(value).unwrap();
+        let mut next_line = 0;
+        for fragment in result.pages.iter().flat_map(|page| &page.fragments) {
+            let Fragment::Paragraph(fragment) = fragment else {
+                panic!("paragraph expected");
+            };
+            assert_eq!(fragment.from_line, next_line);
+            assert!(fragment.to_line > fragment.from_line);
+            next_line = fragment.to_line;
+        }
+        assert_eq!(next_line, count);
+        result
+    }
+
+    #[test]
+    fn widow_control_terminates_when_fractional_spacing_rounds_two_lines_to_the_gap() {
+        let mut value = widow_rounding_input(300.0, 176.0, 200.0, 57.7, &[11.15; 4]);
+        let result = assert_all_paragraph_lines(&mut value, 4);
+        let Fragment::Paragraph(first) = &result.pages[0].fragments[0] else {
+            panic!("paragraph expected");
+        };
+        assert_eq!(first.to_line, 2);
+        value.options.section_page_float_bands = None;
+        assert_eq!(assert_all_paragraph_lines(&mut value, 4).pages.len(), 1);
+    }
+
+    #[test]
+    fn widow_control_terminates_when_line_rounding_matches_the_gap_with_spacing() {
+        let mut value =
+            widow_rounding_input(500.0, 200.0, 220.0, 64.0, &[20.0, 20.000000000000007]);
+        let result = assert_all_paragraph_lines(&mut value, 2);
+        assert_eq!(result.pages.len(), 1);
+        assert_eq!(result.pages[0].fragments.len(), 1);
+        value.options.section_page_float_bands = None;
+        assert_eq!(assert_all_paragraph_lines(&mut value, 2).pages.len(), 1);
+    }
+
+    #[test]
+    fn a_paragraph_crosses_two_thousand_disjoint_float_bands_on_one_page() {
+        let count = 2_000;
+        let bands: Vec<_> = (0..count)
+            .map(|index| {
+                let top = 97 + index * 2;
+                json!({"top": top, "bottom": top + 1})
+            })
+            .collect();
+        let mut value: Input = serde_json::from_value(json!({
+            "measured": [paragraph(1, count + 1, 1.0, json!({"widowControl": false}))],
+            "options": {
+                "pageSize": {"w": 500, "h": 2 * count + 193},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "sectionPageFloatBands": [{"default": bands}],
+            },
+        }))
+        .unwrap();
+        let result = assert_all_paragraph_lines(&mut value, count + 1);
+        assert_eq!(result.pages.len(), 1);
+        assert_eq!(result.pages[0].fragments.len(), count + 1);
+        for (index, fragment) in result.pages[0].fragments.iter().enumerate() {
+            let Fragment::Paragraph(fragment) = fragment else {
+                panic!("paragraph expected");
+            };
+            assert_eq!(fragment.y, (96 + index * 2) as f64);
+            assert_eq!(fragment.height, 1.0);
+        }
     }
 
     #[test]

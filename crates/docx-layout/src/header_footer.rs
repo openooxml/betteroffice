@@ -177,6 +177,11 @@ fn float_detached_top_and_bottom_images(
                 .and_then(|vertical| vertical.relative_to.as_deref())
                 .is_some_and(|relative| !matches!(relative, "paragraph" | "line"));
             if detached
+                && image
+                    .position
+                    .as_ref()
+                    .and_then(|position| position.behind_doc)
+                    != Some(true)
                 && image.wrap_type.as_deref() == Some("topAndBottom")
                 && image.display_mode.as_deref() != Some("float")
             {
@@ -952,7 +957,8 @@ mod tests {
             })],
         );
         assert!((variant.visual_top + 0.4).abs() < 1e-9);
-        assert!((variant.visual_bottom - 99.6).abs() < 1e-9);
+        assert_eq!(variant.visual_bottom, 103.390625);
+        assert_eq!(variant.flow_height, 103.390625);
         let serialized = serde_json::to_value(&variant).unwrap();
         assert!((serialized["visualTop"].as_f64().unwrap() + 0.4).abs() < 1e-9);
         assert!(
@@ -966,6 +972,67 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn behind_document_top_and_bottom_header_image_keeps_original_flow_and_body_top() {
+        let blocks = vec![json!({
+            "kind": "paragraph", "id": "anchor",
+            "attrs": {"spacing": {"line": 16, "lineRule": "exact"}},
+            "runs": [
+                {"kind": "text", "text": "Anchor"},
+                {"kind": "image", "src": "image", "width": 100, "height": 100,
+                 "wrapType": "topAndBottom", "distTop": 0, "distBottom": 0,
+                 "position": {"behindDoc": true,
+                              "vertical": {"relativeTo": "page", "posOffset": 200 * 9525}}}
+            ]
+        })];
+        let mut original: Vec<LayoutBlock> = serde_json::from_value(json!(blocks)).unwrap();
+        let measures =
+            measure_blocks(&mut original, 308.0, &header_footer_measurement_config()).unwrap();
+        let expected_height = measures.iter().map(extent_height).sum::<f64>();
+        let expected: Vec<_> = original
+            .into_iter()
+            .zip(measures)
+            .map(|(block, measure)| MeasuredBlock { block, measure })
+            .collect();
+        let (variant, size, margins) = header_footer_with_blocks(HeaderFooterKind::Header, blocks);
+        assert_eq!(
+            serde_json::to_value(&variant.measured).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert_eq!(variant.flow_height, expected_height);
+        assert!(variant.flow_height > 100.0);
+        assert!(
+            header_footer_float_bands(
+                &variant,
+                HeaderFooterMetrics {
+                    kind: HeaderFooterKind::Header,
+                    page_size: &size,
+                    margins: &margins,
+                },
+            )
+            .is_empty()
+        );
+        let body_margins = extend_body_margins(&size, &margins, variant.flow_height, 0.0);
+        assert_eq!(body_margins.top, margins.header.unwrap() + expected_height);
+        let mut input: crate::types::Input = serde_json::from_value(json!({
+            "measured": [{
+                "block": {"kind": "paragraph", "id": "body",
+                          "runs": [{"kind": "text", "text": "Body"}]},
+                "measure": {"kind": "paragraph", "totalHeight": 20,
+                            "lines": [{"headRun": 0, "headChar": 0, "tailRun": 0,
+                                       "tailChar": 4, "width": 40, "ascent": 15,
+                                       "descent": 5, "lineHeight": 20}]}
+            }],
+            "options": {"pageSize": size, "margins": body_margins}
+        }))
+        .unwrap();
+        let layout = crate::place::layout_document(&mut input).unwrap();
+        let crate::types::Fragment::Paragraph(body) = &layout.pages[0].fragments[0] else {
+            panic!("paragraph expected");
+        };
+        assert_eq!(body.y, margins.header.unwrap() + expected_height);
     }
 
     #[test]

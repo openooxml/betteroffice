@@ -111,6 +111,21 @@ fn effective_margins(margins: PageMargins) -> PageMargins {
     }
 }
 
+fn normalize_page_float_bands(mut bands: Vec<PageFloatBand>) -> Vec<PageFloatBand> {
+    bands.retain(|band| band.top < band.bottom);
+    bands.sort_by(|a, b| a.top.total_cmp(&b.top));
+    let mut merged: Vec<PageFloatBand> = Vec::with_capacity(bands.len());
+    for mut band in bands {
+        band.odd_page = None;
+        if let Some(last) = merged.last_mut().filter(|last| band.top <= last.bottom) {
+            last.bottom = last.bottom.max(band.bottom);
+        } else {
+            merged.push(band);
+        }
+    }
+    merged
+}
+
 /// The page/column cursor and the pages it has produced so far.
 pub struct Paginator {
     /// Leading spacing already accounted for below the break the cursor just
@@ -139,7 +154,7 @@ pub struct Paginator {
     section_index: usize,
     section_page_margins: Vec<SectionPageMargins>,
     section_page_float_bands: SharedPageFloatBands,
-    float_bands: Vec<Vec<PageFloatBand>>,
+    column_capacities: Vec<Option<f64>>,
     /// Whether the section in force has opened a page yet.
     section_started: bool,
     /// Per state, whether its page is the first of its section.
@@ -197,7 +212,7 @@ impl Paginator {
             section_index: 0,
             section_page_margins: Vec::new(),
             section_page_float_bands: SharedPageFloatBands::default(),
-            float_bands: Vec::new(),
+            column_capacities: Vec::new(),
             section_started: false,
             opens_section: Vec::new(),
             displayed_parity_offset: false,
@@ -428,6 +443,7 @@ impl Paginator {
         &self,
         opens_section: bool,
         page_number: u32,
+        float_bands: &[PageFloatBand],
     ) -> (PageMargins, Option<PageMargins>, Option<PageMargins>) {
         let mut body_margins = self.page_margins(opens_section, page_number);
         let margins = self
@@ -445,7 +461,7 @@ impl Paginator {
             .map(effective_margins)
             .unwrap_or_else(|| body_margins.clone());
         let body_anchor_margins = (body_margins != margins).then(|| body_margins.clone());
-        self.fold_edge_float_bands(&mut body_margins, opens_section, page_number);
+        self.fold_edge_float_bands(&mut body_margins, float_bands);
         let body_margins = (body_margins != margins).then_some(body_margins);
         (margins, body_margins, body_anchor_margins)
     }
@@ -453,17 +469,10 @@ impl Paginator {
     /// Moves a page's body edge past float bands that cover it, so a band at
     /// the top or bottom of the body reserves room as the band's own flow
     /// does; bands inside the body are cleared during placement.
-    fn fold_edge_float_bands(
-        &self,
-        margins: &mut PageMargins,
-        opens_section: bool,
-        page_number: u32,
-    ) {
-        let mut bands = self.page_float_bands(opens_section, page_number);
+    fn fold_edge_float_bands(&self, margins: &mut PageMargins, bands: &[PageFloatBand]) {
         let height = self.page_size.h;
         let mut top = margins.top;
-        bands.sort_by(|a, b| a.top.total_cmp(&b.top));
-        for band in &bands {
+        for band in bands {
             if band.top > top {
                 break;
             }
@@ -471,8 +480,7 @@ impl Paginator {
         }
         let edge = height - margins.bottom;
         let mut bottom = edge;
-        bands.sort_by(|a, b| b.bottom.total_cmp(&a.bottom));
-        for band in &bands {
+        for band in bands.iter().rev() {
             if band.bottom < bottom {
                 break;
             }
@@ -487,7 +495,8 @@ impl Paginator {
     }
 
     fn page_float_bands(&self, opens_section: bool, page_number: u32) -> Vec<PageFloatBand> {
-        self.section_page_float_bands
+        let bands = self
+            .section_page_float_bands
             .sections
             .get(self.section_index)
             .map(|variants| {
@@ -509,7 +518,8 @@ impl Paginator {
                     .cloned()
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        normalize_page_float_bands(bands)
     }
 
     /// Returns the active section's content width.
@@ -534,6 +544,15 @@ impl Paginator {
             .unwrap_or(0.0)
     }
 
+    fn content_bottom(&self, bottom: f64, page_number: u32, bands: &[PageFloatBand]) -> (f64, f64) {
+        let needed = self.footnote_reservation(page_number);
+        if bands.is_empty() || needed <= 0.0 {
+            return (bottom - needed, needed);
+        }
+        let limit = crate::footnotes::note_area_bottom(bottom, needed, bands);
+        (limit - needed, needed + (bottom - limit))
+    }
+
     /// Returns the untouched current page. Column index is excluded because a
     /// standalone column break can leave a blank sheet for a section to reclaim.
     fn pristine_page(&self) -> Option<usize> {
@@ -551,13 +570,18 @@ impl Paginator {
         };
         let page_index = self.states[idx].page_index;
         let number = self.pages[page_index].number;
+        let float_bands = self.page_float_bands(self.opens_section[idx], number);
         let (margins, body_margins, body_anchor_margins) =
-            self.page_geometry(self.opens_section[idx], number);
+            self.page_geometry(self.opens_section[idx], number, &float_bands);
         let flow_margins = body_margins.as_ref().unwrap_or(&margins);
         let content_top = flow_margins.top;
-        let content_limit =
-            self.page_size.h - flow_margins.bottom - self.footnote_reservation(number);
-        self.float_bands[idx] = self.page_float_bands(self.opens_section[idx], number);
+        let (content_limit, reserved) =
+            self.content_bottom(self.page_size.h - flow_margins.bottom, number, &float_bands);
+        if !float_bands.is_empty() || !self.pages[page_index].float_bands.is_empty() {
+            self.pages[page_index].footnote_reserved_height = (reserved > 0.0).then_some(reserved);
+        }
+        self.pages[page_index].float_bands = float_bands;
+        self.column_capacities[idx] = None;
         self.pages[page_index].size = self.page_size.clone();
         self.pages[page_index].margins = margins;
         self.pages[page_index].body_margins = body_margins;
@@ -604,13 +628,14 @@ impl Paginator {
             return;
         };
         let page = &self.pages[self.states[idx].page_index];
-        if self.page_geometry(self.opens_section[idx], page.number)
+        let float_bands = self.page_float_bands(self.opens_section[idx], page.number);
+        if self.page_geometry(self.opens_section[idx], page.number, &float_bands)
             != (
                 page.margins.clone(),
                 page.body_margins.clone(),
                 page.body_anchor_margins.clone(),
             )
-            || self.page_float_bands(self.opens_section[idx], page.number) != self.float_bands[idx]
+            || float_bands != page.float_bands
         {
             self.restamp_pristine_page();
         }
@@ -625,17 +650,21 @@ impl Paginator {
         self.section_started = true;
         self.continued_parity_offset = self.displayed_parity_offset;
         self.displayed_parity_offset = self.page_parity_offset(opens_section, page_number);
-        let (margins, body_margins, body_anchor_margins) =
-            self.page_geometry(opens_section, page_number);
         let float_bands = self.page_float_bands(opens_section, page_number);
+        let (margins, body_margins, body_anchor_margins) =
+            self.page_geometry(opens_section, page_number, &float_bands);
         let flow_margins = body_margins.as_ref().unwrap_or(&margins);
         let content_top = flow_margins.top;
-        let footnote_height = self.footnote_reservation(page_number);
-        let page_content_bottom = self.page_size.h - flow_margins.bottom - footnote_height;
+        let (page_content_bottom, footnote_height) = self.content_bottom(
+            self.page_size.h - flow_margins.bottom,
+            page_number,
+            &float_bands,
+        );
 
         let page = Page {
             number: page_number,
             fragments: Vec::new(),
+            float_bands,
             margins,
             body_margins,
             body_anchor_margins,
@@ -684,7 +713,7 @@ impl Paginator {
         self.pages.push(page);
         self.states.push(state);
         self.opens_section.push(opens_section);
-        self.float_bands.push(float_bands);
+        self.column_capacities.push(None);
         if let Some((size, margins, columns)) = self.resumed_pending.take() {
             self.pending_page_size = size;
             self.pending_margins = margins;
@@ -716,13 +745,20 @@ impl Paginator {
         self.pages[self.states[idx].page_index].fragments.len()
     }
 
+    fn float_bands(&self, idx: usize) -> &[PageFloatBand] {
+        &self.pages[self.states[idx].page_index].float_bands
+    }
+
     fn available_height_of(&self, idx: usize) -> f64 {
         let s = &self.states[idx];
-        let limit = self.float_bands[idx]
-            .iter()
-            .filter(|band| band.bottom > s.pen_y && band.top < s.content_limit)
-            .map(|band| band.top.max(s.pen_y))
-            .fold(s.content_limit, f64::min);
+        let bands = self.float_bands(idx);
+        let first = bands.partition_point(|band| band.bottom <= s.pen_y);
+        let limit = bands
+            .get(first)
+            .filter(|band| band.top < s.content_limit)
+            .map_or(s.content_limit, |band| {
+                s.content_limit.min(band.top.max(s.pen_y))
+            });
         limit - s.pen_y
     }
 
@@ -731,9 +767,11 @@ impl Paginator {
     fn clear_float_bands(&self, idx: usize, height: f64) -> (f64, bool) {
         let state = &self.states[idx];
         let mut pen_y = state.pen_y;
-        for band in &self.float_bands[idx] {
-            if band.bottom <= pen_y || band.top >= state.content_limit {
-                continue;
+        let bands = self.float_bands(idx);
+        let first = bands.partition_point(|band| band.bottom <= pen_y);
+        for band in &bands[first..] {
+            if band.top >= state.content_limit {
+                break;
             }
             if band.top.max(pen_y).min(state.content_limit) - pen_y >= height {
                 return (pen_y, true);
@@ -743,18 +781,23 @@ impl Paginator {
         (pen_y, state.content_limit - pen_y >= height)
     }
 
-    fn column_capacity(&self, idx: usize) -> f64 {
+    fn column_capacity(&mut self, idx: usize) -> f64 {
+        if let Some(capacity) = self.column_capacities[idx] {
+            return capacity;
+        }
         let state = &self.states[idx];
         let mut top = state.content_top;
         let mut capacity = f64::NEG_INFINITY;
-        for band in &self.float_bands[idx] {
+        for band in self.float_bands(idx) {
             if band.bottom <= top || band.top >= state.content_limit {
                 continue;
             }
             capacity = capacity.max(band.top.min(state.content_limit) - top);
             top = top.max(band.bottom);
         }
-        capacity.max(state.content_limit - top)
+        let capacity = capacity.max(state.content_limit - top);
+        self.column_capacities[idx] = Some(capacity);
+        capacity
     }
 
     /// Returns the current state's available height.
@@ -770,7 +813,7 @@ impl Paginator {
 
     pub fn has_float_bands(&mut self) -> bool {
         let idx = self.get_current();
-        !self.float_bands[idx].is_empty()
+        !self.float_bands(idx).is_empty()
     }
 
     fn fits(&self, height: f64, idx: usize) -> bool {
@@ -788,6 +831,7 @@ impl Paginator {
             state.column_index += 1;
             state.pen_y = region_top;
             state.deferred_spacing = 0.0;
+            self.column_capacities[idx] = None;
             return (idx, false);
         }
         (self.create_new_page(), true)
@@ -945,13 +989,15 @@ impl Paginator {
 
         let page = &self.pages[page_index];
         let margins = page.body_margins.as_ref().unwrap_or(&page.margins);
-        let content_limit = page.size.h - margins.bottom - self.footnote_reservation(page.number);
+        let (content_limit, _) =
+            self.content_bottom(page.size.h - margins.bottom, page.number, &page.float_bands);
         self.column_region_top = self.column_region_bottom.max(self.states[idx].pen_y);
         self.column_region_bottom = self.column_region_top;
         let state = &mut self.states[idx];
         state.pen_y = self.column_region_top;
         state.column_index = 0;
         state.content_limit = content_limit;
+        self.column_capacities[idx] = None;
     }
 
     /// Queues a column layout for the next page, leaving the band in force to
@@ -1129,11 +1175,12 @@ impl crate::column_balancing::ColumnBalancePaginator for Paginator {
     fn set_content_limit(&mut self, value: f64) {
         let idx = self.get_current();
         self.states[idx].content_limit = value;
+        self.column_capacities[idx] = None;
     }
 
     fn has_float_band_in_region(&mut self, top: f64, bottom: f64) -> bool {
         let idx = self.get_current();
-        self.float_bands[idx]
+        self.float_bands(idx)
             .iter()
             .any(|band| band.top < bottom && band.bottom > top)
     }
@@ -1165,6 +1212,88 @@ mod tests {
     }
 
     #[test]
+    fn page_bands_merge_after_parity_filtering_and_restamp_without_changing_geometry() {
+        let band = |top, bottom, odd_page| PageFloatBand {
+            top,
+            bottom,
+            odd_page,
+        };
+        let mut paginator = Paginator::new(
+            Size { w: 500.0, h: 500.0 },
+            margins(96.0, 96.0),
+            columns(),
+            None,
+        )
+        .unwrap();
+        paginator.set_section_page_float_bands(vec![SectionPageFloatBands {
+            default: vec![
+                band(250.0, 300.0, Some(false)),
+                band(250.0, 280.0, Some(true)),
+                band(220.0, 250.0, None),
+                band(200.0, 230.0, Some(true)),
+                band(180.0, 180.0, None),
+                band(200.0, 190.0, None),
+            ],
+            ..Default::default()
+        }]);
+        let idx = paginator.get_current();
+        assert_eq!(paginator.float_bands(idx), &[band(200.0, 280.0, None)]);
+        assert_eq!(paginator.column_capacity(idx), 124.0);
+        paginator.restamp_pristine_band();
+        assert_eq!(paginator.column_capacities[idx], Some(124.0));
+        let idx = paginator.insert_blank_page();
+        assert_eq!(paginator.float_bands(idx), &[band(220.0, 300.0, None)]);
+    }
+
+    #[test]
+    fn column_capacity_cache_tracks_limits_columns_and_restamped_bands_and_top() {
+        let band = |top, bottom| PageFloatBand {
+            top,
+            bottom,
+            odd_page: None,
+        };
+        let mut paginator = Paginator::new(
+            Size { w: 500.0, h: 500.0 },
+            margins(96.0, 96.0),
+            columns(),
+            None,
+        )
+        .unwrap();
+        paginator.set_section_page_float_bands(vec![SectionPageFloatBands {
+            default: vec![band(200.0, 220.0)],
+            ..Default::default()
+        }]);
+        let idx = paginator.get_current();
+        assert_eq!(paginator.column_capacity(idx), 184.0);
+        crate::column_balancing::ColumnBalancePaginator::set_content_limit(&mut paginator, 200.0);
+        assert_eq!(paginator.column_capacity(idx), 104.0);
+        assert_eq!(paginator.available_height_of(idx), 104.0);
+        assert_eq!(paginator.clear_float_bands(idx, 104.0), (96.0, true));
+        let mut new_columns = columns();
+        new_columns.count = 2.0;
+        paginator.update_columns(new_columns);
+        assert_eq!(paginator.column_capacity(idx), 184.0);
+        assert_eq!(paginator.advance_column(idx), (idx, false));
+        assert_eq!(paginator.column_capacities[idx], None);
+        assert_eq!(paginator.column_capacity(idx), 184.0);
+        paginator.set_section_page_float_bands(vec![SectionPageFloatBands {
+            default: vec![band(200.0, 350.0)],
+            ..Default::default()
+        }]);
+        paginator.restamp_pristine_band();
+        assert_eq!(paginator.column_capacity(idx), 104.0);
+        paginator
+            .update_page_layout(None, Some(margins(120.0, 96.0)), true)
+            .unwrap();
+        assert_eq!(paginator.column_capacity(idx), 80.0);
+        crate::column_balancing::ColumnBalancePaginator::set_content_limit(
+            &mut paginator,
+            f64::NEG_INFINITY,
+        );
+        assert_eq!(paginator.column_capacity(idx), f64::NEG_INFINITY);
+    }
+
+    #[test]
     fn folding_keeps_an_edge_no_band_covers_exact() {
         let mut paginator = Paginator::new(
             Size { w: 500.0, h: 500.0 },
@@ -1182,7 +1311,7 @@ mod tests {
             ..Default::default()
         }]);
         let mut folded = margins(96.0, 96.1);
-        paginator.fold_edge_float_bands(&mut folded, false, 1);
+        paginator.fold_edge_float_bands(&mut folded, &paginator.page_float_bands(false, 1));
         assert_eq!((folded.top, folded.bottom), (120.0, 96.1));
     }
 
@@ -1216,7 +1345,7 @@ mod tests {
             ..Default::default()
         }]);
         let mut folded = margins(96.0, 96.0);
-        paginator.fold_edge_float_bands(&mut folded, false, 1);
+        paginator.fold_edge_float_bands(&mut folded, &paginator.page_float_bands(false, 1));
         assert_eq!((folded.top, folded.bottom), (160.0, 160.0));
     }
 
@@ -1305,7 +1434,7 @@ mod tests {
             ..Default::default()
         }]);
         let mut folded = margins(96.0, 96.0);
-        paginator.fold_edge_float_bands(&mut folded, false, 1);
+        paginator.fold_edge_float_bands(&mut folded, &paginator.page_float_bands(false, 1));
         assert_eq!(folded, margins(96.0, 96.0));
     }
 

@@ -2277,6 +2277,8 @@ pub struct HeaderFooterRefs {
 pub struct Page {
     pub number: u32,
     pub fragments: Vec<Fragment>,
+    #[serde(skip)]
+    pub(crate) float_bands: Vec<PageFloatBand>,
     pub margins: PageMargins,
     /// Body flow margins when they differ from the anchor frame.
     #[serde(skip_serializing_if = "Option::is_none")]

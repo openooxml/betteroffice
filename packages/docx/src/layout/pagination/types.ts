@@ -1622,8 +1622,8 @@ export type LayoutOptions = {
   bodyBreakType?: 'continuous' | 'nextPage' | 'evenPage' | 'oddPage' | 'nextColumn';
   sectionPageFloatBands?: Array<{
     default: Array<{ top: number; bottom: number; oddPage?: boolean }>;
-    first?: Array<{ top: number; bottom: number; oddPage?: boolean }>;
-    even?: Array<{ top: number; bottom: number; oddPage?: boolean }>;
+    first?: Array<{ top: number; bottom: number; oddPage?: boolean }> | null;
+    even?: Array<{ top: number; bottom: number; oddPage?: boolean }> | null;
     anchorMargins?: PageMargins;
   }>;
   /** Effective section states, indexed by section. Undefined = legacy globals. */
