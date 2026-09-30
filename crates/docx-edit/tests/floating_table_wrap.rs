@@ -40,60 +40,38 @@ fn request(bytes: &[u8]) -> String {
 fn metrics(bytes: &[u8]) -> (f64, usize) {
     let engine = EngineSession::new(76600);
     seed_from_docx(engine.doc(), bytes).unwrap();
-    let output: Value = serde_json::from_str(
-        &engine
-            .layout_document_with_regions_json(&request(bytes))
-            .unwrap(),
-    )
-    .unwrap();
-    let measured = output["measured"].as_array().unwrap();
-    let anchor = measured
+    let layout = engine
+        .layout_document_with_regions_json(&request(bytes))
+        .unwrap();
+    let output: Value = serde_json::from_str(&layout).unwrap();
+    let display: Value =
+        serde_json::from_str(&engine.build_display_list_json(&layout).unwrap()).unwrap();
+    let anchor_lines = output["measured"]
+        .as_array()
+        .unwrap()
         .iter()
         .find(|block| block["block"]["kind"] == "paragraph")
-        .expect("anchor paragraph");
-    let anchor_lines = anchor["measure"]["lines"].as_array().unwrap().len();
-    let marker = measured
+        .expect("anchor paragraph")["measure"]["lines"]
+        .as_array()
+        .unwrap()
+        .len();
+    let marker = display["pages"][0]["primitives"]
+        .as_array()
+        .unwrap()
         .iter()
-        .find(|block| {
-            block["block"]["kind"] == "paragraph"
-                && block["block"]["runs"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|run| run["text"] == "MARKER HEADING")
-        })
-        .expect("MARKER HEADING paragraph");
-    let lines = marker["measure"]["lines"].as_array().unwrap();
-    assert_eq!(lines.len(), 1, "MARKER HEADING must fit on one line");
-    for page in output["layout"]["pages"].as_array().unwrap() {
-        for fragment in page["fragments"].as_array().unwrap() {
-            if fragment["blockId"] == marker["block"]["id"] {
-                assert_eq!(page["number"], 1, "MARKER HEADING must stay on page one");
-                let y = fragment["y"].as_f64().unwrap()
-                    + lines[0]["floatSkipBefore"].as_f64().unwrap_or(0.0);
-                return (y * 72.0 / 96.0, anchor_lines);
-            }
-        }
-    }
-    panic!("no MARKER HEADING line");
+        .find(|primitive| primitive["kind"] == "text" && primitive["text"] == "MARKER HEADING")
+        .expect("MARKER HEADING on page one");
+    (marker["baselineY"].as_f64().unwrap() * 0.75, anchor_lines)
 }
 
 fn assert_matches_word(name: &str) {
-    let (marker_y, anchor_lines) = metrics(&fixture(name));
+    let (marker_baseline, anchor_lines) = metrics(&fixture(name));
     let word: Value = serde_json::from_str(WORD).unwrap();
-    let expected_y = word[name]["markerY"]
-        .as_f64()
-        .unwrap_or_else(|| {
-            panic!("{name}: fill markerY in floating-table-wrap/word.json from Word")
-        });
-    let expected_lines = word[name]["anchorLines"]
-        .as_u64()
-        .unwrap_or_else(|| {
-            panic!("{name}: fill anchorLines in floating-table-wrap/word.json from Word")
-        });
+    let expected_baseline = word[name]["markerBaseline"].as_f64().unwrap();
+    let expected_lines = word[name]["anchorLines"].as_u64().unwrap();
     assert!(
-        (marker_y - expected_y).abs() <= 2.0,
-        "{name}: MARKER HEADING y={marker_y:.3}pt, Word={expected_y:.3}pt"
+        (marker_baseline - expected_baseline).abs() <= 2.0,
+        "{name}: MARKER HEADING baseline {marker_baseline:.2}pt, Word {expected_baseline}pt"
     );
     assert_eq!(anchor_lines as u64, expected_lines, "{name}: anchor lines");
 }

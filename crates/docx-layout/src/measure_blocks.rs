@@ -1441,7 +1441,8 @@ fn table_floating_zone(
         }
     };
     let mut zone = table_floating_zone_at_x(floating, measure, content_width, x);
-    let (left_space, right_space) = table_wrap_gaps(floating, measure.total_width, content_width, x);
+    let (left_space, right_space) =
+        table_wrap_gaps(floating, measure.total_width, content_width, x);
     if left_space < MIN_WRAP_SEGMENT_WIDTH && right_space < MIN_WRAP_SEGMENT_WIDTH {
         zone.left_margin = 0.0;
         zone.right_margin = 0.0;
@@ -1455,7 +1456,8 @@ fn table_floating_zone_at_x(
     content_width: f64,
     x: f64,
 ) -> FloatingZone {
-    let (left_space, right_space) = table_wrap_gaps(floating, measure.total_width, content_width, x);
+    let (left_space, right_space) =
+        table_wrap_gaps(floating, measure.total_width, content_width, x);
     let text_on_right = if measure.total_width <= content_width / 2.0
         || (left_space < MIN_WRAP_SEGMENT_WIDTH && right_space < MIN_WRAP_SEGMENT_WIDTH)
     {
