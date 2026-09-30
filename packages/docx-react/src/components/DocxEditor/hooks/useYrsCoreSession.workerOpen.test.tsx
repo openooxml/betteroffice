@@ -474,18 +474,20 @@ test('tracked changes start an on-demand replica without a replica request', asy
 test('a failed revision count starts the on-demand replica', async () => {
   const { workers, posted } = installWorker({ holdState: true, failRevisionCount: true });
   const frames = holdFrames();
-  const { result, unmount } = renderHook(useHarness, {
-    initialProps: { ...initialProps, hydrateOnDemand: true },
-  });
+  const props = { ...initialProps, hydrateOnDemand: true, holdReplica: true };
+  const { result, rerender, unmount } = renderHook(useHarness, { initialProps: props });
   try {
     await waitFor(() => expect(result.current.host).not.toBeNull());
     const session = result.current.core.session!;
     act(() => result.current.pipeline.runLayoutPipeline());
-    await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
-    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
     act(() => result.current.presentFrame());
     act(() => frames.run());
     act(() => frames.run());
+    await act(async () => {});
+    expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    rerender({ ...props, holdReplica: false });
     await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
     expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
     expect(result.current.core.replicaReady).toBe(false);
