@@ -41,6 +41,8 @@ export interface YrsCoreSession {
 
 interface YrsCoreSessionCallbacks {
   isCurrentLoad?: (generation: number) => boolean;
+  /** A session was created for the current load, before it is seeded. */
+  onSession?: (session: YrsSession) => void;
   onHostDocument?: (host: YrsDocxHost, generation: number) => void;
   onError?: (error: Error, generation: number) => void;
 }
@@ -247,6 +249,7 @@ export function useYrsCoreSession(
           next.destroy();
           return;
         }
+        callbacksRef.current?.onSession?.(next);
         let host: YrsDocxHost | null;
         try {
           host = seedYrsSession(next, (document) => yrs.documentToYrs(next, document), {
