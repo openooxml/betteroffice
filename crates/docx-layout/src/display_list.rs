@@ -281,20 +281,20 @@ pub struct DocAttrs {
     pub line_index: Option<u64>,
     /// table cell the primitive paints inside (0-based grid coordinates)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cell: Option<TableCellRef>,
+    pub cell: Option<Box<TableCellRef>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment_ids: Option<Vec<String>>,
     /// inert field identity when this primitive paints a field result — the
     /// a11y mirror announces it; the instruction is NEVER parsed/executed.
     /// Additive + serde-optional: field-free fixtures stay byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub field: Option<FieldMetadata>,
+    pub field: Option<Box<FieldMetadata>>,
     /// footnote/endnote reference identity when this primitive is the body
     /// reference mark (note backlinks). Additive + serde-optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note_ref: Option<NoteRefMetadata>,
+    pub note_ref: Option<Box<NoteRefMetadata>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub revision: Option<Revision>,
+    pub revision: Option<Box<Revision>>,
     /// Synthetic numbering glyph emitted before the first line of a list
     /// paragraph. The mirror uses this to expose the stable list-marker class.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -307,7 +307,7 @@ pub struct DocAttrs {
     /// display-list snapshots that carry only run-level revisions stay
     /// byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub structural_revision: Option<StructuralRevision>,
+    pub structural_revision: Option<Box<StructuralRevision>>,
     /// sanitized hyperlink target for clickable text/image primitives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub href: Option<String>,
@@ -323,13 +323,13 @@ pub struct DocAttrs {
     pub link_doc_location: Option<String>,
     /// innermost block-level content-control identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sdt: Option<SdtAttrs>,
+    pub sdt: Option<Box<SdtAttrs>>,
     /// Full outer-to-inner content-control ancestry.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sdt_path: Vec<SdtAttrs>,
     /// inline content-control widget metadata when this text primitive is its glyph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inline_sdt_widget: Option<InlineSdtWidgetAttrs>,
+    pub inline_sdt_widget: Option<Box<InlineSdtWidgetAttrs>>,
     /// accessibility summary for primitives that compose one chart block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chart: Option<ChartA11yAttrs>,
@@ -350,15 +350,15 @@ pub struct DocAttrs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment: Option<CommentMetadata>,
+    pub comment: Option<Box<CommentMetadata>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub clip_group: Option<ClipGroupMetadata>,
+    pub clip_group: Option<Box<ClipGroupMetadata>>,
     /// Leader glyph metadata shared by text and glyph primitives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub leader_glyphs: Option<LeaderGlyphMetadata>,
+    pub leader_glyphs: Option<Box<LeaderGlyphMetadata>>,
     /// Optional decoration metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub highlight_slice: Option<HighlightSliceMetadata>,
+    pub highlight_slice: Option<Box<HighlightSliceMetadata>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style: Option<DisplayBorderStyle>,
     /// Fields belonging to one primitive class are flattened through the shared
@@ -372,23 +372,23 @@ pub struct DocAttrs {
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "shapeType")]
     pub image_shape_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_frame: Option<ContentFrame>,
+    pub content_frame: Option<Box<ContentFrame>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub border: Option<Value>,
+    pub border: Option<Box<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fill_paint: Option<Value>,
+    pub fill_paint: Option<Box<Value>>,
     /// Lossless DrawingML stroke details beyond the plain colour/width/dash
     /// triple: compound, alignment, caps, joins, arrows and custom dashes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stroke_paint: Option<Value>,
+    pub stroke_paint: Option<Box<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effect_extent: Option<Value>,
+    pub effect_extent: Option<Box<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub drawing_scene: Option<Value>,
+    pub drawing_scene: Option<Box<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text_body_properties: Option<Value>,
+    pub text_body_properties: Option<Box<Value>>,
     /// GlyphRun-only member flattened through the shared attrs (same pattern
     /// as the image/shape members above): the resolved CSS font shorthand the
     /// canvas fillText safety net uses when glyph outlines are unavailable,
@@ -399,9 +399,9 @@ pub struct DocAttrs {
     /// (glow/shadow/reflection/textFill/textOutline), passed through losslessly
     /// from `RunFormatting.modernEffects`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub modern_effects: Option<Value>,
+    pub modern_effects: Option<Box<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub table: Option<TableMetadata>,
+    pub table: Option<Box<TableMetadata>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_shape_atom: Option<bool>,
 }
@@ -2772,7 +2772,7 @@ pub(crate) struct PageIn {
     #[serde(default)]
     pub(crate) section_page_index: Option<u64>,
     #[serde(default)]
-    section_page_number: Option<u64>,
+    pub(crate) section_page_number: Option<u64>,
     #[serde(default)]
     pub(crate) header_footer_refs: Option<PageHeaderFooterRefsIn>,
     #[serde(default)]
@@ -3303,7 +3303,7 @@ fn stamp_sdt_range(prims: &mut [Primitive], groups: &[SdtGroupIn], overwrite: bo
         if let Some(attrs) = doc_attrs_mut(p)
             && (overwrite || attrs.sdt.is_none())
         {
-            attrs.sdt = Some(sdt.clone());
+            attrs.sdt = Some(Box::new(sdt.clone()));
             attrs.sdt_path = path.clone();
         }
     }
@@ -3733,12 +3733,13 @@ fn stamp_image_run_attrs(attrs: &mut DocAttrs, run: &ImageRunIn, x: f64, y: f64)
     attrs.image_flip_v = (run.flip_v == Some(true)
         || transform_has_flip(run.transform.as_deref(), 'y'))
     .then_some(true);
-    attrs.content_frame = content_frame(x, y, run.width, run.height, run.rotation_bounds.as_ref());
+    attrs.content_frame =
+        content_frame(x, y, run.width, run.height, run.rotation_bounds.as_ref()).map(Box::new);
     attrs.image_shape_type = run.shape_type.clone();
     attrs.effects = run.effects.clone();
-    attrs.border = run.outline.clone();
+    attrs.border = run.outline.clone().map(Box::new);
     if run.is_insertion == Some(true) || run.is_deletion == Some(true) {
-        attrs.revision = Some(Revision {
+        attrs.revision = Some(Box::new(Revision {
             author: run.change_author.clone().unwrap_or_default(),
             date: run.change_date.clone().unwrap_or_default(),
             revision_id: run
@@ -3750,7 +3751,7 @@ fn stamp_image_run_attrs(attrs: &mut DocAttrs, run: &ImageRunIn, x: f64, y: f64)
             } else {
                 RevisionKind::Del
             },
-        });
+        }));
     }
 }
 
@@ -3770,10 +3771,11 @@ fn stamp_image_block_attrs(attrs: &mut DocAttrs, block: &ImageBlockIn, x: f64, y
         block.width,
         block.height,
         block.rotation_bounds.as_ref(),
-    );
+    )
+    .map(Box::new);
     attrs.image_shape_type = block.shape_type.clone();
     attrs.effects = block.effects.clone();
-    attrs.border = block.outline.clone();
+    attrs.border = block.outline.clone().map(Box::new);
 }
 
 fn image_layout_width(run: &ImageRunIn) -> f64 {
@@ -4860,7 +4862,7 @@ fn recompose_hf_region(
                 let mut attrs = BlockRef::of(&block.id).attrs();
                 attrs.doc_start = block.pm_start;
                 attrs.doc_end = block.pm_end;
-                attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups);
+                attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups).map(Box::new);
                 attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
                 stamp_image_block_attrs(&mut attrs, block, x, y);
                 let rotation = block
@@ -5132,7 +5134,9 @@ fn build_display_list_selected(
                     let mut attrs = BlockRef::of(&imf.block_id).attrs();
                     attrs.doc_start = imf.pm_start.or(block.and_then(|b| b.pm_start));
                     attrs.doc_end = imf.pm_end.or(block.and_then(|b| b.pm_end));
-                    attrs.sdt = block.and_then(|b| sdt_attrs_from_groups(&b.sdt_groups));
+                    attrs.sdt = block
+                        .and_then(|b| sdt_attrs_from_groups(&b.sdt_groups))
+                        .map(Box::new);
                     if let Some(block) = block {
                         attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
                         stamp_image_block_attrs(&mut attrs, block, imf.x, imf.y);
@@ -5276,6 +5280,13 @@ fn build_display_list_selected(
         &input.comment_authors,
         &input.comment_threads,
     );
+    // A resident list keeps every page, so no page holds spare capacity.
+    for page in &mut display_list.pages {
+        page.primitives.shrink_to_fit();
+        for region in [&mut page.header, &mut page.footer].into_iter().flatten() {
+            region.primitives.shrink_to_fit();
+        }
+    }
     display_list
 }
 
@@ -5413,7 +5424,7 @@ fn apply_review_primitive_metadata(
                 if let Some(thread) = thread {
                     apply_comment_thread_metadata(&mut metadata, thread);
                 }
-                attrs.comment = Some(metadata);
+                attrs.comment = Some(Box::new(metadata));
             }
             if is_comment_wash {
                 if all_resolved {
@@ -5550,7 +5561,7 @@ pub(crate) fn emit_paragraph_fragment(
     if emit_block_chrome {
         if let Some(rev) = pmark_revision.clone() {
             let mut bar_attrs = block_ref.attrs();
-            bar_attrs.structural_revision = Some(rev.clone());
+            bar_attrs.structural_revision = Some(Box::new(rev.clone()));
             prims.push(Primitive::Rect(RectPrimitive {
                 x: px(origin_x + STRUCTURAL_CHANGE_BAR_OFFSET_X),
                 y: px(origin_y),
@@ -5650,7 +5661,7 @@ pub(crate) fn emit_paragraph_fragment(
         && frag.carried_to_next != Some(true)
     {
         let mut glyph_attrs = block_ref.attrs();
-        glyph_attrs.structural_revision = Some(rev.clone());
+        glyph_attrs.structural_revision = Some(Box::new(rev.clone()));
         let glyph_x = line.end_x + PARAGRAPH_MARK_GLYPH_GAP;
         prims.push(Primitive::Text(TextRunPrimitive {
             text: "¶".to_string(),
@@ -5720,7 +5731,7 @@ pub(crate) fn emit_paragraph_fragment(
                     a.to_line = Some(to);
                 }
                 if let Some(sdt) = &sdt {
-                    a.sdt = Some(sdt.clone());
+                    a.sdt = Some(Box::new(sdt.clone()));
                     a.sdt_path = sdt_path.clone();
                 }
             }
@@ -6435,7 +6446,7 @@ fn emit_line(
                             attrs.bidi_level =
                                 attrs.bidi_level.or_else(|| logical_order.map(|_| *level));
                             if imr.is_insertion == Some(true) || imr.is_deletion == Some(true) {
-                                attrs.revision = Some(Revision {
+                                attrs.revision = Some(Box::new(Revision {
                                     author: imr.change_author.clone().unwrap_or_default(),
                                     date: imr.change_date.clone().unwrap_or_default(),
                                     revision_id: imr
@@ -6447,7 +6458,7 @@ fn emit_line(
                                     } else {
                                         RevisionKind::Del
                                     },
-                                });
+                                }));
                             }
                         }
                     }
@@ -6597,7 +6608,7 @@ fn emit_tab_leader(
         attrs.doc_end = tab.pm_end;
         attrs.logical_order = logical_order.or(tab.fmt.logical_order);
         attrs.bidi_level = tab.fmt.bidi_level;
-        attrs.leader_glyphs = Some(LeaderGlyphMetadata {
+        attrs.leader_glyphs = Some(Box::new(LeaderGlyphMetadata {
             glyph: Some(glyph.to_string()),
             count: Some(count),
             x: Some(px(x)),
@@ -6609,7 +6620,7 @@ fn emit_tab_leader(
             size: measured.font_size.map(|size| px(size * 96.0 / 72.0)),
             color: Some(run_color(&fmt)),
             rtl: tab.fmt.rtl.filter(|rtl| *rtl),
-        });
+        }));
         prims.push(Primitive::Text(TextRunPrimitive {
             text: glyph.repeat(count as usize),
             x: px(x),
@@ -6766,9 +6777,9 @@ fn emit_text_segment(
     attrs.doc_start = pm_start;
     attrs.doc_end = pm_end;
     attrs.comment_ids = comment_ids.clone();
-    attrs.revision = revision;
+    attrs.revision = revision.map(Box::new);
     attrs.href = hyperlink_href(fmt);
-    attrs.inline_sdt_widget = fmt.inline_sdt_widget.clone();
+    attrs.inline_sdt_widget = fmt.inline_sdt_widget.clone().map(Box::new);
     attrs.logical_order = logical_order.or(fmt.logical_order);
     attrs.bidi_level = exact_advance.then_some(bidi_level).or(fmt.bidi_level);
     attrs.lang = fmt.language.as_ref().and_then(|language| {
@@ -6792,20 +6803,20 @@ fn emit_text_segment(
     // the a11y mirror can announce what the field is. Announce-only — nothing
     // downstream parses or executes the instruction.
     if let Some(field_run) = field {
-        attrs.field = Some(field_metadata(field_run));
+        attrs.field = Some(Box::new(field_metadata(field_run)));
     }
     // footnote/endnote body reference mark → note_ref, the backlink hook
     // (the mirror renders it as a doc-noteref link to `oox-<kind>-<id>`)
     if let Some(id) = fmt.footnote_ref_id {
-        attrs.note_ref = Some(NoteRefMetadata {
+        attrs.note_ref = Some(Box::new(NoteRefMetadata {
             kind: Some("footnote".to_string()),
             id: Some(id),
-        });
+        }));
     } else if let Some(id) = fmt.endnote_ref_id {
-        attrs.note_ref = Some(NoteRefMetadata {
+        attrs.note_ref = Some(Box::new(NoteRefMetadata {
             kind: Some("endnote".to_string()),
             id: Some(id),
-        });
+        }));
     }
 
     // Highlight is the run font box, never the containing line band. Exact
@@ -6814,7 +6825,7 @@ fn emit_text_segment(
         let ascent = font_px * 0.8;
         let descent = font_px * 0.2;
         let mut highlight_attrs = attrs.clone();
-        highlight_attrs.highlight_slice = Some(HighlightSliceMetadata {
+        highlight_attrs.highlight_slice = Some(Box::new(HighlightSliceMetadata {
             source_start: exact_advance.then_some(source_start as u64),
             source_end: exact_advance.then_some(source_end as u64),
             ascent: Some(px(ascent)),
@@ -6822,7 +6833,7 @@ fn emit_text_segment(
             includes_trailing_whitespace: Some(
                 text.chars().next_back().is_some_and(char::is_whitespace),
             ),
-        });
+        }));
         prims.push(Primitive::Decoration(DecorationPrimitive {
             deco: DecoKind::Highlight,
             x: px(x),
@@ -6910,7 +6921,7 @@ fn emit_text_segment(
     };
     if !emitted_glyphs {
         let mut text_attrs = attrs.clone();
-        text_attrs.modern_effects = fmt.modern_effects.clone();
+        text_attrs.modern_effects = fmt.modern_effects.clone().map(Box::new);
         prims.push(Primitive::Text(TextRunPrimitive {
             text: text.to_string(),
             x: px(x),
@@ -7239,7 +7250,7 @@ fn try_emit_glyph_runs(
         // outlines unavailable) — same shorthand the TextRunPrimitive would
         // carry, so the fallback keeps family/weight/style
         sub_attrs.fallback_font = Some(css_font(fmt));
-        sub_attrs.modern_effects = fmt.modern_effects.clone();
+        sub_attrs.modern_effects = fmt.modern_effects.clone().map(Box::new);
 
         local.push(Primitive::GlyphRun(GlyphRunPrimitive {
             font_id: font.to_u32(),
@@ -7894,7 +7905,7 @@ fn emit_floating_image(
     attrs.doc_start = imr.pm_start;
     attrs.doc_end = imr.pm_end;
     stamp_image_run_attrs(&mut attrs, imr, page_x, page_y);
-    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups);
+    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups).map(Box::new);
     attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
     prims.push(Primitive::Image(ImagePrimitive {
         rel_id: imr.src.clone(),
@@ -7934,7 +7945,7 @@ fn emit_shape_fragment(
         .or(frag.pm_end)
         .or(block.doc_end)
         .or(block.pm_end);
-    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups);
+    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups).map(Box::new);
     attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
     attrs.aria_label = block.title.clone();
     attrs.aria_description = block.description.clone();
@@ -7950,12 +7961,12 @@ fn emit_shape_fragment(
         .and_then(|scene| scene.pointer("/root/id"))
         .and_then(Value::as_str)
         .map(str::to_string);
-    attrs.fill_paint = shape_fill_paint(block.fill.as_ref());
-    attrs.stroke_paint = shape_stroke_paint(block.stroke.as_ref());
+    attrs.fill_paint = shape_fill_paint(block.fill.as_ref()).map(Box::new);
+    attrs.stroke_paint = shape_stroke_paint(block.stroke.as_ref()).map(Box::new);
     attrs.effects = block.effects.clone();
-    attrs.effect_extent = block.effect_extent.clone();
-    attrs.drawing_scene = block.scene.clone();
-    attrs.text_body_properties = block.text_body_properties.clone();
+    attrs.effect_extent = block.effect_extent.clone().map(Box::new);
+    attrs.drawing_scene = block.scene.clone().map(Box::new);
+    attrs.text_body_properties = block.text_body_properties.clone().map(Box::new);
 
     let decorative = block.decorative.unwrap_or_else(|| {
         block.inner_text.is_empty() && block.title.is_none() && block.description.is_none()
@@ -8465,7 +8476,7 @@ fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block
         .or(frag.pm_end)
         .or(block.doc_end)
         .or(block.pm_end);
-    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups);
+    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups).map(Box::new);
     attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
     attrs.chart = Some(ChartA11yAttrs {
         label: chart_aria_label(&chart),
@@ -8864,11 +8875,11 @@ fn apply_clip_group(attrs: &mut DocAttrs, id: String, rect: ClipRect) {
     } else {
         rect
     };
-    attrs.clip_group = Some(ClipGroupMetadata {
+    attrs.clip_group = Some(Box::new(ClipGroupMetadata {
         id: Some(id),
         clip: Some(clip),
         opacity: None,
-    });
+    }));
 }
 
 fn table_metadata(
@@ -9113,7 +9124,7 @@ pub(crate) fn emit_table_fragment(
     let table_revision = whole_table_revision(block);
     if let Some(rev) = table_revision.clone() {
         let mut attrs = block_ref.attrs();
-        attrs.structural_revision = Some(rev.clone());
+        attrs.structural_revision = Some(Box::new(rev.clone()));
         prims.push(Primitive::Rect(RectPrimitive {
             x: px(frag.x + STRUCTURAL_CHANGE_BAR_OFFSET_X),
             y: px(frag.y),
@@ -9141,7 +9152,7 @@ pub(crate) fn emit_table_fragment(
                 continue;
             }
             let mut attrs = block_ref.attrs();
-            attrs.structural_revision = Some(rev.clone());
+            attrs.structural_revision = Some(Box::new(rev.clone()));
             prims.push(Primitive::Rect(RectPrimitive {
                 x: px(frag.x + STRUCTURAL_CHANGE_BAR_OFFSET_X),
                 y: px(t),
@@ -9241,7 +9252,7 @@ pub(crate) fn emit_table_fragment(
             && let Some((t, b)) = clip(cy, cy + p.cell_h)
         {
             let mut bg_attrs = block_ref.attrs();
-            bg_attrs.cell = Some(cell_ref.clone());
+            bg_attrs.cell = Some(Box::new(cell_ref.clone()));
             prims.push(Primitive::Rect(RectPrimitive {
                 x: px(cx),
                 y: px(t),
@@ -9265,8 +9276,8 @@ pub(crate) fn emit_table_fragment(
                     Some(p.g.column_index as u64),
                 );
                 let mut attrs = block_ref.attrs();
-                attrs.cell = Some(cell_ref.clone());
-                attrs.structural_revision = Some(rev.clone());
+                attrs.cell = Some(Box::new(cell_ref.clone()));
+                attrs.structural_revision = Some(Box::new(rev.clone()));
                 prims.push(Primitive::Rect(RectPrimitive {
                     x: px(cx),
                     y: px(t),
@@ -9298,7 +9309,7 @@ pub(crate) fn emit_table_fragment(
                 // explicit ownership: the owning grid cell rides on the line so
                 // consumers associate borders exactly (no geometric fallback)
                 let line_attrs = DocAttrs {
-                    cell: Some(cell_ref.clone()),
+                    cell: Some(Box::new(cell_ref.clone())),
                     ..DocAttrs::default()
                 };
                 prims.push(Primitive::Line(LinePrimitive {
@@ -9402,7 +9413,7 @@ pub(crate) fn emit_table_fragment(
             // ownership metadata: the cut rule closes this grid cell's column
             // band at the fragment edge (borderOwner stays Fragment)
             let line_attrs = DocAttrs {
-                cell: Some(TableCellRef {
+                cell: Some(Box::new(TableCellRef {
                     row: g.row_index as u64,
                     col: g.column_index as u64,
                     row_span: g.row_span as u64,
@@ -9417,7 +9428,7 @@ pub(crate) fn emit_table_fragment(
                     owns_right_border: None,
                     owns_bottom_border: None,
                     owns_left_border: None,
-                }),
+                })),
                 ..DocAttrs::default()
             };
             prims.push(Primitive::Line(LinePrimitive {
@@ -9464,7 +9475,7 @@ pub(crate) fn emit_table_fragment(
                     inner.parent_table_id = Some(table_id.clone());
                 }
             } else {
-                attrs.table = Some(metadata.clone());
+                attrs.table = Some(Box::new(metadata.clone()));
             }
         }
     }
@@ -10151,7 +10162,7 @@ fn emit_cell_floating_images(
             let layout_width = image_layout_width(imr);
             let layout_height = image_layout_height(imr);
             let mut attrs = block_ref.attrs();
-            attrs.cell = Some(cell_ref.clone());
+            attrs.cell = Some(Box::new(cell_ref.clone()));
             // A continuation repaint carries no document positions.
             if selectable {
                 attrs.doc_start = imr.pm_start;
@@ -10483,7 +10494,7 @@ fn strip_doc_positions(p: &mut Primitive) {
 /// carry no DocAttrs and stay untouched)
 fn set_cell_ref(p: &mut Primitive, cell: &TableCellRef) {
     if let Some(attrs) = doc_attrs_mut(p) {
-        attrs.cell = Some(cell.clone());
+        attrs.cell = Some(Box::new(cell.clone()));
     }
 }
 
@@ -11325,6 +11336,14 @@ fn normalize_integral_json_numbers(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every retained primitive carries its attributes inline, so rarely set
+    /// metadata stays boxed: 270k primitives cost 1.9 KB each before it was.
+    #[test]
+    fn retained_primitives_stay_compact() {
+        assert!(std::mem::size_of::<DocAttrs>() <= 800);
+        assert!(std::mem::size_of::<Primitive>() <= 1152);
+    }
 
     /// The resident input as it was built before typed transcoding: every
     /// value through a JSON tree, integral numbers normalized.

@@ -77,10 +77,21 @@ export interface UseRustDisplayListResult {
   /** Resolve the newest query facade after pending document/frame changes. */
   resolveQueries: ResolveDisplayListQueries;
   /**
-   * The display list once it shows every document change so far. `relayout`
-   * runs a layout pass when none is on its way; rejects when rendering fails.
+   * The display list once it shows every document change so far, laid out in
+   * full. `relayout` runs a layout pass when none is on its way; rejects when
+   * rendering fails, or after `timeoutMs` (15 s by default, none when null).
    */
-  settledDisplayList(relayout: () => void, timeoutMs?: number): Promise<DisplayList>;
+  settledDisplayList(
+    relayout: (() => void) | null,
+    timeoutMs?: number | null
+  ): Promise<DisplayList>;
+  /**
+   * Drops the settled display list. Without `failure` a new document is on its way, so waiters
+   * wait for its display list; with one they reject.
+   */
+  resetSettled(failure?: Error | null): void;
+  /** True from a document load until the loaded document's first layout arrives. */
+  awaitingDocument(): boolean;
   /** Worker-computed caret tagged to `frame`. */
   caret: YrsResidentCaretSnapshot | null;
   /** Apply a plain-text edit through the resident engine and publish its frame. */
@@ -263,11 +274,21 @@ export function useRustDisplayList(
   const settleErrorRef = useRef<Error | null>(null);
   const settleWaitersRef = useRef(new Set<() => void>());
   const settleRelayoutRef = useRef<(() => void) | null>(null);
-  const markSettled = useCallback((epoch: number | null, failure: Error | null = null): void => {
-    settledEpochRef.current = epoch;
-    settleErrorRef.current = failure;
-    for (const waiter of [...settleWaitersRef.current]) waiter();
-  }, []);
+  const layoutRef = useRef(layout);
+  layoutRef.current = layout;
+  // The layout shown when another document started loading. What becomes of
+  // it settles no wait: waits are for the document being loaded.
+  const replacedLayoutRef = useRef<{ layout: Layout | null } | null>(null);
+  const documentLoadsRef = useRef(0);
+  const markSettled = useCallback(
+    (epoch: number | null, failure: Error | null = null, authoritative = false): void => {
+      if (replacedLayoutRef.current && !authoritative) return;
+      settledEpochRef.current = epoch;
+      settleErrorRef.current = failure;
+      for (const waiter of [...settleWaitersRef.current]) waiter();
+    },
+    []
+  );
   const requestSettleRelayout = useCallback((): void => {
     if (settleWaitersRef.current.size === 0) return;
     setTimeout(() => {
@@ -456,8 +477,9 @@ export function useRustDisplayList(
       workerRef.current?.client.destroy();
       workerRef.current = null;
       queryEpochGate.clear();
+      markSettled(null, new Error('The editor was unmounted'), true);
     },
-    [queryEpochGate]
+    [markSettled, queryEpochGate]
   );
 
   const publishQuerySnapshot = useCallback(
@@ -520,6 +542,7 @@ export function useRustDisplayList(
 
   const applyResidentInput = useCallback(
     (operation: ResidentInputOperation): Promise<ResidentFrameApplyResult | null> => {
+      const documentLoad = documentLoadsRef.current;
       const replayInputOnMainThread = async (
         pending: ResidentInputOperation,
         hostEngine: YrsSession,
@@ -735,9 +758,12 @@ export function useRustDisplayList(
         // stories, or a frame that has not established resident state).
         if (nextError.message.includes('resident input state is not ready')) return null;
         console.error('[CanvasRenderer] Resident input failed', nextError);
-        queryEpochGate.clear();
-        setError(nextError);
-        markSettled(null, nextError);
+        // An input to a document another load replaced fails nothing of the new one.
+        if (documentLoadsRef.current === documentLoad) {
+          queryEpochGate.clear();
+          setError(nextError);
+          markSettled(null, nextError);
+        }
         // Once invoked, never fall through to the legacy op: a worker failure
         // may have happened after committing the transaction.
         return { frameEpoch: null, caretSynchronized: false };
@@ -1105,6 +1131,9 @@ export function useRustDisplayList(
   );
 
   useEffect(() => {
+    if (replacedLayoutRef.current && layout && layout !== replacedLayoutRef.current.layout) {
+      replacedLayoutRef.current = null;
+    }
     if (!layout) {
       // layout reset (document change) — drop the stale pages
       generationRef.current++;
@@ -1118,13 +1147,16 @@ export function useRustDisplayList(
       setError(null);
       setLoading(true);
       settledEpochRef.current = null;
-      settleErrorRef.current = null;
+      // A failure of the document being loaded holds until its layout or the next load.
+      if (!replacedLayoutRef.current) settleErrorRef.current = null;
       setWorkerSurfacesActive(false);
       setWorkerPresentationActive(false);
       notifyCaretInterrupt();
       return;
     }
     queryEpochGate.invalidate();
+    // A new layout settles with its own display list, not with the last one.
+    settledEpochRef.current = null;
     const previewKey = revisionPreviewKeyOf(layout);
     if (
       previewKey !== null &&
@@ -1139,9 +1171,11 @@ export function useRustDisplayList(
     const inputs = (overrides?.getInputs ?? getLayoutKernelInputs)(layout);
     const generation = ++generationRef.current;
     if (!inputs) {
+      const failure = new Error('No display-list inputs were recorded for the current layout.');
       queryEpochGate.clear();
-      setError(new Error('No display-list inputs were recorded for the current layout.'));
+      setError(failure);
       setLoading(false);
+      markSettled(null, failure);
       return;
     }
     const build = overrides?.build ?? buildRustDisplayList;
@@ -1375,7 +1409,7 @@ export function useRustDisplayList(
         setPresentedEngine(residentEngine ?? engine ?? null);
         setError(null);
         setLoading(false);
-        if (!result.provisional) markSettled(contentEpoch);
+        if (!result.provisional && layout.partial !== true) markSettled(contentEpoch);
         const workerProduced = Boolean(
           result.workerProduced && probe && workerRef.current?.client.isReady()
         );
@@ -1425,8 +1459,21 @@ export function useRustDisplayList(
     requestSettleRelayout,
   ]);
 
+  const resetSettled = useCallback(
+    (failure: Error | null = null): void => {
+      if (!failure) {
+        contentEpochRef.current += 1;
+        documentLoadsRef.current += 1;
+        replacedLayoutRef.current = { layout: layoutRef.current };
+      }
+      markSettled(null, failure, true);
+    },
+    [markSettled]
+  );
+  const awaitingDocument = useCallback((): boolean => replacedLayoutRef.current !== null, []);
+
   const settledDisplayList = useCallback(
-    (relayout: () => void, timeoutMs = 15_000): Promise<DisplayList> =>
+    (relayout: (() => void) | null, timeoutMs: number | null = 15_000): Promise<DisplayList> =>
       new Promise<DisplayList>((resolve, reject) => {
         let timer: ReturnType<typeof setTimeout> | undefined;
         const settle = (): boolean => {
@@ -1450,13 +1497,15 @@ export function useRustDisplayList(
           settle();
         };
         if (settle()) return;
-        settleRelayoutRef.current = relayout;
+        if (relayout) settleRelayoutRef.current = relayout;
         settleWaitersRef.current.add(waiter);
-        timer = setTimeout(() => {
-          settleWaitersRef.current.delete(waiter);
-          reject(new Error('The document did not finish rendering'));
-        }, timeoutMs);
-        relayout();
+        if (timeoutMs !== null) {
+          timer = setTimeout(() => {
+            settleWaitersRef.current.delete(waiter);
+            reject(new Error('The document did not finish rendering'));
+          }, timeoutMs);
+        }
+        relayout?.();
       }),
     [schedulePageBuilds]
   );
@@ -1469,6 +1518,8 @@ export function useRustDisplayList(
     queries: snapshot.queries,
     resolveQueries,
     settledDisplayList,
+    resetSettled,
+    awaitingDocument,
     caret: snapshot.caret,
     applyInput,
     applyDelete,
@@ -1622,8 +1673,12 @@ export interface UseCanvasRendererResult {
   queries: DisplayListQueries | null;
   /** Resolve the newest facade after pending edits and relayouts. */
   resolveQueries: ResolveDisplayListQueries;
-  /** The display list once it shows every document change so far. */
-  settledDisplayList(relayout: () => void, timeoutMs?: number): Promise<DisplayList>;
+  /** See {@link UseRustDisplayListResult.settledDisplayList}. */
+  settledDisplayList: UseRustDisplayListResult['settledDisplayList'];
+  /** See {@link UseRustDisplayListResult.resetSettled}. */
+  resetSettled: UseRustDisplayListResult['resetSettled'];
+  /** See {@link UseRustDisplayListResult.awaitingDocument}. */
+  awaitingDocument: UseRustDisplayListResult['awaitingDocument'];
   /** Worker caret from the same atomic renderer snapshot. */
   caret: YrsResidentCaretSnapshot | null;
   /** Whether worker-presented pixels make `caret` authoritative. */
@@ -1704,6 +1759,8 @@ export function useCanvasRenderer(
     queries: snapshotQueries,
     resolveQueries,
     settledDisplayList,
+    resetSettled,
+    awaitingDocument,
     caret,
     applyInput,
     applyDelete,
@@ -1810,6 +1867,8 @@ export function useCanvasRenderer(
     queries: geometryReady ? snapshotQueries : null,
     resolveQueries,
     settledDisplayList,
+    resetSettled,
+    awaitingDocument,
     caret,
     authoritativeCaretActive,
     canvasHostRef,

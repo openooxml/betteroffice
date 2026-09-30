@@ -92,6 +92,7 @@ async function setup(options: {
   comments?: Comment[];
   setComments?: () => void;
   save?: () => Promise<ArrayBuffer | null>;
+  awaitingDocument?: () => boolean;
 }) {
   const events: string[] = [];
   const editor = {
@@ -134,6 +135,7 @@ async function setup(options: {
       modeRef: { current: 'editing' as EditorMode },
       openingRef: options.opening,
       allowHostProposalsRef: { current: false },
+      awaitingDocument: options.awaitingDocument,
     });
     return ref;
   });
@@ -153,6 +155,26 @@ test('a partial layout has no page contents yet', async () => {
   const { pagedEditorRef, api } = await setup({ session, request: () => request });
   Object.assign(pagedEditorRef.current!, { getLayout: () => ({ ...layout, partial: true }) });
   expect(api().getPageContent(1)).toBeNull();
+});
+
+test('the page count is 0 until the loaded document is laid out in full', async () => {
+  const { session, request } = await openSession();
+  const { layout } = JSON.parse(session.layoutDocumentWithRegionsRetainedJson(request)) as {
+    layout: Layout;
+  };
+  let awaiting = false;
+  let current: Layout = { ...layout, partial: true };
+  const { pagedEditorRef, api } = await setup({
+    session,
+    request: () => request,
+    awaitingDocument: () => awaiting,
+  });
+  Object.assign(pagedEditorRef.current!, { getLayout: () => current });
+  expect(api().getTotalPages()).toBe(0);
+  current = layout;
+  expect(api().getTotalPages()).toBe(layout.pages.length);
+  awaiting = true;
+  expect(api().getTotalPages()).toBe(0);
 });
 
 test('flushed input is laid out before its pages are exported', async () => {
