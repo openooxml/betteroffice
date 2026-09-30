@@ -146,6 +146,10 @@ interface HarnessProps {
   collaboration?: DocxEditorCollaborationOptions;
   readOnly?: boolean;
   resolvedCommentIds?: ReadonlySet<number>;
+  /** Asks for the replica as soon as the session exists, as DocxEditor does for plugins, sidebars or the outline. */
+  wanted?: boolean;
+  /** Passes the renderer's own pending completion, as DocxEditor does. */
+  followCompletion?: boolean;
   /** Holds the replica as while the shown engine's completion is still to be asked of the worker. */
   holdReplica?: boolean;
 }
@@ -194,13 +198,17 @@ function useHarness(props: HarnessProps) {
       workerOpen: props.experimentalWorkerOpen ? {
         openInWorker,
         renderedFrame: renderer.status === 'ready' ? renderer.displayList : null,
-        completingLayout: renderer.completingLayout,
         ...(props.holdReplica ? { pendingCompletion: renderer.presentedEngine } : {}),
+        ...(props.followCompletion ? { pendingCompletion: renderer.pendingCompletion } : {}),
         hydrateOnDemand: props.hydrateOnDemand,
       } : undefined,
     }
   );
   handoffFromRef.current = core.handoffFrom;
+  const replicaPending = Boolean(core.hydrateOnDemand && core.session && !core.replicaReady);
+  useEffect(() => {
+    if (props.wanted && replicaPending) core.requestReplica();
+  }, [core, props.wanted, replicaPending]);
   const syncCoordinator = useRef(new LayoutSelectionGate());
   const element = useRef<HTMLDivElement | null>(null);
   const registeredFont = useRef<{ session: YrsSession; id: number } | null>(null);
@@ -346,6 +354,15 @@ test.each([false, true])('textarea focus requests a replica only with hydrateOnD
     await waitFor(() => expect(result.current.host).not.toBeNull());
     const core = result.current.core;
     expect(core.hydrateOnDemand).toBe(hydrateOnDemand);
+    if (hydrateOnDemand) {
+      act(() => result.current.pipeline.runLayoutPipeline());
+      await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+      act(() => result.current.presentFrame());
+      act(() => frames.run());
+      act(() => frames.run());
+      await waitFor(() => expect(posted.map((request) => request.type)).toContain('revisionCount'));
+      expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    }
     const view = render(
       <YrsInput
         enabled
@@ -455,10 +472,15 @@ test('tracked changes start an on-demand replica without a replica request', asy
     await act(async () => {});
     expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
     rerender({ ...props, holdReplica: false });
+    expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
+    act(() => frames.run());
+    act(() => frames.run());
     await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
     expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
     rerender({ ...props, holdReplica: true });
     rerender({ ...props, holdReplica: false });
+    act(() => frames.run());
+    act(() => frames.run());
     await act(async () => {});
     expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
     expect(result.current.core.replicaReady).toBe(false);
@@ -476,34 +498,89 @@ test('tracked changes start an on-demand replica without a replica request', asy
   }
 });
 
-test('the revision count waits until the worker has completed the layout', async () => {
+test.each(['wanted', 'awaited'] as const)(
+  'a replica %s before the first layout loads only once the rest of the layout is asked of the worker',
+  async (how) => {
+    const { workers, posted } = installWorker({ holdState: true, holdCompletion: true });
+    const frames = holdFrames();
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: {
+        ...initialProps,
+        source: await longFixture(1200),
+        hydrateOnDemand: true,
+        followCompletion: true,
+        wanted: how === 'wanted',
+      },
+    });
+    try {
+      await waitFor(() => expect(result.current.host).not.toBeNull());
+      const session = result.current.core.session!;
+      const ready = how === 'awaited' ? awaitWorkerOpenReplica(session) : undefined;
+      await act(async () => {});
+      expect(posted.map((request) => request.type)).toEqual(['open']);
+      act(() => result.current.pipeline.runLayoutPipeline());
+      await waitFor(() => expect(posted.map((request) => request.type)).toContain('completeLayout'), {
+        timeout: 5000,
+      });
+      await waitFor(() => expect(result.current.renderer.pendingCompletion).toBeNull());
+      await act(async () => {});
+      expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+      act(() => result.current.presentFrame());
+      act(() => frames.run());
+      act(() => frames.run());
+      await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+      const types = posted.map((request) => request.type);
+      expect(types.indexOf('encodeState')).toBeGreaterThan(types.indexOf('bootstrap'));
+      expect(types.indexOf('encodeState')).toBeGreaterThan(types.indexOf('completeLayout'));
+      await act(async () => {
+        workers[0].release();
+        await (ready ?? awaitWorkerOpenReplica(session));
+      });
+      await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+      expect(result.current.mainOpens).toEqual([false]);
+      expect(result.current.errors).toEqual([]);
+    } finally {
+      unmount();
+      cleanup();
+      frames.restore();
+    }
+  },
+  15_000
+);
+
+test('the revision count is asked once the rest of the layout is asked of the worker, not after it completes', async () => {
   const { workers, posted } = installWorker({ holdCompletion: true });
   const frames = holdFrames();
   const { result, unmount } = renderHook(useHarness, {
-    initialProps: { ...initialProps, source: await longFixture(1200), hydrateOnDemand: true },
+    initialProps: {
+      ...initialProps,
+      source: await longFixture(1200),
+      hydrateOnDemand: true,
+      followCompletion: true,
+    },
   });
   try {
     await waitFor(() => expect(result.current.host).not.toBeNull());
-    const session = result.current.core.session!;
     act(() => result.current.pipeline.runLayoutPipeline());
     await waitFor(() => expect(posted.map((request) => request.type)).toContain('completeLayout'), {
       timeout: 5000,
+    });
+    await waitFor(() => expect(result.current.renderer.pendingCompletion).toBeNull());
+    await act(async () => {});
+    expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await waitFor(() => expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1));
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    await act(async () => {
+      workers[0].release();
     });
     act(() => result.current.presentFrame());
     act(() => frames.run());
     act(() => frames.run());
     await act(async () => {});
-    expect(result.current.renderer.pendingCompletion).toBeNull();
-    expect(result.current.renderer.completingLayout).toBe(session);
-    expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
-    await act(async () => {
-      workers[0].release();
-    });
-    await waitFor(() => expect(result.current.renderer.completingLayout).toBeNull());
-    act(() => result.current.presentFrame());
-    act(() => frames.run());
-    act(() => frames.run());
-    await waitFor(() => expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1));
+    expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
     expect(result.current.errors).toEqual([]);
   } finally {
@@ -530,6 +607,8 @@ test('a failed revision count starts the on-demand replica', async () => {
     expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
     rerender({ ...props, holdReplica: false });
+    act(() => frames.run());
+    act(() => frames.run());
     await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
     expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
     expect(result.current.core.replicaReady).toBe(false);

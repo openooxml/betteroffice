@@ -71,6 +71,7 @@ import {
 } from './DocxEditor/overlays/CanvasSidebarBrightenOverlay';
 import { useCanvasOverlayTarget } from './DocxEditor/internals/useCanvasOverlayTarget';
 import { isWithinPageArea } from './DocxEditor/internals/pageAreaRouting';
+import { pagePressNeedsReplica } from './DocxEditor/internals/replicaTriggers';
 import { useImageActions } from './DocxEditor/hooks/useImageActions';
 import { useDocxEditorRefApi } from './DocxEditor/hooks/useDocxEditorRefApi';
 import {
@@ -2168,16 +2169,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   useEffect(() => {
     if (experimentalWorkerOpen && replicaReady && showOutlineRef.current) refreshHeadings();
   }, [experimentalWorkerOpen, replicaReady, refreshHeadings, showOutlineRef]);
-  // A mouse press on a page needs the replica; plugin overlays and touch pans do not. A tap asks
-  // through its gesture, the input for itself.
+  // A tap asks through its gesture, the input for itself.
   useEffect(() => {
     const content = editorContentRef.current;
     if (!replicaPending || !content) return;
     const onPointer = (event: PointerEvent) => {
-      if (event.pointerType === 'touch' || event.pointerType === 'pen') return;
-      if (event.target instanceof Element && event.target.closest('.canvas-page') !== null) {
-        requestReplica();
-      }
+      if (pagePressNeedsReplica(event)) requestReplica();
     };
     content.addEventListener('pointerdown', onPointer, true);
     return () => content.removeEventListener('pointerdown', onPointer, true);

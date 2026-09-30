@@ -1,6 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
-import { createRef } from 'react';
+import { createRef, type RefObject } from 'react';
 import type { DisplayListQueries, DisplayListRegionHit } from '@betteroffice/docx/layout/render';
 import type { YrsCellLoc, YrsSession } from '@betteroffice/docx/yrs';
 import type { YrsInputRef } from '../YrsInput';
@@ -13,6 +13,7 @@ import {
   type PagedEditorCommandBridge,
 } from './usePagedEditorRefApi';
 import {
+  awaitWorkerOpenReplica,
   deferWorkerOpenReplica,
   requestWorkerOpenReplica,
 } from '../internals/workerOpenReplica';
@@ -43,6 +44,7 @@ function options(overrides: Partial<UsePagesPointerOptions> = {}) {
   const selections: Array<[number, number, string]> = [];
   const words: Array<[number, string]> = [];
   const paragraphs: Array<[number, string]> = [];
+  const kept: number[] = [];
   let focused = 0;
   const input = {
     focus: () => {
@@ -59,6 +61,7 @@ function options(overrides: Partial<UsePagesPointerOptions> = {}) {
     selectWordAtDisplay: (position: number, story: string) => words.push([position, story]),
     selectParagraphAtDisplay: (position: number, story: string) =>
       paragraphs.push([position, story]),
+    keepSelectionInPlace: () => kept.push(selections.length + words.length + paragraphs.length),
   } as unknown as YrsInputRef;
   const projection = {
     size: 100,
@@ -86,7 +89,7 @@ function options(overrides: Partial<UsePagesPointerOptions> = {}) {
     scrollToPositionImpl: () => {},
     ...overrides,
   };
-  return { opts, selections, words, paragraphs, projection, focused: () => focused };
+  return { opts, selections, words, paragraphs, kept, projection, focused: () => focused };
 }
 
 function mouse(type: string, clientX: number, clientY = 400, detail = 1): void {
@@ -174,6 +177,44 @@ test('a single click during replica loading replays the caret', () => {
   opts.replicaReady = true;
   view.rerender();
   expect(selections).toEqual([[20, 20, 'body']]);
+});
+
+test.each(['click', 'double-click', 'drag'])('a replayed %s keeps its selection in place', (gesture) => {
+  const { opts, selections, words, kept } = options();
+  const view = renderHook(() => usePagesPointer(opts));
+
+  if (gesture === 'click') click(1);
+  else if (gesture === 'double-click') click(2);
+  else {
+    mouse('mousedown', 200);
+    mouse('mousemove', 450);
+    mouse('mouseup', 450);
+  }
+  act(() => document.body.dispatchEvent(new Event('wheel', { bubbles: true })));
+  opts.replicaReady = true;
+  view.rerender();
+  expect(selections.length + words.length).toBe(1);
+  expect(kept).toEqual([1]);
+});
+
+test('a recorded gesture asks for the replica', () => {
+  const requestReplica = mock(() => {});
+  const { opts } = options({ requestReplica });
+  renderHook(() => usePagesPointer(opts));
+
+  click(1);
+  expect(requestReplica).toHaveBeenCalled();
+});
+
+test('without a recorded gesture the pointer asks for nothing', () => {
+  const requestReplica = mock(() => {});
+  const { opts } = options({ requestReplica, replicaPending: () => false });
+  opts.getYrsPositionProjection = () => null;
+  renderHook(() => usePagesPointer(opts));
+
+  click(1);
+  pointerDown(host.firstElementChild!, 'touch');
+  expect(requestReplica).not.toHaveBeenCalled();
 });
 
 test('a pending drag replays the latest mousemove before an animation frame', () => {
@@ -623,6 +664,38 @@ test('a missing projection alone does not record a gesture', () => {
   expect(selections).toEqual([]);
 });
 
+function refApiOptions(
+  opts: UsePagesPointerOptions,
+  ref: RefObject<PagedEditorRef | null>,
+  pointer: ReturnType<typeof usePagesPointer>
+): Parameters<typeof usePagedEditorRefApi>[0] {
+  return {
+    ref,
+    bumpInputEpoch: pointer.bumpInputEpoch,
+    inputEpoch: pointer.inputEpoch,
+    yrsInputRef: opts.yrsInputRef,
+    layout: null,
+    runLayoutPipeline: () => {},
+    getLayoutRequest: () => null,
+    scrollToPositionImpl: () => {},
+    revealPositionImpl: () => 'layout-unavailable',
+    scrollToParaIdImpl: () => false,
+    scrollToPageImpl: () => {},
+    setIsFocused: () => {},
+    onReadyRef: { current: undefined },
+    documentFromYrs: () => null,
+    yrsSession: opts.yrsSession,
+    replicaReady: opts.replicaReady,
+    yrsLocToDisplayPosition: () => null,
+    syncYrsInputState: () => false,
+    applyYrsFormatting: () => false,
+    applyYrsCommand: () => false,
+    getYrsPositionProjection: () => opts.getYrsPositionProjection('body'),
+    displayPositionToYrsLoc: () => null,
+    getPositionAtPoint: () => null,
+  };
+}
+
 for (const [name, navigate] of [
   ['setSelection', (ref: PagedEditorRef) => ref.setSelection(45)],
   ['selectAll', (ref: PagedEditorRef) => ref.selectAll()],
@@ -652,30 +725,7 @@ for (const [name, navigate] of [
     const ref = createRef<PagedEditorRef>();
     const view = renderHook(() => {
       const pointer = usePagesPointer(opts);
-      usePagedEditorRefApi({
-        ref,
-        bumpInputEpoch: pointer.bumpInputEpoch,
-        yrsInputRef: opts.yrsInputRef,
-        layout: null,
-        runLayoutPipeline: () => {},
-        getLayoutRequest: () => null,
-        scrollToPositionImpl: () => {},
-        revealPositionImpl: () => 'layout-unavailable',
-        scrollToParaIdImpl: () => false,
-        scrollToPageImpl: () => {},
-        setIsFocused: () => {},
-        onReadyRef: { current: undefined },
-        documentFromYrs: () => null,
-        yrsSession: opts.yrsSession,
-        replicaReady: opts.replicaReady,
-        yrsLocToDisplayPosition: () => null,
-        syncYrsInputState: () => false,
-        applyYrsFormatting: () => false,
-        applyYrsCommand: () => false,
-        getYrsPositionProjection: () => opts.getYrsPositionProjection('body'),
-        displayPositionToYrsLoc: () => null,
-        getPositionAtPoint: () => null,
-      });
+      usePagedEditorRefApi(refApiOptions(opts, ref, pointer));
       return pointer;
     });
 
@@ -737,3 +787,65 @@ for (const [name, admit] of [
     expect(selections).toEqual([]);
   });
 }
+
+test('a highlight asked while the replica loads applies once it has loaded', async () => {
+  let loaded!: () => void;
+  const session = {
+    cellSelection: () => null,
+    version: () => 'v1',
+  } as unknown as YrsSession;
+  const { opts, selections } = options({ yrsSession: session });
+  const replica = deferWorkerOpenReplica(
+    session,
+    () => new Promise<() => void>((resolve) => { loaded = () => resolve(() => {}); }),
+    () => {},
+    () => { opts.replicaReady = true; },
+    { active: () => true, request: () => replica.start() }
+  );
+  const ref = createRef<PagedEditorRef>();
+  const view = renderHook(() => {
+    const pointer = usePagesPointer(opts);
+    usePagedEditorRefApi(refApiOptions(opts, ref, pointer));
+    return pointer;
+  });
+
+  act(() => ref.current!.highlightRange(20, 45));
+  expect(selections).toEqual([]);
+  await act(async () => {
+    loaded();
+    await awaitWorkerOpenReplica(session);
+  });
+  view.rerender();
+  expect(selections).toEqual([[20, 45, 'body']]);
+});
+
+test('newer input drops a highlight asked while the replica loads', async () => {
+  let loaded!: () => void;
+  const session = {
+    cellSelection: () => null,
+    version: () => 'v1',
+  } as unknown as YrsSession;
+  const { opts, selections } = options({ yrsSession: session });
+  const replica = deferWorkerOpenReplica(
+    session,
+    () => new Promise<() => void>((resolve) => { loaded = () => resolve(() => {}); }),
+    () => {},
+    () => { opts.replicaReady = true; },
+    { active: () => true, request: () => replica.start() }
+  );
+  const ref = createRef<PagedEditorRef>();
+  const view = renderHook(() => {
+    const pointer = usePagesPointer(opts);
+    usePagedEditorRefApi(refApiOptions(opts, ref, pointer));
+    return pointer;
+  });
+
+  act(() => ref.current!.highlightRange(20, 45));
+  click(1, 450);
+  await act(async () => {
+    loaded();
+    await awaitWorkerOpenReplica(session);
+  });
+  view.rerender();
+  expect(selections).toEqual([[45, 45, 'body']]);
+});
