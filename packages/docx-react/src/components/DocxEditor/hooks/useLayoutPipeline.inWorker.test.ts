@@ -175,12 +175,12 @@ for (const proposals of ['present', 'empty', 'unavailable', 'throwing']) {
 }
 
 for (const answer of ['rejects', 'null'] as const) {
-  test(`a worker superset preflight that ${answer} warms nothing and fails nothing`, async () => {
+  test(`a worker superset preflight that ${answer} warms nothing, fails nothing, and retries once hydrated`, async () => {
     const { session } = fakeDocument();
     const hostInputs: string[] = [];
     const errors: Error[] = [];
     const warmed: ResidentFontRequirement[][] = [];
-    deferWorkerOpenReplica(session, () => new Promise(() => {}), () => {}, () => {});
+    const replica = deferWorkerOpenReplica(session, () => new Promise(() => {}), () => {}, () => {});
     Object.assign(session, {
       getProposals: () => ({ proposals: [{ id: 'proposal', revisionIds: ['r1'] }] }),
       layoutFontRequirementsJson: (input: string) => {
@@ -223,6 +223,15 @@ for (const answer of ['rejects', 'null'] as const) {
       expect(errors).toEqual([]);
       expect(warmed).toEqual([]);
       expect(hostInputs).toEqual([]);
+
+      replica.ensure();
+      await act(async () => {
+        hook.result.current.runLayoutPipeline();
+        await new Promise((done) => setTimeout(done, 5));
+      });
+      expect(hostInputs.filter((input) => JSON.parse(input).revisionFontSuperset)).toHaveLength(1);
+      expect(warmed).toEqual([[]]);
+      expect(errors).toEqual([]);
     } finally {
       hook.unmount();
     }

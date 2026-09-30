@@ -362,16 +362,19 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     const claim = { session: owner, key };
     warmedProposalsRef.current = claim;
     const warmInput = JSON.stringify({ ...request, revisionFontSuperset: true });
-    const adopt = (json: string | null): void => {
-      if (json === null || sessionRef.current !== owner || unmountedRef.current) return;
-      warmFontRequirementsRef.current?.(JSON.parse(json) as ResidentFontRequirement[]);
-    };
     const failed = (): void => {
       if (warmedProposalsRef.current === claim) warmedProposalsRef.current = null;
     };
+    const adopt = (json: string | null): void => {
+      if (json === null) return failed();
+      if (sessionRef.current !== owner || unmountedRef.current) return;
+      warmFontRequirementsRef.current?.(JSON.parse(json) as ResidentFontRequirement[]);
+    };
     if (workerOpenEnabledRef.current && workerOpenReplicaPending(owner)) {
       try {
-        const pending = fontRequirementsInWorkerRef.current?.(owner, warmInput);
+        const pending = fontRequirementsInWorkerRef.current?.(owner, warmInput, {
+          background: true,
+        });
         if (pending) void pending.then(adopt).catch(failed);
         else failed();
       } catch {

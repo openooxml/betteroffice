@@ -88,9 +88,11 @@ export type OpenInWorker = (
   generation?: number
 ) => Promise<WorkerOpenedDocument | null>;
 
+/** A `background` preflight answers null on any failure and never falls back or hydrates. */
 export type FontRequirementsInWorker = (
   session: YrsSession,
-  request: string
+  request: string,
+  options?: { background?: boolean }
 ) => Promise<string | null> | null;
 
 // provider for the canvas renderer's display list: returns the injected value
@@ -1262,10 +1264,12 @@ export function useRustDisplayList(
   );
 
   const fontRequirementsInWorker = useCallback<FontRequirementsInWorker>(
-    (hostEngine, request) => {
+    (hostEngine, request, options) => {
       if (!workerOpenEnabledRef.current || !workerOpenReplicaPending(hostEngine)) return null;
+      const background = options?.background === true;
+      if (background && workerRef.current?.engine !== hostEngine) return null;
       if (!workerOpenSourcesRef.current.has(hostEngine)) {
-        ensureWorkerOpenReplica(hostEngine);
+        if (!background) ensureWorkerOpenReplica(hostEngine);
         return null;
       }
       const owner = { current: workerRef.current };
@@ -1279,6 +1283,7 @@ export function useRustDisplayList(
           return requirements;
         })
         .catch((error: unknown) => {
+          if (background) return null;
           if (error instanceof ResidentWorkerOutOfMemoryError) throw error;
           if (error instanceof SupersededPreviewError) {
             if (workerFallbackEngineRef.current === hostEngine) return null;
