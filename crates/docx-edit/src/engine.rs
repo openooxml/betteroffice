@@ -2569,8 +2569,9 @@ impl EngineSession {
     /// Paginate a resident measured arena whose clean block fingerprints were
     /// retained while rebuilding the dirty paragraph. Compatibility callers
     /// still enter through `layout_document_value` and fingerprint every block.
-    /// The paragraphs of the body and its nested stories that hold a revision
-    /// whose previewed decision differs between `previous` and `next`.
+    /// The paragraphs of every story that hold a revision whose previewed
+    /// decision differs between `previous` and `next`. Story ids are opaque, so
+    /// a body table's cells may live under any id.
     fn preview_changed_paragraphs(
         &self,
         previous: &BTreeMap<String, RevisionPreview>,
@@ -2592,9 +2593,9 @@ impl EngineSession {
             txn.get_map(crate::STORIES)
                 .map_or_else(Vec::new, |stories| {
                     stories
-                        .keys(&txn)
-                        .filter(|story| *story == "body" || is_nested_body_story(story))
-                        .map(str::to_owned)
+                        .iter(&txn)
+                        .filter(|(_, value)| value.clone().cast::<yrs::TextRef>().is_ok())
+                        .map(|(story, _)| story.to_owned())
                         .collect()
                 })
         };
