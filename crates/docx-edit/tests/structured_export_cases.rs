@@ -1972,6 +1972,44 @@ fn numbers_a_format_cannot_write_are_diagnosed() {
 }
 
 #[test]
+fn comments_in_cells_and_block_controls_are_anchored() {
+    let commented = |id: u32, text: &str| {
+        format!(
+            r#"<w:commentRangeStart w:id="{id}"/>{}<w:commentRangeEnd w:id="{id}"/><w:r><w:commentReference w:id="{id}"/></w:r>"#,
+            run(text)
+        )
+    };
+    let xml = format!(
+        r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl><w:sdt><w:sdtPr><w:id w:val="6"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>{}"#,
+        para("0F600001", &commented(1, "Cell")),
+        para("0F600002", &commented(2, "Controlled")),
+        para("0F600003", &run("Tail"))
+    );
+    let comments = format!(
+        r#"<w:comments {}>{}</w:comments>"#,
+        fixture::namespaces(),
+        [1, 2]
+            .map(|id| format!(
+                r#"<w:comment w:id="{id}" w:author="Ann">{}</w:comment>"#,
+                para(&format!("0F60001{id}"), &run("Remark"))
+            ))
+            .concat()
+    );
+    let doc = open(
+        &Package::new(&xml)
+            .part("comments.xml", "rIdComments", COMMENTS, COMMENTS, &comments)
+            .bytes(),
+    );
+    for (id, story, len) in [("1", "body:t0:r0c0", 4), ("2", "", 10)] {
+        let anchors = doc.resolve_comment(id).unwrap();
+        assert_eq!(anchors.len(), 1);
+        assert_ne!(anchors[0].story, "body");
+        assert!(story.is_empty() || anchors[0].story == story);
+        assert_eq!((anchors[0].start, anchors[0].end), (0, len));
+    }
+}
+
+#[test]
 fn shared_ids_leave_cell_and_comment_anchors_without_a_location() {
     let xml = format!(
         r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{}{}</w:tc></w:tr></w:tbl>{}"#,

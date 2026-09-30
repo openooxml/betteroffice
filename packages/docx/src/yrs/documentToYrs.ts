@@ -1862,7 +1862,7 @@ function visitStory(
             {
               includePageBreaks: false,
               appendBodyTail: false,
-              seedComments: false,
+              seedComments: options.seedComments,
               extraRunFormatting: cell.extraRunFormatting,
               tableParagraphFormatting: cell.paragraphFormatting,
             }
@@ -1882,7 +1882,7 @@ function visitStory(
     visitStory(context, childStory, block.content, {
       includePageBreaks: options.includePageBreaks,
       appendBodyTail: false,
-      seedComments: false,
+      seedComments: options.seedComments,
       tableParagraphFormatting: options.tableParagraphFormatting,
     });
     lastKind = 'blockSdt';

@@ -464,3 +464,26 @@ it('keeps a commented document byte-identical on a no-op save', async () => {
   const saved = unzipContainer((await saveYrsDocx(await open(bytes, 91020))).bytes);
   expect(saved).toEqual(unzipContainer(bytes));
 });
+
+it('keeps the ranges of comments inside a table cell and a content control after an edit elsewhere', async () => {
+  const commented = (id: number, text: string) =>
+    `<w:commentRangeStart w:id="${id}"/>${t(text)}<w:commentRangeEnd w:id="${id}"/>` +
+    `<w:r><w:commentReference w:id="${id}"/></w:r>`;
+  const body = BODY.replace(t('Cell'), commented(2, 'Cell')).replace(
+    '<w:p w14:paraId="0C000005">',
+    '<w:sdt><w:sdtPr><w:id w:val="6"/></w:sdtPr><w:sdtContent>' +
+      `<w:p w14:paraId="0C000007">${commented(3, 'Controlled')}</w:p></w:sdtContent></w:sdt>` +
+      '<w:p w14:paraId="0C000005">'
+  );
+  const session = await open(docx(body, [1, 2, 3]), 91080);
+  const { paraId } = session.paragraphs('body')[2]!;
+  session.insertText({ story: 'body', paraId, offset: 0 }, 'QA ');
+  for (const [path, saved] of await saves(session)) {
+    for (const [id, text] of [[1, 'Intro'], [2, 'Cell'], [3, 'Controlled']] as const) {
+      expect([path, id, markers(saved, id)]).toEqual([path, id, ['RangeStart', 'RangeEnd', 'Reference']]);
+      for (const reopened of [await open(saved, 91081), await seeded(saved, 91082)]) {
+        expect(anchored(reopened, String(id))).toBe(text);
+      }
+    }
+  }
+});
