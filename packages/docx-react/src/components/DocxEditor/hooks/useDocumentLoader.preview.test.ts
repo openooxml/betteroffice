@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { Document } from '@betteroffice/docx/types/document';
-import { createFontLoadScope } from '@betteroffice/docx/utils';
+import { createFontLoadScope, extractFontsFromDocument } from '@betteroffice/docx/utils';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { createYrsSession } from '@betteroffice/docx/yrs';
 import { useHistory } from '../../../hooks/useHistory';
@@ -138,9 +138,9 @@ test("a preview's font loads stop once its load's full document is accepted", as
   const preview = previewSession.openDocxPreview(COMMENTED, 1)!;
   const full = fullSession.openDocx(COMMENTED, true);
   const fontScope = createFontLoadScope();
-  const fontsFor: unknown[] = [];
-  fontScope.loadDocumentFonts = async (doc) => {
-    fontsFor.push(doc);
+  const fontLoads: string[][] = [];
+  fontScope.loadFontsWithMapping = async (families) => {
+    fontLoads.push(families);
   };
   const { result, unmount } = renderHook(() =>
     useDocumentLoader({
@@ -169,7 +169,7 @@ test("a preview's font loads stop once its load's full document is accepted", as
     result.current.acceptHostDocument(full, generation);
     await new Promise((done) => setTimeout(done, 50));
   });
-  expect(fontsFor).toEqual([full.document]);
+  expect(fontLoads).toEqual([full.referencedFonts, [...extractFontsFromDocument(full.document)]]);
   unmount();
   fontScope.dispose();
   previewSession.destroy();
