@@ -272,6 +272,30 @@ describe('DOCX engine seeding', () => {
     expect(sequence).toEqual(control);
   });
 
+  it('keeps seed clocks unchanged by SEQs in hidden text boxes', async () => {
+    const seed = async (kind: string): Promise<Map<bigint, bigint>> => {
+      const boxed = `<w:fldSimple w:instr="${kind} Figure"><w:r><w:t>1</w:t></w:r></w:fldSimple>`;
+      const bytes = sequencePackage(`<w:p>${sequenceTextBox(boxed, true)}</w:p><w:p><w:r><w:t>After</w:t></w:r></w:p>`);
+      const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+      const session = await createYrsSession({ clientId: 47040 });
+      try {
+        documentToYrs(session, parsed);
+        const drawing = session.storySegments('body').find((segment) =>
+          segment.kind === 'embed' && segment.embedKind === 'shape'
+        );
+        expect(drawing).toBeDefined();
+        expect(drawing?.attributes).not.toHaveProperty('hidden');
+        return seedClocks(session);
+      } finally {
+        session.destroy();
+      }
+    };
+    const sequence = await seed('SEQ');
+    const control = await seed('XEQ');
+    expect(sequence.size).toBeGreaterThan(0);
+    expect(sequence).toEqual(control);
+  });
+
   it.each(['hyperlink', 'simpleField'])('keeps projected SEQ owners opaque when seeding and hydrating (%s)', async (kind) => {
     const result = kind === 'hyperlink'
       ? '<w:hyperlink w:anchor="top"><w:r><w:t>1</w:t></w:r></w:hyperlink>'
@@ -491,9 +515,9 @@ describe('DOCX engine seeding', () => {
   it('preserves stale captions after hidden text boxes across seed and hydration paths', async () => {
     const boxed = '<w:fldSimple w:instr="SEQ Figure"><w:r><w:t>1</w:t></w:r></w:fldSimple>';
     const bytes = sequencePackage(`<w:p>${sequenceTextBox(boxed, true)}</w:p><w:p><w:fldSimple w:instr="SEQ Figure"><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>`);
-    const { sessions } = await seedSequenceSessions(bytes);
+    const { engine, projected, plain, nativePeer, projectedPeer, hydrated, sessions } = await seedSequenceSessions(bytes);
     try {
-      for (const session of sessions) {
+      for (const session of [engine, nativePeer]) {
         const drawing = session.storySegments('body').find((segment) =>
           segment.kind === 'embed' && segment.embedKind === 'shape'
         );
@@ -504,6 +528,20 @@ describe('DOCX engine seeding', () => {
             .flatMap((run) => run.kind === 'field' && run.rawType === 'SEQ' ? [run.fallback] : []);
           expect(results).toEqual(showHiddenText ? ['1', '2'] : ['9']);
           expect(blocks.some((block) => block.kind === 'shape')).toBe(showHiddenText);
+        }
+      }
+      for (const session of [projected, plain, projectedPeer, hydrated]) {
+        const drawing = session.storySegments('body').find((segment) =>
+          segment.kind === 'embed' && segment.embedKind === 'shape'
+        );
+        expect(drawing).toBeDefined();
+        expect(drawing?.attributes).not.toHaveProperty('hidden');
+        for (const showHiddenText of [false, true]) {
+          const blocks = session.yrsBlocksForStory('body', { showHiddenText }) as LayoutBlock[];
+          const results = sequenceRuns(blocks)
+            .flatMap((run) => run.kind === 'field' && run.rawType === 'SEQ' ? [run.fallback] : []);
+          expect(results).toEqual(['1', '9']);
+          expect(blocks.some((block) => block.kind === 'shape')).toBe(true);
         }
       }
     } finally {

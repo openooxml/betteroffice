@@ -506,9 +506,9 @@ function fieldPayload(
   };
 }
 
-function nestedSequenceNames(field: SimpleField | ComplexField): string[] {
+function nestedSequenceNames(model: SimpleField | ComplexField | Image | Shape | Chart): string[] {
   const names = new Set<string>();
-  const pending: Array<[unknown, boolean]> = [[field, false]];
+  const pending: Array<[unknown, boolean]> = [[model, false]];
   while (pending.length > 0) {
     const [value, scannedHyperlink] = pending.pop()!;
     if (Array.isArray(value)) {
@@ -518,7 +518,7 @@ function nestedSequenceNames(field: SimpleField | ComplexField): string[] {
     } else if (value !== null && typeof value === 'object') {
       const node = value as Attrs;
       if (
-        value !== field &&
+        value !== model &&
         (node.type === 'complexField' || node.type === 'simpleField') &&
         typeof node.instruction === 'string'
       ) {
@@ -689,18 +689,25 @@ function noteRefUnit(
   );
 }
 
-/** The hidden state and tracked change a drawing keeps. */
+/** The tracked insertion or deletion a drawing keeps from its run. */
 function trackedMarks(marks: readonly MarkDescriptor[]): MarkDescriptor[] {
-  return marks.filter((mark) =>
-    mark.name === 'hidden' || mark.name === 'insertion' || mark.name === 'deletion'
-  );
+  return marks.filter((mark) => mark.name === 'insertion' || mark.name === 'deletion');
 }
 
 function runContentToUnits(
   content: RunContent,
   marks: readonly MarkDescriptor[],
+  opaqueSequences: string[],
   commentId?: number
 ): InlineUnit[] {
+  if (
+    (content.type === 'drawing' || content.type === 'shape' || content.type === 'chart') &&
+    marks.some((mark) => mark.name === 'hidden')
+  ) {
+    const model = content.type === 'drawing' ? content.image
+      : content.type === 'shape' ? content.shape : content.chart;
+    opaqueSequences.push(...nestedSequenceNames(model));
+  }
   switch (content.type) {
     case 'text':
       return content.text ? [textUnit(content.text, marks, commentId)] : [];
@@ -768,11 +775,12 @@ function runToUnits(
   run: Run,
   styleFormatting: TextFormatting | undefined,
   styleResolver: StyleResolver | null,
+  opaqueSequences: string[],
   commentId?: number,
   extraMarks: readonly MarkDescriptor[] = []
 ): InlineUnit[] {
   const marks = [...runMarks(run, styleFormatting, styleResolver), ...extraMarks];
-  return run.content.flatMap((content) => runContentToUnits(content, marks, commentId));
+  return run.content.flatMap((content) => runContentToUnits(content, marks, opaqueSequences, commentId));
 }
 
 function hyperlinkToUnits(
@@ -787,7 +795,7 @@ function hyperlinkToUnits(
   for (const child of hyperlink.structuredChildren ?? hyperlink.children) {
     if (child.type === 'run') {
       const marks = [...runMarks(child, styleFormatting, styleResolver), ...extraMarks, link];
-      for (const content of child.content) units.push(...runContentToUnits(content, marks));
+      for (const content of child.content) units.push(...runContentToUnits(content, marks, opaqueSequences));
     } else if (child.type === 'simpleField' || child.type === 'complexField') {
       opaqueSequences.push(...nestedSequenceNames(child));
       const field = fieldPayload(child, styleFormatting);
@@ -831,7 +839,7 @@ function trackedToUnits(
   const units: InlineUnit[] = [];
   for (const child of content.content) {
     if (child.type === 'run') {
-      units.push(...runToUnits(child, styleFormatting, styleResolver, commentId, [mark]));
+      units.push(...runToUnits(child, styleFormatting, styleResolver, opaqueSequences, commentId, [mark]));
     } else {
       opaqueSequences.push(...hyperlinkSequenceNames(child));
       const linked = hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences, [mark]);
@@ -879,7 +887,7 @@ function sdtPayload(
 
   for (const child of sdt.content) {
     if (child.type === 'run') {
-      runToUnits(child, styleFormatting, styleResolver).forEach(append);
+      runToUnits(child, styleFormatting, styleResolver, opaqueSequences).forEach(append);
     } else if (child.type === 'hyperlink') {
       opaqueSequences.push(...hyperlinkSequenceNames(child));
       hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences).forEach(append);
@@ -957,7 +965,7 @@ function flowBreakOffsets(run: Run): Array<{ offset: number; type: 'page' | 'col
       breaks.push({ offset, type });
       continue;
     }
-    offset += unitsText(runContentToUnits(content, [])).length;
+    offset += unitsText(runContentToUnits(content, [], [])).length;
   }
   return breaks;
 }
@@ -967,7 +975,7 @@ function runBoundary(
   styleFormatting: TextFormatting | undefined,
   styleResolver: StyleResolver | null
 ): Attrs | null {
-  const units = runToUnits(run, styleFormatting, styleResolver);
+  const units = runToUnits(run, styleFormatting, styleResolver, []);
   if (units.some((unit) => unit.kind !== 'text' && unit.embedKind !== 'noteRef')) return null;
   const keys = units.map((unit) => marksKey(unit.marks));
   if (keys.some((key) => key !== keys[0])) return null;
@@ -1196,7 +1204,7 @@ function paragraphUnits(
       const boundary = runBoundary(content, styleFormatting, styleResolver);
       if (boundary && boundaries) boundaries.push(boundary);
       else boundaries = undefined;
-      units.push(...runToUnits(content, styleFormatting, styleResolver, commentId));
+      units.push(...runToUnits(content, styleFormatting, styleResolver, opaqueSequences, commentId));
     } else if (content.type === 'hyperlink') {
       boundaries = undefined;
       opaqueSequences.push(...hyperlinkSequenceNames(content));
