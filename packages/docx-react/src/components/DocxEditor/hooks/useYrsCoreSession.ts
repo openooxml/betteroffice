@@ -165,8 +165,6 @@ export function dirtyProjectionStory(activeStory: string): string {
     : 'body';
 }
 
-const NO_HELD_ENGINES: readonly unknown[] = [];
-
 /**
  * Frees sessions the editor let go of. Consumers' effects in the commit that replaces a session
  * still run with the session they rendered, and the renderer keeps the engines in `held` (its
@@ -176,6 +174,7 @@ const NO_HELD_ENGINES: readonly unknown[] = [];
  */
 function useRetiredSessions(
   session: YrsSession | null,
+  /** A fixed number of holders on every render: the effect compares them slot by slot. */
   held: readonly unknown[]
 ): (replaced: YrsSession | null) => void {
   const renderedRef = useRef({ session, held });
@@ -221,8 +220,8 @@ export function useYrsCoreSession(
   collaboration?: DocxEditorCollaborationOptions,
   callbacks?: YrsCoreSessionCallbacks,
   options?: {
-    /** Engines the renderer still builds with; a replaced session among them lives on. */
-    heldEngines?: readonly unknown[];
+    /** The engine the renderer still builds with; a replaced session it names lives on. */
+    heldEngine?: unknown;
   }
 ): YrsCoreSession {
   const collaborationClientId = collaboration?.clientId;
@@ -243,7 +242,7 @@ export function useYrsCoreSession(
   enabledRef.current = enabled;
   const [session, setSession] = useState<YrsSession | null>(null);
   const [sessionGeneration, setSessionGeneration] = useState<number | null>(null);
-  const retire = useRetiredSessions(session, options?.heldEngines ?? NO_HELD_ENGINES);
+  const retire = useRetiredSessions(session, [options?.heldEngine ?? null]);
 
   useEffect(() => {
     setSession(null);
