@@ -4,7 +4,7 @@ import type { LayoutComputation } from '@betteroffice/docx/editor';
 import { LayoutSelectionGate, type ResidentMeasurementConfig } from '@betteroffice/docx/layout';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { YrsRenderEnv, YrsSession } from '@betteroffice/docx/yrs';
-import { sourceVersionOf } from '../internals/layoutProvenance';
+import { isSupersededLayout, sourceVersionOf } from '../internals/layoutProvenance';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -163,10 +163,12 @@ test('updates that land while the worker lays out queue one pass for the latest 
 
   await answer(1);
   expect(shown()).toBe('2');
+  expect(isSupersededLayout(hook.result.current.layout)).toBe(true);
   await frame();
   expect(worker.map((pass) => pass.at)).toEqual([1, 2, 4]);
   await answer(2);
   expect(shown()).toBe('4');
+  expect(isSupersededLayout(hook.result.current.layout)).toBe(false);
   expect(doc.laidOutHere).toEqual([]);
   expect(errors).toEqual([]);
 });

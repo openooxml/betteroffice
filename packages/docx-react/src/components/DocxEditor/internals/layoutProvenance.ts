@@ -12,6 +12,18 @@ export function sourceVersionOf(target: object | null | undefined): string | nul
   return target ? (sourceVersions.get(target) ?? null) : null;
 }
 
+const supersededLayouts = new WeakSet<object>();
+
+/** Records that the document changed past `layout` before it was shown. */
+export function markSupersededLayout(layout: object): void {
+  supersededLayouts.add(layout);
+}
+
+/** Whether the document changed past `layout` before it was shown; such a layout never settles. */
+export function isSupersededLayout(layout: object | null | undefined): boolean {
+  return layout ? supersededLayouts.has(layout) : false;
+}
+
 const revisionPreviewKeys = new WeakMap<object, string>();
 
 /** A canonical key for a revision preview; '' when nothing is previewed. */

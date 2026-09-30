@@ -28,6 +28,7 @@ import type { LayoutInWorker } from './useDisplayList';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { viewportMinHeightPx } from '../internals/scrollUtils';
 import {
+  markSupersededLayout,
   readSessionVersion,
   revisionPreviewKey,
   stampRevisionPreviewKey,
@@ -469,14 +470,13 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             if (pass !== passRef.current || sessionRef.current !== session) return;
             // A change that landed meanwhile makes the worker's layout stale.
             // Only a queued worker pass follows it at once; until then it is
-            // the newest layout there is.
-            if (
-              !computation ||
-              (readSessionVersion(session) !== sourceVersion && !queuedBehindWorkerRef.current)
-            ) {
+            // the newest layout there is, so it paints but settles no wait.
+            const stale = readSessionVersion(session) !== sourceVersion;
+            if (!computation || (stale && !queuedBehindWorkerRef.current)) {
               layOutHere();
               return;
             }
+            if (stale) markSupersededLayout(computation.layout);
             applyComputation(computation);
             // The first pages paint now; the full layout replaces them.
             void computation.complete?.then(

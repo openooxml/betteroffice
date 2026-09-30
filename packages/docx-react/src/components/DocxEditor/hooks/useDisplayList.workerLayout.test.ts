@@ -10,6 +10,7 @@ import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
+import { markSupersededLayout } from '../internals/layoutProvenance';
 import { useRustDisplayList } from './useDisplayList';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -138,6 +139,12 @@ test('a worker-run layout arrives with its frame and needs no second worker pass
   }
 });
 
+/** Lays out the session's current state, then builds its frame on `base`. */
+function laidOut(native: ReturnType<typeof createEditSession>, base: number) {
+  const layoutJson = native.layout_document_with_regions_retained_json(REQUEST);
+  return { frame: native.build_display_list_frame(JSON.stringify({}), base), layoutJson };
+}
+
 test('after a worker layout the host dropped, the next one paints the current text', async () => {
   const { native, paraId, layoutJson, frame, engine } = setup();
   try {
@@ -146,39 +153,33 @@ test('after a worker layout the host dropped, the next one paints the current te
       { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
     );
     const worker = () => FakeWorker.last!;
-    const pass = async (built: Uint8Array, laidOut: string) => {
+    const pass = async (built: { frame: Uint8Array; layoutJson: string }) => {
       const pending = result.current.layoutInWorker(engine, REQUEST)!;
       const request = worker().posted.at(-1)!;
-      const epoch = decodeFrameDelta(built.slice().buffer).frameEpoch;
+      const epoch = decodeFrameDelta(built.frame.slice().buffer).frameEpoch;
       worker().reply({
         id: request.id,
         ok: true,
-        frame: built.slice().buffer,
+        frame: built.frame.slice().buffer,
         caret: { frameEpoch: epoch, caretRect: null },
         selection: null,
         layoutRevision: 1,
-        layoutJson: laidOut,
+        layoutJson: built.layoutJson,
       });
       return { request, computation: (await pending)! };
     };
-    const opened = await pass(frame, layoutJson);
+    const opened = await pass({ frame, layoutJson });
     await act(async () => {
       rerender({ layout: opened.computation.layout, source: engine });
     });
     await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(1));
 
     native.insert_text('body', paraId, 0, 'Dropped ');
-    const dropped = await pass(
-      native.build_display_list_frame(JSON.stringify({}), 1),
-      native.layout_document_with_regions_retained_json(REQUEST)
-    );
+    const dropped = await pass(laidOut(native, 1));
     expect(dropped.request).toMatchObject({ type: 'sync', expectedFrameEpoch: 1 });
 
     native.insert_text('body', paraId, 0, 'Shown ');
-    const shown = await pass(
-      native.build_display_list_frame(JSON.stringify({}), 1),
-      native.layout_document_with_regions_retained_json(REQUEST)
-    );
+    const shown = await pass(laidOut(native, 1));
     expect(shown.request).toMatchObject({ type: 'sync', expectedFrameEpoch: 1 });
     await act(async () => {
       rerender({ layout: shown.computation.layout, source: engine });
@@ -476,6 +477,24 @@ test('a layout of part of the document never settles, even after a full one did'
     rerender({ layout: layout(false) });
   });
   await waitFor(() => expect(partial.settled).toBe(true));
+});
+
+test('a layout the document moved past paints but settles no wait', async () => {
+  const { rerender, layout, settle } = settleHarness();
+  const first = settle();
+  await waitFor(() => expect(first.settled).toBe(true));
+  const behind = layout(false);
+  markSupersededLayout(behind);
+  await act(async () => {
+    rerender({ layout: behind });
+  });
+  const waiting = settle();
+  await act(async () => {});
+  expect(waiting.settled).toBe(false);
+  await act(async () => {
+    rerender({ layout: layout(false) });
+  });
+  await waitFor(() => expect(waiting.settled).toBe(true));
 });
 
 test('a reset waits for the next layout and a failure rejects', async () => {

@@ -45,6 +45,7 @@ import type { RustFontChainsProvider } from './useRustMeasurement';
 import { displayListNeedsHostImages } from '../canvasPresentation';
 import { CARET_PAINT_IDLE_MS, PaintedCaretMachine } from '../paintedCaret';
 import {
+  isSupersededLayout,
   readSessionVersion,
   revisionPreviewKey,
   revisionPreviewKeyOf,
@@ -1537,7 +1538,9 @@ export function useRustDisplayList(
         setSnapshot(nextSnapshot);
         setError(null);
         setLoading(false);
-        if (!result.provisional && layout.partial !== true) markSettled(contentEpoch);
+        if (!result.provisional && layout.partial !== true && !isSupersededLayout(layout)) {
+          markSettled(contentEpoch);
+        }
         const workerProduced = Boolean(
           result.workerProduced && probe && workerRef.current?.client.isReady()
         );
