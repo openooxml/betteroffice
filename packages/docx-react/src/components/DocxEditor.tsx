@@ -50,7 +50,7 @@ import type {
   SelectionState,
   TableContextInfo,
 } from './DocxEditor/types';
-import { onPresented } from './DocxEditor/internals/layoutProvenance';
+import { onPresented, onReplayFailed } from './DocxEditor/internals/layoutProvenance';
 import { useOutlineSidebar } from './DocxEditor/hooks/useOutlineSidebar';
 import { useKeyboardShortcuts } from './DocxEditor/hooks/useKeyboardShortcuts';
 import { useFileIO } from './DocxEditor/hooks/useFileIO';
@@ -1092,7 +1092,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       onHostDocument: acceptHostDocument,
       onError: failHostDocument,
     },
-    { previewFirstPage, heldEngine: canvasRenderer.layoutEngine }
+    {
+      previewFirstPage,
+      heldEngine: canvasRenderer.layoutEngine,
+      shownEngine: canvasRenderer.presentedEngine,
+    }
   );
   // Until the full session's pages are shown, the editor takes no input and its
   // API and commands see a document that is still loading.
@@ -1113,19 +1117,32 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const shownRef = useRef({
     displayList: canvasRenderer.displayList,
     engine: canvasRenderer.presentedEngine,
+    layoutEngine: canvasRenderer.layoutEngine,
   });
   shownRef.current = {
     displayList: canvasRenderer.displayList,
     engine: canvasRenderer.presentedEngine,
+    layoutEngine: canvasRenderer.layoutEngine,
   };
-  useEffect(
-    () =>
-      onPresented((displayList) => {
-        const shown = shownRef.current;
-        if (shown.engine && displayList === shown.displayList) notifyFramePresented(shown.engine);
-      }),
-    [notifyFramePresented]
-  );
+  useEffect(() => {
+    const offPresented = onPresented((displayList) => {
+      const shown = shownRef.current;
+      if (shown.engine && displayList === shown.displayList) notifyFramePresented(shown.engine);
+    });
+    // Pages of the opening session that fail to paint fail the load, as its render errors do.
+    const offFailed = onReplayFailed((displayList, error) => {
+      const shown = shownRef.current;
+      if (displayList !== shown.displayList || !shown.layoutEngine) return;
+      failOpeningRef.current(
+        error instanceof Error ? error : new Error(String(error)),
+        shown.layoutEngine
+      );
+    });
+    return () => {
+      offPresented();
+      offFailed();
+    };
+  }, [notifyFramePresented]);
   sessionGenerationRef.current = yrsCore.sessionGeneration;
   // Content listeners project the document on every edit; warm its base once
   // the first pages are on screen so neither opening nor the first key pays.

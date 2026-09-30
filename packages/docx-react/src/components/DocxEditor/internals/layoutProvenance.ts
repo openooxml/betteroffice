@@ -61,6 +61,21 @@ export function onPresented(listener: (displayList: object) => void): () => void
   return () => presentListeners.delete(listener);
 }
 
+const replayFailureListeners = new Set<(displayList: object, error: unknown) => void>();
+
+/** Records that the canvas pages failed to paint `displayList`. */
+export function markReplayFailed(displayList: object, error: unknown): void {
+  for (const listener of [...replayFailureListeners]) listener(displayList, error);
+}
+
+/** Calls `listener` with each display list whose pages fail to paint. */
+export function onReplayFailed(
+  listener: (displayList: object, error: unknown) => void
+): () => void {
+  replayFailureListeners.add(listener);
+  return () => replayFailureListeners.delete(listener);
+}
+
 /** Forgets what `host` shows, while its canvas pages repaint for a new surface or zoom. */
 export function clearPresented(host: object): void {
   presentedLists.delete(host);

@@ -74,6 +74,8 @@ export interface YrsCoreSessionOptions {
   fullOpenTimeoutMs?: number;
   /** The engine the renderer still builds with; a replaced session it names lives on. */
   heldEngine?: unknown;
+  /** The engine whose frame is on screen; a replaced session it names lives on. */
+  shownEngine?: unknown;
 }
 
 /** Body blocks a first-page preview parses. */
@@ -316,7 +318,11 @@ export function useYrsCoreSession(
     options?.previewFirstPage === true && !collaboration && !collaborationInitialUpdate;
   const fullOpenTimeoutRef = useRef(FULL_OPEN_TIMEOUT_MS);
   fullOpenTimeoutRef.current = options?.fullOpenTimeoutMs ?? FULL_OPEN_TIMEOUT_MS;
-  const retire = useRetiredSessions(session, [handoffFrom, options?.heldEngine ?? null]);
+  const retire = useRetiredSessions(session, [
+    handoffFrom,
+    options?.heldEngine ?? null,
+    options?.shownEngine ?? null,
+  ]);
   // The handoff and the renderer's layout hold the preview until the full session replaces both.
   const retirePreview = useCallback(
     (retiring: YrsSession): void => {
