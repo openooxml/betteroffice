@@ -681,6 +681,61 @@ fn two_relationship_ids_sharing_bytes_share_the_decode() {
     assert_eq!(pixel(&rendered.bytes, 28, 12), [0x11, 0x66, 0xcc, 255]);
 }
 
+#[test]
+fn header_and_footer_drawings_lie_under_the_body() {
+    let rect =
+        |x: u32, y: u32, fill: &str| json!({"kind":"rect","x":x,"y":y,"w":20,"h":10,"fill":fill});
+    let scene: DisplayList = serde_json::from_value(json!({
+        "pages": [{
+            "pageIndex": 0,
+            "width": 60,
+            "height": 40,
+            "primitives": [rect(0, 10, "#1166cc"), rect(30, 10, "#000000")],
+            "header": {"rId": "rIdHeader", "kind": "header", "y": 0, "height": 20,
+                "primitives": [rect(0, 10, "#ffffff"), rect(30, 20, "#ffffff")]},
+            "footer": {"rId": "rIdFooter", "kind": "footer", "y": 20, "height": 20,
+                "primitives": [rect(30, 10, "#ffffff")]}
+        }]
+    }))
+    .expect("display list");
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let rendered = render_page(&scene, 0, &resources).expect("render");
+    assert_eq!(pixel(&rendered.bytes, 10, 15), [0x11, 0x66, 0xcc, 255]);
+    assert_eq!(pixel(&rendered.bytes, 40, 15), [0, 0, 0, 255]);
+    assert_eq!(pixel(&rendered.bytes, 40, 25), [0xff, 0xff, 0xff, 255]);
+}
+
+#[test]
+fn watermark_prefix_lies_under_header_footer_and_body_drawings() {
+    let rect = |x: u32, y: u32, w: u32, fill: &str| json!({"kind":"rect","x":x,"y":y,"w":w,"h":10,"fill":fill});
+    let scene: DisplayList = serde_json::from_value(json!({
+        "pages": [{
+            "pageIndex": 0, "width": 80, "height": 50,
+            "watermarkPrimitiveCount": 2,
+            "primitives": [
+                rect(0, 10, 80, "#cc0000"), rect(0, 30, 80, "#cc0000"),
+                rect(30, 10, 20, "#1166cc")
+            ],
+            "header": {"rId": "rIdHeader", "kind": "header", "y": 0, "height": 20,
+                "primitives": [rect(0, 10, 50, "#ffffff")]},
+            "footer": {"rId": "rIdFooter", "kind": "footer", "y": 30, "height": 20,
+                "primitives": [rect(0, 30, 80, "#ffffff")]},
+            "noteAreas": [{"kind": "footnote", "y": 30, "height": 10,
+                "primitives": [rect(30, 30, 20, "#000000")]}]
+        }]
+    }))
+    .expect("display list");
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let rendered = render_page(&scene, 0, &resources).expect("render");
+    assert_eq!(pixel(&rendered.bytes, 10, 15), [0xff, 0xff, 0xff, 255]);
+    assert_eq!(pixel(&rendered.bytes, 40, 15), [0x11, 0x66, 0xcc, 255]);
+    assert_eq!(pixel(&rendered.bytes, 70, 15), [0xcc, 0, 0, 255]);
+    assert_eq!(pixel(&rendered.bytes, 10, 35), [0xff, 0xff, 0xff, 255]);
+    assert_eq!(pixel(&rendered.bytes, 40, 35), [0, 0, 0, 255]);
+}
+
 /// A refusal written to a shared cache must not spend the next page's decode
 /// budget: page two gets its own [`MAX_PAGE_IMAGE_PIXELS`] to spend, no matter
 /// what page one refused.

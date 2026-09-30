@@ -34,6 +34,8 @@ export interface DisplayPage {
   /** Formatted PAGE label (for example, "vii"). */
   pageLabel?: string;
   primitives: DisplayPrimitive[]; // body content, paint order
+  /** Leading primitives painted beneath the header and footer. */
+  watermarkPrimitiveCount?: number;
   /** Resolved page background. Undefined = transparent/host white. */
   background?: string;
   pageBorders?: PageBorderPrimitive[];
