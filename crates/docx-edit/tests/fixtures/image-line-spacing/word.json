@@ -1,0 +1,6 @@
+{
+  "source": "Microsoft Word 16.113.2 PDF export; points from the page top. imageTops are the two images' tops, bottomBTop the last line's top (baseline minus the 11.3pt ascent of the first line).",
+  "img-body-240": { "imageTops": [85.8, 243.6], "bottomBTop": 315.5 },
+  "img-body-360": { "imageTops": [85.8, 250.5], "bottomBTop": 329.6 },
+  "img-body-480": { "imageTops": [85.8, 257.4], "bottomBTop": 343.3 }
+}
