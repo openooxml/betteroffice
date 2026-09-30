@@ -169,6 +169,17 @@ test('a session handed over keeps its worker and shows the old pages until the n
     expect(stale.hitTestRegions(0, 100, 100)).toEqual(previewHits);
     expect(warnings).not.toHaveBeenCalled();
 
+    // What hosts read from here on (search, geometry, plugin queries, hit tests) is the full layout's.
+    await act(async () => {
+      await new Promise((done) => setTimeout(done, 50));
+    });
+    const current = result.current.queries!;
+    expect(current).toBe(live);
+    expect(text(current.displayList)).toContain('Full');
+    expect(text(current.displayList)).not.toContain('Preview');
+    expect(text(result.current.displayList)).not.toContain('Preview');
+    expect(text(shown.at(-1)!)).toContain('Full');
+
     expect(FakeWorker.created).toHaveLength(1);
     const worker = FakeWorker.created[0]!;
     expect(worker.posted.map((request) => request.type)).toEqual(['bootstrap', 'bootstrap']);
