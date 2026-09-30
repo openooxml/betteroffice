@@ -88,10 +88,23 @@ const ALL_BLOCKS = 2 ** 32 - 1;
 // The request being handled, and the requests answered with a trap.
 let handlingId = 0;
 const trappedIds = new Set<number>();
+const queuedRequests: { id: number; sync: boolean; layout: boolean }[] = [];
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
-  enqueue(() => handle(event.data), event.data.id);
+  const request = event.data;
+  const sync = request.type === 'sync';
+  queuedRequests.push({ id: request.id, sync, layout: sync && request.layoutExtras !== undefined });
+  enqueue(() => handle(request), request.id);
 };
+
+/** A later layout sync supersedes this sync unless another request intervenes. */
+function syncSuperseded(): boolean {
+  for (const next of queuedRequests) {
+    if (!next.sync) return false;
+    if (next.layout) return true;
+  }
+  return false;
+}
 
 /** `current` drops an operation whose request was answered while it waited. */
 function enqueue(
@@ -101,6 +114,8 @@ function enqueue(
 ): void {
   operations = operations
     .then(() => {
+      const index = queuedRequests.findIndex((request) => request.id === id);
+      if (index >= 0) queuedRequests.splice(index, 1);
       if (!current()) return;
       if (trap) throw trap;
       handlingId = id;
@@ -193,6 +208,14 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     unsubscribe?.();
     unsubscribe = null;
     if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
+    if (syncSuperseded()) {
+      // Later snapshots diff against this one's state and fonts, so it still loads them.
+      loadSnapshot(request.snapshot);
+      subscribe();
+      const stateVector = exactBuffer(session.encodeStateVector());
+      reply({ id: request.id, ok: true, superseded: true, stateVector }, [stateVector]);
+      return;
+    }
     const { layoutJson } = hydrate(request.snapshot);
     subscribe();
     const started = performance.now();
@@ -370,21 +393,7 @@ function hydrate(
   provisionalPages?: number
 ): { layoutJson: string | null; provisional: boolean } {
   if (!session) throw new Error('Resident engine worker is not initialized');
-  supersedeSlicedCompletion();
-  incompleteLayout = null;
-  completedLayout = null;
-  session.loadState(snapshot.state);
-  session.setPartialDocument(snapshot.partialDocument === true);
-  if (snapshot.fontsRevision !== fontsRevision) {
-    // A mismatched revision always carries the full font set (the client only
-    // omits fonts when it knows this session's applied revision matches).
-    session.clearFonts();
-    for (const font of snapshot.fonts) {
-      if (font instanceof Uint8Array) session.registerFont(font);
-      else session.registerSubstituteFont(font.substituteOf, font.family);
-    }
-    fontsRevision = snapshot.fontsRevision;
-  }
+  loadSnapshot(snapshot);
   for (const { story, env } of snapshot.renderInputs) session.yrsBlocksForStory(story, env);
   for (const input of snapshot.measureInputs) session.measureParagraphJson(input);
   let layoutJson: string | null = null;
@@ -405,6 +414,26 @@ function hydrate(
   layoutRevision = snapshot.layoutRevision;
   pendingUpdates = [];
   return { layoutJson, provisional };
+}
+
+/** Loads a snapshot's document state and fonts, replacing any layout of the previous state. */
+function loadSnapshot(snapshot: YrsResidentWorkerSnapshot): void {
+  if (!session) throw new Error('Resident engine worker is not initialized');
+  supersedeSlicedCompletion();
+  incompleteLayout = null;
+  completedLayout = null;
+  session.loadState(snapshot.state);
+  session.setPartialDocument(snapshot.partialDocument === true);
+  if (snapshot.fontsRevision !== fontsRevision) {
+    // A mismatched revision always carries the full font set (the client only
+    // omits fonts when it knows this session's applied revision matches).
+    session.clearFonts();
+    for (const font of snapshot.fonts) {
+      if (font instanceof Uint8Array) session.registerFont(font);
+      else session.registerSubstituteFont(font.substituteOf, font.family);
+    }
+    fontsRevision = snapshot.fontsRevision;
+  }
 }
 
 /**

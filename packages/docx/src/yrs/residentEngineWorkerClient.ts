@@ -226,6 +226,9 @@ export class ResidentEngineWorkerClient {
     );
     this.recordSent(options.stateVector, fontsRevision);
     const response = await pending;
+    if (response.superseded) {
+      throw new ResidentWorkerSupersededError('A later sync lays out and builds this frame');
+    }
     const result = frameResult(response);
     this.recordSync(response, fontsRevision);
     this.ready = true;
@@ -440,6 +443,9 @@ class ResidentWorkerUnavailableError extends Error {}
 
 /** The worker itself failed (crash, timeout, torn-down, corrupt reply). */
 export class ResidentWorkerFailureError extends Error {}
+
+/** A sync that loaded its snapshot while a later sync builds the frame. */
+export class ResidentWorkerSupersededError extends Error {}
 
 /** The worker trapped because its wasm memory could not grow any further. */
 export class ResidentWorkerOutOfMemoryError extends ResidentWorkerUnavailableError {

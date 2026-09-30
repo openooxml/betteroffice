@@ -10,7 +10,11 @@ import {
 import { preloadEditWasm } from '../wasm/edit';
 import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
 import { createYrsSession, type DocxEditRequest, type YrsSession } from './index';
-import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
+import {
+  ResidentEngineWorkerClient,
+  ResidentWorkerSupersededError,
+} from './residentEngineWorkerClient';
+import type { ResidentEngineWorkerResponse } from './residentEngineWorkerProtocol';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 const FONT = resolve(
@@ -252,4 +256,69 @@ test('a resident delete does not merge a paragraph forward over a table', async 
   ).toEqual({ applied: false });
   expect(accepted(main)).toEqual(before);
   expect(client.isReady()).toBe(true);
+});
+
+test('queued syncs load their state and only the newest lays out and builds a frame', async () => {
+  const main = await createYrsSession({ clientId: 5120 });
+  sessions.push(main);
+  const { paraId } = main.createStory('body', 'Seed');
+  main.registerFont(new Uint8Array(readFileSync(FONT)));
+  main.adoptResidentWorkerLayout!(LAYOUT);
+  const worker = startWorker();
+  const client = new ResidentEngineWorkerClient(worker);
+  clients.push(client);
+  const layoutOptions = () => ({ layoutExtras: '{}', stateVector: main.encodeStateVector() });
+  const booted = await client.bootstrap(main.residentWorkerSnapshot()!, '', layoutOptions());
+  const replies: (ResidentEngineWorkerResponse & { ok: true })[] = [];
+  const receive = worker.onmessage;
+  worker.onmessage = (event) => {
+    if (event.data.ok) replies.push(event.data);
+    receive?.(event);
+  };
+  const sync = () => {
+    main.adoptResidentWorkerLayout!(LAYOUT);
+    return client.sync(
+      main.residentWorkerSnapshot({
+        knownStateVector: client.remoteStateVector(),
+        knownFontsRevision: client.syncedFontsRevision(),
+      })!,
+      '',
+      booted.caret.frameEpoch,
+      false,
+      layoutOptions()
+    );
+  };
+
+  main.insertText({ story: 'body', paraId, offset: 4 }, ' one');
+  const firstVector = main.encodeStateVector();
+  const first = sync();
+  main.insertText({ story: 'body', paraId, offset: 8 }, ' two');
+  const secondVector = main.encodeStateVector();
+  const second = sync();
+  main.insertText({ story: 'body', paraId, offset: 12 }, ' three');
+  const third = sync();
+  await Promise.all([
+    expect(first).rejects.toBeInstanceOf(ResidentWorkerSupersededError),
+    expect(second).rejects.toBeInstanceOf(ResidentWorkerSupersededError),
+  ]);
+  const latest = await third;
+
+  expect(replies).toHaveLength(3);
+  for (const [index, reply] of replies.slice(0, 2).entries()) {
+    expect(reply.superseded).toBe(true);
+    expect(reply.frame).toBeUndefined();
+    expect(reply.layoutJson).toBeUndefined();
+    expect(new Uint8Array(reply.stateVector!)).toEqual([firstVector, secondVector][index]);
+  }
+  expect(replies[2]!.superseded).toBeUndefined();
+  expect(client.remoteStateVector()).toEqual(main.encodeStateVector());
+  const initialDelta = decodeFrameDelta(booted.frame);
+  const latestDelta = decodeFrameDelta(latest.frame);
+  expect(latestDelta.layoutEpoch).toBe(initialDelta.layoutEpoch + 1);
+  expect(latestDelta.frameEpoch).toBe(initialDelta.frameEpoch + 1);
+  const frame = applyFrameDeltaOwned(applyFrameDeltaOwned(null, initialDelta), latestDelta);
+  expect(frameText(frame)).toBe('Seed one two three');
+  expect(JSON.parse(latest.layoutJson!)).toEqual(
+    JSON.parse(main.layoutDocumentWithRegionsRetainedJson(LAYOUT))
+  );
 });

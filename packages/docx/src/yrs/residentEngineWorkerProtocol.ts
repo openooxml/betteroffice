@@ -133,6 +133,8 @@ export type ResidentEngineWorkerResponse = (
       layoutJson?: string;
       /** `layoutJson` covers only the first pages of the body. */
       layoutProvisional?: boolean;
+      /** A sync that loaded its snapshot and left layout and frame to a later sync. */
+      superseded?: boolean;
     }
   | {
       id: number;
