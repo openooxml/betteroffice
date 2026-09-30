@@ -267,12 +267,24 @@ fn a_metafile_part_with_a_damaged_signature_shows_a_placeholder_and_warns() {
 }
 
 #[test]
-fn a_raster_saved_under_a_metafile_name_passes_through() {
-    let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
-    let path = "word/media/image1.emf";
-    let wire = parse_docx_s9_wire(&package(path, png, DRAWING), S9ParseOptions::default()).unwrap();
-    assert_eq!(wire.document.warnings, None);
-    let json = serde_json::to_value(&wire).unwrap();
-    let src = find_images(&json)[0]["src"].as_str().unwrap().to_owned();
-    assert!(src.starts_with("data:image/x-emf;base64,"), "{src}");
+fn a_raster_or_svg_saved_under_a_metafile_name_passes_through() {
+    let png: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+    let svg: &[u8] = b"\xEF\xBB\xBF\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"4\" height=\"4\"/>";
+    for (data, extension, mime) in [
+        (png, "emf", "image/x-emf"),
+        (svg, "emf", "image/x-emf"),
+        (svg, "wmf", "image/x-wmf"),
+    ] {
+        let path = format!("word/media/image1.{extension}");
+        let bytes = package(&path, data, DRAWING);
+        let wire = parse_docx_s9_wire(&bytes, S9ParseOptions::default()).unwrap();
+        assert_eq!(wire.document.warnings, None);
+        let json = serde_json::to_value(&wire).unwrap();
+        let src = find_images(&json)[0]["src"].as_str().unwrap().to_owned();
+        assert!(src.starts_with(&format!("data:{mime};base64,")), "{src}");
+        let package = ooxml_opc::RetainedPackage::new(bytes.into()).unwrap();
+        let table = docx_parse::media::MediaTable::new(package).unwrap();
+        assert!(table.warnings().is_empty());
+        assert_eq!(table.bytes(0).unwrap().as_ref(), data);
+    }
 }

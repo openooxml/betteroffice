@@ -601,11 +601,13 @@ fn metafile_display_form<'a>(
     }
 }
 
-/// Whether `data` starts like a raster format browsers decode, whatever its
-/// part name says.
+/// Whether `data` starts like a raster format or markup (SVG) browsers
+/// decode, whatever its part name says.
 #[cfg(feature = "metafile")]
 fn is_browser_image(data: &[u8]) -> bool {
-    data.starts_with(b"\x89PNG")
+    let text = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(data);
+    text.trim_ascii_start().starts_with(b"<")
+        || data.starts_with(b"\x89PNG")
         || data.starts_with(&[0xFF, 0xD8, 0xFF])
         || data.starts_with(b"GIF8")
         || data.starts_with(b"BM")
