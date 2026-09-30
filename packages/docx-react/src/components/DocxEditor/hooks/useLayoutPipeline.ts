@@ -172,7 +172,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   // The document version the first pass of this session laid out.
   const openedVersionRef = useRef<{ session: YrsSession; version: string | null } | null>(null);
   const workerPrewarmRef = useRef<{ session: YrsSession; release: () => void } | null>(null);
-  const releaseWorkerPrewarm = useCallback((owner: YrsSession) => {
+  const releaseWorkerPrewarm = useCallback((owner: YrsSession | null) => {
     const worker = workerPrewarmRef.current;
     if (!worker || worker.session !== owner) return;
     worker.release();
