@@ -29,6 +29,8 @@ const BROWSER_GLOBALS = [
 /** Exports that are not JavaScript modules, by specifier. */
 const NOT_MODULES = new Set(['@betteroffice/docx-react/styles.css']);
 
+const IMPORTED = 'betteroffice-import-complete';
+
 const PROBE = `
 for (const name of ${JSON.stringify(BROWSER_GLOBALS)}) {
   if (!Reflect.deleteProperty(globalThis, name) || name in globalThis) {
@@ -37,6 +39,7 @@ for (const name of ${JSON.stringify(BROWSER_GLOBALS)}) {
 }
 const [specifier, json] = process.argv.slice(1);
 await import(specifier, json === 'json' ? { with: { type: 'json' } } : undefined);
+process.stdout.write(${JSON.stringify(IMPORTED)});
 `;
 
 const CONDITIONS = new Set(['node', 'import', 'module-sync', 'default']);
@@ -94,7 +97,7 @@ function importInNode(directory, { specifier, json }) {
     ],
     { cwd: directory, encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_OPTIONS: '' } }
   );
-  if (result.status === 0) return null;
+  if (result.status === 0 && result.stdout.endsWith(IMPORTED)) return null;
   const reason = result.error?.message ?? `exit ${result.status ?? result.signal}`;
   const output = `${result.stderr ?? ''}${result.stdout ?? ''}`.trim().split('\n').slice(-8);
   return `${specifier}: ${reason}\n    ${output.join('\n    ')}`;
