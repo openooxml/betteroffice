@@ -185,9 +185,12 @@ test('a pass no change asked to run here waits for the worker pass in flight', a
 
   await answer(1);
   expect(shown()).toBe('2');
+  // The queued pass may change only the revision preview, so this one settles no wait.
+  expect(isSupersededLayout(hook.result.current.layout)).toBe(true);
   await frame();
   expect(worker.map((pass) => pass.at)).toEqual([1, 2, 2]);
   await answer(2);
+  expect(isSupersededLayout(hook.result.current.layout)).toBe(false);
   expect(doc.laidOutHere).toEqual([]);
   expect(errors).toEqual([]);
 });
