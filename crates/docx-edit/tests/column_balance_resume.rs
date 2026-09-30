@@ -42,8 +42,8 @@ fn section(columns: u64, top: u64, start: &str, last: bool) -> String {
 }
 
 /// Paragraphs, page breaks and sections of one to three columns, each starting on a new
-/// page, continuously or in the next column. The last section has one column, as
-/// incremental pagination needs.
+/// page, continuously or in the next column. The last section has one column and a
+/// paragraph, as incremental pagination needs.
 fn generated(seed: u64) -> Vec<u8> {
     let mut rng = Rng(seed * 2_654_435_761 + 1);
     let mut body = String::new();
@@ -72,26 +72,29 @@ fn generated(seed: u64) -> Vec<u8> {
             }
         }
     }
+    body.push_str(&p("FFFFFFFF", ""));
     body.push_str(&section(1, 720, "continuous", true));
     with_body_and_note(&body, &p("", &r("A note.")))
 }
 
-/// Types `text` into the middle of the body's last run of text.
-fn type_into(engine: &EngineSession, text: &str) {
+/// Types `text` into the middle of the body's run of text that `pick` chooses from their
+/// count.
+fn type_into(engine: &EngineSession, text: &str, pick: impl Fn(usize) -> usize) {
     let mut offset = 0;
-    let mut at = None;
+    let mut runs = Vec::new();
     for segment in engine.doc().story_segments("body").unwrap() {
         match segment.content {
             SegmentContent::Text(text) => {
                 let units = text.encode_utf16().count() as u32;
                 if units > 1 {
-                    at = Some(offset + units / 2);
+                    runs.push(offset + units / 2);
                 }
                 offset += units;
             }
             _ => offset += 1,
         }
     }
+    let at = runs.get(pick(runs.len())).copied();
     engine
         .doc()
         .insert_text(
@@ -103,16 +106,22 @@ fn type_into(engine: &EngineSession, text: &str) {
         .unwrap();
 }
 
-/// Lays `bytes` out, types `text` into its last run of text and lays it out again, which
-/// must repaginate incrementally and match a full layout of the edited document.
-fn assert_edit_relays_out_like_a_full_layout(bytes: &[u8], text: &str, font: u32, label: &str) {
+/// Lays `bytes` out, types `text` into the run of text `pick` chooses and lays it out
+/// again, which must repaginate incrementally and match a full layout of the edited
+/// document.
+fn assert_edit_relays_out_like_a_full_layout(
+    bytes: &[u8],
+    (text, pick): (&str, impl Fn(usize) -> usize),
+    font: u32,
+    label: &str,
+) {
     let engine = EngineSession::new(72);
     seed_from_docx(engine.doc(), bytes).unwrap();
     let request = region_request(&engine, bytes, font).to_string();
     engine
         .layout_document_with_regions_retained_json(&request)
         .unwrap();
-    type_into(&engine, text);
+    type_into(&engine, text, pick);
     let before = engine.stats().incremental_pagination_calls;
     let incremental = engine
         .layout_document_with_regions_retained_json(&request)
@@ -138,13 +147,13 @@ fn assert_edit_relays_out_like_a_full_layout(bytes: &[u8], text: &str, font: u32
 }
 
 #[test]
-fn an_edit_in_a_later_section_relays_out_like_a_full_layout() {
+fn an_edit_anywhere_relays_out_like_a_full_layout() {
     docx_layout::clear_measure_fonts();
     let font = docx_layout::register_measure_font(FONT).unwrap();
     for seed in 1..=24 {
         assert_edit_relays_out_like_a_full_layout(
             &generated(seed),
-            "typed ",
+            ("typed ", |count| (seed as usize * 7919) % count),
             font,
             &format!("generated document {seed}"),
         );
@@ -170,7 +179,7 @@ fn a_section_balanced_on_the_page_before_is_not_rebalanced_after_its_page_break(
     .concat();
     assert_edit_relays_out_like_a_full_layout(
         &with_body_and_note(&body, &p("", &r("A note."))),
-        "typed ",
+        ("typed ", |count| count - 1),
         font,
         "a page break opening a balanced section",
     );
@@ -200,7 +209,7 @@ fn an_edit_past_a_page_break_rebalances_its_section() {
     body.push(section(1, 720, "continuous", true));
     assert_edit_relays_out_like_a_full_layout(
         &with_body_and_note(&body.concat(), &p("", &r("A note."))),
-        &"grown ".repeat(40),
+        (&"grown ".repeat(40), |count| count - 1),
         font,
         "an edit after a page break in a balanced section",
     );
