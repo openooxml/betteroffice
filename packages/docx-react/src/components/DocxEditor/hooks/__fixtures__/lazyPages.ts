@@ -21,11 +21,29 @@ export class EngineWorker {
   heldInputReplies: (() => void)[] = [];
   constructor() {
     EngineWorker.last = this;
+    EngineWorker.spawned += 1;
   }
   static failPageBuilds = false;
+  static outOfMemoryPageBuilds = false;
+  static spawned = 0;
+  terminated = false;
   postMessage(request: ResidentEngineWorkerRequest): void {
     this.posted.push(request);
     const engine = EngineWorker.engine!;
+    if (request.type === 'buildPages' && EngineWorker.outOfMemoryPageBuilds) {
+      queueMicrotask(() =>
+        this.onmessage?.({
+          data: {
+            id: request.id,
+            ok: false,
+            error: 'Resident engine worker ran out of memory allocating 64 bytes: unreachable',
+            terminal: true,
+            outOfMemory: true,
+          },
+        } as MessageEvent<ResidentEngineWorkerResponse>)
+      );
+      return;
+    }
     if (request.type === 'buildPages' && EngineWorker.failPageBuilds) {
       queueMicrotask(() =>
         this.onmessage?.({
@@ -78,7 +96,9 @@ export class EngineWorker {
   releaseInputReplies(): void {
     for (const respond of this.heldInputReplies.splice(0)) queueMicrotask(respond);
   }
-  terminate(): void {}
+  terminate(): void {
+    this.terminated = true;
+  }
 }
 
 export const PREVIEW = { r1: 'accepted' } as const;
@@ -133,6 +153,8 @@ export function lazyFixture(paragraphLength?: number) {
   );
   EngineWorker.engine = engine;
   EngineWorker.failPageBuilds = false;
+  EngineWorker.outOfMemoryPageBuilds = false;
+  EngineWorker.spawned = 0;
   globalThis.Worker = EngineWorker as unknown as typeof Worker;
   const host = {
     residentWorkerProbe: () => ({ layoutRevision: 1 }),

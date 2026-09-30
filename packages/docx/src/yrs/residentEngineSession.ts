@@ -9,7 +9,7 @@ import type {
   CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
-import { createEditSession, preloadEditWasm } from './wasm/index';
+import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
 
 export type ResidentEngineSession = Pick<
   YrsSession,
@@ -48,8 +48,11 @@ export type ResidentEngineSession = Pick<
   setWindowedIncrementalBuilds(enabled: boolean): void;
 };
 
-export async function createResidentEngineSession(): Promise<ResidentEngineSession> {
+export async function createResidentEngineSession(
+  heapLimitBytes?: number
+): Promise<ResidentEngineSession> {
   await preloadEditWasm();
+  setEditWasmHeapLimit(heapLimitBytes);
   const session = createEditSession(randomClientId());
   const listeners = new Set<
     (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
