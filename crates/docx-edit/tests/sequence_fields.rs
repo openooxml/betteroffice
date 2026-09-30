@@ -152,6 +152,25 @@ fn a_sequence_with_a_nested_field_keeps_its_cached_results() {
 }
 
 #[test]
+fn a_text_box_with_a_projected_nested_sequence_keeps_cached_results() {
+    let nested = format!(
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> QUOTE "</w:instrText></w:r>{}<w:r><w:instrText xml:space="preserve">" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:hyperlink w:anchor="top">{}</w:hyperlink><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+        field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>1</w:t>", 1),
+        run("1")
+    );
+    let body = [
+        format!("<w:p>{}</w:p>", text_box(&nested)),
+        paragraph(&field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>2</w:t>", 1)),
+        paragraph(&field("SEQ Table")),
+    ]
+    .concat();
+    assert_eq!(
+        boxed_sequence_results(&body),
+        [(false, "2"), (false, "1")].map(|(boxed, result)| (boxed, result.to_owned()))
+    );
+}
+
+#[test]
 fn a_text_box_anchored_at_a_paragraph_start_counts_before_the_paragraph() {
     let body = [
         paragraph(&field("SEQ Figure")),

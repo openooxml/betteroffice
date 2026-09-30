@@ -488,6 +488,7 @@ function fieldPayload(
   const formatting =
     fieldFormatting ?? (field.type === 'complexField' ? field.formatting : undefined);
   const displayMode = field.fieldTree?.displayMode ?? 'result';
+  const nestedSequences = nestedSequenceNames(field);
   return {
     payload: {
       fieldType: field.fieldType,
@@ -500,9 +501,43 @@ function fieldPayload(
       hasCachedResult: displayText.length > 0,
       fieldData: JSON.stringify(field),
       modelKind: 'field',
+      ...(nestedSequences.length > 0 ? { nestedSequences } : {}),
     },
     marks: formattingToMarks(mergeTextFormatting(styleFormatting, formatting)),
   };
+}
+
+function nestedSequenceNames(field: SimpleField | ComplexField): string[] {
+  const names = new Set<string>();
+  const pending: unknown[] = [field];
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (Array.isArray(value)) {
+      for (let index = value.length - 1; index >= 0; index--) pending.push(value[index]);
+    } else if (value !== null && typeof value === 'object') {
+      const node = value as Attrs;
+      if (
+        value !== field &&
+        (node.type === 'complexField' || node.type === 'simpleField') &&
+        typeof node.instruction === 'string'
+      ) {
+        const name = sequenceName(node.instruction);
+        if (name !== undefined) names.add(name);
+      }
+      for (const key of Object.keys(node).sort().reverse()) pending.push(node[key]);
+    }
+  }
+  return [...names];
+}
+
+function sequenceName(instruction: string): string | undefined {
+  const tokens = instruction.matchAll(/"([^"]*)(?:"|$)|([^\p{White_Space}]+)/gu);
+  const first = tokens.next().value;
+  const second = tokens.next().value;
+  const kind = first?.[1] ?? first?.[2];
+  const name = second?.[1] ?? second?.[2];
+  if (!kind || !/^[sS][eE][qQ]$/.test(kind) || name === undefined || name.startsWith('\\')) return undefined;
+  return name.toLowerCase();
 }
 
 function mathPayload(math: MathEquation): Attrs {

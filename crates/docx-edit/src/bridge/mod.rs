@@ -1617,6 +1617,7 @@ fn lower_shape_block<T: ReadTxn>(
         x: None,
         y: None,
         inner_text: None,
+        nested_sequences: Vec::new(),
         inner_measures: None,
         children: Vec::new(),
         scene: None,

@@ -129,6 +129,7 @@ fn collect_shape<'a>(
     fields: &mut Vec<&'a mut FieldRun>,
     nested: &mut HashSet<String>,
 ) {
+    nested.extend(shape.nested_sequences.iter().cloned());
     for paragraph in shape.inner_text.iter_mut().flatten() {
         collect_paragraph(paragraph, fields, nested);
     }

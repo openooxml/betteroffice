@@ -1014,6 +1014,8 @@ pub struct ShapeBlock {
     pub y: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inner_text: Option<Vec<ParagraphBlock>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nested_sequences: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inner_measures: Option<Vec<ParagraphExtent>>,
     pub children: Vec<ShapeBlock>,
@@ -1568,6 +1570,7 @@ impl PartialEq for ShapeBlock {
             x: _,
             y: _,
             inner_text: _,
+            nested_sequences: _,
             inner_measures: _,
             children: _,
             scene: _,
@@ -1599,6 +1602,7 @@ impl PartialEq for ShapeBlock {
             && self.x == other.x
             && self.y == other.y
             && self.inner_text == other.inner_text
+            && self.nested_sequences == other.nested_sequences
             && self.inner_measures == other.inner_measures
             && self.children == other.children
             && self.scene == other.scene

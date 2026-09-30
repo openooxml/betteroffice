@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 
 use docx_layout::types::{
@@ -143,7 +143,10 @@ fn lower_shape(
     let (doc_start, doc_end) = pm_start
         .map(|start| (Some(start as f64), Some((start + 1) as f64)))
         .unwrap_or((None, None));
-    let inner_text = shape_inner_text(shape, &block_id);
+    let mut nested_sequences = Vec::new();
+    let inner_text = shape_inner_text(shape, &block_id, &mut nested_sequences);
+    let mut seen = HashSet::new();
+    nested_sequences.retain(|name| seen.insert(name.clone()));
     let position = shape_position(shape);
 
     Some(ShapeBlock {
@@ -163,6 +166,7 @@ fn lower_shape(
             .and_then(|value| number_in(value, "y"))
             .map(emu_to_pixels),
         inner_text,
+        nested_sequences,
         inner_measures: None,
         children,
         scene: field(shape, "scene").cloned(),
@@ -375,12 +379,22 @@ fn shape_transform(shape: &Value) -> Option<Value> {
     (!output.is_empty()).then_some(Value::Object(output))
 }
 
-fn shape_inner_text(shape: &Value, block_id: &str) -> Option<Vec<ParagraphBlock>> {
+fn shape_inner_text(
+    shape: &Value,
+    block_id: &str,
+    nested_sequences: &mut Vec<String>,
+) -> Option<Vec<ParagraphBlock>> {
     let text_body = object(shape, "textBody")?;
     let content = text_body.get("content")?.as_array()?;
     let mut blocks = Vec::new();
     for (index, block) in content.iter().enumerate() {
-        push_shape_body_block(block, format!("{block_id}:p:{index}"), 0, &mut blocks);
+        push_shape_body_block(
+            block,
+            format!("{block_id}:p:{index}"),
+            0,
+            &mut blocks,
+            nested_sequences,
+        );
     }
     Some(blocks)
 }
@@ -392,6 +406,7 @@ fn push_shape_body_block(
     block_id: String,
     depth: usize,
     output: &mut Vec<ParagraphBlock>,
+    nested_sequences: &mut Vec<String>,
 ) {
     if depth > MAX_SHAPE_BODY_DEPTH {
         return;
@@ -406,6 +421,7 @@ fn push_shape_body_block(
                             format!("{block_id}:r{row_index}c{cell_index}:p:{index}"),
                             depth + 1,
                             output,
+                            nested_sequences,
                         );
                     }
                 }
@@ -413,14 +429,24 @@ fn push_shape_body_block(
         }
         Some("blockSdt") => {
             for (index, child) in array(block, "content").into_iter().flatten().enumerate() {
-                push_shape_body_block(child, format!("{block_id}:sdt:{index}"), depth + 1, output);
+                push_shape_body_block(
+                    child,
+                    format!("{block_id}:sdt:{index}"),
+                    depth + 1,
+                    output,
+                    nested_sequences,
+                );
             }
         }
-        _ => output.push(shape_paragraph(block, block_id)),
+        _ => output.push(shape_paragraph(block, block_id, nested_sequences)),
     }
 }
 
-fn shape_paragraph(paragraph: &Value, block_id: String) -> ParagraphBlock {
+fn shape_paragraph(
+    paragraph: &Value,
+    block_id: String,
+    nested_sequences: &mut Vec<String>,
+) -> ParagraphBlock {
     let alignment = object(paragraph, "formatting")
         .and_then(|value| string_in(value, "alignment"))
         .and_then(|value| match value.as_str() {
@@ -431,7 +457,7 @@ fn shape_paragraph(paragraph: &Value, block_id: String) -> ParagraphBlock {
     let runs = array(paragraph, "content")
         .into_iter()
         .flatten()
-        .flat_map(shape_paragraph_content_runs)
+        .flat_map(|content| shape_content_runs(content, 0, nested_sequences))
         .collect();
     ParagraphBlock {
         sdt_groups: None,
@@ -447,11 +473,11 @@ fn shape_paragraph(paragraph: &Value, block_id: String) -> ParagraphBlock {
     }
 }
 
-fn shape_paragraph_content_runs(content: &Value) -> Vec<Run> {
-    shape_content_runs(content, 0)
-}
-
-fn shape_content_runs(content: &Value, depth: usize) -> Vec<Run> {
+fn shape_content_runs(
+    content: &Value,
+    depth: usize,
+    nested_sequences: &mut Vec<String>,
+) -> Vec<Run> {
     if depth >= MAX_SHAPE_BODY_DEPTH {
         return Vec::new();
     }
@@ -461,15 +487,16 @@ fn shape_content_runs(content: &Value, depth: usize) -> Vec<Run> {
             .or_else(|| array(content, "children"))
             .into_iter()
             .flatten()
-            .flat_map(|child| shape_content_runs(child, depth + 1))
+            .flat_map(|child| shape_content_runs(child, depth + 1, nested_sequences))
             .collect(),
         Some("inlineSdt") => array(content, "content")
             .into_iter()
             .flatten()
-            .flat_map(|child| shape_content_runs(child, depth + 1))
+            .flat_map(|child| shape_content_runs(child, depth + 1, nested_sequences))
             .collect(),
         Some("complexField") => match projected_result(content, depth) {
             Some(result) => {
+                nested_sequences.extend(crate::seed::nested_sequence_names(content));
                 let formatting = field(content, "formatting");
                 result
                     .iter()
@@ -481,9 +508,9 @@ fn shape_content_runs(content: &Value, depth: usize) -> Vec<Run> {
                         {
                             let mut child = child.clone();
                             child["formatting"] = formatting.clone();
-                            shape_content_runs(&child, depth + 1)
+                            shape_content_runs(&child, depth + 1, nested_sequences)
                         }
-                        _ => shape_content_runs(child, depth + 1),
+                        _ => shape_content_runs(child, depth + 1, nested_sequences),
                     })
                     .collect()
             }
@@ -1247,6 +1274,82 @@ mod tests {
             matches!(&deep[..], [Run::Field(field)] if field.fallback.as_deref() == Some("p")),
             "{deep:?}"
         );
+    }
+
+    #[test]
+    fn a_projected_shape_field_keeps_nested_sequences_opaque() {
+        use docx_layout::sequence_fields::number_sequence_fields;
+        use docx_layout::types::LayoutBlock;
+
+        let text = json!({"type": "run", "content": [{"type": "text", "text": "1"}]});
+        let sequence = json!({"type": "complexField", "fieldType": "SEQ",
+            "instruction": "SEQ Figure", "fieldCode": [], "fieldResult": [text]});
+        let link = json!({"type": "hyperlink", "anchor": "top", "children": [text]});
+        let page = json!({"type": "simpleField", "fieldType": "PAGE",
+            "instruction": "PAGE", "content": [text]});
+        let text_runs = shape_document_runs(&text);
+        let mut text_and_page = text_runs.clone();
+        text_and_page.push(shape_field_run(&page));
+        for (result, expected) in [
+            (json!([link]), text_runs),
+            (json!([link, page]), text_and_page),
+        ] {
+            let quote = json!({"type": "complexField", "fieldType": "QUOTE",
+                "instruction": "QUOTE \"{ SEQ Figure }\"", "fieldCode": [], "fieldResult": [text],
+                "structuredCode": {"inline": [sequence]}, "structuredResult": {"inline": result}});
+            let shape = json!({"shapeType": "rect",
+                "textBody": {"content": [{"type": "paragraph", "content": [quote]}]}});
+            let shape = lower_shape_json(&shape, 1, &RenderEnv::default()).unwrap();
+            assert_eq!(shape.nested_sequences, ["figure"]);
+            let projected = shape.inner_text.as_ref().unwrap()[0].runs.clone();
+            assert_eq!(projected, expected);
+            let body = json!({"type": "paragraph", "content": [{"type": "complexField",
+                "fieldType": "SEQ", "instruction": "SEQ Figure", "fieldCode": [],
+                "fieldResult": [{"type": "run", "content": [{"type": "text", "text": "2"}]}]}]});
+            let mut blocks = vec![
+                LayoutBlock::Shape(shape),
+                LayoutBlock::Paragraph(shape_paragraph(
+                    &body,
+                    "body:p:0".to_owned(),
+                    &mut Vec::new(),
+                )),
+            ];
+            number_sequence_fields(&mut blocks);
+            let LayoutBlock::Shape(shape) = &blocks[0] else {
+                panic!("missing shape")
+            };
+            assert_eq!(shape.inner_text.as_ref().unwrap()[0].runs, projected);
+            let LayoutBlock::Paragraph(body) = &blocks[1] else {
+                panic!("missing body paragraph")
+            };
+            assert!(
+                matches!(&body.runs[..], [Run::Field(field)] if field.fallback.as_deref() == Some("2"))
+            );
+        }
+    }
+
+    #[test]
+    fn projected_shape_sequences_keep_first_seen_order_across_body_blocks() {
+        let projected = |name: &str| {
+            json!({"type": "complexField", "fieldType": "QUOTE", "instruction": "QUOTE cached",
+                "structuredCode": {"inline": [{"type": "simpleField",
+                    "instruction": format!("SEQ {name}")}]},
+                "structuredResult": {"inline": [{"type": "hyperlink", "children": []}]}})
+        };
+        let shape = json!({"shapeType": "rect", "textBody": {"content": [
+            {"type": "paragraph", "content": [projected("Table")]},
+            {"type": "blockSdt", "content": [{"type": "table", "rows": [{"cells": [
+                {"content": [{"type": "paragraph", "content": [{"type": "inlineSdt",
+                    "content": [{"type": "hyperlink",
+                        "children": [projected("Figure"), projected("TABLE")]}]}]}]}
+            ]}]}]},
+            {"type": "paragraph", "content": [projected("Other")]}
+        ]}});
+        let shape = lower_shape_json(&shape, 1, &RenderEnv::default()).unwrap();
+        assert_eq!(shape.nested_sequences, ["table", "figure", "other"]);
+        let paragraphs = shape.inner_text.unwrap();
+        assert_eq!(paragraphs.len(), 3);
+        assert!(paragraphs.iter().all(|paragraph| paragraph.runs.is_empty()));
     }
 
     #[test]

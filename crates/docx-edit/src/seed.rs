@@ -1522,7 +1522,13 @@ fn field_payload(
 
 /// The sequences of SEQ fields nested anywhere in a field's code or result.
 pub(crate) fn nested_sequence_names(field_value: &Value) -> Vec<String> {
-    fn walk(value: &Value, names: &mut Vec<String>) {
+    let mut names = Vec::new();
+    let mut seen = HashSet::new();
+    let mut pending = Vec::new();
+    if let Value::Object(map) = field_value {
+        pending.extend(map.values().rev());
+    }
+    while let Some(value) = pending.pop() {
         match value {
             Value::Object(map) => {
                 if matches!(
@@ -1530,19 +1536,15 @@ pub(crate) fn nested_sequence_names(field_value: &Value) -> Vec<String> {
                     Some("complexField" | "simpleField")
                 ) && let Some(name) = string(map.get("instruction"))
                     .and_then(docx_layout::sequence_fields::sequence_name)
-                    && !names.contains(&name)
+                    && seen.insert(name.clone())
                 {
                     names.push(name);
                 }
-                map.values().for_each(|value| walk(value, names));
+                pending.extend(map.values().rev());
             }
-            Value::Array(values) => values.iter().for_each(|value| walk(value, names)),
+            Value::Array(values) => pending.extend(values.iter().rev()),
             _ => {}
         }
-    }
-    let mut names = Vec::new();
-    if let Value::Object(map) = field_value {
-        map.values().for_each(|value| walk(value, &mut names));
     }
     names
 }
@@ -5349,6 +5351,21 @@ pub(crate) fn seed_stories(document: &EditingDoc, bytes: &[u8]) -> Result<(), St
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nested_sequence_names_keep_first_seen_order() {
+        let field = json!({"type": "complexField", "instruction": "SEQ Outer",
+            "structuredCode": {"inline": [
+                {"type": "simpleField", "instruction": "sEq \"Figure\""},
+                {"type": "complexField", "instruction": "SEQ Table"},
+                {"type": "simpleField", "instruction": "SEQ FIGURE"}
+            ]},
+            "structuredResult": {"inline": [
+                {"type": "complexField", "instruction": "SEQ TABLE"},
+                {"type": "simpleField", "instruction": "SEQ Other"}
+            ]}});
+        assert_eq!(nested_sequence_names(&field), ["figure", "table", "other"]);
+    }
+
     #[test]
     fn a_preview_inflates_the_media_its_document_and_other_parts_use() {
         const IMAGE: &str =

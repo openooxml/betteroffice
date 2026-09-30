@@ -816,6 +816,7 @@ export type ShapeBlock = {
   y?: number;
   /** Optional inner paragraphs for future text-bearing shape rendering. */
   innerText?: ParagraphBlock[];
+  nestedSequences?: string[];
   /** Pre-measured inner paragraph measures for display-list shape text. */
   innerMeasures?: ParagraphExtent[];
   /** Child shapes positioned relative to this shape's top-left corner. */
