@@ -89,6 +89,7 @@ afterAll(async () => {
 function installWorker(options: {
   failOpen?: boolean;
   failState?: boolean;
+  failFontRequirementsAfter?: number;
   holdState?: boolean;
   holdOpen?: boolean;
   oomStage?: 'open' | 'fontRequirements' | 'bootstrap' | 'encodeState';
@@ -96,12 +97,14 @@ function installWorker(options: {
 } = {}) {
   const workers: InProcessResidentWorker[] = [];
   const posted: ResidentEngineWorkerRequest[] = [];
+  let fontRequirements = 0;
   globalThis.Worker = class {
     constructor() {
       const worker = startWorker();
       const send = worker.postMessage.bind(worker);
       worker.postMessage = (request, transfer) => {
         posted.push(request);
+        if (request.type === 'fontRequirements') fontRequirements += 1;
         if ((options.holdState && request.type === 'encodeState') ||
             (options.holdOpen && request.type === 'open') ||
             (options.holdRetryOpen && workers.length > 1 && request.type === 'open')) worker.hold();
@@ -114,6 +117,12 @@ function installWorker(options: {
             (options.failState && request.type === 'encodeState')) {
           queueMicrotask(() => worker.onmessage?.({
             data: { id: request.id, ok: false, error: 'open failed', terminal: true },
+          } as MessageEvent));
+        } else if (request.type === 'fontRequirements' &&
+            options.failFontRequirementsAfter !== undefined &&
+            fontRequirements === options.failFontRequirementsAfter + 1) {
+          queueMicrotask(() => worker.onmessage?.({
+            data: { id: request.id, ok: false, error: 'font requirements failed' },
           } as MessageEvent));
         } else send(request, transfer);
       };
@@ -890,6 +899,60 @@ for (const stage of ['fontRequirements', 'bootstrap'] as const) {
     });
   }
 }
+
+test.each([false, true])(
+  'a failed worker font preflight keeps the replica pending only in the background (background=%s)',
+  async (background) => {
+    const { workers, posted } = installWorker({ failFontRequirementsAfter: 1 });
+    const frames = holdFrames();
+    try {
+      const { result, unmount } = renderHook(useHarness, {
+        initialProps: { ...initialProps, source: longBytes, readOnly: true, holdReplica: true },
+      });
+      await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+      const session = result.current.core.session!;
+      expect(result.current.renderer.presentedEngine).toBe(session);
+      expect(result.current.renderer.frame).not.toBeNull();
+      expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(true);
+      expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+      expect(workers).toHaveLength(1);
+      const worker = workers[0]!;
+      const preflights = posted.filter((request) => request.type === 'fontRequirements');
+      expect(preflights).toHaveLength(1);
+      const input = preflights[0]!.layoutInput;
+
+      await act(async () => {
+        expect(await result.current.renderer.fontRequirementsInWorker(session, input, { background })).toBeNull();
+      });
+      expect(posted.filter((request) => request.type === 'fontRequirements')).toHaveLength(2);
+      expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(background);
+      if (background) {
+        expect(result.current.core.replicaReady).toBe(false);
+        expect(result.current.mainOpens).toEqual([]);
+        expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+        await act(async () => {
+          expect(await result.current.renderer.fontRequirementsInWorker(session, input)).toEqual(expect.any(String));
+        });
+        expect(workers).toHaveLength(1);
+        expect(workers[0]).toBe(worker);
+        expect(worker.requests.filter((type) => type === 'fontRequirements')).toHaveLength(2);
+        expect(posted.filter((request) => request.type === 'fontRequirements')).toHaveLength(3);
+        expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(true);
+        expect(result.current.mainOpens).toEqual([]);
+        expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+      } else {
+        expect(result.current.core.replicaReady).toBe(true);
+        expect(result.current.mainOpens).toEqual([true]);
+        expect(session.hasStory('body')).toBe(true);
+      }
+      expect(result.current.errors).toEqual([]);
+      unmount();
+    } finally {
+      cleanup();
+      frames.restore();
+    }
+  }
+);
 
 test('read-only handoff fallback requests a new frame and restores queries', async () => {
   installWorker({ failState: true });
