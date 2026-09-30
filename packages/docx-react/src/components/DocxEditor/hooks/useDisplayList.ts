@@ -88,7 +88,10 @@ export type OpenInWorker = (
   generation?: number
 ) => Promise<WorkerOpenedDocument | null>;
 
-/** A `background` preflight answers null on any failure and never falls back or hydrates. */
+/**
+ * A `background` preflight is answered only by a worker already laying out the session; it is null
+ * otherwise or on any failure, and never falls back, hydrates or starts a worker.
+ */
 export type FontRequirementsInWorker = (
   session: YrsSession,
   request: string,
@@ -1136,9 +1139,7 @@ export function useRustDisplayList(
     async <T,>(
       hostEngine: YrsSession,
       request: (owner: NonNullable<typeof workerRef.current>) => Promise<T>,
-      onOwner?: (owner: NonNullable<typeof workerRef.current>) => void,
-      // Optional work neither starts a worker nor recovers one that ran out of memory.
-      { background = false }: { background?: boolean } = {}
+      onOwner?: (owner: NonNullable<typeof workerRef.current>) => void
     ): Promise<T> => {
       const source = workerOpenSourcesRef.current.get(hostEngine);
       const load = sessionLoad(hostEngine);
@@ -1155,7 +1156,6 @@ export function useRustDisplayList(
           throw new SupersededPreviewError();
         }
         if (workerRef.current?.engine !== hostEngine) {
-          if (background) throw new SupersededPreviewError();
           const owner = workerFor(hostEngine);
           owner.opened = true;
           owner.opening = owner.client
@@ -1189,9 +1189,7 @@ export function useRustDisplayList(
           return result;
         } catch (error) {
           if (error instanceof ResidentWorkerOutOfMemoryError) {
-            if (!background && replaceOutOfMemoryWorker(hostEngine, owner, error) === 'retry') {
-              continue;
-            }
+            if (replaceOutOfMemoryWorker(hostEngine, owner, error) === 'retry') continue;
           } else {
             if (!isCurrentWorker(hostEngine, owner)) throw new SupersededPreviewError();
           }
@@ -1272,26 +1270,36 @@ export function useRustDisplayList(
 
   const fontRequirementsInWorker = useCallback<FontRequirementsInWorker>(
     (hostEngine, request, options) => {
+      if (options?.background) {
+        // Only a worker already laying out this document answers, hydrated or not.
+        const current = workerRef.current;
+        if (!current || current.engine !== hostEngine || !current.client.bootstrapSent()) {
+          return null;
+        }
+        return current.client
+          .fontRequirements(request)
+          .then((requirements) => {
+            JSON.parse(requirements);
+            return requirements;
+          })
+          .catch(() => null);
+      }
       if (!workerOpenEnabledRef.current || !workerOpenReplicaPending(hostEngine)) return null;
-      const background = options?.background === true;
-      if (background && workerRef.current?.engine !== hostEngine) return null;
       if (!workerOpenSourcesRef.current.has(hostEngine)) {
-        if (!background) ensureWorkerOpenReplica(hostEngine);
+        ensureWorkerOpenReplica(hostEngine);
         return null;
       }
       const owner = { current: workerRef.current };
       return requestOpenedWorker(
         hostEngine,
         (current) => current.client.fontRequirements(request),
-        (current) => { owner.current = current; },
-        { background }
+        (current) => { owner.current = current; }
       )
         .then((requirements) => {
           JSON.parse(requirements);
           return requirements;
         })
         .catch((error: unknown) => {
-          if (background) return null;
           if (error instanceof ResidentWorkerOutOfMemoryError) throw error;
           if (error instanceof SupersededPreviewError) {
             if (workerFallbackEngineRef.current === hostEngine) return null;

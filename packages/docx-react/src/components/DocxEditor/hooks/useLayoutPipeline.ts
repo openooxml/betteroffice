@@ -352,8 +352,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   // Layout Pipeline
   // =========================================================================
 
-  // Once per proposal set, after the pass's layout request; never fatal, and never swept on this
-  // thread while a worker-open replica is unhydrated.
+  // Once per proposal set, after the pass's layout request, by the worker already laying the
+  // document out; here only without one. Never fatal.
   const warmedProposalsRef = useRef<{ session: YrsSession; key: string } | null>(null);
   const warmDecisionFonts = useCallback((owner: YrsSession, request: object): void => {
     const key = warmFontRequirementsRef.current ? proposalSetKey(owner) : null;
@@ -370,18 +370,17 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       if (sessionRef.current !== owner || unmountedRef.current) return;
       warmFontRequirementsRef.current?.(JSON.parse(json) as ResidentFontRequirement[]);
     };
-    if (workerOpenEnabledRef.current && workerOpenReplicaPending(owner)) {
-      try {
-        const pending = fontRequirementsInWorkerRef.current?.(owner, warmInput, {
-          background: true,
-        });
-        if (pending) void pending.then(adopt).catch(failed);
-        else failed();
-      } catch {
-        failed();
-      }
+    let pending: Promise<string | null> | null = null;
+    try {
+      pending =
+        fontRequirementsInWorkerRef.current?.(owner, warmInput, { background: true }) ?? null;
+    } catch {}
+    if (pending) {
+      void pending.then(adopt).catch(failed);
       return;
     }
+    // An unhydrated worker-open replica has no document to sweep here.
+    if (workerOpenEnabledRef.current && workerOpenReplicaPending(owner)) return failed();
     setTimeout(() => {
       if (sessionRef.current !== owner || unmountedRef.current) return;
       try {

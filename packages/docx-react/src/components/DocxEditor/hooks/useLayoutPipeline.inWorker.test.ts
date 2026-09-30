@@ -127,11 +127,10 @@ for (const proposals of ['present', 'empty', 'unavailable', 'throwing']) {
           hook.result.current.runLayoutPipeline({ onHost: !inWorker });
           await new Promise((done) => setTimeout(done, 5));
         });
-        const where = inWorker ? 'worker' : 'host';
         expect(order).toEqual([
-          `${where}:exact`,
+          `${inWorker ? 'worker' : 'host'}:exact`,
           'layout',
-          ...(proposals === 'present' ? [`${where}:superset`] : []),
+          ...(proposals === 'present' ? ['worker:superset'] : []),
         ]);
         expect(measured).toEqual([requirements]);
         expect(warmed).toEqual(proposals === 'present' ? [warm] : []);
@@ -175,12 +174,13 @@ for (const proposals of ['present', 'empty', 'unavailable', 'throwing']) {
 }
 
 for (const answer of ['rejects', 'null'] as const) {
-  test(`a worker superset preflight that ${answer} warms nothing, fails nothing, and retries once hydrated`, async () => {
+  test(`a worker superset preflight that ${answer} warms nothing, fails nothing, and retries here without a worker`, async () => {
     const { session } = fakeDocument();
     const hostInputs: string[] = [];
     const errors: Error[] = [];
     const warmed: ResidentFontRequirement[][] = [];
     const replica = deferWorkerOpenReplica(session, () => new Promise(() => {}), () => {}, () => {});
+    let workerLive = true;
     Object.assign(session, {
       getProposals: () => ({ proposals: [{ id: 'proposal', revisionIds: ['r1'] }] }),
       layoutFontRequirementsJson: (input: string) => {
@@ -205,11 +205,13 @@ for (const answer of ['rejects', 'null'] as const) {
         onError: (error) => errors.push(error),
         experimentalWorkerOpen: true,
         fontRequirementsInWorker: (_session, input) =>
-          JSON.parse(input).revisionFontSuperset
-            ? answer === 'rejects'
-              ? Promise.reject(new Error('superset preflight failed'))
-              : Promise.resolve(null)
-            : Promise.resolve('[]'),
+          !JSON.parse(input).revisionFontSuperset
+            ? Promise.resolve('[]')
+            : !workerLive
+              ? null
+              : answer === 'rejects'
+                ? Promise.reject(new Error('superset preflight failed'))
+                : Promise.resolve(null),
         layoutInWorker: () =>
           Promise.resolve({ layout: { pages: [] } as unknown as Layout, notesConverged: true }),
       })
@@ -225,6 +227,7 @@ for (const answer of ['rejects', 'null'] as const) {
       expect(hostInputs).toEqual([]);
 
       replica.ensure();
+      workerLive = false;
       await act(async () => {
         hook.result.current.runLayoutPipeline();
         await new Promise((done) => setTimeout(done, 5));
@@ -710,7 +713,7 @@ test('without the warm-up the failed real pass lays out here', async () => {
   expect(shown()).toBe('2');
 });
 
-test('a hydrated worker-open session warms decision fonts here, after the pass', async () => {
+test('a hydrated worker-open session without a worker warms decision fonts here, after the pass', async () => {
   const { session } = fakeDocument();
   const order: string[] = [];
   const warmed: ResidentFontRequirement[][] = [];
