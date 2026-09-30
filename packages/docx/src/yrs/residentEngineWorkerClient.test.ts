@@ -4,6 +4,9 @@ import {
   RESIDENT_WORKER_SILENCE_MS,
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
+  preloadResidentEngineWorker,
+  retainPreloadedResidentEngineWorker,
+  takePreloadedResidentEngineWorker,
   ResidentWorkerOutOfMemoryError,
   type ResidentEngineWorkerPort,
 } from './residentEngineWorkerClient';
@@ -13,14 +16,21 @@ import type {
 } from './residentEngineWorkerProtocol';
 
 class FakeWorker implements ResidentEngineWorkerPort {
+  static instances: FakeWorker[] = [];
   onmessage: ResidentEngineWorkerPort['onmessage'] = null;
   onerror: ResidentEngineWorkerPort['onerror'] = null;
   onmessageerror: ResidentEngineWorkerPort['onmessageerror'] = null;
   readonly posted: ResidentEngineWorkerRequest[] = [];
+  readonly transfers: Transferable[][] = [];
   terminated = false;
 
-  postMessage(message: ResidentEngineWorkerRequest): void {
+  constructor(readonly url?: string | URL, readonly options?: WorkerOptions) {
+    FakeWorker.instances.push(this);
+  }
+
+  postMessage(message: ResidentEngineWorkerRequest, transfer: Transferable[] = []): void {
     this.posted.push(message);
+    this.transfers.push(transfer);
   }
 
   terminate(): void {
@@ -41,9 +51,11 @@ const timers = new Map<number, Timer>();
 let nextTimer = 1;
 const realSetTimeout = globalThis.setTimeout;
 const realClearTimeout = globalThis.clearTimeout;
+const originalWorker = globalThis.Worker;
 
 beforeEach(() => {
   timers.clear();
+  FakeWorker.instances = [];
   globalThis.setTimeout = ((callback: () => void, ms: number) => {
     const id = nextTimer++;
     timers.set(id, { callback, ms });
@@ -55,6 +67,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  takePreloadedResidentEngineWorker()?.destroy();
+  globalThis.Worker = originalWorker;
   globalThis.setTimeout = realSetTimeout;
   globalThis.clearTimeout = realClearTimeout;
 });
@@ -107,6 +121,166 @@ function setup() {
   const client = new ResidentEngineWorkerClient(worker);
   return { worker, client };
 }
+
+describe('warmup', () => {
+  test('waits for warm without marking a session ready or bootstrapped', async () => {
+    const { worker, client } = setup();
+    const warm = client.warm();
+    expect(worker.posted).toEqual([{ id: 1, type: 'warm' }]);
+    expect(client.isReady()).toBe(false);
+    expect(client.bootstrapSent()).toBe(false);
+    worker.reply({ id: worker.lastId(), ok: true });
+    await warm;
+    expect(client.isReady()).toBe(false);
+    expect(client.remoteStateVector()).toBeNull();
+    const bootstrap = client.bootstrap(snapshot, '');
+    worker.reply(frameReply(worker.lastId()));
+    await bootstrap;
+    expect(client.isReady()).toBe(true);
+  });
+
+  test('a rejected warm leaves bootstrap usable', async () => {
+    const { worker, client } = setup();
+    const warm = client.warm();
+    worker.reply({ id: worker.lastId(), ok: false, error: 'init failed' });
+    await expect(warm).rejects.toThrow('init failed');
+    const bootstrap = client.bootstrap(snapshot, '');
+    worker.reply(frameReply(worker.lastId()));
+    await bootstrap;
+    expect(worker.terminated).toBe(false);
+    expect(client.isReady()).toBe(true);
+  });
+});
+
+describe('preloaded worker', () => {
+  function installWorker(): void {
+    globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  }
+
+  async function preloaded(): Promise<FakeWorker> {
+    installWorker();
+    const warm = preloadResidentEngineWorker();
+    const worker = FakeWorker.instances.at(-1)!;
+    worker.reply({ id: worker.lastId(), ok: true });
+    await warm;
+    return worker;
+  }
+
+  test('keeps one spare and consumes it exactly once', async () => {
+    installWorker();
+    const first = preloadResidentEngineWorker();
+    const second = preloadResidentEngineWorker();
+    expect(first).toBe(second);
+    expect(FakeWorker.instances).toHaveLength(1);
+    const worker = FakeWorker.instances[0];
+    expect(String(worker.url).endsWith('/yrs/residentEngineWorker.mjs')).toBe(true);
+    expect(worker.options).toEqual({ type: 'module', name: 'openooxml-resident-engine' });
+    worker.reply({ id: worker.lastId(), ok: true });
+    await first;
+    const client = takePreloadedResidentEngineWorker();
+    expect(client).not.toBeNull();
+    expect(takePreloadedResidentEngineWorker()).toBeNull();
+    expect(timers.size).toBe(0);
+    client?.destroy();
+  });
+
+  test('drops a failed spare so the next preload creates a fresh worker', async () => {
+    installWorker();
+    const warm = preloadResidentEngineWorker();
+    const failed = FakeWorker.instances[0];
+    failed.reply({ id: failed.lastId(), ok: false, error: 'init failed' });
+    await expect(warm).rejects.toThrow('init failed');
+    expect(failed.terminated).toBe(true);
+    expect(takePreloadedResidentEngineWorker()).toBeNull();
+    const next = await preloaded();
+    expect(next).not.toBe(failed);
+    expect(FakeWorker.instances).toHaveLength(2);
+  });
+
+  test('an adopted spare can retry bootstrap after its pending warm fails', async () => {
+    installWorker();
+    const warm = preloadResidentEngineWorker();
+    const worker = FakeWorker.instances[0];
+    const client = takePreloadedResidentEngineWorker()!;
+    const bootstrap = client.bootstrap(snapshot, '');
+    worker.reply({ id: worker.posted[0].id, ok: false, error: 'init failed' });
+    await expect(warm).rejects.toThrow('init failed');
+    worker.reply(frameReply(worker.lastId()));
+    await bootstrap;
+    expect(worker.terminated).toBe(false);
+    expect(client.isReady()).toBe(true);
+    client.destroy();
+  });
+
+  test('does not adopt a spare made by another Worker constructor', async () => {
+    const worker = await preloaded();
+    class OtherWorker extends FakeWorker {}
+    globalThis.Worker = OtherWorker as unknown as typeof Worker;
+    expect(takePreloadedResidentEngineWorker()).toBeNull();
+    expect(worker.terminated).toBe(true);
+    const fresh = new ResidentEngineWorkerClient();
+    expect(FakeWorker.instances.at(-1)).toBeInstanceOf(OtherWorker);
+    fresh.destroy();
+  });
+
+  test('does not adopt a spare that crashed after warming', async () => {
+    const worker = await preloaded();
+    worker.onerror?.({ message: 'out of memory' } as ErrorEvent);
+    expect(takePreloadedResidentEngineWorker()).toBeNull();
+    expect(worker.terminated).toBe(true);
+    const next = await preloaded();
+    expect(next).not.toBe(worker);
+  });
+
+  test('keeps the spare through StrictMode cleanup and frees it after the last owner leaves', async () => {
+    const worker = await preloaded();
+    const release = retainPreloadedResidentEngineWorker();
+    release();
+    release();
+    await preloadResidentEngineWorker();
+    const remounted = retainPreloadedResidentEngineWorker();
+    const secondOwner = retainPreloadedResidentEngineWorker();
+    expireTimers();
+    expect(worker.terminated).toBe(false);
+    remounted();
+    expireTimers();
+    expect(worker.terminated).toBe(false);
+    secondOwner();
+    expireTimers();
+    expect(worker.terminated).toBe(true);
+    expect(takePreloadedResidentEngineWorker()).toBeNull();
+  });
+
+  test('releasing an owner cannot terminate an adopted worker or a later spare', async () => {
+    const adopted = await preloaded();
+    const release = retainPreloadedResidentEngineWorker();
+    const client = takePreloadedResidentEngineWorker()!;
+    const spare = await preloaded();
+    const releaseSpare = retainPreloadedResidentEngineWorker();
+    release();
+    expireTimers();
+    expect(adopted.terminated).toBe(false);
+    expect(spare.terminated).toBe(false);
+    releaseSpare();
+    expireTimers();
+    expect(spare.terminated).toBe(true);
+    client.destroy();
+  });
+
+  test('expires an unused public preload', async () => {
+    const worker = await preloaded();
+    expireTimers();
+    expect(worker.terminated).toBe(true);
+    expect(takePreloadedResidentEngineWorker()).toBeNull();
+  });
+
+  test('skips worker startup where Worker is unavailable', async () => {
+    globalThis.Worker = undefined as unknown as typeof Worker;
+    await preloadResidentEngineWorker();
+    expect(FakeWorker.instances).toHaveLength(0);
+    expect(takePreloadedResidentEngineWorker()).toBeNull();
+  });
+});
 
 describe('watchdog', () => {
   test('queued requests share one silence budget that each reply restarts', async () => {
@@ -250,6 +424,204 @@ describe('worker failure', () => {
     expect(worker.terminated).toBe(true);
     await expect(client.buildFrame('', 0)).rejects.toThrow('unreadable message');
   });
+});
+
+describe('resident worker opening', () => {
+  test('an opened bootstrap under another heap limit fails before touching its bookkeeping', async () => {
+    const { worker, client } = setup();
+    void client.open(new Uint8Array([1]), { heapLimitBytes: 1024 });
+    await expect(
+      client.bootstrap(snapshot, '', { opened: true, heapLimitBytes: 2048 })
+    ).rejects.toThrow('another heap limit');
+    expect(client.bootstrapSent()).toBe(false);
+    expect(worker.posted).toHaveLength(1);
+  });
+
+  test('opens one document per worker and sends only the bytes of the view it gets', async () => {
+    const { worker, client } = setup();
+    // A Buffer view into a larger store: its `slice` shares that store rather than copying.
+    const view = Buffer.from(new Uint8Array([0, 1, 2, 3, 4]).buffer, 1, 3);
+    expect(view.buffer.byteLength).toBeGreaterThan(3);
+    void client.open(view);
+    const request = worker.posted[0];
+    if (request.type !== 'open') throw new Error('open request missing');
+    expect(request.bytes).not.toBe(view.buffer);
+    expect(request.bytes.byteLength).toBe(3);
+    expect(new Uint8Array(request.bytes)).toEqual(new Uint8Array([1, 2, 3]));
+    expect(worker.transfers[0]).toEqual([request.bytes]);
+    await expect(client.open(new Uint8Array([4]))).rejects.toThrow('already holds a document');
+    expect(worker.posted).toHaveLength(1);
+  });
+
+  test('open, font requirements, and state handover report memory before an opened bootstrap', async () => {
+    const { worker, client } = setup();
+    const bytes = new Uint8Array([1, 2, 3]);
+    const opened = client.open(bytes, { digest: 'abc', generation: 'opening', heapLimitBytes: 2048 });
+    const request = worker.posted[0];
+    expect(request).toMatchObject({
+      type: 'open',
+      digest: 'abc',
+      generation: 'opening',
+      heapLimitBytes: 2048,
+    });
+    if (request.type !== 'open') throw new Error('open request missing');
+    expect(request.bytes).not.toBe(bytes.buffer);
+    expect(new Uint8Array(request.bytes)).toEqual(bytes);
+    const stateVector = new Uint8Array([5]);
+    worker.reply({
+      id: request.id,
+      ok: true,
+      hostJson: '{"host":1}',
+      stateVector: stateVector.buffer,
+      memory: [{ label: 'docx-edit', bufferBytes: 1 }],
+    });
+    expect(await opened).toEqual({ hostJson: '{"host":1}', stateVector });
+    expect(client.remoteStateVector()).toEqual(stateVector);
+    expect(client.memory()).toEqual([{ label: 'docx-edit', bufferBytes: 1 }]);
+
+    const requirements = client.fontRequirements('{}');
+    expect(worker.posted[1]).toMatchObject({ type: 'fontRequirements', layoutInput: '{}' });
+    worker.reply({
+      id: worker.lastId(),
+      ok: true,
+      requirementsJson: '[]',
+      memory: [{ label: 'docx-edit', bufferBytes: 2 }],
+    });
+    expect(await requirements).toBe('[]');
+    expect(client.memory()).toEqual([{ label: 'docx-edit', bufferBytes: 2 }]);
+
+    const state = client.encodeState();
+    expect(worker.posted[2]).toMatchObject({ type: 'encodeState' });
+    worker.reply({
+      id: worker.lastId(),
+      ok: true,
+      state: new Uint8Array([7, 8]).buffer,
+      memory: [{ label: 'docx-edit', bufferBytes: 3 }],
+    });
+    expect(await state).toEqual(new Uint8Array([7, 8]));
+    expect(client.memory()).toEqual([{ label: 'docx-edit', bufferBytes: 3 }]);
+
+    const bootstrap = client.bootstrap(snapshot, '', { opened: true, frameEpoch: 7 });
+    expect(worker.posted[3]).toMatchObject({ type: 'bootstrap', opened: true, expectedFrameEpoch: 7 });
+    worker.reply(frameReply(worker.lastId()));
+    await bootstrap;
+    expect(client.isReady()).toBe(true);
+  });
+
+  test('a package that fails to open leaves the client able to open another', async () => {
+    const { worker, client } = setup();
+    const failed = client.open(new Uint8Array([1]));
+    worker.reply({ id: worker.lastId(), ok: false, error: 'not a package' });
+    await expect(failed).rejects.toThrow('not a package');
+    const opened = client.open(new Uint8Array([2]));
+    expect(worker.posted).toHaveLength(2);
+    worker.reply({
+      id: worker.lastId(),
+      ok: true,
+      hostJson: '{}',
+      stateVector: new Uint8Array([5]).buffer,
+    });
+    expect((await opened).hostJson).toBe('{}');
+    await expect(client.open(new Uint8Array([3]))).rejects.toThrow('already holds a document');
+  });
+
+  test('an opened bootstrap queued behind a failed open leaves the client able to open again', async () => {
+    const { worker, client } = setup();
+    const failed = client.open(new Uint8Array([1]));
+    const bootstrap = client.bootstrap(snapshot, '', { opened: true });
+    expect(worker.posted).toHaveLength(2);
+    worker.reply({ id: worker.posted[0].id, ok: false, error: 'not a package' });
+    await expect(failed).rejects.toThrow('not a package');
+    worker.reply({
+      id: worker.posted[1].id,
+      ok: false,
+      error: 'Resident engine worker has no opened document',
+    });
+    await expect(bootstrap).rejects.toThrow('no opened document');
+    expect(client.bootstrapSent()).toBe(false);
+    expect(client.remoteStateVector()).toBeNull();
+    const opened = client.open(new Uint8Array([2]));
+    expect(worker.posted).toHaveLength(3);
+    worker.reply({
+      id: worker.lastId(),
+      ok: true,
+      hostJson: '{}',
+      stateVector: new Uint8Array([5]).buffer,
+    });
+    expect((await opened).hostJson).toBe('{}');
+  });
+
+  test('a failed opened bootstrap leaves a later bootstrap in place', async () => {
+    const { worker, client } = setup();
+    const failed = client.open(new Uint8Array([1]));
+    const opened = client.bootstrap(snapshot, '', { opened: true });
+    worker.reply({ id: worker.posted[0].id, ok: false, error: 'not a package' });
+    await expect(failed).rejects.toThrow('not a package');
+    const recovery = client.bootstrap(snapshot, '');
+    worker.reply({
+      id: worker.posted[1].id,
+      ok: false,
+      error: 'Resident engine worker has no opened document',
+    });
+    await expect(opened).rejects.toThrow('no opened document');
+    worker.reply(frameReply(worker.posted[2].id));
+    await recovery;
+    expect(client.bootstrapSent()).toBe(true);
+    await expect(client.open(new Uint8Array([2]))).rejects.toThrow('already holds a document');
+  });
+
+  test('an opened bootstrap without an open fails before touching its bookkeeping', async () => {
+    const { worker, client } = setup();
+    await expect(client.bootstrap(snapshot, '', { opened: true })).rejects.toThrow(
+      'no opened document'
+    );
+    expect(client.bootstrapSent()).toBe(false);
+    expect(worker.posted).toHaveLength(0);
+  });
+
+  test('bytes that cannot be copied leave the client able to open another', async () => {
+    const { worker, client } = setup();
+    const unreadable = {
+      get length(): number {
+        throw new TypeError('detached');
+      },
+    } as unknown as Uint8Array;
+    await expect(client.open(unreadable)).rejects.toThrow('detached');
+    expect(worker.posted).toHaveLength(0);
+    void client.open(new Uint8Array([2]));
+    expect(worker.posted).toHaveLength(1);
+  });
+
+  for (const type of ['open', 'fontRequirements', 'encodeState'] as const) {
+    test(`${type} propagates the worker's OOM error and memory`, async () => {
+      const { worker, client } = setup();
+      const pending =
+        type === 'open'
+          ? client.open(new Uint8Array([1]))
+          : type === 'fontRequirements'
+            ? client.fontRequirements('{}')
+            : client.encodeState();
+      const memory = [{ label: 'docx-edit', bufferBytes: 65536, failedAllocationBytes: 64 }];
+      worker.reply({
+        id: worker.lastId(),
+        ok: false,
+        error: 'Resident engine worker ran out of memory allocating 64 bytes: unreachable',
+        terminal: true,
+        outOfMemory: true,
+        memory,
+      });
+      const failure = await pending.then(
+        () => { throw new Error('trapped request resolved'); },
+        (error: Error) => error
+      );
+      expect(failure).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+      expect((failure as ResidentWorkerOutOfMemoryError).memory).toEqual(memory);
+      expect(client.memory()).toEqual(memory);
+      expect(worker.terminated).toBe(true);
+      await expect(client.encodeState()).rejects.toBe(failure);
+      expect(worker.posted).toHaveLength(1);
+    });
+  }
 });
 
 describe('wasm trap', () => {

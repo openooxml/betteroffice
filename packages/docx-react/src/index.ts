@@ -11,6 +11,8 @@ import { version as packageVersion } from '../package.json';
 
 export const VERSION: string = packageVersion;
 
+export { preloadDocxEngine } from '@betteroffice/docx/yrs';
+
 // Main editor contract
 export {
   DocxEditor,

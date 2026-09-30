@@ -65,6 +65,11 @@ revisions) and the editor's command store, `commands`.
 Vanished (hidden) text stays out of the layout by default; pass
 `showHiddenText` to reveal it with normal wrapping.
 
+`previewFirstPage` (experimental, off by default) paints a display-only preview
+of a document's first pages before the whole document opens, then hands them
+over to it; the editor stays read-only until then. It is ignored with
+collaboration.
+
 ## What works today
 
 - Editing with Word-faithful pagination; layout runs in Rust, never in the DOM
