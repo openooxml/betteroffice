@@ -103,8 +103,9 @@ async function setup(options: {
       events.push('flush');
       options.flush?.();
     },
-    relayout: () => {
-      events.push('relayout');
+    relayout: (relayoutOptions?: { onHost?: boolean }) => {
+      // An export lays out on this thread: a worker pass would leave the session's layout as it is.
+      events.push(relayoutOptions?.onHost ? 'relayout' : 'relayout in the worker');
       options.relayout?.();
     },
   } as unknown as PagedEditorRef;
