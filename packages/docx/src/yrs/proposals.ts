@@ -796,7 +796,12 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
       );
     },
     mirror(mirror) {
-      const before = JSON.stringify(canonical(snapshot()));
+      // Like the registry's own changes, a new document version alone notifies no one.
+      const visible = () => {
+        const { version: _, ...rest } = snapshot();
+        return JSON.stringify(canonical(rest));
+      };
+      const before = visible();
       if (mirror) {
         mirrored = structuredClone(mirror);
       } else if (mirrored) {
@@ -805,7 +810,7 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
         previewVersion = mirrored.proposals.previewVersion;
         mirrored = null;
       }
-      if (JSON.stringify(canonical(snapshot())) !== before) notify();
+      if (visible() !== before) notify();
     },
     subscribe(listener) {
       if (typeof listener !== 'function')
