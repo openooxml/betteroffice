@@ -475,31 +475,34 @@ fn resolve_autofit_column_widths(
         })),
     );
     if target < min_total {
-        if table_block.indent.is_some_and(|indent| indent > 0.0) {
-            let mut column_padding = vec![0.0_f64; col_count];
-            for grid_cell in resolve_cell_grid(table_block) {
-                let cell = &table_block.rows[grid_cell.row_index].cells[grid_cell.cell_index];
-                let padding = cell
-                    .padding
-                    .as_ref()
-                    .map_or(2.0 * DEFAULT_CELL_PADDING_X, |padding| {
-                        padding.left + padding.right
-                    });
-                for column in column_padding
-                    .iter_mut()
-                    .skip(grid_cell.column_index)
-                    .take(grid_cell.col_span)
-                {
-                    *column = column.max(padding);
-                }
-            }
-            let padding_total: f64 = column_padding.iter().sum();
-            if target < padding_total && content_width >= padding_total {
-                return None;
+        let scale = target / min_total;
+        let widths: Vec<f64> = minimums.into_iter().map(|width| width * scale).collect();
+        let mut column_floors = vec![1.0_f64; col_count];
+        for grid_cell in resolve_cell_grid(table_block) {
+            let cell = &table_block.rows[grid_cell.row_index].cells[grid_cell.cell_index];
+            let padding = cell
+                .padding
+                .as_ref()
+                .map_or(2.0 * DEFAULT_CELL_PADDING_X, |padding| {
+                    padding.left + padding.right
+                });
+            for column in column_floors
+                .iter_mut()
+                .skip(grid_cell.column_index)
+                .take(grid_cell.col_span)
+            {
+                *column = column.max(padding + 1.0);
             }
         }
-        let scale = target / min_total;
-        return Some(minimums.into_iter().map(|width| width * scale).collect());
+        if widths
+            .iter()
+            .zip(&column_floors)
+            .any(|(width, floor)| width < floor)
+            && content_width >= column_floors.iter().sum::<f64>()
+        {
+            return None;
+        }
+        return Some(widths);
     }
     if target >= max_total {
         return Some(distribute_to_target(maximums, target));
@@ -528,7 +531,7 @@ pub(crate) fn resolve_table_intrinsic_widths(
     content_width: f64,
     content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
 ) -> (f64, f64) {
-    let indent = table_block.indent.unwrap_or(0.0).max(0.0);
+    let indent = table_indent(table_block);
     if table_block
         .width_algorithm
         .as_deref()
@@ -558,9 +561,23 @@ pub(crate) fn resolve_table_intrinsic_widths(
     (minimum + indent, maximum + indent)
 }
 
-/// The budget a table may spend, after its own left indent.
+fn table_indent(table_block: &TableBlock) -> f64 {
+    if matches!(
+        table_block.justification.as_deref(),
+        Some("center" | "right")
+    ) {
+        return 0.0;
+    }
+    table_block
+        .indent
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0)
+        .max(0.0)
+}
+
+/// The available width after the table's applied indent.
 fn table_width_budget(table_block: &TableBlock, content_width: f64) -> f64 {
-    (content_width - table_block.indent.unwrap_or(0.0).max(0.0)).max(0.0)
+    (content_width - table_indent(table_block)).max(0.0)
 }
 
 /// Grid columns whose width no cell states, for a table that states no width
@@ -755,7 +772,7 @@ pub fn resolve_table_total_width_px(table_block: &TableBlock, content_width: f64
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     /// bun:test `toBeCloseTo(expected, digits)`: |actual - expected| < 0.5 * 10^-digits.
     fn assert_close_to(actual: f64, expected: f64, digits: i32) {
@@ -1049,7 +1066,34 @@ mod tests {
     }
 
     #[test]
-    fn autofit_shrinks_minimums_when_the_indented_budget_covers_padding() {
+    fn autofit_with_zero_padding_and_exhausted_indent_keeps_its_grid() {
+        for grid in [
+            json!({"columnWidths": [100, 100]}),
+            json!({"gridWidths": [100, 100]}),
+        ] {
+            let mut table = json!({
+                "id": 0, "layoutMode": "autofit", "indent": 600,
+                "rows": [{"id": 0, "cells": [
+                    {"id": 0, "blocks": [], "minContentWidth": 40, "maxContentWidth": 40,
+                     "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0}},
+                    {"id": 1, "blocks": [], "minContentWidth": 40, "maxContentWidth": 40,
+                     "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0}}
+                ]}]
+            });
+            table
+                .as_object_mut()
+                .unwrap()
+                .extend(grid.as_object().unwrap().clone());
+            let block: TableBlock = serde_json::from_value(table).unwrap();
+            assert_eq!(
+                resolve_table_column_widths(&block, 600.0),
+                vec![100.0, 100.0]
+            );
+        }
+    }
+
+    #[test]
+    fn autofit_shrinks_minimums_when_each_column_covers_padding_and_content() {
         let mut block: TableBlock = serde_json::from_value(json!({
             "id": 0, "layoutMode": "autofit", "gridWidths": [100, 100], "indent": 500,
             "rows": [{"id": 0, "cells": [
@@ -1059,6 +1103,13 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(resolve_table_column_widths(&block, 600.0), vec![50.0, 50.0]);
+        block.indent = Some(570.0);
+        assert_eq!(resolve_table_column_widths(&block, 600.0), vec![15.0, 15.0]);
+        block.indent = Some(571.0);
+        assert_eq!(
+            resolve_table_column_widths(&block, 600.0),
+            vec![100.0, 100.0]
+        );
         block.indent = Some(19.0);
         assert_eq!(resolve_table_column_widths(&block, 20.0), vec![0.5, 0.5]);
     }
@@ -1090,6 +1141,12 @@ mod tests {
         let padding = block.rows[1].cells[1].padding.as_mut().unwrap();
         padding.left = 20.0;
         padding.right = 20.0;
+        assert_eq!(
+            resolve_table_column_widths(&block, 600.0),
+            vec![100.0, 100.0]
+        );
+        let padding = block.rows[0].cells[0].padding.as_mut().unwrap();
+        padding.left = 29.0;
         assert_eq!(resolve_table_column_widths(&block, 600.0), vec![50.0, 50.0]);
         block.indent = Some(599.0);
         for row in &mut block.rows {
@@ -1099,7 +1156,87 @@ mod tests {
                 padding.right = 0.0;
             }
         }
-        assert_eq!(resolve_table_column_widths(&block, 600.0), vec![0.5, 0.5]);
+        assert_eq!(
+            resolve_table_column_widths(&block, 600.0),
+            vec![100.0, 100.0]
+        );
+        block.indent = Some(598.0);
+        assert_eq!(resolve_table_column_widths(&block, 600.0), vec![1.0, 1.0]);
+    }
+
+    #[test]
+    fn autofit_keeps_its_grid_when_shrinking_would_hide_another_cells_text() {
+        for padding in [
+            Value::Null,
+            json!({"top": 0, "bottom": 0, "left": 7, "right": 7}),
+        ] {
+            let block: TableBlock = serde_json::from_value(json!({
+                "id": 0, "layoutMode": "autofit", "gridWidths": [300, 300],
+                "preferredWidth": {"value": 9000, "type": "dxa"},
+                "rows": [{"id": 0, "cells": [
+                    {"id": 0, "blocks": [], "minContentWidth": 4000, "maxContentWidth": 4000,
+                     "preferredWidth": {"value": 0, "type": "auto"}, "padding": padding},
+                    {"id": 1, "blocks": [], "minContentWidth": 49, "maxContentWidth": 49,
+                     "preferredWidth": {"value": 0, "type": "auto"}, "padding": padding}
+                ]}]
+            }))
+            .unwrap();
+            assert_eq!(
+                resolve_table_column_widths(&block, 600.0),
+                vec![300.0, 300.0]
+            );
+        }
+    }
+
+    #[test]
+    fn table_width_budget_and_intrinsic_widths_match_placement_alignment() {
+        for justification in [
+            None,
+            Some("left"),
+            Some("start"),
+            Some("end"),
+            Some("center"),
+            Some("right"),
+        ] {
+            for bidi in [false, true] {
+                let mut block: TableBlock = serde_json::from_value(json!({
+                    "id": 0, "layoutMode": "autofit", "gridWidths": [300, 300],
+                    "preferredWidth": {"value": 9000, "type": "dxa"},
+                    "indent": 100, "justification": justification, "bidi": bidi,
+                    "rows": [{"id": 0, "cells": [
+                        {"id": 0, "blocks": [], "minContentWidth": 40, "maxContentWidth": 40},
+                        {"id": 1, "blocks": [], "minContentWidth": 40, "maxContentWidth": 40}
+                    ]}]
+                }))
+                .unwrap();
+                let indent = if matches!(justification, Some("center" | "right")) {
+                    0.0
+                } else {
+                    100.0
+                };
+                for legacy in [false, true] {
+                    if legacy {
+                        let preferred = block.preferred_width.take().unwrap();
+                        block.width = preferred.value;
+                        block.width_type = preferred.r#type;
+                    }
+                    assert_eq!(
+                        resolve_table_column_widths(&block, 600.0),
+                        vec![(600.0 - indent) / 2.0; 2],
+                        "{justification:?}, bidi={bidi}, legacy={legacy}"
+                    );
+                    assert_eq!(
+                        resolve_table_intrinsic_widths(&block, 600.0, None),
+                        (80.0 + indent, 600.0 + indent)
+                    );
+                }
+                block.layout_mode = Some("fixed".to_owned());
+                assert_eq!(
+                    resolve_table_intrinsic_widths(&block, 600.0, None),
+                    (600.0 + indent, 600.0 + indent)
+                );
+            }
+        }
     }
 
     #[test]

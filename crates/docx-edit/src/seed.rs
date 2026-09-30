@@ -5420,6 +5420,94 @@ mod tests {
         document
     }
 
+    #[test]
+    fn seeded_grid_percentages_do_not_become_cell_width_preferences() {
+        for formatting in [Value::Null, json!({}), json!({"verticalAlign": "center"})] {
+            let table = json!({
+                "type": "table", "columnWidths": [1500, 4500],
+                "formatting": {"layout": "fixed", "width": {"value": 9000, "type": "dxa"}},
+                "rows": [{"type": "tableRow", "cells": [
+                    {"type": "tableCell", "formatting": formatting, "content": []},
+                    {"type": "tableCell", "formatting": formatting, "content": []}
+                ]}]
+            });
+            let projected = project_table(&table, &StyleResolver::new(None), None, 12);
+            for (cell, width) in projected.rows[0].cells.iter().zip([25.0, 75.0]) {
+                assert_eq!(cell.attrs.get("width").and_then(Value::as_f64), Some(width));
+                assert_eq!(
+                    cell.attrs.get("widthType").and_then(Value::as_str),
+                    Some("pct")
+                );
+            }
+            let document = seed_body(&[table]);
+            let env = crate::bridge::RenderEnv::default();
+            let blocks = crate::bridge::yrs_doc_to_layout_blocks(&document, "body", &env).unwrap();
+            let docx_layout::types::LayoutBlock::Table(table) = &blocks[0] else {
+                panic!()
+            };
+            for cell in &table.rows[0].cells {
+                assert_eq!(cell.width, None);
+                assert_eq!(cell.width_value, None);
+                assert_eq!(cell.preferred_width, None);
+            }
+            assert_eq!(
+                docx_layout::table_grid::resolve_table_column_widths(table, 600.0),
+                vec![150.0, 450.0]
+            );
+            document
+                .set_column_width(
+                    &EditCtx::local("", ""),
+                    &crate::CellLoc::new("body", 0, 0, 0),
+                    3000.0,
+                )
+                .unwrap();
+            let blocks = crate::bridge::yrs_doc_to_layout_blocks(&document, "body", &env).unwrap();
+            let docx_layout::types::LayoutBlock::Table(table) = &blocks[0] else {
+                panic!()
+            };
+            assert_eq!(
+                docx_layout::table_grid::resolve_table_column_widths(table, 600.0),
+                vec![250.0, 350.0]
+            );
+        }
+    }
+
+    #[test]
+    fn seeded_cell_percentages_preserve_authored_units() {
+        for (values, expected) in [
+            ([1250.0, 3750.0], vec![150.0, 450.0]),
+            ([25.0, 75.0], vec![297.0, 303.0]),
+        ] {
+            let document = seed_body(&[json!({
+                "type": "table", "columnWidths": [1500, 4500],
+                "formatting": {"layout": "fixed", "width": {"value": 9000, "type": "dxa"}},
+                "rows": [{"type": "tableRow", "cells": [
+                    {"type": "tableCell", "content": [],
+                     "formatting": {"width": {"value": values[0], "type": "pct"}}},
+                    {"type": "tableCell", "content": [],
+                     "formatting": {"width": {"value": values[1], "type": "pct"}}}
+                ]}]
+            })]);
+            let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+                &document,
+                "body",
+                &crate::bridge::RenderEnv::default(),
+            )
+            .unwrap();
+            let docx_layout::types::LayoutBlock::Table(table) = &blocks[0] else {
+                panic!()
+            };
+            for (cell, value) in table.rows[0].cells.iter().zip(values) {
+                assert_eq!(cell.width_value, Some(value));
+                assert_eq!(cell.preferred_width.as_ref().unwrap().value, Some(value));
+            }
+            assert_eq!(
+                docx_layout::table_grid::resolve_table_column_widths(table, 600.0),
+                expected
+            );
+        }
+    }
+
     fn rendered(document: &EditingDoc) -> (usize, String) {
         let blocks = crate::bridge::yrs_doc_to_layout_blocks(
             document,

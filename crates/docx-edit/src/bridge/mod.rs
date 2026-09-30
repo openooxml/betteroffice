@@ -1073,6 +1073,7 @@ fn lower_table<T: ReadTxn>(
         .unwrap_or_else(|| story_index.to_string());
     let table_id = format!("{parent_story}:table:{table_identity}");
 
+    let original = tbl_pr.get("_originalFormatting").and_then(any_map);
     let table_margins = tbl_pr.get("cellMargins").and_then(any_map);
     let mut rows = Vec::with_capacity(row_values.len());
     let mut row_pm_start = pm_start + 1;
@@ -1142,8 +1143,15 @@ fn lower_table<T: ReadTxn>(
             )?;
 
             let width_type = map_string(tc_pr, "widthType");
-            let width_value =
-                map_number(tc_pr, "width").filter(|_| width_type.as_deref() != Some("auto"));
+            let authored_width = tc_pr
+                .get("_originalFormatting")
+                .and_then(any_map)
+                .and_then(|value| value.get("width"));
+            let synthesized_width = original.is_some()
+                && authored_width.is_none()
+                && width_type.as_deref() == Some("pct");
+            let width_value = map_number(tc_pr, "width")
+                .filter(|_| width_type.as_deref() != Some("auto") && !synthesized_width);
             let width =
                 width_value.filter(|value| *value != 0.0).and_then(|value| {
                     match width_type.as_deref() {
@@ -1226,7 +1234,6 @@ fn lower_table<T: ReadTxn>(
         .filter_map(any_number)
         .map(twips_to_pixels)
         .collect();
-    let original = tbl_pr.get("_originalFormatting").and_then(any_map);
     let indent = original
         .and_then(|value| value.get("indent"))
         .and_then(any_map)
