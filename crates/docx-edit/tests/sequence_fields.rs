@@ -219,6 +219,64 @@ fn a_sequence_with_a_nested_field_keeps_its_cached_results() {
 }
 
 #[test]
+fn legacy_state_without_sequence_metadata_keeps_all_cached_results() {
+    let nested = format!(
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> QUOTE "</w:instrText></w:r>{}<w:r><w:instrText xml:space="preserve">" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>2</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+        field("SEQ Figure")
+    );
+    let body = [
+        paragraph(&field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>1</w:t>", 1)),
+        paragraph(&nested),
+        paragraph(&field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>3</w:t>", 1)),
+    ]
+    .concat();
+    let doc = EditingDoc::new(1);
+    seed_from_docx(&doc, &document(&body)).unwrap();
+    {
+        let mut txn = doc.yrs_doc().transact_mut();
+        let stories = txn.get_map("stories").unwrap();
+        let Some(Out::YText(story)) = stories.get(&txn, "body") else {
+            panic!("body");
+        };
+        let mut nested_fields = 0;
+        for diff in story.diff(&txn, yrs::types::text::YChange::identity) {
+            if let Out::YMap(field) = diff.insert
+                && field.remove(&mut txn, "nestedSequences").is_some()
+            {
+                nested_fields += 1;
+            }
+        }
+        assert_eq!(nested_fields, 1);
+    }
+    for (has_metadata, expected) in [(true, ["1", "2", "2"]), (false, ["1", "2", "3"])] {
+        if !has_metadata {
+            let mut txn = doc.yrs_doc().transact_mut();
+            let session = txn.get_map("session").unwrap();
+            assert!(session.remove(&mut txn, "opaqueSequences").is_some());
+        }
+        let peer = EditingDoc::new(2);
+        peer.apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        for doc in [&doc, &peer] {
+            let blocks = yrs_doc_to_layout_blocks(doc, "body", &RenderEnv::default()).unwrap();
+            let results: Vec<_> = blocks
+                .iter()
+                .filter_map(|block| match block {
+                    LayoutBlock::Paragraph(paragraph) => Some(&paragraph.runs),
+                    _ => None,
+                })
+                .flatten()
+                .filter_map(|run| match run {
+                    Run::Field(field) => field.fallback.as_deref(),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(results, expected);
+        }
+    }
+}
+
+#[test]
 fn a_body_projected_sequence_result_is_not_duplicated() {
     for result in [
         r#"<w:hyperlink w:anchor="top"><w:r><w:t>1</w:t></w:r></w:hyperlink>"#,

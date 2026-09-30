@@ -585,7 +585,12 @@ describe('DOCX engine seeding', () => {
       engine.seedFromDocx(bytes);
 
       expectEquivalentStories(engine, existingRoom);
-      expect(engine.encodeStateVector()).toEqual(existingRoom.encodeStateVector());
+      const seeded = engine.encodeStateVector();
+      engine.loadState(existingRoom.encodeStateAsUpdate(seeded));
+      expect(engine.encodeStateVector()).toEqual(seeded);
+      const before = existingRoom.encodeStateVector();
+      existingRoom.openDocx(bytes, false);
+      expect(existingRoom.encodeStateVector()).toEqual(before);
     } finally {
       existingRoom.destroy();
       engine.destroy();

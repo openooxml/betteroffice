@@ -330,8 +330,11 @@ pub fn yrs_doc_to_mapped_layout_blocks(
     let txn = doc.yrs_doc().transact();
     let mut active_stories = BTreeSet::new();
     let mut map = LoweringMap::default();
-    let mut opaque_sequences: BTreeSet<String> = txn
-        .get_map(crate::identity::SESSION)
+    let session = txn.get_map(crate::identity::SESSION);
+    let has_sequence_metadata = session
+        .as_ref()
+        .is_some_and(|session| session.contains_key(&txn, crate::seed::OPAQUE_SEQUENCES));
+    let mut opaque_sequences: BTreeSet<String> = session
         .map(|session| {
             any_strings(shared_any(&session, &txn, crate::seed::OPAQUE_SEQUENCES).as_ref())
                 .into_iter()
@@ -350,7 +353,7 @@ pub fn yrs_doc_to_mapped_layout_blocks(
         &mut opaque_sequences,
     )?;
     // Word numbers SEQ fields in the main text only.
-    if story_id == "body" {
+    if story_id == "body" && has_sequence_metadata {
         docx_layout::sequence_fields::number_sequence_fields_with_opaque(
             &mut blocks,
             opaque_sequences,

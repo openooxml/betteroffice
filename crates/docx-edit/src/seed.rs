@@ -24,16 +24,18 @@ use crate::{EditCtx, EditingDoc, RawOp};
 
 type JsonObject = BTreeMap<String, Value>;
 
+/// Marks state seeded with sequence metadata. State written before sequence numbering
+/// lacks this key and keeps cached SEQ results.
 pub(crate) const OPAQUE_SEQUENCES: &str = "opaqueSequences";
 
 pub(crate) fn seed_opaque_sequences(document: &EditingDoc, names: &[String]) {
-    if names.is_empty() {
-        return;
-    }
     let mut txn = document.transact_for(&EditCtx::system(""));
     let session = txn
         .get_map(crate::identity::SESSION)
         .expect("session root is declared by EditingDoc::new");
+    if names.is_empty() && session.contains_key(&txn, OPAQUE_SEQUENCES) {
+        return;
+    }
     let mut opaque_sequences: BTreeSet<String> = names.iter().cloned().collect();
     if let Some(Out::Any(Any::Array(previous))) = session.get(&txn, OPAQUE_SEQUENCES) {
         opaque_sequences.extend(previous.iter().filter_map(|value| match value {
@@ -5541,9 +5543,22 @@ mod tests {
     #[test]
     fn opaque_sequence_names_accumulate_in_document_state() {
         let doc = EditingDoc::new(1);
+        seed_opaque_sequences(&doc, &[]);
+        {
+            let txn = doc.yrs_doc().transact();
+            assert_eq!(
+                txn.get_map(crate::identity::SESSION)
+                    .unwrap()
+                    .get(&txn, OPAQUE_SEQUENCES),
+                Some(Out::Any(Any::Array(Vec::new().into())))
+            );
+        }
         seed_opaque_sequences(&doc, &["table".into(), "figure".into(), "table".into()]);
         seed_opaque_sequences(&doc, &["other".into(), "figure".into()]);
+        let before = doc.encode_state_vector_v1();
         seed_opaque_sequences(&doc, &[]);
+        seed_opaque_sequences(&doc, &["table".into(), "figure".into(), "other".into()]);
+        assert_eq!(doc.encode_state_vector_v1(), before);
         doc.begin_opening(Some("opening"));
         let txn = doc.yrs_doc().transact();
         assert_eq!(
