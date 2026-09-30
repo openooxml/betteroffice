@@ -639,6 +639,53 @@ fn a_preview_decision_paginates_incrementally_as_a_fresh_layout_would() {
 }
 
 #[test]
+fn a_decision_that_only_moves_a_paragraphs_positions_lays_it_out_again() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let insertion = |id: u32, text: &str| {
+        format!(
+            r#"<w:ins w:id="{id}" w:author="Bo" w:date="2026-09-29T12:00:00Z"><w:r><w:t>{text}</w:t></w:r></w:ins>"#
+        )
+    };
+    let filler: String = (0..240)
+        .map(|index| format!("<w:p><w:r><w:t>Filler paragraph {index}</w:t></w:r></w:p>"))
+        .collect();
+    let bytes = document(&format!(
+        "<w:p>{}{}</w:p>{filler}<w:p><w:r><w:t>End</w:t></w:r>{}</w:p>",
+        insertion(1, "X"),
+        insertion(2, "X"),
+        insertion(3, "!")
+    ));
+    let pass = |engine: &EngineSession, env: &RenderEnv| {
+        let output = engine
+            .layout_document_with_regions_json(&layout_request(env, font))
+            .unwrap();
+        let epoch = engine.stats().frame_epoch;
+        engine.build_display_list_frame("{}", epoch).unwrap();
+        let mut output: Value = serde_json::from_str(&output).unwrap();
+        let primitives = engine
+            .with_display_list(|list| serde_json::to_value(&list.pages[0].primitives).unwrap())
+            .unwrap();
+        (output["layout"].take(), primitives)
+    };
+    let engine = EngineSession::new(75110);
+    seed_from_docx(engine.doc(), &bytes).unwrap();
+    pass(&engine, &preview(&[("1", Accepted), ("2", Rejected)]));
+    let decided = preview(&[("1", Rejected), ("2", Accepted), ("3", Accepted)]);
+    let before = engine.stats();
+    let incremental = pass(&engine, &decided);
+    assert!(engine.stats().incremental_pagination_calls > before.incremental_pagination_calls);
+    let fresh = EngineSession::new(75111);
+    seed_from_docx(fresh.doc(), &bytes).unwrap();
+    let expected = pass(&fresh, &decided);
+    assert_eq!(
+        incremental.0["pages"][0]["fragments"][0], expected.0["pages"][0]["fragments"][0],
+        "first fragment"
+    );
+    assert_eq!(incremental.1, expected.1, "first page primitives");
+    assert_eq!(incremental, expected);
+}
+
+#[test]
 fn a_previewed_page_break_revision_moves_the_following_page() {
     let font = docx_layout::register_measure_font(FONT).unwrap();
     let two_paragraphs =
