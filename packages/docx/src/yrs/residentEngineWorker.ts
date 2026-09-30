@@ -446,16 +446,6 @@ async function replyFrame(
 ): Promise<void> {
   retainedFrame = applyFrameDeltaOwned(retainedFrame, decodeFrameDelta(bytes));
   for (const pageId of retainedFrame.damagedPageIds) pendingOffscreenPageIds.add(pageId.toString());
-  // The decoder's primitive-id arrays are zero-copy views into `bytes`. The
-  // FrameDelta buffer is transferred to the main thread below, so retain only
-  // these compact identity arrays in worker-owned memory before detaching it.
-  retainedFrame = {
-    ...retainedFrame,
-    pages: retainedFrame.pages.map((page) => ({
-      ...page,
-      primitiveIds: page.primitiveIds.slice(),
-    })),
-  };
   const caret = session?.residentCaretSnapshot();
   if (!caret || !residentCaretSnapshotForFrame(caret, retainedFrame)) {
     throw new Error('Resident caret snapshot does not match the produced frame');

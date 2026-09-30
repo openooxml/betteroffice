@@ -35,6 +35,7 @@ import {
 } from '@betteroffice/docx/layout/render';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import { projectPageLocalRect } from '../internals/canvasProjection';
+import { viewportColumnBand } from '../internals/viewportBand';
 import {
   buildRemotePresencePageMetrics,
   remotePresencePageWindow,
@@ -135,14 +136,13 @@ export function CanvasTableResizeOverlay({
       }
       const usesWindow = scrollsWindow(next);
       const column = host.firstElementChild as HTMLElement | null;
-      const viewportTop = usesWindow ? 0 : next.getBoundingClientRect().top;
-      const viewportBottom = viewportTop + (usesWindow ? window.innerHeight : next.clientHeight);
-      const nextWindow = column
+      const band = column ? viewportColumnBand(usesWindow ? null : next, column) : null;
+      const nextWindow = band
         ? remotePresencePageWindow(
             metrics,
-            column.getBoundingClientRect().top,
-            viewportTop,
-            viewportBottom,
+            band.columnTop,
+            band.top,
+            band.top + band.height,
             Infinity
           )
         : null;

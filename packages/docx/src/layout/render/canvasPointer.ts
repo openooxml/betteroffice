@@ -38,6 +38,32 @@ export interface DisplayPageClientRect {
 }
 
 /**
+ * The CSS `zoom` `element` renders at, its ancestors' included. Client rects
+ * carry it; layout sizes and an element's scroll offsets do not. Where
+ * `currentCSSZoom` is unavailable, zoom set inside a closed shadow tree the
+ * element is slotted through cannot be read and is left out.
+ */
+export function effectiveZoom(element: Element): number {
+  const current = (element as Element & { currentCSSZoom?: unknown }).currentCSSZoom;
+  if (typeof current === 'number') return current > 0 && Number.isFinite(current) ? current : 1;
+  if (typeof getComputedStyle !== 'function') return 1;
+  let zoom = 1;
+  for (let node: Element | null = element; node; node = flatTreeParent(node)) {
+    const value = Number.parseFloat(getComputedStyle(node).zoom);
+    if (value > 0 && Number.isFinite(value)) zoom *= value;
+  }
+  return zoom;
+}
+
+/** Zoom inherits along the flat tree: through assigned slots and shadow hosts. */
+function flatTreeParent(node: Element): Element | null {
+  if (node.assignedSlot) return node.assignedSlot;
+  if (node.parentElement) return node.parentElement;
+  const root = node.getRootNode();
+  return typeof ShadowRoot !== 'undefined' && root instanceof ShadowRoot ? root.host : null;
+}
+
+/**
  * The page canvases a renderer mounts under its pages host, so page lookups
  * read them instead of searching a subtree that also holds every page's
  * accessibility mirror. A renderer adds each `<canvas data-page-index>` it
@@ -49,6 +75,20 @@ export class DisplayPageRegistry {
   private readonly canvases = new Set<HTMLCanvasElement>();
   private ordered: HTMLCanvasElement[] | null = null;
   private byIndex: Map<number, HTMLCanvasElement> | null = null;
+  private materializer: ((pageIndices: readonly number[]) => void) | null = null;
+
+  /**
+   * Lets a renderer that keeps page DOM only near the viewport build the
+   * DOM of other pages when something needs it; see {@link materializeDisplayPages}.
+   */
+  setMaterializer(materializer: ((pageIndices: readonly number[]) => void) | null): void {
+    this.materializer = materializer;
+  }
+
+  /** Builds the DOM of `pageIndices` now, where the renderer keeps it only for some pages. */
+  materialize(pageIndices: readonly number[]): void {
+    this.materializer?.(pageIndices);
+  }
 
   add(canvas: HTMLCanvasElement): void {
     this.canvases.add(canvas);
@@ -103,6 +143,11 @@ export function bindDisplayPageRegistry(
 ): void {
   if (registry) displayPageRegistries.set(host, registry);
   else displayPageRegistries.delete(host);
+}
+
+/** Builds the accessibility DOM of `pageIndices` under `host` before a DOM query reads it. */
+export function materializeDisplayPages(host: HTMLElement, pageIndices: readonly number[]): void {
+  if (pageIndices.length > 0) displayPageRegistries.get(host)?.materialize(pageIndices);
 }
 
 /** The first `<canvas data-page-index>` under `host` for `pageIndex`. */
