@@ -172,12 +172,13 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   // The document version the first pass of this session laid out.
   const openedVersionRef = useRef<{ session: YrsSession; version: string | null } | null>(null);
   const workerPrewarmRef = useRef<{ session: YrsSession; release: () => void } | null>(null);
-  useEffect(() => () => {
+  const releaseWorkerPrewarm = useCallback((owner: YrsSession) => {
     const worker = workerPrewarmRef.current;
-    if (!worker || worker.session !== session) return;
+    if (!worker || worker.session !== owner) return;
     worker.release();
     workerPrewarmRef.current = null;
-  }, [session]);
+  }, []);
+  useEffect(() => () => releaseWorkerPrewarm(session), [releaseWorkerPrewarm, session]);
   // A deferred pass that had to run on this thread keeps that requirement.
   const pendingOnHostRef = useRef(false);
   onTotalPagesChangeRef.current = onTotalPagesChange;
@@ -298,6 +299,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         measurement = residentMeasurementConfig(requirements);
       } catch (error) {
         console.error('[PagedEditor] Resident font preflight error:', error);
+        releaseWorkerPrewarm(session);
         onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
         syncCoordinator.onLayoutComplete(currentEpoch);
         return;
@@ -433,10 +435,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         }
       }
       // The spare warmed while fonts loaded has been adopted by now, or is not needed.
-      if (workerPrewarmRef.current?.session === session) {
-        workerPrewarmRef.current.release();
-        workerPrewarmRef.current = null;
-      }
+      releaseWorkerPrewarm(session);
       if (!workerPass) {
         layOutHere();
         syncCoordinator.onLayoutComplete(currentEpoch);
@@ -492,6 +491,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       pagesContainerRef,
       viewportLayoutRef,
       scrollRestoreController,
+      releaseWorkerPrewarm,
     ]
   );
 

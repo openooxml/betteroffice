@@ -226,7 +226,7 @@ test('session change and unmount release a font-deferred spare before another ed
 });
 
 test('a font-deferred spare the first layout does not adopt is released', async () => {
-  for (const ending of ['build', 'onHost']) {
+  for (const ending of ['build', 'onHost', 'preflight']) {
     const source = setupLayoutPipeline();
     Object.assign(source.engine, {
       layoutDocumentWithRegionsRetainedJson: () => source.layoutJson,
@@ -246,12 +246,19 @@ test('a font-deferred spare the first layout does not adopt is released', async 
       const spare = FakeWorker.last!;
       expect(spare.posted.map((request) => request.type)).toEqual(['warm']);
       if (ending === 'build') hook.rerender({ overrides: { build } });
+      if (ending === 'preflight') {
+        Object.assign(source.engine, {
+          layoutFontRequirementsJson: () => {
+            throw new Error('preflight failed');
+          },
+        });
+      }
       await act(async () => {
         settleFonts();
         await fonts;
       });
       act(() => hook.result.current.runLayoutPipeline({ onHost: ending === 'onHost' }));
-      expect(hook.result.current.layout?.pages.length).toBeGreaterThan(0);
+      if (ending !== 'preflight') expect(hook.result.current.layout?.pages.length).toBeGreaterThan(0);
       expect(spare.posted.map((request) => request.type)).toEqual(['warm']);
       expect(source.adopted).toEqual([]);
       await waitFor(() => expect(spare.terminated).toBe(true));
