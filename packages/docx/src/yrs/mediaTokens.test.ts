@@ -5,7 +5,8 @@ import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { preloadEditWasm } from '../wasm/edit';
 import { unzipContainer } from '../wasm/opc';
-import { createYrsSession, saveYrsDocx, yrsToDocument } from './index';
+import { createYrsSession, decodeDocxHostJson, saveYrsDocx, yrsToDocument } from './index';
+import { createResidentEngineSession } from './residentEngineSession';
 
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]);
@@ -82,6 +83,22 @@ for (const [extension, mimeType, image] of [
     expect(Buffer.from(await save(true)).equals(defaultSave)).toBe(true);
   });
 }
+
+test('a resident worker opens comment images as a direct open does', async () => {
+  const bytes = fixture();
+  const direct = await createYrsSession({ clientId: 4 });
+  const worker = await createResidentEngineSession();
+  try {
+    const host = decodeDocxHostJson(worker.openDocx(bytes), bytes);
+    const comments = JSON.stringify(host.document.package.document.comments);
+    expect(comments).toContain('"src":"data:image/png;base64,');
+    expect(comments).not.toContain('media:');
+    expect(host.document).toEqual(direct.openDocx(bytes, true).document);
+  } finally {
+    direct.destroy();
+    worker.destroy();
+  }
+});
 
 test('destroyed sessions return null for cached and uncached media lookups', async () => {
   const session = await createYrsSession({ clientId: 3 });

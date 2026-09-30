@@ -17,6 +17,7 @@
 import type { EditSession } from './wasm/index';
 import type { Document } from '../types/document';
 import type { CompatibilityFlags } from '../docx/settingsParser';
+import { resolveCommentMedia } from './hostMedia';
 import { registerSessionInternals } from './sessionInternals';
 import { noteYrsStoriesDirty } from './yrsToDocument';
 import type {
@@ -1700,20 +1701,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     return url;
   };
 
-  // Comments reach the host as parsed, so their images carry `data:` URLs.
   const withHostMedia = (host: YrsDocxHost): YrsDocxHost => {
-    const resolve = (value: unknown): void => {
-      if (Array.isArray(value)) {
-        for (const item of value) resolve(item);
-      } else if (value && typeof value === 'object') {
-        const record = value as Record<string, unknown>;
-        for (const [key, field] of Object.entries(record)) {
-          if (key === 'src' && typeof field === 'string') record[key] = mediaDataUrl(field) ?? field;
-          else resolve(field);
-        }
-      }
-    };
-    resolve(host.document.package.document.comments);
+    resolveCommentMedia(host.document.package.document.comments, mediaDataUrl);
     return host;
   };
 

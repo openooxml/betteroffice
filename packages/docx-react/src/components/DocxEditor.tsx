@@ -838,7 +838,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // the merged doc-wide font chains; the canvas display-list build reads it to
   // gate GlyphRun emission. Null until Rust measurement warms its first chains.
   const rustFontChainsProviderRef = useRef<RustFontChainsProvider | null>(null);
-  const mediaSessionRef = useRef<YrsSession | null>(null);
   // Assigned by CanvasA11yLiveRegion, called by useSelectionTracker.
   const canvasA11yNotifyRef = useRef<(() => void) | null>(null);
 
@@ -923,8 +922,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     rustFontChainsProviderRef,
     resolvedIdsForRender,
     () => pagedEditorRef.current?.relayout(),
-    memoryBudget?.workerLimitBytes,
-    mediaSessionRef
+    memoryBudget?.workerLimitBytes
   );
   useEffect(() => {
     if (canvasRenderer.error) onError?.(canvasRenderer.error);
@@ -1122,7 +1120,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     { heldEngine: canvasRenderer.layoutEngine, mediaTokens }
   );
   sessionGenerationRef.current = yrsCore.sessionGeneration;
-  mediaSessionRef.current = yrsCore.session;
   // A failed load has nothing to build: the renderer lets go of the previous document.
   const releaseRenderer = canvasRenderer.onLayoutComputed;
   useEffect(() => {

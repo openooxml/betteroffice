@@ -9,6 +9,7 @@ import type {
   CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
+import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
 
 export type ResidentEngineSession = Pick<
@@ -86,7 +87,11 @@ export async function createResidentEngineSession(
   };
 
   return {
-    openDocx: (bytes, digest, generation) => session.open_docx(bytes, true, generation, digest),
+    openDocx: (bytes, digest, generation) =>
+      resolveHostJsonCommentMedia(
+        session.open_docx(bytes, true, generation, digest),
+        (token) => (token.startsWith('media:') ? (session.media_data_url(token) ?? null) : null)
+      ),
     encodeState: () => session.encode_state(),
     registerFont: (bytes) => session.register_measure_font(bytes),
     registerSubstituteFont: (base, family) =>

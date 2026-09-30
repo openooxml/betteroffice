@@ -1138,13 +1138,12 @@ test('each session decodes its images into a cache of its own', () => {
   expect(result.current.resolveImage).not.toBe(firstImages);
 });
 
-test('the media resolver follows the current session before its replacement layout arrives', async () => {
+test('an image resolver reads the media of the session its layout was built with', async () => {
   const originalImage = globalThis.Image;
   const originalCreate = URL.createObjectURL;
   const originalRevoke = URL.revokeObjectURL;
   const reads: string[] = [];
   const blobs: Blob[] = [];
-  let retired = false;
   let scope = 1;
   class FakeImage {
     onload: (() => void) | null = null;
@@ -1153,25 +1152,16 @@ test('the media resolver follows the current session before its replacement layo
       queueMicrotask(() => this.onload?.());
     }
   }
-  const first = {
-    mediaSource: (token: string) => {
-      if (retired) throw new Error('old session is destroyed');
-      reads.push(`first:${token}`);
-      return { bytes: new Uint8Array([1]), mimeType: 'image/png' };
-    },
-    mediaScope: () => {
-      if (retired) throw new Error('old session is destroyed');
-      return 1;
-    },
-  } as unknown as YrsSession;
-  const next = {
-    mediaSource: (token: string) => {
-      reads.push(`next:${token}`);
-      return { bytes: new Uint8Array([scope + 1]), mimeType: 'image/png' };
-    },
-    mediaScope: () => scope,
-  } as unknown as YrsSession;
-  const mediaSessionRef = { current: first as YrsSession | null };
+  const session = (name: string, mediaScope: () => number, byte: () => number) =>
+    ({
+      mediaSource: (token: string) => {
+        reads.push(`${name}:${token}`);
+        return { bytes: new Uint8Array([byte()]), mimeType: 'image/png' };
+      },
+      mediaScope,
+    }) as unknown as YrsSession;
+  const first = session('first', () => 1, () => 1);
+  const next = session('next', () => scope, () => scope + 1);
   globalThis.Image = FakeImage as unknown as typeof Image;
   URL.createObjectURL = (blob: Blob) => {
     blobs.push(blob);
@@ -1179,36 +1169,26 @@ test('the media resolver follows the current session before its replacement layo
   };
   URL.revokeObjectURL = () => {};
   try {
-    const { result, rerender, unmount } = renderHook(() =>
-      useCanvasRenderer(undefined, undefined, undefined, undefined, mediaSessionRef)
-    );
+    const { result, unmount } = renderHook(() => useCanvasRenderer());
     act(() => result.current.onLayoutComputed(null, first));
-    const retainedResolver = result.current.resolveImage;
-    const firstImage = await retainedResolver('media:0');
+    const firstResolver = result.current.resolveImage;
+    const firstImage = await firstResolver('media:0');
     expect(firstImage).toBeInstanceOf(FakeImage);
-    expect(await retainedResolver('media:0')).toBe(firstImage);
-    act(() => {
-      mediaSessionRef.current = next;
-      retired = true;
-      rerender();
-    });
-    expect(result.current.resolveImage).toBe(retainedResolver);
-    const nextImage = await result.current.resolveImage('media:0');
+    expect(await firstResolver('media:0')).toBe(firstImage);
+    act(() => result.current.onLayoutComputed(null, next));
+    const nextResolver = result.current.resolveImage;
+    expect(nextResolver).not.toBe(firstResolver);
+    const nextImage = await nextResolver('media:0');
     expect(nextImage).toBeInstanceOf(FakeImage);
     expect(nextImage).not.toBe(firstImage);
-    await result.current.resolveImage('media:1');
-    expect(reads).toEqual(['first:media:0', 'next:media:0', 'next:media:1']);
+    await firstResolver('media:1');
     scope += 1;
-    expect(await result.current.resolveImage('media:0')).not.toBe(nextImage);
-    act(() => result.current.onLayoutComputed(null, next));
-    await retainedResolver('media:2');
-    expect(reads).toEqual([
-      'first:media:0', 'next:media:0', 'next:media:1', 'next:media:0', 'next:media:2',
-    ]);
+    expect(await nextResolver('media:0')).not.toBe(nextImage);
+    expect(reads).toEqual(['first:media:0', 'next:media:0', 'first:media:1', 'next:media:0']);
     const decoded = await Promise.all(
       blobs.map(async (blob) => Array.from(new Uint8Array(await blob.arrayBuffer())))
     );
-    expect(decoded).toEqual([[1], [2], [2], [3], [3]]);
+    expect(decoded).toEqual([[1], [2], [1], [3]]);
     unmount();
   } finally {
     globalThis.Image = originalImage;

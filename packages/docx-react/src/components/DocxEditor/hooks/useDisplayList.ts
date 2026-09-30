@@ -1910,21 +1910,17 @@ export function useCanvasRenderer(
   /** Asks the host for a layout of the document as it is now. */
   requestLayout?: () => void,
   /** The most a resident worker's editing core may allocate at once. */
-  workerHeapLimitBytes?: number,
-  mediaSessionRef?: React.RefObject<RustDisplayListEngine | null>
+  workerHeapLimitBytes?: number
 ): UseCanvasRendererResult {
   const [layout, setLayout] = useState<Layout | null>(null);
   const [engine, setEngine] = useState<
     (RustDisplayListEngine & { outlineGlyphJson?: GlyphOutlineProvider }) | null
   >(null);
-  const mediaEngineRef = useRef(engine);
-  mediaEngineRef.current = engine;
   const onLayoutComputed = useCallback(
     (
       next: Layout | null,
       nextEngine?: (RustDisplayListEngine & { outlineGlyphJson?: GlyphOutlineProvider }) | null
     ) => {
-      mediaEngineRef.current = nextEngine ?? null;
       setLayout(next);
       setEngine(nextEngine ?? null);
     },
@@ -1965,26 +1961,16 @@ export function useCanvasRenderer(
     workerHeapLimitBytes
   );
   // Decoded images of one session's document; the next session starts empty.
-  const resolveImage = useMemo(() => {
-    const currentEngine = () =>
-      mediaSessionRef ? mediaSessionRef.current : mediaEngineRef.current;
-    let sourceEngine: RustDisplayListEngine | null | undefined;
-    let sourceScope: number | undefined;
-    let scope = 0;
-    return createCanvasImageResolver({
-      media: (token) => currentEngine()?.mediaSource?.(token) ?? null,
-      mediaScope: () => {
-        const current = currentEngine();
-        const nextScope = current?.mediaScope?.() ?? 0;
-        if (current !== sourceEngine || nextScope !== sourceScope) {
-          sourceEngine = current;
-          sourceScope = nextScope;
-          scope += 1;
-        }
-        return scope;
-      },
-    });
-  }, [engine, mediaSessionRef]);
+  // A replay of a replaced session's frame reads that session's images, which
+  // it keeps while the renderer holds it.
+  const resolveImage = useMemo(
+    () =>
+      createCanvasImageResolver({
+        media: (token) => engine?.mediaSource?.(token) ?? null,
+        mediaScope: () => engine?.mediaScope?.() ?? 0,
+      }),
+    [engine]
+  );
   const status: UseCanvasRendererResult['status'] = error
     ? 'error'
     : loading || displayList == null
