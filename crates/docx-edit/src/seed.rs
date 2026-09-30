@@ -4528,11 +4528,37 @@ pub(crate) fn checked_package_digest(digest: &str) -> Result<String, String> {
 /// Parses a DOCX for editing with the inflated parts the identity index
 /// reads. `digest` is its [`package_digest`], so the parser does not hash the
 /// package again.
+#[cfg(any(test, feature = "wasm"))]
 pub(crate) fn parse_docx_package_with_digest(
     bytes: &[u8],
     digest: String,
 ) -> Result<(docx_parse::S9WireEnvelope, Vec<(String, Vec<u8>)>), String> {
     docx_parse::parse_docx_s9_wire_parts_with_limits(
+        bytes,
+        docx_parse::S9ParseOptions {
+            source_ordinals: true,
+            determinism_seed: Some(digest),
+            ..docx_parse::S9ParseOptions::default()
+        },
+        &docx_parse::xml::ParseLimits::default(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// [`parse_docx_package_with_digest`] leaving the media in the package: an
+/// image names its part by a `media:{n}` token of the returned table.
+pub(crate) fn parse_docx_package_with_media(
+    bytes: Arc<[u8]>,
+    digest: String,
+) -> Result<
+    (
+        docx_parse::S9WireEnvelope,
+        Vec<(String, Vec<u8>)>,
+        docx_parse::media::MediaTable,
+    ),
+    String,
+> {
+    docx_parse::parse_docx_s9_wire_with_media_table(
         bytes,
         docx_parse::S9ParseOptions {
             source_ordinals: true,
@@ -4639,7 +4665,7 @@ pub(crate) fn seed_parsed_docx_with(
 ) -> Result<Vec<String>, String> {
     let mut lowered = lower_docx(envelope, parts)?;
     lowered.script_fonts = None;
-    seed_lowered(document, lowered, None).map(|fonts| fonts.referenced)
+    seed_lowered(document, lowered, None, SeedMedia::AsParsed).map(|fonts| fonts.referenced)
 }
 
 /// The fonts a seeded document references, and those of them it names only
@@ -4650,12 +4676,26 @@ pub(crate) struct SeededFonts {
     pub(crate) unused_script: Vec<String>,
 }
 
+/// How seeding writes the images of a package parsed against a media table.
+pub(crate) enum SeedMedia<'a> {
+    /// As parsed: `media:{n}` tokens, which only a reader holding the
+    /// package resolves.
+    AsParsed,
+    /// As their parts' `data:` URLs, which every replica reads; with
+    /// `layout_tokens`, layout still carries the tokens.
+    DataUrls {
+        table: &'a docx_parse::media::MediaTable,
+        layout_tokens: bool,
+    },
+}
+
 /// Seeds every lowered story into `document` and retains the package context, with the identity
 /// index when there is one.
 fn seed_lowered(
     document: &EditingDoc,
     lowered: LoweredDocx,
     index: Option<SourceIndex>,
+    media: SeedMedia<'_>,
 ) -> Result<SeededFonts, String> {
     let LoweredDocx {
         context,
@@ -4679,9 +4719,21 @@ fn seed_lowered(
         batches.push((story_id, ops));
         referenced_fonts.extend(fonts);
     }
+    let sources = match media {
+        SeedMedia::AsParsed => crate::media::MediaSources::default(),
+        SeedMedia::DataUrls {
+            table,
+            layout_tokens,
+        } => crate::media::write_data_urls(
+            batches.iter_mut().flat_map(|(_, ops)| ops.iter_mut()),
+            table,
+            layout_tokens,
+        )?,
+    };
     document
         .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
         .map_err(|error| error.to_string())?;
+    document.set_media_sources(sources);
     read.pin(document);
     read.comment_writes = CommentWrites::watch(document);
     if let Some(index) = index {
@@ -5066,7 +5118,7 @@ pub(crate) fn source_index(
     digest: Option<String>,
 ) -> Result<SourceIndex, String> {
     let digest = digest.unwrap_or_else(|| package_digest(&bytes));
-    let (envelope, parts) = parse_docx_package_with_digest(&bytes, digest.clone())?;
+    let (envelope, parts, _) = parse_docx_package_with_media(Arc::clone(&bytes), digest.clone())?;
     let ids = PackageIds::scan(&parts);
     let parts = SourceParts::new(parts);
     let lowered = lower_docx(envelope, None)?;
@@ -5090,6 +5142,7 @@ pub(crate) fn seed_parsed_docx(
     parts: Vec<(String, Vec<u8>)>,
     bytes: Arc<[u8]>,
     digest: String,
+    media: SeedMedia<'_>,
 ) -> Result<SeededFonts, String> {
     let ids = PackageIds::scan(&parts);
     let parts = SourceParts::new(parts);
@@ -5103,7 +5156,7 @@ pub(crate) fn seed_parsed_docx(
         &lowered.relationships,
         std::mem::take(&mut lowered.context.paragraphs),
     );
-    seed_lowered(document, lowered, Some(index))
+    seed_lowered(document, lowered, Some(index), media)
 }
 
 /// Opens a DOCX: seeds every story and starts a new opening with a fresh
@@ -5142,162 +5195,53 @@ pub fn seed_docx_preview(
     bytes: &[u8],
     blocks: usize,
 ) -> Result<bool, String> {
-    let Some(envelope) = parse_docx_preview(bytes, blocks)? else {
+    let Some((envelope, media)) = parse_docx_preview(Arc::from(bytes), blocks)? else {
         return Ok(false);
     };
-    seed_preview_envelope(document, envelope).map(|_| true)
+    seed_preview_envelope(document, envelope, media).map(|_| true)
 }
 
-/// The parse [`seed_docx_preview`] seeds from, or `None` when it refuses one.
+/// The parse [`seed_docx_preview`] seeds from and the media its images name,
+/// or `None` when it refuses one.
 pub(crate) fn parse_docx_preview(
-    bytes: &[u8],
+    bytes: Arc<[u8]>,
     blocks: usize,
-) -> Result<Option<docx_parse::S9WireEnvelope>, String> {
-    let is_media = |path: &str| path.to_ascii_lowercase().starts_with("word/media/");
-    let mut parts = ooxml_opc::unzip_parts_where(bytes, u64::MAX, |path| !is_media(path))?;
-    let parse = |parts: &[(String, Vec<u8>)]| {
-        docx_parse::parse_docx_s9_preview_from_parts(
-            parts,
-            blocks,
-            docx_parse::S9ParseOptions {
-                source_ordinals: true,
-                determinism_seed: Some(PREVIEW_SEED.to_owned()),
-                ..docx_parse::S9ParseOptions::default()
-            },
-            &docx_parse::xml::ParseLimits::default(),
-        )
-        .map_err(|error| error.to_string())
-    };
-    let Some(envelope) = parse(&parts)? else {
-        return Ok(None);
-    };
-    // Inflate only the images the parsed prefix and the other parts use.
-    let media = preview_media(&envelope, &parts)?;
-    if media.is_empty() {
-        return Ok(Some(envelope));
-    }
-    let inflated: u64 = parts.iter().map(|(_, data)| data.len() as u64).sum();
-    parts.extend(ooxml_opc::unzip_parts_where(
-        bytes,
-        ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES.saturating_sub(inflated),
-        |path| media.contains(&path.to_ascii_lowercase()),
-    )?);
-    parse(&parts)
+) -> Result<Option<(docx_parse::S9WireEnvelope, docx_parse::media::MediaTable)>, String> {
+    let (parts, media) =
+        docx_parse::media_table_parts(&bytes).map_err(|error| error.to_string())?;
+    let envelope = docx_parse::parse_docx_s9_preview_with_media_table(
+        &parts,
+        &media,
+        blocks,
+        docx_parse::S9ParseOptions {
+            source_ordinals: true,
+            determinism_seed: Some(PREVIEW_SEED.to_owned()),
+            ..docx_parse::S9ParseOptions::default()
+        },
+        &docx_parse::xml::ParseLimits::default(),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(envelope.map(|envelope| (envelope, media)))
 }
 
-/// Seeds a preview parse; returns the fonts it references, and those of them
-/// it names only for East Asian or complex-script text its cut does not contain.
+/// Seeds a preview parse and keeps the media its images name; returns the
+/// fonts it references, and those of them it names only for East Asian or
+/// complex-script text its cut does not contain.
 pub(crate) fn seed_preview_envelope(
     document: &EditingDoc,
     envelope: docx_parse::S9WireEnvelope,
+    media: docx_parse::media::MediaTable,
 ) -> Result<SeededFonts, String> {
     let mut lowered = lower_docx(envelope, None)?;
     retain_referenced_body_stories(&mut lowered.context.plans);
-    seed_lowered(document, lowered, None)
+    let fonts = seed_lowered(document, lowered, None, SeedMedia::AsParsed)?;
+    document.install_media(media);
+    Ok(fonts)
 }
 
 /// The seed for IDs a preview's parse generates. A preview is never saved,
 /// so it does not hash the package for the IDs a full open would generate.
 const PREVIEW_SEED: &str = "0000000000000000000000000000000000000000000000000000000000000001";
-
-/// Lowercased paths of the media a preview draws: the targets of the document
-/// relationships its parsed document names, and every medium another part
-/// relates to.
-fn preview_media(
-    envelope: &docx_parse::S9WireEnvelope,
-    parts: &[(String, Vec<u8>)],
-) -> Result<HashSet<String>, String> {
-    fn strings<'a>(value: &'a Value, found: &mut HashSet<&'a str>) {
-        match value {
-            Value::String(text) => {
-                found.insert(text);
-            }
-            Value::Object(fields) => fields.values().for_each(|value| strings(value, found)),
-            Value::Array(values) => values.iter().for_each(|value| strings(value, found)),
-            _ => {}
-        }
-    }
-    let media_path = |directory: &str, target: &str| {
-        let target = percent_decoded(target);
-        let joined = match target.strip_prefix('/') {
-            Some(absolute) => absolute.to_owned(),
-            None => format!("{directory}{target}"),
-        };
-        let mut segments: Vec<&str> = Vec::new();
-        for segment in joined.split('/') {
-            match segment {
-                ".." => {
-                    segments.pop();
-                }
-                "." | "" => {}
-                segment => segments.push(segment),
-            }
-        }
-        let path = segments.join("/").to_ascii_lowercase();
-        path.starts_with("word/media/").then_some(path)
-    };
-    let mut document =
-        serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
-    if let Some(package) = document.get_mut("package").and_then(Value::as_object_mut) {
-        package.remove("relationshipEntries");
-    }
-    let mut mentioned = HashSet::new();
-    strings(&document, &mut mentioned);
-    let mut media: HashSet<String> = envelope
-        .document
-        .package
-        .relationship_entries
-        .iter()
-        .filter(|(id, _)| mentioned.contains(id.as_str()))
-        .filter_map(|(_, relationship)| media_path("word/", &relationship.target))
-        .collect();
-    let limits = docx_parse::xml::ParseLimits::default();
-    for (path, xml) in parts {
-        let lower = path.to_ascii_lowercase();
-        let Some((directory, _)) = lower.split_once("_rels/") else {
-            continue;
-        };
-        if !lower.ends_with(".rels")
-            || lower == "_rels/.rels"
-            || lower == "word/_rels/document.xml.rels"
-        {
-            continue;
-        }
-        let mut budget = docx_parse::xml::ParseBudget::new(&limits);
-        let relationships = docx_parse::relationships::parse_relationships(xml, path, &mut budget)
-            .map_err(|error| error.to_string())?;
-        media.extend(relationships.values().filter_map(|relationship| {
-            (relationship.target_mode != Some(docx_parse::relationships::TargetMode::External))
-                .then(|| media_path(directory, &relationship.target))
-                .flatten()
-        }));
-    }
-    Ok(media)
-}
-
-/// `%XX` escapes in a relationship target, decoded.
-fn percent_decoded(target: &str) -> String {
-    let bytes = target.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        let hex = bytes
-            .get(index + 1..index + 3)
-            .and_then(|hex| std::str::from_utf8(hex).ok())
-            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
-        match (bytes[index], hex) {
-            (b'%', Some(byte)) => {
-                decoded.push(byte);
-                index += 3;
-            }
-            (byte, _) => {
-                decoded.push(byte);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&decoded).into_owned()
-}
 
 /// Drops the body's nested stories, such as table cells, that the (cut) body
 /// no longer reaches. Headers, footers, notes and comments stay whole.
@@ -5345,67 +5289,52 @@ fn retain_referenced_body_stories(plans: &mut Vec<StoryPlan>) {
     });
 }
 
+/// Seeds `bytes` as the browser editor opens them: `data:` URLs in the
+/// stories, tokens in layout.
+#[cfg(test)]
+pub(crate) fn seed_with_layout_tokens(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
+    let source: Arc<[u8]> = Arc::from(bytes);
+    let digest = package_digest(&source);
+    let (envelope, parts, media) =
+        parse_docx_package_with_media(Arc::clone(&source), digest.clone())?;
+    seed_parsed_docx(
+        document,
+        envelope,
+        parts,
+        source,
+        digest,
+        SeedMedia::DataUrls {
+            table: &media,
+            layout_tokens: true,
+        },
+    )?;
+    document.install_media(media);
+    document.begin_opening(None);
+    Ok(())
+}
+
 pub(crate) fn seed_stories(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
     let digest = package_digest(bytes);
-    let (envelope, parts) = parse_docx_package_with_digest(bytes, digest.clone())?;
-    seed_parsed_docx(document, envelope, parts, Arc::from(bytes), digest).map(|_| ())
+    let bytes: Arc<[u8]> = Arc::from(bytes);
+    let (envelope, parts, media) =
+        parse_docx_package_with_media(Arc::clone(&bytes), digest.clone())?;
+    seed_parsed_docx(
+        document,
+        envelope,
+        parts,
+        bytes,
+        digest,
+        SeedMedia::DataUrls {
+            table: &media,
+            layout_tokens: false,
+        },
+    )?;
+    document.install_media(media);
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn a_preview_inflates_the_media_its_document_and_other_parts_use() {
-        const IMAGE: &str =
-            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
-        let drawing = |id: &str| {
-            format!(
-                r#"<w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="p"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="{id}"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
-            )
-        };
-        let document = format!(
-            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>{}<w:p><w:r><w:t>After the cut</w:t></w:r></w:p>{}</w:body></w:document>"#,
-            drawing("rIdUsed"),
-            drawing("rIdLater")
-        );
-        let parts = vec![
-            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
-            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
-            ("word/_rels/document.xml.rels".to_owned(), format!(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdUsed" Type="{IMAGE}" Target="media/used.png"/><Relationship Id="rIdLater" Type="{IMAGE}" Target="media/later.png"/><Relationship Id="rIdMark" Type="{IMAGE}" Target="/word/media/Mark.PNG"/></Relationships>"#).into_bytes()),
-            ("word/document.xml".to_owned(), document.into_bytes()),
-            ("word/headers/_rels/header1.xml.rels".to_owned(), format!("<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId1' Type='{IMAGE}' Target = '../media/logo%201.png'/></Relationships>").into_bytes()),
-        ];
-        let parsed = |blocks| {
-            docx_parse::parse_docx_s9_preview_from_parts(
-                &parts,
-                blocks,
-                docx_parse::S9ParseOptions {
-                    determinism_seed: Some(PREVIEW_SEED.to_owned()),
-                    ..docx_parse::S9ParseOptions::default()
-                },
-                &docx_parse::xml::ParseLimits::default(),
-            )
-            .unwrap()
-            .unwrap()
-        };
-        let mut envelope = parsed(1);
-        let media = preview_media(&envelope, &parts).unwrap();
-        assert!(media.contains("word/media/used.png"));
-        assert!(media.contains("word/media/logo 1.png"));
-        assert!(!media.contains("word/media/later.png"));
-        // A document relationship named under any key, as a watermark's `relId` is.
-        envelope.document.warnings = Some(vec!["rIdMark".to_owned()]);
-        assert!(
-            preview_media(&envelope, &parts)
-                .unwrap()
-                .contains("word/media/mark.png")
-        );
-        assert!(
-            preview_media(&parsed(3), &parts)
-                .unwrap()
-                .contains("word/media/later.png")
-        );
-    }
-
     fn seed_body(blocks: &[Value]) -> EditingDoc {
         let mut context = LoweringContext {
             styles: StyleResolver::new(None),
@@ -6005,6 +5934,103 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&passed).unwrap(),
             serde_json::to_value(&hashed).unwrap()
+        );
+    }
+
+    #[test]
+    fn seeding_data_urls_fails_on_an_image_part_that_cannot_be_read() {
+        let mut state = 0x2545_f491_u32;
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend((0..8192).map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        }));
+        let mut bytes = ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/_rels/document.xml.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/picture.png"/></Relationships>"#.to_vec()),
+            ("word/media/picture.png".to_owned(), png.clone()),
+            ("word/document.xml".to_owned(), br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="picture"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#.to_vec()),
+        ])
+        .unwrap();
+        seed_with_layout_tokens(&EditingDoc::new(9), &bytes).unwrap();
+        let late = &png[6000..6032];
+        let at = bytes
+            .windows(late.len())
+            .position(|window| window == late)
+            .expect("incompressible image bytes are stored verbatim");
+        bytes[at + 16] ^= 0xff;
+        assert!(seed_with_layout_tokens(&EditingDoc::new(10), &bytes).is_err());
+    }
+
+    #[test]
+    fn a_seeded_image_names_its_part_and_resolves_in_any_replica_of_the_package() {
+        let png = [0x89, b'P', b'N', b'G', 1, 2, 3, 4];
+        let bytes = ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/_rels/document.xml.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/picture.png"/></Relationships>"#.to_vec()),
+            ("word/media/unused.png".to_owned(), vec![9; 16]),
+            ("word/media/picture.png".to_owned(), png.to_vec()),
+            ("word/document.xml".to_owned(), br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="picture"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#.to_vec()),
+        ])
+        .unwrap();
+        let native = EditingDoc::new(6);
+        seed_from_docx(&native, &bytes).unwrap();
+        assert!(native.media_sources().is_empty());
+        let seeded = EditingDoc::new(7);
+        seed_with_layout_tokens(&seeded, &bytes).unwrap();
+        let image_src = |doc: &EditingDoc| {
+            let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+                doc,
+                "body",
+                &crate::bridge::RenderEnv {
+                    media_tokens: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let docx_layout::types::LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+                panic!("the image paragraph stays a paragraph");
+            };
+            paragraph
+                .runs
+                .iter()
+                .find_map(|run| match run {
+                    docx_layout::types::Run::Image(image) => Some(image.src.clone()),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(image_src(&seeded), "media:1");
+        let data_url = "data:image/png;base64,iVBORwECAwQ=".to_owned();
+        assert_eq!(image_src(&native), data_url);
+        assert_eq!(
+            seeded.media_table().unwrap().resolve("media:1"),
+            Some(data_url.clone())
+        );
+
+        let state = seeded.encode_state_as_update_v1();
+        assert!(
+            state
+                .windows(data_url.len())
+                .any(|window| window == data_url.as_bytes())
+        );
+
+        let replica = EditingDoc::new(8);
+        replica.apply_update_v1(&state).unwrap();
+        assert!(replica.media_table().is_none());
+        assert_eq!(image_src(&replica), data_url);
+        replica.set_media_sources(
+            crate::media::MediaSources::from_json(&seeded.media_sources().to_json()).unwrap(),
+        );
+        assert_eq!(image_src(&replica), "media:1");
+        replica.retain_source_docx(bytes);
+        assert_eq!(
+            replica.media_table().unwrap().resolve("media:1"),
+            Some(data_url)
         );
     }
 

@@ -980,6 +980,10 @@ fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue>
         .get("showHiddenText")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    env.media_tokens = value
+        .get("mediaTokens")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if let Some(Value::Object(ids)) = value.get("numericIds") {
         for (key, entry) in ids {
             if let Some(id) = entry.as_f64() {
@@ -1191,6 +1195,8 @@ pub struct EditSession {
     resident_deleted_units: Cell<u32>,
     /// The comparison applied here, awaiting its saved bytes.
     compared: RefCell<Option<(Box<CompareApplied>, CompareLimits)>>,
+    /// Seed images as `media:{n}` tokens rather than `data:` URLs.
+    media_tokens: Cell<bool>,
 }
 
 struct UpdateEventObserver {
@@ -1321,19 +1327,29 @@ impl EditSession {
             Some(digest) => crate::seed::checked_package_digest(digest)?,
             None => crate::seed::package_digest(bytes),
         };
-        let (envelope, parts) = crate::seed::parse_docx_package_with_digest(bytes, digest.clone())
-            .map_err(|error| error.to_string())?;
+        let (envelope, parts, media) =
+            crate::seed::parse_docx_package_with_media(Arc::clone(&source), digest.clone())?;
         let host_envelope = thin_docx_envelope(&envelope);
         let fonts = if seed_stories {
+            let seed_media = if self.media_tokens.get() {
+                crate::seed::SeedMedia::AsParsed
+            } else {
+                crate::seed::SeedMedia::DataUrls {
+                    table: &media,
+                    layout_tokens: true,
+                }
+            };
             let fonts = crate::seed::seed_parsed_docx(
                 self.engine.doc(),
                 envelope,
                 parts,
                 Arc::clone(&source),
                 digest.clone(),
+                seed_media,
             )
             .map_err(|error| error.to_string())?;
             self.engine.doc().begin_opening(generation);
+            self.engine.doc().install_media(media);
             fonts
         } else {
             let fonts =
@@ -1346,6 +1362,10 @@ impl EditSession {
             self.engine
                 .doc()
                 .retain_source_docx_with_digest(Arc::clone(&source), digest.clone());
+            self.engine.doc().install_media(media);
+            self.engine
+                .doc()
+                .set_media_sources(crate::media::MediaSources::default());
             drop(envelope);
             crate::seed::SeededFonts {
                 referenced: fonts,
@@ -1371,11 +1391,12 @@ impl EditSession {
         if self.docx_source.borrow().is_some() || !self.story_ids().is_empty() {
             return Err("a preview opens only into an empty session".to_owned());
         }
-        let Some(envelope) = crate::seed::parse_docx_preview(bytes, blocks)? else {
+        let Some((envelope, media)) = crate::seed::parse_docx_preview(Arc::from(bytes), blocks)?
+        else {
             return Ok(None);
         };
         let host_envelope = thin_docx_envelope(&envelope);
-        let fonts = crate::seed::seed_preview_envelope(self.engine.doc(), envelope)?;
+        let fonts = crate::seed::seed_preview_envelope(self.engine.doc(), envelope, media)?;
         self.engine.set_partial_document(true);
         self.engine.doc().rotate_version(js_entropy());
         serde_json::to_string(&DocxHostWire {
@@ -1576,6 +1597,7 @@ impl EditSession {
             last_apply_profile_json: RefCell::new("{}".to_owned()),
             resident_deleted_units: Cell::new(0),
             compared: RefCell::new(None),
+            media_tokens: Cell::new(false),
         };
         session.engine.doc().rotate_version(js_entropy());
         Ok(session)
@@ -2255,6 +2277,37 @@ impl EditSession {
             .map_err(|error| js_err(&error))
     }
 
+    /// Whether [`EditSession::open_docx`] seeds images as `media:{n}` tokens,
+    /// which only a replica opened from the same package resolves, instead of
+    /// `data:` URLs. Off by default.
+    pub fn set_media_tokens(&self, enabled: bool) {
+        self.media_tokens.set(enabled);
+    }
+
+    /// The digests mapping the `data:` URLs this replica seeded to
+    /// `media:{n}` tokens, for [`EditSession::load_media_sources`]; empty
+    /// when it seeded none.
+    pub fn media_sources_json(&self) -> String {
+        let sources = self.engine.doc().media_sources();
+        if sources.is_empty() {
+            String::new()
+        } else {
+            sources.to_json()
+        }
+    }
+
+    /// Lays this replica's `data:` image sources out as the `media:{n}` tokens
+    /// another replica seeded them from.
+    pub fn load_media_sources(&self, json: &str) -> Result<(), JsValue> {
+        let sources = if json.is_empty() {
+            crate::media::MediaSources::default()
+        } else {
+            crate::media::MediaSources::from_json(json).map_err(|error| js_err(&error))?
+        };
+        self.engine.doc().set_media_sources(sources);
+        Ok(())
+    }
+
     /// Marks whether the session's document is part of a package, as a
     /// replica of a preview is: its layouts render NUMPAGES empty.
     pub fn set_partial_document(&self, partial: bool) {
@@ -2279,6 +2332,28 @@ impl EditSession {
             crate::seed::parse_docx_package_with_digest(source, digest).map_err(js_err)?;
         let json = serde_json::to_string(&envelope).map_err(js_err)?;
         Ok(Some(json))
+    }
+
+    /// The bytes a `media:{n}` image source displays, as the part's
+    /// [`EditSession::media_type`]; `undefined` for any other source or a
+    /// part that cannot be read.
+    pub fn media_bytes(&self, token: &str) -> Option<Vec<u8>> {
+        let media = self.engine.doc().media_table()?;
+        let index = docx_parse::media::media_token_index(token)?;
+        media.bytes(index).ok().map(std::borrow::Cow::into_owned)
+    }
+
+    /// The media type of [`EditSession::media_bytes`].
+    pub fn media_type(&self, token: &str) -> Option<String> {
+        let media = self.engine.doc().media_table()?;
+        media
+            .mime_type(docx_parse::media::media_token_index(token)?)
+            .map(str::to_owned)
+    }
+
+    /// The `data:` URL a `media:{n}` image source stands for.
+    pub fn media_data_url(&self, token: &str) -> Option<String> {
+        self.engine.doc().media_table()?.resolve(token)
     }
 
     /// Seeds stories from JSON:
@@ -4705,11 +4780,48 @@ mod tests {
             session.docx_source.borrow().as_deref(),
             Some(source.as_slice())
         );
-        let blocks = session
-            .engine
-            .lower_story_json("body", &crate::bridge::RenderEnv::default())
-            .unwrap();
-        assert!(blocks.contains("data:image/png;base64,AQIDBA=="));
+        let blocks =
+            |env: &crate::bridge::RenderEnv| session.engine.lower_story_json("body", env).unwrap();
+        let tokens_env = crate::bridge::RenderEnv {
+            media_tokens: true,
+            ..Default::default()
+        };
+        assert!(blocks(&tokens_env).contains(r#""media:0""#));
+        assert!(!blocks(&tokens_env).contains("data:"));
+        assert!(
+            blocks(&crate::bridge::RenderEnv::default()).contains("data:image/png;base64,AQIDBA==")
+        );
+        assert_eq!(session.media_bytes("media:0"), Some(image_bytes.clone()));
+        assert_eq!(session.media_type("media:0").as_deref(), Some("image/png"));
+        assert_eq!(
+            session.media_data_url("media:0").as_deref(),
+            Some("data:image/png;base64,AQIDBA==")
+        );
+        assert_eq!(session.media_bytes("media:1"), None);
+        assert_eq!(
+            session.media_data_url("data:image/png;base64,AQIDBA=="),
+            None
+        );
+        let data_url = b"data:image/png;base64,AQIDBA==";
+        let holds = |state: &[u8]| {
+            state
+                .windows(data_url.len())
+                .any(|window| window == data_url)
+        };
+        assert!(holds(&session.engine.doc().encode_state_as_update_v1()));
+        let tokens = EditSession::new(8.0).unwrap();
+        tokens.set_media_tokens(true);
+        tokens.open_docx(&source, true, None, None).unwrap();
+        assert!(!holds(&tokens.engine.doc().encode_state_as_update_v1()));
+        assert!(
+            tokens
+                .engine
+                .lower_story_json("body", &crate::bridge::RenderEnv::default())
+                .unwrap()
+                .contains(r#""media:0""#)
+        );
+        assert_eq!(tokens.media_sources_json(), "");
+        assert_ne!(session.media_sources_json(), "");
         let materialized: docx_parse::S9WireEnvelope =
             serde_json::from_str(&session.materialize_docx().unwrap().unwrap()).unwrap();
         assert_eq!(materialized, expected);
