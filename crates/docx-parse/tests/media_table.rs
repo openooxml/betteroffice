@@ -253,11 +253,16 @@ fn markup_under_word_media_inflates_with_the_package() {
     let parts = vec![
         ("word/media/image1.png".to_owned(), png(4, 4, 1)),
         ("word/media/notes.bin".to_owned(), b"<w:document/>".to_vec()),
+        (
+            "word/media/header.bin".to_owned(),
+            format!("<!--{} EMF--><w:hdr/>", "x".repeat(36)).into_bytes(),
+        ),
     ];
     let bytes: Arc<[u8]> = ooxml_opc::rezip_parts(&parts).unwrap().into();
     let (inflated, table) = media_table_parts(&bytes).unwrap();
-    assert_eq!(table.len(), 2);
+    assert_eq!(table.len(), 3);
     assert_eq!(inflated, parts[1..]);
     assert!(table.keeps_compressed("word/media/image1.png"));
     assert!(!table.keeps_compressed("word/media/notes.bin"));
+    assert!(!table.keeps_compressed("word/media/header.bin"));
 }
