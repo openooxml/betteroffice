@@ -353,43 +353,68 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   // =========================================================================
 
   // Once per proposal set, after the pass's layout request, where the pass laid the document out
-  // (a worker's copy may lag a pass laid out here). Never fatal.
+  // (a worker's copy may lag a pass laid out here). Never fatal; a side that failed for a set is not
+  // asked again before the document's next version.
   const warmedProposalsRef = useRef<{ session: YrsSession; key: string } | null>(null);
+  const failedWarmRef = useRef<{
+    session: YrsSession;
+    key: string;
+    version: string | null;
+    worker: boolean;
+    here: boolean;
+  } | null>(null);
   const warmDecisionFonts = useCallback(
     (owner: YrsSession, request: object, here: boolean): void => {
       const key = warmFontRequirementsRef.current ? proposalSetKey(owner) : null;
       const warmed = warmedProposalsRef.current;
       if (key === null || (warmed?.session === owner && warmed.key === key)) return;
+      const version = readSessionVersion(owner);
+      const last = failedWarmRef.current;
+      const failure =
+        last?.session === owner && last.key === key && last.version === version ? last : null;
+      if (failure?.here) return;
       const claim = { session: owner, key };
       warmedProposalsRef.current = claim;
       const warmInput = JSON.stringify({ ...request, revisionFontSuperset: true });
-      const failed = (): void => {
+      const released = (): void => {
         if (warmedProposalsRef.current === claim) warmedProposalsRef.current = null;
       };
-      const adopt = (json: string | null): void => {
-        if (json === null) return failed();
+      const failed = (side: 'worker' | 'here'): void => {
+        released();
+        const current = failedWarmRef.current;
+        const record =
+          current?.session === owner && current.key === key && current.version === version
+            ? current
+            : { session: owner, key, version, worker: false, here: false };
+        record[side] = true;
+        failedWarmRef.current = record;
+      };
+      const adopt = (json: string | null, side: 'worker' | 'here'): void => {
+        if (json === null) return failed(side);
         if (sessionRef.current !== owner || unmountedRef.current) return;
         warmFontRequirementsRef.current?.(JSON.parse(json) as ResidentFontRequirement[]);
       };
       let pending: Promise<string | null> | null = null;
       try {
-        if (!here) {
+        if (!here && !failure?.worker) {
           pending =
             fontRequirementsInWorkerRef.current?.(owner, warmInput, { background: true }) ?? null;
         }
       } catch {}
       if (pending) {
-        void pending.then(adopt).catch(failed);
+        void pending
+          .then((json) => adopt(json, 'worker'))
+          .catch(() => failed('worker'));
         return;
       }
       // An unhydrated worker-open replica has no document to sweep here.
-      if (workerOpenEnabledRef.current && workerOpenReplicaPending(owner)) return failed();
+      if (workerOpenEnabledRef.current && workerOpenReplicaPending(owner)) return released();
       setTimeout(() => {
         if (sessionRef.current !== owner || unmountedRef.current) return;
         try {
-          adopt(owner.layoutFontRequirementsJson(warmInput));
+          adopt(owner.layoutFontRequirementsJson(warmInput), 'here');
         } catch {
-          failed();
+          failed('here');
         }
       }, 0);
     },

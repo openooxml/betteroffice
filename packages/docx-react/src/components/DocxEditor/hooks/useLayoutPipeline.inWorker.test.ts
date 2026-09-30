@@ -242,6 +242,69 @@ for (const answer of ['rejects', 'null'] as const) {
   });
 }
 
+test('a superset that fails is asked again on neither side before the next document version', async () => {
+  const { doc, session } = fakeDocument();
+  const asked: string[] = [];
+  const warmed: ResidentFontRequirement[][] = [];
+  let hostFails = true;
+  Object.assign(session, {
+    getProposals: () => ({ proposals: [{ id: 'proposal', revisionIds: ['r1'] }] }),
+    layoutFontRequirementsJson: (input: string) => {
+      if (!JSON.parse(input).revisionFontSuperset) return '[]';
+      asked.push(`here@${doc.version}`);
+      if (hostFails) throw new Error('superset sweep failed');
+      return '[]';
+    },
+  });
+  const hook = renderHook(() =>
+    useLayoutPipeline({
+      document: null,
+      session,
+      renderEnv: {} as YrsRenderEnv,
+      pageGap: 24,
+      zoom: 1,
+      residentMeasurementConfig: () => ({}) as ResidentMeasurementConfig,
+      warmFontRequirements: (fonts) => warmed.push(fonts),
+      deferLayoutPass: () => false,
+      pagesContainerRef: { current: null },
+      viewportLayoutRef: { current: null },
+      syncCoordinator: new LayoutSelectionGate(),
+      getScrollContainer: () => null,
+      experimentalWorkerOpen: true,
+      fontRequirementsInWorker: (_session, input) => {
+        if (!JSON.parse(input).revisionFontSuperset) return Promise.resolve('[]');
+        asked.push(`worker@${doc.version}`);
+        return Promise.reject(new Error('superset preflight failed'));
+      },
+      layoutInWorker: () =>
+        Promise.resolve({ layout: { pages: [] } as unknown as Layout, notesConverged: true }),
+    })
+  );
+  const pass = (onHost = false) =>
+    act(async () => {
+      hook.result.current.runLayoutPipeline({ onHost });
+      await new Promise((done) => setTimeout(done, 5));
+    });
+  try {
+    await pass();
+    await pass();
+    expect(asked).toEqual(['worker@1', 'here@1']);
+    await pass();
+    await pass(true);
+    expect(asked).toEqual(['worker@1', 'here@1']);
+
+    doc.version = 2;
+    hostFails = false;
+    await pass(true);
+    expect(asked).toEqual(['worker@1', 'here@1', 'here@2']);
+    expect(warmed).toEqual([[]]);
+    await pass();
+    expect(asked).toEqual(['worker@1', 'here@1', 'here@2']);
+  } finally {
+    hook.unmount();
+  }
+});
+
 /** A document whose version each test moves on; worker passes answer when the test says. */
 async function opened() {
   const { doc, session } = fakeDocument();

@@ -96,6 +96,8 @@ function installWorker(options: {
   holdOpen?: boolean;
   oomStage?: 'open' | 'fontRequirements' | 'bootstrap' | 'sync' | 'encodeState';
   holdRetryOpen?: boolean;
+  /** Leaves font preflights unanswered until the worker fails. */
+  holdFontRequirements?: boolean;
 } = {}) {
   const workers: InProcessResidentWorker[] = [];
   const posted: ResidentEngineWorkerRequest[] = [];
@@ -110,7 +112,9 @@ function installWorker(options: {
         if ((options.holdState && request.type === 'encodeState') ||
             (options.holdOpen && request.type === 'open') ||
             (options.holdRetryOpen && workers.length > 1 && request.type === 'open')) worker.hold();
-        if (options.oomStage === request.type &&
+        if (options.holdFontRequirements && request.type === 'fontRequirements') {
+          return;
+        } else if (options.oomStage === request.type &&
             (request.type !== 'encodeState' || workers.length === 1)) {
           queueMicrotask(() => worker.onmessage?.({
             data: { id: request.id, ok: false, error: 'worker exhausted memory', terminal: true, outOfMemory: true },
@@ -1162,7 +1166,7 @@ test('background worker layout OOM waits for the next foreground pass to recover
 });
 
 test('a foreground request that fails with a background one pending spares the next replacement too', async () => {
-  const options: { oomStage?: 'sync' } = {};
+  const options: { oomStage?: 'sync'; holdFontRequirements?: boolean } = {};
   const { workers, posted } = installWorker(options);
   const frames = holdFrames();
   try {
@@ -1178,18 +1182,24 @@ test('a foreground request that fails with a background one pending spares the n
       return pass!.catch((error: unknown) => error);
     };
 
+    options.holdFontRequirements = true;
+    let background: Promise<unknown> = Promise.resolve(undefined);
+    act(() => {
+      background = result.current.renderer.fontRequirementsInWorker(session, input, {
+        background: true,
+      })!;
+    });
+    options.holdFontRequirements = false;
     options.oomStage = 'sync';
     let foreground: Promise<unknown> = Promise.resolve(null);
-    let background: Promise<unknown> = Promise.resolve(null);
     act(() => {
       foreground = layOut();
-      background = result.current.renderer.layoutInWorker(session, input, { background: true })!;
     });
-    options.oomStage = undefined;
     await act(async () => {
       expect(await foreground).not.toBeNull();
       expect(await background).toBeNull();
     });
+    options.oomStage = undefined;
     expect(workers).toHaveLength(2);
     expect(result.current.renderer.error).toBeNull();
     expect(
