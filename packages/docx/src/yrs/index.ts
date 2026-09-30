@@ -16,6 +16,7 @@
 
 import type { EditSession } from './wasm/index';
 import type { Document } from '../types/document';
+import type { CompatibilityFlags } from '../docx/settingsParser';
 import { registerSessionInternals } from './sessionInternals';
 import { noteYrsStoriesDirty } from './yrsToDocument';
 import type {
@@ -80,16 +81,26 @@ export * from './inputPositionMap';
 export {
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
+  ResidentWorkerOutOfMemoryError,
   canUseResidentEngineWorker,
+  retainPreloadedResidentEngineWorker,
+  takePreloadedResidentEngineWorker,
   type ResidentEngineWorkerApplyResult,
   type ResidentEngineWorkerFrame,
   type ResidentEngineOffscreenPage,
 } from './residentEngineWorkerClient';
+export { preloadDocxEngine } from './preloadDocxEngine';
 export {
   residentCaretSnapshotForFrame,
   residentCaretDeviceRect,
   type ResidentCaretPaintStyle,
 } from './residentCaret';
+export {
+  WASM32_MEMORY_LIMIT_BYTES,
+  wasmModuleMemories,
+  type WasmHeapStats,
+  type WasmModuleMemory,
+} from '../wasm/loadWasmAsset';
 export { documentToYrs } from './documentToYrs';
 export { yrsToDocument } from './yrsToDocument';
 export * from './paragraphIdentity';
@@ -118,6 +129,13 @@ export {
 export interface YrsDocxHost {
   document: Document;
   referencedFonts: string[];
+  /**
+   * The `referencedFonts` a document seeded from its package names only for
+   * East Asian or complex-script text it does not contain, so no text is
+   * measured or drawn with them. Empty when its stories were not seeded; a
+   * preview's cover only its own first pages.
+   */
+  unusedScriptFonts?: string[];
   embeddedFonts: Map<string, ArrayBuffer>;
   fontTableRelationshipsXml?: string;
 }
@@ -249,6 +267,11 @@ export async function prepareDocxBytes(bytes: Uint8Array): Promise<Uint8Array> {
     // Opening hashes the copy itself.
   }
   return copy;
+}
+
+/** The SHA-256 {@link prepareDocxBytes} took of `bytes`, if it took one. @internal */
+export function preparedDocxDigest(bytes: Uint8Array): string | undefined {
+  return preparedDigests.get(bytes);
 }
 
 /** Snapshot of one paragraph from {@link YrsSession.paragraphs}. */
@@ -491,6 +514,7 @@ export type YrsRawOp =
 
 /** Host context for {@link YrsSession.yrsBlocksForStory} (theme + list numbering). */
 export interface YrsRenderEnv {
+  compatibilityFlags?: Partial<CompatibilityFlags>;
   tocStyleIds?: string[];
   paragraphSpacingLinePx?: number;
   /** Section document-grid snap pitch in px (w:docGrid). The engine derives this from sections; hosts may omit it. */
@@ -953,6 +977,8 @@ export interface YrsSession extends CollaborationReplica {
    * with {@link openDocx}. @internal
    */
   openDocxPreview(bytes: Uint8Array, blocks: number): YrsDocxHost | null;
+  /** Opened by {@link openDocxPreview}: its document refuses every change. @internal */
+  isDisplayOnly(): boolean;
   /**
    * Marks whether the document is a preview's, as a replica of one is: its
    * layouts render NUMPAGES empty. @internal
@@ -1426,7 +1452,15 @@ function docxSourceBuffer(bytes: Uint8Array): ArrayBuffer {
   ) {
     return bytes.buffer;
   }
-  return bytes.slice().buffer as ArrayBuffer;
+  return new Uint8Array(bytes).buffer as ArrayBuffer;
+}
+
+/**
+ * Decodes the host metadata a resident worker's `open` replied with, for the
+ * package `source` it opened. @internal
+ */
+export function decodeDocxHostJson(json: string, source: Uint8Array): YrsDocxHost {
+  return decodeDocxHost(json, source);
 }
 
 function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
@@ -1441,10 +1475,18 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
   ) {
     throw new TypeError('DOCX host referencedFonts must be a string array');
   }
+  const unusedScriptFonts = wire.unusedScriptFonts ?? [];
+  if (
+    !Array.isArray(unusedScriptFonts) ||
+    !unusedScriptFonts.every((name) => typeof name === 'string')
+  ) {
+    throw new TypeError('DOCX host unusedScriptFonts must be a string array');
+  }
   const result = decodeS9EnvelopeValue(wire.envelope, docxSourceBuffer(source));
   return {
     document: result.document,
     referencedFonts: wire.referencedFonts,
+    unusedScriptFonts,
     embeddedFonts: result.embeddedFonts,
     ...(result.fontTableRelationshipsXml === undefined
       ? {}
@@ -1521,9 +1563,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     }
   };
 
+  // A preview session refuses every change to its document.
+  let displayOnly = false;
   // A preview's cut of a package, whose layouts count only its own pages.
   let partialDocument = false;
   const mutate = <T>(operation: () => T): T => {
+    if (displayOnly) throw new Error('A document preview is display-only');
     invalidateReadCaches();
     wasmCallDepth += 1;
     try {
@@ -1634,9 +1679,11 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       markDirty('all');
       const json = mutate(() => session.open_docx_preview(bytes, blocks));
       if (json === undefined) return null;
+      displayOnly = true;
       partialDocument = true;
       return decodeDocxHost(json, bytes);
     },
+    isDisplayOnly: () => displayOnly,
     setPartialDocument: (partial) => {
       partialDocument = partial;
       session.set_partial_document(partial);

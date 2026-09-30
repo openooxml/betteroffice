@@ -5,6 +5,7 @@ import {
   createResidentEngineSession,
   type ResidentEngineSession,
 } from './residentEngineSession';
+import { preloadEditWasm } from './wasm/index';
 import {
   presentOffscreenPageBackBuffer,
   presentOffscreenPageBackBufferWithCaret,
@@ -16,6 +17,7 @@ import {
   type RetainedFrame,
 } from '../layout/render/frameDelta';
 import { GlyphCache } from '../layout/render/glyphCache';
+import { wasmModuleMemories } from '../wasm/loadWasmAsset';
 import {
   encodeDisplayListFrameExtras,
   type DisplayListBuildInputs,
@@ -32,6 +34,8 @@ import {
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 let session: ResidentEngineSession | null = null;
+/** Set while the session holds the document `open` seeded, with the heap limit it used. */
+let openedDocument: { heapLimitBytes?: number } | null = null;
 let unsubscribe: (() => void) | null = null;
 let pendingUpdates: Uint8Array[] = [];
 let layoutRevision = 0;
@@ -66,7 +70,9 @@ interface LayoutRequest {
   layoutExtras?: string;
 }
 let incompleteLayout: (LayoutRequest & { layoutInput: string }) | null = null;
-let completedLayout: (LayoutRequest & { layoutJson: string }) | null = null;
+let completedLayout:
+  | (LayoutRequest & { layoutJson: string; headersFootersJson: string | undefined })
+  | null = null;
 // A `completeLayout` measured a few blocks at a time, as operations queued
 // behind the requests that arrive meanwhile.
 interface SlicedCompletion {
@@ -84,6 +90,10 @@ const COMPLETION_SLICE_MS = 24;
 const COMPLETION_RESTARTS = 3;
 const ALL_BLOCKS = 2 ** 32 - 1;
 
+// The request being handled, and the requests answered with a trap.
+let handlingId = 0;
+const trappedIds = new Set<number>();
+
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
   enqueue(() => handle(event.data), event.data.id);
 };
@@ -98,20 +108,17 @@ function enqueue(
     .then(() => {
       if (!current()) return;
       if (trap) throw trap;
+      handlingId = id;
       return operation();
     })
     .catch((error) => replyFailure(id, error));
 }
 
 function replyFailure(id: number, error: unknown): void {
-  if (error instanceof WebAssembly.RuntimeError) {
-    trap = error;
-    reply({
-      id,
-      ok: false,
-      error: `Resident engine worker trapped: ${error.message}`,
-      terminal: true,
-    });
+  // Once trapped, every failure is the trap's, answered once per request.
+  const failure = trap ?? error;
+  if (failure instanceof WebAssembly.RuntimeError) {
+    trapped(id, failure);
     return;
   }
   reply({
@@ -121,20 +128,87 @@ function replyFailure(id: number, error: unknown): void {
   });
 }
 
+/** A trap leaves the module unusable: `id` is answered as terminal, and nothing succeeds after. */
+function trapped(id: number, error: WebAssembly.RuntimeError): void {
+  if (trappedIds.has(id)) return;
+  trappedIds.add(id);
+  trap = error;
+  const failed = editFailedAllocationBytes();
+  reply({
+    id,
+    ok: false,
+    error:
+      failed > 0
+        ? `Resident engine worker ran out of memory allocating ${failed} bytes: ${error.message}`
+        : `Resident engine worker trapped: ${error.message}`,
+    terminal: true,
+    ...(failed > 0 ? { outOfMemory: true } : {}),
+  });
+}
+
 async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
+  if (request.type === 'warm') {
+    try {
+      await preloadEditWasm();
+      reply({ id: request.id, ok: true });
+    } catch (error) {
+      // No session exists yet, so a failed load is retried by the next request.
+      reply({
+        id: request.id,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
   if (request.type === 'destroy') {
     destroySession();
     return;
   }
+  if (request.type === 'open') {
+    // One document per worker, so every queued request addresses the one it was sent for.
+    if (session) {
+      throw new Error('Resident engine worker already holds a document');
+    }
+    const opening = await createResidentEngineSession(request.heapLimitBytes);
+    let hostJson: string;
+    try {
+      hostJson = opening.openDocx(new Uint8Array(request.bytes), request.digest, request.generation);
+    } catch (error) {
+      if (!(error instanceof WebAssembly.RuntimeError)) opening.destroy();
+      throw error;
+    }
+    session = opening;
+    openedDocument = { heapLimitBytes: request.heapLimitBytes };
+    const stateVector = exactBuffer(session.encodeStateVector());
+    reply({ id: request.id, ok: true, hostJson, stateVector }, [stateVector]);
+    return;
+  }
   if (request.type === 'bootstrap') {
-    destroySession();
-    // The worker is a genuine yrs peer. Reusing the main replica's client id
-    // makes a fast structural input race overlap one client's clock range and
-    // corrupt the update; a fresh id lets yrs merge queued/local operations
-    // safely while the main replica applies worker updates with local origin.
-    session = await createResidentEngineSession();
+    if (!request.opened) {
+      destroySession(request.keepSurfaces === true);
+      // The worker is a genuine yrs peer. Reusing the main replica's client id
+      // makes a fast structural input race overlap one client's clock range and
+      // corrupt the update; a fresh id lets yrs merge queued/local operations
+      // safely while the main replica applies worker updates with local origin.
+      session = await createResidentEngineSession(request.heapLimitBytes);
+    } else if (!session || !openedDocument) {
+      throw new Error('Resident engine worker has no opened document');
+    } else if (
+      request.heapLimitBytes !== undefined &&
+      request.heapLimitBytes !== openedDocument.heapLimitBytes
+    ) {
+      throw new Error('Resident engine worker opened its document under another heap limit');
+    }
+    unsubscribe?.();
+    unsubscribe = null;
     if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
-    const { layoutJson, provisional } = hydrate(request.snapshot, request.provisionalPages);
+    const { layoutJson, provisional } = hydrate(
+      request.snapshot,
+      request.provisionalPages,
+      request.layoutExtras !== undefined,
+      request.opened !== true
+    );
     if (provisional) {
       incompleteLayout = {
         layoutInput: request.snapshot.layoutInput,
@@ -162,6 +236,21 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     );
     return;
   }
+  if (request.type === 'fontRequirements') {
+    if (!session) throw new Error('Resident engine worker is not initialized');
+    reply({
+      id: request.id,
+      ok: true,
+      requirementsJson: session.layoutFontRequirementsJson(request.layoutInput),
+    });
+    return;
+  }
+  if (request.type === 'encodeState') {
+    if (!session) throw new Error('Resident engine worker is not initialized');
+    const state = exactBuffer(session.encodeState());
+    reply({ id: request.id, ok: true, state }, [state]);
+    return;
+  }
   if (request.type === 'eraseCaret') {
     caretPaintRect = null;
     if (paintedCaretPageId !== null) await replayOffscreen(false);
@@ -173,7 +262,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     unsubscribe?.();
     unsubscribe = null;
     if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
-    const { layoutJson } = hydrate(request.snapshot);
+    const { layoutJson } = hydrate(request.snapshot, undefined, request.layoutExtras !== undefined);
     subscribe();
     const started = performance.now();
     const frame = session.buildDisplayListFrame(
@@ -284,6 +373,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   await completeProvisionalLayout();
+  // The edit replaces the pagination a cached completion's frame would paint.
+  completedLayout = null;
   session.setSelection(request.selection.anchor, request.selection.head);
   pendingUpdates = [];
   const started = performance.now();
@@ -324,6 +415,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       request.type === 'applyDelete' ? session.residentDeletedUnits() : undefined
     );
   } catch (error) {
+    if (trap) throw trap;
     if (error instanceof WebAssembly.RuntimeError) throw error;
     const message = error instanceof Error ? error.message : String(error);
     reply({
@@ -342,17 +434,20 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
 
 /**
  * Loads a snapshot and runs its layout, over the first `provisionalPages`
- * pages only when given; returns the region layout reply.
+ * pages only when given; returns the region layout reply, which a full pass
+ * serializes only when `reply` asks for it.
  */
 function hydrate(
   snapshot: YrsResidentWorkerSnapshot,
-  provisionalPages?: number
+  provisionalPages?: number,
+  reply = true,
+  loadState = true
 ): { layoutJson: string | null; provisional: boolean } {
   if (!session) throw new Error('Resident engine worker is not initialized');
   supersedeSlicedCompletion();
   incompleteLayout = null;
   completedLayout = null;
-  session.loadState(snapshot.state);
+  if (loadState) session.loadState(snapshot.state);
   session.setPartialDocument(snapshot.partialDocument === true);
   if (snapshot.fontsRevision !== fontsRevision) {
     // A mismatched revision always carries the full font set (the client only
@@ -374,6 +469,8 @@ function hydrate(
       provisionalPages
     );
     provisional = (JSON.parse(layoutJson) as { provisional?: boolean }).provisional === true;
+  } else if (snapshot.layoutWithRegions && !reply) {
+    session.layoutDocumentWithRegionsRetained(snapshot.layoutInput);
   } else if (snapshot.layoutWithRegions) {
     // the retained reply leaves out the tens-of-MB measured arena
     layoutJson = session.layoutDocumentWithRegionsRetainedJson(snapshot.layoutInput);
@@ -408,6 +505,7 @@ async function completeProvisionalLayout(): Promise<void> {
     completedLayout = {
       ...request,
       layoutJson: layoutJson ?? session.layoutDocumentWithRegionsRetainedJson(layoutInput),
+      headersFootersJson: session.retainedHeadersFootersJson(),
     };
     if (waiting) {
       await replyCompletedLayout(waiting.id, waiting.expectedFrameEpoch, waiting.paintCaret);
@@ -434,7 +532,7 @@ async function replyCompletedLayout(
   pendingUpdates = [];
   const started = performance.now();
   const frame = session.buildDisplayListFrame(
-    frameExtras(completed.extras, completed.layoutExtras, completed.layoutJson),
+    frameExtras(completed.extras, completed.layoutExtras, null, completed.headersFootersJson),
     expectedFrameEpoch
   );
   await replyFrame(
@@ -525,7 +623,11 @@ async function completionSlice(completion: SlicedCompletion): Promise<void> {
   const { layoutInput: _input, ...request } = incompleteLayout;
   incompleteLayout = null;
   slicedCompletion = null;
-  completedLayout = { ...request, layoutJson: progress.layoutJson };
+  completedLayout = {
+    ...request,
+    layoutJson: progress.layoutJson,
+    headersFootersJson: session.retainedHeadersFootersJson(),
+  };
   await replyCompletedLayout(completion.id, completion.expectedFrameEpoch, completion.paintCaret);
 }
 
@@ -538,17 +640,24 @@ function supersedeSlicedCompletion(): void {
 
 /**
  * The extras a frame is built with. For a layout this worker owns, the host
- * sends them without the header/footer payload, which only this layout has.
+ * sends them without the header/footer payload, which only this layout has:
+ * the session retains it after a region layout (`layoutJson` is its reply),
+ * or a completed layout captured it.
  */
 function frameExtras(
   extras: string,
   layoutExtras: string | undefined,
-  layoutJson: string | null
+  layoutJson: string | null,
+  headersFootersJson?: string
 ): string {
   if (layoutExtras === undefined) return extras;
-  const headersFooters = layoutJson
-    ? (JSON.parse(layoutJson) as Pick<DisplayListBuildInputs, 'headersFooters'>).headersFooters
-    : undefined;
+  const retained =
+    headersFootersJson ??
+    (layoutJson === null ? undefined : session?.retainedHeadersFootersJson());
+  const headersFooters =
+    retained === undefined
+      ? undefined
+      : (JSON.parse(retained) as DisplayListBuildInputs['headersFooters']);
   return encodeDisplayListFrameExtras({
     ...(JSON.parse(layoutExtras) as DisplayListBuildInputs),
     ...(headersFooters ? { headersFooters } : {}),
@@ -560,11 +669,16 @@ function subscribe(): void {
   unsubscribe = session.onUpdate((update) => pendingUpdates.push(update.slice()));
 }
 
-function destroySession(): void {
+/**
+ * Drops the document. `keepSurfaces` keeps the attached page canvases, still
+ * showing the old pages, for a document that replaces it page for page.
+ */
+function destroySession(keepSurfaces = false): void {
   unsubscribe?.();
   unsubscribe = null;
   session?.destroy();
   session = null;
+  openedDocument = null;
   pendingUpdates = [];
   layoutRevision = 0;
   fontsRevision = -1;
@@ -573,10 +687,12 @@ function destroySession(): void {
   completedLayout = null;
   retainedFrame = null;
   glyphCache = null;
-  offscreenCanvases.clear();
   offscreenBackBuffers.clear();
   pendingOffscreenPageIds.clear();
-  activeOffscreenPageIds.clear();
+  if (!keepSurfaces) {
+    offscreenCanvases.clear();
+    activeOffscreenPageIds.clear();
+  }
   caretPaintRect = null;
   paintedCaretPageId = null;
   paintedCaretKey = null;
@@ -672,7 +788,17 @@ async function replayOffscreen(
   }
   if (!glyphCache && session) {
     glyphCache = new GlyphCache({
-      provider: (fontId, glyphId) => session!.outlineGlyphJson(fontId, glyphId),
+      provider: (fontId, glyphId) => {
+        try {
+          return session!.outlineGlyphJson(fontId, glyphId);
+        } catch (error) {
+          // The raster paints on with browser text, so running out of memory is answered here.
+          if (error instanceof WebAssembly.RuntimeError && editFailedAllocationBytes() > 0) {
+            trapped(handlingId, error);
+          }
+          throw error;
+        }
+      },
     });
   }
   const caretTarget =
@@ -769,6 +895,13 @@ function exactBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.slice().buffer;
 }
 
+function editFailedAllocationBytes(): number {
+  return wasmModuleMemories().find((module) => module.label === 'docx-edit')?.failedAllocationBytes ?? 0;
+}
+
 function reply(response: ResidentEngineWorkerResponse, transfer: Transferable[] = []): void {
-  scope.postMessage(response, transfer);
+  // A trap the raster painted past fails the request that would succeed, and
+  // every request waiting on it, through the paths that answer failures.
+  if (trap && response.ok) throw trap;
+  scope.postMessage({ ...response, memory: wasmModuleMemories() }, transfer);
 }

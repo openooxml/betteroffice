@@ -11,6 +11,8 @@ import { version as packageVersion } from '../package.json';
 
 export const VERSION: string = packageVersion;
 
+export { preloadDocxEngine } from '@betteroffice/docx/yrs';
+
 // Main editor contract
 export {
   DocxEditor,
@@ -125,6 +127,12 @@ export type {
   DocxPluginCommandState,
 } from './commands/types';
 export type { DocxPointPosition, SelectionState } from './components/DocxEditor/types';
+export type {
+  DocxMemoryBudget,
+  DocxMemoryPressure,
+  DocxMemoryPressureLevel,
+  DocxMemoryStats,
+} from './components/DocxEditor/memoryStats';
 export type {
   RenderedDomContext,
   PositionCoordinates,

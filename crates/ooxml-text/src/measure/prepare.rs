@@ -41,6 +41,7 @@ use crate::line_break::break_opportunities;
 use crate::shape::{ShapeDirection, ShapeFeature, shape_with_direction, shape_with_properties};
 use crate::word_metrics::{kern_enabled, kern_features};
 
+use super::font_slots::{FontSlot, char_slot};
 use super::input::{MeasureRequest, RunIn, validate_pt_size};
 use super::{MAX_RUN_TEXT_BYTES, MeasureError, pt_to_px};
 
@@ -705,40 +706,6 @@ fn prepare_text_run(
         Many(Vec<char>),
     }
 
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum FontSlot {
-        Ascii,
-        HAnsi,
-        EastAsia,
-        Cs,
-    }
-
-    impl FontSlot {
-        /// Index into a run's per-slot resolved chains.
-        fn index(self) -> usize {
-            match self {
-                FontSlot::Ascii => 0,
-                FontSlot::HAnsi => 1,
-                FontSlot::EastAsia => 2,
-                FontSlot::Cs => 3,
-            }
-        }
-    }
-
-    fn is_complex(ch: char) -> bool {
-        matches!(ch as u32,
-            0x0590..=0x08ff | 0x0900..=0x0dff | 0xfb1d..=0xfdff | 0xfe70..=0xfeff)
-    }
-    fn is_east_asian(ch: char) -> bool {
-        matches!(ch as u32,
-            0x1100..=0x11ff | 0x2e80..=0x30ff | 0x3130..=0x318f |
-            0x31a0..=0x31ff | 0x3400..=0x4dbf | 0x4e00..=0x9fff |
-            0xa960..=0xa97f | 0xac00..=0xd7ff | 0xf900..=0xfaff |
-            0xff00..=0xffef)
-    }
-    fn is_combining(ch: char) -> bool {
-        matches!(ch as u32, 0x0300..=0x036f | 0x1ab0..=0x1aff | 0x1dc0..=0x1dff | 0x20d0..=0x20ff | 0xfe20..=0xfe2f)
-    }
     fn family_for_slot<'a>(run: &'a RunIn, slot: FontSlot, fallback: &'a str) -> &'a str {
         let slots = run.font_slots.as_ref();
         let selected = match slot {
@@ -788,6 +755,8 @@ fn prepare_text_run(
     let mut plan: Vec<PlanChar> = Vec::new();
     let mut utf16_offset: u32 = 0;
     let mut previous_slot = FontSlot::HAnsi;
+    let east_asia_hint =
+        run.font_slots.as_ref().and_then(|s| s.hint.as_deref()) == Some("eastAsia");
     // Family and style are fixed per slot within a run, so each of the four
     // resolves at most once instead of once per character. Keeping a chain
     // trades memory for the next character's lookup, so a chain too large for
@@ -796,19 +765,7 @@ fn prepare_text_run(
     let mut slot_chains: [Option<Vec<FontId>>; 4] = [None, None, None, None];
     let mut oversized: Vec<FontId> = Vec::new();
     for (char_index, ch) in text.chars().enumerate() {
-        let slot = if run.complex_script || is_complex(ch) {
-            FontSlot::Cs
-        } else if is_east_asian(ch) {
-            FontSlot::EastAsia
-        } else if is_combining(ch) {
-            previous_slot
-        } else if ch.is_ascii() {
-            FontSlot::Ascii
-        } else if run.font_slots.as_ref().and_then(|s| s.hint.as_deref()) == Some("eastAsia") {
-            FontSlot::EastAsia
-        } else {
-            FontSlot::HAnsi
-        };
+        let slot = char_slot(ch, run.complex_script, east_asia_hint, previous_slot);
         previous_slot = slot;
         let language = language_for_slot(run, slot);
         let (mut shaped, mut advance_scale): (Vec<char>, f32) = if run.all_caps {

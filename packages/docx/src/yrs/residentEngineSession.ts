@@ -9,7 +9,7 @@ import type {
   CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
-import { createEditSession, preloadEditWasm } from './wasm/index';
+import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
 
 export type ResidentEngineSession = Pick<
   YrsSession,
@@ -44,10 +44,21 @@ export type ResidentEngineSession = Pick<
 > & {
   /** The region layout of only as much of the body as fills `pages` pages. */
   layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
+  /** Parses and seeds a DOCX; returns the host metadata JSON the main thread decodes. */
+  openDocx(bytes: Uint8Array, digest?: string, generation?: string): string;
+  /** The whole document state as one yrs v1 update. */
+  encodeState(): Uint8Array;
+  /** The retained region layout pass without serializing its reply. */
+  layoutDocumentWithRegionsRetained(input: string): void;
+  /** The retained region layout's `headersFooters` JSON, when it has any. */
+  retainedHeadersFootersJson(): string | undefined;
 };
 
-export async function createResidentEngineSession(): Promise<ResidentEngineSession> {
+export async function createResidentEngineSession(
+  heapLimitBytes?: number
+): Promise<ResidentEngineSession> {
   await preloadEditWasm();
+  setEditWasmHeapLimit(heapLimitBytes);
   const session = createEditSession(randomClientId());
   const listeners = new Set<
     (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
@@ -74,6 +85,8 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
   };
 
   return {
+    openDocx: (bytes, digest, generation) => session.open_docx(bytes, true, generation, digest),
+    encodeState: () => session.encode_state(),
     registerFont: (bytes) => session.register_measure_font(bytes),
     registerSubstituteFont: (base, family) =>
       session.register_substitute_measure_font(base, family),
@@ -91,6 +104,9 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
     setPartialDocument: (partial) => session.set_partial_document(partial),
     layoutDocumentWithRegionsPrefixRetainedJson: (input, pages) =>
       session.layout_document_with_regions_prefix_retained_json(input, pages),
+    layoutDocumentWithRegionsRetained: (input) =>
+      session.layout_document_with_regions_retained(input),
+    retainedHeadersFootersJson: () => session.retained_headers_footers_json(),
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
     setDisplayWindow: (start, end) => session.set_display_window(start, end),

@@ -113,6 +113,29 @@ test('a replaced session stays usable until the editor renders without it', asyn
   expect(hook.result.current).not.toBe(replaced);
 });
 
+test('a replaced session lives while the renderer still builds with it', async () => {
+  const first = fixture();
+  const hook = renderHook(
+    ({ bytes, generation, held }: { bytes: Uint8Array; generation: number; held: unknown }) =>
+      useYrsCoreSession(true, null, null, bytes, generation, undefined, undefined, {
+        heldEngine: held,
+      }).session,
+    { initialProps: { bytes: first, generation: 1, held: null as unknown } }
+  );
+  await waitFor(() => expect(hook.result.current).not.toBeNull());
+  const replaced = hook.result.current!;
+  hook.rerender({ bytes: first, generation: 1, held: replaced });
+  const next = fixture();
+  hook.rerender({ bytes: next, generation: 2, held: replaced });
+  await waitFor(() => expect(hook.result.current).not.toBeNull());
+  expect(hook.result.current).not.toBe(replaced);
+  expect(() => replaced.version()).not.toThrow();
+  // The next document's layout reaches the renderer.
+  hook.rerender({ bytes: next, generation: 2, held: hook.result.current });
+  expect(() => replaced.version()).toThrow();
+  hook.unmount();
+});
+
 test('opening never materializes the compatibility document by itself', async () => {
   const { project, materializations } = await openedSession();
   await act(idle);
@@ -192,4 +215,23 @@ describe('useCompatibilityWarm', () => {
     rerender({ session: sessions[0]!, frame: frames[0]!, projects: true });
     expect(calls.filter((call) => call === 'schedule')).toHaveLength(1);
   });
+});
+
+test('a new session is reported before it is seeded', async () => {
+  const bytes = fixture();
+  const events: string[] = [];
+  const reported: YrsSession[] = [];
+  const hook = renderHook(() =>
+    useYrsCoreSession(true, null, null, bytes, 1, undefined, {
+      onSession: (session) => {
+        reported.push(session);
+        events.push('session');
+      },
+      onHostDocument: () => events.push('host'),
+    })
+  );
+  await waitFor(() => expect(hook.result.current.session).not.toBeNull());
+  expect(events).toEqual(['session', 'host']);
+  expect(reported).toEqual([hook.result.current.session!]);
+  hook.unmount();
 });

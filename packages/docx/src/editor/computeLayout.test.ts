@@ -7,6 +7,7 @@ import { createYrsSession, type YrsRenderEnv, type YrsSession } from '../yrs';
 import { documentToYrs } from '../yrs/documentToYrs';
 import { yrsToDocument } from '../yrs/yrsToDocument';
 import type { Document, Paragraph } from '../types/document';
+import { DEFAULT_COMPATIBILITY_FLAGS } from '../docx/settingsParser';
 import {
   buildResidentRegionLayoutRequest,
   computeLayout,
@@ -118,6 +119,22 @@ describe('computeLayout retained kernel inputs', () => {
     } finally {
       session.destroy();
     }
+  });
+});
+
+describe('buildResidentRegionLayoutRequest compatibilityFlags', () => {
+  test('forwards document spacing compatibility settings to lowering', () => {
+    const document = stylesDoc([]);
+    const compatibilityFlags = {
+      ...DEFAULT_COMPATIBILITY_FLAGS,
+      doNotUseHTMLParagraphAutoSpacing: true,
+      suppressSpBfAfterPgBrk: true,
+      allowSpaceOfSameStyleInTable: true,
+    };
+    document.package.settings = { defaultTabStop: 720, compatibilityFlags };
+    const request = buildResidentRegionLayoutRequest(document, 24, {});
+    expect(request.renderEnv.compatibilityFlags).toEqual(compatibilityFlags);
+    expect(request.regions.settings?.compatibilityFlags).toEqual(compatibilityFlags);
   });
 });
 

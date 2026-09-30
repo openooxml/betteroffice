@@ -86,6 +86,7 @@ mod queries;
 mod raw;
 mod read_state;
 pub mod read_types;
+mod script_fonts;
 mod search;
 mod seed;
 mod segments;
@@ -142,6 +143,8 @@ pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoCaptureM
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
+#[cfg(feature = "wasm")]
+pub mod wasm_memory;
 
 const STORIES: &str = "stories";
 const COMMENTS: &str = "comments";
@@ -524,6 +527,7 @@ pub struct EditingDoc {
     chunk_snapshots: Mutex<EpochCache<Vec<ops::Chunk>>>,
     source: Mutex<Option<identity::SourcePackage>>,
     seen: identity::SeenCell,
+    scan_cache: identity::ScanCache,
     story_revisions: Arc<Mutex<StoryRevisions>>,
     _update_sub: Subscription,
     _story_revision_sub: Subscription,
@@ -572,6 +576,7 @@ impl EditingDoc {
             chunk_snapshots: Mutex::default(),
             source: Mutex::new(None),
             seen,
+            scan_cache: identity::ScanCache::default(),
             story_revisions,
             _update_sub: update_sub,
             _story_revision_sub: story_revision_sub,
