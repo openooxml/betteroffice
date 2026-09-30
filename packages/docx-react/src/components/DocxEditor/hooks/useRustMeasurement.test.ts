@@ -81,4 +81,49 @@ describe('useRustMeasurement default fonts', () => {
       warn.mockRestore();
     }
   });
+
+  test('a font that loads after the editor let go of its engine registers nothing on it', async () => {
+    let finishLoad: (() => void) | undefined;
+    configureDefaultFonts({
+      load: () =>
+        Promise.resolve({
+          createFontProvider: () => ({
+            resolve: () => () =>
+              new Promise<ArrayBuffer>((resolve) => {
+                finishLoad = () => resolve(bytesOf('late'));
+              }),
+          }),
+        }),
+    });
+    const registered: Uint8Array[] = [];
+    const engine: RustTextEngine = {
+      registerFont(bytes) {
+        registered.push(bytes);
+        return registered.length;
+      },
+      clearFonts() {},
+    };
+    const regular: ResidentFontRequirement = {
+      key: 'regular',
+      family: 'Calibri',
+      bold: false,
+      italic: false,
+    };
+    const { result, unmount } = renderHook(() =>
+      useRustMeasurement({ document: null, textEngine: engine })
+    );
+    await waitFor(() => expect(result.current.deferLayoutPass()).toBe(false));
+    let passes = 0;
+    result.current.runLayoutPipelineRef.current = () => {
+      passes++;
+    };
+    expect(result.current.residentMeasurementConfig([regular])).toBeNull();
+    await waitFor(() => expect(finishLoad).toBeDefined());
+
+    unmount();
+    finishLoad!();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(registered).toEqual([]);
+    expect(passes).toBe(0);
+  });
 });
