@@ -51,6 +51,15 @@ mock.module('@betteroffice/docx/yrs', () => ({
 const displayList = await import('./hooks/useDisplayList');
 const { useCanvasRenderer } = displayList;
 let renderer: ReturnType<typeof useCanvasRenderer> | null = null;
+let holdCanvasReplay: 'full' | 'ordinary' | null = null;
+interface PendingCanvasReplay {
+  displayList: NonNullable<ReturnType<typeof useCanvasRenderer>['displayList']>;
+  layoutEngine: unknown;
+  isCurrent: () => boolean;
+  resolve: () => void;
+  reject: (error: Error) => void;
+}
+let pendingCanvasReplays: PendingCanvasReplay[] = [];
 // Once the full session exists, its pages fail to render; or, until the full
 // session's first frame shows, the preview's error stays set.
 const renderFailure = new Error('render failed');
@@ -67,9 +76,42 @@ mock.module('./hooks/useDisplayList', () => ({
         : failRender === 'preview' && (created < 2 || renderer.presentedEngine !== fullSession)
           ? previewFailure
           : null;
-    return error ? { ...renderer, error, status: 'error' as const } : renderer;
+    if (error) return { ...renderer, error, status: 'error' as const };
+    return holdCanvasReplay ? { ...renderer, offscreenReplay: null } : renderer;
   },
 }));
+const canvasReplay = await import('./canvasReplay');
+const { presentCanvasReplay } = canvasReplay;
+mock.module('./canvasReplay', () => ({
+  ...canvasReplay,
+  presentCanvasReplay: (...args: Parameters<typeof presentCanvasReplay>) => {
+    const [preparations, isCurrent] = args;
+    const shown = renderer;
+    if (
+      !holdCanvasReplay ||
+      !shown?.displayList ||
+      (holdCanvasReplay === 'full' &&
+        (fullSession === null || shown.presentedEngine !== fullSession))
+    ) {
+      return presentCanvasReplay(...args);
+    }
+    const list = shown.displayList;
+    const ready = new Promise<void>((resolve, reject) => {
+      pendingCanvasReplays.push({
+        displayList: list,
+        layoutEngine: shown.layoutEngine,
+        isCurrent,
+        resolve,
+        reject,
+      });
+    });
+    return presentCanvasReplay(
+      [...preparations, { buffer: document.createElement('canvas'), ready, present: () => {} }],
+      isCurrent
+    );
+  },
+}));
+const { isPresented } = await import('./internals/layoutProvenance');
 const { DocxEditor } = await import('../../index');
 type Editor = import('../../index').DocxEditorRef;
 
@@ -95,7 +137,12 @@ beforeAll(async () => {
   console.error = () => {};
   console.warn = () => {};
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  holdCanvasReplay = null;
+  for (const replay of pendingCanvasReplays) replay.resolve();
+  pendingCanvasReplays = [];
+});
 afterAll(async () => {
   // React's scheduler still runs the last commit's passive effects, which read `window`.
   await new Promise((done) => setTimeout(done, 100));
@@ -120,6 +167,13 @@ async function expectWaitRejects(ref: React.RefObject<Editor | null>) {
     (error: Error) => (outcome = error)
   );
   await waitFor(() => expect(outcome).toBeInstanceOf(Error));
+}
+
+async function currentCanvasReplay() {
+  await waitFor(() => expect(pendingCanvasReplays.some((replay) => replay.isCurrent())).toBe(true), {
+    timeout: 20_000,
+  });
+  return pendingCanvasReplays.find((replay) => replay.isCurrent())!;
 }
 
 test('a load whose full open fails after its preview painted keeps none of its pages', async () => {
@@ -176,6 +230,101 @@ test('a load whose full session fails to render fails, and leaves no session beh
   expect(ref.current!.getTotalPages()).toBe(0);
   expect(ref.current!.getDocument()).toBeNull();
   await expectWaitRejects(ref);
+}, 30_000);
+
+test('a full session whose canvas replay rejects during preview handover fails the load once', async () => {
+  created = 0;
+  fullSession = null;
+  shownPages = false;
+  fullOpen = 'open';
+  failRender = null;
+  holdCanvasReplay = 'full';
+  const ref = createRef<Editor>();
+  const errors: Error[] = [];
+  const replayError = new Error('full canvas replay failed');
+  const view = render(load(documentBuffer(), (error) => errors.push(error), ref));
+  const replay = await currentCanvasReplay();
+
+  expect(created).toBe(2);
+  expect(fullSession).not.toBeNull();
+  expect(replay.layoutEngine).toBe(fullSession);
+  expect(renderer!.presentedEngine).toBe(fullSession);
+  expect(renderer!.displayList).toBe(replay.displayList);
+  expect(isPresented(renderer!.canvasHostRef.current, replay.displayList)).toBe(false);
+  expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+  expect(ref.current!.getDocument()).toBeNull();
+  expect(errors).toEqual([]);
+
+  await act(async () => {
+    expect(replay.isCurrent()).toBe(true);
+    replay.reject(replayError);
+  });
+  await waitFor(() => expect(errors).toEqual([replayError]), { timeout: 10_000 });
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 200));
+  });
+  expect(errors).toEqual([replayError]);
+  expect(view.container.querySelector('.docx-editor-error')?.textContent).toContain(
+    replayError.message
+  );
+  expect(view.container.querySelector('.docx-editor-loading')).toBeNull();
+  expect(view.queryByTestId('yrs-input')).toBeNull();
+  expect(renderer!.displayList).toBeNull();
+  expect(renderer!.presentedEngine).toBeNull();
+  expect(ref.current!.getTotalPages()).toBe(0);
+  expect(ref.current!.getDocument()).toBeNull();
+  await expectWaitRejects(ref);
+}, 30_000);
+
+test('an ordinary editor logs a canvas replay rejection without failing the load', async () => {
+  created = 0;
+  fullSession = null;
+  shownPages = false;
+  fullOpen = 'open';
+  failRender = null;
+  holdCanvasReplay = 'ordinary';
+  const ref = createRef<Editor>();
+  const errors: Error[] = [];
+  const replayError = new Error('ordinary canvas replay failed');
+  const previousError = console.error;
+  const logged = mock((..._args: unknown[]) => {});
+  console.error = logged;
+  try {
+    const view = render(
+      <DocxEditor
+        ref={ref}
+        previewFirstPage={false}
+        documentBuffer={documentBuffer()}
+        onError={(error) => errors.push(error)}
+      />
+    );
+    const replay = await currentCanvasReplay();
+    expect(created).toBe(1);
+    expect(renderer!.displayList).toBe(replay.displayList);
+    expect(isPresented(renderer!.canvasHostRef.current, replay.displayList)).toBe(false);
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(false);
+    expect(ref.current!.getDocument()).not.toBeNull();
+
+    await act(async () => {
+      expect(replay.isCurrent()).toBe(true);
+      replay.reject(replayError);
+    });
+    await waitFor(() =>
+      expect(logged).toHaveBeenCalledWith('[CanvasRenderer] Canvas replay failed', replayError)
+    );
+    await act(async () => {
+      await new Promise((done) => setTimeout(done, 200));
+    });
+    expect(errors).toEqual([]);
+    expect(view.container.querySelector('.docx-editor-error')).toBeNull();
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(false);
+    expect(renderer!.status).toBe('ready');
+    expect(renderer!.displayList).toBe(replay.displayList);
+    expect(ref.current!.getTotalPages()).toBeGreaterThan(0);
+    expect(ref.current!.getDocument()).not.toBeNull();
+  } finally {
+    console.error = previousError;
+  }
 }, 30_000);
 
 test('a load whose full session fails to lay out fails once, and leaves no session behind', async () => {
