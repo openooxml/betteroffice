@@ -72,8 +72,8 @@ export interface YrsCoreSessionOptions {
   previewFirstPage?: boolean;
   /** How long a preview waits for the full document to open; see {@link FULL_OPEN_TIMEOUT_MS}. */
   fullOpenTimeoutMs?: number;
-  /** Engines the renderer still builds with; a replaced session among them lives on. */
-  heldEngines?: readonly unknown[];
+  /** The engine the renderer still builds with; a replaced session it names lives on. */
+  heldEngine?: unknown;
 }
 
 /** Body blocks a first-page preview parses. */
@@ -228,8 +228,6 @@ export function dirtyProjectionStory(activeStory: string): string {
     : 'body';
 }
 
-const NO_HELD_ENGINES: readonly unknown[] = [];
-
 /**
  * Frees sessions the editor let go of. Consumers' effects in the commit that replaces a session
  * still run with the session they rendered, and `held` names sessions still shown after it (a
@@ -239,6 +237,7 @@ const NO_HELD_ENGINES: readonly unknown[] = [];
  */
 function useRetiredSessions(
   session: YrsSession | null,
+  /** A fixed number of holders on every render: the effect compares them slot by slot. */
   held: readonly unknown[]
 ): (replaced: YrsSession | null) => void {
   const renderedRef = useRef({ session, held });
@@ -317,10 +316,7 @@ export function useYrsCoreSession(
     options?.previewFirstPage === true && !collaboration && !collaborationInitialUpdate;
   const fullOpenTimeoutRef = useRef(FULL_OPEN_TIMEOUT_MS);
   fullOpenTimeoutRef.current = options?.fullOpenTimeoutMs ?? FULL_OPEN_TIMEOUT_MS;
-  const retire = useRetiredSessions(session, [
-    handoffFrom,
-    ...(options?.heldEngines ?? NO_HELD_ENGINES),
-  ]);
+  const retire = useRetiredSessions(session, [handoffFrom, options?.heldEngine ?? null]);
   // The handoff and the renderer's layout hold the preview until the full session replaces both.
   const retirePreview = useCallback(
     (retiring: YrsSession): void => {

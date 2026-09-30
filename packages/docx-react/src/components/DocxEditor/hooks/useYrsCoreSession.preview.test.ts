@@ -97,7 +97,7 @@ test('a first-page preview opens first, cannot save, and hands over once it has 
 
 test("the renderer's layout keeps the preview alive past the handoff until it lets go", async () => {
   const { result, rerender, unmount } = renderHook(
-    ({ held }: { held: unknown[] }) =>
+    ({ held }: { held: unknown }) =>
       useYrsCoreSession(
         true,
         null,
@@ -106,9 +106,9 @@ test("the renderer's layout keeps the preview alive past the handoff until it le
         1,
         undefined,
         { isCurrentLoad: () => true },
-        { previewFirstPage: true, heldEngines: held }
+        { previewFirstPage: true, heldEngine: held }
       ),
-    { initialProps: { held: [null] as unknown[] } }
+    { initialProps: { held: null as unknown } }
   );
   await waitFor(() => expect(result.current.previewing).toBe(true));
   const preview = result.current.session!;
@@ -118,7 +118,7 @@ test("the renderer's layout keeps the preview alive past the handoff until it le
     destroyed = true;
     destroy();
   };
-  rerender({ held: [preview] });
+  rerender({ held: preview });
   await act(async () => {
     result.current.notifyFramePresented(preview);
   });
@@ -132,7 +132,7 @@ test("the renderer's layout keeps the preview alive past the handoff until it le
   expect(destroyed).toBe(false);
   expect(preview.paragraphs('body').length).toBeGreaterThan(0);
 
-  rerender({ held: [full] });
+  rerender({ held: full });
   expect(destroyed).toBe(true);
   unmount();
 });

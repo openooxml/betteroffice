@@ -118,7 +118,7 @@ test('a replaced session lives while the renderer still builds with it', async (
   const hook = renderHook(
     ({ bytes, generation, held }: { bytes: Uint8Array; generation: number; held: unknown }) =>
       useYrsCoreSession(true, null, null, bytes, generation, undefined, undefined, {
-        heldEngines: [held],
+        heldEngine: held,
       }).session,
     { initialProps: { bytes: first, generation: 1, held: null as unknown } }
   );

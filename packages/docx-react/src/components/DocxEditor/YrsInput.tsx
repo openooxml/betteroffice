@@ -298,12 +298,16 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     pendingResidentDeleteRef.current = null;
   }, []);
 
+  // An operation still queued when the input lets go of its session starts nothing.
   const enqueueInputOperation = useCallback(
     (operation: () => void | Promise<void>): void => {
       sealInputBatches();
-      inputOperationQueueRef.current?.enqueue(operation);
+      const admitted = session;
+      inputOperationQueueRef.current?.enqueue(() =>
+        isCurrentInput(admitted) ? operation() : undefined
+      );
     },
-    [sealInputBatches]
+    [isCurrentInput, sealInputBatches, session]
   );
 
   const advanceInteractionEpoch = useCallback((): void => {

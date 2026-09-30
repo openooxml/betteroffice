@@ -342,9 +342,11 @@ test('flush rejects failed resident input instead of claiming it was committed',
 });
 
 test.each([
-  ['text input', 'unmount'],
-  ['Backspace', 'session replacement'],
-])('resident %s never calls the old session after %s', async (operation, lifecycle) => {
+  ['text input', 'unmount', false],
+  ['Backspace', 'session replacement', false],
+  ['text input', 'unmount', true],
+  ['Backspace', 'session replacement', true],
+])('resident %s never calls the old session after %s (Enter queued behind it: %p)', async (operation, lifecycle, queued) => {
   const original = await seededSession();
   let retired = false;
   const afterRetirement: string[] = [];
@@ -397,6 +399,7 @@ test.each([
       if (operation === 'text input') fireEvent.input(textarea, { target: { value: 'x' } });
       else fireEvent.keyDown(textarea, { key: 'Backspace' });
       await applying;
+      if (queued) fireEvent.keyDown(textarea, { key: 'Enter' });
     });
     expect(resident.mock.calls).toEqual(operation === 'text input' ? [['x']] : [['backward', 1]]);
     if (lifecycle === 'unmount') view.unmount();
