@@ -270,6 +270,8 @@ export function useRustDisplayList(
   // it settles no wait: waits are for the document being loaded.
   const replacedLayoutRef = useRef<{ layout: Layout | null } | null>(null);
   const documentLoadsRef = useRef(0);
+  // The document load a layout belongs to: a facade forwards only within its load.
+  const documentLineRef = useRef<object>({});
   const markSettled = useCallback(
     (epoch: number | null, failure: Error | null = null, authoritative = false): void => {
       if (replacedLayoutRef.current && !authoritative) return;
@@ -531,6 +533,7 @@ export function useRustDisplayList(
   const applyResidentInput = useCallback(
     (operation: ResidentInputOperation): Promise<ResidentFrameApplyResult | null> => {
       const documentLoad = documentLoadsRef.current;
+      const line = documentLineRef.current;
       const replayInputOnMainThread = async (
         pending: ResidentInputOperation,
         hostEngine: YrsSession,
@@ -584,7 +587,8 @@ export function useRustDisplayList(
           null,
           { ...previous, queries: null },
           readSessionVersion(hostEngine),
-          UNKNOWN_REVISION_PREVIEW_KEY
+          UNKNOWN_REVISION_PREVIEW_KEY,
+          line
         );
         generationRef.current += 1;
         snapshotRef.current = nextSnapshot;
@@ -702,7 +706,8 @@ export function useRustDisplayList(
           null,
           previous,
           readSessionVersion(worker.engine),
-          workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision)
+          workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
+          line
         );
         // Supersede an older async compatibility build before publishing the
         // frame produced by the edit transaction.
@@ -834,6 +839,7 @@ export function useRustDisplayList(
       }
       pageBuildInFlightRef.current = true;
       const dispatchedEpoch = contentEpochRef.current;
+      const line = documentLineRef.current;
       const paintToken = paintedCaretMachine.token();
       const paintCaret =
         workerPresentationActiveRef.current && paintedCaretMachine.shouldPaint(performance.now());
@@ -870,7 +876,8 @@ export function useRustDisplayList(
                     null,
                     previous,
                     readSessionVersion(worker.engine),
-                    workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision)
+                    workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
+                    line
                   )
                 : { displayList: nextFrame.displayList, frame: nextFrame, queries: null, caret };
             snapshotRef.current = nextSnapshot;
@@ -1099,6 +1106,7 @@ export function useRustDisplayList(
     }
     if (previewKey !== null) layoutPreviewKeyRef.current = previewKey;
     const contentEpoch = contentEpochRef.current;
+    const line = documentLineRef.current;
     const sourceVersion = sourceVersionOf(layout);
     const inputs = (overrides?.getInputs ?? getLayoutKernelInputs)(layout);
     const generation = ++generationRef.current;
@@ -1338,7 +1346,8 @@ export function useRustDisplayList(
           result.queryEngine,
           snapshotRef.current,
           sourceVersion,
-          result.previewKey === undefined ? previewKey : result.previewKey
+          result.previewKey === undefined ? previewKey : result.previewKey,
+          line
         );
         snapshotRef.current = nextSnapshot;
         publishQuerySnapshot(nextSnapshot, contentEpoch);
@@ -1400,6 +1409,7 @@ export function useRustDisplayList(
       if (!failure) {
         contentEpochRef.current += 1;
         documentLoadsRef.current += 1;
+        documentLineRef.current = {};
         replacedLayoutRef.current = { layout: layoutRef.current };
       }
       markSettled(null, failure, true);
@@ -1505,7 +1515,7 @@ function rememberWorkerPreview(
 
 /**
  * `sourceVersion` and `previewKey`: the document version and revision preview the frame's pixels
- * and queries show.
+ * and queries show; `line`, the document load it lays out.
  */
 function createRustDisplayListSnapshot(
   displayList: DisplayList,
@@ -1514,15 +1524,11 @@ function createRustDisplayListSnapshot(
   engine: RustDisplayListEngine | null | undefined,
   previous: RustDisplayListSnapshot,
   sourceVersion: string | null,
-  previewKey: string | null
+  previewKey: string | null,
+  line: object
 ): RustDisplayListSnapshot {
   const residentQueries = residentDisplayListQueryEngine(engine);
-  const queries = createDisplayListQueries(
-    displayList,
-    residentQueries,
-    previous.queries,
-    engine ?? null
-  );
+  const queries = createDisplayListQueries(displayList, residentQueries, previous.queries, line);
   stampSourceVersion(queries, sourceVersion);
   if (previewKey !== null) stampRevisionPreviewKey(queries, previewKey);
   return { displayList, frame, queries, caret };

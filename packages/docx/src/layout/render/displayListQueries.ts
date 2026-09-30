@@ -566,7 +566,7 @@ function pagesTouchingPositions(
  * changed. The donor facade's remaining queries degrade to its own JSON-arg
  * path (same stale-list semantics it always had after replacement).
  *
- * `line` names the document the list lays out (its engine). A facade of another
+ * `line` names the document the list lays out, such as its load. A facade of another
  * document starts a new line and ends the previous one, so a facade of the
  * replaced document never answers from the new one.
  */
