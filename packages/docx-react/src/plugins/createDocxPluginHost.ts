@@ -278,6 +278,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   };
 
   const proposalsChanged = (snapshot: DocxProposalSnapshot): void => {
+    documentChanged();
     state.previewVersion = snapshot.previewVersion;
     const generation = runtime.generation();
     const invalidated = state.layout && state.layout.previewVersion !== snapshot.previewVersion;

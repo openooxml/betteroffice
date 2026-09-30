@@ -16,6 +16,11 @@ import {
 } from '../components/DocxEditor/editorBatches';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
 import { sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
+import { requestWorkerOpenReplica } from '../components/DocxEditor/internals/workerOpenReplica';
+import {
+  workerProposalAuthority,
+  type WorkerProposalAuthority,
+} from '../components/DocxEditor/internals/workerProposalAuthority';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type {
   DocxPluginCommandClient,
@@ -139,10 +144,57 @@ export function createPluginClients(
     return invalid(flush.session) ?? use(flush.session, flush.editor);
   };
 
+  const replicaReady = async (session: YrsSession): Promise<DocxPluginRefusal | null> => {
+    const before = invalid(session);
+    if (before) return before;
+    try {
+      await requestWorkerOpenReplica(session);
+    } catch {
+      return invalid(session) ?? pluginRefusal('input-failed');
+    }
+    return invalid(session);
+  };
+
   const read: DocxPluginReadClient = {
-    version: () => whenFlushed((session) => ({ ok: true as const, version: session.version() })),
-    readParagraphs: (request) => whenFlushed((session) => session.readParagraphs(request)),
-    findText: (request) => whenFlushed((session) => session.findText(request)),
+    version: () => {
+      const session = access.pagedEditorRef.current?.getYrsSession();
+      if (session && workerProposalAuthority(session)) {
+        return Promise.resolve(invalid(session) ?? { ok: true as const, version: session.version() });
+      }
+      return whenFlushed((session) => ({ ok: true as const, version: session.version() }));
+    },
+    readParagraphs: async (request) => {
+      const session = access.pagedEditorRef.current?.getYrsSession();
+      const authority = session ? workerProposalAuthority(session) : null;
+      if (session && authority) {
+        const before = invalid(session);
+        if (before) return before;
+        let fallbackRefusal: DocxPluginRefusal | null = null;
+        try {
+          const result = await authority.readParagraphs(request, async (request) => {
+            const result = await whenFlushed((session) => session.readParagraphs(request));
+            if ('version' in result) return result;
+            fallbackRefusal = result;
+            throw result;
+          });
+          return invalid(session) ?? result;
+        } catch (error) {
+          const refused = invalid(session);
+          if (refused) return refused;
+          if (fallbackRefusal && error === fallbackRefusal) return fallbackRefusal;
+          throw error;
+        }
+      }
+      return whenFlushed((session) => session.readParagraphs(request));
+    },
+    findText: async (request) => {
+      const session = access.pagedEditorRef.current?.getYrsSession();
+      if (session && workerProposalAuthority(session)) {
+        const refused = await replicaReady(session);
+        if (refused) return refused;
+      }
+      return whenFlushed((session) => session.findText(request));
+    },
     validateEdits: (request) =>
       whenFlushed(
         (session) =>
@@ -199,6 +251,37 @@ export function createPluginClients(
     return typeof resolved === 'string'
       ? navigationFailure(resolved, `The paragraph cannot be shown (${resolved})`)
       : resolved;
+  };
+
+  const locateWorker = async (
+    session: YrsSession,
+    target: { story: string; paraId: string },
+    version: string,
+    authority: WorkerProposalAuthority
+  ) => {
+    const before = invalid(session);
+    if (before) return before;
+    if (session.version() !== version) {
+      return navigationFailure('stale-version', 'The document changed after that version');
+    }
+    let resolved: Awaited<ReturnType<WorkerProposalAuthority['navigationTarget']>>;
+    try {
+      resolved = await authority.navigationTarget(target?.story, target?.paraId, () =>
+        resolveParagraph(session, target)
+      );
+    } catch (error) {
+      const refused = invalid(session);
+      if (refused) return refused;
+      throw error;
+    }
+    const refused = invalid(session);
+    if (refused) return refused;
+    if (session.version() !== version || resolved.version !== version) {
+      return navigationFailure('stale-version', 'The document changed after that version');
+    }
+    return typeof resolved.target === 'string'
+      ? navigationFailure(resolved.target, `The paragraph cannot be shown (${resolved.target})`)
+      : resolved.target;
   };
 
   const settledLayout = (
@@ -261,10 +344,17 @@ export function createPluginClients(
       invocation.lifetimeSignal.addEventListener('abort', abort, { once: true });
       if (invocation.signal.aborted || invocation.lifetimeSignal.aborted) abort();
       try {
-        const first = await whenFlushed((session) => ({
-          session,
-          located: locate(session, target, options.expectVersion),
-        }));
+        const current = access.pagedEditorRef.current?.getYrsSession();
+        const authority = current ? workerProposalAuthority(current) : null;
+        const first = current && authority
+          ? {
+              session: current,
+              located: await locateWorker(current, target, options.expectVersion, authority),
+            }
+          : await whenFlushed((session) => ({
+              session,
+              located: locate(session, target, options.expectVersion),
+            }));
         if (!('session' in first)) return first;
         if ('ok' in first.located) return first.located;
         const session = first.session;
@@ -276,8 +366,18 @@ export function createPluginClients(
         );
         const refused = invalid(session);
         if (refused) return refused;
-        const located = locate(session, target, options.expectVersion);
+        const currentAuthority = workerProposalAuthority(session);
+        const located = currentAuthority
+          ? await locateWorker(session, target, options.expectVersion, currentAuthority)
+          : locate(session, target, options.expectVersion);
         if ('ok' in located) return located;
+        if (currentAuthority) {
+          const refused = invalid(session);
+          if (refused) return refused;
+          if (session.version() !== options.expectVersion) {
+            return navigationFailure('stale-version', 'The document changed after that version');
+          }
+        }
         if (!settled || request.signal.aborted) {
           return navigationFailure(
             'layout-unavailable',
@@ -285,6 +385,16 @@ export function createPluginClients(
               ? 'A newer paragraph navigation superseded this request'
               : 'No rendered layout shows this version yet'
           );
+        }
+        if (options.focus && workerProposalAuthority(session)) {
+          const refused = await replicaReady(session);
+          if (refused) return refused;
+          if (request.signal.aborted) {
+            return navigationFailure(
+              'layout-unavailable',
+              'A newer paragraph navigation superseded this request'
+            );
+          }
         }
         const editor = access.pagedEditorRef.current!;
         const outcome = editor.revealDisplayPosition(located.position);

@@ -76,6 +76,7 @@ interface RefApiInputs {
   documentFromYrsRef: React.MutableRefObject<() => Document | null>;
   yrsSessionRef: React.MutableRefObject<YrsSession | null>;
   yrsLocToDisplayPositionRef: React.MutableRefObject<(loc: YrsLoc) => number | null>;
+  refreshWorkerLayoutRef: React.MutableRefObject<() => void>;
   syncYrsInputStateRef: React.MutableRefObject<
     (
       docChanged: boolean,
@@ -124,6 +125,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     yrsSessionRef,
     yrsLocToDisplayPositionRef,
     syncYrsInputStateRef,
+    refreshWorkerLayoutRef,
     applyYrsFormattingRef,
     applyYrsCommandRef,
     getYrsPositionProjectionRef,
@@ -223,6 +225,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     getLayout: () => layout,
     getLayoutRequest,
     relayout: runLayoutPipeline,
+    refreshWorkerLayout: () => refreshWorkerLayoutRef.current(),
     scrollToPosition: scrollToPositionImpl,
     revealDisplayPosition: revealPositionImpl,
     scrollToParaId: scrollToParaIdImpl,
@@ -278,6 +281,7 @@ export interface UsePagedEditorRefApiOptions {
   documentFromYrs: () => Document | null;
   yrsSession: YrsSession | null;
   replicaReady?: boolean;
+  refreshWorkerLayout?: () => void;
   experimentalWorkerOpen?: boolean;
   yrsLocToDisplayPosition: (loc: YrsLoc) => number | null;
   syncYrsInputState: (
@@ -308,6 +312,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     documentFromYrs,
     yrsSession,
     replicaReady = true,
+    refreshWorkerLayout = runLayoutPipeline,
     experimentalWorkerOpen = false,
     yrsLocToDisplayPosition,
     syncYrsInputState,
@@ -323,6 +328,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   const yrsSessionRef = useRef(yrsSession);
   const yrsLocToDisplayPositionRef = useRef(yrsLocToDisplayPosition);
   const syncYrsInputStateRef = useRef(syncYrsInputState);
+  const refreshWorkerLayoutRef = useRef(refreshWorkerLayout);
   const applyYrsFormattingRef = useRef(applyYrsFormatting);
   const applyYrsCommandRef = useRef(applyYrsCommand);
   const getYrsPositionProjectionRef = useRef(getYrsPositionProjection);
@@ -332,6 +338,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   yrsSessionRef.current = yrsSession;
   yrsLocToDisplayPositionRef.current = yrsLocToDisplayPosition;
   syncYrsInputStateRef.current = syncYrsInputState;
+  refreshWorkerLayoutRef.current = refreshWorkerLayout;
   applyYrsFormattingRef.current = applyYrsFormatting;
   applyYrsCommandRef.current = applyYrsCommand;
   getYrsPositionProjectionRef.current = getYrsPositionProjection;
@@ -353,6 +360,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     yrsSessionRef,
     yrsLocToDisplayPositionRef,
     syncYrsInputStateRef,
+    refreshWorkerLayoutRef,
     applyYrsFormattingRef,
     applyYrsCommandRef,
     getYrsPositionProjectionRef,

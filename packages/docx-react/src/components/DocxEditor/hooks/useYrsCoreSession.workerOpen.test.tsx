@@ -22,7 +22,7 @@ import { useLayoutPipeline } from './useLayoutPipeline';
 import type { DocxHostSearch } from './useHostSearch';
 import { useYrsCoreSession } from './useYrsCoreSession';
 import type { DocxEditorCollaborationOptions } from '../types';
-import { awaitWorkerOpenReplica, ensureWorkerOpenReplica } from '../internals/workerOpenReplica';
+import { awaitWorkerOpenReplica, ensureWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
 import { sourceVersionOf } from '../internals/layoutProvenance';
 import * as replicaHelpers from '../internals/workerOpenReplica';
 import type { DocxEditorRef } from '../../DocxEditor';
@@ -131,6 +131,8 @@ interface HarnessProps {
   generation: number;
   collaboration?: DocxEditorCollaborationOptions;
   readOnly?: boolean;
+  workerProposals?: boolean;
+  allowHostProposals?: boolean;
   resolvedCommentIds?: ReadonlySet<number>;
 }
 
@@ -177,6 +179,8 @@ function useHarness(props: HarnessProps) {
       shownEngine: renderer.presentedEngine,
       workerOpen: props.experimentalWorkerOpen ? {
         openInWorker,
+        workerProposals: props.workerProposals,
+        refreshWorkerLayout: () => relayout.current?.(),
         renderedFrame: renderer.status === 'ready' ? renderer.displayList : null,
       } : undefined,
     }
@@ -227,6 +231,8 @@ function useHarness(props: HarnessProps) {
     getYrsSession: () => core.session,
     getDocument: core.documentFromYrs,
     flushPendingInput: async () => {},
+    syncYrsInputState: () => true,
+    refreshWorkerLayout: () => relayout.current?.(),
   } as PagedEditorRef : null;
   const ref = useRef<DocxEditorRef>(null);
   useDocxEditorRefApi({
@@ -251,7 +257,7 @@ function useHarness(props: HarnessProps) {
     commentIdAllocator: createCommentIdAllocator(),
     commands: UNAVAILABLE_DOCX_COMMANDS,
     modeRef: { current: 'viewing' },
-    allowHostProposalsRef: { current: false },
+    allowHostProposalsRef: { current: props.allowHostProposals === true },
     hostSearch: {} as DocxHostSearch,
   });
   const bridgeRef = useRef<PagedEditorCommandBridge | null>(null);
@@ -902,4 +908,136 @@ test('disabled worker open preserves main-thread open, projection and flush with
   } finally {
     for (const spy of spies) spy.mockRestore();
   }
+});
+
+test('worker proposals reach the registry before hydration and survive hand-over', async () => {
+  const { posted } = installWorker();
+  const frames = holdFrames();
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, workerProposals: true, allowHostProposals: true },
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const api = () => result.current.ref.current!;
+    const identities = await api().getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((identity) => identity.session?.story === 'body')!.session!;
+    const initial = await api().getProposals();
+    let applied!: Awaited<ReturnType<DocxEditorRef['proposeChanges']>>;
+    await act(async () => {
+      applied = await api().proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'worker-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Proposed ',
+        }],
+      });
+    });
+    expect(applied.ok).toBe(true);
+    expect(result.current.core.workerProposalsReady).toBe(true);
+    expect(posted.some((request) => request.type === 'proposal' && request.operation.kind === 'propose')).toBe(true);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(session.storyIds()).toEqual([]);
+    const mirrored = await api().getProposals();
+    expect(mirrored.proposals.map((proposal) => proposal.id)).toEqual(['worker-proposal']);
+    await act(async () => { await requestWorkerOpenReplica(session); });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(session.workerDocumentMirrored()).toBe(false);
+    expect(session.getProposals().proposals).toEqual(mirrored.proposals);
+    const workerCalls = posted.filter((request) => request.type === 'proposal').length;
+    const decided = await api().setProposalStates({
+      expectVersion: session.version(),
+      expectPreviewVersion: session.getProposals().previewVersion,
+      changes: [{ id: 'worker-proposal', state: 'accepted' }],
+    });
+    expect(decided.ok).toBe(true);
+    expect(session.getProposals().proposals[0]!.state).toBe('accepted');
+    expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(workerCalls);
+  } finally {
+    unmount();
+    frames.restore();
+  }
+});
+
+test('without worker proposals the ref waits for hydration before applying a proposal', async () => {
+  const { posted, workers } = installWorker({ holdState: true });
+  const { result } = renderHook(useHarness, {
+    initialProps: { ...initialProps, workerProposals: false, allowHostProposals: true },
+  });
+  await waitFor(() => expect(result.current.host).not.toBeNull());
+  const session = result.current.core.session!;
+  let settled = false;
+  const call = result.current.ref.current!.proposeChanges({ expectVersion: session.version(), proposals: [] });
+  void call.then(() => { settled = true; });
+  expect(posted.some((request) => request.type === 'proposal')).toBe(false);
+  expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+  expect(result.current.mainOpens).toEqual([]);
+  expect(settled).toBe(false);
+  act(() => { requestWorkerOpenReplica(session); });
+  await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
+  expect(settled).toBe(false);
+  await act(async () => { workers[0].release(); await call; });
+  expect(settled).toBe(true);
+  expect(result.current.mainOpens).toEqual([false]);
+  expect(posted.some((request) => request.type === 'proposal')).toBe(false);
+});
+
+test('the host proposal gate refuses before initializing the worker authority', async () => {
+  const { posted } = installWorker();
+  const { result } = renderHook(useHarness, {
+    initialProps: { ...initialProps, workerProposals: true },
+  });
+  await waitFor(() => expect(result.current.host).not.toBeNull());
+  const session = result.current.core.session!;
+  expect(await result.current.ref.current!.proposeChanges({ expectVersion: session.version(), proposals: [] })).toEqual({
+    ok: false, version: session.version(),
+    failure: { code: 'read-only', message: 'The editor is read-only' },
+  });
+  expect(posted.some((request) => request.type === 'proposal')).toBe(false);
+  expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+  expect(result.current.mainOpens).toEqual([]);
+});
+
+test('a failed hand-over refuses to reseed worker proposals', async () => {
+  installWorker({ failState: true });
+  const { result } = renderHook(useHarness, {
+    initialProps: { ...initialProps, workerProposals: true, allowHostProposals: true },
+  });
+  await waitFor(() => expect(result.current.host).not.toBeNull());
+  const session = result.current.core.session!;
+  const api = () => result.current.ref.current!;
+  const initial = await api().getProposals();
+  await act(async () => {
+    expect(await api().setProposalStates({
+      expectVersion: initial.version, expectPreviewVersion: initial.previewVersion, changes: [],
+    })).toMatchObject({ ok: true });
+  });
+  await act(async () => {
+    await expect(requestWorkerOpenReplica(session)!).rejects.toThrow(
+      'The resident worker holds proposals the main thread cannot rebuild'
+    );
+  });
+  expect(result.current.mainOpens).toEqual([]);
+  expect(result.current.core.replicaReady).toBe(false);
+});
+
+test('a failed empty hand-over releases the mirror before using the main replica', async () => {
+  installWorker({ failState: true });
+  const { result } = renderHook(useHarness, {
+    initialProps: { ...initialProps, workerProposals: true, allowHostProposals: true },
+  });
+  await waitFor(() => expect(result.current.host).not.toBeNull());
+  const session = result.current.core.session!;
+  await act(async () => { await result.current.ref.current!.getProposals(); });
+  expect(session.workerDocumentMirrored()).toBe(true);
+  await act(async () => { await requestWorkerOpenReplica(session); });
+  expect(result.current.mainOpens).toEqual([true]);
+  expect(session.workerDocumentMirrored()).toBe(false);
+  expect(await result.current.ref.current!.setProposalStates({
+    expectVersion: session.version(), expectPreviewVersion: session.getProposals().previewVersion,
+    changes: [],
+  })).toMatchObject({ ok: true });
 });
