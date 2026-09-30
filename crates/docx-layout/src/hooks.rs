@@ -170,8 +170,8 @@ pub(crate) fn row_keep_heights(block: &TableBlock, measure: &TableExtent) -> Vec
 /// that overruns the remaining space breaks at the deepest whole-line boundary
 /// that fits (Word's "allow row to break across pages"), which keeps the row's
 /// other columns on the page where they start and lets a tall vertically merged
-/// cell flow across the boundary. `w:cantSplit` rows (§17.4.6) never break
-/// unless they cannot fit a whole column even alone. `w:trHeight w:hRule="exact"`
+/// cell flow across the boundary. `w:cantSplit` rows (§17.4.6) break only when
+/// taller than a fresh column's body room. `w:trHeight w:hRule="exact"`
 /// rows are likewise atomic: their break geometry offers only the full-height
 /// boundary, so the whole row moves to the next page rather than slicing
 /// mid-row. A fresh fragment where not one line fits places the row's remainder
@@ -215,6 +215,11 @@ fn layout_table_with_position(
         let is_first_fragment = row_index == 0 && consumed == 0.0;
         let column_capacity =
             paginator.state(state_idx).content_limit - paginator.state(state_idx).content_top;
+        let body_capacity = if header_row_count > 0 && header_rows_height <= column_capacity {
+            column_capacity - header_rows_height
+        } else {
+            column_capacity
+        };
         let row_remaining_at_start = rows[row_index].height - consumed;
         let row_cant_split = block
             .rows
@@ -231,33 +236,33 @@ fn layout_table_with_position(
             .rows
             .get(row_index)
             .is_some_and(|row| row.is_exact_height());
-        if (row_cant_split || row_is_exact)
-            && consumed == 0.0
-            && row_remaining_at_start > paginator.get_available_height()
-            && paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
-        {
-            paginator.ensure_fits(row_remaining_at_start);
-            continue;
-        }
-
         // Only the first fragment consumes deferred spacing.
         let pending_spacing = if is_first_fragment {
             paginator.state(state_idx).deferred_spacing
         } else {
             0.0
         };
-        // A first body row the paragraph rules leave no break in a whole
-        // column starts on a fresh one, and the header band goes with it.
+        // Without cantSplit, a first body row whose paragraph rules leave no break
+        // below the header band starts on a fresh column with the band.
         let first_body_kept_oversized = is_first_fragment
             && header_row_count > 0
             && header_row_count < rows.len()
-            && breaks.kept_oversized(header_row_count, 0.0, column_capacity);
-        let header_start_height =
-            if first_fragment_height <= column_capacity || first_body_kept_oversized {
-                first_fragment_height
-            } else {
-                header_rows_height
-            };
+            && breaks.kept_oversized(header_row_count, 0.0, body_capacity);
+        let first_body_unavoidable_cant_split = is_first_fragment
+            && header_row_count > 0
+            && header_row_count < rows.len()
+            && block
+                .rows
+                .get(header_row_count)
+                .is_some_and(|row| row.cant_split.unwrap_or(false))
+            && rows[header_row_count].height > body_capacity;
+        let header_start_height = if first_body_unavoidable_cant_split {
+            header_rows_height + breaks.fresh_slice(header_row_count, 0.0, body_capacity)
+        } else if first_fragment_height <= column_capacity || first_body_kept_oversized {
+            first_fragment_height
+        } else {
+            header_rows_height
+        };
         if is_first_fragment
             && header_row_count > 0
             && (header_start_height <= column_capacity || first_body_kept_oversized)
@@ -267,7 +272,7 @@ fn layout_table_with_position(
             paginator.ensure_fits(header_start_height + pending_spacing);
             continue;
         }
-        let minimum_body_slice = breaks.fresh_slice(row_index, consumed, column_capacity);
+        let minimum_body_slice = breaks.fresh_slice(row_index, consumed, body_capacity);
         let header_overhead = if !is_first_fragment
             && row_index >= header_row_count
             && header_row_count > 0
@@ -277,6 +282,15 @@ fn layout_table_with_position(
         } else {
             0.0
         };
+        if (row_is_exact
+            || (row_cant_split && row_remaining_at_start <= column_capacity - header_overhead))
+            && consumed == 0.0
+            && row_remaining_at_start + header_overhead > paginator.get_available_height()
+            && paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
+        {
+            paginator.ensure_fits(row_remaining_at_start + header_overhead);
+            continue;
+        }
         let available_height = paginator.get_available_height() - pending_spacing - header_overhead;
 
         let start_row = row_index;
@@ -325,8 +339,8 @@ fn layout_table_with_position(
             // at the deepest whole line that fits (Word's "allow row to break across
             // pages") — this keeps the row's other columns on the page where they
             // start and flows a tall vertically-merged cell across the boundary.
-            // `w:cantSplit` rows (§17.4.6) never break. Exact-height rows need no
-            // branch here: their break geometry holds only the full-height
+            // `w:cantSplit` rows (§17.4.6) only break when oversized. Exact-height
+            // rows need no branch here: their break geometry holds only the full-height
             // boundary, so `snap_row_break` already returns 0 for a partial fit.
             let budget = available_height - used;
             let cant_split = block
@@ -334,8 +348,12 @@ fn layout_table_with_position(
                 .get(cur)
                 .and_then(|r| r.cant_split)
                 .unwrap_or(false);
-            let unavoidable_cant_split =
-                cant_split && remaining > column_capacity - header_overhead;
+            let row_capacity = if is_first_fragment && cur >= header_row_count {
+                body_capacity
+            } else {
+                column_capacity - header_overhead
+            };
+            let unavoidable_cant_split = cant_split && remaining > row_capacity;
             let placeable = if cant_split && !unavoidable_cant_split {
                 0.0
             } else {
@@ -351,14 +369,16 @@ fn layout_table_with_position(
                 && !(start_row == 0
                     && clip_top == 0.0
                     && cur == header_row_count
-                    && paginator.state(state_idx).pen_y == paginator.state(state_idx).content_top
-                    && (unavoidable_cant_split || breaks.kept_oversized(cur, 0.0, column_capacity)))
+                    && (unavoidable_cant_split
+                        || (paginator.state(state_idx).pen_y
+                            == paginator.state(state_idx).content_top
+                            && breaks.kept_oversized(cur, 0.0, row_capacity))))
             {
                 // Nothing of this row fits, but earlier rows did — end before it,
-                // unless they are the header band atop a fresh column, where the
-                // row breaks as it would below a repeated band.
+                // unless they are the header band above an unavoidable split.
             } else if paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
                 && moved_row != Some(cur)
+                && !unavoidable_cant_split
             {
                 // Nothing fits below content already in this column: start the
                 // fragment in the next one.
@@ -366,10 +386,8 @@ fn layout_table_with_position(
                 paginator.advance_for_overflow();
                 continue 'rows;
             } else {
-                // A fresh column where widow control and `keepLines` leave no
-                // break breaks at any line, as Word breaks a paragraph taller
-                // than a page; where not even one line fits, the rest of the row
-                // overflows rather than loop forever (oversized-row guard).
+                // Paragraph rules that leave no break in a column yield to whole lines.
+                // If no line fits, overflow instead of looping.
                 let line_break = if cant_split && !unavoidable_cant_split {
                     0.0
                 } else {

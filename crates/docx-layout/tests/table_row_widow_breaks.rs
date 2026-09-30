@@ -118,3 +118,40 @@ fn a_kept_paragraph_taller_than_a_page_splits_below_its_repeated_header() {
         [(1, 100.0), (2, 100.0), (3, 60.0)]
     );
 }
+
+#[test]
+fn a_kept_remainder_that_fits_a_bare_page_still_repeats_its_header() {
+    assert_eq!(
+        fragments(vec![table_rows(&[
+            (1, json!({}), json!({"isHeader": true})),
+            (9, json!({"keepLines": true}), json!({}))
+        ])]),
+        [(0, 100.0), (1, 100.0), (2, 40.0)]
+    );
+}
+
+#[test]
+fn an_oversized_cant_split_kept_row_starts_below_its_header_in_the_room_left() {
+    let (block, measure) = paragraph(1, 2, json!({}));
+    let above = json!({"block":block,"measure":measure});
+    assert_eq!(
+        fragments(vec![
+            above,
+            table_rows(&[
+                (1, json!({}), json!({"isHeader": true})),
+                (10, json!({"keepLines": true}), json!({"cantSplit": true}))
+            ])
+        ]),
+        [(0, 60.0), (1, 100.0), (2, 100.0)]
+    );
+}
+
+#[test]
+fn a_row_without_widow_control_uses_one_line_of_room_at_the_page_bottom() {
+    let (block, measure) = paragraph(1, 4, json!({}));
+    let above = json!({"block":block,"measure":measure});
+    assert_eq!(
+        fragments(vec![above, table(8, json!({"widowControl": false}))]),
+        [(0, 20.0), (1, 100.0), (2, 40.0)]
+    );
+}

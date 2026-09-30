@@ -139,20 +139,30 @@ impl<'a> RowBreaks<'a> {
     /// Whether the paragraph rules alone leave `row` no break from `consumed`
     /// on in a column `capacity` tall.
     pub(crate) fn kept_oversized(&self, row: usize, consumed: f64, capacity: f64) -> bool {
-        let kept = minimum_row_slice(self.block, self.measure, &self.kept, row, consumed);
-        kept > capacity
-            && minimum_row_slice(self.block, self.measure, self.lines(), row, consumed) < kept
+        let kept = minimum_break_slice(self.measure, &self.kept, row, consumed);
+        kept > capacity && minimum_break_slice(self.measure, self.lines(), row, consumed) < kept
     }
 
     /// The smallest slice of `row` from `consumed` on that a fresh column
     /// `capacity` tall places.
     pub(crate) fn fresh_slice(&self, row: usize, consumed: f64, capacity: f64) -> f64 {
+        let remaining = self.measure.rows[row].height - consumed;
+        if consumed == 0.0
+            && remaining <= capacity
+            && self
+                .block
+                .rows
+                .get(row)
+                .is_some_and(|row| row.cant_split.unwrap_or(false))
+        {
+            return remaining;
+        }
         let info = if self.kept_oversized(row, consumed, capacity) {
             self.lines()
         } else {
             &self.kept
         };
-        minimum_row_slice(self.block, self.measure, info, row, consumed)
+        minimum_break_slice(self.measure, info, row, consumed)
     }
 }
 
@@ -303,6 +313,16 @@ pub(crate) fn minimum_row_slice(
     {
         return remaining;
     }
+    minimum_break_slice(measure, info, row, consumed)
+}
+
+fn minimum_break_slice(
+    measure: &TableExtent,
+    info: &TableRowBreakInfo,
+    row: usize,
+    consumed: f64,
+) -> f64 {
+    let remaining = measure.rows[row].height - consumed;
     info.break_offsets[row]
         .iter()
         .copied()
