@@ -1,7 +1,9 @@
 //! A paragraph mark inside a complex field's code is part of the code, so
-//! Word hides it and joins the paragraph with the next one. Each fixture
-//! holds IF fields whose code spans paragraph marks, followed by their
-//! results, on A4 at an exact 12pt pitch. The page breaks and lines were
+//! Word hides it and joins the paragraph with the next one. Headers and
+//! footers show that join; the body keeps each paragraph. Each fixture holds
+//! IF fields whose code spans paragraph marks, followed by their results, on
+//! A4 at an exact 12pt pitch (`generate.py` rebuilds them). The page breaks
+//! and lines of `header-field-code-paragraphs` and the body fixtures were
 //! exported from Word 16.113.
 
 use docx_edit::bridge::{RenderEnv, RevisionPreview};
@@ -46,11 +48,14 @@ fn seeded(bytes: &[u8]) -> EngineSession {
     engine
 }
 
+const HEADER: &str = "hf:rHeader";
+
+/// The owner, the two code-only paragraphs and the result paragraph of the header's field.
 fn field_paragraph_ids(engine: &EngineSession) -> [String; 4] {
-    let paragraphs = engine.doc().paragraphs("body").unwrap();
+    let paragraphs = engine.doc().paragraphs(HEADER).unwrap();
     let owner = paragraphs
         .iter()
-        .position(|paragraph| paragraph.text.starts_with("Line 041"))
+        .position(|paragraph| paragraph.text.starts_with("Header 7"))
         .unwrap();
     paragraphs[owner..owner + 4]
         .iter()
@@ -61,7 +66,7 @@ fn field_paragraph_ids(engine: &EngineSession) -> [String; 4] {
 }
 
 fn lower(engine: &EngineSession, env: &RenderEnv) -> Value {
-    serde_json::from_str(&engine.lower_story_json("body", env).unwrap()).unwrap()
+    serde_json::from_str(&engine.lower_story_json(HEADER, env).unwrap()).unwrap()
 }
 
 fn block_text(block: &Value) -> String {
@@ -133,71 +138,75 @@ fn a_header_field_code_over_paragraph_marks_takes_one_line() {
 }
 
 #[test]
-fn a_body_field_code_over_paragraph_marks_joins_its_paragraphs() {
-    let pages = pages(&fixture("body-field-code-paragraphs"));
-    assert!(
-        pages[0]
-            .iter()
-            .any(|line| line.trim_end() == "Line 041 yes")
-    );
-    let starts: Vec<_> = page_ranges(&pages)
-        .into_iter()
-        .map(|(first, _)| first)
-        .collect();
-    assert_eq!(
-        starts,
-        ["Line 001", "Line 059", "Line 117", "Line 175", "Line 233"]
-    );
-}
-
-#[test]
-fn adjacent_chained_and_nested_field_codes_join_their_paragraphs() {
-    for (name, joined) in [
-        ("body-field-code-adjacent", "Line 041 yes"),
-        ("body-field-code-chained", "Line 041 yes and again"),
-        ("body-field-code-nested", "Line 041 yes"),
+fn body_field_codes_over_paragraph_marks_keep_their_paragraphs() {
+    for name in [
+        "body-field-code-paragraphs",
+        "body-field-code-adjacent",
+        "body-field-code-chained",
+        "body-field-code-nested",
+        "cell-field-code-paragraphs",
     ] {
-        let pages = pages(&fixture(name));
+        let lines: Vec<_> = pages(&fixture(name)).concat();
+        let owner = |line: &String| line.starts_with("Line 041") || line.starts_with("Cell");
         assert!(
-            pages[0].iter().any(|line| line.trim_end() == joined),
-            "{name}: {:?}",
-            &pages[0][38..44]
-        );
-        let starts: Vec<_> = page_ranges(&pages)
-            .into_iter()
-            .map(|(first, _)| first)
-            .collect();
-        assert_eq!(
-            starts,
-            ["Line 001", "Line 059", "Line 117", "Line 175", "Line 233"],
+            !lines.iter().any(|line| owner(line) && line.contains("yes")),
             "{name}"
         );
+        assert!(lines.iter().any(|line| line.starts_with("yes")), "{name}");
     }
 }
 
 #[test]
-fn a_field_code_over_paragraph_marks_in_a_table_cell_joins_its_paragraphs() {
-    let pages = pages(&fixture("cell-field-code-paragraphs"));
-    let starts: Vec<_> = page_ranges(&pages)
-        .into_iter()
-        .map(|(first, _)| first)
-        .collect();
-    assert_eq!(
-        starts,
-        ["Line 001", "Line 059", "Line 117", "Line 175", "Line 233"]
+fn adjacent_chained_and_nested_header_field_codes_join_their_paragraphs() {
+    for (name, joined) in [
+        ("header-field-code-paragraphs", "Header 7 yes"),
+        ("header-field-code-adjacent", "Header 7 yes"),
+        ("header-field-code-chained", "Header 7 yes and again"),
+        ("header-field-code-nested", "Header 7 yes"),
+    ] {
+        let blocks = lower(&seeded(&fixture(name)), &RenderEnv::default());
+        let texts: Vec<_> = blocks
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|block| block_text(block).trim_end().to_owned())
+            .collect();
+        assert_eq!(texts.len(), 7, "{name}: {texts:?}");
+        assert_eq!(texts[6], joined, "{name}");
+    }
+}
+
+#[test]
+fn a_header_field_code_over_paragraph_marks_in_a_table_cell_joins_its_paragraphs() {
+    let blocks = lower(
+        &seeded(&fixture("header-field-code-cell")),
+        &RenderEnv::default(),
     );
+    let table = blocks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|block| block["kind"] == "table")
+        .unwrap();
+    let texts: Vec<_> = table["rows"][0]["cells"][0]["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|block| block_text(block).trim_end().to_owned())
+        .collect();
+    assert_eq!(texts, ["Cell yes", "Cell end"]);
 }
 
 #[test]
 fn the_page_map_places_both_joined_paragraphs() {
-    let bytes = fixture("body-field-code-paragraphs");
+    let bytes = fixture("header-field-code-paragraphs");
     let engine = seeded(&bytes);
     engine
         .layout_document_with_regions_retained_json(&request(&bytes))
         .unwrap();
     let content = engine
         .export_structured_with_pages(&PageExportOptions {
-            stories: Some(vec![StorySelection::Body]),
+            stories: Some(vec![StorySelection::Headers]),
             ..PageExportOptions::new(RevisionView::Accepted)
         })
         .unwrap()
@@ -205,7 +214,7 @@ fn the_page_map_places_both_joined_paragraphs() {
     let paragraphs = engine
         .doc()
         .read_paragraphs(&ReadParagraphsRequest {
-            story: None,
+            story: Some(HEADER.to_owned()),
             para_ids: None,
             view: EditTextView::Accepted,
         })
@@ -213,7 +222,7 @@ fn the_page_map_places_both_joined_paragraphs() {
         .paragraphs;
     let owner = paragraphs
         .iter()
-        .position(|paragraph| paragraph.text.starts_with("Line 041"))
+        .position(|paragraph| paragraph.text.starts_with("Header 7"))
         .unwrap();
     for paragraph in [&paragraphs[owner], &paragraphs[owner + 3]] {
         let block = content.structured.stories[0]
@@ -245,7 +254,7 @@ fn the_page_map_places_both_joined_paragraphs() {
 
 #[test]
 fn merging_the_result_backward_keeps_its_visible_content() {
-    let engine = seeded(&fixture("body-field-code-paragraphs"));
+    let engine = seeded(&fixture("header-field-code-paragraphs"));
     let [owner, _, hidden, target] = field_paragraph_ids(&engine);
     engine
         .doc()
@@ -260,7 +269,7 @@ fn merging_the_result_backward_keeps_its_visible_content() {
 
 #[test]
 fn a_missing_bound_code_paragraph_cancels_the_join() {
-    let engine = seeded(&fixture("body-field-code-paragraphs"));
+    let engine = seeded(&fixture("header-field-code-paragraphs"));
     let [owner, hidden, _, target] = field_paragraph_ids(&engine);
     engine
         .doc()
@@ -275,13 +284,13 @@ fn a_missing_bound_code_paragraph_cancels_the_join() {
 
 #[test]
 fn a_rejected_spanning_field_does_not_join_its_paragraphs() {
-    let engine = seeded(&fixture("body-field-code-paragraphs"));
+    let engine = seeded(&fixture("header-field-code-paragraphs"));
     let [owner, first_hidden, last_hidden, target] = field_paragraph_ids(&engine);
     let field = engine.doc().paragraph_mark_position(&owner).unwrap().index - 1;
     engine
         .doc()
         .apply_raw_ops(
-            "body",
+            HEADER,
             vec![RawOp::Format {
                 index: field,
                 len: 1,
@@ -343,7 +352,7 @@ fn only_visible_inline_drawings_block_a_join() {
         ("image", 0, false, false, true),
         ("image", 1, false, false, false),
     ] {
-        let engine = seeded(&fixture("body-field-code-paragraphs"));
+        let engine = seeded(&fixture("header-field-code-paragraphs"));
         let ids = field_paragraph_ids(&engine);
         let at = engine
             .doc()
@@ -387,7 +396,7 @@ fn only_visible_inline_drawings_block_a_join() {
         engine
             .doc()
             .apply_raw_ops(
-                "body",
+                HEADER,
                 vec![RawOp::InsertEmbed {
                     index: at,
                     kind: kind.to_owned(),
@@ -405,7 +414,7 @@ fn only_visible_inline_drawings_block_a_join() {
         let blocks = blocks.as_array().unwrap();
         let target = blocks.iter().find(|block| block["id"] == ids[3]).unwrap();
         assert_eq!(
-            block_text(target).contains("Line 041"),
+            block_text(target).contains("Header 7"),
             anchored || hidden || rejected
         );
         assert_eq!(
@@ -422,11 +431,11 @@ fn only_visible_inline_drawings_block_a_join() {
 
 #[test]
 fn inserting_text_beside_a_nested_code_field_cancels_the_join() {
-    let engine = seeded(&fixture("body-field-code-nested"));
-    let paragraphs = engine.doc().paragraphs("body").unwrap();
+    let engine = seeded(&fixture("header-field-code-nested"));
+    let paragraphs = engine.doc().paragraphs(HEADER).unwrap();
     let owner = paragraphs
         .iter()
-        .position(|paragraph| paragraph.text.starts_with("Line 041"))
+        .position(|paragraph| paragraph.text.starts_with("Header 7"))
         .unwrap();
     let hidden = &paragraphs[owner + 1].para_id;
     engine
@@ -499,14 +508,14 @@ fn a_trailing_soft_break_keeps_its_blank_line_page_fragment() {
 
 #[test]
 fn retained_display_refreshes_joined_run_positions() {
-    let bytes = fixture("body-field-code-paragraphs");
+    let bytes = fixture("header-field-code-paragraphs");
     let engine = seeded(&bytes);
     let [_, hidden, _, _] = field_paragraph_ids(&engine);
     let code = engine.doc().paragraph_mark_position(&hidden).unwrap().index;
     engine
         .doc()
         .apply_raw_ops(
-            "body",
+            HEADER,
             vec![RawOp::Insert {
                 index: code,
                 text: "code".to_owned(),
@@ -526,7 +535,7 @@ fn retained_display_refreshes_joined_run_positions() {
         .doc()
         .delete_range(
             &EditCtx::local("", ""),
-            StoryRange::new("body", code, code + 4),
+            StoryRange::new(HEADER, code, code + 4),
         )
         .unwrap();
     let last = engine
@@ -568,69 +577,76 @@ fn retained_display_refreshes_joined_run_positions() {
     assert_eq!(display(&engine), display(&fresh));
 }
 
+/// The editor maps a click's display position to a paragraph by counting each paragraph of the
+/// story as its length plus two; a joined header line keeps every part at its own positions, so a
+/// click in either part edits that part's paragraph.
 #[test]
-fn joined_sources_have_their_own_page_continuations() {
-    let bytes = fixture("body-field-code-paragraphs");
-    let engine = seeded(&bytes);
+fn a_click_in_either_part_of_a_joined_header_line_edits_that_part() {
+    let engine = seeded(&fixture("header-field-code-paragraphs"));
     let [owner, _, _, target] = field_paragraph_ids(&engine);
-    let owner_end = engine.doc().paragraph_mark_position(&owner).unwrap().index - 1;
-    engine
-        .doc()
-        .apply_raw_ops(
-            "body",
-            vec![RawOp::Insert {
-                index: owner_end,
-                text: "carried\u{000b}".repeat(90),
-                attrs: Default::default(),
-            }],
-            &EditCtx::local("", ""),
-        )
-        .unwrap();
-    let target_end = engine.doc().paragraph_mark_position(&target).unwrap();
-    engine
-        .doc()
-        .apply_raw_ops(
-            "body",
-            vec![RawOp::Insert {
-                index: target_end.index,
-                text: "result\u{000b}".repeat(90),
-                attrs: Default::default(),
-            }],
-            &EditCtx::local("", ""),
-        )
-        .unwrap();
-    engine
-        .layout_document_with_regions_retained_json(&request(&bytes))
-        .unwrap();
-    let content = engine
-        .export_structured_with_pages(&PageExportOptions {
-            stories: Some(vec![StorySelection::Body]),
-            ..PageExportOptions::new(RevisionView::Accepted)
-        })
+    let blocks = lower(&engine, &RenderEnv::default());
+    let joined = blocks
+        .as_array()
         .unwrap()
-        .content;
-    let fragments = |id: &str| {
-        content
-            .layout
-            .fragments
-            .iter()
-            .filter(|fragment| {
-                matches!(&fragment.anchor, Anchor::Paragraph { para_id, .. } if para_id == id)
-                    && matches!(fragment.slice, FragmentSlice::Block)
-            })
-            .collect::<Vec<_>>()
-    };
-    let owner_fragments = fragments(&owner);
-    let target_fragments = fragments(&target);
-    for fragments in [&owner_fragments, &target_fragments] {
-        assert!(fragments.len() >= 2);
-        for (index, fragment) in fragments.iter().enumerate() {
-            assert_eq!(fragment.continued_from_previous, index > 0);
-            assert_eq!(fragment.continued_on_next, index + 1 < fragments.len());
+        .iter()
+        .find(|block| block_text(block).trim_end() == "Header 7 yes")
+        .unwrap();
+    // (paragraph, offset, story index) of a display position
+    let display_loc = |position: u64| {
+        let (mut display_start, mut story_start, mut units) = (0_u64, 0_u64, 0_u64);
+        let mut located = None;
+        for segment in engine.doc().story_segments(HEADER).unwrap() {
+            match segment.content {
+                docx_edit::SegmentContent::Text(text) => {
+                    units += text.encode_utf16().count() as u64;
+                }
+                docx_edit::SegmentContent::OtherEmbed { .. } => units += 1,
+                docx_edit::SegmentContent::Pilcrow(properties) => {
+                    if display_start <= position {
+                        let offset = position - display_start - 1;
+                        located =
+                            Some((properties.para_id.to_string(), offset, story_start + offset));
+                    }
+                    display_start += units + 2;
+                    story_start += units + 1;
+                    units = 0;
+                }
+            }
         }
+        located.unwrap()
+    };
+    let text_of = |para_id: &str| {
+        engine
+            .doc()
+            .paragraphs(HEADER)
+            .unwrap()
+            .into_iter()
+            .find(|paragraph| *paragraph.para_id == *para_id)
+            .unwrap()
+            .text
+    };
+    for (text, expected) in [("Header 7 ", &owner), ("yes", &target)] {
+        let run = joined["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|run| run["text"] == text)
+            .unwrap();
+        let (para_id, offset, index) = display_loc(run["pmStart"].as_u64().unwrap());
+        assert_eq!(&para_id, expected, "{text}");
+        assert_eq!(offset, 0, "{text}");
+        let other = if expected == &owner { &target } else { &owner };
+        let before = text_of(other);
+        engine
+            .doc()
+            .insert_text(
+                &EditCtx::local("", ""),
+                docx_edit::Position::new(HEADER, index as u32),
+                "Z",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+        assert!(text_of(expected).starts_with('Z'), "{text}");
+        assert_eq!(text_of(other), before, "{text}");
     }
-    assert!(owner_fragments[0].page_index < target_fragments[0].page_index);
-    assert!(
-        owner_fragments.last().unwrap().page_index < target_fragments.last().unwrap().page_index
-    );
 }

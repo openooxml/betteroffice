@@ -908,7 +908,8 @@ fn lower_story<T: ReadTxn>(
                         pending_hidden_field_blocks
                             .append(&mut hidden_field_result_blocks(&field, txn));
                     }
-                    if let Some(join) = field_code_join(&field, txn)
+                    if joins_field_code_paragraphs(story_id)
+                        && let Some(join) = field_code_join(&field, txn)
                         && !env.revision_hidden(attributes)
                         && pending_code_join
                             .as_ref()
@@ -1319,6 +1320,12 @@ fn nested_code_fields(value: &Value, fields: &mut Vec<Value>) {
         }
         _ => {}
     }
+}
+
+/// Headers and footers show a field whose code spans paragraph marks on one line, as Word
+/// does; other stories keep each paragraph, whose carets and edits address it alone.
+fn joins_field_code_paragraphs(story_id: &str) -> bool {
+    story_id.starts_with("hf:")
 }
 
 struct FieldCodeParagraph {
