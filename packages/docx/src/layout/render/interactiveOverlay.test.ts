@@ -185,10 +185,10 @@ test('a filled body shape hides header controls only where its path is its own b
   });
   // Its diagonals move less than the corner tolerance.
   const narrowBowtie = box({
-    x: 100, w: 0.011,
+    x: 109.995, w: 0.011,
     geometryPath: [
-      { type: 'move', x: 100.002, y: 20 }, { type: 'line', x: 100.011, y: 40 },
-      { type: 'line', x: 100.011, y: 20 }, { type: 'line', x: 100.002, y: 40 }, { type: 'close' },
+      { type: 'move', x: 109.997, y: 20 }, { type: 'line', x: 110.006, y: 40 },
+      { type: 'line', x: 110.006, y: 20 }, { type: 'line', x: 109.997, y: 40 }, { type: 'close' },
     ],
   });
   for (const shape of [triangle, bowtie, narrowBowtie, box({ transform: { rotation: 45 } })]) {
