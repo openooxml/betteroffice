@@ -503,16 +503,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           const pieces = inputText.replace(/\r\n?/g, '\n').split('\n');
           let caret = at;
           const storedKey = (loc: YrsLoc): string => `${loc.story}\u0000${loc.paraId}`;
-          // A replacement's text and caret can land in another paragraph than the
-          // head it was typed at: the head's stored formatting moves with them.
-          const carried = hasSelection ? stored : undefined;
-          let carriedKey = storedKey(current.head);
-          const carry = (loc: YrsLoc): void => {
-            if (!carried) return;
-            storedFormattingByParagraphRef.current.delete(carriedKey);
-            carriedKey = storedKey(loc);
-            storedFormattingByParagraphRef.current.set(carriedKey, carried);
-          };
+          // A suggested replacement's text lands after the struck-out text, possibly
+          // in another paragraph: the head's stored formatting goes with it.
+          const carried = hasSelection && isSuggesting ? stored : undefined;
           for (let i = 0; i < pieces.length; i += 1) {
             const piece = pieces[i];
             if (piece || (i === 0 && hasSelection)) {
@@ -525,7 +518,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
                 } else {
                   caret = { ...caret, offset: caret.offset + piece.length };
                 }
-                carry(caret);
               } else {
                 session.insertText(caret, piece, suggestingAuthor());
                 caret = { ...caret, offset: caret.offset + piece.length };
@@ -547,8 +539,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             if (i < pieces.length - 1) {
               const receipt = session.splitParagraph(caret, suggestingAuthor());
               caret = { story: caret.story, paraId: receipt.secondParaId, offset: 0 };
-              carry(caret);
             }
+          }
+          if (carried && !storedFormattingByParagraphRef.current.has(storedKey(caret))) {
+            storedFormattingByParagraphRef.current.set(storedKey(caret), carried);
           }
           session.setSelection(caret);
           finishMutation();

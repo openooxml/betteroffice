@@ -242,6 +242,64 @@ test('multiline suggesting type-over keeps the stored formatting on every piece'
   }
 });
 
+test('type-over keeps paragraph stored formatting apart from the carried override', async () => {
+  const setup = async (isSuggesting: boolean) => {
+    const session = await seededSession();
+    const first = session.paragraphs('body')[0]!.paraId;
+    const { secondParaId: second } = session.splitParagraph({
+      story: 'body',
+      paraId: first,
+      offset: 2,
+    });
+    const input = createRef<YrsInputRef>();
+    render(inputFor(session, input, undefined, undefined, { isSuggesting, author: 'Ada' }));
+    const store = (paraId: string, delta: Record<string, boolean>) => {
+      session.setSelection({ story: 'body', paraId, offset: 1 });
+      act(() => input.current!.applyStoredFormatting({ type: 'set', delta }));
+    };
+    store(first, { italic: true });
+    store(second, { bold: true });
+    const type = async (text: string) => {
+      act(() => input.current!.insertText(text));
+      await act(async () => {
+        await input.current!.flushPendingInput();
+      });
+    };
+    const attributesOf = (text: string) => {
+      const segment = session
+        .storySegments('body')
+        .find((candidate) => candidate.kind === 'text' && candidate.text.includes(text));
+      return segment?.attributes ?? {};
+    };
+    return { session, first, second, type, attributesOf };
+  };
+
+  // Plain type-over formats the text with its own paragraph's stored formatting.
+  const plain = await setup(false);
+  plain.session.setSelection(
+    { story: 'body', paraId: plain.first, offset: 1 },
+    { story: 'body', paraId: plain.second, offset: 1 }
+  );
+  await plain.type('X');
+  expect(plain.attributesOf('X').italic).toBe(true);
+  expect(plain.attributesOf('X').bold).not.toBe(true);
+  cleanup();
+
+  // A suggested one carries the head's, without displacing another paragraph's.
+  const suggested = await setup(true);
+  suggested.session.setSelection(
+    { story: 'body', paraId: suggested.second, offset: 1 },
+    { story: 'body', paraId: suggested.first, offset: 1 }
+  );
+  await suggested.type('X\nY');
+  expect(suggested.attributesOf('X').italic).toBe(true);
+  expect(suggested.attributesOf('Y').italic).toBe(true);
+  suggested.session.setSelection({ story: 'body', paraId: suggested.second, offset: 0 });
+  await suggested.type('Z');
+  expect(suggested.attributesOf('Z').bold).toBe(true);
+  cleanup();
+});
+
 test('flush includes a completed IME composition exactly once', async () => {
   const { session, input, view } = await mount();
   const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
