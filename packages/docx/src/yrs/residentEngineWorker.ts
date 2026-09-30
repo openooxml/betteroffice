@@ -208,7 +208,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     unsubscribe?.();
     unsubscribe = null;
     if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
-    if (syncSuperseded()) {
+    if (request.supersedable && syncSuperseded()) {
       // Later snapshots diff against this one's state and fonts, so it still loads them.
       loadSnapshot(request.snapshot);
       subscribe();

@@ -209,7 +209,14 @@ export class ResidentEngineWorkerClient {
     extras: string,
     expectedFrameEpoch: number,
     paintCaret = false,
-    options: ResidentEngineWorkerLayoutOptions & ResidentEngineWorkerSnapshotOptions = {}
+    options: ResidentEngineWorkerLayoutOptions &
+      ResidentEngineWorkerSnapshotOptions & {
+        /**
+         * Lets a later layout sync supersede this one while both are queued:
+         * it then rejects with `ResidentWorkerSupersededError`.
+         */
+        supersedable?: boolean;
+      } = {}
   ): Promise<ResidentEngineWorkerFrame> {
     const fontsRevision = snapshot.fontsRevision;
     const pending = this.request(
@@ -221,6 +228,7 @@ export class ResidentEngineWorkerClient {
         paintCaret,
         ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
         ...(options.displayWindow ? { displayWindow: options.displayWindow } : {}),
+        ...(options.supersedable ? { supersedable: true } : {}),
       },
       snapshotTransfers(snapshot)
     );

@@ -285,7 +285,7 @@ test('queued syncs load their state and only the newest lays out and builds a fr
       '',
       booted.caret.frameEpoch,
       false,
-      layoutOptions()
+      { ...layoutOptions(), supersedable: true }
     );
   };
 
@@ -320,5 +320,42 @@ test('queued syncs load their state and only the newest lays out and builds a fr
   expect(frameText(frame)).toBe('Seed one two three');
   expect(JSON.parse(latest.layoutJson!)).toEqual(
     JSON.parse(main.layoutDocumentWithRegionsRetainedJson(LAYOUT))
+  );
+});
+
+test('queued syncs that do not opt in each lay out and build a frame', async () => {
+  const main = await createYrsSession({ clientId: 5121 });
+  sessions.push(main);
+  const { paraId } = main.createStory('body', 'Seed');
+  main.registerFont(new Uint8Array(readFileSync(FONT)));
+  main.adoptResidentWorkerLayout!(LAYOUT);
+  const worker = startWorker();
+  const client = new ResidentEngineWorkerClient(worker);
+  clients.push(client);
+  const layoutOptions = () => ({ layoutExtras: '{}', stateVector: main.encodeStateVector() });
+  const booted = await client.bootstrap(main.residentWorkerSnapshot()!, '', layoutOptions());
+  const sync = () => {
+    main.adoptResidentWorkerLayout!(LAYOUT);
+    return client.sync(
+      main.residentWorkerSnapshot({
+        knownStateVector: client.remoteStateVector(),
+        knownFontsRevision: client.syncedFontsRevision(),
+      })!,
+      '',
+      booted.caret.frameEpoch,
+      false,
+      layoutOptions()
+    );
+  };
+
+  main.insertText({ story: 'body', paraId, offset: 4 }, ' one');
+  const first = sync();
+  main.insertText({ story: 'body', paraId, offset: 8 }, ' two');
+  const [one, two] = await Promise.all([first, sync()]);
+
+  expect(one.layoutJson).toBeDefined();
+  expect(two.layoutJson).toBeDefined();
+  expect(decodeFrameDelta(two.frame).layoutEpoch).toBe(
+    decodeFrameDelta(one.frame).layoutEpoch + 1
   );
 });

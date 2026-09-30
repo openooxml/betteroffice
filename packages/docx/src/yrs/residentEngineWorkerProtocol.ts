@@ -39,6 +39,8 @@ export type ResidentEngineWorkerRequest =
        */
       layoutExtras?: string;
       displayWindow?: [number, number];
+      /** A later layout sync queued behind this one may answer it `superseded`. */
+      supersedable?: boolean;
     }
   | {
       id: number;
