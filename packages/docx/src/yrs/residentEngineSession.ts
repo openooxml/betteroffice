@@ -9,6 +9,7 @@ import type {
   CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
+import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
 
 export type ResidentEngineSession = Pick<
@@ -27,6 +28,7 @@ export type ResidentEngineSession = Pick<
   | 'layoutDocumentJson'
   | 'layoutFontRequirementsJson'
   | 'layoutDocumentWithRegionsRetainedJson'
+  | 'loadMediaSources'
   | 'loadState'
   | 'setPartialDocument'
   | 'measureParagraphJson'
@@ -44,6 +46,16 @@ export type ResidentEngineSession = Pick<
 > & {
   /** The region layout of only as much of the body as fills `pages` pages. */
   layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
+  /** Limit incremental rebuilds to the display window and caret pages. Off by default. */
+  setWindowedIncrementalBuilds(enabled: boolean): void;
+  /** Parses and seeds a DOCX; returns the host metadata JSON the main thread decodes. */
+  openDocx(bytes: Uint8Array, digest?: string, generation?: string): string;
+  /** The whole document state as one yrs v1 update. */
+  encodeState(): Uint8Array;
+  /** The retained region layout pass without serializing its reply. */
+  layoutDocumentWithRegionsRetained(input: string): void;
+  /** The retained region layout's `headersFooters` JSON, when it has any. */
+  retainedHeadersFootersJson(): string | undefined;
 };
 
 export async function createResidentEngineSession(
@@ -77,6 +89,12 @@ export async function createResidentEngineSession(
   };
 
   return {
+    openDocx: (bytes, digest, generation) =>
+      resolveHostJsonCommentMedia(
+        session.open_docx(bytes, true, generation, digest),
+        (token) => (token.startsWith('media:') ? (session.media_data_url(token) ?? null) : null)
+      ),
+    encodeState: () => session.encode_state(),
     registerFont: (bytes) => session.register_measure_font(bytes),
     registerSubstituteFont: (base, family) =>
       session.register_substitute_measure_font(base, family),
@@ -94,9 +112,13 @@ export async function createResidentEngineSession(
     setPartialDocument: (partial) => session.set_partial_document(partial),
     layoutDocumentWithRegionsPrefixRetainedJson: (input, pages) =>
       session.layout_document_with_regions_prefix_retained_json(input, pages),
+    layoutDocumentWithRegionsRetained: (input) =>
+      session.layout_document_with_regions_retained(input),
+    retainedHeadersFootersJson: () => session.retained_headers_footers_json(),
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
     setDisplayWindow: (start, end) => session.set_display_window(start, end),
+    setWindowedIncrementalBuilds: (enabled) => session.set_windowed_incremental_builds(enabled),
     buildDisplayPagesFrame: (pages, expectedFrameEpoch) =>
       session.build_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch),
     residentCaretSnapshot: () =>
@@ -124,6 +146,7 @@ export async function createResidentEngineSession(
       return { frame, profile };
     },
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
+    loadMediaSources: (json) => session.load_media_sources(json),
     loadState: (update) => session.load(update),
     applyUpdate: (update) =>
       JSON.parse(

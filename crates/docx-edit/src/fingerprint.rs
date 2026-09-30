@@ -38,15 +38,6 @@ pub(crate) fn fingerprint_without_positions<T: Serialize + ?Sized>(
     Ok(hasher.finish())
 }
 
-/// Fingerprint of `value` with its absolute document positions included, so it
-/// also tells where each part of the value sits.
-pub(crate) fn fingerprint_with_positions<T: Serialize + ?Sized>(value: &T) -> Result<u64, String> {
-    let mut hasher = Hasher::new();
-    hasher.keep_positions = true;
-    value.serialize(&mut hasher).map_err(|error| error.0)?;
-    Ok(hasher.finish())
-}
-
 fn is_position_key(key: &str) -> bool {
     POSITION_KEYS.contains(&key)
 }
@@ -55,14 +46,12 @@ fn is_position_key(key: &str) -> bool {
 /// a session-local fingerprint needs.
 struct Hasher {
     inner: DefaultHasher,
-    keep_positions: bool,
 }
 
 impl Hasher {
     fn new() -> Self {
         Self {
             inner: DefaultHasher::new(),
-            keep_positions: false,
         }
     }
 
@@ -120,7 +109,7 @@ struct Container<'a> {
 
 impl<'a> Container<'a> {
     fn field<T: Serialize + ?Sized>(&mut self, key: &str, value: &T) -> Result<(), Error> {
-        if !self.hasher.keep_positions && is_position_key(key) {
+        if is_position_key(key) {
             return Ok(());
         }
         self.hasher.word(TAG_KEY);
@@ -131,9 +120,8 @@ impl<'a> Container<'a> {
     fn key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), Error> {
         let mut probe = KeyProbe::new();
         key.serialize(&mut probe)?;
-        let skip = probe.position && !self.hasher.keep_positions;
-        self.skip_value = skip;
-        if !skip {
+        self.skip_value = probe.position;
+        if !probe.position {
             self.hasher.word(TAG_KEY);
             self.hasher.word(probe.key.finish());
         }
@@ -574,24 +562,6 @@ mod tests {
             height: None,
             extra: json!({ "pmEnd": position + 4.0, "nested": [{ "docEnd": position }] }),
         }
-    }
-
-    #[test]
-    fn a_positioned_fingerprint_tells_where_each_part_sits() {
-        use super::fingerprint_with_positions as positioned;
-        let base = positioned(&run("text", 1.0)).unwrap();
-        assert_eq!(base, positioned(&run("text", 1.0)).unwrap());
-        assert_ne!(base, positioned(&run("text", 2.0)).unwrap());
-        // The same position owned by another part of the value.
-        let owner = |first: Option<f64>, second: Option<f64>| json!([{ "text": "a", "pmStart": first }, { "text": "b", "pmStart": second }]);
-        assert_ne!(
-            positioned(&owner(Some(101.0), None)).unwrap(),
-            positioned(&owner(None, Some(101.0))).unwrap()
-        );
-        assert_eq!(
-            fingerprint(&owner(Some(101.0), None)).unwrap(),
-            fingerprint(&owner(None, Some(101.0))).unwrap()
-        );
     }
 
     #[test]

@@ -227,6 +227,10 @@ export interface RustDisplayListEngine {
     from: number,
     to: number
   ): string;
+  /** The bytes and media type of the part a `media:{n}` image source names. */
+  mediaSource?(token: string): { bytes: Uint8Array; mimeType: string } | null;
+  /** Changes whenever the package `mediaSource` reads changes. */
+  mediaScope?(): number;
 }
 
 export type RustDisplayListSourceErrorStage = 'load' | 'build' | 'parse' | 'decode' | 'apply';

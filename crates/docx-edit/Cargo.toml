@@ -37,6 +37,7 @@ docx-layout.workspace = true
 docx-parse.workspace = true
 ooxml-diff.workspace = true
 ooxml-opc.workspace = true
+ooxml-text.workspace = true
 ryu-js = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

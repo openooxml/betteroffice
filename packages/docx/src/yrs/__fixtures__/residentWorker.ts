@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { createResidentEngineSession } from '../residentEngineSession';
+import { preloadEditWasm } from '../wasm/index';
 import type { ResidentEngineWorkerPort } from '../residentEngineWorkerClient';
 import type {
   ResidentEngineWorkerRequest,
@@ -13,13 +14,12 @@ export interface InProcessResidentWorker extends ResidentEngineWorkerPort {
   /** Holds the worker's replies until `release`. */
   hold(): void;
   release(): void;
-  /** Delivers each request as its own task, as a browser worker does. */
-  deliverAsTasks(): void;
 }
 
 const STUBS: Record<string, string> = {
   './residentEngineSession':
     'export const createResidentEngineSession = () => testHarness.createSession();',
+  './wasm/index': 'export const preloadEditWasm = () => testHarness.preload();',
   '../layout/render/glyphCache': 'export class GlyphCache {}',
   '../layout/render/canvasBackend': `
     export const rasterizeDisplayPageToBackBuffer = async () => {};
@@ -63,8 +63,6 @@ export async function residentWorkerFactory(): Promise<() => InProcessResidentWo
   ) as (scope: unknown, canvas: unknown, harness: unknown) => void;
   return () => {
     let held: ResidentEngineWorkerResponse[] | null = null;
-    let tasks: MessageChannel | null = null;
-    const pendingTasks: ResidentEngineWorkerRequest[] = [];
     const scope = {
       onmessage: null as ((event: { data: ResidentEngineWorkerRequest }) => void) | null,
       postMessage(reply: ResidentEngineWorkerResponse) {
@@ -86,19 +84,7 @@ export async function residentWorkerFactory(): Promise<() => InProcessResidentWo
       postMessage(message) {
         worker.requests.push(message.type);
         const data = structuredClone(message);
-        if (!tasks) {
-          queueMicrotask(() => scope.onmessage?.({ data }));
-          return;
-        }
-        pendingTasks.push(data);
-        tasks.port2.postMessage(null);
-      },
-      deliverAsTasks() {
-        tasks ??= new MessageChannel();
-        tasks.port1.onmessage = () => {
-          const data = pendingTasks.shift();
-          if (data) scope.onmessage?.({ data });
-        };
+        queueMicrotask(() => scope.onmessage?.({ data }));
       },
       terminate() {},
       hold() {
@@ -110,7 +96,10 @@ export async function residentWorkerFactory(): Promise<() => InProcessResidentWo
         for (const reply of replies) deliver(reply);
       },
     };
-    start(scope, class {}, { createSession: createResidentEngineSession });
+    start(scope, class {}, {
+      createSession: createResidentEngineSession,
+      preload: preloadEditWasm,
+    });
     return worker;
   };
 }

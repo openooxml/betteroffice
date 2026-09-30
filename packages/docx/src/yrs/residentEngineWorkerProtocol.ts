@@ -8,6 +8,7 @@ import type { ResidentCaretPaintStyle } from './residentCaret';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 
 export type ResidentEngineWorkerRequest =
+  | { id: number; type: 'warm' }
   | {
       id: number;
       type: 'bootstrap';
@@ -22,9 +23,29 @@ export type ResidentEngineWorkerRequest =
        * marked `layoutProvisional` is finished by `completeLayout`.
        */
       provisionalPages?: number;
+      /**
+       * The document replaces the one this worker showed, which the host
+       * hands over from: keep the attached page surfaces for its pages.
+       */
+      keepSurfaces?: boolean;
+      /** Lay out the document `open` seeded here, not the snapshot's state. */
+      opened?: boolean;
       /** The most the worker's editing core may allocate at once. */
       heapLimitBytes?: number;
     }
+  | {
+      id: number;
+      type: 'open';
+      /** The DOCX package, parsed and seeded in a fresh session here. */
+      bytes: ArrayBuffer;
+      /** The package's SHA-256, when the caller already took it. */
+      digest?: string;
+      generation?: string;
+      /** The most the worker's editing core may allocate at once. */
+      heapLimitBytes?: number;
+    }
+  | { id: number; type: 'fontRequirements'; layoutInput: string }
+  | { id: number; type: 'encodeState' }
   | {
       id: number;
       type: 'sync';
@@ -39,8 +60,6 @@ export type ResidentEngineWorkerRequest =
        */
       layoutExtras?: string;
       displayWindow?: [number, number];
-      /** A later layout sync queued behind this one may answer it `superseded`. */
-      supersedable?: boolean;
     }
   | {
       id: number;
@@ -66,6 +85,7 @@ export type ResidentEngineWorkerRequest =
       extras: string;
       expectedFrameEpoch: number;
       paintCaret: boolean;
+      displayWindow?: [number, number];
     }
   | {
       id: number;
@@ -75,6 +95,7 @@ export type ResidentEngineWorkerRequest =
       expectedFrameEpoch: number;
       profile: boolean;
       paintCaret: boolean;
+      displayWindow?: [number, number];
     }
   | {
       id: number;
@@ -85,6 +106,7 @@ export type ResidentEngineWorkerRequest =
       expectedFrameEpoch: number;
       profile: boolean;
       paintCaret: boolean;
+      displayWindow?: [number, number];
     }
   | {
       id: number;
@@ -135,8 +157,12 @@ export type ResidentEngineWorkerResponse = (
       layoutJson?: string;
       /** `layoutJson` covers only the first pages of the body. */
       layoutProvisional?: boolean;
-      /** A sync that loaded its snapshot and left layout and frame to a later sync. */
-      superseded?: boolean;
+      /** An `open` reply: the opened package's host metadata JSON. */
+      hostJson?: string;
+      /** A `fontRequirements` reply. */
+      requirementsJson?: string;
+      /** An `encodeState` reply: the document state as one yrs v1 update. */
+      state?: ArrayBuffer;
     }
   | {
       id: number;

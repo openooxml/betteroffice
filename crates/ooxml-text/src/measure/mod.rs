@@ -120,12 +120,14 @@
 //! changes how neutral characters segment, never the sums.
 
 mod floats;
+mod font_slots;
 mod input;
 mod line_filler;
 mod list_marker;
 mod prepare;
 mod tabs;
 
+pub use font_slots::{FontSlotUse, font_slot_use};
 pub use input::{
     AttrsIn, BlockIn, CompatIn, DefaultsIn, FloatSegmentIn, FloatZoneIn, FontChains, IndentIn,
     MeasureInput, MeasureRequest, RotationBoundsIn, RunFontSlotsIn, RunIn, RunLanguageSlotsIn,

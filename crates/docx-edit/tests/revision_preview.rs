@@ -10,7 +10,6 @@ use docx_edit::{
     SearchScope, StoryRange, TargetEdge, TextTarget, UndoSession, seed_from_docx,
 };
 use docx_layout::display_list::{Primitive, RevisionKind};
-use docx_layout::types::LayoutBlock;
 use serde_json::{Value, json};
 
 use RevisionPreview::{Accepted, Rejected};
@@ -559,14 +558,9 @@ fn a_changed_preview_rebuilds_the_retained_frame() {
 
     let mut epoch = engine.stats().frame_epoch;
     let mut frame = |env: &RenderEnv| {
-        let incremental = engine.stats().incremental_pagination_calls;
         engine
             .layout_document_with_regions_json(&layout_request(env, font))
             .unwrap();
-        assert!(
-            engine.stats().incremental_pagination_calls > incremental,
-            "a preview change keeps the pagination checkpoints"
-        );
         engine.build_display_list_frame("{}", epoch).unwrap();
         assert!(engine.stats().frame_epoch > epoch);
         epoch = engine.stats().frame_epoch;
@@ -586,148 +580,6 @@ fn a_changed_preview_rebuilds_the_retained_frame() {
     ]);
     assert_eq!(frame(&all), [segment("Alpha BETA gammaTitle!", None)]);
     assert_eq!(frame(&native), tracked);
-}
-
-/// Two pages: "red" suggested as "blue", then after a page break a suggested
-/// deletion of "x" and insertion of "x", so the second paragraph shows an "x"
-/// from another source position whichever way the revisions are decided.
-fn twin_x_engine() -> (EngineSession, RenderEnv, RenderEnv, usize, f64) {
-    let engine = EngineSession::new(75110);
-    let body = r#"<w:p w14:paraId="00000001"><w:r><w:t>red</w:t></w:r><w:r><w:br w:type="page"/></w:r></w:p><w:p w14:paraId="00000002"><w:r><w:t>x</w:t></w:r></w:p>"#;
-    seed_from_docx(engine.doc(), &document(body)).unwrap();
-    let suggest = EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting();
-    let red = engine
-        .doc()
-        .locate_range(
-            &engine
-                .doc()
-                .resolve_search("body", None, "red", docx_edit::TextView::Vanilla)
-                .unwrap(),
-        )
-        .unwrap()
-        .start;
-    let replace = engine
-        .doc()
-        .replace_range(&suggest, StoryRange::new("body", red, red + 3), "blue")
-        .unwrap()
-        .revision_ids[0]
-        .clone();
-    let blocks = lower(&engine, &RenderEnv::default());
-    let last = blocks.as_array().unwrap().len() - 1;
-    let start = runs(&blocks, last)[0].1;
-    let x = engine
-        .doc()
-        .resolve_search("body", None, "x", docx_edit::TextView::Vanilla)
-        .unwrap();
-    let at = engine.doc().locate_range(&x).unwrap().start;
-    let delete = engine
-        .doc()
-        .delete_range(&suggest, StoryRange::new("body", at, at + 1))
-        .unwrap()
-        .revision_ids[0]
-        .clone();
-    let insert = engine
-        .doc()
-        .insert_text(
-            &suggest,
-            Position::new("body", at + 1),
-            "x",
-            FormatPolicy::Inherit,
-        )
-        .unwrap()
-        .revision_ids[0]
-        .clone();
-    let accepted = preview(&[
-        (&replace, Accepted),
-        (&delete, Accepted),
-        (&insert, Accepted),
-    ]);
-    let rejected = preview(&[
-        (&replace, Rejected),
-        (&delete, Rejected),
-        (&insert, Rejected),
-    ]);
-    (engine, accepted, rejected, last, start)
-}
-
-#[test]
-fn a_changed_preview_refreshes_positions_in_an_identical_later_block() {
-    let font = docx_layout::register_measure_font(FONT).unwrap();
-    let (engine, accepted, rejected, last, start) = twin_x_engine();
-    let before = lower(&engine, &accepted);
-    let after = lower(&engine, &rejected);
-    assert_eq!(
-        serde_json::from_value::<LayoutBlock>(before[last].clone()).unwrap(),
-        serde_json::from_value::<LayoutBlock>(after[last].clone()).unwrap()
-    );
-    assert_eq!(before[last]["pmStart"], after[last]["pmStart"]);
-    assert_eq!(before[last]["pmEnd"], after[last]["pmEnd"]);
-    assert_eq!(
-        runs(&before, last),
-        [run("x", start + 1.0, start + 2.0, "")]
-    );
-    assert_eq!(runs(&after, last), [run("x", start, start + 1.0, "")]);
-
-    engine
-        .layout_document_with_regions_json(&layout_request(&accepted, font))
-        .unwrap();
-    engine.build_display_list_frame("{}", 0).unwrap();
-    assert_eq!(engine.with_display_list(|list| list.pages.len()), Some(2));
-    let initial = engine.stats();
-    let request = layout_request(&rejected, font);
-    engine.layout_document_with_regions_json(&request).unwrap();
-    assert!(engine.stats().incremental_pagination_calls > initial.incremental_pagination_calls);
-    engine
-        .build_display_list_frame("{}", initial.frame_epoch)
-        .unwrap();
-
-    let fresh = EngineSession::new(75111);
-    fresh
-        .doc()
-        .apply_update_v1(&engine.doc().encode_state_as_update_v1())
-        .unwrap();
-    fresh.layout_document_with_regions_json(&request).unwrap();
-    fresh.build_display_list_frame("{}", 0).unwrap();
-    assert_eq!(
-        engine.with_display_list(Clone::clone).unwrap(),
-        fresh.with_display_list(Clone::clone).unwrap()
-    );
-}
-
-#[test]
-fn a_resident_edit_after_a_preview_only_preflight_lays_out_the_retained_request() {
-    let font = docx_layout::register_measure_font(FONT).unwrap();
-    let (engine, accepted, rejected, _, _) = twin_x_engine();
-    let request = layout_request(&accepted, font);
-    engine.layout_document_with_regions_json(&request).unwrap();
-    engine.build_display_list_frame("{}", 0).unwrap();
-    // The worker lays out the rejected preview; the host only reads its fonts.
-    engine
-        .layout_font_requirements_json(&layout_request(&rejected, font))
-        .unwrap();
-    engine
-        .doc()
-        .insert_text(
-            &EditCtx::local("Ann", "2026-09-29T12:00:00Z"),
-            Position::new("body", 0),
-            "A",
-            FormatPolicy::Inherit,
-        )
-        .unwrap();
-    let epoch = engine.stats().frame_epoch;
-    engine.apply_and_layout("body", epoch).unwrap();
-
-    let fresh = EngineSession::new(75113);
-    fresh
-        .doc()
-        .apply_update_v1(&engine.doc().encode_state_as_update_v1())
-        .unwrap();
-    fresh.layout_document_with_regions_json(&request).unwrap();
-    fresh.build_display_list_frame("{}", 0).unwrap();
-    assert_eq!(
-        engine.with_display_list(Clone::clone).unwrap(),
-        fresh.with_display_list(Clone::clone).unwrap()
-    );
 }
 
 #[test]
@@ -908,34 +760,6 @@ fn a_paged_export_refuses_a_previewed_layout() {
         Err(ExportFailureCode::UnsupportedRevisionLayout)
     );
     assert_eq!(export(RenderEnv::default()), Ok(()));
-}
-
-#[test]
-fn a_paged_export_refuses_a_preview_present_only_in_the_current_request() {
-    let font = docx_layout::register_measure_font(FONT).unwrap();
-    let bytes = document(&format!(
-        r#"{PROPOSALS}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>"#
-    ));
-    let (engine, [replace, ..]) = proposals_in(&bytes);
-    let request = fixture::region_request(&engine, &bytes, font);
-    engine
-        .layout_document_with_regions_json(&request.to_string())
-        .unwrap();
-    let options = PageExportOptions::new(RevisionView::Markup);
-    let mut current = request.clone();
-    current["renderEnv"]["revisionPreview"] = json!({replace: "accepted"});
-    let refusal = engine
-        .export_structured_with_pages_for(&options, &current.to_string())
-        .unwrap_err();
-    assert_eq!(
-        refusal.failure.code,
-        ExportFailureCode::UnsupportedRevisionLayout
-    );
-    assert!(
-        engine
-            .export_structured_with_pages_for(&options, &request.to_string())
-            .is_ok()
-    );
 }
 
 #[test]

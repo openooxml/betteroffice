@@ -68,7 +68,8 @@ interface CurrentViewportAnchor {
 }
 
 export interface UseLayoutPipelineOptions {
-  onError?: (error: Error) => void;
+  /** `session`: the session whose pass failed. */
+  onError?: (error: Error, session: YrsSession) => void;
   document: Document | null;
   session: YrsSession | null;
   renderEnv: YrsRenderEnv;
@@ -181,13 +182,6 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   sessionRef.current = session;
   // The document version the first pass of this session laid out.
   const openedVersionRef = useRef<{ session: YrsSession; version: string | null } | null>(null);
-  // The last layout this pipeline applied: its session, document version, and
-  // request without the revision preview.
-  const laidOutRef = useRef<{
-    session: YrsSession;
-    version: string | null;
-    request: string;
-  } | null>(null);
   // A deferred pass that had to run on this thread keeps that requirement.
   const pendingOnHostRef = useRef(false);
   // Whether every change the next pass lays out asked for a worker pass.
@@ -343,7 +337,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       } catch (error) {
         console.error('[PagedEditor] Resident font preflight error:', error);
         markLayoutQueued(session, false);
-        onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
+        onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
         syncCoordinator.onLayoutComplete(currentEpoch);
         return;
       }
@@ -364,13 +358,6 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       const computeInputs = { document, pageGap, session, renderEnv, measurement };
       const sourceVersion = readSessionVersion(session);
       const previewKey = revisionPreviewKey(renderEnv.revisionPreview);
-      const request = {
-        ...buildResidentRegionLayoutRequest(document, pageGap, renderEnv),
-        measurement,
-      };
-      const requestWithoutPreview = JSON.stringify(request, (key, value: unknown) =>
-        key === 'revisionPreview' ? undefined : value
-      );
 
       // Step 4+: paint + scroll/events with the computed values.
       const applyComputation = (
@@ -381,7 +368,6 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         const { layout: newLayout } = computation;
         stampSourceVersion(newLayout, version);
         stampRevisionPreviewKey(newLayout, previewKey);
-        laidOutRef.current = { session, version, request: requestWithoutPreview };
 
         const pagesEl = pagesContainerRef.current;
         const scrollParent =
@@ -441,7 +427,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           }
         } catch (error) {
           console.error('[PagedEditor] Layout pipeline error:', error);
-          onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
+          onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
         }
       };
 
@@ -449,25 +435,26 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       // and answers with it and its first frame.
       // The document as opened is laid out by the resident worker alone: that
       // pass also builds its first frame, so the main thread runs no layout
-      // before the first paint. So is a pass that changes only the revision
-      // preview of the layout last applied, and one for host batches or remote
+      // before the first paint. So is a pass for host batches or remote
       // updates alone, which no caret waits on. Passes for local edits run here.
       if (openedVersionRef.current?.session !== session) {
         openedVersionRef.current = { session, version: sourceVersion };
       }
-      const laidOut = laidOutRef.current;
-      const previewOnly =
-        laidOut?.session === session &&
-        laidOut.version === sourceVersion &&
-        laidOut.request === requestWithoutPreview;
       let workerPass: ReturnType<LayoutInWorker> = null;
       if (
         !onHost &&
         sourceVersion !== null &&
-        (sourceVersion === openedVersionRef.current.version || previewOnly || inWorker)
+        (sourceVersion === openedVersionRef.current.version || inWorker)
       ) {
         try {
-          workerPass = layoutInWorkerRef.current?.(session, JSON.stringify(request)) ?? null;
+          workerPass =
+            layoutInWorkerRef.current?.(
+              session,
+              JSON.stringify({
+                ...buildResidentRegionLayoutRequest(document, pageGap, renderEnv),
+                measurement,
+              })
+            ) ?? null;
         } catch (error) {
           console.error('[PagedEditor] Resident worker layout could not start:', error);
         }
@@ -477,7 +464,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         syncCoordinator.onLayoutComplete(currentEpoch);
         return;
       }
-      workerPassRef.current = { pass, session, opening: !inWorker && !previewOnly };
+      workerPassRef.current = { pass, session, opening: !inWorker };
       void workerPass
         .then(
           (computation) => {
@@ -515,7 +502,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             // The display reports a worker out of memory; nothing lays out here.
             if (error instanceof ResidentWorkerOutOfMemoryError) return;
             console.error('[PagedEditor] Layout pipeline error:', error);
-            onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
+            onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
           }
         )
         .finally(() => {

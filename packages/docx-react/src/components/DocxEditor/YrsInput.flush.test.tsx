@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
@@ -12,6 +12,7 @@ import {
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import { YrsInput, type YrsInputProps, type YrsInputRef } from './YrsInput';
+import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
 import { performYrsHistoryAction } from './yrsCommands';
 import { DocxCommandAdmissionError } from '../../commands/createDocxCommandStore';
 
@@ -51,7 +52,10 @@ function inputFor(
   input: React.Ref<YrsInputRef>,
   applyResidentInput?: YrsInputProps['applyResidentInput'],
   applyResidentDelete?: YrsInputProps['applyResidentDelete'],
-  props: Pick<YrsInputProps, 'isSuggesting' | 'author'> = {}
+  props: Pick<
+    YrsInputProps,
+    'isSuggesting' | 'author' | 'onPendingInputChange' | 'resolveDisplayListQueries'
+  > = {}
 ) {
   const map = () =>
     createYrsInputPositionMap(
@@ -340,6 +344,84 @@ test('flush rejects failed resident input instead of claiming it was committed',
   expect(session.paragraphs('body')[0].text).toBe('Seed');
 });
 
+test.each([
+  ['text input', 'unmount', false],
+  ['Backspace', 'session replacement', false],
+  ['text input', 'unmount', true],
+  ['Backspace', 'session replacement', true],
+])('resident %s never calls the old session after %s (Enter queued behind it: %p)', async (operation, lifecycle, queued) => {
+  const original = await seededSession();
+  let retired = false;
+  const afterRetirement: string[] = [];
+  const session = new Proxy(original, {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver);
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        if (retired) {
+          afterRetirement.push(String(key));
+          throw new Error(`Retired session method: ${String(key)}`);
+        }
+        return value.apply(target, args);
+      };
+    },
+  });
+  let release!: (result: ResidentFrameApplyResult) => void;
+  const blocked = new Promise<ResidentFrameApplyResult>((resolve) => {
+    release = resolve;
+  });
+  let started!: () => void;
+  const applying = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const resident = mock((..._args: unknown[]) => {
+    started();
+    return blocked;
+  });
+  let finished!: () => void;
+  const settled = new Promise<void>((resolve) => {
+    finished = resolve;
+  });
+  const onPendingInputChange = (pending: boolean) => {
+    if (!pending) finished();
+  };
+  const input = createRef<YrsInputRef>();
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const view = render(
+      inputFor(
+        session,
+        input,
+        operation === 'text input' ? resident : undefined,
+        operation === 'Backspace' ? resident : undefined,
+        { onPendingInputChange }
+      )
+    );
+    const textarea = view.getByTestId('yrs-input');
+    await act(async () => {
+      if (operation === 'text input') fireEvent.input(textarea, { target: { value: 'x' } });
+      else fireEvent.keyDown(textarea, { key: 'Backspace' });
+      await applying;
+      if (queued) fireEvent.keyDown(textarea, { key: 'Enter' });
+    });
+    expect(resident.mock.calls).toEqual(operation === 'text input' ? [['x']] : [['backward', 1]]);
+    if (lifecycle === 'unmount') view.unmount();
+    else {
+      const replacement = await seededSession();
+      view.rerender(inputFor(replacement, input, undefined, undefined, { onPendingInputChange }));
+    }
+    retired = true;
+    await act(async () => {
+      release({ frameEpoch: 1, caretSynchronized: true });
+      await settled;
+    });
+    expect(afterRetirement).toEqual([]);
+    expect(errors).not.toHaveBeenCalled();
+  } finally {
+    errors.mockRestore();
+  }
+});
+
 test('undo waits behind pending typing and later typing waits behind undo', async () => {
   let release!: () => void;
   const blocked = new Promise<void>((resolve) => {
@@ -579,6 +661,118 @@ test('a command admitted before the document was replaced is refused', async () 
     error = await command;
   });
   expect(admissionCode(error)).toBe('document-replaced');
+});
+
+test.each([false, true])(
+  'ArrowDown awaiting display queries never calls a replaced session (Enter queued behind it: %p)',
+  async (queued) => {
+    const original = await seededSession();
+    const replacement = await seededSession();
+    let released = false;
+    const afterRelease: string[] = [];
+    const session = new Proxy(original, {
+      get(target, key, receiver) {
+        const value = Reflect.get(target, key, receiver);
+        if (typeof value !== 'function') return value;
+        return (...args: unknown[]) => {
+          if (released) {
+            afterRelease.push(String(key));
+            throw new Error(`Released session method: ${String(key)}`);
+          }
+          return value.apply(target, args);
+        };
+      },
+    });
+    let releaseQueries!: (value: null) => void;
+    const blocked = new Promise<null>((resolve) => {
+      releaseQueries = resolve;
+    });
+    let started!: () => void;
+    const resolving = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const resolveDisplayListQueries = mock((_minimumFrameEpoch?: number | null) => {
+      started();
+      return blocked;
+    });
+    let finished!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      finished = resolve;
+    });
+    const onPendingInputChange = (pending: boolean) => {
+      if (!pending) finished();
+    };
+    const resident = mock(async (_text: string) => null);
+    const input = createRef<YrsInputRef>();
+    const setSelection = spyOn(original, 'setSelection');
+    const errors = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const view = render(inputFor(session, input, resident, undefined, {
+        onPendingInputChange,
+        resolveDisplayListQueries,
+      }));
+      await act(async () => {
+        fireEvent.keyDown(view.getByTestId('yrs-input'), { key: 'ArrowDown' });
+        await resolving;
+        if (queued) fireEvent.keyDown(view.getByTestId('yrs-input'), { key: 'Enter' });
+      });
+      expect(resolveDisplayListQueries.mock.calls).toEqual([[null]]);
+      view.rerender(inputFor(replacement, input, resident, undefined, { onPendingInputChange }));
+      const replacementSelection = replacement.selection();
+      setSelection.mockClear();
+      released = true;
+      await act(async () => {
+        releaseQueries(null);
+        await settled;
+      });
+      expect(afterRelease).toEqual([]);
+      expect(setSelection).not.toHaveBeenCalled();
+      expect(errors).not.toHaveBeenCalled();
+      expect(replacement.selection()).toEqual(replacementSelection);
+      expect(text(replacement)).toBe('Seed');
+      act(() => input.current!.insertText(' B'));
+      await act(async () => {
+        await input.current!.flushPendingInput();
+      });
+      expect(resident.mock.calls).toEqual([[' B']]);
+      expect(text(replacement)).toBe('Seed B');
+      expect(replacement.selection()?.head.offset).toBe(6);
+      expect(afterRelease).toEqual([]);
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      setSelection.mockRestore();
+      errors.mockRestore();
+    }
+  }
+);
+
+test('a composition that ends as the input unmounts commits nothing to the released session', async () => {
+  const original = await seededSession();
+  let released = false;
+  const afterRelease: string[] = [];
+  const session = new Proxy(original, {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver);
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        if (released) {
+          afterRelease.push(String(key));
+          throw new Error(`Released session method: ${String(key)}`);
+        }
+        return value.apply(target, args);
+      };
+    },
+  });
+  const view = render(inputFor(session, createRef<YrsInputRef>()));
+  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  fireEvent.compositionStart(textarea);
+  textarea.value = '日本';
+  fireEvent.compositionEnd(textarea, { data: '日本' });
+  view.unmount();
+  released = true;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(afterRelease).toEqual([]);
+  expect(text(original)).toBe('Seed');
 });
 
 test('a command waiting on composition is refused when the input unmounts', async () => {
