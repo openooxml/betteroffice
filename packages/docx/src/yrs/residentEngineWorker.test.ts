@@ -83,6 +83,7 @@ function worker() {
     failPresent: null as number | null,
     session: {
       loadState() {},
+      loadMediaSources(_json: string) {},
       setPartialDocument() {},
       clearFonts() {},
       layoutDocumentJson() {},
@@ -478,6 +479,36 @@ describe('resident worker layout ownership', () => {
     };
     await w.send({ type: 'bootstrap', expectedFrameEpoch: 0, extras: '{}', snapshot });
     expect(calls).toEqual(['load', 'partial:false', 'layout']);
+  });
+
+  test('lays out the media sources a snapshot carries, and clears them when it carries none', async () => {
+    const w = worker();
+    const loaded: string[] = [];
+    Object.assign(w.harness.session, {
+      loadMediaSources: (json: string) => loaded.push(json),
+      layoutDocumentWithRegionsRetainedJson: () =>
+        JSON.stringify({ layout: { pages: [] }, notesConverged: true }),
+    });
+    const snapshot = {
+      clientId: 1,
+      state: new Uint8Array(),
+      fontsRevision: 0,
+      fonts: [],
+      renderInputs: [],
+      measureInputs: [],
+      layoutInput: '{}',
+      layoutWithRegions: true,
+      layoutRevision: 1,
+      selection: null,
+    };
+    await w.send({
+      type: 'bootstrap',
+      expectedFrameEpoch: 0,
+      extras: '{}',
+      snapshot: { ...snapshot, mediaSources: '{"sources":1}' },
+    });
+    await w.send({ type: 'sync', expectedFrameEpoch: 0, extras: '{}', paintCaret: false, snapshot });
+    expect(loaded).toEqual(['{"sources":1}', '']);
     calls.length = 0;
     await w.send({
       type: 'bootstrap',
