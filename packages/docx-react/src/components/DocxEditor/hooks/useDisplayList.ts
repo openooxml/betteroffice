@@ -945,6 +945,8 @@ export function useRustDisplayList(
       }
       if (workerRef.current?.engine !== hostEngine) {
         workerRef.current?.client.destroy();
+        // A successor that fails to construct leaves no destroyed client current.
+        workerRef.current = null;
         workerRef.current = {
           engine: hostEngine,
           client: new ResidentEngineWorkerClient(),
@@ -1253,6 +1255,7 @@ export function useRustDisplayList(
         } else {
           if (workerRef.current?.engine !== hostEngine) {
             workerRef.current?.client.destroy();
+            workerRef.current = null;
             workerRef.current = {
               engine: hostEngine,
               client: new ResidentEngineWorkerClient(),

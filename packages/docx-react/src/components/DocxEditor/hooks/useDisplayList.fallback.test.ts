@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import type { YrsSelection, YrsSession } from '@betteroffice/docx/yrs';
+import { ResidentEngineWorkerClient, type YrsSelection, type YrsSession } from '@betteroffice/docx/yrs';
 import type { ResidentEngineWorkerRequest, ResidentEngineWorkerResponse } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { useCanvasRenderer, useRustDisplayList, type ResidentFrameApplyResult } from './useDisplayList';
 
@@ -881,6 +881,175 @@ test('a replaced worker preserves the current document when its delayed provisio
     ).toBe(false);
     unmount();
   } finally {
+    errors.mockRestore();
+    for (const { native } of documents) native.free();
+  }
+});
+
+test('a failed successor worker constructor ignores the released engine when provisional completion rejects', async () => {
+  const request = JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Calibri' } },
+    renderEnv: {},
+  });
+  const documents = ['Document A', 'Document B'].map((text, index) => {
+    const native = createEditSession(9304 + index);
+    native.create_story('body', text, 'Normal', 'left');
+    const inputs = JSON.parse(native.layout_document_with_regions_json(request));
+    const layoutJson = native.layout_document_with_regions_retained_json(request);
+    const frame = native.build_display_list_frame(JSON.stringify({}), 0);
+    const frameEpoch = 100 + index;
+    new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
+      .setBigUint64(32, BigInt(frameEpoch), true);
+    const caret = { ...JSON.parse(native.resident_caret_snapshot_json()), frameEpoch };
+    const adopted: string[] = [];
+    let released = false;
+    const afterRelease: string[] = [];
+    const host = {
+      adoptResidentWorkerLayout: (input: string) => {
+        adopted.push(input);
+        return adopted.length;
+      },
+      residentLayoutInWorker: () => adopted.length > 0,
+      buildDisplayListJson: (input: string) => native.build_display_list_json(input),
+      buildDisplayListFrame: (input: string, epoch: number) =>
+        native.build_display_list_frame(input, epoch),
+      resetFrameBase: () => native.reset_frame_base(),
+      residentWorkerProbe: () => adopted.length > 0 ? { layoutRevision: adopted.length } : null,
+      residentWorkerSnapshot: () => ({
+        state: new Uint8Array(), fonts: [], fontsRevision: 0, layoutRevision: adopted.length,
+      }),
+      encodeStateVector: () => new Uint8Array(),
+      onUpdate: () => () => {},
+      selection: () => null,
+      applyUpdate: () => null,
+      displayHitTestRegionsJson: (pageIndex: number, x: number, y: number) =>
+        native.display_hit_test_regions_json(pageIndex, x, y),
+      displayVerticalMoveJson: (position: number, direction: 'up' | 'down', goalX: number) =>
+        native.display_vertical_move_json(position, direction, goalX),
+      displayRangeRectsJson: (from: number, to: number) => native.display_range_rects_json(from, to),
+      displayRangeRectsRegionJson: (...args: Parameters<YrsSession['displayRangeRectsRegionJson']>) =>
+        native.display_range_rects_region_json(...args),
+    } as unknown as YrsSession;
+    const engine = new Proxy(host, {
+      get(target, key, receiver) {
+        const value = Reflect.get(target, key, receiver);
+        if (typeof value !== 'function') return value;
+        return (...args: unknown[]) => {
+          if (released) {
+            afterRelease.push(String(key));
+            throw new Error(`Released engine method: ${String(key)}`);
+          }
+          return value.apply(target, args);
+        };
+      },
+    });
+    return {
+      native, inputs, layoutJson, frame, frameEpoch, caret, engine, adopted, afterRelease,
+      release: () => { released = true; },
+    };
+  });
+  const documentA = documents[0]!;
+  const documentB = documents[1]!;
+  const constructorFailure = new Error('successor worker construction failed');
+  let constructionAttempts = 0;
+  const workers: FakeWorker[] = [];
+  class FakeWorker extends InputFakeWorker {
+    constructor() {
+      constructionAttempts += 1;
+      if (constructionAttempts === 2) throw constructorFailure;
+      super(new Uint8Array());
+      workers.push(this);
+    }
+    reply(response: ResidentEngineWorkerResponse): void {
+      this.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+    }
+  }
+  globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  let failCompletion!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    failCompletion = resolve;
+  });
+  const completionFailure = new Error('delayed provisional completion failed');
+  const completeLayout = spyOn(ResidentEngineWorkerClient.prototype, 'completeLayout')
+    .mockImplementation(async () => {
+      await blocked;
+      throw completionFailure;
+    });
+  const overrides = { getInputs: () => documentB.inputs };
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) => useRustDisplayList(layout, overrides, undefined, undefined, source),
+      { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+    );
+    const pendingA = result.current.layoutInWorker(documentA.engine, request);
+    expect(pendingA).not.toBeNull();
+    const workerA = workers[0]!;
+    workerA.reply({
+      id: workerA.posted[0]!.id,
+      ok: true,
+      frame: documentA.frame.slice().buffer,
+      caret: documentA.caret,
+      selection: null,
+      layoutRevision: 1,
+      layoutJson: documentA.layoutJson,
+      layoutProvisional: true,
+    });
+    const provisional = await pendingA!;
+    expect(provisional?.complete).toBeDefined();
+    const completeA = provisional!.complete!.catch((cause) => cause);
+    await waitFor(() => expect(completeLayout).toHaveBeenCalledTimes(1));
+
+    expect(() => result.current.layoutInWorker(documentB.engine, request)).toThrow(constructorFailure);
+    expect(constructionAttempts).toBe(2);
+    expect(workers).toHaveLength(1);
+    expect(workerA.terminated).toBe(true);
+    expect(workerA.posted.map((message) => message.type)).toEqual(['bootstrap', 'destroy']);
+    documentA.release();
+    documentB.engine.resetFrameBase();
+    await act(async () => {
+      rerender({ layout: documentB.inputs.layout as Layout, source: documentB.engine });
+    });
+    await waitFor(() => {
+      if (result.current.error) throw result.current.error;
+      expect(result.current.frame).not.toBeNull();
+      expect(result.current.loading).toBe(false);
+    });
+    const { frame, queries, caret, displayList } = result.current;
+    expect(queries).not.toBeNull();
+    expect(queries!.isReady()).toBe(true);
+    const rects = queries!.rangeRects(1, 2);
+    expect(result.current.workerSurfacesActive).toBe(false);
+    expect(await result.current.resolveQueries()).toEqual({ queries, frameEpoch: frame!.frameEpoch });
+
+    let outcome: unknown;
+    await act(async () => {
+      failCompletion();
+      outcome = await completeA;
+    });
+
+    expect(documentA.afterRelease).toEqual([]);
+    expect(outcome).toBeNull();
+    expect(result.current.frame).toBe(frame);
+    expect(result.current.queries).toBe(queries);
+    expect(result.current.caret).toBe(caret);
+    expect(result.current.displayList).toBe(displayList);
+    expect(queries!.rangeRects(1, 2)).toEqual(rects);
+    expect(await result.current.resolveQueries()).toEqual({ queries, frameEpoch: frame!.frameEpoch });
+    expect(result.current.error).toBeNull();
+    expect(result.current.loading).toBe(false);
+    expect(result.current.workerSurfacesActive).toBe(false);
+    expect(result.current.workerPresentationActive).toBe(false);
+    expect(constructionAttempts).toBe(2);
+    expect(documentA.adopted).toEqual([request]);
+    expect(documentB.adopted).toEqual([]);
+    expect(documentB.afterRelease).toEqual([]);
+    expect(errors).not.toHaveBeenCalled();
+    unmount();
+  } finally {
+    completeLayout.mockRestore();
     errors.mockRestore();
     for (const { native } of documents) native.free();
   }
