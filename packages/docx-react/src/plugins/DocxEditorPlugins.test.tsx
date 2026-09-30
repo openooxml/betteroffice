@@ -802,6 +802,7 @@ describe('DocxEditor plugins', () => {
             data-testid="layout-marker"
             data-version={geometry.layout.version}
             data-snapshot={context.snapshot.version}
+            data-drawn={geometry.toOverlayRect({ x: 0, y: 0, width: 1, height: 1 }) !== null}
           />
         );
       },
@@ -833,7 +834,11 @@ describe('DocxEditor plugins', () => {
         });
         expect(applied).not.toBe('');
         expect(marker()).toBe(mounted);
-        expect(marker()!.dataset).toMatchObject({ version: from, snapshot: applied });
+        expect(marker()!.dataset).toMatchObject({
+          version: from,
+          snapshot: applied,
+          drawn: 'true',
+        });
         expect(geometries.at(-1)!.layout.version).toBe(from);
         expect(geometries.at(-1)!.toOverlayRect(unit)).not.toBeNull();
         expect(contexts.at(-1)!.geometry).toBeNull();
