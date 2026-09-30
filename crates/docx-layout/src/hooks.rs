@@ -378,7 +378,7 @@ fn layout_table_with_position(
                 // unless they are the header band above an unavoidable split.
             } else if paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
                 && moved_row != Some(cur)
-                && !unavoidable_cant_split
+                && !(unavoidable_cant_split && breaks.kept_oversized(cur, start_off, row_capacity))
             {
                 // Nothing fits below content already in this column: start the
                 // fragment in the next one.

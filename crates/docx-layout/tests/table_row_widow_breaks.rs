@@ -155,3 +155,16 @@ fn a_row_without_widow_control_uses_one_line_of_room_at_the_page_bottom() {
         [(0, 20.0), (1, 100.0), (2, 40.0)]
     );
 }
+
+#[test]
+fn an_oversized_cant_split_row_keeps_widow_control_where_a_fresh_page_allows_it() {
+    let (block, measure) = paragraph(1, 4, json!({}));
+    let above = json!({"block":block,"measure":measure});
+    assert_eq!(
+        fragments(vec![
+            above,
+            table_rows(&[(8, json!({}), json!({"cantSplit": true}))])
+        ]),
+        [(1, 100.0), (2, 60.0)]
+    );
+}
