@@ -316,8 +316,11 @@ interface FacadeDeltaSeed {
   hasHandle(): boolean;
   /** Nearest ancestor facade that held the handle when this one was created. */
   donor(): DisplayListQueries | null;
-  /** A successor now owns this generation: never open/adopt a handle here. */
-  supersede(): void;
+  /** `successor` now owns this generation: never open/adopt a handle here. */
+  supersede(successor: DisplayListQueries): void;
+  /** The facade that superseded this one, if any. */
+  successor(): DisplayListQueries | null;
+  disposed(): boolean;
 }
 
 const facadeDeltaSeeds = new WeakMap<DisplayListQueries, FacadeDeltaSeed>();
@@ -580,6 +583,7 @@ export function createDisplayListQueries(
   let handle: number | null = null;
   let handleAttempted = false;
   let superseded = false;
+  let successor: DisplayListQueries | null = null;
   let disposed = false;
   // lets dispose() cancel the finalizer below so a handle is never double-closed
   const finalizerToken = {};
@@ -590,13 +594,8 @@ export function createDisplayListQueries(
   // superseded keeps stale-closure queries on it from stealing the handle out
   // of the chain.
   let donorFacade: DisplayListQueries | null = null;
-  if (previous) {
-    const previousSeed = facadeDeltaSeeds.get(previous);
-    if (previousSeed) {
-      donorFacade = previousSeed.hasHandle() ? previous : previousSeed.donor();
-      previousSeed.supersede();
-    }
-  }
+  const previousSeed = previous ? facadeDeltaSeeds.get(previous) : undefined;
+  if (previousSeed) donorFacade = previousSeed.hasHandle() ? previous! : previousSeed.donor();
 
   const source = (): DisplayListQuerySource | null => resident ?? eng;
 
@@ -821,6 +820,23 @@ export function createDisplayListQueries(
     }
   };
 
+  /**
+   * Where a superseded facade's queries go once its successor holds the handle:
+   * the newest live facade, so a stale caller gets the current layout instead of
+   * this whole list serialised for every call. Undefined while this facade
+   * answers itself; null when no live facade is left, which answers nothing.
+   */
+  const handedOff = (): DisplayListQueries | null | undefined => {
+    if (resident || !superseded || handle !== null) return undefined;
+    let next = successor;
+    let seed = next ? facadeDeltaSeeds.get(next) : undefined;
+    while (seed?.successor()) {
+      next = seed.successor();
+      seed = next ? facadeDeltaSeeds.get(next) : undefined;
+    }
+    return next && seed && !seed.disposed() ? next : null;
+  };
+
   const residentQuery = (query: () => string, label: string): string | null => {
     if (isDead()) return null;
     try {
@@ -837,6 +853,8 @@ export function createDisplayListQueries(
   };
 
   const hitTestRegions = (pageIndex: number, x: number, y: number): DisplayListRegionHit | null => {
+    const live = handedOff();
+    if (live !== undefined) return live?.hitTestRegions(pageIndex, x, y) ?? null;
     if (resident) {
       return parseQuery(
         residentQuery(
@@ -858,6 +876,8 @@ export function createDisplayListQueries(
   };
 
   const rangeRects = (from: number, to: number): DisplayListRect[] => {
+    const live = handedOff();
+    if (live !== undefined) return live?.rangeRects(from, to) ?? [];
     if (resident) {
       return parseQuery(
         residentQuery(() => resident.displayRangeRectsJson(from, to), 'range_rects'),
@@ -879,6 +899,8 @@ export function createDisplayListQueries(
     direction: 'up' | 'down',
     goalX?: number
   ): DisplayListVerticalMove | null => {
+    const live = handedOff();
+    if (live !== undefined) return live?.verticalMove(position, direction, goalX) ?? null;
     const resolvedGoalX = goalX ?? Number.NaN;
     if (resident) {
       return parseQuery(
@@ -909,6 +931,15 @@ export function createDisplayListQueries(
     from: number,
     to: number
   ): DisplayListRect[] => {
+    const live = handedOff();
+    if (live !== undefined) {
+      if (!live) return [];
+      return region === 'header' || region === 'footer'
+        ? live.hfRangeRects(region, partId, from, to)
+        : region === 'footnote' || region === 'endnote'
+          ? live.noteRangeRects(region, Number(partId), from, to)
+          : [];
+    }
     if (resident) {
       return parseQuery(
         residentQuery(
@@ -1021,6 +1052,8 @@ export function createDisplayListQueries(
   };
 
   const caretRect = (pos: number): DisplayListRect | null => {
+    const live = handedOff();
+    if (live !== undefined) return live?.caretRect(pos) ?? null;
     const forward = rangeRects(pos, pos + 1);
     if (forward.length > 0) {
       // left edge of the first covered slice is the caret
@@ -1043,6 +1076,8 @@ export function createDisplayListQueries(
   };
 
   const anchorRect = (pos: number): DisplayListRect | null => {
+    const live = handedOff();
+    if (live !== undefined) return live?.anchorRect(pos) ?? null;
     // [pos, pos+2) covers both "node position + first char at pos+1" and a
     // blank paragraph's zero-length marker at pos+1
     const forward = rangeRects(pos, pos + 2);
@@ -1344,9 +1379,12 @@ export function createDisplayListQueries(
     engine: () => eng,
     hasHandle: () => handle !== null,
     donor: () => donorFacade,
-    supersede: () => {
+    supersede: (next) => {
       superseded = true;
+      successor = next;
     },
+    successor: () => successor,
+    disposed: () => disposed,
     takeHandle: () => {
       const transferred = handle;
       if (transferred !== null) {
@@ -1358,6 +1396,7 @@ export function createDisplayListQueries(
       return transferred;
     },
   });
+  previousSeed?.supersede(queries);
 
   return queries;
 }

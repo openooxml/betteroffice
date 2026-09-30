@@ -87,17 +87,40 @@ describe('createDisplayListQueries handle lifecycle', () => {
     expect(calls.update).toBe(1);
   });
 
-  test('superseded generations fall back to JSON-arg queries, never reopening', () => {
+  test('a superseded generation answers from the live one, never reopening or serialising', () => {
     const { engine, calls } = fakeEngine();
+    // the store answers with the generation it holds, as the live layout would
+    engine.rangeRectsByHandle = () => {
+      calls.rangeByHandle += 1;
+      return `[{"pageIndex":0,"x":${calls.update},"y":0,"width":1,"height":1}]`;
+    };
     const shared = page(0);
     const first = createDisplayListQueries({ pages: [shared] }, engine);
     first.rangeRects(0, 1);
     const second = createDisplayListQueries({ pages: [shared] }, engine, first);
+    // still holding the handle, the old generation answers itself
+    expect(first.rangeRects(0, 1)[0]?.x).toBe(0);
     second.rangeRects(0, 1);
-    expect(calls.update).toBe(1);
-    first.rangeRects(0, 1);
+    const third = createDisplayListQueries({ pages: [shared, page(1)] }, engine, second);
+    expect(third.rangeRects(0, 1)[0]?.x).toBe(2);
+
+    expect(first.rangeRects(0, 1)[0]?.x).toBe(2);
+    expect(second.caretRect(0)?.x).toBe(2);
     expect(calls.open).toBe(1);
-    expect(calls.rangeJson).toBe(1);
+    expect(calls.rangeJson).toBe(0);
+  });
+
+  test('a superseded generation whose successor is gone answers nothing', () => {
+    const { engine, calls } = fakeEngine();
+    const first = createDisplayListQueries({ pages: [page(0)] }, engine);
+    first.rangeRects(0, 1);
+    const second = createDisplayListQueries({ pages: [page(0)] }, engine, first);
+    second.rangeRects(0, 1);
+    second.dispose();
+    expect(first.rangeRects(0, 1)).toEqual([]);
+    expect(first.hitTestRegions(0, 1, 1)).toBeNull();
+    expect(first.anchorRect(0)).toBeNull();
+    expect(calls.rangeJson).toBe(0);
   });
 
   test('routes vertical movement through the retained handle', () => {
