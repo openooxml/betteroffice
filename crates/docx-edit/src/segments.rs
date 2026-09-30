@@ -306,22 +306,25 @@ mod tests {
 
     #[test]
     fn segment_index_counts_the_paragraphs_carrying_an_id() {
-        let doc = seeded_doc();
-        doc.apply_raw_ops(
-            "body",
-            vec![RawOp::InsertEmbed {
-                index: 0,
-                kind: "pilcrow".into(),
-                payload: vec![("paraId".into(), Any::from("p-3"))],
-                attrs: Default::default(),
-            }],
-            &EditCtx::local(String::new(), String::new()),
-        )
-        .unwrap();
-        let index = doc.segment_index("body").unwrap();
-        assert_eq!(index.para_id_count("p-2"), 1);
-        assert_eq!(index.para_id_count("p-3"), 2);
+        use yrs::{Doc, MapPrelim, Transact};
+        // Built on a bare story: the editing paths repair a copied id before it is committed.
+        let doc = Doc::new();
+        let story = doc.get_or_insert_text("story");
+        {
+            let mut txn = doc.transact_mut();
+            for (index, para_id) in ["p-1", "p-2", "p-2"].into_iter().enumerate() {
+                let entries = [
+                    (KIND_KEY.to_owned(), Any::from("pilcrow")),
+                    (PARA_ID.to_owned(), Any::from(para_id)),
+                ];
+                story.insert_embed(&mut txn, index as u32, MapPrelim::from_iter(entries));
+            }
+        }
+        let index = SegmentIndex::build(&story, &doc.transact());
+        assert_eq!(index.para_id_count("p-1"), 1);
+        assert_eq!(index.para_id_count("p-2"), 2);
         assert_eq!(index.para_id_count("absent"), 0);
+        assert_eq!(index.para_span("p-2"), Some((1, 1)));
     }
 
     #[test]
