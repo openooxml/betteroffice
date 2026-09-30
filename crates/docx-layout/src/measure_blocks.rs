@@ -1305,7 +1305,14 @@ fn extract_floating_zones(
                 extract_image_zones(paragraph, block_index, content_width, &mut zones);
             }
             LayoutBlock::Table(table) => {
-                extract_table_zone(table, block_index, content_width, config, &mut zones)?;
+                extract_table_zone(
+                    table,
+                    block_index,
+                    content_width,
+                    config,
+                    page_geometry,
+                    &mut zones,
+                )?;
             }
             LayoutBlock::TextBox(text_box) => extract_text_box_zone(
                 text_box,
@@ -1513,6 +1520,7 @@ fn extract_table_zone(
     block_index: usize,
     content_width: f64,
     config: &MeasurementConfig,
+    page_geometry: Option<&FloatPageGeometry>,
     zones: &mut Vec<AnchoredFloatingZone>,
 ) -> Result<(), String> {
     if table.floating.is_none() {
@@ -1520,7 +1528,11 @@ fn extract_table_zone(
     }
     let mut measured_table = table.clone();
     let measure = measure_table(&mut measured_table, content_width, config)?;
-    if let Some(mut zone) = table_floating_zone(table, &measure, content_width) {
+    // Placement resolves a margin anchor across the whole margin box; only a
+    // body wider than half of it is sure to have a single column.
+    let one_column = page_geometry
+        .is_none_or(|geometry| content_width > (geometry.page_width - geometry.margin_left) / 2.0);
+    if let Some(mut zone) = table_floating_zone(table, &measure, content_width, one_column) {
         (zone.left_margin, zone.right_margin) =
             clamp_margins(zone.left_margin, zone.right_margin, content_width);
         zones.push(AnchoredFloatingZone {
@@ -1536,6 +1548,7 @@ fn table_floating_zone(
     table: &TableBlock,
     measure: &TableExtent,
     content_width: f64,
+    one_column: bool,
 ) -> Option<FloatingZone> {
     let floating = table.floating.as_ref()?;
     let x = if let Some(value) = floating.tblp_x {
@@ -1554,11 +1567,17 @@ fn table_floating_zone(
             _ => 0.0,
         }
     };
+    let column_frame = match floating.horz_anchor.as_deref() {
+        Some("text") => true,
+        Some("page") => false,
+        _ => one_column,
+    };
     Some(table_floating_zone_at_x(
         floating,
         measure,
         content_width,
         x,
+        column_frame,
     ))
 }
 
@@ -1567,10 +1586,11 @@ fn table_floating_zone_at_x(
     measure: &TableExtent,
     content_width: f64,
     x: f64,
+    column_frame: bool,
 ) -> FloatingZone {
     let (left_space, right_space) =
         table_wrap_gaps(floating, measure.total_width, content_width, x);
-    let text_on_right = if floating.horz_anchor.as_deref() == Some("page")
+    let text_on_right = if !column_frame
         || measure.total_width <= content_width / 2.0
         || (left_space < MIN_WRAP_SEGMENT_WIDTH && right_space < MIN_WRAP_SEGMENT_WIDTH)
     {
@@ -1845,7 +1865,7 @@ fn measure_cell_blocks_with_table_floats(
                 measure.total_width,
                 content_width,
             );
-            let mut zone = table_floating_zone_at_x(floating, measure, content_width, x);
+            let mut zone = table_floating_zone_at_x(floating, measure, content_width, x, true);
             zone.top_y += y;
             zone.bottom_y += y;
             zones.push(zone);
@@ -2235,7 +2255,7 @@ mod tests {
                 "leftFromText": left_distance, "rightFromText": right_distance
             }))
             .unwrap();
-            let zone = table_floating_zone_at_x(&floating, &measure, 600.0, x);
+            let zone = table_floating_zone_at_x(&floating, &measure, 600.0, x, true);
             assert_eq!((zone.left_margin, zone.right_margin), expected, "x={x}");
         }
     }
@@ -2254,7 +2274,7 @@ mod tests {
                 total_height: 160.0,
             };
             for x in [0.0, 120.0, 299.0, 300.0, 600.0 - width] {
-                let zone = table_floating_zone_at_x(&floating, &measure, 600.0, x);
+                let zone = table_floating_zone_at_x(&floating, &measure, 600.0, x, true);
                 let expected: (f64, f64) = if x < 300.0 {
                     (x + width + 13.2, 0.0)
                 } else {
@@ -2285,28 +2305,40 @@ mod tests {
                 "id": "float", "rows": [], "floating": floating
             }))
             .unwrap();
-            let zone = table_floating_zone(&table, &measure, 600.0).unwrap();
+            let zone = table_floating_zone(&table, &measure, 600.0, true).unwrap();
             assert_eq!((zone.left_margin, zone.right_margin), expected);
         }
     }
 
     #[test]
-    fn page_anchored_wide_floating_tables_keep_their_margins() {
+    fn wide_floating_tables_outside_the_column_frame_keep_their_margins() {
         let measure = TableExtent {
             rows: Vec::new(),
             column_widths: vec![360.0],
             total_width: 360.0,
             total_height: 160.0,
         };
-        let table = serde_json::from_value(json!({
-            "id": "float", "rows": [],
-            "floating": {
-                "horzAnchor": "page", "tblpX": 150, "leftFromText": 12, "rightFromText": 12
-            }
-        }))
-        .unwrap();
-        let zone = table_floating_zone(&table, &measure, 600.0).unwrap();
-        assert_eq!((zone.left_margin, zone.right_margin), (522.0, 0.0));
+        for (anchor, one_column, expected) in [
+            (Some("page"), true, (522.0, 0.0)),
+            (None, false, (522.0, 0.0)),
+            (Some("margin"), false, (522.0, 0.0)),
+            (Some("margin"), true, (0.0, 462.0)),
+            (Some("text"), false, (0.0, 462.0)),
+        ] {
+            let table = serde_json::from_value(json!({
+                "id": "float", "rows": [],
+                "floating": {
+                    "horzAnchor": anchor, "tblpX": 150, "leftFromText": 12, "rightFromText": 12
+                }
+            }))
+            .unwrap();
+            let zone = table_floating_zone(&table, &measure, 600.0, one_column).unwrap();
+            assert_eq!(
+                (zone.left_margin, zone.right_margin),
+                expected,
+                "{anchor:?} {one_column}"
+            );
+        }
     }
 
     #[test]
