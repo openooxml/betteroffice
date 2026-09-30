@@ -46,6 +46,10 @@ export type ResidentEngineSession = Pick<
   layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
   /** Limit incremental rebuilds to the display window and caret pages. Off by default. */
   setWindowedIncrementalBuilds(enabled: boolean): void;
+  /** Parses and seeds a DOCX; returns the host metadata JSON the main thread decodes. */
+  openDocx(bytes: Uint8Array, digest?: string, generation?: string): string;
+  /** The whole document state as one yrs v1 update. */
+  encodeState(): Uint8Array;
   /** The retained region layout pass without serializing its reply. */
   layoutDocumentWithRegionsRetained(input: string): void;
   /** The retained region layout's `headersFooters` JSON, when it has any. */
@@ -83,6 +87,8 @@ export async function createResidentEngineSession(
   };
 
   return {
+    openDocx: (bytes, digest, generation) => session.open_docx(bytes, true, generation, digest),
+    encodeState: () => session.encode_state(),
     registerFont: (bytes) => session.register_measure_font(bytes),
     registerSubstituteFont: (base, family) =>
       session.register_substitute_measure_font(base, family),

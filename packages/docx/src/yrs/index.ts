@@ -267,6 +267,11 @@ export async function prepareDocxBytes(bytes: Uint8Array): Promise<Uint8Array> {
   return copy;
 }
 
+/** The SHA-256 {@link prepareDocxBytes} took of `bytes`, if it took one. @internal */
+export function preparedDocxDigest(bytes: Uint8Array): string | undefined {
+  return preparedDigests.get(bytes);
+}
+
 /** Snapshot of one paragraph from {@link YrsSession.paragraphs}. */
 export interface YrsParagraph {
   /** Session key; not the paragraph's Word `w14:paraId`. */
@@ -1437,7 +1442,15 @@ function docxSourceBuffer(bytes: Uint8Array): ArrayBuffer {
   ) {
     return bytes.buffer;
   }
-  return bytes.slice().buffer as ArrayBuffer;
+  return new Uint8Array(bytes).buffer as ArrayBuffer;
+}
+
+/**
+ * Decodes the host metadata a resident worker's `open` replied with, for the
+ * package `source` it opened. @internal
+ */
+export function decodeDocxHostJson(json: string, source: Uint8Array): YrsDocxHost {
+  return decodeDocxHost(json, source);
 }
 
 function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {

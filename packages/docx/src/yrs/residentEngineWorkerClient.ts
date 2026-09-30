@@ -41,6 +41,8 @@ export interface ResidentEngineWorkerLayoutOptions {
   stateVector?: Uint8Array;
   /** Bootstrap only: lay out just the body's first pages before replying. */
   provisionalPages?: number;
+  /** Bootstrap only: lay out the document {@link ResidentEngineWorkerClient.open} opened. */
+  opened?: boolean;
   /** Bootstrap only: the epoch of the frame the host shows; the worker's frames follow it. */
   frameEpoch?: number;
   /**
@@ -48,6 +50,14 @@ export interface ResidentEngineWorkerLayoutOptions {
    * An allocation past it stops the worker with {@link ResidentWorkerOutOfMemoryError}.
    */
   heapLimitBytes?: number;
+}
+
+/** What an {@link ResidentEngineWorkerClient.open} seeded in the worker. */
+export interface ResidentEngineWorkerOpened {
+  /** The package's host metadata JSON, for `decodeDocxHostJson`. */
+  hostJson: string;
+  /** The worker replica's state vector once seeded. */
+  stateVector: Uint8Array;
 }
 
 /** How a bootstrap or sync builds its frame. */
@@ -109,6 +119,9 @@ export class ResidentEngineWorkerClient {
   private remoteVector: Uint8Array | null = null;
   private appliedFontsRevision: number | null = null;
   private bootstrapped = false;
+  /** Set once `open` is sent, with the heap limit it opened under. */
+  private openedHeapLimit: { bytes?: number } | null = null;
+  private bootstraps = 0;
   /** Id of the last snapshot request sent; replies to earlier requests must
    * not replace the state it recorded. */
   private lastSnapshotId = 0;
@@ -178,6 +191,62 @@ export class ResidentEngineWorkerClient {
     return this.bootstrapped;
   }
 
+  /**
+   * Parses and seeds a DOCX in the worker, which then holds the document:
+   * its first layout is a bootstrap with `opened`, and the main replica loads
+   * {@link encodeState}. A copy of `bytes` is transferred.
+   */
+  async open(
+    bytes: Uint8Array,
+    options: { digest?: string; generation?: string; heapLimitBytes?: number } = {}
+  ): Promise<ResidentEngineWorkerOpened> {
+    if (this.openedHeapLimit || this.bootstrapped) {
+      throw new ResidentWorkerFailureError('Resident engine worker already holds a document');
+    }
+    const reservation = { bytes: options.heapLimitBytes };
+    this.openedHeapLimit = reservation;
+    let response: ResidentEngineWorkerResponse & { ok: true };
+    try {
+      const copy = new Uint8Array(bytes);
+      response = await this.request(
+        {
+          type: 'open',
+          bytes: copy.buffer,
+          ...(options.digest !== undefined ? { digest: options.digest } : {}),
+          ...(options.generation !== undefined ? { generation: options.generation } : {}),
+          ...(options.heapLimitBytes !== undefined ? { heapLimitBytes: options.heapLimitBytes } : {}),
+        },
+        [copy.buffer]
+      );
+    } catch (error) {
+      // The worker freed the session a failed open made, so it can open again.
+      if (this.openedHeapLimit === reservation) this.openedHeapLimit = null;
+      throw error;
+    }
+    if (response.hostJson === undefined || !response.stateVector) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted the opened document');
+    }
+    return { hostJson: response.hostJson, stateVector: new Uint8Array(response.stateVector) };
+  }
+
+  /** The font requirements of a region layout request, read from the opened document. */
+  async fontRequirements(layoutInput: string): Promise<string> {
+    const response = await this.request({ type: 'fontRequirements', layoutInput });
+    if (response.requirementsJson === undefined) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted the font requirements');
+    }
+    return response.requirementsJson;
+  }
+
+  /** The worker's whole document state as one yrs v1 update. */
+  async encodeState(): Promise<Uint8Array> {
+    const response = await this.request({ type: 'encodeState' });
+    if (!response.state) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted its state');
+    }
+    return new Uint8Array(response.state);
+  }
+
   async warm(): Promise<void> {
     await this.request({ type: 'warm' });
   }
@@ -187,8 +256,21 @@ export class ResidentEngineWorkerClient {
     extras: string,
     options: ResidentEngineWorkerLayoutOptions & ResidentEngineWorkerSnapshotOptions = {}
   ): Promise<ResidentEngineWorkerFrame> {
+    if (options.opened && !this.openedHeapLimit) {
+      throw new ResidentWorkerFailureError('Resident engine worker has no opened document');
+    }
+    if (
+      options.opened &&
+      options.heapLimitBytes !== undefined &&
+      options.heapLimitBytes !== this.openedHeapLimit?.bytes
+    ) {
+      throw new ResidentWorkerFailureError(
+        'Resident engine worker opened its document under another heap limit'
+      );
+    }
     const fontsRevision = snapshot.fontsRevision;
     this.bootstrapped = true;
+    const generation = ++this.bootstraps;
     const pending = this.request(
       {
         type: 'bootstrap',
@@ -200,12 +282,24 @@ export class ResidentEngineWorkerClient {
         ...(options.provisionalPages !== undefined
           ? { provisionalPages: options.provisionalPages }
           : {}),
+        ...(options.opened ? { opened: true } : {}),
         ...(options.heapLimitBytes !== undefined ? { heapLimitBytes: options.heapLimitBytes } : {}),
       },
       snapshotTransfers(snapshot)
     );
     this.recordSent(options.stateVector, fontsRevision);
-    const response = await pending;
+    let response: ResidentEngineWorkerResponse & { ok: true };
+    try {
+      response = await pending;
+    } catch (error) {
+      // The open it was queued behind failed, so the worker holds no document to bootstrap.
+      if (options.opened && !this.openedHeapLimit && generation === this.bootstraps) {
+        this.bootstrapped = false;
+        this.remoteVector = null;
+        this.appliedFontsRevision = null;
+      }
+      throw error;
+    }
     const result = frameResult(response);
     this.recordSync(response, fontsRevision);
     this.ready = true;
