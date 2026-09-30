@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
   createYrsSession,
+  preloadResidentEngineWorker,
   ResidentWorkerOutOfMemoryError,
   type YrsDocxHost,
   type YrsSession,
@@ -532,6 +533,36 @@ test('failure of the accepted full session before its frame cancels deferred hyd
     expect(result.current.errors).toEqual([failure]);
     expect(result.current.core.failOpening(new Error('later'), full)).toBe(false);
     expect(result.current.errors).toHaveLength(1);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
+
+test('a preloaded spare worker takes the open that starts alongside the preview', async () => {
+  const { workers, posted } = installWorker();
+  await preloadResidentEngineWorker();
+  expect(workers).toHaveLength(1);
+  const frames = holdFrames();
+  try {
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, previewFirstPage: true, source: longBytes },
+    });
+    await waitFor(() => expect(result.current.core.previewing).toBe(true));
+    await waitFor(() => expect(posted.some((request) => request.type === 'open')).toBe(true));
+    const preview = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(preview));
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await waitFor(() => expect(result.current.core.previewing).toBe(false));
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(result.current.core.session));
+    expect(workers).toHaveLength(1);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
+    expect(result.current.errors).toEqual([]);
     unmount();
   } finally {
     cleanup();
