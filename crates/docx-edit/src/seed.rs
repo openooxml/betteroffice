@@ -5518,10 +5518,7 @@ mod tests {
                 .unwrap()
                 .get(&txn, OPAQUE_SEQUENCES),
             Some(Out::Any(Any::Array(
-                ["figure", "other", "table"]
-                    .map(Any::from)
-                    .to_vec()
-                    .into()
+                ["figure", "other", "table"].map(Any::from).to_vec().into()
             )))
         );
     }

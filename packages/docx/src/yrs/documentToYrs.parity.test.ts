@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { parseDocx } from '../docx';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { unzipContainer } from '../docx/wasm';
-import type { LayoutBlock, Run as LayoutRun } from '../layout/pagination/types';
+import type { LayoutBlock, Run as LayoutRun, ShapeBlock } from '../layout/pagination/types';
 import type { ComplexField, Document, Run, SimpleField } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { createYrsSession, saveYrsDocx, type YrsSession } from './index';
@@ -36,12 +36,19 @@ function sequenceTextBox(content: string, hidden = false): string {
   return `<w:r>${hidden ? '<w:rPr><w:vanish/></w:rPr>' : ''}<w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:align>right</wp:align></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="1600000" cy="228600"/><wp:wrapNone/><wp:docPr id="1" name="Box 1"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1600000" cy="228600"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent><w:p>${content}</w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`;
 }
 
+function shapeSequenceRuns(shape: ShapeBlock): LayoutRun[] {
+  return [
+    ...(shape.innerText ?? []).flatMap((paragraph) => paragraph.runs),
+    ...(shape.children ?? []).flatMap(shapeSequenceRuns),
+  ];
+}
+
 function sequenceRuns(blocks: readonly LayoutBlock[]): LayoutRun[] {
   return blocks.flatMap((block) => {
     switch (block.kind) {
       case 'paragraph': return block.runs;
-      case 'shape': return [...sequenceRuns(block.innerText ?? []), ...sequenceRuns(block.children ?? [])];
-      case 'textBox': return sequenceRuns(block.content);
+      case 'shape': return shapeSequenceRuns(block);
+      case 'textBox': return block.content.flatMap((paragraph) => paragraph.runs);
       case 'table': return block.rows.flatMap((row) => row.cells.flatMap((cell) => sequenceRuns(cell.blocks)));
       default: return [];
     }
