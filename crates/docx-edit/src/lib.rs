@@ -142,6 +142,8 @@ pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoCaptureM
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
+#[cfg(feature = "wasm")]
+pub mod wasm_memory;
 
 const STORIES: &str = "stories";
 const COMMENTS: &str = "comments";
