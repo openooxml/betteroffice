@@ -1127,7 +1127,7 @@ fn synthetic_text_width(
         * horizontal_scale
 }
 
-fn synthetic_inline_image_width(image: &crate::types::ImageRun) -> f64 {
+pub(crate) fn synthetic_inline_image_width(image: &crate::types::ImageRun) -> f64 {
     let floating = matches!(
         image.wrap_type.as_deref(),
         Some("square" | "tight" | "through" | "behind" | "inFront")

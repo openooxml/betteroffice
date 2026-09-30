@@ -450,6 +450,24 @@ fn autofit_content_widths(
     (minimums, maximums)
 }
 
+/// The widest inline image among a cell's paragraphs, which shrinking can't narrow.
+fn widest_inline_image(blocks: &[crate::types::LayoutBlock]) -> f64 {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            crate::types::LayoutBlock::Paragraph(paragraph) => Some(paragraph),
+            _ => None,
+        })
+        .flat_map(|paragraph| &paragraph.runs)
+        .filter_map(|run| match run {
+            crate::types::Run::Image(image) => {
+                Some(crate::measure_blocks::synthetic_inline_image_width(image))
+            }
+            _ => None,
+        })
+        .fold(0.0, f64::max)
+}
+
 fn resolve_autofit_column_widths(
     table_block: &TableBlock,
     content_width: f64,
@@ -489,7 +507,7 @@ fn resolve_autofit_column_widths(
                 .map_or(2.0 * DEFAULT_CELL_PADDING_X, |padding| {
                     padding.left + padding.right
                 });
-            let floor = padding + 1.0;
+            let floor = padding + widest_inline_image(&cell.blocks).max(1.0);
             let cell_width: f64 = widths
                 .iter()
                 .skip(grid_cell.column_index)
@@ -1166,6 +1184,30 @@ mod tests {
         );
         block.indent = Some(598.0);
         assert_eq!(resolve_table_column_widths(&block, 600.0), vec![1.0, 1.0]);
+    }
+
+    #[test]
+    fn autofit_keeps_its_grid_when_shrinking_would_crop_an_inline_image() {
+        let block: TableBlock = serde_json::from_value(json!({
+            "id": 0, "layoutMode": "autofit", "gridWidths": [200, 400],
+            "preferredWidth": {"value": 9000, "type": "dxa"},
+            "rows": [{"id": 0, "cells": [
+                {"id": 0, "minContentWidth": 200, "maxContentWidth": 200,
+                 "blocks": [{"kind": "paragraph", "id": 0, "runs": [
+                     {"kind": "image", "src": "", "width": 200, "height": 40}
+                 ]}],
+                 "preferredWidth": {"value": 0, "type": "auto"},
+                 "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0}},
+                {"id": 1, "blocks": [], "minContentWidth": 1510.16, "maxContentWidth": 1510.16,
+                 "preferredWidth": {"value": 0, "type": "auto"},
+                 "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0}}
+            ]}]
+        }))
+        .unwrap();
+        assert_eq!(
+            resolve_table_column_widths(&block, 600.0),
+            vec![200.0, 400.0]
+        );
     }
 
     #[test]
