@@ -134,6 +134,7 @@ export {
   displayPageCanvas,
   displayPageCanvases,
   DisplayPageRegistry,
+  effectiveZoom,
   materializeDisplayPages,
   resolveCanvasPoint,
   resolveDisplayPageClientRect,
