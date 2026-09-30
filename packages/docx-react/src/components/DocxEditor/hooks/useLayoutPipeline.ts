@@ -128,6 +128,22 @@ export interface UseLayoutPipelineReturn {
   getLayoutRequest: () => string | null;
 }
 
+/** Whether `next` measures as `last` does and only adds font chains. */
+function addsFontChainsOnly(
+  last: ResidentMeasurementConfig,
+  next: ResidentMeasurementConfig
+): boolean {
+  if (
+    JSON.stringify({ ...last, fontChains: null }) !== JSON.stringify({ ...next, fontChains: null })
+  ) {
+    return false;
+  }
+  return Object.entries(last.fontChains).every(([key, chain]) => {
+    const kept = next.fontChains[key];
+    return kept?.length === chain.length && kept.every((id, index) => id === chain[index]);
+  });
+}
+
 /** A pass may run in the worker only if every change it lays out asked for that. */
 function mergeInWorker(current: boolean | null, next: boolean): boolean {
   return (current ?? true) && next;
@@ -191,12 +207,14 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   sessionRef.current = session;
   // The document version the first pass of this session laid out.
   const openedVersionRef = useRef<{ session: YrsSession; version: string | null } | null>(null);
-  // The last layout this pipeline applied: its session, document version, and
-  // request without the revision preview.
+  // The last layout this pipeline applied: its session, document version,
+  // request without the revision preview or measurement, preview and measurement.
   const laidOutRef = useRef<{
     session: YrsSession;
     version: string | null;
     request: string;
+    previewKey: string;
+    measurement: ResidentMeasurementConfig;
   } | null>(null);
   const workerPrewarmRef = useRef<{ session: YrsSession; release: () => void } | null>(null);
   const releaseWorkerPrewarm = useCallback((owner: YrsSession | null) => {
@@ -429,8 +447,9 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           ...buildResidentRegionLayoutRequest(document, pageGap, renderEnv),
           measurement,
         };
-        const requestWithoutPreview = JSON.stringify(request, (key, value: unknown) =>
-          key === 'revisionPreview' ? undefined : value
+        const requestWithoutPreview = JSON.stringify(
+          { ...request, measurement: undefined },
+          (key, value: unknown) => (key === 'revisionPreview' ? undefined : value)
         );
 
         // Step 4+: paint + scroll/events with the computed values.
@@ -445,7 +464,13 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             workerOpenEnabledRef.current ? workerOpenSourceVersion(session, version) : version
           );
           stampRevisionPreviewKey(newLayout, previewKey);
-          laidOutRef.current = { session, version, request: requestWithoutPreview };
+          laidOutRef.current = {
+            session,
+            version,
+            request: requestWithoutPreview,
+            previewKey,
+            measurement: computeInputs.measurement,
+          };
 
           const pagesEl = pagesContainerRef.current;
           const scrollParent =
@@ -515,7 +540,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         // The document as opened is laid out by the resident worker alone: that
         // pass also builds its first frame, so the main thread runs no layout
         // before the first paint. So is a pass that changes only the revision
-        // preview of the layout last applied, and a pass for host batches or
+        // preview of the layout last applied (adding at most the font chains
+        // that preview needs), and a pass for host batches or
         // remote updates alone, which no caret waits on. Passes for local edits
         // run here.
         if (openedVersionRef.current?.session !== session) {
@@ -525,7 +551,10 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         const previewOnly =
           laidOut?.session === session &&
           laidOut.version === sourceVersion &&
-          laidOut.request === requestWithoutPreview;
+          laidOut.request === requestWithoutPreview &&
+          (JSON.stringify(laidOut.measurement) === JSON.stringify(measurement) ||
+            (laidOut.previewKey !== previewKey &&
+              addsFontChainsOnly(laidOut.measurement, computeInputs.measurement)));
         let workerPass: ReturnType<LayoutInWorker> = null;
         if (
           !onHost &&

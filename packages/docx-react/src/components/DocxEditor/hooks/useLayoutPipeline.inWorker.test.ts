@@ -22,12 +22,25 @@ interface WorkerPass {
   fail(): void;
 }
 
+interface HookProps {
+  session: YrsSession;
+  renderEnv?: YrsRenderEnv;
+}
+
+const MEASUREMENT: ResidentMeasurementConfig = {
+  fontChains: { a: [0] },
+  defaults: { fontSize: 22, fontFamily: 'Calibri' },
+  compat: { noLeading: false, doNotExpandShiftReturn: false },
+  authoritativeShaping: true,
+};
+
 function fakeDocument() {
   const doc = {
     version: 1,
     laidOutHere: [] as number[],
     workerAvailable: true,
     fontsReady: true,
+    measurement: MEASUREMENT,
   };
   const session = {
     version: () => String(doc.version),
@@ -47,14 +60,14 @@ async function opened() {
   const worker: WorkerPass[] = [];
   const errors: Error[] = [];
   const syncCoordinator = new LayoutSelectionGate();
-  const hook = renderHook(({ session }) =>
+  const hook = renderHook(({ session, renderEnv }: HookProps) =>
     useLayoutPipeline({
       document: null,
       session,
-      renderEnv: {} as YrsRenderEnv,
+      renderEnv: renderEnv ?? ({} as YrsRenderEnv),
       pageGap: 24,
       zoom: 1,
-      residentMeasurementConfig: () => (doc.fontsReady ? ({} as ResidentMeasurementConfig) : null),
+      residentMeasurementConfig: () => (doc.fontsReady ? doc.measurement : null),
       deferLayoutPass: () => false,
       pagesContainerRef: { current: null },
       viewportLayoutRef: { current: null },
@@ -114,6 +127,36 @@ test('host batches and remote updates lay out in the worker, local edits here', 
   await answer(2);
   expect(shown()).toBe('4');
   expect(doc.laidOutHere).toEqual([3]);
+  expect(errors).toEqual([]);
+});
+
+test('a preview change that only adds font chains lays out in the worker', async () => {
+  const { doc, session, worker, errors, hook, frame, answer } = await opened();
+  doc.version = 2;
+  act(() => hook.result.current.scheduleLayout('local'));
+  await frame();
+  expect(doc.laidOutHere).toEqual([2]);
+
+  doc.measurement = { ...MEASUREMENT, fontChains: { a: [0], b: [1] } };
+  hook.rerender({ session, renderEnv: { revisionPreview: { a: 'accepted' } } as YrsRenderEnv });
+  act(() => hook.result.current.runLayoutPipeline());
+  await frame();
+  expect(worker.map((pass) => pass.at)).toEqual([1, 2]);
+  await answer(1);
+
+  // A chain that measures differently keeps the pass here.
+  doc.measurement = { ...MEASUREMENT, fontChains: { a: [2], b: [1] } };
+  hook.rerender({ session, renderEnv: {} as YrsRenderEnv });
+  act(() => hook.result.current.runLayoutPipeline());
+  await frame();
+  expect(doc.laidOutHere).toEqual([2, 2]);
+
+  // So does a new font chain without a preview change.
+  doc.measurement = { ...MEASUREMENT, fontChains: { a: [2], b: [1], c: [3] } };
+  act(() => hook.result.current.runLayoutPipeline());
+  await frame();
+  expect(doc.laidOutHere).toEqual([2, 2, 2]);
+  expect(worker).toHaveLength(2);
   expect(errors).toEqual([]);
 });
 
