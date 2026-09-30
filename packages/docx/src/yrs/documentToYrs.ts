@@ -509,11 +509,13 @@ function fieldPayload(
 
 function nestedSequenceNames(field: SimpleField | ComplexField): string[] {
   const names = new Set<string>();
-  const pending: unknown[] = [field];
+  const pending: Array<[unknown, boolean]> = [[field, false]];
   while (pending.length > 0) {
-    const value = pending.pop();
+    const [value, scannedHyperlink] = pending.pop()!;
     if (Array.isArray(value)) {
-      for (let index = value.length - 1; index >= 0; index--) pending.push(value[index]);
+      for (let index = value.length - 1; index >= 0; index--) {
+        pending.push([value[index], scannedHyperlink]);
+      }
     } else if (value !== null && typeof value === 'object') {
       const node = value as Attrs;
       if (
@@ -524,10 +526,13 @@ function nestedSequenceNames(field: SimpleField | ComplexField): string[] {
         const name = sequenceName(node.instruction);
         if (name !== undefined) names.add(name);
       }
-      if (node.type === 'hyperlink') {
+      if (node.type === 'hyperlink' && !scannedHyperlink) {
         for (const name of hyperlinkSequenceNames(value as Hyperlink)) names.add(name);
       }
-      for (const key of Object.keys(node).sort().reverse()) pending.push(node[key]);
+      const insideScannedHyperlink = scannedHyperlink || node.type === 'hyperlink';
+      for (const key of Object.keys(node).sort().reverse()) {
+        pending.push([node[key], insideScannedHyperlink]);
+      }
     }
   }
   return [...names];
@@ -537,11 +542,20 @@ function hyperlinkSequenceNames(hyperlink: Hyperlink): string[] {
   const pending: ParagraphContent[] = [hyperlink];
   const instructions: Array<string | undefined> = [];
   const names: string[] = [];
-  const push = (children: readonly ParagraphContent[]): void => {
+  const push = (children: readonly ParagraphContent[] | undefined): void => {
+    if (!Array.isArray(children)) return;
     for (let index = children.length - 1; index >= 0; index--) pending.push(children[index]);
   };
   while (pending.length > 0) {
     const node = pending.pop()!;
+    if (!node) continue;
+    if (
+      (node.type === 'simpleField' || node.type === 'complexField') &&
+      typeof node.instruction === 'string'
+    ) {
+      const name = sequenceName(node.instruction);
+      if (name !== undefined) names.push(name);
+    }
     switch (node.type) {
       case 'hyperlink':
         push(node.structuredChildren ?? node.children);
@@ -557,7 +571,9 @@ function hyperlinkSequenceNames(hyperlink: Hyperlink): string[] {
         push(node.structuredCode?.inline ?? node.fieldTree?.code?.inline ?? node.fieldCode);
         break;
       case 'run':
+        if (!Array.isArray(node.content)) break;
         for (const content of node.content) {
+          if (!content) continue;
           let instruction: string | undefined;
           if (content.type === 'fieldChar') {
             if (content.charType === 'begin') instructions.push('');
@@ -567,7 +583,9 @@ function hyperlinkSequenceNames(hyperlink: Hyperlink): string[] {
             } else if (content.charType === 'end') instruction = instructions.pop();
           } else if (content.type === 'instrText') {
             const index = instructions.length - 1;
-            if (instructions[index] !== undefined) instructions[index] += content.text;
+            if (instructions[index] !== undefined) {
+              instructions[index] += typeof content.text === 'string' ? content.text : '';
+            }
           }
           const name = instruction === undefined ? undefined : sequenceName(instruction);
           if (name !== undefined) names.push(name);

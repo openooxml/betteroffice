@@ -17,6 +17,10 @@ const EXISTING_ROOM_SEED = resolve(import.meta.dir, '../../../../apps/demo/publi
 function sequenceHyperlinkPackage(instruction: string): Uint8Array<ArrayBuffer> {
   const hyperlink = `<w:hyperlink w:anchor="top"><w:r><w:fldChar w:fldCharType="begin" w:fldLock="true"/></w:r>${instruction}<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple><w:r><w:fldChar w:fldCharType="end"/></w:r></w:hyperlink>`;
   const body = `<w:p><w:fldSimple w:instr="QUOTE">${hyperlink}</w:fldSimple></w:p><w:p><w:fldSimple w:instr="SEQ Figure"><w:r><w:t>2</w:t></w:r></w:fldSimple></w:p><w:p><w:fldSimple w:instr="SEQ Table"><w:r><w:t>7</w:t></w:r></w:fldSimple></w:p>`;
+  return sequencePackage(body);
+}
+
+function sequencePackage(body: string): Uint8Array<ArrayBuffer> {
   const parts = new Map([
     ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'],
     ['_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'],
@@ -179,6 +183,68 @@ describe('DOCX engine seeding', () => {
     } finally {
       projected.destroy();
       hydrated.destroy();
+    }
+  });
+
+  it('keeps cached body SEQs after a typed SEQ in a hyperlink SDT when seeding and hydrating', async () => {
+    const field = (cached: string): string => `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> SEQ Figure </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>${cached}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+    const bytes = sequencePackage(`<w:p><w:hyperlink w:anchor="top"><w:sdt><w:sdtPr/><w:sdtContent>${field('1')}</w:sdtContent></w:sdt></w:hyperlink></w:p><w:p>${field('2')}</w:p>`);
+    const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const engine = await createYrsSession({ clientId: 47011 });
+    const projected = await createYrsSession({ clientId: 47012 });
+    const hydrated = await createYrsSession({ clientId: 47013 });
+    try {
+      engine.seedFromDocx(bytes);
+      documentToYrs(projected, parsed);
+      hydrated.openDocx(bytes, false);
+      hydrated.loadState(projected.encodeState());
+      for (const session of [engine, hydrated]) {
+        const blocks = session.yrsBlocksForStory('body', {}) as LayoutBlock[];
+        const results = blocks.flatMap((block) => block.kind === 'paragraph' ? block.runs : [])
+          .flatMap((run) => run.kind === 'field' && run.rawType === 'SEQ' ? [run.fallback] : []);
+        expect(results).toEqual(['2']);
+      }
+    } finally {
+      engine.destroy();
+      projected.destroy();
+      hydrated.destroy();
+    }
+  });
+
+  it('tolerates missing arrays and null children in nested hyperlinks', async () => {
+    const quote = {
+      type: 'simpleField',
+      fieldType: 'QUOTE',
+      instruction: 'QUOTE',
+      content: [],
+      structuredResult: {
+        inline: [
+          { type: 'hyperlink' },
+          { type: 'hyperlink', children: {} },
+          { type: 'hyperlink', structuredChildren: [
+            null,
+            { type: 'inlineSdt' },
+            { type: 'simpleField' },
+            { type: 'complexField' },
+            { type: 'run' },
+            { type: 'run', content: [
+              null,
+              { type: 'fieldChar', charType: 'begin' },
+              { type: 'instrText' },
+              { type: 'fieldChar', charType: 'end' },
+            ] },
+          ] },
+        ],
+      },
+    } as unknown as SimpleField;
+    const document: Document = {
+      package: { document: { content: [{ type: 'paragraph', content: [quote] }] } },
+    };
+    const session = await createYrsSession({ clientId: 47014 });
+    try {
+      expect(() => documentToYrs(session, document)).not.toThrow();
+    } finally {
+      session.destroy();
     }
   });
 

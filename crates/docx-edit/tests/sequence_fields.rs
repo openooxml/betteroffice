@@ -255,6 +255,20 @@ fn a_body_hyperlink_sequence_instruction_in_an_sdt_keeps_cached_results() {
 }
 
 #[test]
+fn a_body_typed_hyperlink_sequence_in_an_sdt_keeps_cached_results() {
+    let hyperlink = format!(
+        r#"<w:hyperlink w:anchor="top"><w:sdt><w:sdtPr/><w:sdtContent>{}</w:sdtContent></w:sdt></w:hyperlink>"#,
+        field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>1</w:t>", 1)
+    );
+    let body = [
+        paragraph(&hyperlink),
+        paragraph(&field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>2</w:t>", 1)),
+    ]
+    .concat();
+    assert_eq!(sequence_results(&body), ["2"]);
+}
+
+#[test]
 fn a_text_box_anchored_at_a_paragraph_start_counts_before_the_paragraph() {
     let body = [
         paragraph(&field("SEQ Figure")),
