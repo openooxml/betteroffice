@@ -71,7 +71,8 @@ struct RenderState {
 struct PreviewFontRequirements {
     doc_epoch: u64,
     request_fingerprint: u64,
-    json: String,
+    /// `None` when the superset needs script fallbacks and each preview takes the exact path.
+    json: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1644,11 +1645,18 @@ impl EngineSession {
                 serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
             let fingerprint = font_requirements_fingerprint(request)?;
             let epoch = self.doc_epoch();
-            if let Some(cached) = self.preview_font_requirements.borrow().as_ref()
-                && cached.doc_epoch == epoch
-                && cached.request_fingerprint == fingerprint
-            {
-                return Ok(cached.json.clone());
+            let cached = self
+                .preview_font_requirements
+                .borrow()
+                .as_ref()
+                .filter(|cached| {
+                    cached.doc_epoch == epoch && cached.request_fingerprint == fingerprint
+                })
+                .map(|cached| cached.json.clone());
+            match cached {
+                Some(Some(json)) => return Ok(json),
+                Some(None) => return self.layout_font_requirements(input_json, false),
+                None => {}
             }
             Some((epoch, fingerprint))
         } else {
@@ -1741,7 +1749,15 @@ impl EngineSession {
                 }
             }
         }
-        if cache_key.is_some() && !preview_superset_safe {
+        if let Some((doc_epoch, request_fingerprint)) = cache_key
+            && !preview_superset_safe
+        {
+            self.preview_font_requirements
+                .replace(Some(PreviewFontRequirements {
+                    doc_epoch,
+                    request_fingerprint,
+                    json: None,
+                }));
             return self.layout_font_requirements(input_json, false);
         }
         let json = serde_json::to_string(&requirements.into_values().collect::<Vec<_>>())
@@ -1751,7 +1767,7 @@ impl EngineSession {
                 .replace(Some(PreviewFontRequirements {
                     doc_epoch,
                     request_fingerprint,
-                    json: json.clone(),
+                    json: Some(json.clone()),
                 }));
         }
         Ok(json)
@@ -5765,8 +5781,9 @@ mod tests {
                 .borrow()
                 .as_ref()
                 .unwrap()
-                .json,
-            second
+                .json
+                .as_deref(),
+            Some(second.as_str())
         );
     }
 
@@ -6004,42 +6021,62 @@ mod tests {
     }
 
     #[test]
-    fn preview_font_preflight_preserves_exact_cjk_fallbacks() {
-        let engine = EngineSession::new(1371);
-        let blocks = [serde_json::json!({
-            "type": "paragraph", "content": [font_preflight_run("骨", "Calibri")]
-        })];
-        crate::seed::seed_blocks(engine.doc(), None, &[("body".to_owned(), &blocks)]).unwrap();
-        let insertion = engine
-            .doc()
-            .insert_text(
-                &crate::EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
-                crate::Position::new("body", 1),
-                "かな",
-                crate::FormatPolicy::Inherit,
-            )
-            .unwrap();
-        for (decision, script) in [
-            (crate::bridge::RevisionPreview::Rejected, "cjk-sc"),
-            (crate::bridge::RevisionPreview::Accepted, "cjk-jp"),
-            (crate::bridge::RevisionPreview::Rejected, "cjk-sc"),
-        ] {
-            let env =
-                RenderEnv::default().with_revision_preview(&insertion.revision_ids[0], decision);
-            let blocks =
-                crate::bridge::yrs_doc_to_layout_blocks(engine.doc(), "body", &env).unwrap();
-            let exact = docx_layout::measure_blocks::collect_font_requirements(&blocks, "Calibri");
-            let request = serde_json::json!({"bodyStory": "body", "renderEnv": env});
-            let requirements: serde_json::Value = serde_json::from_str(
-                &engine
-                    .layout_font_requirements_json(&request.to_string())
-                    .unwrap(),
-            )
-            .unwrap();
-            assert_eq!(requirements, serde_json::to_value(exact).unwrap());
-            assert_eq!(requirements[0]["key"], "calibri|0|0");
-            assert_eq!(requirements[0]["scripts"], serde_json::json!([script]));
-            assert!(engine.preview_font_requirements.borrow().is_none());
+    fn preview_font_preflight_takes_the_exact_path_for_script_fallbacks() {
+        let cases: [(u64, &str, &str, &[&str]); 2] = [
+            (1371, "骨", "Calibri", &["cjk-sc", "cjk-jp"]),
+            (1372, "a😀b", "Arial", &[]),
+        ];
+        for (client_id, text, family, scripts) in cases {
+            let engine = EngineSession::new(client_id);
+            let blocks = [serde_json::json!({
+                "type": "paragraph", "content": [font_preflight_run(text, family)]
+            })];
+            crate::seed::seed_blocks(engine.doc(), None, &[("body".to_owned(), &blocks)]).unwrap();
+            let insertion = engine
+                .doc()
+                .insert_text(
+                    &crate::EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
+                    crate::Position::new("body", 1),
+                    "かな",
+                    crate::FormatPolicy::Inherit,
+                )
+                .unwrap();
+            for (index, decision) in [
+                crate::bridge::RevisionPreview::Rejected,
+                crate::bridge::RevisionPreview::Accepted,
+                crate::bridge::RevisionPreview::Rejected,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let env = RenderEnv::default()
+                    .with_revision_preview(&insertion.revision_ids[0], decision);
+                let blocks =
+                    crate::bridge::yrs_doc_to_layout_blocks(engine.doc(), "body", &env).unwrap();
+                let exact = docx_layout::measure_blocks::collect_font_requirements(&blocks, family);
+                let request = serde_json::json!({
+                    "bodyStory": "body",
+                    "renderEnv": env,
+                    "measurement": {"defaults": {"fontFamily": family}}
+                });
+                let requirements: serde_json::Value = serde_json::from_str(
+                    &engine
+                        .layout_font_requirements_json(&request.to_string())
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(requirements, serde_json::to_value(exact).unwrap());
+                if let Some(script) = scripts.get(index % 2) {
+                    assert_eq!(requirements[0]["scripts"], serde_json::json!([script]));
+                }
+                assert!(
+                    engine
+                        .preview_font_requirements
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|cached| cached.json.is_none())
+                );
+            }
         }
     }
 

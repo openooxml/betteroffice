@@ -112,7 +112,8 @@ pub fn collect_font_requirements_into<'a>(
     }
 }
 
-/// Fonts any revision preview may need; returns false for ambiguous CJK fallbacks.
+/// Fonts any revision preview may need. Returns false when any of them needs a
+/// script fallback, whose chain order a superset cannot keep exact.
 pub fn collect_preview_font_requirements_into<'a>(
     blocks: impl IntoIterator<Item = &'a LayoutBlock>,
     default_family: &str,
@@ -193,14 +194,9 @@ pub fn collect_preview_font_requirements_into<'a>(
             }
         });
     }
-    requirements.values().all(|requirement| {
-        requirement
-            .scripts
-            .iter()
-            .filter(|script| matches!(script.as_str(), "cjk-jp" | "cjk-sc" | "cjk-tc" | "cjk-kr"))
-            .count()
-            <= 1
-    })
+    requirements
+        .values()
+        .all(|requirement| requirement.scripts.is_empty())
 }
 
 /// The family measurement gives text naming none: `defaults.fontFamily`, else Calibri.
