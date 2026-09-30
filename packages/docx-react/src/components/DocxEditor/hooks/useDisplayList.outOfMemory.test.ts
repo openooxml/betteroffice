@@ -289,6 +289,79 @@ test('a provisional layout whose completion runs out of memory completes in a fr
   }
 });
 
+test('a provisional layout whose worker ran out of memory twice rejects its completion instead of laying out here', async () => {
+  const { native, inputs, frame, engine, layoutJson, mainThreadBuilds } = setup();
+  let rejectCompletion!: (cause: unknown) => void;
+  const delayedCompletion = new Promise<never>((_, reject) => {
+    rejectCompletion = reject;
+  });
+  const completeLayout = spyOn(ResidentEngineWorkerClient.prototype, 'completeLayout')
+    .mockImplementationOnce(() => delayedCompletion);
+  const warnings = spyOn(console, 'warn').mockImplementation(() => {});
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, rerender, unmount } = renderHook(
+      ({ layout }) => useRustDisplayList(layout, overrides, undefined, undefined, engine),
+      { initialProps: { layout: null as Layout | null } }
+    );
+    const pending = result.current.layoutInWorker(engine, REQUEST)!;
+    const first = FakeWorker.spawned[0]!;
+    expect(first.last()).toMatchObject({ type: 'bootstrap', provisionalPages: 3 });
+    await act(async () => first.outOfMemory());
+    expect(first.terminated).toBe(true);
+    expect(FakeWorker.spawned).toHaveLength(2);
+    const second = FakeWorker.spawned[1]!;
+    expect(second.last()).toMatchObject({ type: 'bootstrap', provisionalPages: 3 });
+    await act(async () =>
+      second.replyFrame(frame(1), 1, { layoutJson, layoutProvisional: true })
+    );
+    const provisional = (await pending) as {
+      layout: Layout;
+      complete?: Promise<unknown>;
+    };
+    expect(provisional.complete).toBeDefined();
+    await act(async () => rerender({ layout: provisional.layout }));
+    await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(1));
+    expect(result.current.error).toBeNull();
+
+    await act(async () => {
+      const attached = result.current.attachOffscreenCanvases([], [], 1, 1, {
+        color: '#000',
+        width: 2,
+      });
+      expect(second.last()).toMatchObject({ type: 'attachCanvases' });
+      second.outOfMemory();
+      expect(await attached).toBe(false);
+    });
+    await waitFor(() => expect(completeLayout).toHaveBeenCalledTimes(1));
+    expect(second.terminated).toBe(true);
+    expect(FakeWorker.spawned).toHaveLength(2);
+    const failure = result.current.error;
+    expect(failure).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    expect(failure?.message).toBe(
+      'Resident engine worker ran out of memory allocating 65536 bytes: unreachable'
+    );
+    expect(mainThreadBuilds).toEqual([]);
+
+    await act(async () => {
+      rejectCompletion(failure);
+      await expect(provisional.complete!).rejects.toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    });
+    await expect(provisional.complete!).rejects.toBe(failure);
+    expect(FakeWorker.spawned).toHaveLength(2);
+    expect(mainThreadBuilds).toEqual([]);
+    expect(result.current.error).toBe(failure);
+    unmount();
+  } finally {
+    cleanup();
+    completeLayout.mockRestore();
+    warnings.mockRestore();
+    errors.mockRestore();
+    native.free();
+  }
+});
+
 test('a pass whose session no worker serves any more starts no worker when its completion runs out of memory', async () => {
   const { native, inputs, frame, engine, layoutJson, mainThreadBuilds } = setup();
   let released = false;
