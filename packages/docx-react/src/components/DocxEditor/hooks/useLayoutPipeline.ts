@@ -107,7 +107,11 @@ export interface UseLayoutPipelineReturn {
   layoutUpdateOrigin: LayoutUpdateOrigin;
   /** `onHost` lays out on this thread even when a worker could. */
   runLayoutPipeline: (options?: { onHost?: boolean }) => void;
-  scheduleLayout: (origin?: LayoutUpdateOrigin) => void;
+  /**
+   * `inWorker` lets the pass run in the resident worker unless a change that
+   * asked for no such pass lands before it runs; remote updates ask for it.
+   */
+  scheduleLayout: (origin?: LayoutUpdateOrigin, inWorker?: boolean) => void;
   cancelPendingScrollRestore: () => void;
   /** Counts navigation intents, the user's and programmatic scrolls alike. */
   navigationEpoch: () => number;
@@ -116,6 +120,11 @@ export interface UseLayoutPipelineReturn {
    * `null` while it has no session or the fonts the document needs are not ready.
    */
   getLayoutRequest: () => string | null;
+}
+
+/** A pass may run in the worker only if every change it lays out asked for that. */
+function mergeInWorker(current: boolean | null, next: boolean): boolean {
+  return (current ?? true) && next;
 }
 
 export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipelineReturn {
@@ -179,6 +188,15 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   } | null>(null);
   // A deferred pass that had to run on this thread keeps that requirement.
   const pendingOnHostRef = useRef(false);
+  // Whether every change the next pass lays out asked for a worker pass.
+  const pendingInWorkerRef = useRef<boolean | null>(null);
+  // The worker pass in flight. A pass that may run in the worker waits for it,
+  // so a burst of updates lays out their latest state once, not each in turn.
+  const workerPassRef = useRef<number | null>(null);
+  const queuedBehindWorkerRef = useRef(false);
+  const schedulerRef = useRef<number | null>(null);
+  const runRef = useRef<() => void>(() => {});
+  const unmountedRef = useRef(false);
   onTotalPagesChangeRef.current = onTotalPagesChange;
   onLayoutComputedRef.current = onLayoutComputed;
   onAnchorPositionsChangeRef.current = onAnchorPositionsChange;
@@ -219,6 +237,13 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   }
   const pendingLayoutOriginRef = useRef<LayoutUpdateOrigin | null>(null);
   const layoutUpdateOriginRef = useRef<LayoutUpdateOrigin>('local');
+  const requestPass = useCallback(() => {
+    if (schedulerRef.current != null || unmountedRef.current) return;
+    schedulerRef.current = requestAnimationFrame(() => {
+      schedulerRef.current = null;
+      if (pendingLayoutOriginRef.current) runRef.current();
+    });
+  }, []);
 
   const captureViewportPosition = useCallback(
     (position: number) => {
@@ -268,8 +293,15 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
 
   const runLayoutPipeline = useCallback(
     (options?: { onHost?: boolean }) => {
-      const pass = ++passRef.current;
       const onHost = options?.onHost === true || pendingOnHostRef.current;
+      const inWorker = !onHost && pendingInWorkerRef.current === true;
+      if (inWorker && workerPassRef.current !== null) {
+        queuedBehindWorkerRef.current = true;
+        return;
+      }
+      queuedBehindWorkerRef.current = false;
+      pendingInWorkerRef.current = null;
+      const pass = ++passRef.current;
       const layoutUpdateOrigin = pendingLayoutOriginRef.current ?? 'local';
       pendingLayoutOriginRef.current = null;
       if (layoutUpdateOrigin === 'local') scrollRestoreController.cancel();
@@ -284,6 +316,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           layoutUpdateOrigin
         );
         pendingOnHostRef.current = onHost;
+        pendingInWorkerRef.current = mergeInWorker(pendingInWorkerRef.current, inWorker);
         syncCoordinator.onLayoutComplete(currentEpoch);
         return;
       }
@@ -307,6 +340,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           layoutUpdateOrigin
         );
         pendingOnHostRef.current = onHost;
+        pendingInWorkerRef.current = mergeInWorker(pendingInWorkerRef.current, inWorker);
         syncCoordinator.onLayoutComplete(currentEpoch);
         return;
       }
@@ -401,8 +435,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       // The document as opened is laid out by the resident worker alone: that
       // pass also builds its first frame, so the main thread runs no layout
       // before the first paint. So is a pass that changes only the revision
-      // preview of the layout last applied. Once the document changes, passes
-      // run here.
+      // preview of the layout last applied, and one for host batches or remote
+      // updates alone, which no caret waits on. Passes for local edits run here.
       if (openedVersionRef.current?.session !== session) {
         openedVersionRef.current = { session, version: sourceVersion };
       }
@@ -415,7 +449,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       if (
         !onHost &&
         sourceVersion !== null &&
-        (sourceVersion === openedVersionRef.current.version || previewOnly)
+        (sourceVersion === openedVersionRef.current.version || previewOnly || inWorker)
       ) {
         try {
           workerPass = layoutInWorkerRef.current?.(session, JSON.stringify(request)) ?? null;
@@ -428,12 +462,18 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         syncCoordinator.onLayoutComplete(currentEpoch);
         return;
       }
+      workerPassRef.current = pass;
       void workerPass
         .then(
           (computation) => {
             if (pass !== passRef.current || sessionRef.current !== session) return;
             // A change that landed meanwhile makes the worker's layout stale.
-            if (!computation || readSessionVersion(session) !== sourceVersion) {
+            // Only a queued worker pass follows it at once; until then it is
+            // the newest layout there is.
+            if (
+              !computation ||
+              (readSessionVersion(session) !== sourceVersion && !queuedBehindWorkerRef.current)
+            ) {
               layOutHere();
               return;
             }
@@ -462,6 +502,11 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         )
         .finally(() => {
           if (pass === passRef.current) syncCoordinator.onLayoutComplete(currentEpoch);
+          if (workerPassRef.current !== pass) return;
+          workerPassRef.current = null;
+          if (queuedBehindWorkerRef.current && sessionRef.current === session) {
+            requestPass();
+          }
         });
     },
     [
@@ -478,6 +523,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       pagesContainerRef,
       viewportLayoutRef,
       scrollRestoreController,
+      requestPass,
     ]
   );
 
@@ -608,28 +654,29 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
    * it; the `runRef` indirection lets the stable scheduler always call the
    * latest `runLayoutPipeline` without recreating itself.
    */
-  const runRef = useRef(runLayoutPipeline);
   runRef.current = runLayoutPipeline;
-  const schedulerRef = useRef<number | null>(null);
-  const scheduleLayout = useCallback((origin: LayoutUpdateOrigin = 'local') => {
-    if (origin === 'local') scrollRestoreController.cancel();
-    pendingLayoutOriginRef.current = mergeLayoutUpdateOrigin(
-      pendingLayoutOriginRef.current,
-      origin
-    );
-    if (schedulerRef.current != null) return;
-    schedulerRef.current = requestAnimationFrame(() => {
-      schedulerRef.current = null;
-      if (pendingLayoutOriginRef.current) runRef.current();
-    });
-  }, [scrollRestoreController]);
+  const scheduleLayout = useCallback(
+    (origin: LayoutUpdateOrigin = 'local', inWorker = origin === 'remote') => {
+      if (origin === 'local') scrollRestoreController.cancel();
+      pendingLayoutOriginRef.current = mergeLayoutUpdateOrigin(
+        pendingLayoutOriginRef.current,
+        origin
+      );
+      pendingInWorkerRef.current = mergeInWorker(pendingInWorkerRef.current, inWorker);
+      requestPass();
+    },
+    [requestPass, scrollRestoreController]
+  );
 
   // Clean up pending rAF on unmount. A worker pass answering later must not
   // touch the session, which its owner frees on unmount.
   useEffect(() => {
+    unmountedRef.current = false;
     return () => {
+      unmountedRef.current = true;
       passRef.current += 1;
       if (schedulerRef.current != null) cancelAnimationFrame(schedulerRef.current);
+      schedulerRef.current = null;
     };
   }, []);
 
