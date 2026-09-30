@@ -1525,9 +1525,19 @@ export function useRustDisplayList(
       settledEpochRef.current = null;
       // A failure of the document being loaded holds until its layout or the next load.
       if (!replacedLayoutRef.current) settleErrorRef.current = null;
-      // The worker of a session the renderer let go of never builds again.
-      if (workerRef.current && workerRef.current.engine !== residentEngine) {
-        workerRef.current.client.destroy();
+      // The worker of a session the renderer let go of never builds again; one
+      // opening the current load's document has no layout to show yet.
+      const current = workerRef.current;
+      if (
+        current &&
+        current.engine !== residentEngine &&
+        !(
+          current.opened &&
+          current.load === documentLoadsRef.current &&
+          workerOpenSourcesRef.current.has(current.engine)
+        )
+      ) {
+        current.client.destroy();
         workerRef.current = null;
       }
       setWorkerSurfacesActive(false);
@@ -1667,9 +1677,16 @@ export function useRustDisplayList(
         if (
           unmountedRef.current ||
           documentLoad !== documentLoadsRef.current ||
-          (requested !== null && !isCurrentWorker(hostEngine, requested))
+          (requested?.engine === hostEngine && !isCurrentWorker(hostEngine, requested))
         ) {
           return Promise.reject(new SupersededPreviewError());
+        }
+        // A successor that failed to construct leaves this build to the host engine.
+        if (requested !== workerRef.current) {
+          if (workerOpenEnabledRef.current && workerOpenReplicaPending(hostEngine)) {
+            ensureWorkerOpenReplica(hostEngine);
+          }
+          return buildOnMainThread();
         }
         const nextError =
           cause instanceof Error

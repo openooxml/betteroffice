@@ -104,12 +104,17 @@ interface HarnessProps {
   generation: number;
   collaboration?: DocxEditorCollaborationOptions;
   readOnly?: boolean;
+  resolvedCommentIds?: ReadonlySet<number>;
 }
 
 function useHarness(props: HarnessProps) {
   const relayout = useRef<(() => void) | null>(null);
   const renderer = useCanvasRenderer(
-    undefined, undefined, () => relayout.current?.(), undefined, props.experimentalWorkerOpen
+    undefined,
+    props.resolvedCommentIds,
+    () => relayout.current?.(),
+    undefined,
+    props.experimentalWorkerOpen
   );
   useEffect(() => renderer.resetSettled(), [props.generation]);
   const [host, setHost] = useState<YrsDocxHost | null>(null);
@@ -317,6 +322,20 @@ test('a failed worker open falls back to the existing main open', async () => {
   expect(result.current.core.session?.hasStory('body')).toBe(true);
   expect(result.current.errors).toEqual([]);
   expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+});
+
+test('a comment visibility change during the worker open keeps the opening worker', async () => {
+  const { workers, posted } = installWorker({ holdOpen: true });
+  const { result, rerender } = renderHook(useHarness, { initialProps });
+  await waitFor(() => expect(posted.some((request) => request.type === 'open')).toBe(true));
+  rerender({ ...initialProps, resolvedCommentIds: new Set([1]) });
+  await act(async () => {
+    workers[0].release();
+  });
+  await waitFor(() => expect(result.current.host).not.toBeNull());
+  expect(workers).toHaveLength(1);
+  expect(result.current.mainOpens).toEqual([]);
+  expect(result.current.errors).toEqual([]);
 });
 
 test('an unavailable worker falls back before publishing host metadata', async () => {
