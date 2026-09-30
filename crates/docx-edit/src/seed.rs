@@ -4705,7 +4705,7 @@ fn seed_lowered(
             batches.iter_mut().flat_map(|(_, ops)| ops.iter_mut()),
             table,
             layout_tokens,
-        ),
+        )?,
     };
     document
         .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
@@ -5906,6 +5906,34 @@ mod tests {
             serde_json::to_value(&passed).unwrap(),
             serde_json::to_value(&hashed).unwrap()
         );
+    }
+
+    #[test]
+    fn seeding_data_urls_fails_on_an_image_part_that_cannot_be_read() {
+        let mut state = 0x2545_f491_u32;
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend((0..8192).map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        }));
+        let mut bytes = ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/_rels/document.xml.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/picture.png"/></Relationships>"#.to_vec()),
+            ("word/media/picture.png".to_owned(), png.clone()),
+            ("word/document.xml".to_owned(), br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="picture"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#.to_vec()),
+        ])
+        .unwrap();
+        seed_with_layout_tokens(&EditingDoc::new(9), &bytes).unwrap();
+        let late = &png[6000..6032];
+        let at = bytes
+            .windows(late.len())
+            .position(|window| window == late)
+            .expect("incompressible image bytes are stored verbatim");
+        bytes[at + 16] ^= 0xff;
+        assert!(seed_with_layout_tokens(&EditingDoc::new(10), &bytes).is_err());
     }
 
     #[test]

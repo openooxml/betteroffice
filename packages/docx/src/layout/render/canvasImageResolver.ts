@@ -72,12 +72,12 @@ export function createCanvasImageResolver(
           );
         }
         const img = new Image();
-        const settle = (image: HTMLImageElement | null) => {
+        const settle = (image: CanvasImageSource | null) => {
           if (token) URL.revokeObjectURL(url);
           resolve(image);
         };
         img.onload = () => settle(img);
-        img.onerror = () => settle(null);
+        img.onerror = () => settle(token ? missingMedia() : null);
         img.src = url;
       });
       cache.set(relId, pending);

@@ -87,6 +87,38 @@ describe('createCanvasImageResolver', () => {
     expect(resolve('media:x')).toBeNull();
   });
 
+  it('paints a token whose bytes are missing or fail to decode as a grey box', async () => {
+    const originalCanvas = globalThis.OffscreenCanvas;
+    const fills: string[] = [];
+    class FakeCanvas {
+      getContext() {
+        return {
+          set fillStyle(value: string) {
+            fills.push(value);
+          },
+          fillRect() {},
+        };
+      }
+    }
+    globalThis.OffscreenCanvas = FakeCanvas as unknown as typeof OffscreenCanvas;
+    URL.createObjectURL = (blob: Blob) => {
+      blobs.push(blob);
+      return `broken-${blobs.length}`;
+    };
+    try {
+      const resolve = createCanvasImageResolver({
+        media: (token) =>
+          token === 'media:1' ? { bytes: new Uint8Array([1]), mimeType: 'image/png' } : null,
+      });
+      expect(await resolve('media:1')).toBeInstanceOf(FakeCanvas);
+      expect(revoked).toEqual(['broken-1']);
+      expect(await resolve('media:2')).toBeInstanceOf(FakeCanvas);
+      expect(fills).toEqual(['#e6e6e6', '#e6e6e6']);
+    } finally {
+      globalThis.OffscreenCanvas = originalCanvas;
+    }
+  });
+
   it('keeps decoding data URLs directly', async () => {
     const resolve = createCanvasImageResolver({ media: () => null });
     expect(await resolve('data:image/png;base64,AA==')).toBeInstanceOf(FakeImage);

@@ -25,9 +25,36 @@ pub struct MediaSources(Arc<Sources>);
 struct Sources {
     key: (u64, u64),
     parts: HashMap<u64, u32>,
-    /// Sources found to match, by address. Holding each keeps its address from
-    /// naming another string; only the package's own images are held.
-    seen: Mutex<HashMap<usize, (Arc<str>, u32)>>,
+    seen: Mutex<Seen>,
+}
+
+/// Sources found to match, by address. Holding each keeps its address from
+/// naming another string; an entry only the cache still holds is dropped once
+/// the cache has doubled since it was last pruned.
+#[derive(Debug, Default)]
+struct Seen {
+    sources: HashMap<usize, (Arc<str>, u32)>,
+    prune_at: usize,
+}
+
+impl Seen {
+    fn new(sources: HashMap<usize, (Arc<str>, u32)>) -> Self {
+        let prune_at = Self::next_prune(sources.len());
+        Self { sources, prune_at }
+    }
+
+    fn next_prune(len: usize) -> usize {
+        (len * 2).max(64)
+    }
+
+    fn insert(&mut self, address: usize, source: Arc<str>, index: u32) {
+        if self.sources.len() >= self.prune_at {
+            self.sources
+                .retain(|_, (source, _)| Arc::strong_count(source) > 1);
+            self.prune_at = Self::next_prune(self.sources.len());
+        }
+        self.sources.insert(address, (source, index));
+    }
 }
 
 impl PartialEq for MediaSources {
@@ -49,11 +76,11 @@ impl MediaSources {
         }
         let address = Arc::as_ptr(src) as *const u8 as usize;
         let mut seen = self.0.seen.lock().unwrap();
-        let index = match seen.get(&address) {
+        let index = match seen.sources.get(&address) {
             Some((_, index)) => *index,
             None => {
                 let index = *self.0.parts.get(&self.digest(src))?;
-                seen.insert(address, (Arc::clone(src), index));
+                seen.insert(address, Arc::clone(src), index);
                 index
             }
         };
@@ -125,15 +152,17 @@ const JSON_PAYLOADS: &[&str] = &["shapeJson", "chartJson", "fieldData", "propert
 
 /// Replaces the tokens of seed `ops` with the `data:` URLs of their parts,
 /// each built once and shared. With `layout_tokens`, returns the sources that
-/// let layout carry the tokens again.
+/// let layout carry the tokens again. Fails when a part cannot be read, as
+/// inflating the whole package would.
 pub(crate) fn write_data_urls<'a>(
     ops: impl IntoIterator<Item = &'a mut RawOp>,
     table: &MediaTable,
     layout_tokens: bool,
-) -> MediaSources {
+) -> Result<MediaSources, String> {
     let mut writer = DataUrls {
         table,
         urls: HashMap::new(),
+        error: None,
     };
     for op in ops {
         match op {
@@ -150,8 +179,11 @@ pub(crate) fn write_data_urls<'a>(
             | RawOp::RemoveComment { .. } => {}
         }
     }
+    if let Some(error) = writer.error {
+        return Err(error);
+    }
     if !layout_tokens {
-        return MediaSources::default();
+        return Ok(MediaSources::default());
     }
     let [k0, k1] = crate::identity::entropy();
     let key = (k0, k1);
@@ -163,23 +195,32 @@ pub(crate) fn write_data_urls<'a>(
             seen.insert(Arc::as_ptr(&url) as *const u8 as usize, (url, index as u32));
         }
     }
-    MediaSources(Arc::new(Sources {
+    Ok(MediaSources(Arc::new(Sources {
         key,
         parts,
-        seen: Mutex::new(seen),
-    }))
+        seen: Mutex::new(Seen::new(seen)),
+    })))
 }
 
 struct DataUrls<'a> {
     table: &'a MediaTable,
     urls: HashMap<usize, Option<Arc<str>>>,
+    error: Option<String>,
 }
 
 impl DataUrls<'_> {
     fn url(&mut self, index: usize) -> Option<Arc<str>> {
+        let table = self.table;
+        let error = &mut self.error;
         self.urls
             .entry(index)
-            .or_insert_with(|| self.table.data_url(index).ok().map(Arc::from))
+            .or_insert_with(|| match table.data_url(index) {
+                Ok(url) => Some(Arc::from(url)),
+                Err(message) => {
+                    error.get_or_insert(message);
+                    None
+                }
+            })
             .clone()
     }
 
@@ -281,6 +322,25 @@ mod tests {
         assert_eq!(sources.token(&Arc::from(changed.as_str())), None);
         assert_eq!(sources.token_of(&source).as_deref(), Some("media:3"));
         assert_eq!(sources.token_of("media:3"), None);
+    }
+
+    #[test]
+    fn matched_sources_no_longer_held_elsewhere_are_released() {
+        let source = "data:image/png;base64,AAAA";
+        let sources = sources(&[(source, 2)]);
+        let kept: Arc<str> = Arc::from(source);
+        assert_eq!(sources.token(&kept).as_deref(), Some("media:2"));
+        for _ in 0..1000 {
+            let copy: Arc<str> = Arc::from(source);
+            assert_eq!(sources.token(&copy).as_deref(), Some("media:2"));
+        }
+        let seen = sources.0.seen.lock().unwrap();
+        assert!(seen.sources.len() <= 64);
+        assert!(
+            seen.sources
+                .values()
+                .any(|(source, _)| Arc::ptr_eq(source, &kept))
+        );
     }
 
     #[test]
