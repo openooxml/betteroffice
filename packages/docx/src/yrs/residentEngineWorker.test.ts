@@ -638,6 +638,27 @@ describe('resident worker memory', () => {
     expect(!next.ok && next.terminal).toBe(true);
   });
 
+  test('a trap the raster paints past without a failed allocation keeps the worker', async () => {
+    const w = worker();
+    await w.bootstrap();
+    Object.assign(w.harness.session, {
+      outlineGlyphJson: () => {
+        throw new WebAssembly.RuntimeError('unreachable');
+      },
+    });
+    const rasterize = w.harness.rasterize;
+    w.harness.rasterize = async (...args: Parameters<typeof rasterize>) => {
+      try {
+        (w.harness as { glyphs?: (fontId: number, glyphId: number) => string }).glyphs?.(1, 1);
+      } catch {
+        // painted with browser text instead
+      }
+      return rasterize(...args);
+    };
+    expect((await w.attach([1])).ok).toBe(true);
+    expect((await w.build([1])).ok).toBe(true);
+  });
+
   test('a trap without a failed allocation is not reported as out of memory', async () => {
     const w = worker();
     await w.bootstrap();

@@ -533,8 +533,10 @@ async function replayOffscreen(
         try {
           return session!.outlineGlyphJson(fontId, glyphId);
         } catch (error) {
-          // The raster paints on with browser text, so the trap is answered here.
-          if (error instanceof WebAssembly.RuntimeError) trapped(handlingId, error);
+          // The raster paints on with browser text, so running out of memory is answered here.
+          if (error instanceof WebAssembly.RuntimeError && editFailedAllocationBytes() > 0) {
+            trapped(handlingId, error);
+          }
           throw error;
         }
       },
