@@ -53,7 +53,7 @@ export function createCanvasImageResolver(
   return (relId: string) => {
     const token = media && MEDIA_TOKEN.test(relId);
     if (!token && !relId.startsWith('blob:') && !relId.startsWith('data:')) return null;
-    if (token && mediaScope && mediaScope() !== scope) {
+    if (mediaScope && mediaScope() !== scope) {
       scope = mediaScope();
       cache.clear();
     }

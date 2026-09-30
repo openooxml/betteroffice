@@ -980,6 +980,10 @@ fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue>
         .get("showHiddenText")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    env.media_tokens = value
+        .get("mediaTokens")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if let Some(Value::Object(ids)) = value.get("numericIds") {
         for (key, entry) in ids {
             if let Some(id) = entry.as_f64() {
