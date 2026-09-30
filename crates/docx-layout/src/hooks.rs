@@ -282,8 +282,7 @@ fn layout_table_with_position(
         } else {
             0.0
         };
-        if (row_is_exact
-            || (row_cant_split && row_remaining_at_start <= column_capacity - header_overhead))
+        if (row_is_exact || row_cant_split)
             && consumed == 0.0
             && row_remaining_at_start + header_overhead > paginator.get_available_height()
             && paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
@@ -376,9 +375,11 @@ fn layout_table_with_position(
             {
                 // Nothing of this row fits, but earlier rows did — end before it,
                 // unless they are the header band above an unavoidable split.
-            } else if paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
-                && moved_row != Some(cur)
-                && !(unavoidable_cant_split && breaks.kept_oversized(cur, start_off, row_capacity))
+            } else if snap_row_break(&breaks.kept, cur, start_off, row_capacity) > 0.0
+                || (paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
+                    && moved_row != Some(cur)
+                    && !(unavoidable_cant_split
+                        && breaks.kept_oversized(cur, start_off, row_capacity)))
             {
                 // Nothing fits below content already in this column: start the
                 // fragment in the next one.

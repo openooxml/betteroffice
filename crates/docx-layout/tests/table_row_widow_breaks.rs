@@ -47,10 +47,14 @@ fn table_rows(spec: &[(usize, Value, Value)]) -> Value {
     })
 }
 
-/// Lays out on 100px-tall pages and returns each table fragment's page and height.
-fn fragments(measured: Vec<Value>) -> Vec<(usize, f64)> {
-    let input = json!({"measured":measured,"options":{"pageSize":{"w":200,"h":120},
-        "margins":{"top":10,"right":10,"bottom":10,"left":10}}});
+/// Returns table fragments on 100px-tall pages.
+fn table_fragments(measured: Vec<Value>, columns: Option<Value>) -> Vec<(usize, Value)> {
+    let mut options = json!({"pageSize":{"w":200,"h":120},
+        "margins":{"top":10,"right":10,"bottom":10,"left":10}});
+    if let Some(columns) = columns {
+        options["columns"] = columns;
+    }
+    let input = json!({"measured":measured,"options":options});
     let layout: Value =
         serde_json::from_str(&docx_layout::layout_to_canonical_json(&input.to_string()).unwrap())
             .unwrap();
@@ -65,10 +69,58 @@ fn fragments(measured: Vec<Value>) -> Vec<(usize, f64)> {
                 .unwrap()
                 .iter()
                 .filter(|fragment| fragment["kind"] == "table")
-                .map(move |fragment| (page, fragment["height"].as_f64().unwrap()))
+                .map(move |fragment| (page, fragment.clone()))
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+/// Returns each table fragment's page and height.
+fn fragments(measured: Vec<Value>) -> Vec<(usize, f64)> {
+    table_fragments(measured, None)
+        .into_iter()
+        .map(|(page, fragment)| (page, fragment["height"].as_f64().unwrap()))
+        .collect()
+}
+
+fn shortened_column_fragments(table: Value) -> Vec<(usize, Value)> {
+    let (block, measure) = paragraph(1, 4, json!({}));
+    table_fragments(
+        vec![
+            json!({"block":block,"measure":measure}),
+            json!({"block":{"kind":"sectionBreak","id":2,"type":"continuous"},
+                "measure":{"kind":"sectionBreak"}}),
+            table,
+        ],
+        Some(json!({"count":2,"gap":20})),
+    )
+}
+
+#[test]
+fn a_two_line_widow_controlled_row_skips_shortened_columns() {
+    let result = shortened_column_fragments(table(2, json!({"widowControl": true})));
+    assert_eq!(result.len(), 1);
+    let (page, fragment) = &result[0];
+    assert_eq!((*page, fragment["height"].as_f64().unwrap()), (1, 40.0));
+    assert_eq!(fragment["rowStart"], 0);
+    assert_eq!(fragment["rowEnd"], 1);
+    assert_eq!(fragment["y"], 10);
+    assert!(fragment["clipTop"].is_null());
+    assert!(fragment["clipBottom"].is_null());
+}
+
+#[test]
+fn a_two_line_kept_row_skips_shortened_columns() {
+    let result =
+        shortened_column_fragments(table(2, json!({"keepLines": true, "widowControl": false})));
+    assert_eq!(result.len(), 1);
+    let (page, fragment) = &result[0];
+    assert_eq!((*page, fragment["height"].as_f64().unwrap()), (1, 40.0));
+    assert_eq!(fragment["rowStart"], 0);
+    assert_eq!(fragment["rowEnd"], 1);
+    assert_eq!(fragment["y"], 10);
+    assert!(fragment["clipTop"].is_null());
+    assert!(fragment["clipBottom"].is_null());
 }
 
 #[test]
@@ -154,6 +206,37 @@ fn a_row_without_widow_control_uses_one_line_of_room_at_the_page_bottom() {
         fragments(vec![above, table(8, json!({"widowControl": false}))]),
         [(0, 20.0), (1, 100.0), (2, 40.0)]
     );
+}
+
+#[test]
+fn an_oversized_cant_split_row_without_widow_control_starts_on_a_fresh_page() {
+    let (block, measure) = paragraph(1, 4, json!({}));
+    let result = table_fragments(
+        vec![
+            json!({"block":block,"measure":measure}),
+            table_rows(&[(
+                8,
+                json!({"widowControl": false}),
+                json!({"cantSplit": true}),
+            )]),
+        ],
+        None,
+    );
+    assert_eq!(
+        result
+            .iter()
+            .map(|(page, fragment)| (*page, fragment["height"].as_f64().unwrap()))
+            .collect::<Vec<_>>(),
+        [(1, 100.0), (2, 60.0)]
+    );
+    for (_, fragment) in &result {
+        assert_eq!(fragment["rowStart"], 0);
+        assert_eq!(fragment["rowEnd"], 1);
+    }
+    assert!(result[0].1["clipTop"].is_null());
+    assert_eq!(result[0].1["clipBottom"], 100);
+    assert_eq!(result[0].1["clipBottom"], result[1].1["clipTop"]);
+    assert!(result[1].1["clipBottom"].is_null());
 }
 
 #[test]
