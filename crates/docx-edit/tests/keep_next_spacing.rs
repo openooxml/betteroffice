@@ -104,3 +104,34 @@ fn a_chain_of_headings_collapses_the_gaps_between_them() {
         pages(&[("Line 001", "Line 052"), ("Line 053", "Line 080")])
     );
 }
+
+/// A keepNext run or keepLines paragraph taller than a page starts on a new
+/// page when the current one already has content, then breaks as needed: 20
+/// lines, then 60 lines kept together, in Word 16. Without the keep flag the
+/// same content fills page one.
+#[test]
+fn content_kept_together_but_taller_than_a_page_starts_a_new_page() {
+    let last_word = |text: &str| text.rsplit(' ').next().unwrap_or_default().to_owned();
+    let pages = |name: &str| -> Vec<(String, String)> {
+        page_lines(name)
+            .into_iter()
+            .map(|(first, last)| (last_word(&first), last_word(&last)))
+            .collect()
+    };
+    assert_eq!(
+        pages("keep-next-chain-longer-than-a-page"),
+        [("F01", "F20"), ("H", "B57"), ("B58", "B59")].map(|(a, b)| (a.to_owned(), b.to_owned()))
+    );
+    assert_eq!(
+        pages("no-keep-next-chain-longer-than-a-page"),
+        [("F01", "B37"), ("B38", "B59")].map(|(a, b)| (a.to_owned(), b.to_owned()))
+    );
+    assert_eq!(
+        pages("keep-lines-longer-than-a-page"),
+        [("F01", "F20"), ("K01", "K58"), ("K59", "K60")].map(|(a, b)| (a.to_owned(), b.to_owned()))
+    );
+    assert_eq!(
+        pages("no-keep-lines-longer-than-a-page"),
+        [("F01", "K38"), ("K39", "K60")].map(|(a, b)| (a.to_owned(), b.to_owned()))
+    );
+}
