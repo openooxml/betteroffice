@@ -1425,11 +1425,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     lastCaretScrollSelectionRef.current = stickySelection;
     const quiet = quietSelectionRef.current;
     quietSelectionRef.current = null;
-    // Read-only, the first selection is where the user already looks.
     const selectionChanged =
-      (previousStickySelection === undefined
-        ? !readOnly
-        : !sameYrsSelection(previousStickySelection, stickySelection)) &&
+      (previousStickySelection === undefined ||
+        !sameYrsSelection(previousStickySelection, stickySelection)) &&
       !(quiet && stickySelection && sameYrsSelection(quiet, stickySelection));
     if (
       selection.anchor === selection.head &&

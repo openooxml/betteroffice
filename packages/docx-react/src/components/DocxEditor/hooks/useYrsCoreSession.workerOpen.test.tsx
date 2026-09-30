@@ -415,7 +415,7 @@ test('on-demand hydration is inactive without worker opening', async () => {
   }
 });
 
-test('an on-demand replica stays empty after frames and the open wait until requested', async () => {
+test('an on-demand replica stays empty past its load point until requested', async () => {
   const { workers, posted } = installWorker({ holdState: true });
   const frames = holdFrames();
   try {
@@ -429,10 +429,8 @@ test('an on-demand replica stays empty after frames and the open wait until requ
     act(() => result.current.presentFrame());
     act(() => frames.run());
     act(() => frames.run());
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 5100));
-    });
-    expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
+    await waitFor(() => expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1));
+    await act(async () => {});
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
     expect(result.current.core.replicaReady).toBe(false);
     expect(result.current.core.replicaReadyRef?.current).toBe(false);
@@ -1087,6 +1085,36 @@ test('a first-layout font setup failure starts the replica for pending reads, sa
     registerFont.mockRestore();
   }
 });
+
+test('an on-demand replica requested before any frame loads after the bounded wait', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, hydrateOnDemand: true, wanted: true },
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    await act(async () => {});
+    expect(posted.map((request) => request.type)).toEqual(['open']);
+    await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true), {
+      timeout: 7000,
+    });
+    const types = posted.map((request) => request.type);
+    expect(types.indexOf('revisionCount')).toBeGreaterThan(-1);
+    expect(types.indexOf('revisionCount')).toBeLessThan(types.indexOf('encodeState'));
+    expect(result.current.renderer.frame).toBeNull();
+    await act(async () => {
+      workers[0].release();
+      await awaitWorkerOpenReplica(session);
+    });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+    cleanup();
+  }
+}, 15_000);
 
 test('a worker open without a frame or error starts the replica after the bounded wait', async () => {
   const { workers, posted } = installWorker({ holdState: true });

@@ -16,7 +16,7 @@ import { YrsInput, type YrsInputProps, type YrsInputRef } from './YrsInput';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, render } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render } = await import('@testing-library/react');
 const ROOT = resolve(import.meta.dir, '../../../../..');
 const bytes = new Uint8Array(
   readFileSync(resolve(ROOT, 'crates/docx-edit/tests/fixtures/page-fragments/pages.docx'))
@@ -161,14 +161,22 @@ test('keepSelectionInPlace suppresses scrolling for one selection', async () => 
   expect(scroller.scrollTop).toBeGreaterThan(scrollTop);
 });
 
-test('a read-only input scrolls only after its first observed selection changes', async () => {
+test('read-only, a first selection set on a replica without a caret scrolls into view', async () => {
   const { session, input, scroller, scrollTop, expectCaret } = await mount(true, false);
   expect(session.selection()).toBeNull();
-  expect(scroller.scrollTop).toBe(scrollTop);
   act(() => input.current!.setSelectionFromDisplay(2));
   expectCaret(1);
-  expect(scroller.scrollTop).toBe(scrollTop);
-  act(() => input.current!.setSelectionFromDisplay(3));
-  expectCaret(2);
+  expect(scroller.scrollTop).toBeGreaterThan(scrollTop);
+});
+
+test('read-only, the first keyboard move on a replica without a caret scrolls into view', async () => {
+  const { session, input, scroller, scrollTop, view } = await mount(true, false);
+  expect(session.selection()).toBeNull();
+  const textarea = view.getByTestId('yrs-input');
+  await act(async () => {
+    fireEvent.keyDown(textarea, { key: 'End', ctrlKey: true });
+    await input.current!.flushPendingInput();
+  });
+  expect(session.selection()).not.toBeNull();
   expect(scroller.scrollTop).toBeGreaterThan(scrollTop);
 });

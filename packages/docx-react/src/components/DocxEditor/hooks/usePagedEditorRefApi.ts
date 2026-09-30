@@ -114,6 +114,8 @@ function storyOffsetToLoc(session: YrsSession, story: string, offset: number): Y
   return { story, paraId: last.paraId, offset: span.end - span.start };
 }
 
+const READER_INPUT = ['wheel', 'touchmove', 'pointerdown', 'keydown'] as const;
+
 function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
   const {
     bumpInputEpochRef,
@@ -277,13 +279,26 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
         highlight();
         return;
       }
-      // Runs once the replica has loaded, unless newer input came first.
+      // Runs once the replica has loaded, unless newer input or the reader's own navigation came first.
       const epoch = inputEpochRef.current?.();
+      let navigated = false;
+      const onReaderInput = (): void => {
+        navigated = true;
+      };
+      for (const type of READER_INPUT) {
+        document.addEventListener(type, onReaderInput, { capture: true, passive: true });
+      }
+      const stop = (): void => {
+        for (const type of READER_INPUT) document.removeEventListener(type, onReaderInput, true);
+      };
       void awaitWorkerOpenReplica(session)?.then(
         () => {
-          if (yrsSessionRef.current === session && inputEpochRef.current?.() === epoch) highlight();
+          stop();
+          if (!navigated && yrsSessionRef.current === session && inputEpochRef.current?.() === epoch) {
+            highlight();
+          }
         },
-        () => {}
+        stop
       );
     },
     scrollToCommentId: (commentId) => {

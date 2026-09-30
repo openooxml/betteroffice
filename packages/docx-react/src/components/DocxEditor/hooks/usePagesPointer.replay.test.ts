@@ -834,6 +834,45 @@ test('a highlight asked while the replica loads applies once it has loaded', asy
   expect(selections).toEqual([[20, 45, 'body']]);
 });
 
+test.each(['wheel', 'touchmove', 'keydown'])(
+  'reader %s drops a highlight asked while the replica loads',
+  async (type) => {
+    let loaded!: () => void;
+    const session = {
+      cellSelection: () => null,
+      version: () => 'v1',
+    } as unknown as YrsSession;
+    const { opts, selections } = options({ yrsSession: session });
+    const replica = deferWorkerOpenReplica(
+      session,
+      () => new Promise<() => void>((resolve) => { loaded = () => resolve(() => {}); }),
+      () => {},
+      () => { opts.replicaReady = true; },
+      { active: () => true, request: () => replica.start() }
+    );
+    const ref = createRef<PagedEditorRef>();
+    const view = renderHook(() => {
+      const pointer = usePagesPointer(opts);
+      usePagedEditorRefApi(refApiOptions(opts, ref, pointer));
+      return pointer;
+    });
+    const remove = spyOn(document, 'removeEventListener');
+    try {
+      act(() => ref.current!.highlightRange(20, 45));
+      act(() => document.body.dispatchEvent(new Event(type, { bubbles: true })));
+      await act(async () => {
+        loaded();
+        await awaitWorkerOpenReplica(session);
+      });
+      view.rerender();
+      expect(selections).toEqual([]);
+      expect(remove.mock.calls.filter(([name]) => name === type)).toHaveLength(1);
+    } finally {
+      remove.mockRestore();
+    }
+  }
+);
+
 test('newer input drops a highlight asked while the replica loads', async () => {
   let loaded!: () => void;
   const session = {
