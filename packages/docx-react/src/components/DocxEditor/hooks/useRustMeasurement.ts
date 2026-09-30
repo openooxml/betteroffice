@@ -30,6 +30,29 @@ export interface UseRustMeasurementReturn {
   runLayoutPipelineRef: React.RefObject<(() => void) | null>;
 }
 
+/** `engine` until `release()`: fonts that finish loading after it register nothing. */
+function releasableTextEngine(engine: RustTextEngine): {
+  engine: RustTextEngine;
+  release: () => void;
+} {
+  let released = false;
+  return {
+    engine: {
+      registerFont: (bytes) => (released ? -1 : engine.registerFont(bytes)),
+      ...(engine.registerSubstituteFont && {
+        registerSubstituteFont: (id: number, family: string) =>
+          released ? id : engine.registerSubstituteFont!(id, family),
+      }),
+      clearFonts: () => {
+        if (!released) engine.clearFonts();
+      },
+    },
+    release: () => {
+      released = true;
+    },
+  };
+}
+
 export function useRustMeasurement(
   options: UseRustMeasurementOptions
 ): UseRustMeasurementReturn {
@@ -39,6 +62,7 @@ export function useRustMeasurement(
   const runLayoutPipelineRef = useRef<(() => void) | null>(null);
   const sourceRef = useRef<RustMeasureSource | null>(null);
   const sourceEngineRef = useRef<RustTextEngine | null>(null);
+  const releaseSourceRef = useRef<(() => void) | null>(null);
   const latestFontChainsRef = useRef<Record<string, number[]>>({});
   const requirementWarmupsRef = useRef(new Map<string, Promise<void>>());
   const fedFontSourceRef = useRef<{
@@ -65,8 +89,13 @@ export function useRustMeasurement(
         }
         const firstLoad = !source;
         if (!source) {
-          source = createRustMeasureSource({ engine, bundled: fontProviderRef.current });
+          const releasable = releasableTextEngine(engine);
+          source = createRustMeasureSource({
+            engine: releasable.engine,
+            bundled: fontProviderRef.current,
+          });
           sourceRef.current = source;
+          releaseSourceRef.current = releasable.release;
         }
         source.setCompat(document?.package.settings?.compatibilityFlags);
 
@@ -90,6 +119,19 @@ export function useRustMeasurement(
       cancelled = true;
     };
   }, [document, textEngine]);
+
+  // A replaced or unmounted editor may free the session behind `textEngine`: font loads and
+  // layout passes its source still has pending end with it.
+  useEffect(
+    () => () => {
+      releaseSourceRef.current?.();
+      releaseSourceRef.current = null;
+      sourceRef.current = null;
+      // The next source starts over, even on the same engine.
+      sourceEngineRef.current = null;
+    },
+    [textEngine]
+  );
 
   const deferLayoutPass = useCallback((): boolean => sourceRef.current === null, []);
 

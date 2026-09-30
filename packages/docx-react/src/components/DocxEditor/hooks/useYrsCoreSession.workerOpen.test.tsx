@@ -137,10 +137,13 @@ function useHarness(props: HarnessProps) {
       onHostDocument: setHost,
       onError: (error) => errors.current.push(error),
     },
-    props.experimentalWorkerOpen ? {
-      openInWorker,
-      renderedFrame: renderer.status === 'ready' ? renderer.displayList : null,
-    } : undefined
+    {
+      heldEngine: renderer.layoutEngine,
+      workerOpen: props.experimentalWorkerOpen ? {
+        openInWorker,
+        renderedFrame: renderer.status === 'ready' ? renderer.displayList : null,
+      } : undefined,
+    }
   );
   const syncCoordinator = useRef(new LayoutSelectionGate());
   const element = useRef<HTMLDivElement | null>(null);
