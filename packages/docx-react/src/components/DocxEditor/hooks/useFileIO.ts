@@ -337,6 +337,10 @@ export function useFileIO({
             rId,
             wrapType: 'inline',
             displayMode: 'inline',
+            distTop: 0,
+            distBottom: 0,
+            distLeft: 0,
+            distRight: 0,
           };
           if (insert) {
             void insert(picture).then((result) => {
