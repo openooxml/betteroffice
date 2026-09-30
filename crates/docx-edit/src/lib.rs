@@ -2273,7 +2273,10 @@ mod tests {
         main.apply_host_update_v1(&worker.encode_state_as_update_v1())
             .unwrap();
 
-        assert_eq!(main.paragraphs("body").unwrap()[0].text, "host before local");
+        assert_eq!(
+            main.paragraphs("body").unwrap()[0].text,
+            "host before local"
+        );
         assert!(undo.undo());
         assert_eq!(main.paragraphs("body").unwrap()[0].text, "host before");
         assert!(!undo.undo());

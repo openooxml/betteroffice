@@ -251,6 +251,8 @@ export interface ProposalWithdrawal {
   accept: readonly string[];
   reject: readonly string[];
   proposalIds?: Readonly<Record<string, string>>;
+  /** Refuses as `stale-version` when the document is no longer at this version. */
+  expectVersion?: string;
 }
 
 /** @internal */
@@ -487,8 +489,17 @@ export function executeProposalRound(
 /** @internal */
 export function executeProposalWithdrawal(
   session: DocxProposalSession,
-  { owned, accept, reject, proposalIds }: ProposalWithdrawal
+  { owned, accept, reject, proposalIds, expectVersion }: ProposalWithdrawal
 ): ProposalWithdrawalOutcome {
+  if (expectVersion !== undefined && expectVersion !== session.version()) {
+    return {
+      ok: false,
+      failure: {
+        code: 'stale-version',
+        message: 'the document changed since the expected version was read',
+      },
+    };
+  }
   const owners = new Set(owned);
   const foreign = session
     .listRevisions()

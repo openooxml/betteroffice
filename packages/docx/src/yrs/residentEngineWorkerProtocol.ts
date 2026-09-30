@@ -16,7 +16,7 @@ import type {
 /** @internal */
 export type ResidentProposalOperation =
   | { kind: 'propose'; proposals: DocxProposalInput[]; expectVersion: string }
-  | ({ kind: 'withdraw' } & ProposalWithdrawal);
+  | ({ kind: 'withdraw'; expectVersion: string } & ProposalWithdrawal);
 
 /** @internal */
 export type ResidentProposalOutcome = ProposalRoundOutcome | ProposalWithdrawalOutcome;

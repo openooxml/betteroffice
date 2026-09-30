@@ -1056,9 +1056,9 @@ it('adopts a replica proposal round with the same text and revisions as a direct
     session.listRevisions().map((revision) => revision.revisionId).sort();
   expect(revisions(main)).toEqual(revisions(peer));
   expect(revisions(main)).toEqual(revisions(direct));
-  expect(outcome.receipts.flatMap((receipt) => receipt.revisionIds)).toEqual(
-    snapshot.proposals[0]!.revisionIds
-  );
+  expect(outcome.receipts.flatMap((receipt) => receipt.revisionIds)).toEqual([
+    ...snapshot.proposals[0]!.revisionIds,
+  ]);
   expect(main.getProposals().proposals).toEqual([]);
   expect(peer.getProposals().proposals).toEqual([]);
 });

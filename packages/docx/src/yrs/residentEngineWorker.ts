@@ -262,6 +262,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (!session) throw new Error('Resident engine worker is not initialized');
   if (request.type === 'executeProposal') {
+    if (!unsubscribe) throw new Error('Resident engine worker has not laid out its document');
     // The edit must not land between a provisional layout and the completion that finishes it.
     await completeProvisionalLayout();
     pendingUpdates = [];

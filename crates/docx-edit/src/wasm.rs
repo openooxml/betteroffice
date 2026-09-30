@@ -2491,7 +2491,11 @@ impl EditSession {
     /// It commits outside undo history and notifies as a local change.
     pub fn apply_host_update(&self, update: &[u8]) -> Result<(), JsValue> {
         self.undo.add_undo_barrier();
-        let result = self.engine.doc().apply_host_update_v1(update).map_err(js_err);
+        let result = self
+            .engine
+            .doc()
+            .apply_host_update_v1(update)
+            .map_err(js_err);
         self.undo.add_undo_barrier();
         result
     }

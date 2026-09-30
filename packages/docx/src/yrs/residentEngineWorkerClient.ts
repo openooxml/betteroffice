@@ -299,6 +299,9 @@ export class ResidentEngineWorkerClient {
 
   /** @internal */
   async executeProposal(operation: ResidentProposalOperation): Promise<ResidentProposalReply> {
+    if (!this.bootstrapped) {
+      throw new ResidentWorkerFailureError('Resident engine worker has not laid out its document');
+    }
     const response = await this.request({ type: 'executeProposal', operation });
     if (
       response.outcome === undefined ||

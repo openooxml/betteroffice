@@ -302,6 +302,20 @@ test('the worker lays a host batch out exactly as the main thread does', async (
   expect(inWorker).toEqual(JSON.parse(main.layoutDocumentWithRegionsRetainedJson(LAYOUT)));
 });
 
+test('a worker that has not laid out its document refuses proposal rounds', async () => {
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  await expect(
+    client.executeProposal({
+      kind: 'withdraw',
+      owned: [],
+      accept: [],
+      reject: [],
+      expectVersion: '',
+    })
+  ).rejects.toThrow('has not laid out its document');
+});
+
 test('worker proposal rounds return adoptable host updates and refuse stale versions', async () => {
   const main = await createYrsSession({ clientId: 5106 });
   sessions.push(main);
@@ -348,7 +362,7 @@ test('worker proposal rounds return adoptable host updates and refuse stale vers
   worker.applyUpdate(await client.encodeState());
   expect(accepted(main)).toEqual(['Proposed']);
   expect(accepted(main)).toEqual(accepted(worker));
-  expect(main.encodeStateVector()).toEqual(client.remoteStateVector());
+  expect(client.remoteStateVector()).toEqual(main.encodeStateVector());
   expect(main.getProposals().proposals).toEqual([]);
 
   const stale = await client.executeProposal({
@@ -366,11 +380,22 @@ test('worker proposal rounds return adoptable host updates and refuse stale vers
     throw new Error('expected proposal receipts');
   }
   const owned = applied.outcome.receipts.flatMap((receipt) => receipt.revisionIds);
+  const late = await client.executeProposal({
+    kind: 'withdraw',
+    owned,
+    accept: [],
+    reject: owned,
+    expectVersion: initial.version,
+  });
+  expect(late.outcome).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+  expect(late.updates).toEqual([]);
+  expect(late.changedStories).toEqual([]);
   const withdrawn = await client.executeProposal({
     kind: 'withdraw',
     owned,
     accept: [],
     reject: owned,
+    expectVersion: applied.version,
   });
   expect(withdrawn.outcome).toEqual({ ok: true });
   expect(withdrawn.updates.length).toBeGreaterThan(0);
