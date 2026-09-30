@@ -508,32 +508,48 @@ it('keeps every range of a comment anchored in the body and a table cell across 
   }
 });
 
-it('keeps overlapping and cross-paragraph comment ranges after an unrelated edit', async () => {
+it('keeps overlapping, enclosed, multi-paragraph and embed-only comment ranges after an unrelated edit', async () => {
+  const start = (id: number) => `<w:commentRangeStart w:id="${id}"/>`;
+  const end = (id: number) => `<w:commentRangeEnd w:id="${id}"/>`;
+  const refs = (...ids: number[]) =>
+    ids.map((id) => `<w:r><w:commentReference w:id="${id}"/></w:r>`).join('');
   const body =
-    `<w:p w14:paraId="0F000001"><w:commentRangeStart w:id="3"/>${t('A')}` +
-    `<w:commentRangeStart w:id="4"/>${t('B')}<w:commentRangeEnd w:id="3"/>${t('C')}` +
-    '<w:commentRangeEnd w:id="4"/><w:r><w:commentReference w:id="3"/></w:r>' +
-    '<w:r><w:commentReference w:id="4"/></w:r></w:p>' +
-    `<w:p w14:paraId="0F000002">${t('Before ')}<w:commentRangeStart w:id="5"/>${t('first')}</w:p>` +
-    `<w:p w14:paraId="0F000003">${t('second')}<w:commentRangeEnd w:id="5"/>` +
-    `<w:r><w:commentReference w:id="5"/></w:r>${t(' after')}</w:p>` +
-    `<w:p w14:paraId="0F000004">${t('Later')}</w:p>`;
-  const session = await open(docx(body, [3, 4, 5]), 91090);
-  const { start } = range(session, 3, 0, 0);
-  session.insertText({ story: 'body', ...start }, 'QA ');
+    `<w:p w14:paraId="0F000001">${start(3)}${t('A')}${start(4)}${t('B')}${end(3)}${t('C')}` +
+    `${start(6)}${t('D')}${end(6)}${end(4)}${refs(3, 4, 6)}</w:p>` +
+    `<w:p w14:paraId="0F000002">${t('Before ')}${start(5)}${t('first')}</w:p>` +
+    `<w:p w14:paraId="0F000003">${t('second')}${end(5)}${start(7)}` +
+    `<w:fldSimple w:instr=" PAGE ">${t('1')}</w:fldSimple>${end(7)}${refs(5, 7)}${t(' after')}${start(8)}</w:p>` +
+    '<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc>' +
+    `<w:p w14:paraId="0F00000A">${t('Cell')}</w:p></w:tc></w:tr></w:tbl>` +
+    `<w:p w14:paraId="0F000004">${t('Past')}${end(8)}${refs(8)}${start(9)}</w:p>` +
+    `<w:p w14:paraId="0F000005">${end(9)}${refs(9)}${t('Mark')}</w:p>` +
+    `<w:p w14:paraId="0F000006">${t('Later')}</w:p>`;
+  const ids = [3, 4, 6, 5, 7, 8, 9];
+  const anchors = (session: YrsSession) => ids.map((id) => session.resolveComment(String(id)));
+  const source = docx(body, ids);
+  const session = await open(source, 91090);
+  const expected = anchors(session);
+  expect(ids.map((id) => anchored(session, String(id)))).toEqual(
+    ['AB', 'BCD', 'D', 'firstsecond', '', 'Past', '']
+  );
+  expect(anchors(await seeded(source, 91093))).toEqual(expected);
+  const later = session.paragraphs('body').at(-1)!;
+  session.insertText({ story: 'body', paraId: later.paraId, offset: 0 }, 'QA ');
   for (const [path, bytes] of await saves(session)) {
-    for (const [id, text] of [[3, 'AB'], [4, 'BC'], [5, 'firstsecond']] as const) {
+    for (const id of ids) {
       expect([path, id, markers(bytes, id)]).toEqual([path, id, ['RangeStart', 'RangeEnd', 'Reference']]);
-      for (const reopened of [await open(bytes, 91091), await seeded(bytes, 91092)]) {
-        expect(anchored(reopened, String(id))).toBe(text);
-      }
     }
-    const first = paragraphXml(bytes, '0F000002');
-    const second = paragraphXml(bytes, '0F000003');
-    expect(first).toContain('<w:commentRangeStart w:id="5"/>');
-    expect(first).not.toContain('<w:commentRangeEnd w:id="5"/>');
-    expect(second).toContain('<w:commentRangeEnd w:id="5"/>');
-    expect(second).not.toContain('<w:commentRangeStart w:id="5"/>');
+    for (const reopened of [await open(bytes, 91091), await seeded(bytes, 91092)]) {
+      expect([path, anchors(reopened)]).toEqual([path, expected]);
+    }
+    for (const [id, from, to] of [
+      [5, '0F000002', '0F000003'],
+      [8, '0F000003', '0F000004'],
+      [9, '0F000004', '0F000005'],
+    ] as const) {
+      const spans = [paragraphXml(bytes, from).includes(start(id)), paragraphXml(bytes, to).includes(end(id))];
+      expect([path, id, spans]).toEqual([path, id, [true, true]]);
+    }
   }
 });
 
