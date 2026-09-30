@@ -261,7 +261,7 @@ test('the worker lays a host batch out exactly as the main thread does', async (
   const ids = main.loadStories([
     {
       storyId: 'body',
-      paragraphs: Array.from({ length: 80 }, (_, index) => ({ text: `${index} ${filler}` })),
+      paragraphs: Array.from({ length: 240 }, (_, index) => ({ text: `${index} ${filler}` })),
     },
   ]).body!;
   main.registerFont(new Uint8Array(readFileSync(FONT)));
@@ -274,7 +274,7 @@ test('the worker lays a host batch out exactly as the main thread does', async (
   const sessionId = main.paragraphIdentities().sessionId;
   const proposed = main.proposeChanges({
     expectVersion: main.version(),
-    proposals: [0, 23, 57].map((index) => ({
+    proposals: [0, 90, 200].map((index) => ({
       id: `p${index}`,
       paragraph: { kind: 'session', sessionId, story: 'body', paraId: ids[index]! },
       suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },

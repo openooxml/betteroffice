@@ -67,7 +67,9 @@ class FakeWorker {
 
 function setup() {
   const native = createEditSession(9301);
-  const paraId = native.create_story('body', 'Owned layout', 'Normal', 'left');
+  const { paraId } = JSON.parse(native.create_story('body', 'Owned layout', 'Normal', 'left')) as {
+    paraId: string;
+  };
   const layoutJson = native.layout_document_with_regions_retained_json(REQUEST);
   const frame = native.build_display_list_frame(JSON.stringify({}), 0);
   const adopted: string[] = [];
