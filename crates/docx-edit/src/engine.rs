@@ -2581,6 +2581,7 @@ impl EngineSession {
         if changed.is_empty() {
             return Ok(paragraphs);
         }
+        use yrs::{Map, ReadTxn, Transact};
         let stories: Vec<String> = {
             let txn = self.doc.yrs_doc().transact();
             txn.get_map(crate::STORIES)
