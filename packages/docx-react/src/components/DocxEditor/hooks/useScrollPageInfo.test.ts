@@ -8,7 +8,7 @@ import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { PagedEditorRef } from '../PagedEditor';
 import { pageAtViewportMiddle, useScrollPageInfo } from './useScrollPageInfo';
 
-const { cleanup, renderHook } = await import('@testing-library/react');
+const { act, cleanup, renderHook } = await import('@testing-library/react');
 
 afterEach(() => {
   cleanup();
@@ -118,6 +118,36 @@ test('the ref reads the page at call time, before any scroll event re-renders', 
   expect(hook.result.current.scrollPageInfo.currentPage).toBe(1);
   current = layout(3);
   expect(hook.result.current.readCurrentPage()).toBe(3);
-  current = layout(5, true);
+  current = layout(0);
   expect(hook.result.current.readCurrentPage()).toBeNull();
+});
+
+test('a partial layout reads the page among its pages but leaves the indicator alone', () => {
+  const { scroller, scrollTo } = pagesScroller(3);
+  let current: Layout = layout(3, true);
+  const editor = { getLayout: () => current } as unknown as PagedEditorRef;
+  const hook = renderHook(() =>
+    useScrollPageInfo({
+      scrollContainerRef: { current: scroller as HTMLDivElement },
+      pagedEditorRef: { current: editor },
+    })
+  );
+  scrollTo(100);
+  expect(hook.result.current.readCurrentPage()).toBe(2);
+  act(() => void scroller.dispatchEvent(new Event('scroll')));
+  expect(hook.result.current.scrollPageInfo).toEqual({
+    currentPage: 1,
+    totalPages: 0,
+    visible: false,
+  });
+  current = layout(3);
+  act(() => void scroller.dispatchEvent(new Event('scroll')));
+  expect(hook.result.current.scrollPageInfo).toEqual({
+    currentPage: 2,
+    totalPages: 3,
+    visible: true,
+  });
+  current = layout(2, true);
+  scrollTo(5000);
+  expect(hook.result.current.readCurrentPage()).toBe(2);
 });

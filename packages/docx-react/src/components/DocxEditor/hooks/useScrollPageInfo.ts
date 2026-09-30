@@ -73,13 +73,12 @@ export function useScrollPageInfo({
   });
   const scrollFadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  /** The page the scroll position shows now, or null without a full layout. */
+  /** The page the scroll position shows now among the laid-out pages, or null without any. */
   const readCurrentPage = useCallback((): number | null => {
     const scroller = scrollContainerRef.current;
     const layout = pagedEditorRef.current?.getLayout();
-    const totalPages = documentPageCount(layout);
-    if (!scroller || !layout || totalPages === 0) return null;
-    return Math.min(pageAtViewportMiddle(scroller, layout), totalPages);
+    if (!scroller || !layout || layout.pages.length === 0) return null;
+    return Math.min(pageAtViewportMiddle(scroller, layout), layout.pages.length);
   }, [scrollContainerRef, pagedEditorRef]);
 
   const scrollContainerEl = scrollContainerRef.current;
@@ -88,7 +87,7 @@ export function useScrollPageInfo({
 
     const handleScroll = () => {
       const totalPages = documentPageCount(pagedEditorRef.current?.getLayout());
-      const currentPage = readCurrentPage();
+      const currentPage = totalPages === 0 ? null : readCurrentPage();
       if (currentPage === null) return;
 
       // bail out on unchanged values: this fires per scroll event, and a new
