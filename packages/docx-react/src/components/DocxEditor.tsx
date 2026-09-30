@@ -9,7 +9,7 @@
  * - Loading states
  */
 
-import { useRef, useCallback, useState, useEffect, useMemo, forwardRef } from 'react';
+import { useRef, useCallback, useState, useEffect, useLayoutEffect, useMemo, forwardRef } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import type { Document, Theme } from '@betteroffice/docx/types/document';
 import type {
@@ -375,7 +375,7 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   /** Receives the editor's rendered-DOM context whenever a new frame or zoom rebuilds it. */
   onRenderedDomContextReady?: (context: RenderedDomContext) => void;
   /**
-   * Called once per document, when its first page is painted on screen, by the first-page
+   * Called once per document, when its first pages are painted on screen, by the first-page
    * preview or the full document, whichever shows first. The document may still be opening.
    */
   onFirstPagePainted?: () => void;
@@ -1113,19 +1113,23 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   });
   const { resetSettled, awaitingDocument } = canvasRenderer;
   const shownListRef = useRef(canvasRenderer.displayList);
-  shownListRef.current = canvasRenderer.displayList;
   // Pages shown while a load is under way belong to the document it replaces.
   const replacedListsRef = useRef(new WeakSet<object>());
   if (canvasRenderer.displayList && awaitingDocument()) {
     replacedListsRef.current.add(canvasRenderer.displayList);
   }
   const firstPagePendingRef = useRef(true);
+  const firstPageGenerationRef = useRef(0);
   const onFirstPagePaintedRef = useRef(onFirstPagePainted);
-  onFirstPagePaintedRef.current = onFirstPagePainted;
+  useLayoutEffect(() => {
+    shownListRef.current = canvasRenderer.displayList;
+    onFirstPagePaintedRef.current = onFirstPagePainted;
+  });
   const resetForNewDocument = useCallback(() => {
     beginPluginLoadRef.current();
     if (shownListRef.current) replacedListsRef.current.add(shownListRef.current);
     firstPagePendingRef.current = true;
+    firstPageGenerationRef.current += 1;
     resetEditorState();
     resetSettled();
   }, [resetEditorState, resetSettled]);
@@ -1222,8 +1226,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     displayList: canvasRenderer.displayList,
     engine: canvasRenderer.presentedEngine,
   };
+  useEffect(
+    () => () => {
+      firstPageGenerationRef.current += 1;
+    },
+    []
+  );
   useEffect(() => {
-    const offPresented = onPresented((displayList) => {
+    const offPresented = onPresented((displayList, options) => {
       const shown = shownRef.current;
       if (displayList !== shown.displayList) return;
       if (shown.engine) notifyFramePresented(shown.engine);
@@ -1231,14 +1241,20 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         firstPagePendingRef.current &&
         !awaitingDocument() &&
         !replacedListsRef.current.has(displayList) &&
-        shown.displayList?.pages.some((page) => page.pageIndex === 0)
+        shown.displayList?.pages.length
       ) {
         firstPagePendingRef.current = false;
-        try {
-          onFirstPagePaintedRef.current?.();
-        } catch (error) {
-          console.error('[DocxEditor] onFirstPagePainted threw', error);
-        }
+        const generation = firstPageGenerationRef.current;
+        const fire = () => {
+          if (generation !== firstPageGenerationRef.current) return;
+          try {
+            onFirstPagePaintedRef.current?.();
+          } catch (error) {
+            console.error('[DocxEditor] onFirstPagePainted threw', error);
+          }
+        };
+        if (options?.worker) requestAnimationFrame(() => requestAnimationFrame(fire));
+        else fire();
       }
     });
     // Pages of the opening session that fail to paint fail the load, as its render errors do.

@@ -70,8 +70,8 @@ of a document's first pages before the whole document opens, then hands them
 over to it; the editor stays read-only until then. It is ignored with
 collaboration.
 
-`onFirstPagePainted` is called once per document when its first page is on
-screen, from the preview or the full document, so a host can drop its loading
+`onFirstPagePainted` is called once per document when its first pages are painted
+on screen, from the preview or the full document, so a host can drop its loading
 state before the whole document is open.
 
 ## What works today

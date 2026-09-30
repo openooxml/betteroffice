@@ -79,26 +79,27 @@ afterAll(async () => {
 test('a preview reports its first page painted before the full document opens', async () => {
   let releaseFullOpen = () => {};
   holdFullOpen = new Promise((done) => (releaseFullOpen = done));
-  const events: string[] = [];
+  const ref = createRef<Editor>();
+  let painted = 0;
   render(
     <DocxEditor
+      ref={ref}
       previewFirstPage
       documentBuffer={fixture('page-fragments/pages.docx')}
-      onFirstPagePainted={() => events.push('painted')}
-      onRenderedDomContextReady={() => events.push('rendered')}
+      onFirstPagePainted={() => (painted += 1)}
     />
   );
-  await waitFor(() => expect(events).toContain('painted'), { timeout: 20_000 });
-  expect(created).toBe(2);
-  expect(events).toEqual(['painted']);
+  await waitFor(() => expect(created).toBe(2), { timeout: 20_000 });
+  expect(painted).toBe(1);
 
-  releaseFullOpen();
-  await waitFor(() => expect(events).toContain('rendered'), { timeout: 20_000 });
+  await act(async () => releaseFullOpen());
+  await waitFor(() => expect(ref.current!.getDocument()).not.toBeNull(), {
+    timeout: 20_000,
+  });
   await act(async () => {
     await new Promise((done) => setTimeout(done, 200));
   });
-  expect(events[0]).toBe('painted');
-  expect(events.filter((event) => event === 'painted')).toHaveLength(1);
+  expect(painted).toBe(1);
 }, 40_000);
 
 test('a document reports its first page painted once its canvas presents, not at layout', async () => {
