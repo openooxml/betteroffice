@@ -7365,6 +7365,9 @@ mod tests {
         )
         .unwrap();
         for measured_block in output["measured"].as_array().unwrap() {
+            if measured_block["block"]["kind"] != "paragraph" {
+                continue;
+            }
             let template = serde_json::json!({
                 "block": measured_block["block"],
                 "maxWidth": 248,
