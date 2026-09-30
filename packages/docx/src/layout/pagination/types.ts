@@ -657,8 +657,10 @@ export type TableBlock = {
   widthType?: string;
   /** Preferred `tblW` retained as one typed value. Undefined = legacy fields. */
   preferredWidth?: { value?: number; type?: 'auto' | 'pct' | 'dxa' | 'nil' };
-  /** `w:tblLayout`; undefined preserves the legacy resolver. */
+  /** Width layout policy; undefined preserves the legacy resolver. */
   layoutMode?: 'fixed' | 'autofit';
+  /** DOCX `w:tblLayout`, applied only when all cell content widths are known. */
+  tableLayout?: 'fixed' | 'autofit';
   /** Intrinsic sizing policy. Undefined = legacy fill-available-width. */
   widthAlgorithm?: 'legacy' | 'fixed' | 'autofit';
   /** Resolved table-style provenance/conditionals. */

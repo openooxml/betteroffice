@@ -5465,6 +5465,20 @@ mod tests {
         document
     }
 
+    fn measured_table_column_widths(table: &docx_layout::types::TableBlock) -> Vec<f64> {
+        let mut block = docx_layout::types::LayoutBlock::Table(table.clone());
+        let config = docx_layout::measure_blocks::MeasurementConfig {
+            defaults: json!({"fontFamily": "Arial", "fontSize": 12}),
+            ..Default::default()
+        };
+        let docx_layout::types::BlockExtent::Table(extent) =
+            docx_layout::measure_blocks::measure_block(&mut block, 600.0, &config).unwrap()
+        else {
+            panic!()
+        };
+        extent.column_widths
+    }
+
     #[test]
     fn seeded_grid_percentages_do_not_become_cell_width_preferences() {
         for formatting in [Value::Null, json!({}), json!({"verticalAlign": "center"})] {
@@ -5495,10 +5509,7 @@ mod tests {
                 assert_eq!(cell.width_value, None);
                 assert_eq!(cell.preferred_width, None);
             }
-            assert_eq!(
-                docx_layout::table_grid::resolve_table_column_widths(table, 600.0),
-                vec![150.0, 450.0]
-            );
+            assert_eq!(measured_table_column_widths(table), vec![150.0, 450.0]);
             document
                 .set_column_width(
                     &EditCtx::local("", ""),
@@ -5510,10 +5521,7 @@ mod tests {
             let docx_layout::types::LayoutBlock::Table(table) = &blocks[0] else {
                 panic!()
             };
-            assert_eq!(
-                docx_layout::table_grid::resolve_table_column_widths(table, 600.0),
-                vec![250.0, 350.0]
-            );
+            assert_eq!(measured_table_column_widths(table), vec![250.0, 350.0]);
         }
     }
 
@@ -5553,10 +5561,7 @@ mod tests {
                 assert_eq!(cell.width_value, Some(width));
                 assert_eq!(cell.preferred_width.as_ref().unwrap().value, Some(width));
             }
-            assert_eq!(
-                docx_layout::table_grid::resolve_table_column_widths(table, 600.0),
-                vec![150.0, 450.0]
-            );
+            assert_eq!(measured_table_column_widths(table), vec![150.0, 450.0]);
         }
     }
 
@@ -5592,7 +5597,7 @@ mod tests {
             assert_eq!(cell.preferred_width, None);
         }
         assert_eq!(
-            docx_layout::table_grid::resolve_table_column_widths(table, 600.0),
+            measured_table_column_widths(table),
             vec![100.0, 200.0, 300.0]
         );
     }
@@ -5626,10 +5631,7 @@ mod tests {
                 assert_eq!(cell.width_value, Some(value));
                 assert_eq!(cell.preferred_width.as_ref().unwrap().value, Some(value));
             }
-            assert_eq!(
-                docx_layout::table_grid::resolve_table_column_widths(table, 600.0),
-                expected
-            );
+            assert_eq!(measured_table_column_widths(table), expected);
         }
     }
 

@@ -7,8 +7,9 @@ use serde_json::Value;
 use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offset};
 use crate::floating_objects::MIN_WRAP_SEGMENT_WIDTH;
 use crate::table_grid::{
-    content_sized_columns, count_table_columns, grow_content_sized_columns, preferred_width_px,
-    resolve_cell_grid, resolve_content_fitted_column_widths,
+    content_sized_columns, count_table_columns, grow_content_sized_columns,
+    has_unknown_content_widths, legacy_preferred_width_px, preferred_width_px, resolve_cell_grid,
+    resolve_content_fitted_column_widths,
 };
 use crate::types::{
     BlockExtent, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition, LayoutBlock,
@@ -2022,12 +2023,14 @@ fn table_content_widths(
     content_width: f64,
     config: &MeasurementConfig,
 ) -> Option<Vec<Vec<Option<(f64, f64)>>>> {
-    if table
-        .width_algorithm
-        .as_deref()
-        .or(table.layout_mode.as_deref())
-        != Some("autofit")
-    {
+    if !matches!(
+        table
+            .width_algorithm
+            .as_deref()
+            .or(table.layout_mode.as_deref())
+            .or(table.table_layout.as_deref()),
+        Some("fixed" | "autofit")
+    ) {
         return None;
     }
     // Painting places each row's cells from column zero.
@@ -2075,7 +2078,7 @@ fn measure_table_column_widths(
     fitted_table_column_widths(table, content_width, config).0
 }
 
-/// The resolved column widths, and whether autofit sized them from content.
+#[cfg(test)]
 fn fitted_table_column_widths(
     table: &TableBlock,
     content_width: f64,
@@ -2090,15 +2093,27 @@ fn measure_table(
     content_width: f64,
     config: &MeasurementConfig,
 ) -> Result<TableExtent, String> {
-    let explicit_width = preferred_width_px(
-        table.preferred_width.as_ref(),
-        table.width,
-        table.width_type.as_deref(),
-        content_width,
-        None,
-    );
+    let content_widths = table_content_widths(table, content_width, config);
+    let unknown = has_unknown_content_widths(table, content_widths.as_deref());
+    let explicit_width = if unknown {
+        legacy_preferred_width_px(
+            None,
+            table.width,
+            table.width_type.as_deref(),
+            content_width,
+            None,
+        )
+    } else {
+        preferred_width_px(
+            table.preferred_width.as_ref(),
+            table.width,
+            table.width_type.as_deref(),
+            content_width,
+            None,
+        )
+    };
     let (mut column_widths, content_fitted) =
-        fitted_table_column_widths(table, content_width, config);
+        resolve_content_fitted_column_widths(table, content_width, content_widths.as_deref());
     let content_sized = if content_fitted {
         Vec::new()
     } else {
@@ -2109,7 +2124,9 @@ fn measure_table(
         grow_content_sized_columns(table, content_width, &maximums, &mut column_widths);
     }
     let resolved_total: f64 = column_widths.iter().sum();
-    let target_width = if resolved_total > 0.0 {
+    let target_width = if unknown {
+        explicit_width.unwrap_or(content_width)
+    } else if resolved_total > 0.0 {
         resolved_total
     } else {
         explicit_width.unwrap_or(content_width)
@@ -2131,13 +2148,25 @@ fn measure_table(
                 .take(col_span)
                 .sum::<f64>();
             if cell_width == 0.0 {
-                cell_width = preferred_width_px(
-                    cell.preferred_width.as_ref(),
-                    cell.width_value,
-                    cell.width_type.as_deref(),
-                    target_width,
-                    cell.width,
-                )
+                cell_width = if unknown {
+                    cell.width.filter(|width| *width > 0.0).or_else(|| {
+                        legacy_preferred_width_px(
+                            None,
+                            cell.width_value,
+                            cell.width_type.as_deref(),
+                            target_width,
+                            None,
+                        )
+                    })
+                } else {
+                    preferred_width_px(
+                        cell.preferred_width.as_ref(),
+                        cell.width_value,
+                        cell.width_type.as_deref(),
+                        target_width,
+                        cell.width,
+                    )
+                }
                 .unwrap_or(100.0);
             }
             let left = cell
@@ -3316,6 +3345,65 @@ mod tests {
             assert!(fitted);
             assert!(widths[0] < 100.0);
         });
+    }
+
+    #[test]
+    fn known_docx_layout_sizes_images_without_legacy_growth() {
+        for (layout, expected) in [("fixed", 100.0), ("autofit", 200.0)] {
+            let mut table: TableBlock = serde_json::from_value(json!({
+                "id": "table", "tableLayout": layout, "columnWidths": [100],
+                "rows": [{"id": "row", "cells": [
+                    {"id": "cell", "padding": {"left": 0, "right": 0, "top": 0, "bottom": 0},
+                     "blocks": [{"kind": "paragraph", "id": "paragraph", "runs": [
+                         {"kind": "image", "src": "image", "width": 200, "height": 40}
+                     ]}]}
+                ]}]
+            }))
+            .unwrap();
+            let config = MeasurementConfig {
+                defaults: json!({"fontFamily": "Arial", "fontSize": 12}),
+                ..MeasurementConfig::default()
+            };
+            assert_eq!(
+                fitted_table_column_widths(&table, 600.0, &config),
+                (vec![expected], true)
+            );
+            let measured = measure_table(&mut table, 600.0, &config).unwrap();
+            assert_eq!(measured.column_widths, vec![expected]);
+            assert_eq!(measured.rows[0].cells[0].width, expected);
+        }
+    }
+
+    #[test]
+    fn fixed_table_with_unknown_nested_content_keeps_main_column_and_cell_widths() {
+        let mut table: TableBlock = serde_json::from_value(json!({
+            "id": "outer", "layoutMode": "fixed", "columnWidths": [300],
+            "rows": [{"id": "row", "cells": [
+                {"id": "cell", "widthValue": 1500, "widthType": "dxa",
+                 "padding": {"left": 0, "right": 0, "top": 0, "bottom": 0},
+                 "blocks": [{
+                     "kind": "table", "id": "nested", "layoutMode": "fixed",
+                     "columnWidths": [200], "rows": [{"id": "nested-row", "cells": [
+                         {"id": "nested-cell", "blocks": [],
+                          "padding": {"left": 0, "right": 0, "top": 0, "bottom": 0}}
+                     ]}]
+                 }]}
+            ]}]
+        }))
+        .unwrap();
+        let config = MeasurementConfig::default();
+        assert_eq!(
+            fitted_table_column_widths(&table, 600.0, &config),
+            (vec![300.0], false)
+        );
+        let measured = measure_table(&mut table, 600.0, &config).unwrap();
+        assert_eq!(measured.column_widths, vec![300.0]);
+        assert_eq!(measured.total_width, 300.0);
+        assert_eq!(measured.rows[0].cells[0].width, 300.0);
+        let BlockExtent::Table(nested) = &measured.rows[0].cells[0].blocks[0] else {
+            panic!()
+        };
+        assert_eq!(nested.total_width, 200.0);
     }
 
     #[test]

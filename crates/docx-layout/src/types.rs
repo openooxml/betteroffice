@@ -885,6 +885,8 @@ pub struct TableBlock {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_layout: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width_algorithm: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style_cascade: Option<Value>,
@@ -1456,6 +1458,7 @@ impl PartialEq for TableBlock {
             width_type: _,
             preferred_width: _,
             layout_mode: _,
+            table_layout: _,
             width_algorithm: _,
             style_cascade: _,
             background: _,
@@ -1477,6 +1480,7 @@ impl PartialEq for TableBlock {
             && self.width_type == other.width_type
             && self.preferred_width == other.preferred_width
             && self.layout_mode == other.layout_mode
+            && self.table_layout == other.table_layout
             && self.width_algorithm == other.width_algorithm
             && self.style_cascade == other.style_cascade
             && self.background == other.background
@@ -2726,6 +2730,27 @@ pub struct DisplayCommentAuthorContract {
 mod contract_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn optional_table_layout_round_trips_and_changes_measurement_identity() {
+        let legacy: TableBlock = serde_json::from_value(json!({"id": 0, "rows": []})).unwrap();
+        assert_eq!(legacy.table_layout, None);
+        assert!(
+            serde_json::to_value(&legacy)
+                .unwrap()
+                .get("tableLayout")
+                .is_none()
+        );
+        let mut fixed = legacy.clone();
+        fixed.table_layout = Some("fixed".to_owned());
+        assert_ne!(legacy, fixed);
+        let value = serde_json::to_value(&fixed).unwrap();
+        assert_eq!(value["tableLayout"], "fixed");
+        assert_eq!(serde_json::from_value::<TableBlock>(value).unwrap(), fixed);
+        let mut autofit = fixed.clone();
+        autofit.table_layout = Some("autofit".to_owned());
+        assert_ne!(fixed, autofit);
+    }
 
     #[test]
     fn old_optional_contracts_deserialize_to_noop_defaults() {

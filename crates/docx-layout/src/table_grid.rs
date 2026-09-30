@@ -174,7 +174,7 @@ pub(crate) fn preferred_width_px(
         })
 }
 
-fn legacy_preferred_width_px(
+pub(crate) fn legacy_preferred_width_px(
     preferred: Option<&crate::types::PreferredWidth>,
     legacy_value: Option<f64>,
     legacy_type: Option<&str>,
@@ -469,6 +469,49 @@ fn autofit_content_widths(
     (minimums, maximums)
 }
 
+fn legacy_fixed_column_widths(
+    table_block: &TableBlock,
+    content_width: f64,
+    col_count: usize,
+    explicit_width_px: Option<f64>,
+) -> Vec<f64> {
+    let source = table_block
+        .grid_widths
+        .as_deref()
+        .or(table_block.column_widths.as_deref())
+        .unwrap_or(&[]);
+    let mut widths = normalize_table_column_widths(
+        source,
+        col_count,
+        explicit_width_px.unwrap_or(content_width),
+    );
+    for grid_cell in resolve_cell_grid(table_block)
+        .into_iter()
+        .filter(|cell| cell.row_index == 0)
+    {
+        let Some(cell) = table_block.rows[0].cells.get(grid_cell.cell_index) else {
+            continue;
+        };
+        if let Some(preferred) = legacy_preferred_width_px(
+            cell.preferred_width.as_ref(),
+            cell.width_value,
+            cell.width_type.as_deref(),
+            explicit_width_px.unwrap_or(content_width),
+            cell.width,
+        ) {
+            add_span_constraint(
+                &mut widths,
+                grid_cell.column_index,
+                grid_cell.col_span,
+                preferred,
+            );
+        }
+    }
+    explicit_width_px.map_or(widths.clone(), |target| {
+        distribute_to_target(widths, target)
+    })
+}
+
 fn legacy_autofit_column_widths(
     table_block: &TableBlock,
     content_width: f64,
@@ -715,7 +758,7 @@ pub fn content_sized_columns(
             cell.preferred_width.as_ref(),
             cell.width_value,
             cell.width_type.as_deref(),
-            total,
+            content_width,
             cell.width,
         )
         .is_some()
@@ -765,23 +808,9 @@ pub fn resolve_table_column_widths(table_block: &TableBlock, content_width: f64)
     resolve_table_column_widths_with_content(table_block, content_width, None)
 }
 
-pub(crate) fn resolve_table_column_widths_with_content(
-    table_block: &TableBlock,
-    content_width: f64,
-    content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
-) -> Vec<f64> {
-    resolve_content_fitted_column_widths(table_block, content_width, content_widths).0
-}
-
-/// Like [`resolve_table_column_widths_with_content`], also reporting whether
-/// autofit sized the columns from `content_widths` rather than falling back.
-pub(crate) fn resolve_content_fitted_column_widths(
-    table_block: &TableBlock,
-    content_width: f64,
-    content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
-) -> (Vec<f64>, bool) {
+fn legacy_table_column_widths(table_block: &TableBlock, content_width: f64) -> Vec<f64> {
     let mut column_widths: Vec<f64> = table_block.column_widths.clone().unwrap_or_default();
-    let explicit_width_px = preferred_width_px(
+    let explicit_width_px = legacy_preferred_width_px(
         table_block.preferred_width.as_ref(),
         table_block.width,
         table_block.width_type.as_deref(),
@@ -797,44 +826,105 @@ pub(crate) fn resolve_content_fitted_column_widths(
         .or(table_block.layout_mode.as_deref())
         .unwrap_or("legacy");
     if !table_block.rows.is_empty() && algorithm == "fixed" {
-        return (
-            resolve_fixed_column_widths(table_block, content_width, col_count, explicit_width_px),
-            false,
+        return legacy_fixed_column_widths(
+            table_block,
+            content_width,
+            col_count,
+            explicit_width_px,
         );
     }
     if !table_block.rows.is_empty() && algorithm == "autofit" {
-        let unknown = table_block.rows.iter().enumerate().any(|(row_index, row)| {
-            row.grid_before.is_some_and(|before| before > 0)
-                || row.cells.iter().enumerate().any(|(cell_index, cell)| {
-                    cell.grid_start.is_some()
-                        || match content_widths {
-                            Some(rows) => rows
-                                .get(row_index)
-                                .and_then(|cells| cells.get(cell_index))
-                                .is_none_or(Option::is_none),
-                            None => {
-                                cell.min_content_width.is_none() || cell.max_content_width.is_none()
-                            }
-                        }
-                })
-        });
-        if unknown {
-            return (
-                legacy_autofit_column_widths(
-                    table_block,
-                    content_width,
-                    col_count,
-                    legacy_preferred_width_px(
-                        table_block.preferred_width.as_ref(),
-                        table_block.width,
-                        table_block.width_type.as_deref(),
-                        content_width,
-                        None,
-                    ),
-                ),
-                false,
-            );
+        return legacy_autofit_column_widths(
+            table_block,
+            content_width,
+            col_count,
+            explicit_width_px,
+        );
+    }
+
+    if !table_block.rows.is_empty() {
+        column_widths = normalize_table_column_widths(&column_widths, col_count, target_width);
+    }
+
+    if !column_widths.is_empty()
+        && let Some(explicit) = explicit_width_px
+        && js_truthy(explicit)
+    {
+        let total: f64 = column_widths.iter().fold(0.0, |sum, &w| sum + w);
+        if total > 0.0 && (total - explicit).abs() > 1.0 {
+            let scale = explicit / total;
+            column_widths = column_widths.into_iter().map(|w| w * scale).collect();
         }
+    }
+
+    column_widths
+}
+
+pub(crate) fn resolve_table_column_widths_with_content(
+    table_block: &TableBlock,
+    content_width: f64,
+    content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
+) -> Vec<f64> {
+    resolve_content_fitted_column_widths(table_block, content_width, content_widths).0
+}
+
+pub(crate) fn has_unknown_content_widths(
+    table_block: &TableBlock,
+    content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
+) -> bool {
+    table_block.rows.iter().enumerate().any(|(row_index, row)| {
+        row.grid_before.is_some_and(|before| before > 0)
+            || row.cells.iter().enumerate().any(|(cell_index, cell)| {
+                cell.grid_start.is_some()
+                    || match content_widths {
+                        Some(rows) => rows
+                            .get(row_index)
+                            .and_then(|cells| cells.get(cell_index))
+                            .is_none_or(Option::is_none),
+                        None => {
+                            cell.min_content_width.is_none() || cell.max_content_width.is_none()
+                        }
+                    }
+            })
+    })
+}
+
+/// Resolves widths and reports whether content-aware sizing was applied.
+pub(crate) fn resolve_content_fitted_column_widths(
+    table_block: &TableBlock,
+    content_width: f64,
+    content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
+) -> (Vec<f64>, bool) {
+    if has_unknown_content_widths(table_block, content_widths) {
+        return (
+            legacy_table_column_widths(table_block, content_width),
+            false,
+        );
+    }
+    let mut column_widths: Vec<f64> = table_block.column_widths.clone().unwrap_or_default();
+    let explicit_width_px = preferred_width_px(
+        table_block.preferred_width.as_ref(),
+        table_block.width,
+        table_block.width_type.as_deref(),
+        content_width,
+        None,
+    );
+    let col_count = count_table_columns(table_block);
+    let target_width = explicit_width_px.unwrap_or(content_width);
+
+    let algorithm = table_block
+        .width_algorithm
+        .as_deref()
+        .or(table_block.layout_mode.as_deref())
+        .or(table_block.table_layout.as_deref())
+        .unwrap_or("legacy");
+    if !table_block.rows.is_empty() && algorithm == "fixed" {
+        return (
+            resolve_fixed_column_widths(table_block, content_width, col_count, explicit_width_px),
+            true,
+        );
+    }
+    if !table_block.rows.is_empty() && algorithm == "autofit" {
         if let Some(widths) = autofit_column_widths(
             table_block,
             content_width,
@@ -1042,8 +1132,8 @@ mod tests {
         let block: TableBlock = serde_json::from_value(json!({
             "id": 0,
             "rows": [{ "id": 0, "cells": [
-                { "id": 0, "blocks": [], "preferredWidth": { "value": 3000, "type": "dxa" } },
-                { "id": 1, "blocks": [] }
+                { "id": 0, "blocks": [], "minContentWidth": 0, "maxContentWidth": 0, "preferredWidth": { "value": 3000, "type": "dxa" } },
+                { "id": 1, "blocks": [], "minContentWidth": 0, "maxContentWidth": 0 }
             ] }],
             "gridWidths": [100, 100],
             "layoutMode": "fixed",
@@ -1053,6 +1143,58 @@ mod tests {
             resolve_table_column_widths(&block, 600.0),
             vec![200.0, 100.0]
         );
+    }
+
+    #[test]
+    fn unknown_content_uses_main_algorithm_before_docx_layout() {
+        for (algorithm, layout, expected) in [
+            (None, None, 300.0),
+            (None, Some("fixed"), 300.0),
+            (None, Some("autofit"), 100.0),
+            (Some("legacy"), Some("autofit"), 300.0),
+            (Some("fixed"), Some("autofit"), 300.0),
+            (Some("autofit"), Some("fixed"), 100.0),
+        ] {
+            for table_layout in ["fixed", "autofit"] {
+                let block: TableBlock = serde_json::from_value(json!({
+                    "id": 0, "widthAlgorithm": algorithm, "layoutMode": layout,
+                    "tableLayout": table_layout, "columnWidths": [300],
+                    "rows": [{"id": 0, "cells": [
+                        {"id": 0, "blocks": [], "widthValue": 1500, "widthType": "dxa"}
+                    ]}]
+                }))
+                .unwrap();
+                for content in [None, Some(vec![vec![None]])] {
+                    assert_eq!(
+                        resolve_content_fitted_column_widths(&block, 600.0, content.as_deref()),
+                        (vec![expected], false)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn docx_layout_sizes_known_content_and_preserves_explicit_algorithm_overrides() {
+        for layout in ["fixed", "autofit"] {
+            let mut block: TableBlock = serde_json::from_value(json!({
+                "id": 0, "tableLayout": layout, "columnWidths": [300],
+                "rows": [{"id": 0, "cells": [
+                    {"id": 0, "blocks": [], "widthValue": 1500, "widthType": "dxa"}
+                ]}]
+            }))
+            .unwrap();
+            let content = vec![vec![Some((20.0, 30.0))]];
+            assert_eq!(
+                resolve_content_fitted_column_widths(&block, 600.0, Some(&content)),
+                (vec![100.0], true)
+            );
+            block.width_algorithm = Some("legacy".to_owned());
+            assert_eq!(
+                resolve_content_fitted_column_widths(&block, 600.0, Some(&content)),
+                (vec![300.0], false)
+            );
+        }
     }
 
     #[test]
@@ -1067,12 +1209,12 @@ mod tests {
                 "preferredWidth": {"value": table_width, "type": "dxa"},
                 "rows": [
                     {"id": 0, "cells": [
-                        {"id": 0, "blocks": [], "preferredWidth": {"value": 1500, "type": "dxa"}},
-                        {"id": 1, "blocks": [], "preferredWidth": {"value": 7500, "type": "dxa"}}
+                        {"id": 0, "blocks": [], "minContentWidth": 0, "maxContentWidth": 0, "preferredWidth": {"value": 1500, "type": "dxa"}},
+                        {"id": 1, "blocks": [], "minContentWidth": 0, "maxContentWidth": 0, "preferredWidth": {"value": 7500, "type": "dxa"}}
                     ]},
                     {"id": 1, "cells": [
-                        {"id": 2, "blocks": [], "widthValue": 7500, "widthType": "dxa"},
-                        {"id": 3, "blocks": [], "widthValue": 1500, "widthType": "dxa"}
+                        {"id": 2, "blocks": [], "minContentWidth": 0, "maxContentWidth": 0, "widthValue": 7500, "widthType": "dxa"},
+                        {"id": 3, "blocks": [], "minContentWidth": 0, "maxContentWidth": 0, "widthValue": 1500, "widthType": "dxa"}
                     ]}
                 ]
             }))
@@ -1100,8 +1242,8 @@ mod tests {
             "gridWidths": [twips_to_pixels(1500.0), twips_to_pixels(4500.0)],
             "preferredWidth": {"value": 9000, "type": "dxa"},
             "rows": [{"id": 0, "cells": [
-                {"id": 0, "blocks": [], "preferredWidth": {"value": 0, "type": "auto"}},
-                {"id": 1, "blocks": [], "preferredWidth": {"value": 0, "type": "auto"}}
+                {"id": 0, "blocks": [], "minContentWidth": 0, "maxContentWidth": 0, "preferredWidth": {"value": 0, "type": "auto"}},
+                {"id": 1, "blocks": [], "minContentWidth": 0, "maxContentWidth": 0, "preferredWidth": {"value": 0, "type": "auto"}}
             ]}]
         }))
         .unwrap();
@@ -1126,9 +1268,9 @@ mod tests {
             "id": 0, "layoutMode": "fixed", "gridWidths": [300, 300, 300],
             "preferredWidth": {"value": 9000, "type": "dxa"},
             "rows": [{"id": 0, "cells": [
-                {"id": 0, "blocks": [], "colSpan": 2,
+                {"id": 0, "blocks": [], "minContentWidth": 0, "maxContentWidth": 0, "colSpan": 2,
                  "preferredWidth": {"value": 1500, "type": "dxa"}},
-                {"id": 1, "blocks": [], "preferredWidth": {"value": 7500, "type": "dxa"}}
+                {"id": 1, "blocks": [], "minContentWidth": 0, "maxContentWidth": 0, "preferredWidth": {"value": 7500, "type": "dxa"}}
             ]}]
         }))
         .unwrap();
@@ -1766,8 +1908,8 @@ mod tests {
                 "id": 0, "layoutMode": "fixed", "gridWidths": grid,
                 "preferredWidth": {"value": 6000, "type": "dxa"},
                 "rows": [{"id": 0, "cells": [
-                    {"id": 0, "blocks": [], "width": preferred[0]},
-                    {"id": 1, "blocks": [], "width": preferred[1]}
+                    {"id": 0, "blocks": [], "minContentWidth": 0, "maxContentWidth": 0, "width": preferred[0]},
+                    {"id": 1, "blocks": [], "minContentWidth": 0, "maxContentWidth": 0, "width": preferred[1]}
                 ]}]
             }))
             .unwrap();
