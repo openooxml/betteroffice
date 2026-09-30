@@ -137,8 +137,8 @@ export async function applyEditBatch<Refusal = never>(
 
 /**
  * The ref's proposal path: the host-proposal gate, an input flush, the gate again, the session
- * call, then one refresh of the stories new proposals changed. Throws when the document is
- * unavailable or replaced while flushing.
+ * call, then one refresh of the stories that new or withdrawn proposals changed. Throws when the
+ * document is unavailable or replaced while flushing.
  */
 export async function applyProposalCall(
   pagedEditorRef: React.RefObject<PagedEditorRef | null>,
@@ -159,12 +159,17 @@ export async function applyProposalCall(
     throw new Error('The document changed while flushing input');
   }
   if (!allowed()) return denied(session);
-  const known = new Set(session.getProposals().proposals.map((proposal) => proposal.id));
+  const known = session.getProposals().proposals;
   const result = call(session);
   if (!result.ok) return result;
+  const before = new Set(known.map((proposal) => proposal.id));
+  const after = new Set(result.snapshot.proposals.map((proposal) => proposal.id));
   const stories = new Set(
-    result.snapshot.proposals
-      .filter((proposal) => proposal.changed && !known.has(proposal.id))
+    [
+      ...result.snapshot.proposals.filter((proposal) => !before.has(proposal.id)),
+      ...known.filter((proposal) => !after.has(proposal.id)),
+    ]
+      .filter((proposal) => proposal.changed)
       .map((proposal) => proposal.paragraph.story)
   );
   if (stories.size > 0) {

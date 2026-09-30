@@ -2807,6 +2807,38 @@ impl EditingDoc {
         }))
     }
 
+    /// Resolves tracked changes by revision id outside undo history, as a host batch does: the
+    /// `accept` ids apply and the `reject` ids roll back, as [`EditingDoc::accept_change`] and
+    /// [`EditingDoc::reject_change`] resolve them. An id that matches nothing is skipped. Returns
+    /// the ids resolved.
+    pub fn settle_revisions(
+        &self,
+        accept: &[crate::RevisionId],
+        reject: &[crate::RevisionId],
+        history: &UndoSession,
+    ) -> crate::OpResult<Vec<crate::RevisionId>> {
+        let ctx = EditCtx::system("");
+        let mut resolved = Vec::new();
+        history.add_undo_barrier();
+        for (ids, accepting) in [(accept, true), (reject, false)] {
+            for id in ids {
+                let target = crate::ChangeTarget::Revision(id.clone());
+                let outcome = if accepting {
+                    self.accept_change(&ctx, &target)
+                } else {
+                    self.reject_change(&ctx, &target)
+                };
+                match outcome {
+                    Ok(receipt) => resolved.extend(receipt.revision_ids),
+                    Err(crate::OpError::UnknownChange(_)) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        history.add_undo_barrier();
+        Ok(resolved)
+    }
+
     /// Drops the authored values of the text controls a committed batch filled, in a transaction
     /// of its own so undoing the fill never brings them back.
     fn drop_values(&self, valued: &[yrs::MapRef]) {

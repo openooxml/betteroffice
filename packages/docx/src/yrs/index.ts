@@ -50,6 +50,7 @@ import {
   type DocxProposalResult,
   type DocxProposalSnapshot,
   type DocxProposalStateRequest,
+  type DocxProposalWithdrawRequest,
 } from './proposals';
 import type {
   DocxContentControlQuery,
@@ -103,6 +104,7 @@ export {
   type DocxProposalSnapshot,
   type DocxProposalState,
   type DocxProposalStateRequest,
+  type DocxProposalWithdrawRequest,
 } from './proposals';
 export {
   captureSessionSave,
@@ -1290,6 +1292,12 @@ export interface YrsSession extends CollaborationReplica {
    * history; each call that changes one increments `previewVersion`.
    */
   setProposalStates(request: DocxProposalStateRequest): DocxProposalResult;
+  /**
+   * Withdraws proposals, settling each as its decision previews it: accepted ones apply for good,
+   * rejected and undecided ones are removed. The settlement is one change against `expectVersion`
+   * outside undo history, so a later round resolves against the text the preview showed.
+   */
+  withdrawProposals(request: DocxProposalWithdrawRequest): DocxProposalResult;
   /** The proposals in the order they were made. */
   getProposals(): DocxProposalSnapshot;
   /** Listens for new proposals, decisions and a forgotten registry. Returns the unsubscribe. */
@@ -1610,7 +1618,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     version: () => facade.version(),
     resolveParagraphAnchor: (anchor) => facade.resolveParagraphAnchor(anchor),
     findText: (request) => facade.findText(request),
+    readParagraphs: (request) => facade.readParagraphs(request),
     applyEdits: (request) => facade.applyEdits(request),
+    settleRevisions: (accept, reject, stories) => {
+      markDirty(stories);
+      session.settle_revisions_json(JSON.stringify({ accept, reject }));
+    },
   });
 
   const facade: YrsSession = {
@@ -2483,6 +2496,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       }),
     proposeChanges: (request) => mutate(() => proposals.propose(request)),
     setProposalStates: (request) => proposals.setStates(request),
+    withdrawProposals: (request) => mutate(() => proposals.withdraw(request)),
     getProposals: () => proposals.snapshot(),
     onProposalChange: (listener) => {
       if (destroyed) throw new Error('yrs session is destroyed');

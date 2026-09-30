@@ -144,7 +144,8 @@ export {
 export { LocaleProvider, useTranslation, type LocaleProviderProps } from './i18n';
 
 // Host-proposal types — re-exported so hosts don't need to import
-// `@betteroffice/docx/yrs` directly for `proposeChanges`/`setProposalStates`/`getProposals`.
+// `@betteroffice/docx/yrs` directly for `proposeChanges`/`setProposalStates`/`withdrawProposals`/
+// `getProposals`.
 export type {
   DocxOccurrence,
   DocxProposalFailure,
@@ -155,4 +156,5 @@ export type {
   DocxProposalSnapshot,
   DocxProposalState,
   DocxProposalStateRequest,
+  DocxProposalWithdrawRequest,
 } from '@betteroffice/docx/yrs';
