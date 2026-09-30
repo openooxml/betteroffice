@@ -38,7 +38,9 @@ fn cell_unbreakable_ranges(
     let mut ranges = Vec::new();
     let mut y = start_y;
     let mut previous_after = 0.0_f64;
+    let mut keep_next_top: Option<f64> = None;
     for (index, measure) in measures.iter().enumerate() {
+        let preceding_keep_top = keep_next_top.take();
         let block = blocks.get(index);
         if let (Some(LayoutBlock::Paragraph(paragraph)), BlockExtent::Paragraph(extent)) =
             (block, measure)
@@ -56,6 +58,8 @@ fn cell_unbreakable_ranges(
                 ranges.push((top, y));
             }
             let lines = &ranges[first..];
+            let first_bottom = lines.first().map(|&(_, bottom)| bottom);
+            let last_top = lines.last().map(|&(top, _)| top);
             if paragraph_rules
                 && let (Some(&(top, _)), Some(&(_, bottom))) = (lines.first(), lines.last())
             {
@@ -66,6 +70,17 @@ fn cell_unbreakable_ranges(
                     ranges.push((top, second_bottom));
                     ranges.push((penultimate_top, bottom));
                 }
+            }
+            if paragraph_rules {
+                if let (Some(top), Some(bottom)) = (preceding_keep_top, first_bottom) {
+                    ranges.push((top, bottom));
+                }
+                keep_next_top =
+                    if paragraph.attrs.as_ref().and_then(|attrs| attrs.keep_next) == Some(true) {
+                        last_top
+                    } else {
+                        None
+                    };
             }
             previous_after = spacing.and_then(|value| value.after).unwrap_or(0.0);
             continue;
@@ -422,6 +437,118 @@ mod tests {
 
     fn measured_cell(blocks: Vec<serde_json::Value>) -> serde_json::Value {
         json!({ "blocks": blocks, "width": 100.0, "height": 0.0 })
+    }
+
+    fn single_cell_table(
+        blocks: Vec<serde_json::Value>,
+        measures: Vec<serde_json::Value>,
+        row_height: f64,
+    ) -> (TableBlock, TableExtent) {
+        let block = serde_json::from_value(json!({
+            "id": 0,
+            "rows": [{ "id": 0, "cells": [cell(None, blocks)] }],
+            "columnWidths": [100.0],
+        }))
+        .unwrap();
+        let measure = serde_json::from_value(json!({
+            "columnWidths": [100.0],
+            "totalWidth": 100.0,
+            "totalHeight": row_height,
+            "rows": [{ "height": row_height, "cells": [measured_cell(measures)] }],
+        }))
+        .unwrap();
+        (block, measure)
+    }
+
+    #[test]
+    fn keep_next_removes_only_the_paragraph_boundary() {
+        for keep_next in [Some(true), Some(false), None] {
+            let mut middle = para();
+            if let Some(keep_next) = keep_next {
+                middle["attrs"]["keepNext"] = json!(keep_next);
+            }
+            let (block, measure) =
+                single_cell_table(vec![para(), middle, para()], vec![para_measure(1); 3], 60.0);
+            let info = build_table_row_break_info(&block, &measure);
+            let (offsets, snapped) = if keep_next == Some(true) {
+                (vec![20.0, 60.0], 20.0)
+            } else {
+                (vec![20.0, 40.0, 60.0], 40.0)
+            };
+            assert_eq!(info.break_offsets[0], offsets);
+            assert_eq!(snap_row_break(&info, 0, 0.0, 40.0), snapped);
+        }
+    }
+
+    #[test]
+    fn keep_next_allows_splitting_both_paragraphs() {
+        let mut kept = para();
+        kept["attrs"]["keepNext"] = json!(true);
+        let (block, measure) =
+            single_cell_table(vec![para(), kept, para()], vec![para_measure(2); 3], 120.0);
+        let info = build_table_row_break_info(&block, &measure);
+        assert_eq!(info.break_offsets[0], vec![20.0, 40.0, 60.0, 100.0, 120.0]);
+        assert_eq!(snap_row_break(&info, 0, 0.0, 60.0), 60.0);
+        assert_eq!(snap_row_break(&info, 0, 0.0, 100.0), 100.0);
+    }
+
+    #[test]
+    fn keep_next_composes_with_follower_widow_control() {
+        for widow_control in [Some(true), None] {
+            for (lines, offsets) in [(2, vec![60.0]), (3, vec![80.0]), (4, vec![60.0, 100.0])] {
+                let mut kept = para();
+                kept["attrs"]["keepNext"] = json!(true);
+                let mut follower = para();
+                follower["attrs"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("widowControl");
+                if let Some(widow_control) = widow_control {
+                    follower["attrs"]["widowControl"] = json!(widow_control);
+                }
+                let (block, measure) = single_cell_table(
+                    vec![kept, follower],
+                    vec![para_measure(1), para_measure(lines)],
+                    (lines + 1) as f64 * LINE,
+                );
+                let info = build_table_row_break_info(&block, &measure);
+                assert_eq!(info.break_offsets[0], offsets);
+                assert_eq!(snap_row_break(&info, 0, 0.0, 40.0), 0.0);
+                if lines == 4 {
+                    assert_eq!(snap_row_break(&info, 0, 0.0, 60.0), 60.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn keep_next_stops_at_nested_tables() {
+        let mut kept = para();
+        kept["attrs"]["keepNext"] = json!(true);
+        let (nested, nested_measure) = single_cell_table(vec![para()], vec![para_measure(2)], 40.0);
+        let mut nested = serde_json::to_value(nested).unwrap();
+        nested["kind"] = json!("table");
+        let mut nested_measure = serde_json::to_value(nested_measure).unwrap();
+        nested_measure["kind"] = json!("table");
+        let (block, measure) = single_cell_table(
+            vec![kept, nested, para()],
+            vec![para_measure(1), nested_measure, para_measure(1)],
+            80.0,
+        );
+        let info = build_table_row_break_info(&block, &measure);
+        assert_eq!(info.break_offsets[0], vec![20.0, 60.0, 80.0]);
+    }
+
+    #[test]
+    fn floating_table_ignores_local_keep_next() {
+        let mut kept = para();
+        kept["attrs"]["keepNext"] = json!(true);
+        let (mut block, measure) =
+            single_cell_table(vec![para(), kept, para()], vec![para_measure(1); 3], 60.0);
+        block.floating = Some(serde_json::from_value(json!({})).unwrap());
+        let breaks = RowBreaks::new(&block, &measure);
+        assert_eq!(&breaks.kept, breaks.lines());
+        assert_eq!(breaks.kept.break_offsets[0], vec![20.0, 40.0, 60.0]);
     }
 
     /// The integration-test table: 3 rows, 2 cols; col 0 is a rowSpan=3 merged
