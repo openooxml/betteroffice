@@ -2,10 +2,11 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, expect, test } from 'bun:test';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { createRenderedDomContext } from '@betteroffice/docx/plugin-api/RenderedDomContext';
-import type {
-  DocxProposalSnapshot,
-  ProposalGeometryMirror,
-  YrsSession,
+import {
+  proposalSetIdentity,
+  type DocxProposalSnapshot,
+  type ProposalGeometryMirror,
+  type YrsSession,
 } from '@betteroffice/docx/yrs';
 import { stampRevisionPreviewKey } from '../components/DocxEditor/internals/layoutProvenance';
 import { createPluginGeometry } from './geometry';
@@ -49,14 +50,27 @@ function mirroredGeometry() {
     pageBounds: () => ({ pageIndex: 0, x: 0, y: 0, width: 100, height: 200 }),
   } as unknown as DisplayListQueries;
   stampRevisionPreviewKey(queries, '');
-  const snapshot: DocxProposalSnapshot = { version: 'v1', previewVersion: 0, proposals: [] };
+  let snapshot: DocxProposalSnapshot = {
+    version: 'v1',
+    previewVersion: 0,
+    proposals: [
+      {
+        id: 'proposal',
+        state: 'proposed',
+        paragraph: { kind: 'session', sessionId: 'session', story: 'body', paraId: 'first' },
+        revisionIds: [],
+        changed: false,
+      },
+    ],
+  };
   const session = {
     version: () => 'v1',
     getProposals: () => snapshot,
   } as unknown as YrsSession;
-  const mirror: ProposalGeometryMirror = {
+  let mirror: ProposalGeometryMirror = {
     version: 'v1',
     previewVersion: 0,
+    proposals: proposalSetIdentity(snapshot),
     targets: {
       proposal: { ok: true, ranges: [{ from: 4, to: 8 }], paragraph: 3 },
       missing: {
@@ -90,6 +104,14 @@ function mirroredGeometry() {
   return {
     geometry,
     anchorPositions,
+    snapshot,
+    mirror,
+    setSnapshot: (value: DocxProposalSnapshot) => {
+      snapshot = value;
+    },
+    setMirror: (value: ProposalGeometryMirror) => {
+      mirror = value;
+    },
     setPending: (value: boolean) => {
       pending = value;
     },
@@ -123,6 +145,46 @@ test('serves proposal geometry from a mirror while the replica has no anchor rea
     ok: false,
     failure: { code: 'layout-unavailable' },
   });
+});
+
+test('refuses mirrored geometry after withdrawal without version changes', () => {
+  const state = mirroredGeometry();
+  state.setSnapshot({ ...state.snapshot, proposals: [] });
+  expect(state.geometry.getAnchorGeometry({ kind: 'proposal', id: 'proposal' })).toEqual({
+    ok: false,
+    failure: { code: 'layout-unavailable', message: 'No rendered layout shows this target yet' },
+  });
+  expect(state.anchorPositions).toEqual([]);
+});
+
+test('waits for a matching mirror when the same proposal id moves to another paragraph', () => {
+  const state = mirroredGeometry();
+  const snapshot: DocxProposalSnapshot = {
+    ...state.snapshot,
+    proposals: state.snapshot.proposals.map((proposal) => ({
+      ...proposal,
+      paragraph: { ...proposal.paragraph, paraId: 'second' },
+    })),
+  };
+  state.setSnapshot(snapshot);
+  expect(state.geometry.getAnchorGeometry({ kind: 'proposal', id: 'proposal' })).toEqual({
+    ok: false,
+    failure: { code: 'layout-unavailable', message: 'No rendered layout shows this target yet' },
+  });
+  expect(state.anchorPositions).toEqual([]);
+
+  state.setMirror({
+    ...state.mirror,
+    proposals: proposalSetIdentity(snapshot),
+    targets: { proposal: { ok: true, ranges: [], paragraph: 9 } },
+  });
+  expect(state.geometry.getAnchorGeometry({ kind: 'proposal', id: 'proposal' })).toMatchObject({
+    ok: true,
+    version: state.mirror.version,
+    previewVersion: state.mirror.previewVersion,
+    anchor: { pageIndex: 0, x: 9, width: 0 },
+  });
+  expect(state.anchorPositions).toEqual([9]);
 });
 
 test('keeps presented and pending-input checks on mirrored proposal geometry', () => {
