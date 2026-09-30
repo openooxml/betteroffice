@@ -107,6 +107,8 @@ const PREVIEW_PAINT_TIMEOUT_MS = 2000;
 const PREVIEW_FRAME_WAIT_MS = 100;
 /** Bounds the wait for a worker frame to reach the screen before the replica hydrates. */
 const REPLICA_FRAME_WAIT_MS = 1000;
+/** Bounds the wait for a worker-opened session's first frame before the replica hydrates. */
+const REPLICA_OPEN_WAIT_MS = 5000;
 /**
  * How long a preview waits for the full session, from the end of its own
  * paint. A full open that has not produced one by then fails the load; once
@@ -337,6 +339,8 @@ export function useYrsCoreSession(
   const workerOpenEnabledRef = useRef(Boolean(openInWorker));
   workerOpenEnabledRef.current = Boolean(openInWorker);
   const pendingReplicaRef = useRef<ReturnType<typeof deferWorkerOpenReplica> | null>(null);
+  const startReplicaRef = useRef<(() => void) | null>(null);
+  const replicaWaitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inheritedFrameRef = useRef<object | null>(null);
   const renderedFrameRef = useRef(workerOpen?.renderedFrame ?? null);
   renderedFrameRef.current = workerOpen?.renderedFrame ?? null;
@@ -550,6 +554,18 @@ export function useYrsCoreSession(
               }
             );
             pendingReplicaRef.current = pending;
+            startReplicaRef.current = () => {
+              if (
+                stale() ||
+                sessionRef.current !== next ||
+                pendingReplicaRef.current !== pending
+              ) return;
+              if (replicaWaitTimerRef.current !== null) {
+                clearTimeout(replicaWaitTimerRef.current);
+                replicaWaitTimerRef.current = null;
+              }
+              pending.start();
+            };
             replicaReadyRef.current = false;
             setReplicaReady(false);
             void pending.ready.catch((error: unknown) => {
@@ -592,6 +608,9 @@ export function useYrsCoreSession(
         setSession(next);
         setPreviewing(false);
         setSessionGeneration(seedGeneration);
+        if (openedWorker && startReplicaRef.current) {
+          replicaWaitTimerRef.current = setTimeout(startReplicaRef.current, REPLICA_OPEN_WAIT_MS);
+        }
         if (host) callbacksRef.current?.onHostDocument?.(host, seedGeneration, next);
       })
       .catch((error) => {
@@ -604,6 +623,9 @@ export function useYrsCoreSession(
       cancelled = true;
       pendingReplicaRef.current?.cancel();
       pendingReplicaRef.current = null;
+      startReplicaRef.current = null;
+      if (replicaWaitTimerRef.current !== null) clearTimeout(replicaWaitTimerRef.current);
+      replicaWaitTimerRef.current = null;
       openedWorker?.destroy();
       failOpeningRef.current = null;
       if (fullOpenTimer !== null) clearTimeout(fullOpenTimer);
@@ -635,19 +657,27 @@ export function useYrsCoreSession(
     if (!openInWorker) return;
     const frame = workerOpen?.renderedFrame;
     const pending = pendingReplicaRef.current;
-    if (!session || !frame || frame === inheritedFrameRef.current || !pending?.pending) return;
+    const start = startReplicaRef.current;
+    if (
+      !session ||
+      session !== sessionRef.current ||
+      !frame ||
+      frame === inheritedFrameRef.current ||
+      !pending?.pending ||
+      !start
+    ) return;
+    if (replicaWaitTimerRef.current !== null) {
+      clearTimeout(replicaWaitTimerRef.current);
+    }
+    replicaWaitTimerRef.current = setTimeout(start, REPLICA_FRAME_WAIT_MS);
     if (typeof requestAnimationFrame !== 'function') {
-      const timer = setTimeout(() => pending.start(), 0);
+      const timer = setTimeout(start, 0);
       return () => clearTimeout(timer);
     }
-    const bound = setTimeout(() => pending.start(), REPLICA_FRAME_WAIT_MS);
     let frameId = requestAnimationFrame(() => {
-      frameId = requestAnimationFrame(() => pending.start());
+      frameId = requestAnimationFrame(start);
     });
-    return () => {
-      clearTimeout(bound);
-      cancelAnimationFrame(frameId);
-    };
+    return () => cancelAnimationFrame(frameId);
   }, [openInWorker, session, workerOpen?.renderedFrame]);
 
   const notifyFramePresented = useCallback((engine: unknown): void => {
@@ -661,8 +691,10 @@ export function useYrsCoreSession(
   }, [retirePreview]);
 
   const failOpening = useCallback(
-    (error: Error, session?: unknown): boolean =>
-      retiringRef.current !== null && (failOpeningRef.current?.(error, session) ?? false),
+    (error: Error, session?: unknown): boolean => {
+      if (session === undefined || session === sessionRef.current) startReplicaRef.current?.();
+      return retiringRef.current !== null && (failOpeningRef.current?.(error, session) ?? false);
+    },
     []
   );
 

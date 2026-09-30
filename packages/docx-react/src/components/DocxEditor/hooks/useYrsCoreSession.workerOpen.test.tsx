@@ -186,7 +186,9 @@ function useHarness(props: HarnessProps) {
     layoutInWorker: renderer.layoutInWorker,
     experimentalWorkerOpen: props.experimentalWorkerOpen,
     fontRequirementsInWorker: props.experimentalWorkerOpen ? renderer.fontRequirementsInWorker : undefined,
-    onError: (error) => errors.current.push(error),
+    onError: (error, session) => {
+      if (!core.failOpening(error, session)) errors.current.push(error);
+    },
   });
   relayout.current = pipeline.runLayoutPipeline;
   useEffect(() => {
@@ -365,6 +367,70 @@ test('a worker lost during the handoff opens a full main replica', async () => {
   expect(result.current.core.session?.hasStory('body')).toBe(true);
   expect(result.current.errors).toEqual([]);
 });
+
+test('a first-layout font setup failure starts the replica for pending reads, save and commands', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const { result } = renderHook(useHarness, { initialProps });
+  await waitFor(() => expect(result.current.host).not.toBeNull());
+  const session = result.current.core.session!;
+  const failure = new Error('font setup failed');
+  const registerFont = spyOn(session, 'registerFont').mockImplementation(() => { throw failure; });
+  try {
+    const calls = Promise.allSettled([
+      result.current.ref.current!.readParagraphs({ view: 'accepted' }),
+      result.current.ref.current!.save(),
+      result.current.bridgeRef.current!.runAfterPendingInput(() => true),
+    ]);
+    const completed = { value: false };
+    void calls.then(() => { completed.value = true; });
+    expect(result.current.core.failOpening(failure, {})).toBe(false);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true), { timeout: 500 });
+    expect(result.current.errors).toEqual([failure]);
+    expect(result.current.renderer.frame).toBeNull();
+    expect(result.current.mainOpens).toEqual([]);
+    expect(completed.value).toBe(false);
+    act(() => { result.current.core.failOpening(failure, session); });
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    await act(async () => { workers[0].release(); });
+    await waitFor(() => expect(completed.value).toBe(true));
+    const settled = await calls;
+    expect(settled[0]).toMatchObject({ status: 'fulfilled', value: { ok: true } });
+    expect(settled[1]).toEqual({ status: 'fulfilled', value: new ArrayBuffer(0) });
+    expect(settled[2]).toEqual({ status: 'fulfilled', value: true });
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(result.current.renderer.frame).toBeNull();
+  } finally {
+    registerFont.mockRestore();
+  }
+});
+
+test('a worker open without a frame or error starts the replica after the bounded wait', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const { result } = renderHook(useHarness, { initialProps });
+  await waitFor(() => expect(result.current.host).not.toBeNull());
+  const calls = Promise.allSettled([
+    result.current.ref.current!.readParagraphs({ view: 'accepted' }),
+    result.current.ref.current!.save(),
+  ]);
+  const completed = { value: false };
+  void calls.then(() => { completed.value = true; });
+  expect(posted.map((request) => request.type)).toEqual(['open']);
+  await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true), { timeout: 7000 });
+  expect(result.current.renderer.frame).toBeNull();
+  expect(result.current.errors).toEqual([]);
+  expect(result.current.mainOpens).toEqual([]);
+  expect(completed.value).toBe(false);
+  await act(async () => { workers[0].release(); });
+  await waitFor(() => expect(completed.value).toBe(true));
+  const settled = await calls;
+  expect(settled[0]).toMatchObject({ status: 'fulfilled', value: { ok: true } });
+  expect(settled[1]).toEqual({ status: 'fulfilled', value: new ArrayBuffer(0) });
+  expect(result.current.mainOpens).toEqual([false]);
+  expect(result.current.core.replicaReady).toBe(true);
+}, 15_000);
 
 test('a failed fallback reports the same document error as a normal open', async () => {
   const invalid = Uint8Array.of(1, 2, 3);
