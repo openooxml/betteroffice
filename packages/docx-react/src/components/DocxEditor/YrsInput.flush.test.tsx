@@ -746,6 +746,35 @@ test.each([false, true])(
   }
 );
 
+test('a composition that ends as the input unmounts commits nothing to the released session', async () => {
+  const original = await seededSession();
+  let released = false;
+  const afterRelease: string[] = [];
+  const session = new Proxy(original, {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver);
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        if (released) {
+          afterRelease.push(String(key));
+          throw new Error(`Released session method: ${String(key)}`);
+        }
+        return value.apply(target, args);
+      };
+    },
+  });
+  const view = render(inputFor(session, createRef<YrsInputRef>()));
+  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  fireEvent.compositionStart(textarea);
+  textarea.value = '日本';
+  fireEvent.compositionEnd(textarea, { data: '日本' });
+  view.unmount();
+  released = true;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(afterRelease).toEqual([]);
+  expect(text(original)).toBe('Seed');
+});
+
 test('a command waiting on composition is refused when the input unmounts', async () => {
   const { input, view } = await mount();
   fireEvent.compositionStart(view.getByTestId('yrs-input'));

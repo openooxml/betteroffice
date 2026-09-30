@@ -1022,7 +1022,7 @@ test('a failed successor worker constructor ignores the released engine when pro
     expect(queries!.isReady()).toBe(true);
     const rects = queries!.rangeRects(1, 2);
     expect(result.current.workerSurfacesActive).toBe(false);
-    expect(await result.current.resolveQueries()).toEqual({ queries, frameEpoch: frame!.frameEpoch });
+    expect(await result.current.resolveQueries()).toEqual({ queries: queries!, frameEpoch: frame!.frameEpoch });
 
     let outcome: unknown;
     await act(async () => {
@@ -1037,7 +1037,7 @@ test('a failed successor worker constructor ignores the released engine when pro
     expect(result.current.caret).toBe(caret);
     expect(result.current.displayList).toBe(displayList);
     expect(queries!.rangeRects(1, 2)).toEqual(rects);
-    expect(await result.current.resolveQueries()).toEqual({ queries, frameEpoch: frame!.frameEpoch });
+    expect(await result.current.resolveQueries()).toEqual({ queries: queries!, frameEpoch: frame!.frameEpoch });
     expect(result.current.error).toBeNull();
     expect(result.current.loading).toBe(false);
     expect(result.current.workerSurfacesActive).toBe(false);
