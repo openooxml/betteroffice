@@ -9,7 +9,7 @@ export async function preloadDocxEngine(): Promise<void> {
     import('./wasm/index').then((wasm) => wasm.preloadEditWasm()),
     import('../docx/wasm').then((opc) => opc.preloadOpcWasm()),
     import('../docx/parseWasm').then((parse) => parse.preloadParseWasm()),
-    import('../layout/measure/rustMeasureSource').then((measure) => measure.getRustTextEngine()),
+    import('../layout/wasm/index').then((layout) => layout.preloadLayoutWasm()),
   ];
   let worker: Promise<void>;
   try {

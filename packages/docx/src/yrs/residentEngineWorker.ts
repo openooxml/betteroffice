@@ -148,7 +148,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       await preloadEditWasm();
       reply({ id: request.id, ok: true });
     } catch (error) {
-      replyFailure(request.id, error);
+      // No session exists yet, so a failed load is retried by the next request.
+      reply({
+        id: request.id,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
     return;
   }
