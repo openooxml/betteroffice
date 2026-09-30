@@ -262,8 +262,10 @@ function embedPlainText(session: YrsSession, kind: string, payload: Record<strin
   }
 }
 
+/** A cell as one tab-separated field, quoted as spreadsheets do when it holds a tab, break or quote. */
 function cellPlainText(session: YrsSession, story: string): string {
-  return storyPlainText(session, story).replace(/\n$/, '').replace(/\n/g, ' ');
+  const text = storyPlainText(session, story).replace(/\n$/, '');
+  return /[\t\n"]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
 /** One tab-separated line per grid row; merged-over slots stay empty. */

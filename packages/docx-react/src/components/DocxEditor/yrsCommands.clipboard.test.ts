@@ -100,3 +100,23 @@ test('copies inline content controls and equations as their text', async () => {
   );
   expect(yrsSelectionPlainText(session)).toBe('Name: Alice\tB, xa+b');
 });
+
+test('a cell holding a break or a quote copies as one quoted field', async () => {
+  const { session, table } = await document();
+  const first = yrsCellStory(session, { ...table, row: 0, column: 0 })!;
+  const { secondParaId } = session.splitParagraph({
+    story: first,
+    paraId: session.paragraphs(first)[0].paraId,
+    offset: 1,
+  });
+  session.insertText({ story: first, paraId: secondParaId, offset: 0 }, 'z');
+  const second = yrsCellStory(session, { ...table, row: 0, column: 1 })!;
+  const secondPara = session.paragraphs(second)[0].paraId;
+  session.insertText({ story: second, paraId: secondPara, offset: 1 }, ' "x"');
+  session.setSelection({ story: second, paraId: secondPara, offset: 0 });
+  session.setCellSelection({
+    anchor: { ...table, row: 0, column: 0 },
+    head: { ...table, row: 1, column: 1 },
+  });
+  expect(yrsSelectionPlainText(session)).toBe('"a\nz"\t"b ""x"""\nc\td');
+});
