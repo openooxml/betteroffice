@@ -695,7 +695,7 @@ test('input that answers after the next document replaced its worker publishes n
     expect(workerB.posted.at(-1)).toMatchObject({ type: 'bootstrap' });
     const pendingQueries = result.current.resolveQueries();
     const pendingDisplayList = result.current.settledDisplayList(null, null);
-    let outcome: ResidentFrameApplyResult | null = null;
+    let outcome = null as ResidentFrameApplyResult | null;
     await act(async () => {
       outcome = await pendingInput;
     });
@@ -821,7 +821,7 @@ test('input a replaced worker rejects publishes nothing of its document', async 
     expect(workerB).not.toBe(workerA);
     expect(workerA.posted.at(-1)).toMatchObject({ type: 'destroy' });
     expect(workerB.posted.at(-1)).toMatchObject({ type: 'bootstrap' });
-    let outcome: ResidentFrameApplyResult | null = null;
+    let outcome = null as ResidentFrameApplyResult | null;
     await act(async () => {
       outcome = await pendingInput;
     });
@@ -903,7 +903,7 @@ test('input a failed worker rejects replays on the main thread for its own docum
       expect(result.current.frame?.frameEpoch).toBe(1);
       expect(result.current.queries).not.toBeNull();
     });
-    let outcome: ResidentFrameApplyResult | null = null;
+    let outcome = null as ResidentFrameApplyResult | null;
     await act(async () => {
       const pendingInput = result.current.applyInput('!');
       for (let i = 0; i < 25 && worker.posted.at(-1)?.type !== 'applyInput'; i += 1) {
