@@ -298,11 +298,14 @@ test('queued syncs load their state and only the newest lays out and builds a fr
   const second = sync();
   main.insertText({ story: 'body', paraId, offset: 12 }, ' three');
   const third = sync();
-  await Promise.all([
-    expect(first).rejects.toBeInstanceOf(ResidentWorkerSupersededError),
-    expect(second).rejects.toBeInstanceOf(ResidentWorkerSupersededError),
+  const rejection = (reply: Promise<unknown>) => reply.then(() => null, (error: unknown) => error);
+  const [firstError, secondError, latest] = await Promise.all([
+    rejection(first),
+    rejection(second),
+    third,
   ]);
-  const latest = await third;
+  expect(firstError).toBeInstanceOf(ResidentWorkerSupersededError);
+  expect(secondError).toBeInstanceOf(ResidentWorkerSupersededError);
 
   expect(replies).toHaveLength(3);
   for (const [index, reply] of replies.slice(0, 2).entries()) {

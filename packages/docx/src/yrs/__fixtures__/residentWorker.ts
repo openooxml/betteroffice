@@ -100,9 +100,7 @@ export async function residentWorkerFactory(): Promise<() => InProcessResidentWo
           if (data) scope.onmessage?.({ data });
         };
       },
-      terminate() {
-        tasks?.port1.close();
-      },
+      terminate() {},
       hold() {
         held ??= [];
       },
