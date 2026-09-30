@@ -71,6 +71,7 @@ interface ProjectedHandle {
   width: number;
   height: number;
   scaleX: number;
+  targetZoom: number;
 }
 
 const HANDLE_CLASS: Record<HandleSpec['type'], string> = {
@@ -233,6 +234,7 @@ export function CanvasTableResizeOverlay({
           width: p.width,
           height: p.height,
           scaleX: p.scaleX,
+          targetZoom: p.targetZoom,
         });
       }
       setProjected(next);
@@ -254,7 +256,7 @@ export function CanvasTableResizeOverlay({
     if (readOnly) return;
     e.preventDefault();
     e.stopPropagation();
-    const { spec, scaleX } = ph;
+    const { spec, scaleX, targetZoom } = ph;
     const handleEl = e.currentTarget as HTMLElement;
     handleEl.classList.add('dragging');
     const startClientX = e.clientX;
@@ -266,7 +268,8 @@ export function CanvasTableResizeOverlay({
     let width = spec.widthTwips ?? 0;
 
     const onMove = (me: MouseEvent) => {
-      const deltaPx = scaleX > 0 ? (me.clientX - startClientX) / scaleX : 0;
+      const deltaTarget = (me.clientX - startClientX) / targetZoom;
+      const deltaPx = scaleX > 0 ? deltaTarget / scaleX : 0;
       const deltaTwips = Math.round(deltaPx * TWIPS_PER_PIXEL);
       if (spec.type === 'col') {
         const nl = (spec.leftTwips ?? 0) + deltaTwips;
@@ -279,7 +282,7 @@ export function CanvasTableResizeOverlay({
         const nextWidth = (spec.widthTwips ?? 0) + deltaTwips;
         if (nextWidth >= MIN_CELL_WIDTH_TWIPS) width = nextWidth;
       }
-      handleEl.style.left = `${origLeft + (me.clientX - startClientX)}px`;
+      handleEl.style.left = `${origLeft + deltaTarget}px`;
     };
     const onUp = () => {
       window.removeEventListener('mousemove', onMove);

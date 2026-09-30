@@ -23,6 +23,7 @@ import {
   type YrsStoryRange,
 } from '@betteroffice/docx/yrs';
 import {
+  effectiveZoom,
   resolveDisplayPageClientRect,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
@@ -1307,10 +1308,16 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const nextLeft = pageRect.left + caret.x * scaleX;
     const nextTop = pageRect.top + caret.y * scaleY;
     const nextHeight = Math.max(1, caret.height * scaleY);
+    const inputZoom = textareaRef.current ? effectiveZoom(textareaRef.current) : 1;
+    const style = {
+      left: nextLeft / inputZoom,
+      top: nextTop / inputZoom,
+      height: nextHeight / inputZoom,
+    };
     setPositionStyle((current) =>
-      current.left === nextLeft && current.top === nextTop && current.height === nextHeight
+      current.left === style.left && current.top === style.top && current.height === style.height
         ? current
-        : { left: nextLeft, top: nextTop, height: nextHeight }
+        : style
     );
     const stickySelection = session?.selection() ?? null;
     const previousStickySelection = lastCaretScrollSelectionRef.current;
