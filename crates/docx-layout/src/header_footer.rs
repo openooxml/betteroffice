@@ -887,6 +887,10 @@ mod tests {
     #[test]
     fn folded_body_margins_preserve_the_header_image_anchor() {
         let (variant, size, margins) = header_with_image("margin", 0.0, false);
+        let regions = serde_json::from_value(json!({
+            "sections": [{"headerFooterRefs": {"headerDefault": variant.r_id}}]
+        }))
+        .unwrap();
         let bands = header_footer_float_bands(
             &variant,
             HeaderFooterMetrics {
@@ -916,7 +920,8 @@ mod tests {
             .unwrap();
             input.options.margins.as_mut().unwrap().top = body_top;
             let expected_top = body_top.max(196.0);
-            let layout = crate::place::layout_document(&mut input).unwrap();
+            let mut layout = crate::place::layout_document(&mut input).unwrap();
+            crate::regions::apply_document_regions(&mut layout, &regions);
             let page = &layout.pages[0];
             assert_eq!(page.margins.top, 96.0);
             assert_eq!(page.body_margins.as_ref().unwrap().top, expected_top);
