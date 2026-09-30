@@ -99,7 +99,9 @@ pub fn collect_font_requirements<'a>(
 }
 
 /// [`collect_font_requirements`] into `requirements`, keyed as it keys them,
-/// for callers gathering several block runs without copying them.
+/// for callers gathering several block runs without copying them. It keeps
+/// every family the blocks name, since a later call may reach one; gather with
+/// a [`FontRequirementCollector`] to drop the unused ones.
 pub fn collect_font_requirements_into<'a>(
     blocks: impl IntoIterator<Item = &'a LayoutBlock>,
     default_family: &str,
@@ -107,11 +109,12 @@ pub fn collect_font_requirements_into<'a>(
 ) {
     let mut collector = FontRequirementCollector::default();
     collector.collect(blocks, default_family);
-    collector.merge_into(requirements);
+    collector.merge_named_into(requirements);
 }
 
 /// Fonts any revision preview may need. Returns false when any of them needs a
-/// script fallback, whose chain order a superset cannot keep exact.
+/// script fallback, whose chain order a superset cannot keep exact. Keeps every
+/// named family, as [`collect_font_requirements_into`] does.
 pub fn collect_preview_font_requirements_into<'a>(
     blocks: impl IntoIterator<Item = &'a LayoutBlock>,
     default_family: &str,
@@ -119,7 +122,7 @@ pub fn collect_preview_font_requirements_into<'a>(
 ) -> bool {
     let mut collector = FontRequirementCollector::default();
     collector.collect_preview(blocks, default_family);
-    collector.merge_into(requirements);
+    collector.merge_named_into(requirements);
     requirements
         .values()
         .all(|requirement| requirement.scripts.is_empty())
@@ -241,6 +244,11 @@ impl FontRequirementCollector {
         let mut requirements = BTreeMap::new();
         self.merge_into(&mut requirements);
         requirements
+    }
+
+    fn merge_named_into(mut self, requirements: &mut BTreeMap<String, FontRequirement>) {
+        self.used.extend(self.named.keys().cloned());
+        self.merge_into(requirements);
     }
 
     fn merge_into(self, requirements: &mut BTreeMap<String, FontRequirement>) {
@@ -4161,23 +4169,22 @@ mod tests {
             run["text"] = json!(text);
             serde_json::from_value(json!({"kind": "paragraph", "id": id, "runs": [run]})).unwrap()
         };
-        let mut requirements = BTreeMap::new();
-        collect_font_requirements_into(
-            [&paragraph("sc", "漢字", json!({"fontFamily": "Arial"}))],
-            "Calibri",
-            &mut requirements,
+        let han = paragraph("sc", "漢字", json!({"fontFamily": "Arial"}));
+        let kana = paragraph(
+            "jp",
+            "かな",
+            json!({"fontFamily": "Aptos", "fontSlots": {"cs": "Arial"}}),
         );
-        collect_font_requirements_into(
-            [&paragraph(
-                "jp",
-                "かな",
-                json!({"fontFamily": "Aptos", "fontSlots": {"cs": "Arial"}}),
-            )],
-            "Calibri",
-            &mut requirements,
-        );
-
-        assert_eq!(requirements["arial|0|0"].scripts, ["cjk-sc", "cjk-jp"]);
+        for (order, expected) in [
+            ([&han, &kana], ["cjk-sc", "cjk-jp"]),
+            ([&kana, &han], ["cjk-jp", "cjk-sc"]),
+        ] {
+            let mut requirements = BTreeMap::new();
+            for block in order {
+                collect_font_requirements_into([block], "Calibri", &mut requirements);
+            }
+            assert_eq!(requirements["arial|0|0"].scripts, expected);
+        }
     }
 
     #[test]
