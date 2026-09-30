@@ -4,6 +4,7 @@ import {
   isDisplayListQuerySourceDead,
   onDisplayListQuerySourceFailure,
   type DisplayListQueries,
+  type DisplayListRegionHit,
 } from './displayListQueries';
 import type { DisplayPage } from './displayList';
 import type { RustDisplayListQueryEngine } from './rustDisplayList';
@@ -112,7 +113,7 @@ describe('createDisplayListQueries handle lifecycle', () => {
   });
 
   const rect = (x: number) => ({ pageIndex: 1, x, y: 0, width: 1, height: 1 });
-  const hit = (pos: number) => ({ region: 'body', pos, target: 'text' });
+  const hit = (pos: number): DisplayListRegionHit => ({ region: 'body', pos, target: 'text' });
   const lineQueries = [
     {
       name: 'rangeRects',
