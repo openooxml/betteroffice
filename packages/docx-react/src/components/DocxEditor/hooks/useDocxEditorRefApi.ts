@@ -244,8 +244,10 @@ export function useDocxEditorRefApi({
       getZoom: () => zoom,
       focus: () => pagedEditorRef.current?.focus(),
       getCurrentPage: () => scrollPageInfo.currentPage,
+      // A preview's layouts are partial, so the count is the full document's even
+      // before its pages replace the preview's, as `whenLayoutComplete` reports it.
       getTotalPages: () =>
-        awaitingDocument?.() ? 0 : documentPageCount(pagedEditorRef.current?.getLayout()),
+        awaitingDocument?.() ? 0 : documentPageCount(hostEditorRef.current?.getLayout()),
       whenLayoutComplete: async (options) => {
         if (!settledDisplayList) throw new Error('This editor paints no display list');
         return (await settledDisplayList(null, options?.timeoutMs ?? null)).pages.length;

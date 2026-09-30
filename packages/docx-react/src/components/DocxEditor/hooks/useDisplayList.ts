@@ -68,6 +68,8 @@ export interface UseRustDisplayListResult {
   displayList: DisplayList | null;
   /** fatal error from resolving inputs or building the display list */
   error: Error | null;
+  /** The engine whose layout, build or input failed with `error`. */
+  errorEngine: unknown;
   /** true until the first display list for the current document is ready */
   loading: boolean;
   /** Binary retained-frame state; null on the compatibility JSON path. */
@@ -296,6 +298,7 @@ export function useRustDisplayList(
     }, 0);
   }, []);
   const [error, setError] = useState<Error | null>(null);
+  const [errorEngine, setErrorEngine] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
   const generationRef = useRef(0);
   const workerRef = useRef<{
@@ -762,6 +765,7 @@ export function useRustDisplayList(
         if (documentLoadsRef.current === documentLoad) {
           queryEpochGate.clear();
           setError(nextError);
+          setErrorEngine(residentEngineRef.current);
           markSettled(null, nextError);
         }
         // Once invoked, never fall through to the legacy op: a worker failure
@@ -823,6 +827,8 @@ export function useRustDisplayList(
   );
 
   const release = useCallback((): void => {
+    // A failed load's failure holds for later waits until the next load.
+    replacedLayoutRef.current = { layout: null };
     cancelPageBuilds(pageBuildTimerRef);
     workerRef.current?.client.destroy();
     workerRef.current = null;
@@ -1179,6 +1185,7 @@ export function useRustDisplayList(
       const failure = new Error('No display-list inputs were recorded for the current layout.');
       queryEpochGate.clear();
       setError(failure);
+      setErrorEngine(engine ?? null);
       setLoading(false);
       settleFailure(failure);
       return;
@@ -1441,6 +1448,7 @@ export function useRustDisplayList(
         console.error('[CanvasRenderer] Rust display-list build failed', nextError);
         queryEpochGate.clear();
         setError(nextError);
+        setErrorEngine(engine ?? null);
         setLoading(false);
         settleFailure(nextError);
       });
@@ -1518,6 +1526,7 @@ export function useRustDisplayList(
   return {
     displayList: snapshot.displayList,
     error,
+    errorEngine,
     loading,
     frame: snapshot.frame,
     queries: snapshot.queries,
@@ -1665,6 +1674,8 @@ export interface UseCanvasRendererResult {
   status: 'loading' | 'ready' | 'error';
   /** fatal display-list error; non-null exactly while status is `error` */
   error: Error | null;
+  /** See {@link UseRustDisplayListResult.errorEngine}. */
+  errorEngine: unknown;
   /** feed PagedEditor's per-pass Layout into the interaction query source */
   onLayoutComputed: (
     layout: Layout | null,
@@ -1759,6 +1770,7 @@ export function useCanvasRenderer(
   const {
     displayList,
     error,
+    errorEngine,
     loading,
     frame,
     queries: snapshotQueries,
@@ -1866,6 +1878,7 @@ export function useCanvasRenderer(
     // canvas and forcing a full replay.
     status,
     error,
+    errorEngine,
     onLayoutComputed,
     reset,
     resolveImage,

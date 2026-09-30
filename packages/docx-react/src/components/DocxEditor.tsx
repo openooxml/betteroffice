@@ -899,12 +899,13 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // preview left set is not the full session's.
   const failOpeningRef = useRef<(error: Error, session?: unknown) => boolean>(() => false);
   const handledRenderErrorRef = useRef<Error | null>(null);
+  const renderErrorEngine = canvasRenderer.errorEngine ?? undefined;
   useEffect(() => {
     const error = canvasRenderer.error;
     if (!error || error === handledRenderErrorRef.current) return;
     handledRenderErrorRef.current = error;
-    if (!failOpeningRef.current(error)) onError?.(error);
-  }, [canvasRenderer.error, onError]);
+    if (!failOpeningRef.current(error, renderErrorEngine)) onError?.(error);
+  }, [canvasRenderer.error, renderErrorEngine, onError]);
 
   const [yrsTrackedChangesResult, setYrsTrackedChangesResult] = useState<TrackedChangesResult>(
     () => ({
