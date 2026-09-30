@@ -5085,12 +5085,12 @@ fn seed_lowered(
             layout_tokens,
         )?,
     };
-    document
-        .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
+    let ranges = document
+        .apply_raw_seed_batches(batches, &EditCtx::local(String::new(), String::new()))
         .map_err(|error| error.to_string())?;
     seed_opaque_sequences(document, &context.opaque_sequences);
     document.set_media_sources(sources);
-    read.pin(document);
+    read.pin(document, &ranges);
     read.comment_writes = CommentWrites::watch(document);
     if let Some(index) = index {
         document.retain_source(SourcePackage::Ready(Arc::new(index)));
@@ -5254,9 +5254,10 @@ pub(crate) fn seed_blocks(
         let (story_id, ops, _) = seed_plan(plan, None)?;
         batches.push((story_id, ops));
     }
-    doc.apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
+    let ranges = doc
+        .apply_raw_seed_batches(batches, &EditCtx::local(String::new(), String::new()))
         .map_err(|error| error.to_string())?;
-    provenance.pin(doc);
+    provenance.pin(doc, &ranges);
     Ok(provenance)
 }
 
@@ -5706,7 +5707,195 @@ pub(crate) fn seed_stories(document: &EditingDoc, bytes: &[u8]) -> Result<(), St
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/support/structured_fixture.rs"]
+mod fixture;
+
+#[cfg(test)]
 mod tests {
+    fn assert_pins_match_story(doc: &EditingDoc, provenance: &Provenance) {
+        let txn = doc.yrs_doc().transact();
+        let pins = provenance
+            .inline
+            .iter()
+            .map(|record| &record.pin)
+            .chain(provenance.relocated.iter().map(|record| &record.pin));
+        for pin in pins {
+            assert_eq!(
+                pin.position,
+                Pin::sticky(&txn, &pin.story, pin.unit),
+                "{}:{}",
+                pin.story,
+                pin.unit
+            );
+        }
+    }
+
+    #[test]
+    fn seed_ranges_pin_every_story_unit_like_sticky_index() {
+        let mut parts = fixture::principal_parts();
+        for (path, bytes) in &mut parts {
+            let paragraph = match path.as_str() {
+                "word/document.xml" => Some(("10000006", "Inner")),
+                "word/footnotes.xml" => Some(("20000004", "Footnote text")),
+                "word/comments.xml" => Some(("30000001", "Please review")),
+                _ => None,
+            };
+            if let Some((id, text)) = paragraph {
+                let mut original = fixture::para(id, &fixture::run(text));
+                if path.as_str() == "word/document.xml" {
+                    original = original.replace(" xml:space=\"preserve\"", "");
+                }
+                let content = format!(
+                    r#"{}<m:oMath><m:r><m:t>x=1</m:t></m:r></m:oMath><w:r><w:br w:type="page"/><w:br w:type="column"/></w:r>{}"#,
+                    fixture::run("a😀b"),
+                    fixture::run(text)
+                );
+                let xml = std::str::from_utf8(bytes).unwrap();
+                assert!(xml.contains(&original));
+                *bytes = xml
+                    .replace(&original, &fixture::para(id, &content))
+                    .into_bytes();
+            }
+        }
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        let LoweredDocx {
+            context, mut read, ..
+        } = lower_docx(parse_docx_for_edit(&bytes).unwrap(), None).unwrap();
+        let doc = EditingDoc::new(74102);
+        let stories: Vec<String> = context
+            .plans
+            .iter()
+            .map(|plan| plan.story_id.clone())
+            .collect();
+        doc.create_empty_stories(&stories).unwrap();
+        let batches = context
+            .plans
+            .into_iter()
+            .map(|plan| {
+                let (story, ops, _) = seed_plan(plan, None).unwrap();
+                (story, ops)
+            })
+            .collect();
+        let ranges = doc
+            .apply_raw_seed_batches(batches, &EditCtx::local("", ""))
+            .unwrap();
+        assert_eq!(ranges.len(), stories.len());
+        assert!(ranges.contains_key("fn:1"));
+        assert!(read.provenance.tables.len() >= 2);
+        assert!(!read.provenance.relocated.is_empty());
+        assert!(
+            read.provenance
+                .inline
+                .iter()
+                .any(|record| matches!(record.content, InlineSource::Omitted { .. }))
+        );
+        assert!(
+            read.provenance
+                .inline
+                .iter()
+                .any(|record| matches!(record.content, InlineSource::Break { .. }))
+        );
+        for (story, range) in &ranges {
+            for unit in 0..=range.len + 1 {
+                read.provenance.relocated.push(Relocated {
+                    pin: Pin::new(story, unit),
+                    para_id: String::new(),
+                });
+            }
+        }
+        read.provenance.relocated.push(Relocated {
+            pin: Pin::new("missing", 0),
+            para_id: String::new(),
+        });
+        read.pin(&doc, &ranges);
+        assert_pins_match_story(&doc, &read.provenance);
+        let comments: Vec<_> = read
+            .comments
+            .iter()
+            .map(|comment| (format!("comment:{}", comment.id), comment.body.as_slice()))
+            .collect();
+        let provenance = seed_blocks(&doc, None, &comments).unwrap();
+        assert!(!provenance.inline.is_empty());
+        assert_pins_match_story(&doc, &provenance);
+
+        let seeded = EditingDoc::new(74103);
+        crate::seed_from_docx(&seeded, &bytes).unwrap();
+        let source = seeded.source_metadata().unwrap();
+        assert_pins_match_story(&seeded, &source.read().provenance);
+    }
+
+    #[test]
+    fn stories_outside_the_seed_contract_pin_with_the_slow_path() {
+        let doc = EditingDoc::new(74104);
+        doc.create_story("nonempty", "a😀b", "Normal", "left")
+            .unwrap();
+        doc.create_empty_stories(&["nonmonotonic".into(), "formatted".into(), "deleted".into()])
+            .unwrap();
+        let insert = |index, text: &str| RawOp::Insert {
+            index,
+            text: text.to_owned(),
+            attrs: Attrs::new(),
+        };
+        let batches = vec![
+            ("nonempty".into(), vec![insert(0, "x")]),
+            (
+                "nonmonotonic".into(),
+                vec![
+                    RawOp::Delete { index: 0, len: 1 },
+                    insert(0, "a😀b"),
+                    insert(0, "x"),
+                ],
+            ),
+            (
+                "formatted".into(),
+                vec![
+                    RawOp::Delete { index: 0, len: 1 },
+                    insert(0, "a😀b"),
+                    RawOp::Format {
+                        index: 0,
+                        len: 1,
+                        attrs: Attrs::from([(Arc::from("bold"), Any::Bool(true))]),
+                    },
+                    insert(4, "x"),
+                ],
+            ),
+            (
+                "deleted".into(),
+                vec![
+                    RawOp::Delete { index: 0, len: 1 },
+                    insert(0, "a😀b"),
+                    RawOp::Delete { index: 0, len: 1 },
+                ],
+            ),
+        ];
+        let ranges = doc
+            .apply_raw_seed_batches(batches, &EditCtx::local("", ""))
+            .unwrap();
+        assert!(ranges.is_empty());
+        let mut provenance = Provenance::default();
+        {
+            let txn = doc.yrs_doc().transact();
+            for story in [
+                "nonempty",
+                "nonmonotonic",
+                "formatted",
+                "deleted",
+                "missing",
+            ] {
+                let len = crate::story_ref(&txn, story).map_or(0, |text| text.len(&txn));
+                for unit in 0..=len + 1 {
+                    provenance.relocated.push(Relocated {
+                        pin: Pin::new(story, unit),
+                        para_id: String::new(),
+                    });
+                }
+            }
+        }
+        provenance.pin(&doc, &ranges);
+        assert_pins_match_story(&doc, &provenance);
+    }
+
     #[test]
     fn opaque_sequence_names_accumulate_in_document_state() {
         let doc = EditingDoc::new(1);

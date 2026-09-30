@@ -1,6 +1,6 @@
 //! Raw story mutations using UTF-16 story indices.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use yrs::types::text::YChange;
@@ -57,6 +57,12 @@ pub enum RawOp {
     },
     /// Remove the side-map comment keyed by `id`. Errors when it does not exist.
     RemoveComment { id: String },
+}
+
+pub(crate) struct SeedRange {
+    pub client: ClientID,
+    pub clock: u32,
+    pub len: u32,
 }
 
 fn valid_paragraph_id(value: &Any) -> bool {
@@ -132,7 +138,7 @@ impl EditingDoc {
             })
             .collect();
         let mut rekeyed = Vec::new();
-        apply_raw_ops_to_story(&mut txn, story_id, ops, false, &mut rekeyed)?;
+        let _ = apply_raw_ops_to_story(&mut txn, story_id, ops, false, &mut rekeyed)?;
         if !reanchored.is_empty() {
             crate::comment_references::reconcile(&mut txn, &reanchored, true);
         }
@@ -145,22 +151,40 @@ impl EditingDoc {
         Ok(())
     }
 
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
     pub(crate) fn apply_raw_story_batches(
         &self,
         batches: Vec<(String, Vec<RawOp>)>,
         ctx: &EditCtx,
     ) -> OpResult<()> {
+        self.apply_raw_seed_batches(batches, ctx).map(|_| ())
+    }
+
+    pub(crate) fn apply_raw_seed_batches(
+        &self,
+        batches: Vec<(String, Vec<RawOp>)>,
+        ctx: &EditCtx,
+    ) -> OpResult<HashMap<String, SeedRange>> {
         for (_, ops) in &batches {
             guard_inserted_values(ops)?;
         }
+        let mut ranges = HashMap::new();
         {
             let mut txn = self.transact_for(ctx);
             for (story_id, ops) in batches {
-                apply_raw_ops_to_story(&mut txn, &story_id, ops, true, &mut Vec::new())?;
+                let range =
+                    apply_raw_ops_to_story(&mut txn, &story_id, ops, true, &mut Vec::new())?;
+                ranges
+                    .entry(story_id)
+                    .and_modify(|range| *range = None)
+                    .or_insert(range);
             }
         }
         self.forget_seen();
-        Ok(())
+        Ok(ranges
+            .into_iter()
+            .filter_map(|(story, range)| range.map(|range| (story, range)))
+            .collect())
     }
 }
 
@@ -170,6 +194,8 @@ struct InsertRun {
     embeds: Vec<InsertedEmbed>,
     formats: BTreeMap<Arc<str>, Vec<FormatSpan>>,
     cursor: Option<u32>,
+    seed_candidate: bool,
+    seed_range: Option<SeedRange>,
 }
 
 struct InsertedEmbed {
@@ -192,6 +218,8 @@ impl InsertRun {
             embeds: Vec::new(),
             formats: BTreeMap::new(),
             cursor: None,
+            seed_candidate: deterministic,
+            seed_range: None,
         }
     }
 
@@ -222,7 +250,35 @@ impl InsertRun {
 
     fn flush(&mut self, story: &TextRef, txn: &mut TransactionMut<'_>) -> OpResult<()> {
         if !self.deltas.is_empty() {
+            let range = if self.seed_candidate && story.len(txn) == 0 {
+                let len = self.deltas.iter().try_fold(0u32, |len, delta| {
+                    let inserted = match delta {
+                        Delta::Inserted(In::Any(Any::String(text)), None) => {
+                            u32::try_from(text.encode_utf16().count()).ok()?
+                        }
+                        Delta::Inserted(In::Map(map), None) if map.is_empty() => 1,
+                        _ => return None,
+                    };
+                    len.checked_add(inserted)
+                });
+                len.filter(|len| self.cursor == Some(*len))
+                    .map(|len| SeedRange {
+                        client: txn.doc().client_id(),
+                        clock: ReadTxn::store(txn).get_local_state(),
+                        len,
+                    })
+            } else {
+                None
+            };
             story.apply_delta(txn, std::mem::take(&mut self.deltas));
+            self.seed_range = range.filter(|range| {
+                ReadTxn::store(txn)
+                    .get_local_state()
+                    .checked_sub(range.clock)
+                    == Some(range.len)
+                    && story.len(txn) == range.len
+            });
+            self.seed_candidate = false;
         }
         if self.deterministic {
             self.hydrate_embeds(story, txn)?;
@@ -424,7 +480,7 @@ fn apply_raw_ops_to_story(
     ops: Vec<RawOp>,
     deterministic: bool,
     rekeyed: &mut Vec<MapRef>,
-) -> OpResult<()> {
+) -> OpResult<Option<SeedRange>> {
     let story = story_ref(txn, story_id).map_err(OpError::from)?;
     let mut run = InsertRun::new(deterministic);
     for mut op in ops {
@@ -467,12 +523,20 @@ fn apply_raw_ops_to_story(
             }
             op => {
                 run.flush(&story, txn)?;
+                match &op {
+                    RawOp::SetComment { .. } | RawOp::RemoveComment { .. } => {}
+                    RawOp::Insert { .. } | RawOp::InsertEmbed { .. } => {
+                        run.seed_candidate = false;
+                        run.seed_range = None;
+                    }
+                    _ => run.seed_range = None,
+                }
                 apply_raw_op_absolute(txn, &story, story_id, op, rekeyed)?;
             }
         }
     }
     run.flush(&story, txn)?;
-    Ok(())
+    Ok(run.seed_range)
 }
 
 fn is_utf16_boundary<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> bool {
