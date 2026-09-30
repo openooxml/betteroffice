@@ -3718,7 +3718,12 @@ mod tests {
         for (text, expected) in [
             (
                 "Latin",
-                vec!["aptos|0|0", "arial|0|0", "calibri|0|0", "times new roman|0|0"],
+                vec![
+                    "aptos|0|0",
+                    "arial|0|0",
+                    "calibri|0|0",
+                    "times new roman|0|0",
+                ],
             ),
             (
                 "漢字",
@@ -3793,14 +3798,25 @@ mod tests {
             }));
             assert_eq!(
                 keys,
-                ["aptos|1|0", "arial|1|0", "calibri|0|0", "times new roman|1|0"]
+                [
+                    "aptos|1|0",
+                    "arial|1|0",
+                    "calibri|0|0",
+                    "times new roman|1|0"
+                ]
             );
         }
     }
 
     #[test]
     fn field_font_requirements_skip_script_slots() {
-        for fallback in [None, Some(""), Some("Latin"), Some("漢字"), Some("\u{201c}")] {
+        for fallback in [
+            None,
+            Some(""),
+            Some("Latin"),
+            Some("漢字"),
+            Some("\u{201c}"),
+        ] {
             let keys = font_requirement_keys(json!({
                 "kind": "field", "fieldType": "PAGE", "fallback": fallback,
                 "fontFamily": "Aptos", "italic": true, "complexScript": true,
