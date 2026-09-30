@@ -766,6 +766,8 @@ struct PaginationState {
     revision_preview_key: u64,
     /// The decisions [`Self::revision_preview_key`] identifies.
     revision_preview: BTreeMap<String, RevisionPreview>,
+    /// The document epoch the retained input was lowered at.
+    doc_epoch: u64,
     rebuilt_page_start: usize,
     rebuilt_page_end: usize,
     position_deltas: HashMap<String, i64>,
@@ -2635,13 +2637,15 @@ impl EngineSession {
             // A preview shows the document at its source positions, so a block whose
             // content is unchanged but whose positions moved shows other source: it is
             // placed afresh rather than shifted.
-            // Only a block holding a revision whose decision changed can show other source.
+            // Over an unchanged document, only a block holding a revision whose
+            // decision changed can show other source.
             if let Some((key, preview)) = revision_preview
                 && key != previous.revision_preview_key
                 && incremental_eligible(&previous, &input, input_options_fingerprint)
-                && let moved =
-                    self.preview_changed_paragraphs(&previous.revision_preview, preview)?
-                && !moved.is_empty()
+                && let moved = (previous.doc_epoch == self.doc_epoch())
+                    .then(|| self.preview_changed_paragraphs(&previous.revision_preview, preview))
+                    .transpose()?
+                && moved.as_ref().is_none_or(|moved| !moved.is_empty())
             {
                 let retained = previous.input.as_ref().expect("eligibility checked input");
                 for (((fingerprint, retained_fingerprint), next), retained) in block_fingerprints
@@ -2651,7 +2655,9 @@ impl EngineSession {
                     .zip(&retained.measured)
                 {
                     if *fingerprint == *retained_fingerprint
-                        && block_holds_paragraph(&next.block, &moved)
+                        && moved
+                            .as_ref()
+                            .is_none_or(|moved| block_holds_paragraph(&next.block, moved))
                         && crate::fingerprint::fingerprint_with_positions(&next.block)?
                             != crate::fingerprint::fingerprint_with_positions(&retained.block)?
                     {
@@ -2729,6 +2735,7 @@ impl EngineSession {
         pagination.checkpoints = run.checkpoints;
         pagination.block_fingerprints = block_fingerprints;
         pagination.options_fingerprint = input_options_fingerprint;
+        pagination.doc_epoch = self.doc_epoch();
         if let Some((key, preview)) = revision_preview {
             pagination.revision_preview_key = key;
             pagination.revision_preview = preview.clone();
