@@ -20,6 +20,7 @@ const REQUIRED_NODES: Record<string, string[]> = {
   'bookmarks-fields': ['bookmarkStart', 'bookmarkEnd', 'simpleField', 'complexField', 'instrText'],
   comments: ['commentRangeStart', 'commentRangeEnd', 'commentReference'],
   'content-controls': ['blockSdt', 'inlineSdt'],
+  'field-code-marks': ['complexField', 'instrText', 'table'],
   hyperlinks: ['hyperlink', 'bookmarkStart'],
   images: ['drawing', 'image', 'inline'],
   lists: ['paragraph'],

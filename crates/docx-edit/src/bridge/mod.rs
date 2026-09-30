@@ -435,7 +435,7 @@ fn lower_story<T: ReadTxn>(
         let comments = resolve_comment_intervals(txn, story_id, env)?;
         let mut blocks = Vec::new();
         let mut paragraph_runs = Vec::new();
-        let mut paragraph_drawings = Vec::new();
+        let mut paragraph_drawings: Vec<DrawingMarker> = Vec::new();
         let mut story_index = 0_u32;
         let mut paragraph_start = 0_u32;
         let mut paragraph_pm_start = pm_base;
@@ -444,6 +444,8 @@ fn lower_story<T: ReadTxn>(
         let mut at_block_boundary = true;
         let mut hidden_field_blocks = BTreeSet::new();
         let mut pending_hidden_field_blocks = BTreeSet::new();
+        let mut pending_code_join: Option<(Vec<FieldCodeParagraph>, String)> = None;
+        let mut field_join: Option<FieldJoin> = None;
         // Sections are body-level, so the cascade is per story; cell and
         // header/footer stories simply never carry section properties.
         let mut section_margins = SectionMarginsTwips::default();
@@ -468,6 +470,139 @@ fn lower_story<T: ReadTxn>(
                     at_block_boundary = false;
                 }
                 Out::YMap(pilcrow) if is_pilcrow(&pilcrow, txn) => {
+                    let values = pilcrow_values(&pilcrow, txn);
+                    let para_id = value_string(values.get("paraId")).unwrap_or_default();
+                    let code_join = pending_code_join.take();
+                    let sectioned =
+                        values.contains_key("sectPr") || values.contains_key("sectionBreakType");
+                    let suppressed = hidden_field_blocks.contains(&para_id);
+                    retain_visible_drawings(&mut paragraph_drawings, env, opaque_sequences);
+                    if !sectioned
+                        && field_join
+                            .as_ref()
+                            .and_then(|join| join.hidden.get(join.next_hidden))
+                            .is_some_and(|paragraph| {
+                                paragraph.id == para_id && paragraph.allows(&paragraph_runs, env)
+                            })
+                        && paragraph_drawings.iter().all(|drawing| drawing.anchored)
+                    {
+                        paragraph_runs.retain(|run| {
+                            let kept = run.visible(env) && run.anchored();
+                            if !kept && !run.revision_hidden {
+                                collect_run_sequences(run, opaque_sequences);
+                            }
+                            kept
+                        });
+                        if !paragraph_runs.is_empty() || !paragraph_drawings.is_empty() {
+                            let source = map.paragraphs.len() as u32;
+                            map.paragraphs.push((story_slot, para_id));
+                            blocks.extend(lift_drawings(
+                                std::mem::take(&mut paragraph_drawings),
+                                source,
+                                paragraph_pm_start,
+                                map,
+                            ));
+                            if !paragraph_runs.is_empty() {
+                                let join = field_join.as_mut().unwrap();
+                                let offset = (paragraph_pm_start - join.pm_start) as u32;
+                                let defaults = paragraph_run_defaults(&values);
+                                for run in &mut paragraph_runs {
+                                    run.pm_start += offset;
+                                    run.pm_end += offset;
+                                    apply_run_defaults(&mut run.formatting, &defaults);
+                                }
+                                join.pm_units = offset + paragraph_pm_units;
+                                join.segments
+                                    .push((source, std::mem::take(&mut paragraph_runs)));
+                            }
+                        }
+                        field_join.as_mut().unwrap().next_hidden += 1;
+                        hidden_field_blocks.append(&mut pending_hidden_field_blocks);
+                        paragraph_runs = Vec::new();
+                        paragraph_drawings = Vec::new();
+                        pm_cursor = paragraph_pm_start + u64::from(paragraph_pm_units) + 2;
+                        story_index += 1;
+                        paragraph_start = story_index;
+                        paragraph_pm_start = pm_cursor;
+                        paragraph_pm_units = 0;
+                        at_block_boundary = true;
+                        continue;
+                    }
+                    let joinable = !sectioned
+                        && !suppressed
+                        && paragraph_drawings.iter().all(|drawing| drawing.anchored);
+                    let carried = field_join.take().and_then(|join| {
+                        if joinable
+                            && join.next_hidden == join.hidden.len()
+                            && join.target == para_id
+                        {
+                            return Some(join);
+                        }
+                        blocks.extend(join.flush(
+                            txn,
+                            story_id,
+                            env,
+                            list_state,
+                            map,
+                            story_slot,
+                            CellEdges {
+                                before: cell_edges.before,
+                                after: false,
+                            },
+                            opaque_sequences,
+                            revealable,
+                        ));
+                        None
+                    });
+                    let (block_pm_start, block_start, mut segments) = match carried {
+                        Some(join) => (join.pm_start, join.story_start, join.segments),
+                        None => (paragraph_pm_start, paragraph_start, Vec::new()),
+                    };
+                    let offset = (paragraph_pm_start - block_pm_start) as u32;
+                    for run in &mut paragraph_runs {
+                        run.pm_start += offset;
+                        run.pm_end += offset;
+                    }
+                    for drawing in &mut paragraph_drawings {
+                        drawing.pm_offset += offset;
+                    }
+                    let block_pm_units = offset + paragraph_pm_units;
+                    pm_cursor = paragraph_pm_start + u64::from(paragraph_pm_units) + 2;
+                    if let Some((hidden, target)) = code_join
+                        && joinable
+                    {
+                        let defaults = paragraph_run_defaults(&values);
+                        for run in &mut paragraph_runs {
+                            apply_run_defaults(&mut run.formatting, &defaults);
+                        }
+                        let source = map.paragraphs.len() as u32;
+                        map.paragraphs.push((story_slot, para_id));
+                        blocks.extend(lift_drawings(
+                            std::mem::take(&mut paragraph_drawings),
+                            source,
+                            block_pm_start,
+                            map,
+                        ));
+                        segments.push((source, std::mem::take(&mut paragraph_runs)));
+                        field_join = Some(FieldJoin {
+                            pilcrow: pilcrow.clone(),
+                            attributes: attributes.cloned(),
+                            segments,
+                            pm_start: block_pm_start,
+                            pm_units: block_pm_units,
+                            story_start: block_start,
+                            hidden,
+                            next_hidden: 0,
+                            target,
+                        });
+                        hidden_field_blocks.append(&mut pending_hidden_field_blocks);
+                        story_index += 1;
+                        paragraph_start = story_index;
+                        paragraph_pm_start = pm_cursor;
+                        paragraph_pm_units = 0;
+                        at_block_boundary = true;
+                        continue;
+                    }
                     let mut paragraph_blocks = flush_paragraph_parts(
                         paragraph_runs,
                         paragraph_drawings,
@@ -476,23 +611,22 @@ fn lower_story<T: ReadTxn>(
                         txn,
                         story_id,
                         env,
-                        paragraph_pm_start,
-                        paragraph_pm_units,
+                        block_pm_start,
+                        block_pm_units,
                         list_state,
                         (map, story_slot),
                         opaque_sequences,
                         revealable,
+                        segments,
                     );
-                    let values = pilcrow_values(&pilcrow, txn);
                     suppress_cell_edge_spacing(
                         &mut paragraph_blocks,
                         &values,
                         CellEdges {
-                            before: cell_edges.before && paragraph_start == 0,
+                            before: cell_edges.before && block_start == 0,
                             after: cell_edges.after && story_index + 1 == story.len(txn),
                         },
                     );
-                    pm_cursor = paragraph_pm_start + u64::from(paragraph_pm_units) + 2;
                     if !shared_map_string(&pilcrow, txn, "paraId")
                         .is_some_and(|id| hidden_field_blocks.contains(&id))
                     {
@@ -520,6 +654,22 @@ fn lower_story<T: ReadTxn>(
                 Out::YMap(table)
                     if shared_map_string(&table, txn, "_kind").as_deref() == Some("table") =>
                 {
+                    if let Some(join) = field_join.take() {
+                        blocks.extend(join.flush(
+                            txn,
+                            story_id,
+                            env,
+                            list_state,
+                            map,
+                            story_slot,
+                            CellEdges {
+                                before: cell_edges.before,
+                                after: false,
+                            },
+                            opaque_sequences,
+                            revealable,
+                        ));
+                    }
                     if !paragraph_runs.is_empty()
                         || !paragraph_drawings.is_empty()
                         || paragraph_start != story_index
@@ -568,6 +718,22 @@ fn lower_story<T: ReadTxn>(
                         Some("pageBreak" | "columnBreak")
                     ) =>
                 {
+                    if let Some(join) = field_join.take() {
+                        blocks.extend(join.flush(
+                            txn,
+                            story_id,
+                            env,
+                            list_state,
+                            map,
+                            story_slot,
+                            CellEdges {
+                                before: cell_edges.before,
+                                after: false,
+                            },
+                            opaque_sequences,
+                            revealable,
+                        ));
+                    }
                     if !at_block_boundary
                         || !paragraph_runs.is_empty()
                         || !paragraph_drawings.is_empty()
@@ -624,6 +790,22 @@ fn lower_story<T: ReadTxn>(
                     if shared_map_string(&block_sdt, txn, "_kind").as_deref()
                         == Some("blockSdt") =>
                 {
+                    if let Some(join) = field_join.take() {
+                        blocks.extend(join.flush(
+                            txn,
+                            story_id,
+                            env,
+                            list_state,
+                            map,
+                            story_slot,
+                            CellEdges {
+                                before: cell_edges.before,
+                                after: false,
+                            },
+                            opaque_sequences,
+                            revealable,
+                        ));
+                    }
                     if !at_block_boundary
                         || !paragraph_runs.is_empty()
                         || !paragraph_drawings.is_empty()
@@ -732,6 +914,15 @@ fn lower_story<T: ReadTxn>(
                         pending_hidden_field_blocks
                             .append(&mut hidden_field_result_blocks(&field, txn));
                     }
+                    if joins_field_code_paragraphs(story_id)
+                        && let Some(join) = field_code_join(&field, txn)
+                        && !env.revision_hidden(attributes)
+                        && pending_code_join
+                            .as_ref()
+                            .is_none_or(|(hidden, _)| join.0.len() > hidden.len())
+                    {
+                        pending_code_join = Some(join);
+                    }
                     let field_type = shared_map_string(&field, txn, "fieldType")
                         .unwrap_or_else(|| "OTHER".to_owned());
                     let mapped_type = match field_type.as_str() {
@@ -752,6 +943,9 @@ fn lower_story<T: ReadTxn>(
                             } else {
                                 shared_map_string(&field, txn, "displayText").unwrap_or_default()
                             }),
+                            source: field_join
+                                .as_ref()
+                                .and_then(|_| shared_map_string(&field, txn, "fieldData")),
                             locked: shared_any(&field, txn, "fldLock")
                                 .as_ref()
                                 .and_then(any_bool)
@@ -1030,6 +1224,19 @@ fn lower_story<T: ReadTxn>(
             }
         }
 
+        if let Some(join) = field_join.take() {
+            blocks.extend(join.flush(
+                txn,
+                story_id,
+                env,
+                list_state,
+                map,
+                story_slot,
+                cell_edges,
+                opaque_sequences,
+                revealable,
+            ));
+        }
         if !at_block_boundary
             || !paragraph_runs.is_empty()
             || !paragraph_drawings.is_empty()
@@ -1053,6 +1260,160 @@ pub fn yrsDocToLayoutBlocks(
     env: &RenderEnv,
 ) -> Result<Vec<LayoutBlock>, BridgeError> {
     yrs_doc_to_layout_blocks(doc, story_id, env)
+}
+
+/// The paragraph a field's paragraph joins because the field's code hides its mark, and the
+/// paragraphs in between, which the code hides whole; bound at seed time.
+fn field_code_join<T: ReadTxn>(
+    field: &MapRef,
+    txn: &T,
+) -> Option<(Vec<FieldCodeParagraph>, String)> {
+    let target = shared_map_string(field, txn, "fieldCodeTarget")?;
+    let data = shared_map_string(field, txn, "fieldData")
+        .and_then(|data| serde_json::from_str::<Value>(&data).ok());
+    let code = data
+        .as_ref()
+        .and_then(|data| data.get("structuredCode"))
+        .and_then(|code| code.get("blocks"))
+        .and_then(Value::as_array);
+    let hidden = match shared_any(field, txn, "fieldCodeMarks") {
+        Some(Any::Array(ids)) => ids
+            .iter()
+            .filter_map(any_str)
+            .enumerate()
+            .map(|(index, id)| {
+                let mut fields = Vec::new();
+                if let Some(content) = code
+                    .and_then(|blocks| blocks.get(index))
+                    .and_then(|block| block.get("content"))
+                {
+                    nested_code_fields(content, &mut fields);
+                }
+                FieldCodeParagraph {
+                    id: id.to_owned(),
+                    fields,
+                }
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    Some((hidden, target))
+}
+
+fn nested_code_fields(value: &Value, fields: &mut Vec<Value>) {
+    match value {
+        Value::Object(object)
+            if matches!(
+                object.get("type").and_then(Value::as_str),
+                Some("simpleField" | "complexField")
+            ) =>
+        {
+            fields.push(value.clone());
+        }
+        Value::Object(object) => {
+            if let Some(content) = object
+                .get("structuredChildren")
+                .or_else(|| object.get("children"))
+                .or_else(|| object.get("content"))
+            {
+                nested_code_fields(content, fields);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                nested_code_fields(child, fields);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Headers and footers show a field whose code spans paragraph marks on one line, as Word
+/// does; other stories keep each paragraph, whose carets and edits address it alone.
+fn joins_field_code_paragraphs(story_id: &str) -> bool {
+    story_id.starts_with("hf:")
+}
+
+struct FieldCodeParagraph {
+    id: String,
+    fields: Vec<Value>,
+}
+
+impl FieldCodeParagraph {
+    fn allows(&self, runs: &[RawRun], env: &RenderEnv) -> bool {
+        let mut fields = self.fields.iter();
+        runs.iter()
+            .filter(|run| run.visible(env) && !run.anchored())
+            .all(|run| match &run.kind {
+                RawRunKind::Field {
+                    source: Some(source),
+                    ..
+                } => serde_json::from_str::<Value>(source)
+                    .ok()
+                    .is_some_and(|source| fields.any(|field| *field == source)),
+                _ => false,
+            })
+    }
+}
+
+/// Paragraphs whose marks a field's code hides, held until the paragraph they join.
+struct FieldJoin {
+    /// The last held paragraph, whose properties apply if the join is cut short.
+    pilcrow: MapRef,
+    attributes: Option<Attrs>,
+    /// Each held paragraph's source and runs, relative to `pm_start`, with its run defaults
+    /// applied.
+    segments: Vec<(u32, Vec<RawRun>)>,
+    pm_start: u64,
+    pm_units: u32,
+    story_start: u32,
+    /// The paragraphs between the last held one and `target`.
+    hidden: Vec<FieldCodeParagraph>,
+    next_hidden: usize,
+    target: String,
+}
+
+impl FieldJoin {
+    /// Lowers the held paragraphs as one paragraph, when what follows cannot take them.
+    #[allow(clippy::too_many_arguments)]
+    fn flush<T: ReadTxn>(
+        self,
+        txn: &T,
+        story_id: &str,
+        env: &RenderEnv,
+        list_state: &mut ListState,
+        map: &mut LoweringMap,
+        story_slot: u32,
+        cell_edges: CellEdges,
+        opaque_sequences: &mut BTreeSet<String>,
+        revealable: &mut Option<Vec<LayoutBlock>>,
+    ) -> Vec<LayoutBlock> {
+        let mut blocks = flush_paragraph_parts(
+            Vec::new(),
+            Vec::new(),
+            &self.pilcrow,
+            self.attributes.as_ref(),
+            txn,
+            story_id,
+            env,
+            self.pm_start,
+            self.pm_units,
+            list_state,
+            (map, story_slot),
+            opaque_sequences,
+            revealable,
+            self.segments,
+        );
+        suppress_cell_edge_spacing(
+            &mut blocks,
+            &pilcrow_values(&self.pilcrow, txn),
+            CellEdges {
+                before: cell_edges.before && self.story_start == 0,
+                after: cell_edges.after,
+            },
+        );
+        blocks
+    }
 }
 
 /// Story blocks a hidden field's cached result duplicates, bound at seed time.
@@ -1995,6 +2356,7 @@ fn lower_inline_sdt_values(
                                 .and_then(|payload| map_string(payload, "displayText"))
                                 .unwrap_or_default(),
                         ),
+                        source: payload.and_then(|payload| map_string(payload, "fieldData")),
                         locked: payload
                             .and_then(|payload| map_bool(payload, "fldLock"))
                             .unwrap_or(false),
@@ -2221,6 +2583,7 @@ enum RawRunKind {
         raw_type: Option<String>,
         instruction: Option<String>,
         fallback: Option<String>,
+        source: Option<String>,
         locked: bool,
         nested_sequences: Vec<String>,
     },
@@ -2247,6 +2610,23 @@ struct RawRun {
     revision_hidden: bool,
 }
 
+impl RawRun {
+    fn visible(&self, env: &RenderEnv) -> bool {
+        !self.revision_hidden && (env.show_hidden_text || self.formatting.hidden != Some(true))
+    }
+
+    fn anchored(&self) -> bool {
+        let RawRunKind::Image(image) = &self.kind else {
+            return false;
+        };
+        image.display_mode.as_deref() == Some("float")
+            || matches!(
+                image.wrap_type.as_deref(),
+                Some("square" | "tight" | "through" | "topAndBottom" | "behind" | "inFront")
+            )
+    }
+}
+
 /// Leaves out the content of a control whose own revision the preview hides.
 fn hide_runs(runs: &mut [RawRun]) {
     for run in runs {
@@ -2263,6 +2643,35 @@ struct DrawingMarker {
     hidden: bool,
     revision_hidden: bool,
     anchored: bool,
+}
+
+impl DrawingMarker {
+    fn visible(&self, env: &RenderEnv) -> bool {
+        !self.revision_hidden && (env.show_hidden_text || !self.hidden)
+    }
+}
+
+fn lift_drawings(
+    drawings: Vec<DrawingMarker>,
+    source: u32,
+    paragraph_pm_start: u64,
+    map: &mut LoweringMap,
+) -> Vec<LayoutBlock> {
+    drawings
+        .into_iter()
+        .map(|drawing| {
+            let pm_start = paragraph_pm_start + 1 + u64::from(drawing.pm_offset);
+            map.spans.push(SourceSpan {
+                pm_start,
+                pm_end: pm_start + 1,
+                paragraph: source,
+                raw_start: drawing.story_index,
+                raw_end: drawing.story_index + 1,
+                atom: true,
+            });
+            drawing.block
+        })
+        .collect()
 }
 
 /// Resolves every comment anchored in `story_id` to sorted, story-global
@@ -2389,6 +2798,42 @@ fn push_text_chunks(
     }
 }
 
+/// Drops the drawings the view hides, keeping the sequences a hidden shape holds opaque.
+fn retain_visible_drawings(
+    drawings: &mut Vec<DrawingMarker>,
+    env: &RenderEnv,
+    opaque_sequences: &mut BTreeSet<String>,
+) {
+    drawings.retain(|drawing| {
+        if drawing.visible(env) {
+            return true;
+        }
+        if !drawing.revision_hidden
+            && let LayoutBlock::Shape(shape) = &drawing.block
+        {
+            collect_shape_sequences(shape, opaque_sequences);
+        }
+        false
+    });
+}
+
+/// Keeps the sequences a field run holds opaque when the view leaves it out.
+fn collect_run_sequences(run: &RawRun, opaque_sequences: &mut BTreeSet<String>) {
+    if let RawRunKind::Field {
+        instruction,
+        nested_sequences,
+        ..
+    } = &run.kind
+    {
+        opaque_sequences.extend(
+            instruction
+                .as_deref()
+                .and_then(docx_layout::sequence_fields::sequence_name),
+        );
+        opaque_sequences.extend(nested_sequences.iter().cloned());
+    }
+}
+
 fn collect_shape_sequences(shape: &ShapeBlock, opaque_sequences: &mut BTreeSet<String>) {
     opaque_sequences.extend(shape.nested_sequences.iter().cloned());
     for run in shape
@@ -2441,49 +2886,31 @@ fn flush_paragraph_parts<T: ReadTxn>(
     (map, story_slot): (&mut LoweringMap, u32),
     opaque_sequences: &mut BTreeSet<String>,
     revealable: &mut Option<Vec<LayoutBlock>>,
+    mut carried: Vec<(u32, Vec<RawRun>)>,
 ) -> Vec<LayoutBlock> {
     let source = map.paragraphs.len() as u32;
     map.paragraphs.push((
         story_slot,
         shared_map_string(pilcrow, txn, "paraId").unwrap_or_default(),
     ));
-    raw_runs.retain(|run| !run.revision_hidden);
-    drawings.retain(|drawing| !drawing.revision_hidden);
-    if env.show_hidden_text {
-        for run in &mut raw_runs {
-            if run.formatting.hidden == Some(true) {
-                run.formatting.hidden = None;
+    retain_visible_drawings(&mut drawings, env, opaque_sequences);
+    for runs in std::iter::once(&mut raw_runs).chain(carried.iter_mut().map(|(_, runs)| runs)) {
+        runs.retain(|run| {
+            if run.visible(env) {
+                return true;
+            }
+            if !run.revision_hidden {
+                collect_run_sequences(run, opaque_sequences);
+            }
+            false
+        });
+        if env.show_hidden_text {
+            for run in runs.iter_mut() {
+                if run.formatting.hidden == Some(true) {
+                    run.formatting.hidden = None;
+                }
             }
         }
-    } else {
-        raw_runs.retain(|run| {
-            if run.formatting.hidden != Some(true) {
-                return true;
-            }
-            if let RawRunKind::Field {
-                instruction,
-                nested_sequences,
-                ..
-            } = &run.kind
-            {
-                opaque_sequences.extend(
-                    instruction
-                        .as_deref()
-                        .and_then(docx_layout::sequence_fields::sequence_name),
-                );
-                opaque_sequences.extend(nested_sequences.iter().cloned());
-            }
-            false
-        });
-        drawings.retain(|drawing| {
-            if !drawing.hidden {
-                return true;
-            }
-            if let LayoutBlock::Shape(shape) = &drawing.block {
-                collect_shape_sequences(shape, opaque_sequences);
-            }
-            false
-        });
     }
     for drawing in &drawings {
         let pm_start = paragraph_pm_start + 1 + u64::from(drawing.pm_offset);
@@ -2512,6 +2939,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
             paragraph_pm_units,
             list_state,
             (map, source),
+            carried,
         );
         if !env.show_hidden_text
             && paragraph.runs.is_empty()
@@ -2549,6 +2977,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
                 drawing.pm_offset - segment_start,
                 list_state,
                 (map, source),
+                Vec::new(),
             )));
         }
         blocks.push(drawing.block);
@@ -2571,6 +3000,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
             paragraph_pm_units - segment_start,
             list_state,
             (map, source),
+            Vec::new(),
         )));
     }
     if let Some(revealed) = revealable
@@ -2590,6 +3020,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
             0,
             &mut list_state.clone(),
             (&mut LoweringMap::default(), 0),
+            Vec::new(),
         )));
     }
     blocks
@@ -2607,6 +3038,7 @@ fn flush_paragraph<T: ReadTxn>(
     paragraph_pm_units: u32,
     list_state: &mut ListState,
     (map, source): (&mut LoweringMap, u32),
+    carried: Vec<(u32, Vec<RawRun>)>,
 ) -> ParagraphBlock {
     let values = pilcrow_values(pilcrow, txn);
     let para_id = value_string(values.get("paraId")).unwrap_or_default();
@@ -2628,7 +3060,15 @@ fn flush_paragraph<T: ReadTxn>(
     }
     let raw_runs = coalesce_runs(raw_runs);
     map.paragraph_blocks.push((paragraph_pm_start, source));
-    for raw in &raw_runs {
+    let carried: Vec<_> = carried
+        .into_iter()
+        .map(|(source, runs)| (source, coalesce_runs(runs)))
+        .collect();
+    for (raw, source) in carried
+        .iter()
+        .flat_map(|(source, runs)| runs.iter().map(|raw| (raw, *source)))
+        .chain(raw_runs.iter().map(|raw| (raw, source)))
+    {
         map.spans.push(SourceSpan {
             pm_start: paragraph_pm_start + 1 + u64::from(raw.pm_start),
             pm_end: paragraph_pm_start + 1 + u64::from(raw.pm_end),
@@ -2638,6 +3078,11 @@ fn flush_paragraph<T: ReadTxn>(
             atom: raw.atom,
         });
     }
+    let raw_runs: Vec<RawRun> = carried
+        .into_iter()
+        .flat_map(|(_, runs)| runs)
+        .chain(raw_runs)
+        .collect();
     let mut attrs = lower_paragraph_attrs(&values, pilcrow_attributes, env, list_state);
     for raw in &raw_runs {
         if let RawRunKind::HorizontalRule(rule) = &raw.kind {
@@ -2911,6 +3356,7 @@ fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
             fallback,
             locked,
             nested_sequences,
+            ..
         } => Run::Field(FieldRun {
             fmt: raw.formatting,
             field_type,

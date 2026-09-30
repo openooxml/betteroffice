@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::hash::{DefaultHasher, Hasher as _};
 use std::rc::Rc;
 
 use docx_layout::display_list::DisplayList;
@@ -1373,8 +1374,71 @@ fn paragraph_offset_position(start: f64, offset: u32) -> Option<i64> {
 }
 
 fn measured_fingerprint(measured: &MeasuredBlock) -> Result<u64, String> {
-    crate::fingerprint::fingerprint_without_positions(measured)
-        .map_err(|error| format!("fingerprint measured block: {error}"))
+    crate::fingerprint::fingerprint_without_positions(&(
+        measured,
+        relative_run_position_fingerprint(&measured.block),
+    ))
+    .map_err(|error| format!("fingerprint measured block: {error}"))
+}
+
+fn relative_run_position_fingerprint(block: &LayoutBlock) -> u64 {
+    fn paragraph(block: &docx_layout::types::ParagraphBlock, positions: &mut DefaultHasher) {
+        let start = block.pm_start.unwrap_or(0.0);
+        for (from, to) in std::iter::once((Some(0.0), block.pm_end.map(|end| end - start))).chain(
+            block.runs.iter().map(|run| {
+                (
+                    run.pm_start().map(|position| position - start),
+                    run.pm_end().map(|position| position - start),
+                )
+            }),
+        ) {
+            for position in [from, to] {
+                positions.write_u8(u8::from(position.is_some()));
+                if let Some(position) = position {
+                    positions.write_u64(if position == 0.0 {
+                        0
+                    } else {
+                        position.to_bits()
+                    });
+                }
+            }
+        }
+    }
+
+    fn collect(block: &LayoutBlock, positions: &mut DefaultHasher) {
+        match block {
+            LayoutBlock::Paragraph(block) => paragraph(block, positions),
+            LayoutBlock::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        for block in &cell.blocks {
+                            collect(block, positions);
+                        }
+                    }
+                }
+            }
+            LayoutBlock::TextBox(textbox) => {
+                for block in &textbox.content {
+                    paragraph(block, positions);
+                }
+            }
+            LayoutBlock::Shape(shape) => {
+                for block in shape.inner_text.iter().flatten().chain(
+                    shape
+                        .children
+                        .iter()
+                        .flat_map(|child| child.inner_text.iter().flatten()),
+                ) {
+                    paragraph(block, positions);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut positions = DefaultHasher::new();
+    collect(block, &mut positions);
+    positions.finish()
 }
 
 /// [`measured_fingerprint`] of a block and its measure held apart.
@@ -1384,8 +1448,11 @@ fn measured_parts_fingerprint(block: &LayoutBlock, measure: &BlockExtent) -> Res
         block: &'a LayoutBlock,
         measure: &'a BlockExtent,
     }
-    crate::fingerprint::fingerprint_without_positions(&MeasuredParts { block, measure })
-        .map_err(|error| format!("fingerprint measured block: {error}"))
+    crate::fingerprint::fingerprint_without_positions(&(
+        MeasuredParts { block, measure },
+        relative_run_position_fingerprint(block),
+    ))
+    .map_err(|error| format!("fingerprint measured block: {error}"))
 }
 
 /// JSON equality with numbers compared by value, as a host's `1` and Rust's `1.0`.
@@ -3050,7 +3117,7 @@ impl EngineSession {
     fn layout_document_value_with_fingerprints(
         &self,
         mut input: LayoutInput,
-        block_fingerprints: Vec<u64>,
+        mut block_fingerprints: Vec<u64>,
     ) -> Result<(), String> {
         if block_fingerprints.len() != input.measured.len() {
             return Err("resident pagination fingerprints do not match measured blocks".to_owned());
@@ -3062,6 +3129,20 @@ impl EngineSession {
         let mut deltas = HashMap::new();
         let run = {
             let mut previous = self.pagination.borrow_mut();
+            if let Some(previous_input) = previous.input.as_ref() {
+                for ((previous, next), fingerprint) in previous_input
+                    .measured
+                    .iter()
+                    .zip(&input.measured)
+                    .zip(&mut block_fingerprints)
+                {
+                    if relative_run_position_fingerprint(&previous.block)
+                        != relative_run_position_fingerprint(&next.block)
+                    {
+                        *fingerprint = measured_fingerprint(next)?;
+                    }
+                }
+            }
             let first_dirty = previous
                 .block_fingerprints
                 .iter()
@@ -4938,6 +5019,29 @@ mod tests {
             measured_table_wrap_margins("text", "left", json!([first, second, third])),
             (0.0, 0.0)
         );
+    }
+
+    #[test]
+    fn measured_fingerprints_preserve_relative_run_positions() {
+        let measured = |start: f64, gap: f64| {
+            serde_json::from_value::<MeasuredBlock>(serde_json::json!({
+                "block": {
+                    "kind": "paragraph", "id": "joined", "pmStart": start, "pmEnd": start + 12.0,
+                    "runs": [
+                        {"kind": "text", "text": "before", "pmStart": start + 1.0, "pmEnd": start + 7.0},
+                        {"kind": "text", "text": "yes", "pmStart": start + gap, "pmEnd": start + gap + 3.0}
+                    ]
+                },
+                "measure": {"kind": "paragraph", "lines": [], "totalHeight": 0.0}
+            }))
+            .unwrap()
+        };
+        let original = measured_fingerprint(&measured(0.0, 8.0)).unwrap();
+        assert_eq!(
+            original,
+            measured_fingerprint(&measured(100.0, 8.0)).unwrap()
+        );
+        assert_ne!(original, measured_fingerprint(&measured(0.0, 7.0)).unwrap());
     }
 
     #[test]
