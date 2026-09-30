@@ -1885,6 +1885,120 @@ mod pagination_rule_tests {
     }
 
     #[test]
+    fn a_repeated_header_row_below_a_float_band_terminates_when_rounding_fits_the_slice() {
+        let rows = [
+            (true, vec![64.0]),
+            (false, vec![20.0; 8]),
+            (false, vec![40.000000000000007, 40.0]),
+        ];
+        let block_rows: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .map(|(index, (header, _))| {
+                json!({ "id": 20 + index, "isHeader": header, "cells": [{ "id": 30 + index,
+                    "padding": {"top": 0, "right": 0, "bottom": 0, "left": 0},
+                    "blocks": [{ "kind": "paragraph", "id": 40 + index,
+                        "runs": [{ "kind": "text", "text": "x", "fmt": {} }],
+                        "attrs": { "widowControl": false } }] }] })
+            })
+            .collect();
+        let extents: Vec<_> = rows
+            .iter()
+            .map(|(_, lines)| {
+                let height: f64 = lines.iter().sum();
+                json!({ "height": height, "cells": [{ "width": 100, "height": height,
+                    "blocks": [{ "kind": "paragraph",
+                        "lines": lines.iter().copied().map(line).collect::<Vec<_>>(),
+                        "totalHeight": height }] }] })
+            })
+            .collect();
+        let total: f64 = rows.iter().flat_map(|(_, lines)| lines).sum();
+        let mut value: Input = serde_json::from_value(json!({
+            "measured": [{
+                "block": { "kind": "table", "id": 2, "rows": block_rows, "columnWidths": [100] },
+                "measure": { "kind": "table", "columnWidths": [100], "totalWidth": 100,
+                             "totalHeight": total, "rows": extents },
+            }],
+            "options": {
+                "pageSize": {"w": 500, "h": 580},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "sectionPageFloatBands": [{"default": [{"top": 200, "bottom": 300}]}],
+            },
+        }))
+        .unwrap();
+        let result = layout_document(&mut value).unwrap();
+        let last_row_end = result
+            .pages
+            .iter()
+            .flat_map(|page| &page.fragments)
+            .filter_map(|fragment| match fragment {
+                Fragment::Table(table) => Some(table.row_end),
+                _ => None,
+            })
+            .next_back();
+        assert_eq!(last_row_end, Some(3));
+        assert!(result.pages.len() <= 4);
+    }
+
+    #[test]
+    fn a_paragraph_split_across_columns_paints_its_float_in_each_column() {
+        let floating = |height: f64, lines: usize| {
+            json!({
+                "block": {"kind": "paragraph", "id": format!("p{lines}"), "runs": [
+                    {"kind": "text", "text": "abcdefghij"},
+                    {"kind": "image", "src": "float", "width": 20, "height": 20,
+                     "displayMode": "float", "wrapType": "square",
+                     "position": {"vertical": {"relativeTo": "paragraph", "posOffset": 0}}},
+                ], "attrs": {"widowControl": false}},
+                "measure": {"kind": "paragraph", "totalHeight": height * lines as f64,
+                            "lines": (0..lines).map(|index| json!({
+                                "headRun": 0, "headChar": index, "tailRun": 0,
+                                "tailChar": index + 1, "width": 10, "ascent": 15,
+                                "descent": 5, "lineHeight": height,
+                            })).collect::<Vec<_>>()},
+            })
+        };
+        let mut value: Input = serde_json::from_value(json!({
+            "measured": [paragraph(1, 5, 20.0, json!({})), floating(20.0, 15)],
+            "options": {
+                "pageSize": {"w": 500, "h": 492},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "columns": {"count": 2, "gap": 20},
+            },
+        }))
+        .unwrap();
+        let result = layout_document(&mut value).unwrap();
+        let split: Vec<_> = result.pages[0]
+            .fragments
+            .iter()
+            .filter_map(|fragment| match fragment {
+                Fragment::Paragraph(fragment)
+                    if matches!(&fragment.block_id, crate::types::BlockId::Str(id) if id == "p15") =>
+                {
+                    Some(fragment)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(split.len(), 2);
+        let display: serde_json::Value = serde_json::from_str(
+            &crate::display_list::build_display_list_json(
+                &json!({"measured": value.measured, "options": value.options, "layout": result})
+                    .to_string(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let images = display["pages"][0]["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|primitive| primitive["kind"] == "image")
+            .count();
+        assert_eq!(images, 2);
+    }
+
+    #[test]
     fn a_paragraph_crosses_two_thousand_disjoint_float_bands_on_one_page() {
         let count = 2_000;
         let bands: Vec<_> = (0..count)

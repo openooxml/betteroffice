@@ -222,8 +222,11 @@ fn layout_table_with_position(
 
     let mut row_index = 0usize;
     let mut consumed = 0.0f64; // px of rows[row_index] already placed on a previous fragment
+    // Room `ensure_fits` granted at the cursor that rounding left out of the budget.
+    let mut granted_floor = 0.0f64;
 
     'rows: while row_index < rows.len() {
+        let floor = std::mem::take(&mut granted_floor);
         let state_idx = paginator.get_current();
         let is_first_fragment = row_index == 0 && consumed == 0.0;
         // The tallest stretch a fresh column offers between float bands.
@@ -300,7 +303,8 @@ fn layout_table_with_position(
         } else {
             0.0
         };
-        let available_height = paginator.get_available_height() - pending_spacing - header_overhead;
+        let available_height =
+            (paginator.get_available_height() - pending_spacing - header_overhead).max(floor);
 
         let start_row = row_index;
         let clip_top = consumed;
@@ -396,11 +400,11 @@ fn layout_table_with_position(
             {
                 // The paragraph rules allow a break that a whole column holds:
                 // start the fragment below a float band, else in the next column.
-                let slice = minimum_row_slice(block, measure, &breaks.kept, cur, start_off)
-                    + header_overhead
-                    + pending_spacing;
-                if !(paginator.has_float_bands() && fit_moved_cursor(paginator, slice)) {
+                let slice = minimum_row_slice(block, measure, &breaks.kept, cur, start_off);
+                if !paginator.has_float_bands() {
                     paginator.advance_for_overflow();
+                } else if !fit_moved_cursor(paginator, slice + header_overhead + pending_spacing) {
+                    granted_floor = used + slice;
                 }
                 continue 'rows;
             } else {

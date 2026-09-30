@@ -5046,7 +5046,9 @@ fn build_display_list_selected(
         for fragment in &page.fragments {
             match fragment {
                 FragmentIn::Paragraph(fragment) => {
-                    if !float_paragraphs.insert(block_key(&fragment.block_id)) {
+                    if !float_paragraphs
+                        .insert((block_key(&fragment.block_id), fragment.x.to_bits()))
+                    {
                         continue;
                     }
                     let Some(measured) = by_id.get(&block_key(&fragment.block_id)) else {
@@ -5233,7 +5235,7 @@ fn build_display_list_selected(
         float_paragraphs.clear();
         for frag in &page.fragments {
             if let FragmentIn::Paragraph(pf) = frag
-                && float_paragraphs.insert(block_key(&pf.block_id))
+                && float_paragraphs.insert((block_key(&pf.block_id), pf.x.to_bits()))
                 && let Some(mb) = by_id.get(&block_key(&pf.block_id))
                 && let BlockIn::Paragraph(block) = &mb.block
             {
