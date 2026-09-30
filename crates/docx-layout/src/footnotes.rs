@@ -6,7 +6,7 @@ use crate::LayoutError;
 use crate::regions::{DocumentRegions, format_number};
 use crate::types::{
     BlockExtent, BlockId, Fragment, Layout, LayoutBlock, NoteAreaContract, NoteLayoutItemContract,
-    Page, ParagraphBlock, Run, RunFormatting, TextRun,
+    Page, PageFloatBand, ParagraphBlock, Run, RunFormatting, TextRun,
 };
 
 pub const FOOTNOTE_SEPARATOR_HEIGHT: f64 = 12.0;
@@ -732,6 +732,29 @@ fn note_item(content: &NoteContent) -> NoteLayoutItemContract {
     }
 }
 
+pub(crate) fn note_area_bottom(mut limit: f64, needed: f64, bands: &[PageFloatBand]) -> f64 {
+    if needed <= 0.0 {
+        return limit;
+    }
+    for band in bands.iter().rev() {
+        if band.bottom <= limit - needed {
+            break;
+        }
+        if band.top < limit {
+            limit = band.top;
+        }
+    }
+    limit
+}
+
+fn note_group_height(group: &[&NoteContent], columns: u64) -> f64 {
+    distribute_notes_into_columns(group.to_vec(), columns)
+        .iter()
+        .map(|column| column.iter().map(|content| content.height).sum::<f64>())
+        .fold(0.0_f64, f64::max)
+        + FOOTNOTE_SEPARATOR_HEIGHT
+}
+
 pub fn attach_note_areas(
     layout: &mut Layout,
     page_note_map: &OrderedMap<u32, Vec<i64>>,
@@ -751,13 +774,30 @@ pub fn attach_note_areas(
                 groups.set(content.note_kind, vec![content]);
             }
         }
-        let content_bottom = page.size.h - page.margins.bottom;
+        let margins = page.body_margins.as_ref().unwrap_or(&page.margins);
+        let content_bottom = page.size.h - margins.bottom;
         let last_body_bottom = page
             .fragments
             .iter()
             .map(fragment_bottom)
-            .fold(page.margins.top, f64::max);
-        let mut bottom_cursor = content_bottom;
+            .fold(margins.top, f64::max);
+        let needed = if page.float_bands.is_empty() {
+            0.0
+        } else {
+            groups
+                .iter()
+                .map(|(kind, group)| {
+                    let columns = if *kind == NoteKind::Footnote {
+                        regions.footnote_columns(page.region_section_index)
+                    } else {
+                        1
+                    };
+                    note_group_height(group, columns)
+                })
+                .sum()
+        };
+        let note_bottom = note_area_bottom(content_bottom, needed, &page.float_bands);
+        let mut bottom_cursor = note_bottom;
         let mut beneath_text_cursor = last_body_bottom;
         let mut areas = Vec::new();
         for (kind, group) in groups.iter() {
@@ -774,13 +814,18 @@ pub fn attach_note_areas(
             } else {
                 1
             };
-            let height = distribute_notes_into_columns(group.clone(), columns)
-                .iter()
-                .map(|column| column.iter().map(|content| content.height).sum::<f64>())
-                .fold(0.0_f64, f64::max)
-                + FOOTNOTE_SEPARATOR_HEIGHT;
+            let height = note_group_height(group, columns);
             let y = if placement == "beneathText" {
-                let y = beneath_text_cursor.min(content_bottom - height);
+                let mut y = beneath_text_cursor.min(note_bottom - height);
+                let first = page.float_bands.partition_point(|band| band.bottom <= y);
+                if page
+                    .float_bands
+                    .get(first)
+                    .is_some_and(|band| band.top < y + height)
+                {
+                    y = bottom_cursor - height;
+                    bottom_cursor = y;
+                }
                 beneath_text_cursor = y + height;
                 y
             } else {
@@ -821,6 +866,9 @@ mod tests {
         Page {
             number,
             fragments,
+            float_bands: Vec::new(),
+            body_margins: None,
+            body_anchor_margins: None,
             margins: PageMargins {
                 top: 96.0,
                 right: 96.0,
@@ -1128,6 +1176,133 @@ mod tests {
         assert_eq!(area.placement.as_deref(), Some("beneathText"));
         assert_eq!(area.y, Some(116.0));
         assert_eq!(area.height, Some(32.0));
+    }
+
+    #[test]
+    fn bottom_notes_clear_a_detached_footer_band_and_reserve_the_skipped_space() {
+        let mut original = page(1, 0, Vec::new());
+        original.size.h = 500.0;
+        let mut paginator = crate::page_flow::Paginator::new(
+            original.size.clone(),
+            original.margins.clone(),
+            serde_json::from_value(json!({"count": 1, "gap": 0})).unwrap(),
+            Some([("1".to_owned(), 154.0)].into_iter().collect()),
+        )
+        .unwrap();
+        paginator.set_section_page_float_bands(vec![crate::types::SectionPageFloatBands {
+            default: vec![PageFloatBand {
+                top: 200.0,
+                bottom: 300.0,
+                odd_page: None,
+            }],
+            ..Default::default()
+        }]);
+        let idx = paginator.get_current();
+        assert_eq!(paginator.state(idx).content_limit, 46.0);
+        let mut output = layout(paginator.pages);
+        let map = [(1, vec![1])].into_iter().collect();
+        attach_note_areas(
+            &mut output,
+            &map,
+            &[content(1, NoteKind::Footnote, 142.0)],
+            &DocumentRegions::default(),
+        );
+        let page = &output.pages[0];
+        let area = &page.note_areas.as_ref().unwrap()[0];
+        assert_eq!(area.y, Some(46.0));
+        assert_eq!(area.height, Some(154.0));
+        assert_eq!(page.footnote_reserved_height, Some(358.0));
+        assert!(page.float_bands.iter().all(|band| {
+            area.y.unwrap() + area.height.unwrap() <= band.top || area.y.unwrap() >= band.bottom
+        }));
+    }
+
+    #[test]
+    fn body_text_stays_above_notes_and_the_skipped_footer_gap() {
+        let mut input: crate::types::Input = serde_json::from_value(json!({
+            "measured": [{
+                "block": {"kind": "paragraph", "id": "body",
+                          "runs": [{"kind": "text", "text": "Body"}]},
+                "measure": {"kind": "paragraph", "totalHeight": 140,
+                            "lines": vec![json!({
+                                "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 4,
+                                "width": 40, "ascent": 15, "descent": 5, "lineHeight": 20
+                            }); 7]}
+            }],
+            "options": {
+                "pageSize": {"w": 500, "h": 700},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "footnoteReservedHeights": {"1": 154},
+                "sectionPageFloatBands": [{"default": [{"top": 400, "bottom": 500}]}]
+            }
+        }))
+        .unwrap();
+        let mut output = crate::place::layout_document(&mut input).unwrap();
+        let map = [(1, vec![1])].into_iter().collect();
+        attach_note_areas(
+            &mut output,
+            &map,
+            &[content(1, NoteKind::Footnote, 142.0)],
+            &DocumentRegions::default(),
+        );
+        assert_eq!(output.pages.len(), 1);
+        let page = &output.pages[0];
+        let area = &page.note_areas.as_ref().unwrap()[0];
+        assert_eq!(area.y, Some(246.0));
+        assert_eq!(page.footnote_reserved_height, Some(358.0));
+        assert!(
+            page.fragments
+                .iter()
+                .all(|fragment| fragment_bottom(fragment) <= area.y.unwrap())
+        );
+        assert!(area.y.unwrap() + area.height.unwrap() <= 400.0);
+    }
+
+    #[test]
+    fn note_clearance_walks_up_a_band_chain_and_keeps_touching_edges_clear() {
+        let band = |top, bottom| PageFloatBand {
+            top,
+            bottom,
+            odd_page: None,
+        };
+        let bands = [band(200.0, 300.0), band(310.0, 320.0)];
+        assert_eq!(note_area_bottom(404.0, 154.0, &bands), 200.0);
+        assert_eq!(note_area_bottom(404.0, 84.0, &bands), 404.0);
+        assert_eq!(note_area_bottom(404.0, 154.0, &[]), 404.0);
+    }
+
+    #[test]
+    fn beneath_text_notes_clear_bands_without_overlapping_bottom_notes() {
+        let mut output = layout(vec![page(1, 0, vec![paragraph_fragment(0.0, 10.0)])]);
+        output.pages[0].size.h = 500.0;
+        output.pages[0].float_bands = vec![PageFloatBand {
+            top: 120.0,
+            bottom: 200.0,
+            odd_page: None,
+        }];
+        let map = [(1, vec![1, -2])].into_iter().collect();
+        let contents = [
+            content(1, NoteKind::Footnote, 20.0),
+            content(1, NoteKind::Endnote, 20.0),
+        ];
+        let regions = DocumentRegions {
+            note_settings: NoteSettings {
+                footnote: NoteProperties {
+                    position: Some("beneathText".to_owned()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        attach_note_areas(&mut output, &map, &contents, &regions);
+        let areas = output.pages[0].note_areas.as_ref().unwrap();
+        assert_eq!(areas[0].y, Some(372.0));
+        assert_eq!(areas[1].y, Some(340.0));
+        assert_eq!(
+            areas[1].y.unwrap() + areas[1].height.unwrap(),
+            areas[0].y.unwrap()
+        );
     }
 
     #[test]
