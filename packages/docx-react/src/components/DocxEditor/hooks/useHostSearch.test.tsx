@@ -7,6 +7,7 @@ import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { createYrsSession, type YrsSession } from '@betteroffice/docx/yrs';
 import type { PagedEditorRef } from '../PagedEditor';
 import { createYrsPositionProjection } from '../internals/yrsPositionProjection';
+import { stampSourceVersion } from '../internals/layoutProvenance';
 import { yrsCellStory } from '../yrsCommands';
 import { useHostSearch, type DocxSearchState } from './useHostSearch';
 
@@ -117,6 +118,7 @@ async function mount(page = 1) {
     layOut: (canPlace: () => boolean) => {
       placeable = canPlace;
     },
+    stamp: (version: number, sourceVersion: string) => stampSourceVersion(queries(version), sourceVersion),
   };
 }
 
@@ -146,7 +148,11 @@ test('finds every body and table match in reading order and walks them', async (
   });
   expect(hook.result.current.highlight?.current).toBe(2);
   expect(reveals.at(-1)).toBe(matches[2].displayFrom);
-  expect(api().searchGoTo(9)?.current).toBe(2);
+  expect(api().searchGoTo(9)?.current).toBe(4);
+  expect(api().searchGoTo(-1)?.current).toBe(4);
+  act(() => {
+    api().searchGoTo(2);
+  });
 
   await act(async () => {
     state = await api().search('the', { caseSensitive: true });
@@ -157,7 +163,7 @@ test('finds every body and table match in reading order and walks them', async (
   expect(hook.result.current.highlight).toBeNull();
   expect(api().getSearchState()).toBeNull();
   expect(api().searchNext()).toBeNull();
-  expect(events.map((event) => event?.current ?? null)).toEqual([0, 4, 0, 2, 0, null]);
+  expect(events.map((event) => event?.current ?? null)).toEqual([0, 4, 0, 2, 4, 4, 2, 0, null]);
 });
 
 test('starts at the first match on the page in view', async () => {
@@ -274,6 +280,33 @@ test('a search ends with its editor or document', async () => {
   pagedEditorRef.current = null;
   expect(hook.result.current.api.searchNext()).toBeNull();
   expect(events.at(-1)).toBeNull();
+});
+
+test('a search without matches still owns the highlights', async () => {
+  const { hook } = await mount();
+  let state = null as DocxSearchState | null;
+  await act(async () => {
+    state = await hook.result.current.api.search('zebra');
+  });
+  expect(state).toMatchObject({ total: 0, current: -1 });
+  expect(hook.result.current.highlight).toEqual({ matches: [], current: -1 });
+  expect(hook.result.current.api.searchNext()).toMatchObject({ total: 0, current: -1 });
+});
+
+test('a reveal against a layout of an older version waits for the current one', async () => {
+  const { session, hook, reveals, stamp } = await mount();
+  stamp(0, 'older');
+  await act(async () => {
+    await hook.result.current.api.search('dog');
+  });
+  expect(reveals).toHaveLength(1);
+  stamp(1, session.version());
+  hook.rerender({ version: 1 });
+  expect(reveals).toHaveLength(2);
+  hook.rerender({ version: 1 });
+  stamp(2, session.version());
+  hook.rerender({ version: 2 });
+  expect(reveals).toHaveLength(2);
 });
 
 test('an empty query clears', async () => {

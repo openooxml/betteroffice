@@ -5,6 +5,7 @@ import type { YrsSession, YrsStickyPosition } from '@betteroffice/docx/yrs';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { CanvasFindMatch } from '../overlays/CanvasFindHighlightOverlay';
 import { scrollViewport } from '../internals/viewportBand';
+import { sourceVersionOf } from '../internals/layoutProvenance';
 
 /** Options for {@link DocxHostSearch.search}. */
 export interface DocxSearchOptions {
@@ -179,7 +180,7 @@ export function useHostSearch({
 
   const publish = useCallback((run: SearchRun | null) => {
     runRef.current = run;
-    setHighlight(run && run.matches.length > 0 ? { matches: run.matches, current: run.current } : null);
+    setHighlight(run ? { matches: run.matches, current: run.current } : null);
     const state = stateOf(run);
     for (const listener of [...listenersRef.current]) {
       try {
@@ -190,10 +191,13 @@ export function useHostSearch({
     }
   }, []);
 
+  /** Scrolls to `position`, and keeps it pending until a layout of `version` placed it. */
   const reveal = useCallback(
-    (position: number) => {
+    (position: number, version: string) => {
       const outcome = pagedEditorRef.current?.revealDisplayPosition(position);
-      pendingRevealRef.current = outcome === 'scrolled' ? null : position;
+      const shown = sourceVersionOf(queriesRef.current);
+      const placed = outcome === 'scrolled' && (shown === null || shown === version);
+      pendingRevealRef.current = placed ? null : position;
     },
     [pagedEditorRef]
   );
@@ -220,7 +224,7 @@ export function useHostSearch({
       if (!run) return null;
       if (run.matches.length === 0 || !Number.isInteger(index)) return stateOf(run);
       const current = ((index % run.matches.length) + run.matches.length) % run.matches.length;
-      reveal(run.matches[current].displayFrom);
+      reveal(run.matches[current].displayFrom, run.version);
       publish({ ...run, current, anchor: anchorOf(run.session, run.matches[current]) });
       return stateOf(runRef.current);
     },
@@ -252,7 +256,7 @@ export function useHostSearch({
         current,
         anchor: anchorOf(session, matches[current]),
       };
-      if (current >= 0) reveal(matches[current].displayFrom);
+      if (current >= 0) reveal(matches[current].displayFrom, run.version);
       publish(run);
       return stateOf(run)!;
     },
@@ -274,7 +278,7 @@ export function useHostSearch({
       pendingRevealRef.current = null;
       const matches = collectMatches(editor, session, run.query, run.options);
       const current = carriedCurrent(editor, session, matches, run.anchor);
-      if (revealing && current >= 0) reveal(matches[current].displayFrom);
+      if (revealing && current >= 0) reveal(matches[current].displayFrom, session.version());
       publish({
         ...run,
         version: session.version(),
@@ -283,7 +287,7 @@ export function useHostSearch({
         anchor: anchorOf(session, matches[current]),
       });
     } else if (pendingRevealRef.current !== null) {
-      reveal(pendingRevealRef.current);
+      reveal(pendingRevealRef.current, run.version);
     }
   }, [clearSearch, displayListQueries, pagedEditorRef, publish, reveal]);
 
@@ -300,11 +304,7 @@ export function useHostSearch({
         const run = liveRun();
         return run ? goTo(run.current - 1) : null;
       },
-      searchGoTo: (index) => {
-        const run = liveRun();
-        if (!run) return null;
-        return index >= 0 && index < run.matches.length ? goTo(index) : stateOf(run);
-      },
+      searchGoTo: goTo,
       clearSearch,
       getSearchState: () => stateOf(liveRun()),
       onSearchChange: (listener) => {

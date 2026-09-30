@@ -629,7 +629,7 @@ export interface DocxEditorRef {
   searchNext: () => DocxSearchState | null;
   /** Make the previous match current, wrapping, and scroll to it. Null without a search. */
   searchPrevious: () => DocxSearchState | null;
-  /** Make match `index` (zero-based) current and scroll to it. Null without a search. */
+  /** Make match `index` (zero-based, wrapping) current and scroll to it. Null without a search. */
   searchGoTo: (index: number) => DocxSearchState | null;
   /** Remove the search and its highlights. */
   clearSearch: () => void;
