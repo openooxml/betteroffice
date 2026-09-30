@@ -55,6 +55,17 @@ function fakeEngine() {
   return { engine, calls };
 }
 
+function dropFacadeWithDonor(
+  engine: RustDisplayListQueryEngine,
+  hostState: WeakMap<object, { latest: DisplayListQueries }>
+): WeakRef<DisplayListQueries> {
+  const donor = createDisplayListQueries({ pages: [page(0)] }, engine);
+  donor.prime();
+  const facade = createDisplayListQueries({ pages: [page(0)] }, engine, donor);
+  hostState.set(donor, { latest: facade });
+  return new WeakRef(facade);
+}
+
 describe('createDisplayListQueries handle lifecycle', () => {
   test('opens the session handle lazily, on the first query', () => {
     const { engine, calls } = fakeEngine();
@@ -75,23 +86,25 @@ describe('createDisplayListQueries handle lifecycle', () => {
     expect(calls.open).toBe(1);
   });
 
-  test('a dropped facade whose donor leads back to it is still finalized', async () => {
+  test('a dropped facade whose donor leads back to it is collected', async () => {
     const { engine } = fakeEngine();
     // Host state keyed by the donor that reaches its successor, as a display window does.
     const hostState = new WeakMap<object, { latest: DisplayListQueries }>();
-    let dropped!: WeakRef<DisplayListQueries>;
-    (() => {
-      const donor = createDisplayListQueries({ pages: [page(0)] }, engine);
-      donor.prime();
-      const facade = createDisplayListQueries({ pages: [page(0)] }, engine, donor);
-      hostState.set(donor, { latest: facade });
-      dropped = new WeakRef(facade);
-    })();
-    for (let i = 0; i < 20 && dropped.deref(); i++) {
-      Bun.gc(true);
+    const dropped = dropFacadeWithDonor(engine, hostState);
+    const alive = (): boolean => dropped.deref() !== undefined;
+    let collected = false;
+    for (let i = 0; i < 20 && !collected; i++) {
+      await new Promise<void>((resolve) =>
+        setTimeout(() => {
+          Bun.gc(true);
+          resolve();
+        }, 0)
+      );
       await new Promise((resolve) => setTimeout(resolve, 0));
+      collected = !alive();
     }
-    expect(dropped.deref()).toBeUndefined();
+    expect(collected).toBe(true);
+    expect(hostState).toBeInstanceOf(WeakMap);
   });
 
   test('adoption chains across unqueried generations as one page-delta', () => {
