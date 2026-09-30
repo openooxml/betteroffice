@@ -272,7 +272,7 @@ test('an untaken worker session whose render and open fail reports the error onc
     await waitFor(() => expect(openInWorker).toHaveBeenCalledTimes(1), { timeout: 10_000 });
     const pendingSession = openInWorker.mock.calls[0][0];
     expect(shownPages).toBe(true);
-    expect(pendingSession).toBe(fullSession);
+    expect(pendingSession as unknown).toBe(fullSession);
     expect(pendingSession.isDisplayOnly()).toBe(false);
     expect(renderer!.layoutEngine).not.toBe(pendingSession);
     expect((renderer!.layoutEngine as YrsSession).isDisplayOnly()).toBe(true);

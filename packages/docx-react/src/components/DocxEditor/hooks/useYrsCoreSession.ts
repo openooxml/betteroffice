@@ -412,7 +412,8 @@ export function useYrsCoreSession(
       retirePreview(preview);
     };
     const fail = (error: unknown, options?: { opened: boolean }): void => {
-      if (shown) dropPreview(shown.session);
+      // A replaced load's preview was retired with it; the next load owns the preview state.
+      if (shown && !cancelled) dropPreview(shown.session);
       if (!cancelled && callbacksRef.current?.isCurrentLoad?.(seedGeneration) !== false) {
         callbacksRef.current?.onError?.(
           error instanceof Error ? error : new Error(String(error)),
