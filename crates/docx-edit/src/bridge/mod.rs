@@ -486,7 +486,13 @@ fn lower_story<T: ReadTxn>(
                             })
                         && paragraph_drawings.iter().all(|drawing| drawing.anchored)
                     {
-                        paragraph_runs.retain(|run| run.visible(env) && run.anchored());
+                        paragraph_runs.retain(|run| {
+                            let kept = run.visible(env) && run.anchored();
+                            if !kept && !run.revision_hidden {
+                                collect_run_sequences(run, opaque_sequences);
+                            }
+                            kept
+                        });
                         if !paragraph_runs.is_empty() || !paragraph_drawings.is_empty() {
                             let source = map.paragraphs.len() as u32;
                             map.paragraphs.push((story_slot, para_id));
@@ -2811,6 +2817,23 @@ fn retain_visible_drawings(
     });
 }
 
+/// Keeps the sequences a field run holds opaque when the view leaves it out.
+fn collect_run_sequences(run: &RawRun, opaque_sequences: &mut BTreeSet<String>) {
+    if let RawRunKind::Field {
+        instruction,
+        nested_sequences,
+        ..
+    } = &run.kind
+    {
+        opaque_sequences.extend(
+            instruction
+                .as_deref()
+                .and_then(docx_layout::sequence_fields::sequence_name),
+        );
+        opaque_sequences.extend(nested_sequences.iter().cloned());
+    }
+}
+
 fn collect_shape_sequences(shape: &ShapeBlock, opaque_sequences: &mut BTreeSet<String>) {
     opaque_sequences.extend(shape.nested_sequences.iter().cloned());
     for run in shape
@@ -2876,19 +2899,8 @@ fn flush_paragraph_parts<T: ReadTxn>(
             if run.visible(env) {
                 return true;
             }
-            if !run.revision_hidden
-                && let RawRunKind::Field {
-                    instruction,
-                    nested_sequences,
-                    ..
-                } = &run.kind
-            {
-                opaque_sequences.extend(
-                    instruction
-                        .as_deref()
-                        .and_then(docx_layout::sequence_fields::sequence_name),
-                );
-                opaque_sequences.extend(nested_sequences.iter().cloned());
+            if !run.revision_hidden {
+                collect_run_sequences(run, opaque_sequences);
             }
             false
         });
