@@ -121,6 +121,8 @@ export interface DisplayListTableInsertHoverInput {
   cellPmPosOf: (tableKey: string, row: number, col: number) => number | null;
   region?: DisplayListTableRegion;
   edgeProximity?: number;
+  /** Client px per CSS px of the button, which scales its offsets from the table. Default 1. */
+  buttonZoom?: number;
 }
 
 export interface DisplayListTableInsertHoverHit {
@@ -781,6 +783,7 @@ export function detectDisplayListTableInsertHover(
     cellPmPosOf,
     region = { kind: 'body' },
     edgeProximity = TABLE_INSERT_EDGE_PROXIMITY_PX,
+    buttonZoom = 1,
   } = input;
 
   const page = list.pages[pageIndex];
@@ -833,8 +836,8 @@ export function detectDisplayListTableInsertHover(
         const anchor = toClient(left, rowTop + (rowBottom - rowTop) / 2);
         return {
           type: 'row',
-          clientX: anchor.clientX - ROW_BUTTON_OFFSET_X,
-          clientY: anchor.clientY - ROW_BUTTON_OFFSET_Y,
+          clientX: anchor.clientX - ROW_BUTTON_OFFSET_X * buttonZoom,
+          clientY: anchor.clientY - ROW_BUTTON_OFFSET_Y * buttonZoom,
           cellPmPos: pmPos,
         };
       }
@@ -862,8 +865,8 @@ export function detectDisplayListTableInsertHover(
         const anchor = toClient(cellLeft + (cellRight - cellLeft) / 2, top);
         return {
           type: 'column',
-          clientX: anchor.clientX - COL_BUTTON_OFFSET_X,
-          clientY: anchor.clientY - COL_BUTTON_OFFSET_Y,
+          clientX: anchor.clientX - COL_BUTTON_OFFSET_X * buttonZoom,
+          clientY: anchor.clientY - COL_BUTTON_OFFSET_Y * buttonZoom,
           cellPmPos: pmPos,
         };
       }

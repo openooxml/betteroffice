@@ -4,6 +4,7 @@ import { useLayoutEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   displayPageCanvas,
+  effectiveZoom,
   type DisplayListQueries,
   type DisplayListRect,
 } from '@betteroffice/docx/layout/render';
@@ -81,6 +82,7 @@ export function CanvasParagraphFlashOverlay({
 
     const recompute = () => {
       const targetRect = overlayTarget.getBoundingClientRect();
+      const targetZoom = effectiveZoom(overlayTarget);
       // Project a page-local (px) rect into `overlayTarget` coordinates via the
       // live `<canvas>` rect — identical to CanvasFindHighlightOverlay. The rect
       // already folds in centering, the sidebar shift, and zoom.
@@ -89,11 +91,11 @@ export function CanvasParagraphFlashOverlay({
         const size = displayListQueries.pageSize(r.pageIndex);
         if (!canvasEl || !size) return null;
         const canvasRect = canvasEl.getBoundingClientRect();
-        const scaleX = size.width > 0 ? canvasRect.width / size.width : 1;
-        const scaleY = size.height > 0 ? canvasRect.height / size.height : 1;
+        const scaleX = (size.width > 0 ? canvasRect.width / size.width : 1) / targetZoom;
+        const scaleY = (size.height > 0 ? canvasRect.height / size.height : 1) / targetZoom;
         return {
-          left: canvasRect.left - targetRect.left + r.x * scaleX,
-          top: canvasRect.top - targetRect.top + r.y * scaleY,
+          left: (canvasRect.left - targetRect.left) / targetZoom + r.x * scaleX,
+          top: (canvasRect.top - targetRect.top) / targetZoom + r.y * scaleY,
           width: r.width * scaleX,
           height: r.height * scaleY,
         };
