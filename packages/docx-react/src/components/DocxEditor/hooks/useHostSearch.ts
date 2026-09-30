@@ -180,11 +180,13 @@ export function useHostSearch({
     current: number;
   } | null>(null);
 
+  /** Makes `run` current and tells subscribers; a listener that replaces it ends the round. */
   const publish = useCallback((run: SearchRun | null) => {
     runRef.current = run;
     setHighlight(run ? { matches: run.matches, current: run.current } : null);
     const state = stateOf(run);
     for (const listener of [...listenersRef.current]) {
+      if (runRef.current !== run) return;
       try {
         listener(state);
       } catch (error) {
@@ -196,12 +198,11 @@ export function useHostSearch({
   /** Scrolls to `position`, and keeps it pending until a layout of `version` placed it. */
   const reveal = useCallback(
     (position: number, version: string) => {
-      const outcome = pagedEditorRef.current?.revealDisplayPosition(position);
       const shown = sourceVersionOf(queriesRef.current);
-      const placed =
-        outcome === 'scrolled' &&
-        (shown === null ? runRef.current?.placed !== false : shown === version);
-      pendingRevealRef.current = placed ? null : position;
+      const current = shown === null ? runRef.current?.placed !== false : shown === version;
+      // a layout of another version would scroll to where the match was, not where it is
+      const outcome = current ? pagedEditorRef.current?.revealDisplayPosition(position) : null;
+      pendingRevealRef.current = outcome === 'scrolled' ? null : position;
     },
     [pagedEditorRef]
   );
@@ -259,8 +260,9 @@ export function useHostSearch({
       if (!run) return null;
       if (run.matches.length === 0 || !Number.isInteger(index)) return stateOf(run);
       const current = ((index % run.matches.length) + run.matches.length) % run.matches.length;
-      publish({ ...run, current, anchor: anchorOf(run.session, run.matches[current]) });
-      reveal(run.matches[current].displayFrom, run.version);
+      const next = { ...run, current, anchor: anchorOf(run.session, run.matches[current]) };
+      publish(next);
+      if (runRef.current === next) reveal(run.matches[current].displayFrom, run.version);
       return stateOf(runRef.current);
     },
     [liveRun, publish, reveal]
@@ -294,6 +296,7 @@ export function useHostSearch({
         placed: shown === null || shown === session.version(),
       };
       publish(run);
+      if (runRef.current !== run) return stateOf(runRef.current) ?? empty;
       if (current >= 0) reveal(matches[current].displayFrom, run.version);
       return stateOf(run)!;
     },
@@ -315,7 +318,9 @@ export function useHostSearch({
       pendingRevealRef.current = null;
       const next = refreshed(run, editor, session, true);
       publish(next);
-      if (revealing && next.current >= 0) reveal(next.matches[next.current].displayFrom, next.version);
+      if (revealing && runRef.current === next && next.current >= 0) {
+        reveal(next.matches[next.current].displayFrom, next.version);
+      }
     } else if (pendingRevealRef.current !== null) {
       reveal(pendingRevealRef.current, run.version);
     }

@@ -299,14 +299,15 @@ test('a reveal against a layout of an older version waits for the current one', 
   await act(async () => {
     await hook.result.current.api.search('dog');
   });
-  expect(reveals).toHaveLength(1);
+  // no scroll to where the older layout has the match
+  expect(reveals).toHaveLength(0);
   stamp(1, session.version());
   hook.rerender({ version: 1 });
-  expect(reveals).toHaveLength(2);
+  expect(reveals).toHaveLength(1);
   hook.rerender({ version: 1 });
   stamp(2, session.version());
   hook.rerender({ version: 2 });
-  expect(reveals).toHaveLength(2);
+  expect(reveals).toHaveLength(1);
 });
 
 test('navigating right after an edit steps from the carried match', async () => {
@@ -325,7 +326,31 @@ test('navigating right after an edit steps from the carried match', async () => 
   });
   // "The" moved to the third match; the next one is the paragraph's "the"
   expect(state).toMatchObject({ total: 6, current: 3 });
+  const revealed = reveals.length;
+  // the reveal waits for the edited document's layout
+  hook.rerender({ version: 1 });
+  expect(reveals).toHaveLength(revealed + 1);
   expect(reveals.at(-1)).toBe(hook.result.current.highlight!.matches[3].displayFrom);
+});
+
+test('a listener that clears the search ends the round of events', async () => {
+  const { hook, events } = await mount();
+  const api = () => hook.result.current.api;
+  const later: Array<DocxSearchState | null> = [];
+  const stop = api().onSearchChange((state) => {
+    if (state?.current === 1) api().clearSearch();
+  });
+  api().onSearchChange((state) => later.push(state));
+  await act(async () => {
+    await api().search('the');
+  });
+  act(() => {
+    api().searchNext();
+  });
+  stop();
+  expect(later.at(-1)).toBeNull();
+  expect(later.filter((state) => state?.current === 1)).toHaveLength(0);
+  expect(events.at(-1)).toBeNull();
 });
 
 test('an empty query clears', async () => {
