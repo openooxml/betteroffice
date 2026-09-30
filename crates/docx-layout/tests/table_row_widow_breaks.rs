@@ -280,14 +280,11 @@ fn an_oversized_cant_split_row_keeps_widow_control_where_a_fresh_page_allows_it(
     );
 }
 
-#[test]
-fn a_keep_next_heading_moves_with_a_header_table_over_a_kept_row() {
+/// Pages of the keepNext heading and of the table's first fragment after a
+/// 60px filler on 100px pages.
+fn heading_and_table_pages(table: Value) -> (Option<usize>, Option<usize>) {
     let (filler, filler_measure) = paragraph(1, 3, json!({}));
     let (heading, heading_measure) = paragraph(2, 1, json!({"keepNext": true}));
-    let table = table_rows(&[
-        (1, json!({}), json!({"isHeader": true})),
-        (8, json!({"keepLines": true, "widowControl": false}), json!({})),
-    ]);
     let input = json!({
         "measured":[
             {"block":filler,"measure":filler_measure},
@@ -307,7 +304,43 @@ fn a_keep_next_heading_moves_with_a_header_table_over_a_kept_row() {
             .iter()
             .position(|page| page["fragments"].as_array().unwrap().iter().any(matches))
     };
-    let heading_page = page_of(&|fragment| fragment["blockId"] == 2);
-    let table_page = page_of(&|fragment| fragment["kind"] == "table");
-    assert_eq!((heading_page, table_page), (Some(1), Some(1)));
+    (
+        page_of(&|fragment| fragment["blockId"] == 2),
+        page_of(&|fragment| fragment["kind"] == "table"),
+    )
+}
+
+fn header_table_over_a_kept_row() -> Value {
+    table_rows(&[
+        (1, json!({}), json!({"isHeader": true})),
+        (
+            8,
+            json!({"keepLines": true, "widowControl": false}),
+            json!({}),
+        ),
+    ])
+}
+
+#[test]
+fn a_keep_next_heading_moves_with_a_header_table_over_a_kept_row() {
+    assert_eq!(
+        heading_and_table_pages(header_table_over_a_kept_row()),
+        (Some(1), Some(1))
+    );
+}
+
+#[test]
+fn a_keep_next_heading_moves_with_an_oversized_widow_controlled_row() {
+    assert_eq!(
+        heading_and_table_pages(table(8, json!({"widowControl": true}))),
+        (Some(1), Some(1))
+    );
+}
+
+#[test]
+fn a_keep_next_heading_moves_with_a_tall_floating_table_placed_in_flow() {
+    let mut table = header_table_over_a_kept_row();
+    table["block"]["floating"] =
+        json!({"horzAnchor": "margin", "vertAnchor": "text", "tblpX": 0, "tblpY": 0});
+    assert_eq!(heading_and_table_pages(table), (Some(1), Some(1)));
 }
