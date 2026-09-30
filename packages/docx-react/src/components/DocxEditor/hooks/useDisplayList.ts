@@ -51,6 +51,8 @@ import type { RustFontChainsProvider } from './useRustMeasurement';
 import { displayListNeedsHostImages } from '../canvasPresentation';
 import { CARET_PAINT_IDLE_MS, PaintedCaretMachine } from '../paintedCaret';
 import {
+  isLayoutQueued,
+  isSupersededLayout,
   readSessionVersion,
   revisionPreviewKey,
   revisionPreviewKeyOf,
@@ -353,6 +355,8 @@ export function useRustDisplayList(
 ): UseRustDisplayListResult {
   const requestLayoutRef = useRef(requestLayout);
   requestLayoutRef.current = requestLayout;
+  const engineRef = useRef(engine);
+  engineRef.current = engine;
   const unbuiltSinceRef = useRef(new WeakMap<YrsSession, number>());
   const [sessionLayoutRetry, setSessionLayoutRetry] = useState(0);
   const workerHeapLimitRef = useRef(workerHeapLimitBytes);
@@ -403,6 +407,8 @@ export function useRustDisplayList(
   const markSettled = useCallback(
     (epoch: number | null, failure: Error | null = null, authoritative = false): void => {
       if (replacedLayoutRef.current && !authoritative) return;
+      // A queued layout pass may change what shows, such as the revision preview.
+      if (!failure && !authoritative && isLayoutQueued(engineRef.current)) return;
       settledEpochRef.current = epoch;
       settleErrorRef.current = failure;
       for (const waiter of [...settleWaitersRef.current]) waiter();
@@ -1403,7 +1409,7 @@ export function useRustDisplayList(
                     caret,
                     null,
                     previous,
-                    readSessionVersion(worker.engine),
+                    sourceVersionOf(previous.queries),
                     workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
                     line
                   )
@@ -2163,7 +2169,9 @@ export function useRustDisplayList(
         setPresentedEngine(residentEngine ?? engine ?? null);
         setError(null);
         setLoading(false);
-        if (!result.provisional && layout.partial !== true) markSettled(contentEpoch);
+        if (!result.provisional && layout.partial !== true && !isSupersededLayout(layout)) {
+          markSettled(contentEpoch);
+        }
         const workerProduced = Boolean(
           result.workerProduced && probe && workerRef.current?.client.isReady()
         );
@@ -2258,6 +2266,7 @@ export function useRustDisplayList(
           const current =
             displayList !== null &&
             settledEpochRef.current === contentEpochRef.current &&
+            !isLayoutQueued(engineRef.current) &&
             !displayList.pages.some((page) => page.unbuilt);
           if (!failure && !current) {
             if (displayList?.pages.some((page) => page.unbuilt)) schedulePageBuilds(0);

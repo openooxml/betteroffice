@@ -25,7 +25,8 @@
 //!   overflowing the box. An image-grown line overrides both and the
 //!   identity still holds.
 //! - A tall inline image sits on the baseline with text descent below it;
-//!   alone on its line it takes the image's own height and nothing more.
+//!   alone on its line it takes the image's own height plus only the room a
+//!   multiple (`auto`) rule adds to the paragraph mark's line.
 //!   Block images retain a descent buffer above and below their footprint.
 //! - Float geometry is probed per line at the running Y with a fixed
 //!   default-font-size estimate, then re-tested against `fullWidthBlock` bands
@@ -834,10 +835,16 @@ impl Filler<'_> {
                 line_height = image_h + buffer * 2.0;
                 ascent = image_h + buffer;
             } else if self.cur.max_font.is_none() {
-                // Word's box for an inline image alone on its line is exactly
-                // the image: the paragraph mark buys no descent under it.
+                // Word's box for an inline image alone on its line is the
+                // image: the paragraph mark buys no descent under it, only the
+                // room a multiple (`auto`) rule adds to the mark's line, below.
+                let added = if matches!(self.rule, wm::LineSpacingRule::Auto { .. }) {
+                    (text_line_height - content.height()).max(0.0)
+                } else {
+                    0.0
+                };
                 descent = 0.0;
-                line_height = image_h;
+                line_height = image_h + added;
                 ascent = image_h;
             } else {
                 line_height = image_h + buffer;

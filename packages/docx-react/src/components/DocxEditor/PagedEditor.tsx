@@ -405,9 +405,14 @@ export interface PagedEditorRef {
   yrsLocToDisplayPosition(loc: YrsLoc): number | null;
   /**
    * Publish a yrs selection/mutation through the direct-input refresh path. `dirtyStories`
-   * names every story a mutation changed; the live selection's story by default.
+   * names every story a mutation changed; the live selection's story by default. `inWorker`
+   * lets the resident worker lay out a host batch, which no caret waits on.
    */
-  syncYrsInputState(docChanged: boolean, dirtyStories?: readonly string[]): boolean;
+  syncYrsInputState(
+    docChanged: boolean,
+    dirtyStories?: readonly string[],
+    options?: { inWorker?: boolean }
+  ): boolean;
   /** Apply a body-toolbar command through yrs. */
   applyYrsFormatting(action: FormattingAction): boolean;
   /** Apply a non-toolbar body command through yrs. */
@@ -813,11 +818,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       []
     );
     const refreshYrsLayout = useCallback(
-      (origin: LayoutUpdateOrigin): void => {
+      (origin: LayoutUpdateOrigin, inWorker?: boolean): void => {
         yrsProjectionVersionRef.current += 1;
         syncCoordinator.incrementStateSeq();
         syncCoordinator.requestRender();
-        scheduleLayout(origin);
+        scheduleLayout(origin, inWorker);
       },
       [scheduleLayout, syncCoordinator]
     );
@@ -831,7 +836,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         docChanged: boolean,
         residentLayoutReady = false,
         residentCaretReady = false,
-        updateOrigin: LayoutUpdateOrigin = 'local'
+        updateOrigin: LayoutUpdateOrigin = 'local',
+        inWorker?: boolean
       ): void => {
         const session = yrsCore.session;
         if (session) {
@@ -903,7 +909,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         // later from a projection rebuild.
         if (!residentCaretReady) updateSelectionOverlay();
         if (docChanged && !residentLayoutReady) {
-          refreshYrsLayout(updateOrigin);
+          refreshYrsLayout(updateOrigin, inWorker);
         }
         if (docChanged) {
           // Compatibility callbacks stay off the synchronous input path.
@@ -949,14 +955,15 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       (
         docChanged: boolean,
         origin: LayoutUpdateOrigin = 'local',
-        dirtyStory?: string | readonly string[]
+        dirtyStory?: string | readonly string[],
+        inWorker?: boolean
       ): boolean => {
         if (!yrsCore.session) return false;
         const displaySelection = yrsInputRef.current?.displaySelection() ?? { anchor: 0, head: 0 };
         if (docChanged) {
           yrsCore.publishDirectInput(dirtyStory);
         }
-        handleYrsStateChange(displaySelection, docChanged, false, false, origin);
+        handleYrsStateChange(displaySelection, docChanged, false, false, origin, inWorker);
         return true;
       },
       [handleYrsStateChange, yrsCore.publishDirectInput, yrsCore.session]
@@ -1719,7 +1726,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         onAnchorPositionsChange(positions);
       };
       const scheduleEmit = (): void => {
-        if (anchorEmitTimerRef.current !== null) return;
+        // A superseded run's whenReady() may resolve late; its timer would block the live emit.
+        if (cancelled || anchorEmitTimerRef.current !== null) return;
         if (performance.now() - lastAnchorEmitAtRef.current >= SIDEBAR_ANCHOR_STALE_MS) {
           lastAnchorEmitAtRef.current = performance.now();
           emit();
@@ -1821,8 +1829,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       replicaReady: yrsCore.replicaReady,
       experimentalWorkerOpen: yrsCore.experimentalWorkerOpen,
       yrsLocToDisplayPosition,
-      syncYrsInputState: (docChanged, dirtyStory) =>
-        syncYrsInputState(docChanged, 'local', dirtyStory),
+      syncYrsInputState: (docChanged, dirtyStory, options) =>
+        syncYrsInputState(docChanged, 'local', dirtyStory, options?.inWorker),
       applyYrsFormatting,
       applyYrsCommand,
       getYrsPositionProjection: () => getYrsPositionProjection('body'),

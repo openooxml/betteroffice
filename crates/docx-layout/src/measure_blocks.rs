@@ -2410,8 +2410,18 @@ fn table_cell_block_height(block: &LayoutBlock, measure: &BlockExtent) -> f64 {
         .attrs
         .as_ref()
         .and_then(|attrs| attrs.spacing.as_ref());
+    // A multiple rule adds its room below an image alone on its line.
+    let added = match synthetic_line_rule(spacing) {
+        Some(LineSpacingRule::Auto { line_240ths }) if line_240ths > 240 => {
+            extent.lines.first().map_or(0.0, |line| {
+                (line.line_height - line.ascent - line.descent).max(0.0)
+            })
+        }
+        _ => 0.0,
+    };
     spacing.and_then(|value| value.before).unwrap_or(0.0)
         + image_height
+        + added
         + spacing.and_then(|value| value.after).unwrap_or(0.0)
 }
 

@@ -82,8 +82,14 @@ async function setup(
       events.push('flush');
       await options.flush?.();
     },
-    syncYrsInputState: (docChanged: boolean, stories?: readonly string[]) => {
-      events.push(`sync:${docChanged}:${stories?.join(',') ?? '*'}`);
+    syncYrsInputState: (
+      docChanged: boolean,
+      stories?: readonly string[],
+      sync?: { inWorker?: boolean }
+    ) => {
+      events.push(
+        `sync:${docChanged}:${stories?.join(',') ?? '*'}${sync?.inWorker ? ':worker' : ''}`
+      );
       return true;
     },
   } as unknown as PagedEditorRef;
@@ -162,7 +168,7 @@ test('applyEdits flushes input first and publishes one applied batch', async () 
   if (!read.ok) return;
   const result = await api().applyEdits({ expectVersion: read.version, steps: request(session).steps });
   expect(result).toMatchObject({ ok: true, applied: true, changedStories: ['body'] });
-  expect(events).toEqual(['flush', 'flush', 'sync:true:body']);
+  expect(events).toEqual(['flush', 'flush', 'sync:true:body:worker']);
   expect(bodyTexts(session)[1]).toBe('Head');
   const noOp = await api().applyEdits({
     expectVersion: session.version(),
@@ -199,7 +205,7 @@ test('a handle rebuilt while input flushes keeps the batch; a replaced session a
   expect(await layout.api().readParagraphs({ view: 'accepted' })).toMatchObject({ ok: true });
   await layout.api().flushPendingInput();
   expect(bodyTexts(layout.session)[1]).toBe('Head');
-  expect(layout.events).toEqual(['flush', 'sync:true:body', 'flush', 'flush']);
+  expect(layout.events).toEqual(['flush', 'sync:true:body:worker', 'flush', 'flush']);
 
   const other = await createYrsSession();
   sessions.push(other);
@@ -277,7 +283,7 @@ test('legacy helpers target the text after a hard break', async () => {
   expect(events.filter((event) => event.startsWith('sync'))).toEqual([
     'sync:true:body',
     'sync:true:body',
-    'sync:true:body',
+    'sync:true:body:worker',
   ]);
 
   session.setSelection(
@@ -327,7 +333,7 @@ test('host proposals refuse a read-only editor unless allowed, and never enable 
   const allowed = await setup({ mode: 'viewing', allowHostProposals: true });
   const proposed = await allowed.api().proposeChanges(proposal(allowed.session));
   expect(proposed).toMatchObject({ ok: true, snapshot: { proposals: [{ id: 'p1', changed: true }] } });
-  expect(allowed.events).toEqual(['flush', 'sync:true:body']);
+  expect(allowed.events).toEqual(['flush', 'sync:true:body:worker']);
   expect(bodyTexts(allowed.session, 'original')[1]).toBe('Tail');
   expect(bodyTexts(allowed.session)[1]).toBe('Head');
   expect(allowed.session.canUndo()).toBe(false);
