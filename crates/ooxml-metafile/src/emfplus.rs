@@ -1947,6 +1947,7 @@ fn draw_string<const FULL: bool>(
         finite_at(data, 20)?,
         finite_at(data, 24)?,
     );
+    player.spend(length as u64, 0)?;
     let units: Vec<u16> = (0..length)
         .map(|index| u16_at(data, 28 + index * 2))
         .collect::<Option<_>>()?;
@@ -2070,6 +2071,7 @@ fn draw_driver_string<const FULL: bool>(
     if options & 0x2 != 0 {
         player.omit("vertical EMF+ text")?;
     }
+    player.spend(count as u64 * 2, 0)?;
     let units: Vec<u16> = (0..count)
         .map(|index| u16_at(data, 16 + index * 2))
         .collect::<Option<_>>()?;

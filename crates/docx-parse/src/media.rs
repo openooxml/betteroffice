@@ -217,7 +217,7 @@ fn metafile_display_form<'a>(
     if data.len() > budget.metafile_bytes {
         return placeholder("the document's pictures exceed the display size limit".to_owned());
     }
-    if budget.replay.work == 0 || budget.replay.pixels == 0 {
+    if budget.replay.work == 0 {
         return placeholder("the document's pictures exceed the replay limits".to_owned());
     }
     budget.metafile_bytes -= data.len();
@@ -367,6 +367,33 @@ mod tests {
                 assert!(svg.contains(r##"fill="#f1f3f4""##));
             }
         }
+    }
+
+    #[cfg(feature = "metafile")]
+    #[test]
+    fn vector_metafiles_render_after_the_document_pixel_budget_is_spent() {
+        let bitmap = include_bytes!("../../ooxml-metafile/tests/fixtures/clip-bitmap.emf");
+        let vector = include_bytes!("../../ooxml-metafile/tests/fixtures/shapes.emf");
+        let mut replay = ooxml_metafile::ReplayBudget::default();
+        let before = replay.pixels;
+        let expected = ooxml_metafile::to_svg_with_budget(bitmap, &mut replay).unwrap();
+        let mut budget = DisplayBudget::default();
+        budget.replay.pixels = before - replay.pixels;
+        assert!(budget.replay.pixels > 0);
+        let (display, mime, _) =
+            display_form(bitmap, "image/x-emf", "word/media/bitmap.emf", &mut budget);
+        assert_eq!(mime, "image/svg+xml");
+        assert_eq!(std::str::from_utf8(&display).unwrap(), expected.markup);
+        assert_eq!(budget.replay.pixels, 0);
+        assert!(budget.replay.work > 0);
+        let (display, mime, warning) =
+            display_form(vector, "image/x-emf", "word/media/vector.emf", &mut budget);
+        assert_eq!(mime, "image/svg+xml");
+        assert!(warning.is_none());
+        let svg = std::str::from_utf8(&display).unwrap();
+        assert!(svg.contains("<path"));
+        assert!(!svg.contains(r##"fill="#f1f3f4""##));
+        assert_eq!(budget.replay.pixels, 0);
     }
 
     #[test]

@@ -216,10 +216,8 @@ fn empty_region_rectangles_filled_away_spend_the_budget() {
     );
 }
 
-#[test]
-fn a_string_drawn_many_times_spends_the_text_budget_once_per_draw() {
-    let units = vec![b'a' as u16; 100_000];
-    let count = 20u32;
+fn repeated_gdi_text(length: usize, count: u32) -> Vec<u8> {
+    let units = vec![b'a' as u16; length];
     let string_at = 8 + 32 + count * 40;
     let mut body = i32s(&[0, 0, -1, -1]);
     body.extend(u32s(&[1]));
@@ -232,7 +230,12 @@ fn a_string_drawn_many_times_spends_the_text_budget_once_per_draw() {
         body.extend(u32s(&[0]));
     }
     body.extend(u16s(&units));
-    assert!(to_svg(&Emf::new(10, 10).rec(97, &body).bytes()).is_err());
+    Emf::new(10, 10).rec(97, &body).bytes()
+}
+
+#[test]
+fn a_string_drawn_many_times_spends_the_text_budget_once_per_draw() {
+    assert!(to_svg(&repeated_gdi_text(100_000, 20)).is_err());
 }
 
 #[test]
@@ -431,6 +434,103 @@ fn failed_nested_images_spend_cumulative_record_work() {
     );
     assert_eq!(budget.work, 0);
     assert_eq!(budget.pixels, ReplayBudget::default().pixels);
+}
+
+#[test]
+fn repeated_nested_text_spends_cumulative_work() {
+    let inner = repeated_gdi_text(512, 20);
+    let allowance = ReplayBudget {
+        work: 30_000,
+        ..ReplayBudget::default()
+    };
+    let mut budget = allowance;
+    assert!(replay_with_budget(&repeated_nested_images(&inner, 1), &mut budget).is_ok());
+    assert!(allowance.work - budget.work >= 20 * 512);
+    let mut budget = allowance;
+    assert_eq!(
+        replay_with_budget(&repeated_nested_images(&inner, 30), &mut budget)
+            .unwrap_err()
+            .0,
+        "the metafile draws more than the replay limits"
+    );
+    assert_eq!(budget.work, 0);
+    assert_eq!(budget.pixels, allowance.pixels);
+}
+
+#[test]
+fn gdi_text_advances_spend_cumulative_work() {
+    let text = "a".repeat(512);
+    let mut pictures = Vec::new();
+    for (options, length, work) in [(0x10, 512, 768), (0x2010, 1024, 1280)] {
+        pictures.push((
+            Emf::new(10, 10)
+                .recs(vec![text_out(
+                    0,
+                    0,
+                    &text,
+                    Some(&vec![1; length]),
+                    options,
+                    [0, 0, -1, -1],
+                )])
+                .bytes(),
+            work,
+        ));
+    }
+    let mut body = i16s(&[0, 0, text.len() as i16]);
+    body.extend(u16s(&[0x10]));
+    body.extend(text.as_bytes());
+    body.extend(i16s(&vec![1; text.len()]));
+    pictures.push((Wmf::new(10, 10, 96).rec(0x0A32, &body).bytes(), 768));
+    for (bytes, work) in pictures {
+        assert!(replay(&bytes).is_ok());
+        let mut budget = ReplayBudget {
+            work,
+            ..ReplayBudget::default()
+        };
+        assert_eq!(
+            replay_with_budget(&bytes, &mut budget).unwrap_err().0,
+            "the metafile draws more than the replay limits"
+        );
+        assert_eq!(budget.work, 0);
+    }
+}
+
+#[test]
+fn emf_plus_text_and_positions_spend_cumulative_work() {
+    let text = "a".repeat(512);
+    let mut string = u32s(&[0xff00_0000, 99, text.len() as u32]);
+    string.extend(f32s(&[0.0; 4]));
+    string.extend(u16s(&utf16(&text)));
+    for (record, work) in [
+        ((0x401C, 0x8000, string), 256),
+        (
+            plus_driver_string(0, 0xff00_0000, &text, (0.0, 0.0), &[]),
+            768,
+        ),
+    ] {
+        let bytes = Emf::new(10, 10)
+            .rec(
+                70,
+                &plus(&[
+                    plus_header(false),
+                    plus_font(0, 12.0, 0, "Arial"),
+                    record,
+                    plus_eof(),
+                ])
+                .1,
+            )
+            .bytes();
+        assert!(replay(&bytes).is_ok());
+        let mut budget = ReplayBudget {
+            work,
+            ..ReplayBudget::default()
+        };
+        assert_eq!(
+            replay_with_budget(&bytes, &mut budget).unwrap_err().0,
+            "the metafile draws more than the replay limits"
+        );
+        assert_eq!(budget.work, 0);
+    }
 }
 
 #[test]

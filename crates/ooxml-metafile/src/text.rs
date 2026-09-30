@@ -284,7 +284,9 @@ fn emr_text<const FULL: bool>(
     charge_text(player, count)?;
     let pairs = options & ETO_PDY != 0;
     if dx != 0 && count > 0 {
-        crate::read::record_span(bytes, dx as usize, count << usize::from(pairs), 4)?;
+        let length = count << usize::from(pairs);
+        crate::read::record_span(bytes, dx as usize, length, 4)?;
+        player.spend(length as u64, 0)?;
     }
     let advances = read_advances(bytes, dx as usize, count, pairs, true);
     let (chars, advances) = if wide {
@@ -346,6 +348,9 @@ pub(crate) fn wmf_text<const FULL: bool>(
         };
         let raw = crate::read::span(bytes, text, length, 1)?;
         let dx = text + length.div_ceil(2) * 2;
+        if crate::read::span(bytes, dx, length, 2).is_some() {
+            player.spend(length as u64, 0)?;
+        }
         let advances = read_advances(bytes, dx, length, false, false);
         let Some(chars) = decode_narrow(raw, charset) else {
             return player.omit("text in multi-byte character sets");
@@ -367,7 +372,7 @@ fn charge_text<const FULL: bool>(player: &mut Player<FULL>, count: usize) -> Opt
     if player.text_chars > player.limits.text_chars {
         return player.refuse("the metafile holds more text than the limit");
     }
-    Some(())
+    player.spend(count as u64, 0)
 }
 
 /// Lays one run out in the current font and pushes it.
