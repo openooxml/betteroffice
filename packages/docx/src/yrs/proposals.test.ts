@@ -957,6 +957,24 @@ describe('YrsSession host proposals', () => {
     });
   }
 
+  it('withdraws typing stamped with the proposal author and exact date as part of the proposal', async () => {
+    const session = await open();
+    const [record] = snapshotOf(
+      propose(session, insert('same-stamp', '00000006', 'end', ' proposed'))
+    ).proposals;
+    const typed = session.insertText(
+      { story: 'body', paraId: '00000006', offset: 'Tail proposed'.length },
+      ' typed',
+      { name: SUGGEST.author, date: SUGGEST.date }
+    );
+    expect(typed.revisionIds).toEqual(record!.revisionIds);
+    expect(
+      snapshotOf(session.withdrawProposals({ expectVersion: session.version(), ids: ['same-stamp'] }))
+        .proposals
+    ).toEqual([]);
+    expect(texts(session, 'accepted').at(-1)).toBe('Tail');
+  });
+
   it('withdraws a proposal beside later typing by a different author', async () => {
     const session = await open();
     const [record] = snapshotOf(
