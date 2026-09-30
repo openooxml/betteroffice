@@ -28,7 +28,10 @@ export interface UseRustMeasurementReturn {
   residentMeasurementConfig: (
     requirements: ResidentFontRequirement[]
   ) => ResidentMeasurementConfig | null;
+  /** Loads fonts a later pass may need, off every pass's path; each asks for a warm pass. */
+  warmFontRequirements: (warm: ResidentFontRequirement[]) => void;
   runLayoutPipelineRef: React.RefObject<(() => void) | null>;
+  scheduleWarmLayoutRef: React.RefObject<(() => void) | null>;
 }
 
 /** `engine` until `release()`: fonts that finish loading after it register nothing. */
@@ -61,6 +64,7 @@ export function useRustMeasurement(
   const onErrorRef = useRef(options.onError);
   onErrorRef.current = options.onError;
   const runLayoutPipelineRef = useRef<(() => void) | null>(null);
+  const scheduleWarmLayoutRef = useRef<(() => void) | null>(null);
   const sourceRef = useRef<RustMeasureSource | null>(null);
   const sourceEngineRef = useRef<RustTextEngine | null>(null);
   const releaseSourceRef = useRef<(() => void) | null>(null);
@@ -116,6 +120,7 @@ export function useRustMeasurement(
           fedFontSourceRef.current = { buffer, fontTable };
           latestFontChainsRef.current = {};
           requiredRef.current = new Map();
+          requirementWarmupsRef.current.clear();
         }
         if (firstLoad) runLayoutPipelineRef.current?.();
       } catch (error) {
@@ -186,6 +191,37 @@ export function useRustMeasurement(
     []
   );
 
+  const warmFontRequirements = useCallback((warm: ResidentFontRequirement[]): void => {
+    const source = sourceRef.current;
+    if (!source) return;
+    const required = requiredRef.current;
+    // Each warm font settles on its own: one that fails counts as absent, as a required one
+    // does, and one that never settles stays out of every config without holding the others.
+    for (const requirement of warm) {
+      if (
+        required.has(requirement.key) ||
+        source.measurementConfigForRequirements([requirement]) !== undefined
+      ) {
+        continue;
+      }
+      required.set(requirement.key, requirement);
+      const key = `warm:${requirement.key}`;
+      if (requirementWarmupsRef.current.has(key)) continue;
+      const settled = source
+        .prepareFontRequirements([requirement])
+        .then(
+          () => undefined,
+          () => undefined
+        )
+        .finally(() => {
+          if (sourceRef.current !== source || requiredRef.current !== required) return;
+          requirementWarmupsRef.current.delete(key);
+          scheduleWarmLayoutRef.current?.();
+        });
+      requirementWarmupsRef.current.set(key, settled);
+    }
+  }, []);
+
   const getDocumentFontChains = useCallback<RustFontChainsProvider>(() => {
     const chains = latestFontChainsRef.current;
     return Object.keys(chains).length > 0 ? chains : undefined;
@@ -201,5 +237,11 @@ export function useRustMeasurement(
     };
   }, [fontChainsProviderRef, getDocumentFontChains]);
 
-  return { deferLayoutPass, residentMeasurementConfig, runLayoutPipelineRef };
+  return {
+    deferLayoutPass,
+    residentMeasurementConfig,
+    warmFontRequirements,
+    runLayoutPipelineRef,
+    scheduleWarmLayoutRef,
+  };
 }

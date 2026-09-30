@@ -25,7 +25,11 @@ import {
 import type { LayoutSelectionGate } from '../internals/LayoutSelectionGate';
 import { documentPageCount } from './documentPageCount';
 import type { FontRequirementsInWorker, LayoutInWorker } from './useDisplayList';
-import { ensureWorkerOpenReplica, workerOpenSourceVersion } from '../internals/workerOpenReplica';
+import {
+  ensureWorkerOpenReplica,
+  workerOpenReplicaPending,
+  workerOpenSourceVersion,
+} from '../internals/workerOpenReplica';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { viewportMinHeightPx } from '../internals/scrollUtils';
 import {
@@ -79,6 +83,8 @@ export interface UseLayoutPipelineOptions {
   residentMeasurementConfig: (
     requirements: ResidentFontRequirement[]
   ) => ResidentMeasurementConfig | null;
+  /** Loads the fonts every proposal decision would need (`useRustMeasurement`). */
+  warmFontRequirements?: (warm: ResidentFontRequirement[]) => void;
   /**
    * Rust measurement readiness gate (`useRustMeasurement.deferLayoutPass`).
    * Checked before computing (engine may still be loading) and before
@@ -118,6 +124,11 @@ export interface UseLayoutPipelineReturn {
    * asked for no such pass lands before it runs; remote updates ask for it.
    */
   scheduleLayout: (origin?: LayoutUpdateOrigin, inWorker?: boolean) => void;
+  /**
+   * A worker pass for fonts that finished loading in the background. It changes nothing the
+   * pages show, so without a worker it does not lay out here.
+   */
+  scheduleWarmLayout: () => void;
   cancelPendingScrollRestore: () => void;
   /** Counts navigation intents, the user's and programmatic scrolls alike. */
   navigationEpoch: () => number;
@@ -133,6 +144,18 @@ function mergeInWorker(current: boolean | null, next: boolean): boolean {
   return (current ?? true) && next;
 }
 
+/** The proposals whose decisions' fonts a warm-up loads, or null when there are none. */
+function proposalSetKey(session: YrsSession): string | null {
+  try {
+    const { proposals } = session.getProposals();
+    return proposals.length > 0
+      ? JSON.stringify(proposals.map((proposal) => [proposal.id, proposal.revisionIds]))
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipelineReturn {
   const {
     document,
@@ -141,6 +164,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     pageGap,
     zoom,
     residentMeasurementConfig,
+    warmFontRequirements,
     deferLayoutPass,
     displayListQueries,
     interactionPageHostRef,
@@ -182,6 +206,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   layoutInWorkerRef.current = layoutInWorker;
   const fontRequirementsInWorkerRef = useRef(fontRequirementsInWorker);
   fontRequirementsInWorkerRef.current = fontRequirementsInWorker;
+  const warmFontRequirementsRef = useRef(warmFontRequirements);
+  warmFontRequirementsRef.current = warmFontRequirements;
   const workerOpenEnabledRef = useRef(experimentalWorkerOpen);
   workerOpenEnabledRef.current = experimentalWorkerOpen;
   // Bumped by every pass, so a worker pass answering late never overwrites a
@@ -210,12 +236,19 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   const pendingOnHostRef = useRef(false);
   // Whether every change the next pass lays out asked for a worker pass.
   const pendingInWorkerRef = useRef<boolean | null>(null);
+  // Whether every request the next pass lays out was a background font warm-up.
+  const pendingWarmOnlyRef = useRef<boolean | null>(null);
+  const scheduledRunRef = useRef(false);
   // The worker pass in flight. A pass that may run in the worker waits for it,
   // so a burst of updates lays out their latest state once, not each in turn.
   const workerPassRef = useRef<{ pass: number; session: YrsSession; opening: boolean } | null>(
     null
   );
   const queuedBehindWorkerRef = useRef(false);
+  // A warm-up waits for the pass in flight too, but holds no settle and supersedes nothing.
+  const queuedWarmBehindWorkerRef = useRef(false);
+  // The pass whose full layout is still to replace its first pages.
+  const completingPassRef = useRef<number | null>(null);
   const schedulerRef = useRef<number | null>(null);
   const runRef = useRef<() => void>(() => {});
   const unmountedRef = useRef(false);
@@ -263,7 +296,13 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     if (schedulerRef.current != null || unmountedRef.current) return;
     schedulerRef.current = requestAnimationFrame(() => {
       schedulerRef.current = null;
-      if (pendingLayoutOriginRef.current) runRef.current();
+      if (!pendingLayoutOriginRef.current) return;
+      scheduledRunRef.current = true;
+      try {
+        runRef.current();
+      } finally {
+        scheduledRunRef.current = false;
+      }
     });
   }, []);
 
@@ -313,8 +352,79 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   // Layout Pipeline
   // =========================================================================
 
+  // Once per proposal set, after the pass's layout request, where the pass laid the document out
+  // (a worker's copy may lag a pass laid out here). Never fatal; a side that failed for a set is not
+  // asked again before the document's next version.
+  const warmedProposalsRef = useRef<{ session: YrsSession; key: string } | null>(null);
+  const failedWarmRef = useRef<{
+    session: YrsSession;
+    key: string;
+    version: string | null;
+    worker: boolean;
+    here: boolean;
+  } | null>(null);
+  const warmDecisionFonts = useCallback(
+    (owner: YrsSession, request: object, here: boolean): void => {
+      const key = warmFontRequirementsRef.current ? proposalSetKey(owner) : null;
+      const warmed = warmedProposalsRef.current;
+      if (key === null || (warmed?.session === owner && warmed.key === key)) return;
+      const version = readSessionVersion(owner);
+      const last = failedWarmRef.current;
+      const failure =
+        last?.session === owner && last.key === key && last.version === version ? last : null;
+      if (failure?.here) return;
+      const claim = { session: owner, key };
+      warmedProposalsRef.current = claim;
+      const warmInput = JSON.stringify({ ...request, revisionFontSuperset: true });
+      const released = (): void => {
+        if (warmedProposalsRef.current === claim) warmedProposalsRef.current = null;
+      };
+      const failed = (side: 'worker' | 'here'): void => {
+        released();
+        const current = failedWarmRef.current;
+        const record =
+          current?.session === owner && current.key === key && current.version === version
+            ? current
+            : { session: owner, key, version, worker: false, here: false };
+        record[side] = true;
+        failedWarmRef.current = record;
+      };
+      const adopt = (json: string | null, side: 'worker' | 'here'): void => {
+        if (json === null) return failed(side);
+        if (sessionRef.current !== owner || unmountedRef.current) return;
+        warmFontRequirementsRef.current?.(JSON.parse(json) as ResidentFontRequirement[]);
+      };
+      let pending: Promise<string | null> | null = null;
+      try {
+        if (!here && !failure?.worker) {
+          pending =
+            fontRequirementsInWorkerRef.current?.(owner, warmInput, { background: true }) ?? null;
+        }
+      } catch {}
+      if (pending) {
+        void pending
+          .then((json) => adopt(json, 'worker'))
+          .catch(() => failed('worker'));
+        return;
+      }
+      // An unhydrated worker-open replica has no document to sweep here.
+      if (workerOpenEnabledRef.current && workerOpenReplicaPending(owner)) return released();
+      setTimeout(() => {
+        if (sessionRef.current !== owner || unmountedRef.current) return;
+        try {
+          adopt(owner.layoutFontRequirementsJson(warmInput), 'here');
+        } catch {
+          failed('here');
+        }
+      }, 0);
+    },
+    []
+  );
+
   const runLayoutPipeline = useCallback(
     (options?: { onHost?: boolean }) => {
+      // A direct run (a trigger or font load) is real work, whether it runs now or queues.
+      if (!scheduledRunRef.current) pendingWarmOnlyRef.current = false;
       const onHost = options?.onHost === true || pendingOnHostRef.current;
       const inWorker = !onHost && pendingInWorkerRef.current === true;
       const inFlight = workerPassRef.current;
@@ -323,15 +433,36 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       // flight lays out the document as opened.
       const waits =
         inWorker || (!onHost && pendingInWorkerRef.current === null && !inFlight?.opening);
-      if (waits && session && inFlight?.session === session) {
+      const warmPending = pendingWarmOnlyRef.current === true;
+      if (
+        waits &&
+        session &&
+        (inFlight?.session === session ||
+          (warmPending && completingPassRef.current === passRef.current))
+      ) {
+        pendingLayoutOriginRef.current ??= 'local';
+        if (warmPending) {
+          queuedWarmBehindWorkerRef.current = true;
+          return;
+        }
         queuedBehindWorkerRef.current = true;
         markLayoutQueued(session, true);
-        pendingLayoutOriginRef.current ??= 'local';
         return;
       }
       queuedBehindWorkerRef.current = false;
+      queuedWarmBehindWorkerRef.current = false;
       pendingInWorkerRef.current = null;
+      const warmOnly = pendingWarmOnlyRef.current === true;
+      pendingWarmOnlyRef.current = null;
+      // A warm-up lays out only in a worker; without one it has nothing to do.
+      const worker = layoutInWorkerRef.current;
+      if (warmOnly && (!session || !worker || worker.available?.(session) === false)) {
+        pendingLayoutOriginRef.current = null;
+        return;
+      }
       const pass = ++passRef.current;
+      // A warm-up's worker requests never fall back, hydrate or retry.
+      const background = warmOnly ? { background: true } : undefined;
       const layoutUpdateOrigin = pendingLayoutOriginRef.current ?? 'local';
       pendingLayoutOriginRef.current = null;
       if (layoutUpdateOrigin === 'local') scrollRestoreController.cancel();
@@ -347,6 +478,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         );
         pendingOnHostRef.current = onHost;
         pendingInWorkerRef.current = mergeInWorker(pendingInWorkerRef.current, inWorker);
+        pendingWarmOnlyRef.current = mergeInWorker(pendingWarmOnlyRef.current, warmOnly);
         syncCoordinator.onLayoutComplete(currentEpoch);
         return;
       }
@@ -358,12 +490,28 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           const input = JSON.stringify(request);
           const pendingRequirements =
             workerOpenEnabledRef.current && workerRequirements === undefined
-              ? fontRequirementsInWorkerRef.current?.(session, input)
+              ? fontRequirementsInWorkerRef.current?.(session, input, background)
               : null;
+          // A warm-up no worker answers has nothing to lay out.
+          if (
+            warmOnly &&
+            workerOpenEnabledRef.current &&
+            workerRequirements === undefined &&
+            !pendingRequirements
+          ) {
+            syncCoordinator.onLayoutComplete(currentEpoch);
+            return;
+          }
           if (pendingRequirements) {
             void pendingRequirements.then(
               (requirements) => {
-                if (pass === passRef.current && sessionRef.current === session) run(requirements);
+                if (pass !== passRef.current || sessionRef.current !== session) return;
+                // A warm-up the worker could not answer has nothing to lay out.
+                if (warmOnly && requirements === null) {
+                  syncCoordinator.onLayoutComplete(currentEpoch);
+                  return;
+                }
+                run(requirements);
               },
               (error: unknown) => {
                 if (pass !== passRef.current || sessionRef.current !== session) return;
@@ -415,6 +563,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           );
           pendingOnHostRef.current = onHost;
           pendingInWorkerRef.current = mergeInWorker(pendingInWorkerRef.current, inWorker);
+          pendingWarmOnlyRef.current = mergeInWorker(pendingWarmOnlyRef.current, warmOnly);
           syncCoordinator.onLayoutComplete(currentEpoch);
           return;
         }
@@ -538,7 +687,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                 : openedVersionRef.current.version))
         ) {
           try {
-            workerPass = layoutInWorkerRef.current?.(session, JSON.stringify(request)) ?? null;
+            workerPass =
+              layoutInWorkerRef.current?.(session, JSON.stringify(request), background) ?? null;
           } catch (error) {
             console.error('[PagedEditor] Resident worker layout could not start:', error);
           }
@@ -546,10 +696,14 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         // The spare warmed while fonts loaded has been adopted by now, or is not needed.
         releaseWorkerPrewarm(session);
         if (!workerPass) {
-          layOutHere();
+          if (!warmOnly) {
+            layOutHere();
+            warmDecisionFonts(session, { ...request, measurement: undefined }, true);
+          }
           syncCoordinator.onLayoutComplete(currentEpoch);
           return;
         }
+        if (!warmOnly) warmDecisionFonts(session, { ...request, measurement: undefined }, false);
         workerPassRef.current = { pass, session, opening: !inWorker && !previewOnly };
         void workerPass
           .then(
@@ -567,31 +721,42 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                   ? workerOpenSourceVersion(session, sourceVersion)
                   : sourceVersion);
               if (!computation || (stale && !queued)) {
-                if (!queued) layOutHere();
+                if (!queued && !warmOnly) layOutHere();
                 return;
               }
               if (stale || queued) markSupersededLayout(computation.layout);
               applyComputation(computation);
               // The first pages paint now; the full layout replaces them.
-              void computation.complete?.then(
-                (complete) => {
-                  if (pass !== passRef.current || sessionRef.current !== session) return;
-                  if (
-                    complete &&
-                    readSessionVersion(session) ===
-                      (workerOpenEnabledRef.current
-                        ? workerOpenSourceVersion(session, sourceVersion)
-                        : sourceVersion)
-                  ) {
-                    if (queuedBehindWorkerRef.current) markSupersededLayout(complete.layout);
-                    // Nothing the user did changed: keep their viewport.
-                    applyComputation(complete, 'remote');
-                  } else if (!queuedBehindWorkerRef.current) {
-                    layOutHere();
+              const completion = computation.complete;
+              if (!completion) return;
+              completingPassRef.current = pass;
+              void completion
+                .then(
+                  (complete) => {
+                    if (pass !== passRef.current || sessionRef.current !== session) return;
+                    if (
+                      complete &&
+                      readSessionVersion(session) ===
+                        (workerOpenEnabledRef.current
+                          ? workerOpenSourceVersion(session, sourceVersion)
+                          : sourceVersion)
+                    ) {
+                      if (queuedBehindWorkerRef.current) markSupersededLayout(complete.layout);
+                      // Nothing the user did changed: keep their viewport.
+                      applyComputation(complete, 'remote');
+                    } else if (!queuedBehindWorkerRef.current && !warmOnly) {
+                      layOutHere();
+                    }
+                  },
+                  () => {}
+                )
+                .finally(() => {
+                  if (completingPassRef.current !== pass) return;
+                  completingPassRef.current = null;
+                  if (queuedWarmBehindWorkerRef.current && sessionRef.current === session) {
+                    requestPass();
                   }
-                },
-                () => {}
-              );
+                });
             },
             (error: unknown) => {
               if (pass !== passRef.current) return;
@@ -605,7 +770,10 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             if (pass === passRef.current) syncCoordinator.onLayoutComplete(currentEpoch);
             if (workerPassRef.current?.pass !== pass) return;
             workerPassRef.current = null;
-            if (queuedBehindWorkerRef.current && sessionRef.current === session) {
+            if (
+              (queuedBehindWorkerRef.current || queuedWarmBehindWorkerRef.current) &&
+              sessionRef.current === session
+            ) {
               requestPass();
             }
           });
@@ -628,6 +796,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       scrollRestoreController,
       requestPass,
       releaseWorkerPrewarm,
+      warmDecisionFonts,
     ]
   );
 
@@ -767,10 +936,20 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         origin
       );
       pendingInWorkerRef.current = mergeInWorker(pendingInWorkerRef.current, inWorker);
+      pendingWarmOnlyRef.current = false;
       requestPass();
     },
     [requestPass, scrollRestoreController]
   );
+  const scheduleWarmLayout = useCallback(() => {
+    pendingLayoutOriginRef.current = mergeLayoutUpdateOrigin(
+      pendingLayoutOriginRef.current,
+      'remote'
+    );
+    pendingInWorkerRef.current = mergeInWorker(pendingInWorkerRef.current, true);
+    pendingWarmOnlyRef.current = mergeInWorker(pendingWarmOnlyRef.current, true);
+    requestPass();
+  }, [requestPass]);
 
   // Clean up pending rAF on unmount. A worker pass answering later must not
   // touch the session, which its owner frees on unmount.
@@ -804,6 +983,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     layoutUpdateOrigin: layoutUpdateOriginRef.current,
     runLayoutPipeline,
     scheduleLayout,
+    scheduleWarmLayout,
     cancelPendingScrollRestore,
     navigationEpoch,
     getLayoutRequest,

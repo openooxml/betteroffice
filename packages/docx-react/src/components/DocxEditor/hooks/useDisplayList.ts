@@ -88,9 +88,14 @@ export type OpenInWorker = (
   generation?: number
 ) => Promise<WorkerOpenedDocument | null>;
 
+/**
+ * A `background` preflight is answered only by a worker already laying out the session; it is null
+ * otherwise or on any failure, and never falls back, hydrates or starts a worker.
+ */
 export type FontRequirementsInWorker = (
   session: YrsSession,
-  request: string
+  request: string,
+  options?: { background?: boolean }
 ) => Promise<string | null> | null;
 
 // provider for the canvas renderer's display list: returns the injected value
@@ -193,11 +198,15 @@ export interface UseRustDisplayListResult {
  * no layout of its own. Null when no worker can take it, and a null result
  * when the worker failed; either way the caller lays out on the main thread.
  */
+/** A `background` pass answers null on any failure and never falls back, hydrates or retries. */
 export type LayoutInWorker = ((
   session: YrsSession,
-  request: string
+  request: string,
+  options?: { background?: boolean }
 ) => Promise<WorkerLayoutComputation | null> | null) & {
   prewarm?: (session: YrsSession) => (() => void) | null;
+  /** False when no worker can take a pass for `session`. */
+  available?: (session: YrsSession) => boolean;
 };
 
 /**
@@ -501,6 +510,12 @@ export function useRustDisplayList(
   // The engines whose worker ran out of memory, each with the failure once its
   // replacement did too. Weak, so a replaced document's session is not kept.
   const outOfMemoryRef = useRef(new WeakMap<YrsSession, ResidentWorkerOutOfMemoryError | null>());
+  // Background work that ran a worker out of memory: the engines it stops for, the workers it
+  // killed (whose replacement leaves the engine's own to a later failure), and those it runs on.
+  const backgroundOutOfMemoryRef = useRef(new WeakSet<YrsSession>());
+  const backgroundKilledRef = useRef(new WeakSet<ResidentEngineWorkerClient>());
+  const backgroundPendingRef = useRef(new WeakMap<ResidentEngineWorkerClient, number>());
+  const spareReplacementRef = useRef(new WeakSet<YrsSession>());
   const displayWindowRef = useRef<[number, number]>(INITIAL_DISPLAY_WINDOW);
   const displayWindowListenersRef = useRef(new Set<() => void>());
   const displayWindow = useMemo<DisplayWindow>(
@@ -764,7 +779,8 @@ export function useRustDisplayList(
     return () => clearTimeout(id);
   }, [snapshot.queries]);
 
-  // A worker that ran out of memory is replaced by a fresh one once. The main
+  // A worker that ran out of memory is replaced by a fresh one once, and once more when
+  // background work ran it out of memory. The main
   // thread never takes over its work: its memory has the same limit and
   // already holds the document. `retry` asks the caller to use the current
   // worker, `stale` means the failed worker no longer serves this engine.
@@ -788,8 +804,17 @@ export function useRustDisplayList(
       workerRef.current = null;
       setWorkerSurfacesActive(false);
       setWorkerPresentationActive(false);
-      if (!previous) {
-        outOfMemoryRef.current.set(hostEngine, null);
+      // Whichever of its requests' handlers runs first, a worker that failed with a background
+      // request pending counts as run out of memory by it.
+      const background =
+        client !== null &&
+        (backgroundKilledRef.current.has(client) ||
+          (backgroundPendingRef.current.get(client) ?? 0) > 0);
+      if (!previous || background || spareReplacementRef.current.delete(hostEngine)) {
+        if (!previous) {
+          outOfMemoryRef.current.set(hostEngine, null);
+          if (background) spareReplacementRef.current.add(hostEngine);
+        }
         console.warn(
           '[CanvasRenderer] Resident engine worker ran out of memory; starting a fresh worker',
           failure
@@ -1259,8 +1284,47 @@ export function useRustDisplayList(
     [dropWorker, isCurrentWorker, overrides?.build, requestOpenedWorker, sessionLoad]
   );
 
+  // Background work that runs its worker out of memory stops for that engine.
+  const trackBackground = useCallback(
+    <T,>(
+      hostEngine: YrsSession,
+      client: ResidentEngineWorkerClient,
+      request: Promise<T>
+    ): Promise<T> => {
+      const pending = backgroundPendingRef.current;
+      pending.set(client, (pending.get(client) ?? 0) + 1);
+      const settled = () => pending.set(client, (pending.get(client) ?? 1) - 1);
+      void request.then(settled, (error: unknown) => {
+        settled();
+        if (!(error instanceof ResidentWorkerOutOfMemoryError)) return;
+        backgroundOutOfMemoryRef.current.add(hostEngine);
+        backgroundKilledRef.current.add(client);
+      });
+      return request;
+    },
+    []
+  );
+
   const fontRequirementsInWorker = useCallback<FontRequirementsInWorker>(
-    (hostEngine, request) => {
+    (hostEngine, request, options) => {
+      if (options?.background) {
+        // Only a worker already laying out this document answers, hydrated or not.
+        const current = workerRef.current;
+        if (
+          !current ||
+          current.engine !== hostEngine ||
+          !current.client.bootstrapSent() ||
+          backgroundOutOfMemoryRef.current.has(hostEngine)
+        ) {
+          return null;
+        }
+        return trackBackground(hostEngine, current.client, current.client.fontRequirements(request))
+          .then((requirements) => {
+            JSON.parse(requirements);
+            return requirements;
+          })
+          .catch(() => null);
+      }
       if (!workerOpenEnabledRef.current || !workerOpenReplicaPending(hostEngine)) return null;
       if (!workerOpenSourcesRef.current.has(hostEngine)) {
         ensureWorkerOpenReplica(hostEngine);
@@ -1286,7 +1350,7 @@ export function useRustDisplayList(
           return null;
         });
     },
-    [dropWorker, isCurrentWorker, requestOpenedWorker]
+    [dropWorker, isCurrentWorker, requestOpenedWorker, trackBackground]
   );
 
   const shownFrameEngine = useCallback((): unknown => frameEngineRef.current, []);
@@ -1518,13 +1582,20 @@ export function useRustDisplayList(
   );
 
   const layoutInWorker: LayoutInWorker = useCallback<LayoutInWorker>(
-    (hostEngine, request) => {
+    (hostEngine, request, passOptions) => {
+      const background = passOptions?.background === true;
       if (!canLayoutInWorker(hostEngine) || !hostEngine.adoptResidentWorkerLayout) {
-        if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(hostEngine);
+        if (workerOpenEnabledRef.current && !background) ensureWorkerOpenReplica(hostEngine);
         return null;
       }
       const outOfMemory = outOfMemoryRef.current.get(hostEngine);
-      if (outOfMemory) return rejectedWorkerLayout(outOfMemory);
+      if (outOfMemory) return background ? null : rejectedWorkerLayout(outOfMemory);
+      if (
+        background &&
+        (workerRef.current?.engine !== hostEngine || backgroundOutOfMemoryRef.current.has(hostEngine))
+      ) {
+        return null;
+      }
       if (
         workerOpenEnabledRef.current && workerOpenReplicaPending(hostEngine) &&
         workerRef.current?.engine !== hostEngine &&
@@ -1556,7 +1627,7 @@ export function useRustDisplayList(
             }
       );
       if (!snapshot) {
-        if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(hostEngine);
+        if (workerOpenEnabledRef.current && !background) ensureWorkerOpenReplica(hostEngine);
         return null;
       }
       const previewKey = layoutPreviewKey(request) ?? '';
@@ -1586,9 +1657,10 @@ export function useRustDisplayList(
         !bootstrapping &&
         workerPresentationActiveRef.current &&
         paintedCaretMachine.shouldPaint(performance.now());
-      const reply = bootstrapping
+      const sent = bootstrapping
         ? worker.bootstrap(snapshot, '', options)
         : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, options);
+      const reply = background ? trackBackground(hostEngine, worker, sent) : sent;
       // A worker out of memory runs the pass again in a fresh worker; once
       // that one runs out too, the pass rejects and nothing lays out here.
       const unavailable = (
@@ -1596,6 +1668,7 @@ export function useRustDisplayList(
       ): Promise<WorkerLayoutComputation | null> | null => {
         const current = workerRef.current;
         if (
+          background ||
           unmountedRef.current ||
           owner.load !== documentLoadsRef.current ||
           (current && current.engine !== hostEngine)
@@ -1685,6 +1758,7 @@ export function useRustDisplayList(
         .catch(unavailable);
     },
     [
+      trackBackground,
       canLayoutInWorker,
       dropWorker,
       frameBase,
@@ -1700,8 +1774,9 @@ export function useRustDisplayList(
   const layoutInWorkerRef: { current: LayoutInWorker } = useRef<LayoutInWorker>(layoutInWorker);
   layoutInWorkerRef.current = layoutInWorker;
   const prewarmableLayoutInWorker = useMemo(
-    () => Object.assign(layoutInWorker, { prewarm: prewarmLayoutWorker }),
-    [layoutInWorker, prewarmLayoutWorker]
+    () =>
+      Object.assign(layoutInWorker, { prewarm: prewarmLayoutWorker, available: canLayoutInWorker }),
+    [layoutInWorker, prewarmLayoutWorker, canLayoutInWorker]
   );
 
   const attachOffscreenCanvases = useCallback(

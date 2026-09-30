@@ -43,7 +43,7 @@ const bytes = new Uint8Array(readFileSync(resolve(
   '../../../../../../crates/docx-edit/tests/fixtures/page-fragments/pages.docx'
 )));
 
-async function longFixture(): Promise<Uint8Array> {
+async function longFixture(paragraphCount = 205): Promise<Uint8Array> {
   const zip = new JSZip();
   zip.file(
     '[Content_Types].xml',
@@ -53,8 +53,8 @@ async function longFixture(): Promise<Uint8Array> {
     '_rels/.rels',
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'
   );
-  const body = Array.from({ length: 205 }, (_, index) => {
-    const text = index === 0 ? 'First paragraph' : index === 204 ? 'Tail paragraph' : `Paragraph ${index}`;
+  const body = Array.from({ length: paragraphCount }, (_, index) => {
+    const text = index === 0 ? 'First paragraph' : index === paragraphCount - 1 ? 'Tail paragraph' : `Paragraph ${index}`;
     return `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
   }).join('');
   zip.file(
@@ -65,6 +65,7 @@ async function longFixture(): Promise<Uint8Array> {
 }
 
 const longBytes = await longFixture();
+const shortBytes = await longFixture(2);
 const font = new Uint8Array(readFileSync(resolve(
   import.meta.dir, '../../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
 )));
@@ -89,23 +90,31 @@ afterAll(async () => {
 function installWorker(options: {
   failOpen?: boolean;
   failState?: boolean;
+  failFontRequirementsAfter?: number;
+  failNextSync?: boolean;
   holdState?: boolean;
   holdOpen?: boolean;
-  oomStage?: 'open' | 'fontRequirements' | 'bootstrap' | 'encodeState';
+  oomStage?: 'open' | 'fontRequirements' | 'bootstrap' | 'sync' | 'encodeState';
   holdRetryOpen?: boolean;
+  /** Leaves font preflights unanswered until the worker fails. */
+  holdFontRequirements?: boolean;
 } = {}) {
   const workers: InProcessResidentWorker[] = [];
   const posted: ResidentEngineWorkerRequest[] = [];
+  let fontRequirements = 0;
   globalThis.Worker = class {
     constructor() {
       const worker = startWorker();
       const send = worker.postMessage.bind(worker);
       worker.postMessage = (request, transfer) => {
         posted.push(request);
+        if (request.type === 'fontRequirements') fontRequirements += 1;
         if ((options.holdState && request.type === 'encodeState') ||
             (options.holdOpen && request.type === 'open') ||
             (options.holdRetryOpen && workers.length > 1 && request.type === 'open')) worker.hold();
-        if (options.oomStage === request.type &&
+        if (options.holdFontRequirements && request.type === 'fontRequirements') {
+          return;
+        } else if (options.oomStage === request.type &&
             (request.type !== 'encodeState' || workers.length === 1)) {
           queueMicrotask(() => worker.onmessage?.({
             data: { id: request.id, ok: false, error: 'worker exhausted memory', terminal: true, outOfMemory: true },
@@ -114,6 +123,17 @@ function installWorker(options: {
             (options.failState && request.type === 'encodeState')) {
           queueMicrotask(() => worker.onmessage?.({
             data: { id: request.id, ok: false, error: 'open failed', terminal: true },
+          } as MessageEvent));
+        } else if (options.failNextSync && request.type === 'sync') {
+          options.failNextSync = false;
+          queueMicrotask(() => worker.onmessage?.({
+            data: { id: request.id, ok: false, error: 'sync failed' },
+          } as MessageEvent));
+        } else if (request.type === 'fontRequirements' &&
+            options.failFontRequirementsAfter !== undefined &&
+            fontRequirements === options.failFontRequirementsAfter + 1) {
+          queueMicrotask(() => worker.onmessage?.({
+            data: { id: request.id, ok: false, error: 'font requirements failed' },
           } as MessageEvent));
         } else send(request, transfer);
       };
@@ -890,6 +910,323 @@ for (const stage of ['fontRequirements', 'bootstrap'] as const) {
     });
   }
 }
+
+test.each([false, true])(
+  'a failed worker font preflight keeps the replica pending only in the background (background=%s)',
+  async (background) => {
+    const { workers, posted } = installWorker({ failFontRequirementsAfter: 1 });
+    const frames = holdFrames();
+    try {
+      const { result, unmount } = renderHook(useHarness, {
+        initialProps: { ...initialProps, source: longBytes, readOnly: true, holdReplica: true },
+      });
+      await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+      const session = result.current.core.session!;
+      expect(result.current.renderer.presentedEngine).toBe(session);
+      expect(result.current.renderer.frame).not.toBeNull();
+      expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(true);
+      expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+      expect(workers).toHaveLength(1);
+      const worker = workers[0]!;
+      const preflights = posted.filter((request) => request.type === 'fontRequirements');
+      expect(preflights).toHaveLength(1);
+      const input = preflights[0]!.layoutInput;
+
+      await act(async () => {
+        expect(await result.current.renderer.fontRequirementsInWorker(session, input, { background })).toBeNull();
+      });
+      expect(posted.filter((request) => request.type === 'fontRequirements')).toHaveLength(2);
+      expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(background);
+      if (background) {
+        expect(result.current.core.replicaReady).toBe(false);
+        expect(result.current.mainOpens).toEqual([]);
+        expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+        await act(async () => {
+          expect(await result.current.renderer.fontRequirementsInWorker(session, input)).toEqual(expect.any(String));
+        });
+        expect(workers).toHaveLength(1);
+        expect(workers[0]).toBe(worker);
+        expect(worker.requests.filter((type) => type === 'fontRequirements')).toHaveLength(2);
+        expect(posted.filter((request) => request.type === 'fontRequirements')).toHaveLength(3);
+        expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(true);
+        expect(result.current.mainOpens).toEqual([]);
+        expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+      } else {
+        expect(result.current.core.replicaReady).toBe(true);
+        expect(result.current.mainOpens).toEqual([true]);
+        expect(session.hasStory('body')).toBe(true);
+      }
+      expect(result.current.errors).toEqual([]);
+      unmount();
+    } finally {
+      cleanup();
+      frames.restore();
+    }
+  }
+);
+
+test('a hydrated replica keeps background font preflight on its layout worker', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, source: shortBytes, readOnly: true },
+  });
+  await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+  const session = result.current.core.session!;
+  await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
+  expect(result.current.core.replicaReady).toBe(false);
+  expect(workers).toHaveLength(1);
+  const worker = workers[0]!;
+  await act(async () => {
+    worker.release();
+    await awaitWorkerOpenReplica(session);
+  });
+  await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+  expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(false);
+  expect(result.current.mainOpens).toEqual([false]);
+  const destroyed = spyOn(worker, 'terminate');
+  const preflights = posted.filter((request) => request.type === 'fontRequirements');
+  const input = preflights[0]!.layoutInput;
+  const workerPreflights = worker.requests.filter((type) => type === 'fontRequirements').length;
+
+  await act(async () => {
+    const requirements = await result.current.renderer.fontRequirementsInWorker(session, input, { background: true });
+    expect(requirements).toEqual(expect.any(String));
+    expect(JSON.parse(requirements!)).toEqual(expect.any(Array));
+  });
+  expect(posted.filter((request) => request.type === 'fontRequirements')).toHaveLength(preflights.length + 1);
+  expect(worker.requests.filter((type) => type === 'fontRequirements')).toHaveLength(workerPreflights + 1);
+  expect(workers).toHaveLength(1);
+  expect(workers[0]).toBe(worker);
+  expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
+  expect(posted.some((request) => request.type === 'destroy')).toBe(false);
+  expect(destroyed).not.toHaveBeenCalled();
+
+  const count = posted.length;
+  expect(result.current.renderer.fontRequirementsInWorker(session, input)).toBeNull();
+  expect(posted).toHaveLength(count);
+  expect(result.current.renderer.status).toBe('ready');
+  expect(result.current.renderer.error).toBeNull();
+  expect(result.current.errors).toEqual([]);
+  unmount();
+});
+
+test.each([false, true])(
+  'a failed worker layout keeps the worker and replica pending only in the background (background=%s)',
+  async (background) => {
+    const options = { failNextSync: false };
+    const { workers, posted } = installWorker(options);
+    const frames = holdFrames();
+    try {
+      const { result, unmount } = renderHook(useHarness, {
+        initialProps: { ...initialProps, source: shortBytes, readOnly: true, holdReplica: true },
+      });
+      await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+      const session = result.current.core.session!;
+      expect(result.current.renderer.presentedEngine).toBe(session);
+      expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(true);
+      expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+      expect(workers).toHaveLength(1);
+      const worker = workers[0]!;
+      const destroyed = spyOn(worker, 'terminate');
+      const bootstrap = posted.find((request) => request.type === 'bootstrap')!;
+      expect(bootstrap).toMatchObject({ opened: true });
+      const input = bootstrap.snapshot.layoutInput;
+      const syncs = posted.filter((request) => request.type === 'sync').length;
+      options.failNextSync = true;
+
+      await act(async () => {
+        const pass = result.current.renderer.layoutInWorker(session, input, { background });
+        expect(pass).not.toBeNull();
+        expect(await pass).toBeNull();
+      });
+      expect(posted.filter((request) => request.type === 'sync')).toHaveLength(syncs + 1);
+      expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
+      expect(workers).toHaveLength(1);
+      expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(background);
+      if (background) {
+        act(() => frames.run());
+        act(() => frames.run());
+        expect(workers).toHaveLength(1);
+        expect(workers[0]).toBe(worker);
+        expect(destroyed).not.toHaveBeenCalled();
+        expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
+        expect(posted.some((request) => request.type === 'destroy')).toBe(false);
+        expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+        expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(true);
+        expect(result.current.core.replicaReady).toBe(false);
+        expect(result.current.mainOpens).toEqual([]);
+        expect(result.current.renderer.status).toBe('ready');
+      } else {
+        expect(destroyed).toHaveBeenCalledTimes(1);
+        expect(posted.filter((request) => request.type === 'destroy')).toHaveLength(1);
+        expect(result.current.core.replicaReady).toBe(true);
+        expect(result.current.mainOpens).toEqual([true]);
+        expect(session.hasStory('body')).toBe(true);
+      }
+      expect(result.current.renderer.error).toBeNull();
+      expect(result.current.errors).toEqual([]);
+      unmount();
+    } finally {
+      cleanup();
+      frames.restore();
+    }
+  }
+);
+
+test('background worker layout OOM waits for the next foreground pass to recover, stops background work and spares the next replacement', async () => {
+  const options: { oomStage?: 'sync' } = {};
+  const { workers, posted } = installWorker(options);
+  const frames = holdFrames();
+  try {
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, source: shortBytes, readOnly: true, holdReplica: true },
+    });
+    await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+    const session = result.current.core.session!;
+    expect(result.current.renderer.presentedEngine).toBe(session);
+    expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(true);
+    expect(workers).toHaveLength(1);
+    const bootstrap = posted.find((request) => request.type === 'bootstrap')!;
+    expect(bootstrap).toMatchObject({ opened: true });
+    const input = bootstrap.snapshot.layoutInput;
+    const syncs = posted.filter((request) => request.type === 'sync').length;
+    options.oomStage = 'sync';
+
+    await act(async () => {
+      const pass = result.current.renderer.layoutInWorker(session, input, { background: true });
+      expect(pass).not.toBeNull();
+      expect(await pass).toBeNull();
+    });
+    expect(posted.filter((request) => request.type === 'sync')).toHaveLength(syncs + 1);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
+    expect(posted.filter((request) => request.type === 'bootstrap')).toHaveLength(1);
+    expect(workers).toHaveLength(1);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(true);
+    expect(result.current.core.session).toBe(session);
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.renderer.status).toBe('ready');
+    expect(result.current.renderer.error).toBeNull();
+    expect(result.current.errors).toEqual([]);
+
+    await act(async () => {
+      const pass = result.current.renderer.layoutInWorker(session, input);
+      expect(pass).not.toBeNull();
+      expect(await pass).not.toBeNull();
+    });
+    expect(workers).toHaveLength(2);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(2);
+    expect(posted.filter((request) => request.type === 'bootstrap')).toHaveLength(2);
+    expect(posted.filter((request) => request.type === 'bootstrap').at(-1)).toMatchObject({ opened: true });
+    expect(workers[1]!.requests).toEqual(['open', 'bootstrap']);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(true);
+    expect(result.current.core.session).toBe(session);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.renderer.status).toBe('ready');
+    expect(result.current.renderer.error).toBeNull();
+    expect(result.current.errors).toEqual([]);
+
+    const count = posted.length;
+    expect(result.current.renderer.layoutInWorker(session, input, { background: true })).toBeNull();
+    expect(
+      result.current.renderer.fontRequirementsInWorker(session, input, { background: true })
+    ).toBeNull();
+    expect(posted).toHaveLength(count);
+
+    await act(async () => {
+      const pass = result.current.renderer.layoutInWorker(session, input);
+      expect(pass).not.toBeNull();
+      expect(await pass).not.toBeNull();
+    });
+    expect(workers).toHaveLength(3);
+    expect(workers[2]!.requests).toEqual(['open', 'bootstrap']);
+    expect(result.current.renderer.error).toBeNull();
+    expect(result.current.errors).toEqual([]);
+
+    let failure: unknown = null;
+    await act(async () => {
+      const pass = result.current.renderer.layoutInWorker(session, input);
+      expect(pass).not.toBeNull();
+      await pass!.catch((error: unknown) => {
+        failure = error;
+      });
+    });
+    expect(failure).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    expect(workers).toHaveLength(3);
+    await waitFor(() =>
+      expect(result.current.renderer.error).toBeInstanceOf(ResidentWorkerOutOfMemoryError)
+    );
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
+
+test('a foreground request that fails with a background one pending spares the next replacement too', async () => {
+  const options: { oomStage?: 'sync'; holdFontRequirements?: boolean } = {};
+  const { workers, posted } = installWorker(options);
+  const frames = holdFrames();
+  try {
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, source: shortBytes, readOnly: true, holdReplica: true },
+    });
+    await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+    const session = result.current.core.session!;
+    const input = posted.find((request) => request.type === 'bootstrap')!.snapshot.layoutInput;
+    const layOut = async () => {
+      const pass = result.current.renderer.layoutInWorker(session, input);
+      expect(pass).not.toBeNull();
+      return pass!.catch((error: unknown) => error);
+    };
+
+    options.holdFontRequirements = true;
+    let background: Promise<unknown> = Promise.resolve(undefined);
+    act(() => {
+      background = result.current.renderer.fontRequirementsInWorker(session, input, {
+        background: true,
+      })!;
+    });
+    options.holdFontRequirements = false;
+    options.oomStage = 'sync';
+    let foreground: Promise<unknown> = Promise.resolve(null);
+    act(() => {
+      foreground = layOut();
+    });
+    await act(async () => {
+      expect(await foreground).not.toBeNull();
+      expect(await background).toBeNull();
+    });
+    options.oomStage = undefined;
+    expect(workers).toHaveLength(2);
+    expect(result.current.renderer.error).toBeNull();
+    expect(
+      result.current.renderer.fontRequirementsInWorker(session, input, { background: true })
+    ).toBeNull();
+
+    options.oomStage = 'sync';
+    await act(async () => {
+      expect(await layOut()).not.toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    });
+    expect(workers).toHaveLength(3);
+    expect(result.current.renderer.error).toBeNull();
+
+    await act(async () => {
+      expect(await layOut()).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    });
+    expect(workers).toHaveLength(3);
+    await waitFor(() =>
+      expect(result.current.renderer.error).toBeInstanceOf(ResidentWorkerOutOfMemoryError)
+    );
+    expect(result.current.mainOpens).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
 
 test('read-only handoff fallback requests a new frame and restores queries', async () => {
   installWorker({ failState: true });
