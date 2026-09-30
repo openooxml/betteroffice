@@ -1265,12 +1265,24 @@ fn lower_table<T: ReadTxn>(
                 && width_value.is_some()
                 && width_value
                     == synthesized_cell_width(&grid_widths, total_grid_width, column, colspan);
-            let width_value =
-                width_value.filter(|_| width_type.as_deref() != Some("auto") && !synthesized_width);
+            // `width`/`width_value` keep main's lowering for the fallback sizing;
+            // the content-aware algorithms read `preferred_width`, where an
+            // automatic or synthesized width is no preference.
+            let preferred_width = if width_type.as_deref() == Some("auto") || synthesized_width {
+                Some(docx_layout::types::PreferredWidth {
+                    value: None,
+                    r#type: Some("auto".to_owned()),
+                })
+            } else {
+                width_value.map(|value| docx_layout::types::PreferredWidth {
+                    value: Some(value),
+                    r#type: width_type.clone(),
+                })
+            };
             let width =
                 width_value.filter(|value| *value != 0.0).and_then(|value| {
                     match width_type.as_deref() {
-                        None | Some("dxa") => Some(twips_to_pixels(value)),
+                        None | Some("dxa") | Some("auto") => Some(twips_to_pixels(value)),
                         _ => None,
                     }
                 });
@@ -1298,10 +1310,7 @@ fn lower_table<T: ReadTxn>(
                 row_span,
                 width,
                 width_value,
-                preferred_width: width_value.map(|value| docx_layout::types::PreferredWidth {
-                    value: Some(value),
-                    r#type: width_type.clone(),
-                }),
+                preferred_width,
                 width_type,
                 grid_start: None,
                 min_content_width: None,
@@ -4658,9 +4667,15 @@ mod tests {
             assert_eq!(table.column_widths, Some(vec![300.0, 300.0]));
             for cell in &mut table.rows[0].cells {
                 if width_type == "auto" {
-                    assert_eq!(cell.width, None);
-                    assert_eq!(cell.width_value, None);
-                    assert_eq!(cell.preferred_width, None);
+                    assert_eq!(cell.width, Some(300.0));
+                    assert_eq!(cell.width_value, Some(4500.0));
+                    assert_eq!(
+                        cell.preferred_width,
+                        Some(docx_layout::types::PreferredWidth {
+                            value: None,
+                            r#type: Some("auto".to_owned()),
+                        })
+                    );
                     assert_eq!(cell.width_type.as_deref(), Some("auto"));
                 } else if width_type == "pct" {
                     assert_eq!(cell.width, None);

@@ -2177,7 +2177,10 @@ fn cell_content_widths(
                 crate::typed_measure::intrinsic_widths(paragraph, content_width, config)?
             }
             LayoutBlock::Table(_) => return None,
-            LayoutBlock::Image(image) if image.anchor.is_none() => (image.width, image.width),
+            LayoutBlock::Image(image) if image.anchor.is_none() => {
+                let width = rotation_bound(&image.rotation_bounds, "width").unwrap_or(image.width);
+                (width, width)
+            }
             LayoutBlock::Shape(shape) if !anchored_shape(shape) => (shape.width, shape.width),
             LayoutBlock::Image(_) | LayoutBlock::Shape(_) => return None,
             LayoutBlock::Chart(chart) => (chart.width, chart.width),
@@ -2319,12 +2322,39 @@ fn fitted_table_column_widths(
     resolve_content_fitted_column_widths(table, content_width, content_widths.as_deref())
 }
 
+thread_local! {
+    /// How many tables' cells are being measured around the current table.
+    static TABLE_NESTING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Marks a table's cells as being measured while alive.
+struct MeasuringCells;
+
+impl MeasuringCells {
+    fn enter() -> Self {
+        TABLE_NESTING.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+impl Drop for MeasuringCells {
+    fn drop(&mut self) {
+        TABLE_NESTING.with(|depth| depth.set(depth.get() - 1));
+    }
+}
+
 fn measure_table(
     table: &mut TableBlock,
     content_width: f64,
     config: &MeasurementConfig,
 ) -> Result<TableExtent, String> {
-    let content_widths = table_content_widths(table, content_width, config);
+    // A nested table's parent cell is unmeasured, so the parent keeps main's
+    // sizing; the nested table keeps it too, as every cell unknown.
+    let content_widths = if TABLE_NESTING.with(|depth| depth.get() > 0) {
+        Some(Vec::new())
+    } else {
+        table_content_widths(table, content_width, config)
+    };
     let unknown = has_unknown_content_widths(table, content_widths.as_deref());
     let explicit_width = if unknown {
         legacy_preferred_width_px(
@@ -2364,6 +2394,7 @@ fn measure_table(
     };
     let grid = resolve_cell_grid(table);
     let mut rows = Vec::with_capacity(table.rows.len());
+    let measuring_cells = MeasuringCells::enter();
 
     for (row_index, row) in table.rows.iter_mut().enumerate() {
         let mut cells = Vec::with_capacity(row.cells.len());
@@ -2441,6 +2472,7 @@ fn measure_table(
         }
         rows.push(TableRowExtent { cells, height: 0.0 });
     }
+    drop(measuring_cells);
 
     let mut exact = vec![false; rows.len()];
     for (row_index, measured_row) in rows.iter_mut().enumerate() {
@@ -3752,6 +3784,85 @@ mod tests {
                 );
             }
         });
+    }
+
+    #[test]
+    fn unmeasured_docx_table_keeps_mains_automatic_cell_widths() {
+        let config = MeasurementConfig {
+            defaults: json!({"fontFamily": "Arial", "fontSize": 12}),
+            ..MeasurementConfig::default()
+        };
+        let image = |width: f64| {
+            json!({"kind": "paragraph", "id": format!("image-{width}"), "runs": [
+                {"kind": "image", "src": "image", "width": width, "height": 20}
+            ]})
+        };
+        let text = json!({"kind": "paragraph", "id": "text",
+                          "runs": [{"kind": "text", "text": "x"}]});
+        let padding = json!({"left": 0, "right": 0, "top": 0, "bottom": 0});
+        let auto = json!({"type": "auto"});
+        let mut table: TableBlock = serde_json::from_value(json!({
+            "id": "table", "tableLayout": "autofit", "columnWidths": [100, 100],
+            "rows": [{"id": "row", "cells": [
+                {"id": "a", "width": 100, "widthValue": 1500, "widthType": "auto",
+                 "preferredWidth": auto, "padding": padding, "blocks": [image(200.0), text]},
+                {"id": "b", "widthValue": 0, "widthType": "auto",
+                 "preferredWidth": auto, "padding": padding, "blocks": [image(300.0)]}
+            ]}]
+        }))
+        .unwrap();
+        let measured = measure_table(&mut table, 400.0, &config).unwrap();
+        assert_eq!(measured.column_widths, vec![100.0, 300.0]);
+    }
+
+    #[test]
+    fn nested_fixed_table_keeps_mains_column_width() {
+        let config = MeasurementConfig {
+            defaults: json!({"fontFamily": "Arial", "fontSize": 12}),
+            ..MeasurementConfig::default()
+        };
+        let padding = json!({"left": 0, "right": 0, "top": 0, "bottom": 0});
+        let nested = json!({
+            "kind": "table", "id": "nested", "tableLayout": "fixed", "columnWidths": [300],
+            "rows": [{"id": "nested-row", "cells": [
+                {"id": "nested-cell", "width": 100, "widthValue": 1500, "widthType": "dxa",
+                 "preferredWidth": {"value": 1500, "type": "dxa"}, "padding": padding,
+                 "blocks": [{"kind": "image", "id": "image", "src": "image",
+                             "width": 200, "height": 20}]}
+            ]}]
+        });
+        let mut table: TableBlock = serde_json::from_value(json!({
+            "id": "outer", "tableLayout": "fixed", "columnWidths": [300],
+            "rows": [{"id": "row", "cells": [
+                {"id": "cell", "padding": padding, "blocks": [nested]}
+            ]}]
+        }))
+        .unwrap();
+        let measured = measure_table(&mut table, 600.0, &config).unwrap();
+        let BlockExtent::Table(nested) = &measured.rows[0].cells[0].blocks[0] else {
+            panic!()
+        };
+        assert_eq!(nested.column_widths, vec![300.0]);
+    }
+
+    #[test]
+    fn autofit_sizes_a_rotated_block_image_by_its_rotation_bounds() {
+        let config = MeasurementConfig {
+            defaults: json!({"fontFamily": "Arial", "fontSize": 12}),
+            ..MeasurementConfig::default()
+        };
+        let table: TableBlock = serde_json::from_value(json!({
+            "id": "table", "tableLayout": "autofit", "columnWidths": [300],
+            "rows": [{"id": "row", "cells": [
+                {"id": "cell", "padding": {"left": 0, "right": 0, "top": 0, "bottom": 0},
+                 "blocks": [{"kind": "image", "id": "image", "src": "image",
+                             "width": 100, "height": 200, "rotationDeg": 90,
+                             "rotationBounds": {"width": 200, "height": 100}}]}
+            ]}]
+        }))
+        .unwrap();
+        let widths = measure_table_column_widths(&table, 600.0, &config);
+        assert!((200.0..=300.0).contains(&widths[0]), "{widths:?}");
     }
 
     #[test]
