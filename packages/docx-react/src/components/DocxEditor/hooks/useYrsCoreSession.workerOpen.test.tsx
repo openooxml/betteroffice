@@ -43,7 +43,7 @@ const bytes = new Uint8Array(readFileSync(resolve(
   '../../../../../../crates/docx-edit/tests/fixtures/page-fragments/pages.docx'
 )));
 
-async function longFixture(): Promise<Uint8Array> {
+async function longFixture(paragraphs = 205): Promise<Uint8Array> {
   const zip = new JSZip();
   zip.file(
     '[Content_Types].xml',
@@ -53,8 +53,8 @@ async function longFixture(): Promise<Uint8Array> {
     '_rels/.rels',
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'
   );
-  const body = Array.from({ length: 205 }, (_, index) => {
-    const text = index === 0 ? 'First paragraph' : index === 204 ? 'Tail paragraph' : `Paragraph ${index}`;
+  const body = Array.from({ length: paragraphs }, (_, index) => {
+    const text = index === 0 ? 'First paragraph' : index === paragraphs - 1 ? 'Tail paragraph' : `Paragraph ${index}`;
     return `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
   }).join('');
   zip.file(
@@ -96,6 +96,7 @@ function installWorker(options: {
   revisionCount?: number;
   failRevisionCount?: boolean;
   onRevisionCount?: () => void;
+  holdCompletion?: boolean;
 } = {}) {
   const workers: InProcessResidentWorker[] = [];
   const posted: ResidentEngineWorkerRequest[] = [];
@@ -107,7 +108,8 @@ function installWorker(options: {
         posted.push(request);
         if ((options.holdState && request.type === 'encodeState') ||
             (options.holdOpen && request.type === 'open') ||
-            (options.holdRetryOpen && workers.length > 1 && request.type === 'open')) worker.hold();
+            (options.holdRetryOpen && workers.length > 1 && request.type === 'open') ||
+            (options.holdCompletion && request.type === 'completeLayout')) worker.hold();
         if (options.oomStage === request.type &&
             (request.type !== 'encodeState' || workers.length === 1)) {
           queueMicrotask(() => worker.onmessage?.({
@@ -475,28 +477,33 @@ test('tracked changes start an on-demand replica without a replica request', asy
 });
 
 test('the revision count waits until the worker has completed the layout', async () => {
-  let completing = () => false;
-  const asked: boolean[] = [];
-  const { posted } = installWorker({ onRevisionCount: () => asked.push(completing()) });
+  const { workers, posted } = installWorker({ holdCompletion: true });
   const frames = holdFrames();
   const { result, unmount } = renderHook(useHarness, {
-    initialProps: { ...initialProps, source: longBytes, hydrateOnDemand: true },
+    initialProps: { ...initialProps, source: await longFixture(1200), hydrateOnDemand: true },
   });
-  completing = () => result.current.renderer.completingLayout !== null;
   try {
     await waitFor(() => expect(result.current.host).not.toBeNull());
     const session = result.current.core.session!;
     act(() => result.current.pipeline.runLayoutPipeline());
-    await waitFor(() => expect(result.current.renderer.completingLayout).toBe(session));
+    await waitFor(() => expect(posted.map((request) => request.type)).toContain('completeLayout'), {
+      timeout: 5000,
+    });
     act(() => result.current.presentFrame());
     act(() => frames.run());
     act(() => frames.run());
-    await waitFor(() => expect(result.current.renderer.completingLayout).toBeNull(), { timeout: 5000 });
+    await act(async () => {});
+    expect(result.current.renderer.pendingCompletion).toBeNull();
+    expect(result.current.renderer.completingLayout).toBe(session);
+    expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
+    await act(async () => {
+      workers[0].release();
+    });
+    await waitFor(() => expect(result.current.renderer.completingLayout).toBeNull());
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
     await waitFor(() => expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1));
-    expect(asked).toEqual([false]);
-    expect(posted.findIndex((request) => request.type === 'revisionCount')).toBeGreaterThan(
-      posted.findIndex((request) => request.type === 'completeLayout')
-    );
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
     expect(result.current.errors).toEqual([]);
   } finally {
