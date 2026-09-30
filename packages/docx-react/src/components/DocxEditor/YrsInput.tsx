@@ -896,7 +896,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     enqueueInputOperation(() => {
       verticalCaretGoalRef.current.reset();
       const current = ensureSelection();
-      const activeStory = current?.head.story;
+      // read-only select all takes the whole document, not the table cell holding the caret
+      const activeStory = readOnly ? story : current?.head.story;
       const map = activeStory ? inputPositionMap(activeStory) : null;
       if (!session || !activeStory || !map || map.paragraphs.length === 0) return;
       const first = map.paragraphs[0];
@@ -906,7 +907,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         { story: activeStory, paraId: last.paraId, offset: last.length }
       );
     });
-  }, [enqueueInputOperation, ensureSelection, inputPositionMap, session, setSelection]);
+  }, [enqueueInputOperation, ensureSelection, inputPositionMap, readOnly, session, setSelection, story]);
 
   const moveTableCell = useCallback(
     (backward: boolean): boolean => {

@@ -107,3 +107,15 @@ test('read-only keys never write, and Tab stays in its table cell', async () => 
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(JSON.stringify(session.storySegments('body'))).toBe(before);
 });
+
+test('read-only select all takes the document from inside a table cell', async () => {
+  const { session, paraId, textarea } = await mount(true);
+  const { table } = session.insertTable({ story: 'body', paraId, offset: 9 }, 1, 1);
+  const cell = yrsCellStory(session, { ...table, row: 0, column: 0 })!;
+  session.setSelection({ story: cell, paraId: session.paragraphs(cell)[0].paraId, offset: 0 });
+  fireEvent.keyDown(textarea, { key: 'a', ctrlKey: true });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const selection = session.selection()!;
+  expect([selection.anchor.story, selection.head.story]).toEqual(['body', 'body']);
+  expect(selection.anchor.offset).toBe(0);
+});

@@ -80,3 +80,23 @@ test('copies a cell range as tab-separated rows', async () => {
   });
   expect(yrsSelectionPlainText(session)).toBe('b\nd');
 });
+
+test('copies inline content controls and equations as their text', async () => {
+  const session = await createYrsSession();
+  sessions.push(session);
+  const { paraId } = session.createStory('body', 'Name: , x');
+  session.applyRawOps('body', [
+    {
+      op: 'insertEmbed',
+      index: 6,
+      kind: 'sdt',
+      payload: { content: [{ kind: 'text', text: 'Alice' }, { kind: 'tab' }, { kind: 'text', text: 'B' }] },
+    },
+    { op: 'insertEmbed', index: 10, kind: 'math', payload: { plainText: 'a+b' } },
+  ]);
+  session.setSelection(
+    { story: 'body', paraId, offset: 0 },
+    { story: 'body', paraId, offset: 11 }
+  );
+  expect(yrsSelectionPlainText(session)).toBe('Name: Alice\tB, xa+b');
+});

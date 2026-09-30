@@ -818,10 +818,14 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         if (!partEdit) setIsFocused(true);
       }
       const latest = yrsInputRef.current?.displaySelection();
+      // a cell range keeps its caret collapsed; read-only offers Copy for it
+      const cells = readOnly && keepCellSelection ? yrsSession?.cellSelection() : null;
       onContextMenu({
         x: e.clientX,
         y: e.clientY,
-        hasSelection: !!latest && latest.anchor !== latest.head,
+        hasSelection:
+          (!!latest && latest.anchor !== latest.head) ||
+          (!!cells && !sameYrsCell(cells.anchor, cells.head)),
         image: imageInfo,
       });
     },
@@ -832,6 +836,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       getYrsPositionProjection,
       onContextMenu,
       partEdit,
+      readOnly,
       resolveCanvasHit,
       resolveTarget,
       setIsFocused,

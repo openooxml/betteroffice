@@ -7,7 +7,6 @@ import type {
   YrsParagraphAttrs,
   YrsSession,
   YrsStoryRange,
-  YrsStorySegment,
   YrsTableLoc,
   YrsTableRange,
 } from '@betteroffice/docx/yrs';
@@ -228,24 +227,33 @@ export function yrsSelectedText(session: YrsSession): string {
     .join('');
 }
 
-function embedPlainText(
-  session: YrsSession,
-  segment: Extract<YrsStorySegment, { kind: 'embed' }>
-): string {
-  switch (segment.embedKind) {
+function embedPlainText(session: YrsSession, kind: string, payload: Record<string, unknown>): string {
+  switch (kind) {
     case 'tab':
       return '\t';
     case 'break':
       return '\n';
     case 'field':
-      return typeof segment.payload.displayText === 'string' ? segment.payload.displayText : '';
+      return typeof payload.displayText === 'string' ? payload.displayText : '';
+    case 'math':
+      return typeof payload.plainText === 'string' ? payload.plainText : '';
+    case 'sdt':
+      return Array.isArray(payload.content)
+        ? payload.content
+            .map((item: { kind?: unknown; text?: unknown; payload?: unknown }) =>
+              item.kind === 'text' && typeof item.text === 'string'
+                ? item.text
+                : embedPlainText(session, String(item.kind), objectValue(item.payload) ?? {})
+            )
+            .join('')
+        : '';
     case 'blockSdt':
-      return typeof segment.payload.story === 'string'
-        ? `${storyPlainText(session, segment.payload.story).replace(/\n$/, '')}\n`
+      return typeof payload.story === 'string'
+        ? `${storyPlainText(session, payload.story).replace(/\n$/, '')}\n`
         : '';
     case 'table':
-      return Array.isArray(segment.payload.rows)
-        ? tablePlainText(session, { rows: segment.payload.rows as TablePayloadRow[] })
+      return Array.isArray(payload.rows)
+        ? tablePlainText(session, { rows: payload.rows as TablePayloadRow[] })
             .map((row) => `${row}\n`)
             .join('')
         : '';
@@ -292,7 +300,7 @@ function storyPlainText(session: YrsSession, story: string, from = 0, to = Infin
     } else if (segment.kind === 'pilcrow') {
       text += '\n';
     } else {
-      text += embedPlainText(session, segment);
+      text += embedPlainText(session, segment.embedKind, segment.payload);
     }
   }
   return text;

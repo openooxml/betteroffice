@@ -144,3 +144,30 @@ test('an editable press still selects the image under it', () => {
   mouse('mousedown', 50, 400, canvasOf());
   expect(selections).toEqual([[5, 6]]);
 });
+
+test('a right-click inside a selected cell range offers Copy only when read-only', () => {
+  const cell = (row: number, column: number) => ({ story: 'body', tableIndex: 0, row, column });
+  const table = {
+    size: 100,
+    targetAt: (position: number) => ({ story: 'body:t0:r0c0', displayPosition: position, cell: cell(0, 0) }),
+    tableAtPosition: () => null,
+    cellPosition: () => null,
+    nodeAt: () => null,
+  } as unknown as YrsPositionProjection;
+  const session = {
+    cellSelection: () => ({ anchor: cell(0, 0), head: cell(1, 1) }),
+  } as unknown as YrsSession;
+  for (const readOnly of [true, false]) {
+    const menus: Array<{ hasSelection: boolean }> = [];
+    const { opts } = options({
+      readOnly,
+      yrsSession: session,
+      getYrsPositionProjection: () => table,
+      onContextMenu: (data) => menus.push(data),
+    });
+    const view = renderHook(() => usePagesPointer(opts));
+    mouse('contextmenu', 200, 400, canvasOf());
+    expect(menus.map((menu) => menu.hasSelection)).toEqual([readOnly]);
+    view.unmount();
+  }
+});
