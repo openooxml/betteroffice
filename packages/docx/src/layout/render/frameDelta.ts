@@ -1361,6 +1361,14 @@ function validateDisplayPage(page: DisplayPage, pageIndex: number, primitiveCoun
     invalid('page dimensions are invalid');
   }
   if (!Array.isArray(page.primitives)) invalid('page primitives are not an array');
+  const watermarkPrimitiveCount = page.watermarkPrimitiveCount ?? 0;
+  if (
+    !Number.isSafeInteger(watermarkPrimitiveCount) ||
+    watermarkPrimitiveCount < 0 ||
+    watermarkPrimitiveCount > page.primitives.length
+  ) {
+    invalid('watermark primitive count is invalid');
+  }
   let actual = page.primitives.length;
   for (const area of page.noteAreas ?? []) {
     if (!Array.isArray(area.separatorPrimitives ?? []) || !Array.isArray(area.primitives ?? [])) {

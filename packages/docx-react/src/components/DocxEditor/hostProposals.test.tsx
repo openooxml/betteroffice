@@ -159,6 +159,14 @@ test('allowHostProposals admits only the proposal methods in a read-only editor'
     previewVersion: 1,
     proposals: [{ id: 'p1', state: 'accepted' }],
   });
+  const withdrawn = await act(() =>
+    ref.current!.withdrawProposals({ expectVersion: session.version(), ids: ['p1'] })
+  );
+  expect(withdrawn).toMatchObject({ ok: true, snapshot: { previewVersion: 2, proposals: [] } });
+  expect(session.listRevisions().filter((revision) => revision.author === 'Atira')).toEqual([]);
+  expect(
+    session.paragraphs('body').find((candidate) => candidate.paraId === paragraph.paraId)!.text
+  ).toStartWith('XYZ');
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
   });

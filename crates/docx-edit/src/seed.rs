@@ -1186,6 +1186,15 @@ fn formatting_to_marks(formatting: Option<&Value>) -> Vec<Mark> {
     marks
 }
 
+/// The story attributes of a paragraph mark's run defaults (`defaultTextFormatting`), lowered as
+/// seeding lowers a run's formatting.
+pub(crate) fn mark_run_attrs(defaults: &Any) -> Vec<(String, Any)> {
+    serde_json::to_value(defaults)
+        .ok()
+        .and_then(|value| payload(marks_to_attrs(&formatting_to_marks(Some(&value)))).ok())
+        .unwrap_or_default()
+}
+
 fn mark_attrs(mark: &Mark) -> Value {
     Value::Object(mark.attrs.iter().cloned().collect())
 }

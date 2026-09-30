@@ -19,6 +19,7 @@ import type { ResidentEngineWorkerRequest } from '@betteroffice/docx/yrs/residen
 import { LayoutSelectionGate } from '@betteroffice/docx/layout';
 import { useCanvasRenderer, type OpenInWorker } from './useDisplayList';
 import { useLayoutPipeline } from './useLayoutPipeline';
+import type { DocxHostSearch } from './useHostSearch';
 import { useYrsCoreSession } from './useYrsCoreSession';
 import type { DocxEditorCollaborationOptions } from '../types';
 import { awaitWorkerOpenReplica, ensureWorkerOpenReplica } from '../internals/workerOpenReplica';
@@ -251,6 +252,7 @@ function useHarness(props: HarnessProps) {
     commands: UNAVAILABLE_DOCX_COMMANDS,
     modeRef: { current: 'viewing' },
     allowHostProposalsRef: { current: false },
+    hostSearch: {} as DocxHostSearch,
   });
   const bridgeRef = useRef<PagedEditorCommandBridge | null>(null);
   const inputRef = useRef<YrsInputRef | null>(null);
