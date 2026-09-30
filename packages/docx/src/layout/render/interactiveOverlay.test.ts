@@ -160,6 +160,34 @@ test('only primitives with paint and positive area occlude controls', () => {
   }
 });
 
+test('a filled body shape hides header controls only where its path is its own box', () => {
+  const box = (extra: Partial<ShapePrimitive> = {}): ShapePrimitive => ({
+    kind: 'shape', x: 100, y: 20, w: 20, h: 20, fill: '#fff',
+    geometryPath: [
+      { type: 'move', x: 100, y: 20 }, { type: 'line', x: 120, y: 20 },
+      { type: 'line', x: 120, y: 40 }, { type: 'line', x: 100, y: 40 }, { type: 'close' },
+    ],
+    ...extra,
+  });
+  expectHidden(headerWidget([box({ transform: { rotation: 180 } })]));
+  const triangle: ShapePrimitive = {
+    kind: 'shape', x: 0, y: 0, w: 200, h: 200, fill: '#fff',
+    geometryPath: [
+      { type: 'move', x: 0, y: 0 }, { type: 'line', x: 200, y: 200 },
+      { type: 'line', x: 0, y: 200 }, { type: 'close' },
+    ],
+  };
+  const bowtie = box({
+    geometryPath: [
+      { type: 'move', x: 100, y: 20 }, { type: 'line', x: 120, y: 40 },
+      { type: 'line', x: 120, y: 20 }, { type: 'line', x: 100, y: 40 }, { type: 'close' },
+    ],
+  });
+  for (const shape of [triangle, bowtie, box({ transform: { rotation: 45 } })]) {
+    expectActive(headerWidget([shape]));
+  }
+});
+
 test('body picture fills with zero opacity do not hide header controls', () => {
   const shape: ShapePrimitive = {
     kind: 'shape', x: 100, y: 20, w: 20, h: 20,

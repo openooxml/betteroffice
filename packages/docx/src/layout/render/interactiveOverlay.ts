@@ -16,6 +16,7 @@ import type {
   GlyphRunPrimitive,
   InlineSdtWidgetAttrs,
   SdtAttrs,
+  ShapePrimitive,
   TextRunPrimitive,
 } from './displayList';
 import {
@@ -212,7 +213,7 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
       case 'shape': {
         const paint = primitive.fillPaint;
         const fill = paint?.color ?? primitive.fill;
-        if (!primitive.geometryPath.length) return false;
+        if (!shapeFillsItsBox(primitive)) return false;
         if (paint?.kind === 'none') return false;
         if (paint?.kind === 'gradient' || paint?.kind === 'pattern') break;
         if (paint?.kind === 'picture' && (paint.pictureSrc || paint.pictureRelId)) {
@@ -241,6 +242,39 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
       clipPaintsPoint(primitive, x, y)
     );
   });
+}
+
+/** Whether a shape's path is its own box, so that its fill covers every point of the box. */
+function shapeFillsItsBox(shape: ShapePrimitive): boolean {
+  if ((shape.transform?.rotation ?? 0) % 180 !== 0) return false;
+  const commands = shape.geometryPath;
+  const end = commands.at(-1)?.type === 'close' ? commands.length - 1 : commands.length;
+  const corners: Array<{ x: number; y: number }> = [];
+  for (let index = 0; index < end; index++) {
+    const command = commands[index]!;
+    if (command.type !== 'move' && command.type !== 'line') return false;
+    if ((command.type === 'move') !== (index === 0)) return false;
+    corners.push({ x: command.x, y: command.y });
+  }
+  const near = (a: number, b: number) => Math.abs(a - b) <= 0.01;
+  const first = corners[0];
+  const last = corners.at(-1);
+  if (corners.length === 5 && first && last && near(first.x, last.x) && near(first.y, last.y)) {
+    corners.pop();
+  }
+  if (corners.length !== 4) return false;
+  const xs = [shape.x, shape.x + shape.w];
+  const ys = [shape.y, shape.y + shape.h];
+  const seen = new Set<number>();
+  for (const [index, corner] of corners.entries()) {
+    const column = xs.findIndex((x) => near(x, corner.x));
+    const row = ys.findIndex((y) => near(y, corner.y));
+    if (column < 0 || row < 0) return false;
+    seen.add(column * 2 + row);
+    const next = corners[(index + 1) % 4]!;
+    if (!near(corner.x, next.x) && !near(corner.y, next.y)) return false;
+  }
+  return seen.size === 4;
 }
 
 /** A run with no glyph fill: whether its outline paints differs by canvas path, so it covers nothing. */

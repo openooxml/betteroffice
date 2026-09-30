@@ -49,7 +49,7 @@
 
 use crate::display_list::{
     DisplayBounds, DisplayList, DisplayPage, DocAttrs, HfRegion, NoteRegion, Primitive,
-    ShapePrimitive, TableCellRef, doc_attrs, note_group_id,
+    ShapePathCommand, ShapePrimitive, TableCellRef, doc_attrs, note_group_id,
 };
 use serde::Serialize;
 use serde_json::{Number, Value};
@@ -1232,6 +1232,62 @@ fn js_blank(text: &str) -> bool {
         .all(|c| c == '\u{feff}' || (c.is_whitespace() && c != '\u{85}'))
 }
 
+/// Whether a shape's path is its own box, so that its fill covers every point of the box.
+fn shape_fills_its_box(shape: &ShapePrimitive) -> bool {
+    let rotation = shape
+        .transform
+        .as_ref()
+        .and_then(|transform| transform.rotation.as_ref())
+        .and_then(Number::as_f64)
+        .unwrap_or(0.0);
+    if rotation % 180.0 != 0.0 {
+        return false;
+    }
+    let commands = &shape.geometry_path;
+    let end = match commands.last() {
+        Some(ShapePathCommand::Close) => commands.len() - 1,
+        _ => commands.len(),
+    };
+    let px = |value: &Number| value.as_f64().unwrap_or(0.0);
+    let mut corners = Vec::with_capacity(end);
+    for (index, command) in commands[..end].iter().enumerate() {
+        match command {
+            ShapePathCommand::Move { x, y } if index == 0 => corners.push((px(x), px(y))),
+            ShapePathCommand::Line { x, y } if index > 0 => corners.push((px(x), px(y))),
+            _ => return false,
+        }
+    }
+    let near = |a: f64, b: f64| (a - b).abs() <= 0.01;
+    if let [first, .., last] = corners.as_slice()
+        && corners.len() == 5
+        && near(first.0, last.0)
+        && near(first.1, last.1)
+    {
+        corners.pop();
+    }
+    if corners.len() != 4 {
+        return false;
+    }
+    let (left, top) = (px(&shape.x), px(&shape.y));
+    let xs = [left, left + px(&shape.w)];
+    let ys = [top, top + px(&shape.h)];
+    let mut seen = [false; 4];
+    for (index, &(x, y)) in corners.iter().enumerate() {
+        let (Some(column), Some(row)) = (
+            xs.iter().position(|&edge| near(edge, x)),
+            ys.iter().position(|&edge| near(edge, y)),
+        ) else {
+            return false;
+        };
+        seen[column * 2 + row] = true;
+        let (next_x, next_y) = corners[(index + 1) % 4];
+        if !near(x, next_x) && !near(y, next_y) {
+            return false;
+        }
+    }
+    seen.iter().all(|&corner| corner)
+}
+
 /// A run with no glyph fill: whether its outline paints differs by canvas path, so it covers nothing.
 fn text_fill_none(attrs: &DocAttrs) -> bool {
     attrs
@@ -1244,7 +1300,7 @@ fn text_fill_none(attrs: &DocAttrs) -> bool {
 
 /// Whether a shape's fill paints its interior, as the overlay's occlusion check decides it.
 fn shape_fill_paints(shape: &ShapePrimitive) -> bool {
-    if shape.geometry_path.is_empty() {
+    if !shape_fills_its_box(shape) {
         return false;
     }
     let paint = shape.attrs.fill_paint.as_deref();
@@ -2254,6 +2310,11 @@ mod tests {
         no_height["h"] = 0.into();
         let shape = |paint: Option<serde_json::Value>, fill: Option<&str>| {
             let mut shape = inline_shape_primitive(100.0, 440.0, 60.0, 40.0, 10, "shape:band");
+            shape["geometryPath"] = serde_json::json!([
+                {"type": "move", "x": 100, "y": 440}, {"type": "line", "x": 160, "y": 440},
+                {"type": "line", "x": 160, "y": 480}, {"type": "line", "x": 100, "y": 480},
+                {"type": "close"}
+            ]);
             if let Some(paint) = paint {
                 shape["fillPaint"] = paint;
             }
@@ -2264,6 +2325,22 @@ mod tests {
         };
         let mut no_path = shape(None, Some("#ff0000"));
         no_path["geometryPath"] = serde_json::json!([]);
+        // Its box covers the click; its path does not.
+        let mut triangle = shape(None, Some("#ff0000"));
+        triangle["geometryPath"] = serde_json::json!([
+            {"type": "move", "x": 100, "y": 440}, {"type": "line", "x": 160, "y": 480},
+            {"type": "line", "x": 100, "y": 480}, {"type": "close"}
+        ]);
+        let mut bowtie = shape(None, Some("#ff0000"));
+        bowtie["geometryPath"] = serde_json::json!([
+            {"type": "move", "x": 100, "y": 440}, {"type": "line", "x": 160, "y": 480},
+            {"type": "line", "x": 160, "y": 440}, {"type": "line", "x": 100, "y": 480},
+            {"type": "close"}
+        ]);
+        let mut rotated = shape(None, Some("#ff0000"));
+        rotated["transform"] = serde_json::json!({"rotation": 45});
+        let mut turned = shape(None, Some("#ff0000"));
+        turned["transform"] = serde_json::json!({"rotation": 180});
         for (x, primitive) in [
             (100.0, no_width),
             (120.0, no_height),
@@ -2294,6 +2371,9 @@ mod tests {
                 ),
             ),
             (120.0, no_path),
+            (140.0, triangle),
+            (140.0, bowtie),
+            (120.0, rotated),
         ] {
             let dl = band_page("footer", 420.0, vec![primitive]);
             let hit = hit_test_regions(&dl, 0, x, 455.0).unwrap();
@@ -2302,6 +2382,7 @@ mod tests {
         }
         for primitive in [
             shape(None, Some("#ff0000")),
+            turned,
             shape(
                 Some(serde_json::json!({"kind": "solid", "color": "#00ff00"})),
                 None,
