@@ -66,7 +66,8 @@ interface CurrentViewportAnchor {
 }
 
 export interface UseLayoutPipelineOptions {
-  onError?: (error: Error) => void;
+  /** `session`: the session whose pass failed. */
+  onError?: (error: Error, session: YrsSession) => void;
   document: Document | null;
   session: YrsSession | null;
   renderEnv: YrsRenderEnv;
@@ -290,7 +291,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         measurement = residentMeasurementConfig(requirements);
       } catch (error) {
         console.error('[PagedEditor] Resident font preflight error:', error);
-        onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
+        onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
         syncCoordinator.onLayoutComplete(currentEpoch);
         return;
       }
@@ -377,7 +378,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           }
         } catch (error) {
           console.error('[PagedEditor] Layout pipeline error:', error);
-          onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
+          onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
         }
       };
 
@@ -442,7 +443,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             // The display reports a worker out of memory; nothing lays out here.
             if (error instanceof ResidentWorkerOutOfMemoryError) return;
             console.error('[PagedEditor] Layout pipeline error:', error);
-            onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
+            onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
           }
         )
         .finally(() => {

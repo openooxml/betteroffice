@@ -629,7 +629,9 @@ export class EditSession {
      * Seeding starts a new opening, with `generation` or a fresh one, so its
      * session anchors are its own; see [`EditingDoc::begin_opening`].
      *
-     * Returns `{"envelope","referencedFonts":[string, …]}`. The envelope is
+     * Returns `{"envelope","referencedFonts":[string, …],"unusedScriptFonts":[string, …]}`:
+     * `unusedScriptFonts` are the referenced fonts a seeded package names only
+     * for East Asian or complex-script text it does not contain. The envelope is
      * the parsed package with the parts the host does not need stripped —
      * body content, header/footer and note content, numbering, media and
      * charts are emptied, section entries keep only their properties — so
@@ -643,7 +645,9 @@ export class EditSession {
     /**
      * Opens `bytes` for display only, seeded from the body's first `blocks`
      * blocks (see `seed::seed_docx_preview`): the reply is the host metadata
-     * of that parse. The session keeps no source package, so it cannot save.
+     * of that parse, as [`EditSession::open_docx`] replies, with the
+     * `unusedScriptFonts` of its cut. The session keeps no source package, so
+     * it cannot save.
      * Opens nothing and replies with nothing for a document the preview
      * refuses, which opens with [`EditSession::open_docx`] instead.
      */

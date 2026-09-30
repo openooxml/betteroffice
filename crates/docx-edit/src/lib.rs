@@ -86,6 +86,7 @@ mod queries;
 mod raw;
 mod read_state;
 pub mod read_types;
+mod script_fonts;
 mod search;
 mod seed;
 mod segments;

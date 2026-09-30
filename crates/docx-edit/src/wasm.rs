@@ -1203,6 +1203,9 @@ struct UpdateEventObserver {
 struct DocxHostWire {
     envelope: docx_parse::S9WireEnvelope,
     referenced_fonts: Vec<String>,
+    /// Empty unless the stories were seeded from the package (a preview's
+    /// from its cut).
+    unused_script_fonts: Vec<String>,
 }
 
 fn thin_header_footer(
@@ -1321,7 +1324,7 @@ impl EditSession {
         let (envelope, parts) = crate::seed::parse_docx_package_with_digest(bytes, digest.clone())
             .map_err(|error| error.to_string())?;
         let host_envelope = thin_docx_envelope(&envelope);
-        let referenced_fonts = if seed_stories {
+        let fonts = if seed_stories {
             let fonts = crate::seed::seed_parsed_docx(
                 self.engine.doc(),
                 envelope,
@@ -1344,11 +1347,15 @@ impl EditSession {
                 .doc()
                 .retain_source_docx_with_digest(Arc::clone(&source), digest.clone());
             drop(envelope);
-            fonts
+            crate::seed::SeededFonts {
+                referenced: fonts,
+                unused_script: Vec::new(),
+            }
         };
         let host = DocxHostWire {
             envelope: host_envelope,
-            referenced_fonts,
+            referenced_fonts: fonts.referenced,
+            unused_script_fonts: fonts.unused_script,
         };
         let json = serde_json::to_string(&host).map_err(|error| error.to_string())?;
         self.docx_source.replace(Some(source));
@@ -1368,12 +1375,13 @@ impl EditSession {
             return Ok(None);
         };
         let host_envelope = thin_docx_envelope(&envelope);
-        let referenced_fonts = crate::seed::seed_preview_envelope(self.engine.doc(), envelope)?;
+        let fonts = crate::seed::seed_preview_envelope(self.engine.doc(), envelope)?;
         self.engine.set_partial_document(true);
         self.engine.doc().rotate_version(js_entropy());
         serde_json::to_string(&DocxHostWire {
             envelope: host_envelope,
-            referenced_fonts,
+            referenced_fonts: fonts.referenced,
+            unused_script_fonts: fonts.unused_script,
         })
         .map(Some)
         .map_err(|error| error.to_string())
@@ -2209,7 +2217,9 @@ impl EditSession {
     /// Seeding starts a new opening, with `generation` or a fresh one, so its
     /// session anchors are its own; see [`EditingDoc::begin_opening`].
     ///
-    /// Returns `{"envelope","referencedFonts":[string, …]}`. The envelope is
+    /// Returns `{"envelope","referencedFonts":[string, …],"unusedScriptFonts":[string, …]}`:
+    /// `unusedScriptFonts` are the referenced fonts a seeded package names only
+    /// for East Asian or complex-script text it does not contain. The envelope is
     /// the parsed package with the parts the host does not need stripped —
     /// body content, header/footer and note content, numbering, media and
     /// charts are emptied, section entries keep only their properties — so
@@ -2235,7 +2245,9 @@ impl EditSession {
 
     /// Opens `bytes` for display only, seeded from the body's first `blocks`
     /// blocks (see `seed::seed_docx_preview`): the reply is the host metadata
-    /// of that parse. The session keeps no source package, so it cannot save.
+    /// of that parse, as [`EditSession::open_docx`] replies, with the
+    /// `unusedScriptFonts` of its cut. The session keeps no source package, so
+    /// it cannot save.
     /// Opens nothing and replies with nothing for a document the preview
     /// refuses, which opens with [`EditSession::open_docx`] instead.
     pub fn open_docx_preview(&self, bytes: &[u8], blocks: u32) -> Result<Option<String>, JsValue> {
@@ -5214,6 +5226,88 @@ mod tests {
             ("word/document.xml".to_owned(), document.into_bytes()),
         ])
         .unwrap()
+    }
+
+    fn script_fonts_docx(body: &str, defaults: &str) -> Vec<u8> {
+        const MAIN: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape""#;
+        let document = format!(r#"<w:document {MAIN}><w:body>{body}</w:body></w:document>"#);
+        let styles = format!(
+            r#"<w:styles {MAIN}><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="SimSun" w:cs="Times New Roman"/>{defaults}</w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#
+        );
+        let fonts = format!(
+            r#"<w:fonts {MAIN}><w:font w:name="Calibri"><w:charset w:val="00"/></w:font><w:font w:name="SimSun"><w:altName w:val="宋体"/><w:charset w:val="86"/></w:font><w:font w:name="Batang"><w:charset w:val="81"/></w:font></w:fonts>"#
+        );
+        ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/_rels/document.xml.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/></Relationships>"#.to_vec()),
+            ("word/document.xml".to_owned(), document.into_bytes()),
+            ("word/styles.xml".to_owned(), styles.into_bytes()),
+            ("word/fontTable.xml".to_owned(), fonts.into_bytes()),
+        ])
+        .unwrap()
+    }
+
+    fn unused_script_fonts(body: &str, defaults: &str, seed_stories: bool) -> Value {
+        let session = EditSession::new(78.0).unwrap();
+        let bytes = script_fonts_docx(body, defaults);
+        let host: Value =
+            serde_json::from_str(&session.open_docx(&bytes, seed_stories, None, None).unwrap())
+                .unwrap();
+        host["unusedScriptFonts"].clone()
+    }
+
+    #[test]
+    fn an_opened_document_names_the_script_fonts_its_text_does_not_use() {
+        let run = |text: &str| format!("<w:r><w:t>{text}</w:t></w:r>");
+        let latin = |text: &str| format!("<w:p>{}</w:p><w:p>{text}</w:p>", run("Latin"));
+        let all = json!(["Batang", "SimSun", "Times New Roman", "宋体"]);
+        assert_eq!(unused_script_fonts(&latin(&run("More")), "", true), all);
+        assert_eq!(
+            unused_script_fonts(&latin(&run("漢字")), "", true),
+            json!(["Times New Roman"])
+        );
+        assert_eq!(
+            unused_script_fonts(&latin(&run("مرحبا")), "", true),
+            json!(["Batang", "SimSun", "宋体"])
+        );
+        assert_eq!(
+            unused_script_fonts(&latin(&run("More")), "", false),
+            json!([])
+        );
+        let control = format!(
+            "<w:p><w:sdt><w:sdtPr/><w:sdtContent>{}</w:sdtContent></w:sdt></w:p>",
+            run("abc")
+        );
+        assert_eq!(unused_script_fonts(&control, "", true), all);
+        assert_eq!(
+            unused_script_fonts(&control, "<w:cs/>", true),
+            json!(["Batang", "SimSun", "宋体"])
+        );
+        let text_box = r#"<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="Text box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:spPr><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:rPr><w:rFonts w:ascii="SimSun" w:hAnsi="SimSun"/></w:rPr><w:t>Hello</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#;
+        assert_eq!(
+            unused_script_fonts(&latin(text_box), "", true),
+            json!(["Batang", "Times New Roman", "宋体"])
+        );
+    }
+
+    #[test]
+    fn a_preview_names_the_script_fonts_its_cut_does_not_use() {
+        let paragraph = |text: &str| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+        let unused = |body: String| -> Value {
+            let session = EditSession::new(79.0).unwrap();
+            let host = session
+                .open_preview(&script_fonts_docx(&body, ""), 1)
+                .unwrap()
+                .unwrap();
+            serde_json::from_str::<Value>(&host).unwrap()["unusedScriptFonts"].clone()
+        };
+        let body = |first: &str, second: &str| format!("{}{}", paragraph(first), paragraph(second));
+        let all = json!(["Batang", "SimSun", "Times New Roman", "宋体"]);
+        assert_eq!(unused(body("Latin", "More")), all);
+        assert_eq!(unused(body("漢字", "Latin")), json!(["Times New Roman"]));
+        // The CJK text lies past the preview's cut.
+        assert_eq!(unused(body("Latin", "漢字")), all);
     }
 
     #[test]
