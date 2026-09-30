@@ -181,11 +181,6 @@ fn a_media_table_parse_equals_the_default_one_read_through_its_tokens() {
             "word/media/image3.tif"
         ]
     );
-    assert!(
-        parts
-            .iter()
-            .all(|(path, _)| !path.starts_with("word/media/"))
-    );
     assert_eq!(
         parts,
         eager_parts
@@ -211,10 +206,10 @@ fn a_media_table_parse_equals_the_default_one_read_through_its_tokens() {
     expected["document"]["package"]["mediaEntries"] = Value::Array(Vec::new());
     let mut actual = serde_json::to_value(&tokens).unwrap();
     let replaced = resolve_tokens(&mut actual, &|index| table.data_url(index).unwrap());
-    // The inline picture and the VML picture in the body, the TIFF, and the
-    // shape's picture fill; the watermark and the comment arrive resolved.
-    assert_eq!(replaced, 4);
-    assert_eq!(count_data_urls(&serde_json::to_value(&tokens).unwrap()), 3);
+    // The body's inline and VML pictures, the TIFF, the shape's picture fill
+    // and the comment's picture, twice; the watermark arrives resolved.
+    assert_eq!(replaced, 6);
+    assert_eq!(count_data_urls(&serde_json::to_value(&tokens).unwrap()), 1);
     assert_eq!(actual, expected);
 }
 
@@ -238,11 +233,31 @@ fn a_preview_parse_against_a_media_table_resolves_the_same_way() {
 }
 
 #[test]
-fn media_declared_past_the_container_budget_refuses_the_package() {
+fn images_declared_past_the_container_budget_refuse_the_package() {
     let bytes: Arc<[u8]> = package().into();
     let package = ooxml_opc::RetainedPackage::new(Arc::clone(&bytes)).unwrap();
-    let error =
-        docx_parse::media::MediaTable::new(package, ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES - 100)
-            .unwrap_err();
+    let table = docx_parse::media::MediaTable::new(package).unwrap();
+    assert!(
+        table
+            .check_budget(ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES - 1000)
+            .is_ok()
+    );
+    let error = table
+        .check_budget(ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES - 100)
+        .unwrap_err();
     assert!(error.contains("inflated size exceeds"), "{error}");
+}
+
+#[test]
+fn markup_under_word_media_inflates_with_the_package() {
+    let parts = vec![
+        ("word/media/image1.png".to_owned(), png(4, 4, 1)),
+        ("word/media/notes.bin".to_owned(), b"<w:document/>".to_vec()),
+    ];
+    let bytes: Arc<[u8]> = ooxml_opc::rezip_parts(&parts).unwrap().into();
+    let (inflated, table) = media_table_parts(&bytes).unwrap();
+    assert_eq!(table.len(), 2);
+    assert_eq!(inflated, parts[1..]);
+    assert!(table.keeps_compressed("word/media/image1.png"));
+    assert!(!table.keeps_compressed("word/media/notes.bin"));
 }

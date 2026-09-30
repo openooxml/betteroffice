@@ -34,10 +34,10 @@ pub fn media_token_index(token: &str) -> Option<usize> {
 const SNIFFED_BYTES: usize = 64;
 
 /// The `word/media/` parts of a retained package in archive order, the
-/// `n`th of which a `media:{n}` token names. A part stays compressed in the
-/// package until read, and its `data:` URL is built only when asked for.
-/// Parts browsers cannot decode are transcoded when the table is built, with
-/// the warnings [`build_media_map_with_warnings`] reports.
+/// `n`th of which a `media:{n}` token names. An image part stays compressed
+/// in the package until read, and its `data:` URL is built only when asked
+/// for. Parts browsers cannot decode are transcoded when the table is built,
+/// with the warnings [`build_media_map_with_warnings`] reports.
 #[derive(Clone, Debug)]
 pub struct MediaTable {
     package: RetainedPackage,
@@ -49,54 +49,88 @@ pub struct MediaTable {
 struct MediaPart {
     path: String,
     position: usize,
+    size: u64,
+    /// An image, which no parser reads as markup and so need not inflate
+    /// with the package.
+    image: bool,
     mime_type: &'static str,
     display: Option<Arc<[u8]>>,
 }
 
 impl MediaTable {
-    /// The media of `package`. `inflated` is what its other parts inflated
-    /// to; with the media's declared sizes it must fit the container budget,
-    /// as inflating the whole package would.
-    pub fn new(package: RetainedPackage, inflated: u64) -> Result<Self, String> {
+    /// The media of `package`. The images it leaves compressed must fit the
+    /// container budget by their declared sizes.
+    pub fn new(package: RetainedPackage) -> Result<Self, String> {
         let mut parts = Vec::new();
-        let mut warnings = Vec::new();
-        let mut total = inflated;
+        let mut images = 0_u64;
         for (position, (path, size)) in package.parts().enumerate() {
             if !is_media_path(path) {
                 continue;
             }
-            total = total.saturating_add(size);
-            if total > MAX_TOTAL_UNCOMPRESSED_BYTES {
-                return Err(format!(
-                    "inflated size exceeds {MAX_TOTAL_UNCOMPRESSED_BYTES} bytes"
-                ));
-            }
-            let mime_type = media_mime_type(path);
             let prefix = package.read_prefix(position, SNIFFED_BYTES)?;
-            let (mime_type, display) = if transcodes(&prefix, mime_type) {
-                let data = package.read(position)?;
-                let (display, mime_type, warning) = display_form(&data, mime_type, path);
-                warnings.extend(warning);
-                let display = match display {
-                    Cow::Owned(display) => display.into(),
-                    Cow::Borrowed(_) => Arc::from(data),
-                };
-                (mime_type, Some(display))
-            } else {
-                (mime_type, None)
-            };
-            parts.push(MediaPart {
-                path: path.to_owned(),
-                position,
-                mime_type,
-                display,
-            });
+            let image = is_image(&prefix);
+            if image {
+                images = images.saturating_add(size);
+                if images > MAX_TOTAL_UNCOMPRESSED_BYTES {
+                    return Err(budget_exceeded());
+                }
+            }
+            parts.push((path.to_owned(), position, size, image, prefix));
         }
+        let mut warnings = Vec::new();
+        let parts = parts
+            .into_iter()
+            .map(|(path, position, size, image, prefix)| {
+                let mime_type = media_mime_type(&path);
+                let (mime_type, display) = if transcodes(&prefix, mime_type) {
+                    let data = package.read(position)?;
+                    let (display, mime_type, warning) = display_form(&data, mime_type, &path);
+                    warnings.extend(warning);
+                    let display = match display {
+                        Cow::Owned(display) => display.into(),
+                        Cow::Borrowed(_) => Arc::from(data),
+                    };
+                    (mime_type, Some(display))
+                } else {
+                    (mime_type, None)
+                };
+                Ok(MediaPart {
+                    path,
+                    position,
+                    size,
+                    image,
+                    mime_type,
+                    display,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         Ok(Self {
             package,
             parts: parts.into(),
             warnings: warnings.into(),
         })
+    }
+
+    /// Whether the package's part at `path` is an image the table reads
+    /// itself, which inflating the package may skip.
+    pub fn keeps_compressed(&self, path: &str) -> bool {
+        self.parts
+            .iter()
+            .any(|part| part.image && part.path == path)
+    }
+
+    /// Whether the images left compressed, by their declared sizes, and the
+    /// `inflated` bytes of the package's other parts fit the container budget.
+    pub fn check_budget(&self, inflated: u64) -> Result<(), String> {
+        let total = self
+            .parts
+            .iter()
+            .filter(|part| part.image)
+            .fold(inflated, |total, part| total.saturating_add(part.size));
+        if total > MAX_TOTAL_UNCOMPRESSED_BYTES {
+            return Err(budget_exceeded());
+        }
+        Ok(())
     }
 
     pub fn len(&self) -> usize {
@@ -177,7 +211,27 @@ impl MediaTable {
     }
 }
 
-pub(crate) fn is_media_path(path: &str) -> bool {
+fn budget_exceeded() -> String {
+    format!("inflated size exceeds {MAX_TOTAL_UNCOMPRESSED_BYTES} bytes")
+}
+
+/// Whether `prefix` starts an image format a media part may hold.
+fn is_image(prefix: &[u8]) -> bool {
+    prefix.starts_with(b"\x89PNG\r\n\x1a\n")
+        || prefix.starts_with(&[0xff, 0xd8, 0xff])
+        || prefix.starts_with(b"GIF8")
+        || prefix.starts_with(b"BM")
+        || (prefix.starts_with(b"RIFF") && prefix.get(8..12) == Some(b"WEBP"))
+        || matches!(
+            prefix.first_chunk::<4>(),
+            Some(b"II\x2a\x00" | b"MM\x00\x2a")
+        )
+        || prefix.starts_with(b"II\xbc")
+        || prefix.get(40..44) == Some(b" EMF")
+        || prefix.starts_with(&[0xd7, 0xcd, 0xc6, 0x9a])
+}
+
+fn is_media_path(path: &str) -> bool {
     path.to_ascii_lowercase().starts_with("word/media/")
 }
 
