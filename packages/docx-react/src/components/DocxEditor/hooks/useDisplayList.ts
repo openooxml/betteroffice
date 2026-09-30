@@ -6,6 +6,7 @@ import {
   applyFrameDeltaOwned,
   createCanvasImageResolver,
   createDisplayListQueries,
+  endDisplayListQueriesLine,
   decodeFrameDelta,
   demoDisplayList,
   encodeDisplayListFrameExtras,
@@ -65,6 +66,7 @@ import {
   workerOpenReplicaPending,
   workerOpenSourceVersion,
 } from '../internals/workerOpenReplica';
+import { bindDisplayWindow, type DisplayWindow } from '../internals/displayWindow';
 
 export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
   encodeState(): Promise<Uint8Array>;
@@ -357,14 +359,23 @@ export function useRustDisplayList(
   // Layouts without a source engine share a line only within a document load.
   const documentLineRef = useRef<object>({});
   const sourceLinesRef = useRef(new WeakMap<object, object>());
+  // Lines handed to facades, ended when the session behind them goes away.
+  const openLinesRef = useRef(new Set<object>());
   const sourceLine = useCallback((source: RustDisplayListEngine | null | undefined): object => {
-    if (!source) return replacedLayoutRef.current?.line ?? documentLineRef.current;
-    let line = sourceLinesRef.current.get(source);
+    let line = source
+      ? sourceLinesRef.current.get(source)
+      : (replacedLayoutRef.current?.line ?? documentLineRef.current);
     if (!line) {
       line = {};
-      sourceLinesRef.current.set(source, line);
+      sourceLinesRef.current.set(source!, line);
     }
+    openLinesRef.current.add(line);
     return line;
+  }, []);
+  // `forget: false` keeps the lines listed, so a line revived after a fallback still ends with its session.
+  const endOpenLines = useCallback((forget = true): void => {
+    for (const line of openLinesRef.current) endDisplayListQueriesLine(line);
+    if (forget) openLinesRef.current.clear();
   }, []);
   const markSettled = useCallback(
     (epoch: number | null, failure: Error | null = null, authoritative = false): void => {
@@ -458,6 +469,19 @@ export function useRustDisplayList(
   // replacement did too. Weak, so a replaced document's session is not kept.
   const outOfMemoryRef = useRef(new WeakMap<YrsSession, ResidentWorkerOutOfMemoryError | null>());
   const displayWindowRef = useRef<[number, number]>(INITIAL_DISPLAY_WINDOW);
+  const displayWindowListenersRef = useRef(new Set<() => void>());
+  const displayWindow = useMemo<DisplayWindow>(
+    () => ({
+      read: () => displayWindowRef.current,
+      subscribe(listener) {
+        displayWindowListenersRef.current.add(listener);
+        return () => {
+          displayWindowListenersRef.current.delete(listener);
+        };
+      },
+    }),
+    []
+  );
   const pageBuildInFlightRef = useRef(false);
   const pageBuildTimerRef = useRef<PageBuildTimer | null>(null);
   const schedulePageBuildsWhenIdleRef = useRef<() => void>(() => {});
@@ -597,9 +621,10 @@ export function useRustDisplayList(
       const fallbackSnapshot = { ...snapshotRef.current, frame: null, queries: null, caret: null };
       snapshotRef.current = fallbackSnapshot;
       setSnapshot(fallbackSnapshot);
+      endOpenLines(false);
       workerFallbackEngineRef.current = hostEngine;
     },
-    [queryEpochGate]
+    [endOpenLines, queryEpochGate]
   );
 
   useEffect(() => {
@@ -638,9 +663,10 @@ export function useRustDisplayList(
       workerRef.current?.client.destroy();
       workerRef.current = null;
       queryEpochGate.clear();
+      endOpenLines();
       markSettled(null, new Error('The editor was unmounted'), true);
     };
-  }, [markSettled, queryEpochGate]);
+  }, [endOpenLines, markSettled, queryEpochGate]);
 
   const publishQuerySnapshot = useCallback(
     (nextSnapshot: RustDisplayListSnapshot, contentEpoch: number): void => {
@@ -650,6 +676,7 @@ export function useRustDisplayList(
         return;
       }
       if (contentEpoch !== contentEpochRef.current) return;
+      bindDisplayWindow(queries, displayWindow);
       queryEpochGate.invalidate();
       const publish = (): void => {
         if (
@@ -677,7 +704,7 @@ export function useRustDisplayList(
         }
       });
     },
-    [queryEpochGate]
+    [displayWindow, queryEpochGate]
   );
 
   const resolveQueries = useCallback<ResolveDisplayListQueries>(
@@ -854,7 +881,8 @@ export function useRustDisplayList(
                   selection,
                   currentFrame.frameEpoch,
                   false,
-                  paintCaret
+                  paintCaret,
+                  displayWindowRef.current
                 )
               : await worker.client.applyDelete(
                   operation.direction,
@@ -862,7 +890,8 @@ export function useRustDisplayList(
                   currentFrame.frameEpoch,
                   false,
                   paintCaret,
-                  operation.count
+                  operation.count,
+                  displayWindowRef.current
                 );
           if (result.applied) {
             try {
@@ -1230,14 +1259,18 @@ export function useRustDisplayList(
       layout: null,
       line: replacedLayoutRef.current?.line ?? documentLineRef.current,
     };
+    documentLineRef.current = {};
+    // A build still running publishes nothing, so no line of the released session comes back.
+    generationRef.current += 1;
     cancelPageBuilds(pageBuildTimerRef);
+    endOpenLines();
     workerRef.current?.client.destroy();
     workerRef.current = null;
     frameEngineRef.current = null;
     setPresentedEngine(null);
     setWorkerSurfacesActive(false);
     setWorkerPresentationActive(false);
-  }, [setWorkerPresentationActive]);
+  }, [endOpenLines, setWorkerPresentationActive]);
 
   /** The frame `engine`'s next frame applies to. */
   const frameBase = useCallback(
@@ -1380,6 +1413,7 @@ export function useRustDisplayList(
       if (current[0] === start && current[1] === end) return;
       displayWindowRef.current = [start, end];
       schedulePageBuilds(0);
+      for (const listener of [...displayWindowListenersRef.current]) listener();
     },
     [schedulePageBuilds]
   );
@@ -1630,6 +1664,8 @@ export function useRustDisplayList(
       layoutPreviewKeyRef.current = null;
       queryEpochGate.clear();
       snapshotRef.current = EMPTY_DISPLAY_LIST_SNAPSHOT;
+      endOpenLines();
+      documentLineRef.current = {};
       frameEngineRef.current = null;
       recoveryFrameEpochRef.current = 0;
       setSnapshot(EMPTY_DISPLAY_LIST_SNAPSHOT);
@@ -1885,7 +1921,12 @@ export function useRustDisplayList(
           previewKey !== null && shownKey !== null && shownKey !== previewKey
             ? Promise.reject(new SupersededPreviewError())
             : !snapshot
-              ? worker.buildFrame(extras, previousFrame?.frameEpoch ?? 0, paintCaret)
+              ? worker.buildFrame(
+                  extras,
+                  previousFrame?.frameEpoch ?? 0,
+                  paintCaret,
+                  displayWindowRef.current
+                )
               : bootstrapping
                 ? worker.bootstrap(snapshot, extras, {
                     ...sent(),
@@ -2036,6 +2077,7 @@ export function useRustDisplayList(
     engine,
     residentEngine,
     dropWorker,
+    endOpenLines,
     frameExtrasInputs,
     isCurrentWorker,
     setWorkerPresentationActive,

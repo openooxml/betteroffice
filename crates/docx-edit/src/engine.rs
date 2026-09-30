@@ -25,11 +25,11 @@ use docx_layout::regions::{
     apply_section_geometry_to_blocks, effective_header_footer_refs,
 };
 use docx_layout::types::{
-    BlockExtent, BlockId, ColumnLayout, Input as LayoutInput, Layout, LayoutBlock, MeasuredBlock,
-    NoteAreaContract, ParagraphExtent, Run, SectionBreakType, SectionPageMargins,
+    BlockExtent, BlockId, ColumnLayout, Fragment, Input as LayoutInput, Layout, LayoutBlock,
+    MeasuredBlock, NoteAreaContract, ParagraphExtent, Run, SectionBreakType, SectionPageMargins,
 };
 use serde::Serialize;
-use yrs::Subscription;
+use yrs::{StickyIndex, Subscription, Transact};
 
 use crate::EditingDoc;
 use crate::bridge::{
@@ -170,6 +170,7 @@ struct PreparedRegionLayout {
     resident_body: bool,
     block_fingerprints: Option<Vec<u64>>,
     lowered_from: Option<Rc<Vec<LayoutBlock>>>,
+    input_lowering: Option<(u64, Rc<LoweringMap>)>,
     has_floats: bool,
     measured_widths: Vec<f64>,
     measured_table_wrap_frames: Vec<bool>,
@@ -242,6 +243,8 @@ pub struct RegionLayoutProgress {
 struct ResidentLayoutInput {
     input: LayoutInput,
     block_fingerprints: Vec<u64>,
+    /// The doc epoch and lowering map `input` was built from.
+    lowering: Option<(u64, Rc<LoweringMap>)>,
 }
 
 #[derive(Serialize)]
@@ -855,6 +858,8 @@ struct PaginationState {
     measured_with: Option<u64>,
     /// The body lowering a float document's `input` arena was measured from.
     lowered_from: Option<Rc<Vec<LayoutBlock>>>,
+    /// The doc epoch and lowering map a resident edit path built `input` from.
+    input_lowering: Option<(u64, Rc<LoweringMap>)>,
     /// The widths, table frames and float geometry the arena was measured at,
     /// and whether floating zones shaped it.
     measured_widths: Vec<f64>,
@@ -892,10 +897,8 @@ struct DisplayState {
     fresh_base: bool,
     incremental_display_builds: u64,
     rebuilt_display_pages: u64,
-    /// Pages a full build compiles besides those already built; the rest stay
-    /// unbuilt placeholders until [`EngineSession::build_display_pages_frame`].
-    /// `None` builds every page.
     window: Option<std::ops::Range<usize>>,
+    windowed_incremental_builds: bool,
 }
 
 /// Engine observability snapshot.
@@ -988,6 +991,8 @@ pub struct EngineSession {
     regions: RefCell<Option<ResidentRegionState>>,
     pagination: RefCell<PaginationState>,
     display: RefCell<DisplayState>,
+    /// The resident caret head and the body or nested body story it lies in.
+    resident_caret_head: RefCell<Option<(String, StickyIndex)>>,
     capture: RefCell<Option<LayoutCapture>>,
     /// A region layout measured a step at a time, between two of its steps.
     resumable: RefCell<Option<ResumableRegionLayout>>,
@@ -1109,6 +1114,177 @@ fn full_build_pages(display: &DisplayState, page_count: usize) -> Vec<bool> {
                     .is_some_and(|page| !page.unbuilt)
         })
         .collect()
+}
+
+/// Where the resident caret sits, for the pages a windowed build keeps.
+#[derive(Clone, Copy)]
+enum CaretExtent {
+    /// Its display position, through the lowering the layout was built from.
+    Position(f64),
+    /// No exact position (inside an atom or hidden text, or no retained
+    /// lowering), so every re-placed page is kept.
+    Unmapped,
+}
+
+impl CaretExtent {
+    /// Whether a fragment over display positions `start..=end` holds the caret.
+    fn holds(self, start: f64, end: f64) -> bool {
+        match self {
+            Self::Position(position) => start <= position && position <= end,
+            Self::Unmapped => true,
+        }
+    }
+}
+
+fn window_build_pages(
+    display: &DisplayState,
+    layout: &Layout,
+    rebuilt_pages: &HashSet<usize>,
+    caret: Option<CaretExtent>,
+) -> Vec<bool> {
+    if !display.windowed_incremental_builds || display.window.is_none() {
+        return full_build_pages(display, layout.pages.len());
+    }
+    layout
+        .pages
+        .iter()
+        .enumerate()
+        .map(|(index, page)| {
+            let caret_page = || {
+                caret.is_some_and(|caret| {
+                    matches!(caret, CaretExtent::Unmapped)
+                        || page.fragments.iter().any(|fragment| {
+                            let (start, end) = match fragment {
+                                Fragment::Paragraph(value) => (value.pm_start, value.pm_end),
+                                Fragment::Table(value) => (value.pm_start, value.pm_end),
+                                Fragment::Image(value) => (value.pm_start, value.pm_end),
+                                Fragment::Shape(value) => (value.pm_start, value.pm_end),
+                                Fragment::Chart(value) => (value.pm_start, value.pm_end),
+                                Fragment::TextBox(value) => (value.pm_start, value.pm_end),
+                            };
+                            start
+                                .zip(end)
+                                .is_some_and(|(start, end)| caret.holds(start, end))
+                        })
+                })
+            };
+            display
+                .window
+                .as_ref()
+                .is_some_and(|window| window.contains(&index))
+                || (rebuilt_pages.contains(&index) && caret_page())
+        })
+        .collect()
+}
+
+fn resident_paragraph_position(input: &LayoutInput, para_id: &str, offset: u32) -> Option<i64> {
+    let start = input.measured.iter().find_map(|measured| {
+        let (id, start) = paragraph_identity(&measured.block)?;
+        (block_key(id) == para_id).then_some(start?)
+    })?;
+    paragraph_offset_position(start, offset)
+}
+
+/// The display positions every block lowered from the paragraph `para_id` spans,
+/// in table cells too.
+fn resident_paragraph_span(input: &LayoutInput, para_id: &str) -> Option<(f64, f64)> {
+    fn visit(block: &LayoutBlock, para_id: &str, span: &mut Option<(f64, f64)>) {
+        match block {
+            LayoutBlock::Table(table) => table
+                .rows
+                .iter()
+                .flat_map(|row| &row.cells)
+                .flat_map(|cell| &cell.blocks)
+                .for_each(|nested| visit(nested, para_id, span)),
+            LayoutBlock::Paragraph(paragraph) if block_key(&paragraph.id) == para_id => {
+                if let (Some(start), Some(end)) = (paragraph.pm_start, paragraph.pm_end) {
+                    let (low, high) = span.get_or_insert((start, end));
+                    *low = low.min(start);
+                    *high = high.max(end);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut span = None;
+    for measured in &input.measured {
+        visit(&measured.block, para_id, &mut span);
+    }
+    span
+}
+
+/// The display position of story index `index` in `paragraph` of `story`, through the lowering
+/// `input` was built from. `None` inside an atom, expanded inline content or hidden text, at a
+/// boundary its spans disagree on, or when the lowering does not start the paragraph where
+/// `input` does.
+fn lowered_caret_position(
+    map: &LoweringMap,
+    input: &LayoutInput,
+    story: &str,
+    paragraph: &crate::segments::ParaEntry,
+    index: u32,
+) -> Option<f64> {
+    let source = map.paragraphs.iter().position(|(slot, id)| {
+        id.as_str() == &*paragraph.para_id
+            && map
+                .stories
+                .get(*slot as usize)
+                .is_some_and(|name| name == story)
+    })?;
+    let source = u32::try_from(source).ok()?;
+    let first_block = map
+        .paragraph_blocks
+        .iter()
+        .filter(|(_, block)| *block == source)
+        .map(|(pm, _)| *pm)
+        .min()?;
+    let (start, _) = resident_paragraph_span(input, &paragraph.para_id)?;
+    if first_block as f64 != start {
+        return None;
+    }
+    let mut spans = map
+        .spans
+        .iter()
+        .filter(|span| span.paragraph == source)
+        .peekable();
+    if spans.peek().is_none() {
+        return (index == paragraph.node_start).then_some(start + 1.0);
+    }
+    span_position(spans, index).map(|position| position as f64)
+}
+
+/// The display position of story index `index` that every span touching it agrees on.
+fn span_position<'a>(
+    spans: impl Iterator<Item = &'a crate::bridge::SourceSpan>,
+    index: u32,
+) -> Option<u64> {
+    let mut position = None;
+    for span in spans.filter(|span| (span.raw_start..=span.raw_end).contains(&index)) {
+        let units = u64::from(span.raw_end.checked_sub(span.raw_start)?);
+        let candidate = if !span.atom && span.pm_end.checked_sub(span.pm_start) == Some(units) {
+            span.pm_start + u64::from(index - span.raw_start)
+        } else if index == span.raw_start {
+            span.pm_start
+        } else if index == span.raw_end {
+            span.pm_end
+        } else {
+            return None;
+        };
+        if position.is_some_and(|position| position != candidate) {
+            return None;
+        }
+        position = Some(candidate);
+    }
+    position
+}
+
+fn paragraph_offset_position(start: f64, offset: u32) -> Option<i64> {
+    (start.is_finite()
+        && start.fract() == 0.0
+        && start >= i64::MIN as f64
+        && start <= i64::MAX as f64)
+        .then_some(start as i64)?
+        .checked_add(1 + i64::from(offset))
 }
 
 fn measured_fingerprint(measured: &MeasuredBlock) -> Result<u64, String> {
@@ -1493,6 +1669,7 @@ impl EngineSession {
             regions: RefCell::new(None),
             pagination: RefCell::new(PaginationState::default()),
             display: RefCell::new(DisplayState::default()),
+            resident_caret_head: RefCell::new(None),
             capture: RefCell::new(None),
             resumable: RefCell::new(None),
             font_fingerprints: RefCell::new(HashMap::new()),
@@ -1576,6 +1753,18 @@ impl EngineSession {
         after_lower: &mut dyn FnMut(),
         read: impl FnOnce(&[LayoutBlock]) -> T,
     ) -> Result<T, BridgeError> {
+        self.with_lowered_story_mapped(story, env, after_lower, |blocks, _| read(blocks))
+    }
+
+    /// [`Self::with_lowered_story_observed`], also handing `read` the doc epoch and lowering
+    /// map of the same lowering as the blocks.
+    fn with_lowered_story_mapped<T>(
+        &self,
+        story: &str,
+        env: &RenderEnv,
+        after_lower: &mut dyn FnMut(),
+        read: impl FnOnce(&[LayoutBlock], (u64, Rc<LoweringMap>)) -> T,
+    ) -> Result<T, BridgeError> {
         let epoch = self.doc_epoch();
         if self.story_is_resident(story, epoch, env) {
             let mut render = self.render.borrow_mut();
@@ -1583,17 +1772,16 @@ impl EngineSession {
         } else {
             self.lower_story_into_cache(story, epoch, env)?;
         }
-        let blocks = Rc::clone(
-            &self
-                .render
-                .borrow()
+        let (blocks, map) = {
+            let render = self.render.borrow();
+            let lowered = render
                 .stories
                 .get(story)
-                .expect("resident story exists after lowering")
-                .blocks,
-        );
+                .expect("resident story exists after lowering");
+            (Rc::clone(&lowered.blocks), Rc::clone(&lowered.map))
+        };
         after_lower();
-        Ok(read(&blocks))
+        Ok(read(&blocks, (epoch, map)))
     }
 
     /// Serializes resident lowered blocks.
@@ -2127,6 +2315,7 @@ impl EngineSession {
         let resident_body = body_story.is_some();
         let mut block_fingerprints: Option<Vec<u64>> = None;
         let mut lowered_from = None;
+        let mut input_lowering = None;
         let mut has_floats = false;
         let mut measured_widths = Vec::new();
         let mut measured_table_wrap_frames = Vec::new();
@@ -2143,39 +2332,48 @@ impl EngineSession {
                 Full(Vec<LayoutBlock>, bool),
             }
             let arena = self
-                .with_lowered_story(story, render_env, |blocks| -> Result<Arena, String> {
-                    apply_section_geometry(&mut input, &regions);
-                    let (widths, table_wrap_frames) =
-                        region_measurement_frames(blocks.iter(), &input, &regions);
-                    let geometry = initial_float_page_geometry(&input, &regions);
-                    measured_widths.clone_from(&widths);
-                    measured_table_wrap_frames.clone_from(&table_wrap_frames);
-                    measured_float_geometry = Some(float_geometry_key(&geometry));
-                    let default_width = widths.first().copied().unwrap_or(0.0);
-                    let (floats, margin_floats) = docx_layout::measure_blocks::floating_zone_kinds(
-                        blocks,
-                        default_width,
-                        &measurement,
-                        Some(&geometry),
-                    )?;
-                    has_floats = floats;
-                    // margin-relative zones couple the whole flow; re-measure all
-                    if margin_floats || (floats && has_wrap_stabilized_shapes(blocks)) {
-                        return Ok(Arena::Full(blocks.to_vec(), true));
-                    }
-                    match self.resident_region_measured(
-                        blocks,
-                        &widths,
-                        &table_wrap_frames,
-                        &regions,
-                        &measurement,
-                        measurement_fingerprint,
-                        floats.then_some(&geometry),
-                    )? {
-                        Some((measured, fingerprints)) => Ok(Arena::Reused(measured, fingerprints)),
-                        None => Ok(Arena::Full(blocks.to_vec(), false)),
-                    }
-                })
+                .with_lowered_story_mapped(
+                    story,
+                    render_env,
+                    &mut || {},
+                    |blocks, lowering| -> Result<Arena, String> {
+                        input_lowering = Some(lowering);
+                        apply_section_geometry(&mut input, &regions);
+                        let (widths, table_wrap_frames) =
+                            region_measurement_frames(blocks.iter(), &input, &regions);
+                        let geometry = initial_float_page_geometry(&input, &regions);
+                        measured_widths.clone_from(&widths);
+                        measured_table_wrap_frames.clone_from(&table_wrap_frames);
+                        measured_float_geometry = Some(float_geometry_key(&geometry));
+                        let default_width = widths.first().copied().unwrap_or(0.0);
+                        let (floats, margin_floats) =
+                            docx_layout::measure_blocks::floating_zone_kinds(
+                                blocks,
+                                default_width,
+                                &measurement,
+                                Some(&geometry),
+                            )?;
+                        has_floats = floats;
+                        // margin-relative zones couple the whole flow; re-measure all
+                        if margin_floats || (floats && has_wrap_stabilized_shapes(blocks)) {
+                            return Ok(Arena::Full(blocks.to_vec(), true));
+                        }
+                        match self.resident_region_measured(
+                            blocks,
+                            &widths,
+                            &table_wrap_frames,
+                            &regions,
+                            &measurement,
+                            measurement_fingerprint,
+                            floats.then_some(&geometry),
+                        )? {
+                            Some((measured, fingerprints)) => {
+                                Ok(Arena::Reused(measured, fingerprints))
+                            }
+                            None => Ok(Arena::Full(blocks.to_vec(), false)),
+                        }
+                    },
+                )
                 .map_err(|error| error.to_string())??;
             if has_floats {
                 lowered_from = self
@@ -2275,6 +2473,7 @@ impl EngineSession {
             resident_body,
             block_fingerprints,
             lowered_from,
+            input_lowering,
             has_floats,
             measured_widths,
             measured_table_wrap_frames,
@@ -2300,6 +2499,7 @@ impl EngineSession {
             resident_body,
             mut block_fingerprints,
             lowered_from,
+            input_lowering,
             has_floats,
             measured_widths,
             measured_table_wrap_frames,
@@ -2495,6 +2695,7 @@ impl EngineSession {
         pagination.measured_with =
             (resident_body && !provisional).then_some(measurement_fingerprint);
         pagination.lowered_from = lowered_from;
+        pagination.input_lowering = input_lowering;
         pagination.measured_widths = measured_widths;
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
         pagination.measured_float_geometry = measured_float_geometry;
@@ -2836,6 +3037,7 @@ impl EngineSession {
         pagination.input = Some(input);
         pagination.measured_with = None;
         pagination.lowered_from = None;
+        pagination.input_lowering = None;
         pagination.note_changed_pages.clear();
         let mut layout = run.layout;
         // Every pass over part of a package, the resident edit paths' too.
@@ -2913,8 +3115,8 @@ impl EngineSession {
             .get(story)
             .map(|story| story.env.clone())
             .ok_or_else(|| format!("resident render environment missing for story {story:?}"))?;
-        self.with_lowered_story_observed(story, &env, after_lower, |blocks| {
-            self.resident_layout_input_from_blocks(
+        self.with_lowered_story_mapped(story, &env, after_lower, |blocks, lowering| {
+            let mut resident = self.resident_layout_input_from_blocks(
                 blocks,
                 false,
                 &mut |_, key, previous_block, next_block| {
@@ -2938,7 +3140,9 @@ impl EngineSession {
                         .map_err(|error| format!("parse resident paragraph extent: {error}"))?;
                     Ok(BlockExtent::Paragraph(extent))
                 },
-            )
+            )?;
+            resident.lowering = Some(lowering);
+            Ok(resident)
         })
         .map_err(|error| error.to_string())?
     }
@@ -3098,6 +3302,7 @@ impl EngineSession {
                 options: previous.options.clone(),
             },
             block_fingerprints,
+            lowering: None,
         })
     }
 
@@ -3373,6 +3578,7 @@ impl EngineSession {
         }
         let resident = self.resident_layout_input(story)?;
         self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
+        self.pagination.borrow_mut().input_lowering = resident.lowering;
         let extras = self
             .display
             .borrow()
@@ -3445,11 +3651,13 @@ impl EngineSession {
             return Ok(false);
         }
         let outcome = self
-            .with_lowered_story_observed(
+            .with_lowered_story_mapped(
                 story,
                 &env,
                 &mut || phase(RegionResidentPhase::Lowered),
-                |blocks| -> Result<Option<(ResidentLayoutInput, usize, Vec<f64>)>, String> {
+                |blocks,
+                 lowering|
+                 -> Result<Option<(ResidentLayoutInput, usize, Vec<f64>)>, String> {
                     let (widths, geometry, previous_pages) = {
                         let pagination = self.pagination.borrow();
                         let (Some(input), Some(layout), false) = (
@@ -3497,7 +3705,10 @@ impl EngineSession {
                             )
                         },
                     ) {
-                        Ok(resident) => Ok(Some((resident, previous_pages, widths))),
+                        Ok(mut resident) => {
+                            resident.lowering = Some(lowering);
+                            Ok(Some((resident, previous_pages, widths)))
+                        }
                         Err(_) => Ok(None),
                     }
                 },
@@ -3511,6 +3722,7 @@ impl EngineSession {
         let previous_capture = self.capture.borrow_mut().take();
         self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
         let mut pagination = self.pagination.borrow_mut();
+        pagination.input_lowering = resident.lowering;
         // The fast path measures through the region config too, so its
         // retained arena is also eligible for the next pass's reuse walk.
         pagination.measured_with = Some(measurement_fingerprint);
@@ -3621,6 +3833,7 @@ impl EngineSession {
                 resident.input,
                 resident.block_fingerprints,
             )?;
+            self.pagination.borrow_mut().input_lowering = resident.lowering;
             let finished = now();
             profile.paginate_ms = finished - started;
             started = finished;
@@ -3711,7 +3924,30 @@ impl EngineSession {
                     ..pagination.rebuilt_page_end)
                     .chain(note_pages.iter().copied())
                     .collect();
-                let build = full_build_pages(&display, layout.pages.len());
+                let caret = if display.windowed_incremental_builds && display.window.is_some() {
+                    self.resident_caret_head
+                        .borrow()
+                        .as_ref()
+                        .map(|(story, head)| {
+                            let extent = || {
+                                let txn = self.doc.yrs_doc().transact();
+                                let index = head.get_offset(&txn)?.index;
+                                drop(txn);
+                                let segments = self.doc.segment_index(story).ok()?;
+                                let paragraph = segments.para_at(index)?;
+                                let (epoch, map) = pagination.input_lowering.as_ref()?;
+                                if *epoch != self.doc_epoch() {
+                                    return None;
+                                }
+                                lowered_caret_position(map, input, story, paragraph, index)
+                                    .map(CaretExtent::Position)
+                            };
+                            extent().unwrap_or(CaretExtent::Unmapped)
+                        })
+                } else {
+                    None
+                };
+                let build = window_build_pages(&display, layout, &rebuilt_pages, caret);
                 let incremental = if let DisplayState {
                     list: Some(previous),
                     resident_input: Some(resident_input),
@@ -3746,7 +3982,15 @@ impl EngineSession {
                     display.resident_input = Some(resident_input);
                     display.list = Some(list);
                 }
-                (incremental, rebuilt_pages.len(), rebuilt_pages)
+                let rebuilt_display_pages = if incremental {
+                    rebuilt_pages
+                        .iter()
+                        .filter(|&&index| build.get(index).copied().unwrap_or(true))
+                        .count()
+                } else {
+                    rebuilt_pages.len()
+                };
+                (incremental, rebuilt_display_pages, rebuilt_pages)
             } else {
                 let build = full_build_pages(&display, layout.pages.len());
                 let (resident_input, list) =
@@ -3817,10 +4061,19 @@ impl EngineSession {
         Ok(bytes)
     }
 
-    /// Limit full display builds to `window` plus the pages already built;
-    /// `None` builds every page.
+    /// Limit full builds to `window` and previously built pages; `None` builds all.
     pub fn set_display_window(&self, window: Option<std::ops::Range<usize>>) {
         self.display.borrow_mut().window = window;
+    }
+
+    /// Limit incremental rebuilds to the display window and caret pages. Off by default.
+    pub fn set_windowed_incremental_builds(&self, enabled: bool) {
+        self.display.borrow_mut().windowed_incremental_builds = enabled;
+    }
+
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+    pub(crate) fn set_resident_caret_head(&self, head: Option<(String, StickyIndex)>) {
+        *self.resident_caret_head.borrow_mut() = head;
     }
 
     /// Build the requested pages that are still unbuilt and return a
@@ -3905,24 +4158,8 @@ impl EngineSession {
         paragraph: Option<(&str, u32)>,
     ) -> Result<ResidentCaretSnapshot, String> {
         let position = paragraph.and_then(|(para_id, offset)| {
-            self.pagination
-                .borrow()
-                .input
-                .as_ref()?
-                .measured
-                .iter()
-                .find_map(|measured| {
-                    let (id, start) = paragraph_identity(&measured.block)?;
-                    (block_key(id) == para_id).then_some(start?)
-                })
-                .and_then(|start| {
-                    (start.is_finite()
-                        && start.fract() == 0.0
-                        && start >= i64::MIN as f64
-                        && start <= i64::MAX as f64)
-                        .then_some(start as i64)
-                })
-                .and_then(|start| start.checked_add(1 + i64::from(offset)))
+            let pagination = self.pagination.borrow();
+            resident_paragraph_position(pagination.input.as_ref()?, para_id, offset)
         });
         let display = self.display.borrow();
         let frame_epoch = display.binary_frame_epoch;
@@ -8249,14 +8486,59 @@ mod tests {
     /// An engine laid out over small pages: an editable first paragraph, then `fillers`
     /// one-line paragraphs. Returns it with the display extras.
     fn paged_filler_engine(client_id: u64, fillers: usize) -> (EngineSession, String) {
+        paged_engine(
+            client_id,
+            &format!(
+                "<w:p><w:r><w:t>Editable paragraph</w:t></w:r></w:p>{}",
+                "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(fillers)
+            ),
+        )
+    }
+
+    fn paged_engine(client_id: u64, body: &str) -> (EngineSession, String) {
+        let (engine, extras, output) = paged_region_engine(client_id, body);
+        let font_chains =
+            serde_json::from_str::<serde_json::Value>(&extras).unwrap()["fontChains"].clone();
+        for measured_block in output["measured"].as_array().unwrap() {
+            if measured_block["block"]["kind"] != "paragraph" {
+                continue;
+            }
+            let template = serde_json::json!({
+                "block": measured_block["block"],
+                "maxWidth": 248,
+                "fontChains": font_chains,
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
+                "authoritativeShaping": true
+            });
+            engine
+                .measure_paragraph_json(&template.to_string())
+                .unwrap();
+        }
+        engine
+            .layout_document_json(
+                &serde_json::json!({
+                    "measured": output["measured"],
+                    "options": output["options"]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        (
+            engine,
+            serde_json::json!({ "fontChains": font_chains }).to_string(),
+        )
+    }
+
+    /// [`paged_engine`] with its region state kept, so an edit in a table cell
+    /// relays out through the region pass as it does in the worker.
+    fn paged_region_engine(
+        client_id: u64,
+        body: &str,
+    ) -> (EngineSession, String, serde_json::Value) {
         docx_layout::clear_measure_fonts();
         let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
         let engine = EngineSession::new(client_id);
-        let body = format!(
-            "<w:p><w:r><w:t>Editable paragraph</w:t></w:r></w:p>{}",
-            "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(fillers)
-        );
-        crate::seed::seed_from_docx(engine.doc(), &docx_bytes("", &body)).unwrap();
+        crate::seed::seed_from_docx(engine.doc(), &docx_bytes("", body)).unwrap();
         let request = serde_json::json!({
             "bodyStory": "body",
             "regions": { "sections": [{
@@ -8283,30 +8565,13 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        for measured_block in output["measured"].as_array().unwrap() {
-            let template = serde_json::json!({
-                "block": measured_block["block"],
-                "maxWidth": 248,
-                "fontChains": { "liberation sans|0|0": [font_id] },
-                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
-                "authoritativeShaping": true
-            });
-            engine
-                .measure_paragraph_json(&template.to_string())
-                .unwrap();
+        // As the host's extras carry the pass's headers/footers, so region
+        // edits keep building on the shown frame.
+        let mut extras = serde_json::json!({ "fontChains": { "liberation sans|0|0": [font_id] } });
+        if let Some(headers_footers) = output.get("headersFooters") {
+            extras["headersFooters"] = headers_footers.clone();
         }
-        engine
-            .layout_document_json(
-                &serde_json::json!({
-                    "measured": output["measured"],
-                    "options": output["options"]
-                })
-                .to_string(),
-            )
-            .unwrap();
-        let extras =
-            serde_json::json!({ "fontChains": { "liberation sans|0|0": [font_id] } }).to_string();
-        (engine, extras)
+        (engine, extras.to_string(), output)
     }
 
     fn full_display_build(
@@ -8328,6 +8593,7 @@ mod tests {
         let full_build = |engine: &EngineSession| full_display_build(engine, &extras);
 
         engine.set_display_window(Some(0..1));
+        engine.set_windowed_incremental_builds(true);
         engine.build_display_list_frame(&extras, 0).unwrap();
         let lazy = engine.with_display_list(Clone::clone).unwrap();
         let last = lazy.pages.len() - 1;
@@ -8384,6 +8650,7 @@ mod tests {
     fn an_edit_that_moves_every_later_page_leaves_unbuilt_pages_unbuilt() {
         let (engine, extras) = paged_filler_engine(206, 40);
         engine.set_display_window(Some(0..1));
+        engine.set_windowed_incremental_builds(true);
         engine.build_display_list_frame(&extras, 0).unwrap();
         let pages = engine.with_display_list(|list| list.pages.len()).unwrap();
         assert!(pages >= 4, "the fixture must span several pages");
@@ -8430,6 +8697,576 @@ mod tests {
         engine.build_display_pages_frame(&rest, epoch).unwrap();
         let built = engine.with_display_list(Clone::clone).unwrap();
         assert_eq!(built.pages, full_display_build(&engine, &extras).pages);
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn an_edit_turns_re_placed_pages_outside_the_window_into_placeholders() {
+        let (engine, extras) = paged_filler_engine(207, 40);
+        engine.set_display_window(Some(0..1));
+        engine.set_windowed_incremental_builds(true);
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let pages = engine.with_display_list(|list| list.pages.len()).unwrap();
+        assert!(pages >= 4, "the fixture must span several pages");
+        let rest: Vec<usize> = (1..pages).collect();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.build_display_pages_frame(&rest, epoch).unwrap();
+        assert_eq!(
+            engine.with_display_list(Clone::clone).unwrap().pages,
+            full_display_build(&engine, &extras).pages
+        );
+
+        let paragraph = engine.doc().paragraphs("body").unwrap().remove(0);
+        let offset = u32::try_from(paragraph.text.encode_utf16().count()).unwrap();
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", offset),
+                " that now runs long enough to wrap onto a second line of the page",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let before = engine.stats();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        let after = engine.stats();
+        assert_eq!(
+            after.incremental_display_builds,
+            before.incremental_display_builds + 1
+        );
+        assert_eq!(
+            after.rebuilt_display_pages - before.rebuilt_display_pages,
+            1
+        );
+        assert_eq!(engine.pagination.borrow().rebuilt_page_start, 0);
+        assert_eq!(engine.pagination.borrow().rebuilt_page_end, pages);
+
+        let edited = engine.with_display_list(Clone::clone).unwrap();
+        let windowed = {
+            let pagination = engine.pagination.borrow();
+            docx_layout::build_resident_display_list_partial_observed(
+                pagination.input.as_ref().unwrap(),
+                pagination.layout.as_ref().unwrap(),
+                &extras,
+                &|index| index == 0,
+                &mut || {},
+            )
+            .unwrap()
+            .1
+        };
+        assert!(!edited.pages[0].unbuilt);
+        assert_eq!(
+            edited.pages[0],
+            full_display_build(&engine, &extras).pages[0]
+        );
+        for (page, placeholder) in edited.pages.iter().zip(&windowed.pages).skip(1) {
+            assert!(page.unbuilt && page.primitives.is_empty());
+            assert!(page.position_span.is_some());
+            assert_eq!(page.position_span, placeholder.position_span);
+            assert_eq!(page, placeholder);
+        }
+
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.build_display_pages_frame(&rest, epoch).unwrap();
+        let built = engine.with_display_list(Clone::clone).unwrap();
+        assert_eq!(built.pages, full_display_build(&engine, &extras).pages);
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn an_edit_builds_the_caret_page_outside_the_display_window() {
+        use yrs::{Assoc, IndexedSequence};
+
+        let (engine, extras) = paged_filler_engine(209, 160);
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let initial = engine.with_display_list(Clone::clone).unwrap();
+        assert!(initial.pages.len() >= 11);
+        assert!(initial.pages.iter().all(|page| !page.unbuilt));
+
+        let paragraph = engine.doc().paragraphs("body").unwrap().remove(0);
+        let offset = u32::try_from(paragraph.text.encode_utf16().count()).unwrap();
+        let txn = engine.doc().yrs_doc().transact();
+        let text = crate::story_ref(&txn, "body").unwrap();
+        let head = text.sticky_index(&txn, offset, Assoc::After).unwrap();
+        drop(txn);
+        engine.set_resident_caret_head(Some(("body".to_owned(), head)));
+        assert_eq!(
+            engine
+                .resident_caret_snapshot(Some((&paragraph.para_id, offset)))
+                .unwrap()
+                .caret_rect
+                .unwrap()
+                .page_index,
+            0
+        );
+        engine.set_display_window(Some(8..11));
+        engine.set_windowed_incremental_builds(true);
+
+        let insertion = "x";
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", offset),
+                insertion,
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let before = engine.stats();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        assert_eq!(
+            engine.stats().incremental_display_builds,
+            before.incremental_display_builds + 1
+        );
+        let edited = engine.with_display_list(Clone::clone).unwrap();
+        assert!(!edited.pages[0].unbuilt);
+        assert!(edited.pages[8..11].iter().all(|page| !page.unbuilt));
+        let caret = engine
+            .resident_caret_snapshot(Some((
+                &paragraph.para_id,
+                offset + u32::try_from(insertion.encode_utf16().count()).unwrap(),
+            )))
+            .unwrap();
+        assert_eq!(
+            caret.frame_epoch,
+            engine.display.borrow().binary_frame_epoch
+        );
+        assert_eq!(caret.caret_rect.unwrap().page_index, 0);
+        assert_eq!(
+            edited.pages[0],
+            full_display_build(&engine, &extras).pages[0]
+        );
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn an_edit_builds_the_table_cell_caret_page_outside_the_display_window() {
+        use yrs::{Assoc, IndexedSequence};
+
+        let (engine, extras, _) = paged_region_engine(
+            211,
+            &format!(
+                r#"<w:tbl><w:tblGrid><w:gridCol w:w="3600"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="3600" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Editable cell paragraph</w:t></w:r></w:p></w:tc></w:tr></w:tbl>{}"#,
+                "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(156)
+            ),
+        );
+        let ctx = crate::EditCtx::local("", "");
+        let cell_story = "body:t0:r0c0".to_owned();
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let initial = engine.with_display_list(Clone::clone).unwrap();
+        assert!(initial.pages.len() >= 11);
+        assert!(initial.pages.iter().all(|page| !page.unbuilt));
+        assert!(matches!(
+            engine.pagination.borrow().layout.as_ref().unwrap().pages[0]
+                .fragments
+                .first(),
+            Some(Fragment::Table(_))
+        ));
+
+        let paragraph = engine.doc().paragraphs(&cell_story).unwrap().remove(0);
+        let offset = u32::try_from(paragraph.text.encode_utf16().count()).unwrap();
+        let txn = engine.doc().yrs_doc().transact();
+        let text = crate::story_ref(&txn, &cell_story).unwrap();
+        let head = text.sticky_index(&txn, offset, Assoc::After).unwrap();
+        drop(txn);
+        engine.set_resident_caret_head(Some((cell_story.clone(), head)));
+        engine.set_display_window(Some(8..11));
+        engine.set_windowed_incremental_builds(true);
+
+        engine
+            .doc()
+            .insert_text(
+                &ctx,
+                crate::Position::new(&cell_story, offset),
+                " that now runs long enough to wrap onto a second line of the page",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let before = engine.stats();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout(&cell_story, epoch).unwrap();
+        // A page-count change takes the full region pass by design.
+        assert_eq!(
+            engine
+                .pagination
+                .borrow()
+                .layout
+                .as_ref()
+                .unwrap()
+                .pages
+                .len(),
+            initial.pages.len()
+        );
+        assert_eq!(
+            engine.stats().incremental_display_builds,
+            before.incremental_display_builds + 1
+        );
+        let edited = engine.with_display_list(Clone::clone).unwrap();
+        assert_eq!(engine.pagination.borrow().rebuilt_page_start, 0);
+        assert_eq!(
+            engine.pagination.borrow().rebuilt_page_end,
+            edited.pages.len()
+        );
+        assert!(!edited.pages[0].unbuilt);
+        assert!(edited.pages[8..11].iter().all(|page| !page.unbuilt));
+        assert!(edited.pages[1..8].iter().all(|page| page.unbuilt));
+        assert_eq!(
+            edited.pages[0],
+            full_display_build(&engine, &extras).pages[0]
+        );
+
+        // A picture in the caret's paragraph keeps it mapped.
+        let mut input = engine.pagination.borrow().input.clone().unwrap();
+        let LayoutBlock::Table(table) = &mut input.measured[0].block else {
+            panic!("expected the table");
+        };
+        let LayoutBlock::Paragraph(cell) = &mut table.rows[0].cells[0].blocks[0] else {
+            panic!("expected the cell paragraph");
+        };
+        let span = (cell.pm_start.unwrap(), cell.pm_end.unwrap());
+        cell.runs.push(Run::Image(
+            serde_json::from_value(serde_json::json!({"src": "picture", "width": 8, "height": 8}))
+                .unwrap(),
+        ));
+        assert_eq!(
+            resident_paragraph_span(&input, &paragraph.para_id),
+            Some(span)
+        );
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn a_caret_maps_only_where_every_span_agrees() {
+        let span = |pm_start, pm_end, raw_start, raw_end, atom| crate::bridge::SourceSpan {
+            pm_start,
+            pm_end,
+            paragraph: 0,
+            raw_start,
+            raw_end,
+            atom,
+        };
+        let text = [span(1, 5, 0, 4, false), span(5, 8, 4, 7, false)];
+        assert_eq!(span_position(text.iter(), 2), Some(3));
+        assert_eq!(span_position(text.iter(), 4), Some(5));
+        assert_eq!(span_position(text.iter(), 7), Some(8));
+        let chart = [span(1, 2, 0, 1, true), span(2, 6, 1, 5, false)];
+        assert_eq!(span_position(chart.iter(), 0), Some(1));
+        assert_eq!(span_position(chart.iter(), 1), Some(2));
+        let control = [
+            span(5, 7, 4, 5, false),
+            span(7, 9, 4, 5, false),
+            span(10, 12, 5, 7, false),
+        ];
+        assert_eq!(span_position(control.iter(), 5), None);
+        let wide = [span(1, 2, 0, 3, true)];
+        assert_eq!(span_position(wide.iter(), 1), None);
+        assert_eq!(span_position(wide.iter(), 3), Some(2));
+    }
+
+    #[test]
+    fn windowed_builds_keep_the_caret_page_or_every_re_placed_page() {
+        let (engine, _) = paged_filler_engine(213, 160);
+        let pagination = engine.pagination.borrow();
+        let layout = pagination.layout.as_ref().unwrap();
+        let display = DisplayState {
+            window: Some(8..11),
+            windowed_incremental_builds: true,
+            ..DisplayState::default()
+        };
+        let rebuilt: HashSet<usize> = (0..layout.pages.len()).collect();
+        let built = |caret| {
+            window_build_pages(&display, layout, &rebuilt, caret)
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, built)| built.then_some(index))
+                .collect::<Vec<_>>()
+        };
+        let Some(Fragment::Paragraph(last)) = layout.pages[0].fragments.last() else {
+            panic!("expected a paragraph at the end of the first page");
+        };
+        let start = last.pm_start.unwrap();
+        assert_eq!(built(None), [8, 9, 10]);
+        assert_eq!(
+            built(Some(CaretExtent::Position(start + 1.0))),
+            [0, 8, 9, 10]
+        );
+        assert_eq!(
+            built(Some(CaretExtent::Unmapped)),
+            (0..layout.pages.len()).collect::<Vec<_>>()
+        );
+        drop(pagination);
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn an_edit_builds_the_caret_page_after_a_long_inline_content_control() {
+        use yrs::{Assoc, IndexedSequence};
+
+        let (engine, extras) = paged_engine(
+            212,
+            &format!(
+                "<w:p><w:sdt><w:sdtPr/><w:sdtContent><w:r><w:t>{}</w:t></w:r></w:sdtContent></w:sdt><w:r><w:t>Trailing text</w:t></w:r></w:p>{}",
+                "Content control text that runs over several pages. ".repeat(40),
+                "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(160)
+            ),
+        );
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let txn = engine.doc().yrs_doc().transact();
+        let text = crate::story_ref(&txn, "body").unwrap();
+        let bounds = crate::op::para_bounds(&text, &txn).remove(0);
+        let head = text
+            .sticky_index(&txn, bounds.pilcrow, Assoc::After)
+            .unwrap();
+        drop(txn);
+        let (_, paragraph_end) = resident_paragraph_span(
+            engine.pagination.borrow().input.as_ref().unwrap(),
+            &bounds.para_id,
+        )
+        .unwrap();
+        let last_page = |engine: &EngineSession| {
+            let pagination = engine.pagination.borrow();
+            let pages = &pagination.layout.as_ref().unwrap().pages;
+            pages
+                .iter()
+                .rposition(|page| {
+                    page.fragments.iter().any(|fragment| {
+                        matches!(fragment, Fragment::Paragraph(value)
+                            if value.pm_start.is_some_and(|start| start <= paragraph_end))
+                    })
+                })
+                .unwrap()
+        };
+        let caret_page = last_page(&engine);
+        assert!(caret_page >= 2, "the paragraph must run over several pages");
+        engine.set_resident_caret_head(Some(("body".to_owned(), head)));
+        engine.set_display_window(Some(caret_page + 4..caret_page + 7));
+        engine.set_windowed_incremental_builds(true);
+
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", bounds.pilcrow),
+                "x",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        assert_eq!(last_page(&engine), caret_page);
+        let edited = engine.with_display_list(Clone::clone).unwrap();
+        assert!(!edited.pages[caret_page].unbuilt);
+        assert_eq!(
+            edited.pages[caret_page],
+            full_display_build(&engine, &extras).pages[caret_page]
+        );
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn an_edit_builds_the_caret_page_when_equal_paragraph_lengths_hide_a_shift() {
+        use yrs::{Assoc, IndexedSequence};
+
+        let (engine, extras, _) = paged_region_engine(
+            214,
+            &format!(
+                "<w:p>{}<w:sdt><w:sdtPr/><w:sdtContent><w:r><w:t>Z</w:t></w:r></w:sdtContent></w:sdt></w:p>{}",
+                "<w:r><w:t>Text across several pages</w:t><w:br/></w:r>".repeat(80),
+                "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(40)
+            ),
+        );
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let ctx = crate::EditCtx::local("", "");
+        for index in 0..2 {
+            engine
+                .doc()
+                .insert_embed(
+                    &ctx,
+                    crate::Position::new("body", index),
+                    "chart",
+                    vec![
+                        ("chartJson".to_owned(), Any::from("{}")),
+                        ("width".to_owned(), Any::Number(8.0)),
+                        ("height".to_owned(), Any::Number(8.0)),
+                    ],
+                )
+                .unwrap();
+        }
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        let initial = engine.with_display_list(Clone::clone).unwrap();
+        assert!(initial.pages.len() >= 4);
+        assert!(initial.pages.iter().all(|page| !page.unbuilt));
+        assert_eq!(initial.pages, full_display_build(&engine, &extras).pages);
+
+        let txn = engine.doc().yrs_doc().transact();
+        let text = crate::story_ref(&txn, "body").unwrap();
+        let bounds = crate::op::para_bounds(&text, &txn).remove(0);
+        drop(txn);
+        let (start, end) = resident_paragraph_span(
+            engine.pagination.borrow().input.as_ref().unwrap(),
+            &bounds.para_id,
+        )
+        .unwrap();
+        assert_eq!(start, 2.0);
+        assert_eq!(end - start, f64::from(bounds.len()) + 2.0);
+
+        let caret_page = 1;
+        let fragment_end = |engine: &EngineSession, page: usize| {
+            engine.pagination.borrow().layout.as_ref().unwrap().pages[page]
+                .fragments
+                .iter()
+                .find_map(|fragment| match fragment {
+                    Fragment::Paragraph(value) if block_key(&value.block_id) == bounds.para_id => {
+                        value.pm_end
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert!(fragment_end(&engine, caret_page + 1) < end);
+        let offset = (fragment_end(&engine, caret_page) - 2.0) as u32;
+        assert!(offset > 2 && offset < bounds.pilcrow - 1);
+        let txn = engine.doc().yrs_doc().transact();
+        let text = crate::story_ref(&txn, "body").unwrap();
+        let head = text.sticky_index(&txn, offset, Assoc::After).unwrap();
+        drop(txn);
+        engine.set_resident_caret_head(Some(("body".to_owned(), head)));
+        let window_page = initial.pages.len() - 1;
+        engine.set_display_window(Some(window_page..window_page + 1));
+        engine.set_windowed_incremental_builds(true);
+
+        engine
+            .doc()
+            .insert_text(
+                &ctx,
+                crate::Position::new("body", offset),
+                "x",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let before = engine.stats();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        assert_eq!(
+            engine.stats().incremental_display_builds,
+            before.incremental_display_builds + 1
+        );
+        let txn = engine.doc().yrs_doc().transact();
+        let caret_index = {
+            let caret = engine.resident_caret_head.borrow();
+            caret.as_ref().unwrap().1.get_offset(&txn).unwrap().index
+        };
+        drop(txn);
+        assert_eq!(caret_index, offset + 1);
+        let caret_position = f64::from(caret_index) + 1.0;
+        assert_eq!(caret_position, fragment_end(&engine, caret_page) - 1.0);
+        let (start, end) = resident_paragraph_span(
+            engine.pagination.borrow().input.as_ref().unwrap(),
+            &bounds.para_id,
+        )
+        .unwrap();
+        assert_eq!(end - start, f64::from(bounds.len() + 1) + 2.0);
+        assert_eq!(start + 1.0 + f64::from(caret_index), caret_position + 2.0);
+        let edited = engine.with_display_list(Clone::clone).unwrap();
+        assert_eq!(edited.pages.len(), initial.pages.len());
+        assert!(!edited.pages[caret_page].unbuilt);
+        assert!(!edited.pages[window_page].unbuilt);
+        assert!(edited.pages[caret_page + 1].unbuilt);
+        assert_eq!(
+            edited.pages[caret_page],
+            full_display_build(&engine, &extras).pages[caret_page]
+        );
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn an_edit_with_windowed_incremental_builds_disabled_builds_every_re_placed_page() {
+        for opt_in in [false, true] {
+            let (engine, extras) = paged_filler_engine(210, 40);
+            assert!(!engine.display.borrow().windowed_incremental_builds);
+            engine.set_display_window(Some(0..1));
+            engine.build_display_list_frame(&extras, 0).unwrap();
+            let pages = engine.with_display_list(|list| list.pages.len()).unwrap();
+            assert!(pages >= 4);
+            let rest: Vec<usize> = (1..pages).collect();
+            let epoch = engine.display.borrow().binary_frame_epoch;
+            engine.build_display_pages_frame(&rest, epoch).unwrap();
+            if opt_in {
+                engine.set_windowed_incremental_builds(true);
+                engine.set_windowed_incremental_builds(false);
+            }
+
+            let paragraph = engine.doc().paragraphs("body").unwrap().remove(0);
+            let offset = u32::try_from(paragraph.text.encode_utf16().count()).unwrap();
+            engine
+                .doc()
+                .insert_text(
+                    &crate::EditCtx::local("", ""),
+                    crate::Position::new("body", offset),
+                    " that now runs long enough to wrap onto a second line of the page",
+                    crate::FormatPolicy::Inherit,
+                )
+                .unwrap();
+            let before = engine.stats();
+            let epoch = engine.display.borrow().binary_frame_epoch;
+            engine.apply_and_layout("body", epoch).unwrap();
+            let after = engine.stats();
+            assert_eq!(
+                after.incremental_display_builds,
+                before.incremental_display_builds + 1
+            );
+            assert_eq!(
+                after.rebuilt_display_pages - before.rebuilt_display_pages,
+                pages as u64
+            );
+            assert_eq!(engine.pagination.borrow().rebuilt_page_start, 0);
+            assert_eq!(engine.pagination.borrow().rebuilt_page_end, pages);
+            let edited = engine.with_display_list(Clone::clone).unwrap();
+            assert!(edited.pages.iter().all(|page| !page.unbuilt));
+            assert_eq!(edited.pages, full_display_build(&engine, &extras).pages);
+            docx_layout::clear_measure_fonts();
+        }
+    }
+
+    #[test]
+    fn an_edit_without_a_display_window_builds_every_re_placed_page() {
+        let (engine, extras) = paged_filler_engine(208, 40);
+        engine.set_windowed_incremental_builds(true);
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let pages = engine.with_display_list(|list| list.pages.len()).unwrap();
+        assert!(pages >= 4, "the fixture must span several pages");
+
+        let paragraph = engine.doc().paragraphs("body").unwrap().remove(0);
+        let offset = u32::try_from(paragraph.text.encode_utf16().count()).unwrap();
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", offset),
+                " that now runs long enough to wrap onto a second line of the page",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let before = engine.stats();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        let after = engine.stats();
+        assert_eq!(
+            after.incremental_display_builds,
+            before.incremental_display_builds + 1
+        );
+        assert_eq!(
+            after.rebuilt_display_pages - before.rebuilt_display_pages,
+            pages as u64
+        );
+        assert_eq!(engine.pagination.borrow().rebuilt_page_start, 0);
+        assert_eq!(engine.pagination.borrow().rebuilt_page_end, pages);
+        let edited = engine.with_display_list(Clone::clone).unwrap();
+        assert!(edited.pages.iter().all(|page| !page.unbuilt));
+        assert_eq!(edited.pages, full_display_build(&engine, &extras).pages);
         docx_layout::clear_measure_fonts();
     }
 
@@ -8516,6 +9353,7 @@ mod tests {
     fn an_edit_before_a_split_row_leaves_its_pages_unbuilt_with_moved_spans() {
         let (engine, extras) = split_row_engine(208);
         engine.set_display_window(Some(0..1));
+        engine.set_windowed_incremental_builds(true);
         engine.build_display_list_frame(&extras, 0).unwrap();
         let before = engine.with_display_list(Clone::clone).unwrap();
 

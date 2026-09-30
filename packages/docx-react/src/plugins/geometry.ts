@@ -7,6 +7,7 @@ import type { PointPosition, RenderedDomContext } from '@betteroffice/docx/plugi
 import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import { sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
+import { displayWindowOf } from '../components/DocxEditor/internals/displayWindow';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { DocxPointPosition } from '../components/DocxEditor/types';
 import {
@@ -147,7 +148,7 @@ function lastInReadingOrder(rects: readonly DisplayListRect[]): DisplayListRect 
   return last && { ...last, x: last.x + last.width, width: 0 };
 }
 
-/** Geometry of the current frame, resolving targets against the live editor. */
+/** Geometry of the current frame; visible unbuilt pages wait for exact content. */
 export function createPluginGeometry(
   layout: DocxPluginLayout,
   dom: RenderedDomContext,
@@ -242,6 +243,12 @@ export function createPluginGeometry(
         return unavailable();
       const resolved = resolveAnchorTarget(session, target, layout.version);
       if (!resolved.ok) return resolved;
+      const window = displayWindowOf(queries)?.read();
+      const pendingPage = (pageIndex: number): boolean =>
+        !!window &&
+        pageIndex >= window[0] &&
+        pageIndex < window[1] &&
+        queries.displayList?.pages[pageIndex]?.unbuilt === true;
       const display = (range: RawAnchorRange): Interval | null => {
         const from = editor.yrsLocToDisplayPosition(range.start);
         const to = editor.yrsLocToDisplayPosition(range.end);
@@ -254,6 +261,16 @@ export function createPluginGeometry(
         ranges.push(mapped);
       }
       ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+      if (
+        window &&
+        queries.displayList?.pages.slice(window[0], window[1]).some(
+          ({ unbuilt, positionSpan }) =>
+            unbuilt &&
+            positionSpan &&
+            ranges.some(({ from, to }) => from <= positionSpan[1] && to >= positionSpan[0])
+        )
+      )
+        return unavailable();
       const hidden = hiddenRanges(session, layout.version)
         .map(display)
         .filter((range): range is Interval => range !== null);
@@ -270,6 +287,7 @@ export function createPluginGeometry(
         if (from >= to) continue;
         const visible = queries.rangeRects(from, to).filter((rect) => rect.width > 0);
         for (const rect of visible) {
+          if (pendingPage(rect.pageIndex)) return unavailable();
           const projected = project(rect);
           if (!projected) return unavailable();
           rects.push(projected);
@@ -286,6 +304,9 @@ export function createPluginGeometry(
           : ((gap && (caretAt(gap.from, true) ?? caretAt(gap.to))) ??
             (paragraph === null ? null : caretAt(paragraph)));
       const fallback = end || paragraph === null ? null : queries.anchorRect(paragraph);
+      if ((end && pendingPage(end.pageIndex)) || (fallback && pendingPage(fallback.pageIndex))) {
+        return unavailable();
+      }
       const anchor = end ? project(end) : fallback ? project({ ...fallback, width: 0 }) : null;
       if (!anchor) return unavailable();
       const page = projector.getPageBounds(anchor.pageIndex);

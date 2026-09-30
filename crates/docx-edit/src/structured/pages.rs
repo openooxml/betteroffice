@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use docx_layout::display_list::DisplayList;
 use docx_layout::footnotes::{NoteContent, NoteKind as LayoutNoteKind};
@@ -1407,7 +1408,7 @@ struct Mapper<'a, 't, T: ReadTxn> {
     maps: &'a HashMap<String, Rc<LoweringMap>>,
     views: Views<'t, T>,
     /// Paragraph positions by id, per story and view.
-    paragraph_indexes: HashMap<(String, u8), Option<(Rc<StoryView>, Rc<HashMap<String, usize>>)>>,
+    paragraph_indexes: HashMap<(String, u8), Option<(Arc<StoryView>, Rc<HashMap<String, usize>>)>>,
     /// Display units of every atom, per root, source paragraph and story unit.
     atom_units: HashMap<String, Rc<HashMap<(u32, u32), u64>>>,
     /// The names of alias headers and footers in the exported stories'.
@@ -1584,7 +1585,7 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
         &mut self,
         story: &str,
         view: EditTextView,
-    ) -> Option<(Rc<StoryView>, Rc<HashMap<String, usize>>)> {
+    ) -> Option<(Arc<StoryView>, Rc<HashMap<String, usize>>)> {
         let key = (story.to_owned(), view_slot(view));
         if let Some(found) = self.paragraph_indexes.get(&key) {
             return found.clone();

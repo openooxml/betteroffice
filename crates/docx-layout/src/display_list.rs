@@ -11025,7 +11025,7 @@ pub fn update_resident_display_list_incremental_with_fonts_observed(
 
 /// [`update_resident_display_list_incremental_with_fonts_observed`] that builds
 /// only the rebuilt pages `build` selects; the others become unbuilt
-/// placeholders of their new layout pages.
+/// placeholders even if previously built. Untouched pages retain their display.
 #[allow(clippy::too_many_arguments)]
 pub fn update_resident_display_list_incremental_partial_with_fonts_observed(
     pagination: &crate::types::Input,

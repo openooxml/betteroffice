@@ -165,6 +165,10 @@ export class EditSession {
      */
     begin_region_layout(input: string): string;
     /**
+     * Until the matching `end_shared_reads`, committed reads share story projections of each document state.
+     */
+    begin_shared_reads(): void;
+    /**
      * Display-only input JSON in, one binary `FrameDelta` v1 out (exposed as
      * a transferable `Uint8Array`). `expected_frame_epoch` is the epoch of the
      * frame the caller currently holds; pass `0` for the first frame. A
@@ -358,6 +362,10 @@ export class EditSession {
      * with [`EditSession::resolve_encoded_selection`].
      */
     encoded_selection(): string;
+    /**
+     * Ends a shared-read scope, dropping shared story projections when the last scope ends.
+     */
+    end_shared_reads(): void;
     /**
      * [`EditSession::export_structured_json`] rendered as Markdown from the same read:
      * `{"ok":true,"version","content":{"markdown","anchors","diagnostics","truncated"}}`.
@@ -1027,6 +1035,10 @@ export class EditSession {
      */
     set_update_observer(callback: Function): void;
     /**
+     * Limit incremental rebuilds to the display window and caret pages. Off by default.
+     */
+    set_windowed_incremental_builds(enabled: boolean): void;
+    /**
      * Resolves tracked changes by revision id outside undo history:
      * `{"accept":[string, …],"reject":[string, …]}` -> `{"revisionIds":[string, …]}`, the ids
      * resolved. An id that matches nothing is skipped. See [`EditingDoc::settle_revisions`].
@@ -1477,6 +1489,7 @@ export interface InitOutput {
     readonly editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_begin_opening: (a: number, b: number, c: number) => void;
     readonly editsession_begin_region_layout: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_begin_shared_reads: (a: number) => void;
     readonly editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_build_display_list_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_build_display_pages_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -1507,6 +1520,7 @@ export interface InitOutput {
     readonly editsession_encode_state_vector: (a: number) => [number, number];
     readonly editsession_encode_sticky_position: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly editsession_encoded_selection: (a: number) => [number, number, number, number];
+    readonly editsession_end_shared_reads: (a: number) => void;
     readonly editsession_export_markdown_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_export_snapshot_with_private_fonts_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_export_structured_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -1601,6 +1615,7 @@ export interface InitOutput {
     readonly editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];
     readonly editsession_set_update_observer: (a: number, b: any) => [number, number];
+    readonly editsession_set_windowed_incremental_builds: (a: number, b: number) => void;
     readonly editsession_settle_revisions_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_split_cell: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_split_paragraph: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
