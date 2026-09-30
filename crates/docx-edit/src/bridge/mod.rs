@@ -53,6 +53,7 @@ use yrs::{Any, Map, MapRef, OffsetKind, Out, ReadTxn, Text, Transact};
 
 use super::{COMMENTS, DEL, EditError, EditingDoc, INS, decode_anchor, is_pilcrow, story_ref};
 use crate::list_marker::{ListState, compute_list_marker};
+use crate::seed::synthesized_cell_width;
 
 mod shapes;
 
@@ -1075,6 +1076,9 @@ fn lower_table<T: ReadTxn>(
 
     let original = tbl_pr.get("_originalFormatting").and_then(any_map);
     let table_margins = tbl_pr.get("cellMargins").and_then(any_map);
+    let grid_widths: Vec<Option<f64>> = grid.iter().map(any_number).collect();
+    let total_grid_width: f64 = grid_widths.iter().flatten().sum();
+    let mut column_row_ends = vec![0usize; grid_widths.len()];
     let mut rows = Vec::with_capacity(row_values.len());
     let mut row_pm_start = pm_start + 1;
 
@@ -1106,6 +1110,7 @@ fn lower_table<T: ReadTxn>(
 
         let mut cells = Vec::with_capacity(cell_values.len());
         let mut cell_pm_start = row_pm_start + 1;
+        let mut column = 0usize;
         for (cell_index, cell_value) in cell_values.iter().enumerate() {
             let cell = any_map(cell_value).ok_or_else(|| {
                 malformed_table(
@@ -1142,16 +1147,29 @@ fn lower_table<T: ReadTxn>(
                 map,
             )?;
 
+            while column_row_ends
+                .get(column)
+                .is_some_and(|end| *end > row_index)
+            {
+                column += 1;
+            }
+            let col_span = map_number(tc_pr, "colspan");
+            let row_span = map_number(tc_pr, "rowspan");
+            let colspan = col_span.unwrap_or(1.0) as usize;
             let width_type = map_string(tc_pr, "widthType");
+            let width_value = map_number(tc_pr, "width");
             let authored_width = tc_pr
                 .get("_originalFormatting")
                 .and_then(any_map)
                 .and_then(|value| value.get("width"));
             let synthesized_width = original.is_some()
                 && authored_width.is_none()
-                && width_type.as_deref() == Some("pct");
-            let width_value = map_number(tc_pr, "width")
-                .filter(|_| width_type.as_deref() != Some("auto") && !synthesized_width);
+                && width_type.as_deref() == Some("pct")
+                && width_value.is_some()
+                && width_value
+                    == synthesized_cell_width(&grid_widths, total_grid_width, column, colspan);
+            let width_value =
+                width_value.filter(|_| width_type.as_deref() != Some("auto") && !synthesized_width);
             let width =
                 width_value.filter(|value| *value != 0.0).and_then(|value| {
                     match width_type.as_deref() {
@@ -1179,8 +1197,8 @@ fn lower_table<T: ReadTxn>(
                 text_direction: map_string(tc_pr, "textDirection"),
                 id: BlockId::Str(cell_story),
                 blocks,
-                col_span: map_number(tc_pr, "colspan"),
-                row_span: map_number(tc_pr, "rowspan"),
+                col_span,
+                row_span,
                 width,
                 width_value,
                 preferred_width: width_value.map(|value| docx_layout::types::PreferredWidth {
@@ -1198,6 +1216,10 @@ fn lower_table<T: ReadTxn>(
                 no_wrap: (map_bool(tc_pr, "noWrap") == Some(true)).then_some(true),
                 tracked_marker: tc_pr.get("cellMarker").and_then(any_json),
             });
+            for end in column_row_ends.iter_mut().skip(column).take(colspan) {
+                *end = row_index.saturating_add(row_span.unwrap_or(1.0) as usize);
+            }
+            column = column.saturating_add(colspan);
             cell_pm_start += content_size + 2;
         }
 
@@ -1229,10 +1251,10 @@ fn lower_table<T: ReadTxn>(
     }
 
     let node_size = row_pm_start + 1 - pm_start;
-    let column_widths: Vec<f64> = grid
+    let column_widths: Vec<f64> = grid_widths
         .iter()
-        .filter_map(any_number)
-        .map(twips_to_pixels)
+        .flatten()
+        .map(|width| twips_to_pixels(*width))
         .collect();
     let indent = original
         .and_then(|value| value.get("indent"))

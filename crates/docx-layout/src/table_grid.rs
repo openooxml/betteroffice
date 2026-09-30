@@ -478,7 +478,10 @@ fn resolve_autofit_column_widths(
         let scale = target / min_total;
         let widths: Vec<f64> = minimums.into_iter().map(|width| width * scale).collect();
         let mut column_floors = vec![1.0_f64; col_count];
-        for grid_cell in resolve_cell_grid(table_block) {
+        let mut cells = resolve_cell_grid(table_block);
+        cells.sort_by_key(|cell| (cell.col_span, cell.column_index));
+        let mut below_cell_floor = false;
+        for grid_cell in cells {
             let cell = &table_block.rows[grid_cell.row_index].cells[grid_cell.cell_index];
             let padding = cell
                 .padding
@@ -486,20 +489,21 @@ fn resolve_autofit_column_widths(
                 .map_or(2.0 * DEFAULT_CELL_PADDING_X, |padding| {
                     padding.left + padding.right
                 });
-            for column in column_floors
-                .iter_mut()
+            let floor = padding + 1.0;
+            let cell_width: f64 = widths
+                .iter()
                 .skip(grid_cell.column_index)
                 .take(grid_cell.col_span)
-            {
-                *column = column.max(padding + 1.0);
-            }
+                .sum();
+            below_cell_floor |= cell_width < floor;
+            add_span_constraint(
+                &mut column_floors,
+                grid_cell.column_index,
+                grid_cell.col_span,
+                floor,
+            );
         }
-        if widths
-            .iter()
-            .zip(&column_floors)
-            .any(|(width, floor)| width < floor)
-            && content_width >= column_floors.iter().sum::<f64>()
-        {
+        if below_cell_floor && content_width >= column_floors.iter().sum::<f64>() {
             return None;
         }
         return Some(widths);
@@ -1184,6 +1188,39 @@ mod tests {
             assert_eq!(
                 resolve_table_column_widths(&block, 600.0),
                 vec![300.0, 300.0]
+            );
+        }
+    }
+
+    #[test]
+    fn autofit_checks_merged_cell_padding_against_its_whole_span() {
+        for merged_first in [true, false] {
+            let merged = json!({"id": 0, "cells": [
+                {"id": 0, "blocks": [], "colSpan": 2,
+                 "minContentWidth": 40, "maxContentWidth": 40,
+                 "preferredWidth": {"value": 0, "type": "auto"},
+                 "padding": {"top": 0, "bottom": 0, "left": 7, "right": 7}}
+            ]});
+            let individual = json!({"id": 1, "cells": [
+                {"id": 1, "blocks": [], "minContentWidth": 20, "maxContentWidth": 20,
+                 "preferredWidth": {"value": 0, "type": "auto"},
+                 "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0}},
+                {"id": 2, "blocks": [], "minContentWidth": 1180, "maxContentWidth": 1180,
+                 "preferredWidth": {"value": 0, "type": "auto"},
+                 "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0}}
+            ]});
+            let rows = if merged_first {
+                vec![merged, individual]
+            } else {
+                vec![individual, merged]
+            };
+            let block: TableBlock = serde_json::from_value(json!({
+                "id": 0, "layoutMode": "autofit", "gridWidths": [300, 300], "rows": rows
+            }))
+            .unwrap();
+            assert_eq!(
+                resolve_table_column_widths(&block, 600.0),
+                vec![10.0, 590.0]
             );
         }
     }
