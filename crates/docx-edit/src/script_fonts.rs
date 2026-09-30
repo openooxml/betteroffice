@@ -182,6 +182,11 @@ impl ScriptFontUse {
         embedded: &mut Embedded,
     ) {
         for (key, value) in entries {
+            // Copies of the source formatting kept for saving; layout reads
+            // no fonts from them.
+            if key.starts_with("_original") {
+                continue;
+            }
             self.entry(key, value, rtl);
             match (key.as_str(), value) {
                 ("text" | "plainText", Value::String(text)) => embedded.texts.push(text.clone()),
@@ -325,7 +330,10 @@ mod tests {
         scan.text("Latin \u{201c}quoted\u{201d} a\u{301}", &attrs(fonts));
         scan.text("abc", &attrs(json!({"fontFamily": {"eastAsia": "Scalar"}})));
         scan.embed(
-            &attrs(json!({"defaultTextFormatting": {"fontFamily": {"ascii": "Aptos", "cs": "Shared"}}})),
+            &attrs(json!({
+                "defaultTextFormatting": {"fontFamily": {"ascii": "Aptos", "cs": "Shared"}},
+                "_originalRunBoundaries": [{"formatting": {"fontFamily": {"eastAsia": "SimSun"}}}]
+            })),
             &BTreeMap::new(),
         );
         scan

@@ -618,7 +618,9 @@ export class EditSession {
      * Seeding starts a new opening, with `generation` or a fresh one, so its
      * session anchors are its own; see [`EditingDoc::begin_opening`].
      *
-     * Returns `{"envelope","referencedFonts":[string, …]}`. The envelope is
+     * Returns `{"envelope","referencedFonts":[string, …],"unusedScriptFonts":[string, …]}`:
+     * `unusedScriptFonts` are the referenced fonts a seeded package names only
+     * for East Asian or complex-script text it does not contain. The envelope is
      * the parsed package with the parts the host does not need stripped —
      * body content, header/footer and note content, numbering, media and
      * charts are emptied, section entries keep only their properties — so
