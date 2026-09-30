@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offset};
-use crate::floating_objects::MIN_WRAP_SEGMENT_WIDTH;
+use crate::floating_objects::{MIN_WRAP_SEGMENT_WIDTH, table_wrap_gaps};
 use crate::table_grid::{
     content_sized_columns, count_table_columns, grow_content_sized_columns, resolve_cell_grid,
     resolve_table_column_widths, resolve_table_width_px,
@@ -1440,12 +1440,13 @@ fn table_floating_zone(
             _ => 0.0,
         }
     };
-    Some(table_floating_zone_at_x(
-        floating,
-        measure,
-        content_width,
-        x,
-    ))
+    let mut zone = table_floating_zone_at_x(floating, measure, content_width, x);
+    let (left_space, right_space) = table_wrap_gaps(floating, measure.total_width, content_width, x);
+    if left_space < MIN_WRAP_SEGMENT_WIDTH && right_space < MIN_WRAP_SEGMENT_WIDTH {
+        zone.left_margin = 0.0;
+        zone.right_margin = 0.0;
+    }
+    Some(zone)
 }
 
 fn table_floating_zone_at_x(
@@ -1454,7 +1455,15 @@ fn table_floating_zone_at_x(
     content_width: f64,
     x: f64,
 ) -> FloatingZone {
-    let (left_margin, right_margin) = if x < content_width / 2.0 {
+    let (left_space, right_space) = table_wrap_gaps(floating, measure.total_width, content_width, x);
+    let text_on_right = if measure.total_width <= content_width / 2.0
+        || (left_space < MIN_WRAP_SEGMENT_WIDTH && right_space < MIN_WRAP_SEGMENT_WIDTH)
+    {
+        x < content_width / 2.0
+    } else {
+        right_space >= left_space
+    };
+    let (left_margin, right_margin) = if text_on_right {
         (
             x + measure.total_width + floating.right_from_text.unwrap_or(12.0),
             0.0,
@@ -2083,6 +2092,86 @@ fn cell_border_height(cell: &crate::types::TableCell) -> f64 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn wide_floating_tables_wrap_in_the_larger_cleared_gap() {
+        let measure = TableExtent {
+            rows: Vec::new(),
+            column_widths: vec![360.0],
+            total_width: 360.0,
+            total_height: 160.0,
+        };
+        for (x, left_distance, right_distance, expected) in [
+            (0.0, 9.0, 13.0, (373.0, 0.0)),
+            (240.0, 9.0, 13.0, (0.0, 369.0)),
+            (100.0, 9.0, 13.0, (473.0, 0.0)),
+            (140.0, 9.0, 13.0, (0.0, 469.0)),
+            (120.0, 9.0, 13.0, (0.0, 489.0)),
+            (120.0, 9.0, 9.0, (489.0, 0.0)),
+        ] {
+            let floating = serde_json::from_value(json!({
+                "leftFromText": left_distance, "rightFromText": right_distance
+            }))
+            .unwrap();
+            let zone = table_floating_zone_at_x(&floating, &measure, 600.0, x);
+            assert_eq!((zone.left_margin, zone.right_margin), expected, "x={x}");
+        }
+    }
+
+    #[test]
+    fn narrow_floating_tables_keep_their_existing_margins() {
+        let floating = serde_json::from_value(json!({
+            "leftFromText": 9.4, "rightFromText": 13.2
+        }))
+        .unwrap();
+        for width in [80.0, 299.0, 300.0] {
+            let measure = TableExtent {
+                rows: Vec::new(),
+                column_widths: vec![width],
+                total_width: width,
+                total_height: 160.0,
+            };
+            for x in [0.0, 120.0, 299.0, 300.0, 600.0 - width] {
+                let zone = table_floating_zone_at_x(&floating, &measure, 600.0, x);
+                let expected: (f64, f64) = if x < 300.0 {
+                    (x + width + 13.2, 0.0)
+                } else {
+                    (0.0, 600.0 - x + 9.4)
+                };
+                assert_eq!(zone.left_margin.to_bits(), expected.0.to_bits());
+                assert_eq!(zone.right_margin.to_bits(), expected.1.to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn floating_tables_with_two_small_gaps_leave_clearance_to_placement() {
+        let measure = TableExtent {
+            rows: Vec::new(),
+            column_widths: vec![540.0],
+            total_width: 540.0,
+            total_height: 160.0,
+        };
+        for (floating, expected) in [
+            (json!({"tblpXSpec": "center"}), (0.0, 0.0)),
+            (
+                json!({"tblpXSpec": "center", "leftFromText": 7, "rightFromText": 7}),
+                (0.0, 0.0),
+            ),
+            (
+                json!({"tblpXSpec": "center", "leftFromText": 6, "rightFromText": 6}),
+                (576.0, 0.0),
+            ),
+        ] {
+            let table = serde_json::from_value(json!({
+                "id": "float", "rows": [], "floating": floating
+            }))
+            .unwrap();
+            let zone = table_floating_zone(&table, &measure, 600.0).unwrap();
+            assert_eq!((zone.left_margin, zone.right_margin), expected);
+            assert!(!zone.full_width_block);
+        }
+    }
 
     #[test]
     fn a_paragraph_anchored_band_hangs_off_its_own_anchor_not_an_earlier_one() {
