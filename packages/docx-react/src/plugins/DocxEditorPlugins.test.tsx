@@ -873,6 +873,25 @@ describe('DocxEditor plugins', () => {
     ).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
   });
 
+  test('removing the plugins releases the layout their overlays held', async () => {
+    const geometries: DocxPluginGeometry[] = [];
+    const plugin = defineDocxPlugin<null>({
+      id: 'acme.held',
+      createState: () => null,
+      overlay: ({ geometry }) => {
+        geometries.push(geometry);
+        return null;
+      },
+    });
+    const unit = { x: 0, y: 0, width: 1, height: 1 };
+    const { rerender } = await mount({ plugins: [plugin] });
+    await until(() => geometries.at(-1)?.toOverlayRect(unit) != null);
+    const held = geometries.at(-1)!;
+    rerender({ plugins: [] });
+    await settle();
+    expect(held.toOverlayRect(unit)).toBeNull();
+  });
+
   test('an overlay resolves paragraph and search anchors at the rendered version', async () => {
     let geometry: DocxPluginGeometry | null = null;
     const plugin = defineDocxPlugin({

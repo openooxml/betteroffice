@@ -23,7 +23,11 @@ import type { RenderedDomContext } from '@betteroffice/docx/plugin-api';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import type { DocxCommandController } from '../commands/createDocxCommandStore';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
-import { isPresented, sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
+import {
+  isPresented,
+  onPresented,
+  sourceVersionOf,
+} from '../components/DocxEditor/internals/layoutProvenance';
 import { displayWindowOf } from '../components/DocxEditor/internals/displayWindow';
 import { resolvePointPosition } from '../components/DocxEditor/internals/pointPosition';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
@@ -345,10 +349,18 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   useLayoutEffect(() => {
     if (adopted && options.session) {
       adoptedRef.current = { session: options.session, geometry: adopted };
+    } else if (!managed || !heldCandidate()) {
+      adoptedRef.current = null;
     }
     // Pages that show a layout of the current version get its geometry next.
     queriesCurrentRef.current = layout !== null;
   });
+  // A frame painted during the hold may retire the held geometry.
+  const holding = !adopted && heldGeometry !== null;
+  useEffect(() => {
+    if (!holding) return;
+    return onPresented(() => host.geometryChanged());
+  }, [host, holding]);
 
   useEffect(() => {
     host.layoutChanged(currentLayout);
