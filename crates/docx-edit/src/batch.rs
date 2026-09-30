@@ -2876,6 +2876,12 @@ impl EditingDoc {
                 )
                 .into());
             }
+            if txn.store().pending_update().is_some() || txn.store().pending_ds().is_some() {
+                return Err(EditError::InvalidUpdate(
+                    "the document holds updates that are not integrated yet".to_owned(),
+                )
+                .into());
+            }
             txn.apply_update(adoption)
                 .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         }
