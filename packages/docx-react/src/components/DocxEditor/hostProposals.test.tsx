@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, mock, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
@@ -9,7 +9,7 @@ if (ownsDom) GlobalRegistrator.register();
 
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
-import type { DocxProposalRequest } from '@betteroffice/docx/yrs';
+import type { DocxProposalRequest, YrsRevisionInfo } from '@betteroffice/docx/yrs';
 import {
   DocxEditor,
   defineDocxPlugin,
@@ -60,7 +60,7 @@ async function until(done: () => boolean) {
   expect(done()).toBe(true);
 }
 
-function fixture(text: string, tracked = false): ArrayBuffer {
+function fixture(text: string, tracked: boolean | 'replacement' = false): ArrayBuffer {
   const parts = new Map<string, Uint8Array>();
   parts.set(
     '[Content_Types].xml',
@@ -80,9 +80,13 @@ function fixture(text: string, tracked = false): ArrayBuffer {
         '</Relationships>'
     )
   );
-  const insertion = tracked
-    ? '<w:ins w:id="1" w:author="Reviewer" w:date="2026-09-29T00:00:00Z"><w:r><w:t>Reviewed</w:t></w:r></w:ins>'
-    : '';
+  const insertion =
+    tracked === 'replacement'
+      ? '<w:del w:id="1" w:author="Reviewer" w:date="2026-09-29T00:00:00Z"><w:r><w:delText>Original</w:delText></w:r></w:del>' +
+        '<w:ins w:id="2" w:author="Reviewer" w:date="2026-09-29T00:00:00Z"><w:r><w:t>Reviewed</w:t></w:r></w:ins>'
+      : tracked
+        ? '<w:ins w:id="1" w:author="Reviewer" w:date="2026-09-29T00:00:00Z"><w:r><w:t>Reviewed</w:t></w:r></w:ins>'
+        : '';
   parts.set(
     'word/document.xml',
     toBytes(
@@ -92,6 +96,189 @@ function fixture(text: string, tracked = false): ArrayBuffer {
   );
   return rezipPartsToArrayBuffer(parts);
 }
+
+async function selectRevisionText(
+  ref: React.RefObject<DocxEditorRef | null>,
+  revision: YrsRevisionInfo,
+  select = false
+) {
+  const editor = ref.current!.getEditorRef()!;
+  const start = {
+    story: revision.range.story,
+    ...revision.range.start,
+    offset: revision.range.start.offset + 1,
+  };
+  await act(async () => {
+    editor.getYrsSession()!.setSelection(
+      start,
+      select ? { ...start, offset: start.offset + 1 } : start
+    );
+    editor.syncYrsInputState(false);
+  });
+}
+
+for (const controlled of [false, true]) {
+  for (const showHostProposalsInSidebar of [false, true]) {
+    const mode = controlled ? 'controlled' : 'uncontrolled';
+    const visibility = showHostProposalsInSidebar ? 'enabled' : 'hidden';
+    test(`host proposal selections do not open the ${mode} sidebar with cards ${visibility}`, async () => {
+      const sidebar = mock((open: boolean) => open);
+      const ref = createRef<DocxEditorRef>();
+      const buffer = fixture('Hello world');
+      const element = (open = false) => (
+        <DocxEditor
+          ref={ref}
+          documentBuffer={buffer}
+          readOnly
+          allowHostProposals
+          showHostProposalsInSidebar={showHostProposalsInSidebar}
+          commentsSidebarOpen={controlled ? open : undefined}
+          onCommentsSidebarOpenChange={sidebar}
+        />
+      );
+      const view = render(element());
+      await until(() => ref.current?.commands.getState('save').enabled === true);
+      const session = ref.current!.getEditorRef()!.getYrsSession()!;
+      const paragraph = session.paragraphs('body')[0]!;
+      const proposed = await act(() =>
+        ref.current!.proposeChanges({
+          expectVersion: session.version(),
+          proposals: [
+            {
+              id: 'p1',
+              paragraph: {
+                kind: 'session',
+                sessionId: session.paragraphIdentities().sessionId,
+                story: 'body',
+                paraId: paragraph.paraId,
+              },
+              suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+              op: 'replaceText',
+              search: 'Hello',
+              replaceWith: 'XYZ',
+            },
+          ],
+        })
+      );
+      if (!proposed.ok) throw new Error(proposed.failure.message);
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      });
+      const revisions = session.listRevisions().filter((revision) => revision.author === 'Host');
+      expect(revisions.some((revision) => revision.kind === 'insertion')).toBe(true);
+      expect(revisions.some((revision) => revision.kind === 'deletion')).toBe(true);
+      for (const revision of revisions) {
+        await selectRevisionText(ref, revision);
+        await selectRevisionText(ref, revision, true);
+      }
+      expect(sidebar).not.toHaveBeenCalledWith(true);
+      expect(view.container.querySelector('aside.docx-unified-sidebar')).toBeNull();
+      expect(ref.current!.commands.getState('commentsSidebar').active).toBe(false);
+
+      await act(async () => {
+        await ref.current!.commands.execute('commentsSidebar', null);
+      });
+      expect(sidebar).toHaveBeenCalledWith(true);
+      if (controlled) view.rerender(element(true));
+      expect(ref.current!.commands.getState('commentsSidebar').active).toBe(true);
+      if (showHostProposalsInSidebar) {
+        await until(() => view.container.querySelector('.docx-tracked-change-card') != null);
+        const cards = view.container.querySelectorAll('.docx-tracked-change-card');
+        expect(cards).toHaveLength(1);
+        expect(cards[0]!.textContent).toContain('Host');
+        expect(cards[0]!.textContent).toContain('XYZ');
+        expect(cards[0]!.querySelector('button[title="Accept"]')).toBeNull();
+        for (const revision of revisions) {
+          await selectRevisionText(ref, revision);
+          expect(cards[0]!.querySelector('button[title="Accept"]')).toBeNull();
+        }
+      } else {
+        expect(view.container.querySelector('.docx-tracked-change-card')).toBeNull();
+        expect(view.container.querySelector('aside.docx-unified-sidebar')).toBeNull();
+      }
+    });
+  }
+}
+
+test('native revisions still open the sidebar with host proposals enabled', async () => {
+  const sidebar = mock((open: boolean) => open);
+  const ref = createRef<DocxEditorRef>();
+  const view = render(
+    <DocxEditor
+      ref={ref}
+      documentBuffer={fixture('Hello world', 'replacement')}
+      allowHostProposals
+      onCommentsSidebarOpenChange={sidebar}
+    />
+  );
+  await until(
+    () =>
+      ref.current?.commands.getState('save').enabled === true &&
+      view.container.querySelector('.docx-tracked-change-card') != null
+  );
+  expect(sidebar).toHaveBeenCalledWith(true);
+  await act(async () => {
+    await ref.current!.commands.execute('commentsSidebar', null);
+  });
+  sidebar.mockClear();
+  const session = ref.current!.getEditorRef()!.getYrsSession()!;
+  const paragraph = session.paragraphs('body')[0]!;
+  const proposed = await act(() =>
+    ref.current!.proposeChanges({
+      expectVersion: session.version(),
+      proposals: [
+        {
+          id: 'p1',
+          paragraph: {
+            kind: 'session',
+            sessionId: session.paragraphIdentities().sessionId,
+            story: 'body',
+            paraId: paragraph.paraId,
+          },
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'replaceText',
+          search: 'world',
+          replaceWith: 'XYZ',
+        },
+      ],
+    })
+  );
+  expect(proposed).toMatchObject({ ok: true });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  });
+  expect(sidebar).not.toHaveBeenCalledWith(true);
+  const revision = session
+    .listRevisions()
+    .find((candidate) => candidate.author === 'Reviewer' && candidate.kind === 'insertion')!;
+  await selectRevisionText(ref, revision);
+  expect(sidebar).toHaveBeenCalledWith(true);
+  await until(() => view.container.querySelector('.docx-tracked-change-card') != null);
+  expect(view.container.querySelector('.docx-tracked-change-card')!.textContent).toContain('Reviewer');
+  expect(view.container.querySelector('aside.docx-unified-sidebar')).not.toBeNull();
+  expect(view.container.querySelectorAll('.docx-tracked-change-card')).toHaveLength(1);
+  expect(
+    view.container.querySelector('.docx-tracked-change-card button[title="Accept"]')
+  ).not.toBeNull();
+
+  await act(async () => {
+    await ref.current!.commands.execute('commentsSidebar', null);
+  });
+  sidebar.mockClear();
+  const nativeDeletion = session
+    .listRevisions()
+    .find((candidate) => candidate.author === 'Reviewer' && candidate.kind === 'deletion')!;
+  const hostInsertion = session
+    .listRevisions()
+    .find((candidate) => candidate.author === 'Host' && candidate.kind === 'insertion')!;
+  expect(hostInsertion.range.end).toEqual(nativeDeletion.range.start);
+  await act(async () => {
+    session.setSelection({ story: nativeDeletion.range.story, ...nativeDeletion.range.start });
+    ref.current!.getEditorRef()!.syncYrsInputState(false);
+  });
+  expect(sidebar).toHaveBeenCalledWith(true);
+  expect(view.container.querySelectorAll('.docx-tracked-change-card')).toHaveLength(1);
+});
 
 test('allowHostProposals admits only the proposal methods in a read-only editor', async () => {
   const contexts: DocxPluginContext<null>[] = [];
@@ -321,8 +508,9 @@ test('host proposals stay hidden after swapping documentBuffer on the same edito
   await act(async () => {
     await ref.current!.commands.execute('commentsSidebar', null);
   });
-  await until(() => view.container.querySelector('.docx-tracked-change-card') != null);
-  expect(view.container.querySelector('.docx-tracked-change-card')!.textContent).toContain('Host A');
+  expect(ref.current!.commands.getState('commentsSidebar').active).toBe(true);
+  expect(view.container.querySelector('.docx-tracked-change-card')).toBeNull();
+  expect(view.container.querySelector('aside.docx-unified-sidebar')).toBeNull();
   await act(async () => {
     await ref.current!.commands.execute('commentsSidebar', null);
   });
@@ -347,12 +535,9 @@ test('host proposals stay hidden after swapping documentBuffer on the same edito
   await act(async () => {
     await ref.current!.commands.execute('commentsSidebar', null);
   });
-  await until(() => view.container.querySelector('.docx-tracked-change-card') != null);
   expect(ref.current!.commands.getState('commentsSidebar').active).toBe(true);
-  const cards = view.container.querySelectorAll('.docx-tracked-change-card');
-  expect(cards.length).toBe(1);
-  expect(cards[0]!.textContent).toContain('Host B');
-  expect(cards[0]!.textContent).not.toContain('Host A');
+  expect(view.container.querySelector('.docx-tracked-change-card')).toBeNull();
+  expect(view.container.querySelector('aside.docx-unified-sidebar')).toBeNull();
 }, 15_000);
 
 test('swapping to a document with its own revisions auto-opens the sidebar once', async () => {
