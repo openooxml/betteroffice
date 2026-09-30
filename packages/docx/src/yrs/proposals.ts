@@ -9,6 +9,7 @@
 import type {
   DocxEditFailure,
   DocxEditFailureCode,
+  DocxEditReceipt,
   DocxEditRequest,
   DocxEditResult,
   DocxEditStep,
@@ -234,58 +235,43 @@ type Located = { anchor: DocxSessionParagraphAnchor } | { failure: DocxProposalF
 
 type Planned = { steps: DocxEditStep[] } | { failure: DocxProposalFailure };
 
-/** The session holds update notifications until `propose` returns, so they see the round. */
-export function createProposalRegistry(session: DocxProposalSession): DocxProposalRegistry {
-  const records = new Map<string, { record: DocxProposalRecord; key: string }>();
-  const listeners = new Set<(snapshot: DocxProposalSnapshot) => void>();
-  let previewVersion = 0;
-  let notifying = false;
-  let renotify = false;
+/** @internal */
+export type ProposalRoundOutcome =
+  | { ok: false; failure: DocxProposalFailure; version?: string }
+  | {
+      ok: true;
+      planned: Array<{ anchor: DocxSessionParagraphAnchor; first: number; count: number }>;
+      receipts: DocxEditReceipt[];
+      changedStories: string[];
+    };
 
-  const snapshot = (): DocxProposalSnapshot => ({
-    version: session.version(),
-    previewVersion,
-    proposals: [...records.values()].map(({ record }) => ({
-      ...record,
-      paragraph: { ...record.paragraph },
-      revisionIds: [...record.revisionIds],
-    })),
-  });
+/** @internal */
+export interface ProposalWithdrawal {
+  owned: readonly string[];
+  accept: readonly string[];
+  reject: readonly string[];
+  proposalIds?: Readonly<Record<string, string>>;
+}
 
-  /** Delivers the latest snapshot; a change made by a listener restarts delivery with a newer one. */
-  const notify = (): void => {
-    renotify = true;
-    if (notifying) return;
-    notifying = true;
-    try {
-      while (renotify) {
-        renotify = false;
-        if (listeners.size === 0) return;
-        const current = snapshot();
-        for (const listener of [...listeners]) {
-          try {
-            listener(current);
-          } catch (error) {
-            console.error('[yrs] a proposal listener threw', error);
-          }
-          if (renotify) break;
-        }
-      }
-    } finally {
-      notifying = false;
-      renotify = false;
-    }
-  };
+/** @internal */
+export type ProposalWithdrawalOutcome = { ok: true } | { ok: false; failure: DocxProposalFailure };
 
+/** Runs within the caller's shared-read scope. @internal */
+export function executeProposalRound(
+  session: DocxProposalSession,
+  fresh: readonly DocxProposalInput[],
+  expectVersion: string
+): ProposalRoundOutcome {
   const refuse = (
     failure: DocxProposalFailure,
     version = session.version()
-  ): DocxProposalResult => ({
-    ok: false,
-    version,
-    failure,
-  });
-
+  ): ProposalRoundOutcome => ({ ok: false, failure, version });
+  if (expectVersion !== session.version()) {
+    return refuse({
+      code: 'stale-version',
+      message: 'the document changed since the expected version was read',
+    });
+  }
   const locate = (input: DocxProposalInput): Located => {
     const failure = (code: DocxProposalFailure['code'], message: string): Located => ({
       failure: { code, message, proposalId: input.id },
@@ -445,6 +431,141 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     };
   };
 
+  const steps: DocxEditStep[] = [];
+  const owners: number[] = [];
+  const inert: boolean[] = [];
+  const planned: Array<{ anchor: DocxSessionParagraphAnchor; first: number; count: number }> = [];
+  for (const [index, input] of fresh.entries()) {
+    const located = locate(input);
+    if ('failure' in located) return refuse(located.failure);
+    const built = plan(input, located.anchor);
+    if ('failure' in built) return refuse(built.failure);
+    planned.push({ anchor: located.anchor, first: steps.length, count: built.steps.length });
+    for (const step of built.steps) {
+      steps.push(step);
+      owners.push(index);
+      inert.push(input.op === 'replaceText' && input.replaceWith === input.search);
+    }
+  }
+  const touching = adjoining(steps, owners, inert);
+  if (touching) {
+    const [earlier, later] = touching.map((step) => fresh[owners[step]!]!.id);
+    return refuse({
+      code: 'overlapping-steps',
+      message: `proposal ${later} adjoins proposal ${earlier}; adjacent suggestions would share one revision`,
+      proposalId: later,
+    });
+  }
+  const result = session.applyEdits({
+    expectVersion,
+    history: 'none',
+    steps,
+  });
+  if (!result.ok) {
+    const { stepIndex, conflictingStepIndex, ...failure } = result.failure;
+    const owner = stepIndex === undefined ? undefined : fresh[owners[stepIndex]!]?.id;
+    const other =
+      conflictingStepIndex === undefined
+        ? undefined
+        : fresh[owners[conflictingStepIndex]!]?.id;
+    return refuse(
+      {
+        ...failure,
+        ...(other !== undefined && other !== owner
+          ? { message: `proposal ${owner} overlaps proposal ${other}` }
+          : owner !== undefined
+          ? { message: `proposal ${owner}: ${failure.message}` }
+          : {}),
+        ...(owner !== undefined ? { proposalId: owner } : {}),
+      },
+      result.version
+    );
+  }
+  return { ok: true, planned, receipts: result.receipts, changedStories: result.changedStories };
+}
+
+/** @internal */
+export function executeProposalWithdrawal(
+  session: DocxProposalSession,
+  { owned, accept, reject, proposalIds }: ProposalWithdrawal
+): ProposalWithdrawalOutcome {
+  const owners = new Set(owned);
+  const foreign = session
+    .listRevisions()
+    .find(
+      ({ revisionId, kind }) =>
+        owners.has(revisionId) && kind !== 'insertion' && kind !== 'deletion'
+    );
+  if (foreign) {
+    const id = proposalIds?.[foreign.revisionId];
+    return {
+      ok: false,
+      failure: {
+        code: 'tracked-revision-conflict',
+        message:
+          id === undefined
+            ? `revision ${foreign.revisionId} also marks a ${foreign.kind} change made outside the proposals`
+            : `proposal ${id} shares revision ${foreign.revisionId} with a ${foreign.kind} change made outside the proposals`,
+        ...(id === undefined ? {} : { proposalId: id }),
+      },
+    };
+  }
+  if (accept.length > 0 || reject.length > 0) session.settleRevisions(accept, reject);
+  return { ok: true };
+}
+
+/** The session holds update notifications until `propose` returns, so they see the round. */
+export function createProposalRegistry(session: DocxProposalSession): DocxProposalRegistry {
+  const records = new Map<string, { record: DocxProposalRecord; key: string }>();
+  const listeners = new Set<(snapshot: DocxProposalSnapshot) => void>();
+  let previewVersion = 0;
+  let notifying = false;
+  let renotify = false;
+
+  const snapshot = (): DocxProposalSnapshot => ({
+    version: session.version(),
+    previewVersion,
+    proposals: [...records.values()].map(({ record }) => ({
+      ...record,
+      paragraph: { ...record.paragraph },
+      revisionIds: [...record.revisionIds],
+    })),
+  });
+
+  /** Delivers the latest snapshot; a change made by a listener restarts delivery with a newer one. */
+  const notify = (): void => {
+    renotify = true;
+    if (notifying) return;
+    notifying = true;
+    try {
+      while (renotify) {
+        renotify = false;
+        if (listeners.size === 0) return;
+        const current = snapshot();
+        for (const listener of [...listeners]) {
+          try {
+            listener(current);
+          } catch (error) {
+            console.error('[yrs] a proposal listener threw', error);
+          }
+          if (renotify) break;
+        }
+      }
+    } finally {
+      notifying = false;
+      renotify = false;
+    }
+  };
+
+  const refuse = (
+    failure: DocxProposalFailure,
+    version = session.version()
+  ): DocxProposalResult => ({
+    ok: false,
+    version,
+    failure,
+  });
+
   const propose = (request: DocxProposalRequest): DocxProposalResult => {
     if (!request || typeof request !== 'object' || !Array.isArray(request.proposals)) {
       throw new TypeError('a proposal request needs a proposals array');
@@ -480,58 +601,14 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
         message: 'the document changed since the expected version was read',
       });
     }
-    const steps: DocxEditStep[] = [];
-    const owners: number[] = [];
-    const inert: boolean[] = [];
-    const planned: Array<{ anchor: DocxSessionParagraphAnchor; first: number; count: number }> = [];
-    for (const [index, { input }] of fresh.entries()) {
-      const located = locate(input);
-      if ('failure' in located) return refuse(located.failure);
-      const built = plan(input, located.anchor);
-      if ('failure' in built) return refuse(built.failure);
-      planned.push({ anchor: located.anchor, first: steps.length, count: built.steps.length });
-      for (const step of built.steps) {
-        steps.push(step);
-        owners.push(index);
-        inert.push(input.op === 'replaceText' && input.replaceWith === input.search);
-      }
-    }
-    const touching = adjoining(steps, owners, inert);
-    if (touching) {
-      const [earlier, later] = touching.map((step) => fresh[owners[step]!]!.input.id);
-      return refuse({
-        code: 'overlapping-steps',
-        message: `proposal ${later} adjoins proposal ${earlier}; adjacent suggestions would share one revision`,
-        proposalId: later,
-      });
-    }
-    const result = session.applyEdits({
-      expectVersion: request.expectVersion,
-      history: 'none',
-      steps,
-    });
-    if (!result.ok) {
-      const { stepIndex, conflictingStepIndex, ...failure } = result.failure;
-      const owner = stepIndex === undefined ? undefined : fresh[owners[stepIndex]!]?.input.id;
-      const other =
-        conflictingStepIndex === undefined
-          ? undefined
-          : fresh[owners[conflictingStepIndex]!]?.input.id;
-      return refuse(
-        {
-          ...failure,
-          ...(other !== undefined && other !== owner
-            ? { message: `proposal ${owner} overlaps proposal ${other}` }
-            : owner !== undefined
-            ? { message: `proposal ${owner}: ${failure.message}` }
-            : {}),
-          ...(owner !== undefined ? { proposalId: owner } : {}),
-        },
-        result.version
-      );
-    }
+    const result = executeProposalRound(
+      session,
+      fresh.map(({ input }) => input),
+      request.expectVersion
+    );
+    if (!result.ok) return refuse(result.failure, result.version);
     for (const [index, { input, key }] of fresh.entries()) {
-      const { anchor, first, count } = planned[index]!;
+      const { anchor, first, count } = result.planned[index]!;
       const receipts = result.receipts.slice(first, first + count);
       records.set(input.id, {
         key,
@@ -659,21 +736,13 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     const settling = [...owners.keys()];
     const accept = settling.filter((revisionId) => shown[revisionId] === 'accepted');
     const reject = settling.filter((revisionId) => shown[revisionId] !== 'accepted');
-    const foreign = session
-      .listRevisions()
-      .find(
-        ({ revisionId, kind }) =>
-          owners.has(revisionId) && kind !== 'insertion' && kind !== 'deletion'
-      );
-    if (foreign) {
-      const id = owners.get(foreign.revisionId)!;
-      return refuse({
-        code: 'tracked-revision-conflict',
-        message: `proposal ${id} shares revision ${foreign.revisionId} with a ${foreign.kind} change made outside the proposals`,
-        proposalId: id,
-      });
-    }
-    if (accept.length > 0 || reject.length > 0) session.settleRevisions(accept, reject);
+    const result = executeProposalWithdrawal(session, {
+      owned: settling,
+      accept,
+      reject,
+      proposalIds: Object.fromEntries(owners),
+    });
+    if (!result.ok) return refuse(result.failure);
     let decided = false;
     for (const id of withdrawn) {
       decided ||= records.get(id)!.record.state !== 'proposed';

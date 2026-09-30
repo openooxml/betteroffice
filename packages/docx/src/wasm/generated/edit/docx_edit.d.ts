@@ -105,6 +105,11 @@ export class EditSession {
      */
     apply_local_update(update: Uint8Array): void;
     /**
+     * Applies an update another replica of this document committed for a host batch.
+     * It commits outside undo history and notifies as a local change.
+     */
+    apply_host_update(update: Uint8Array): void;
+    /**
      * Writes `style_id` as the `pStyle` of every paragraph intersecting
      * `[start, end)`. Only that key changes: this boundary has no style
      * resolver, so it never fabricates the paragraph attributes or run marks
@@ -1496,6 +1501,7 @@ export interface InitOutput {
     readonly editsession_apply_input_profile_json: (a: number) => [number, number];
     readonly editsession_apply_input_profiled: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_apply_local_update: (a: number, b: number, c: number) => [number, number];
+    readonly editsession_apply_host_update: (a: number, b: number, c: number) => [number, number];
     readonly editsession_apply_paragraph_style: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
     readonly editsession_apply_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_apply_seed_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
