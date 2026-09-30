@@ -686,7 +686,7 @@ impl EditingDoc {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "wasm"))]
     pub(crate) fn source_indexed(&self) -> bool {
         matches!(
             *self.source.lock().unwrap(),

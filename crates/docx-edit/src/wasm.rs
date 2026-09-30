@@ -5702,7 +5702,11 @@ mod tests {
         assert!(replica.engine.doc().source_indexed());
         replica.load(&origin.encode_state()).unwrap();
         let paragraphs = |session: &EditSession| {
-            envelope(&session.read_paragraphs_json(r#"{"story":"body"}"#).unwrap())["paragraphs"]
+            envelope(
+                &session
+                    .read_paragraphs_json(r#"{"story":"body","view":"accepted"}"#)
+                    .unwrap(),
+            )["paragraphs"]
                 .clone()
         };
         assert_eq!(paragraphs(&replica), paragraphs(&origin));
