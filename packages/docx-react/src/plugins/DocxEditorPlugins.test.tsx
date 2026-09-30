@@ -816,9 +816,26 @@ describe('DocxEditor plugins', () => {
     expect(retained.toOverlayRect(unit)).not.toBeNull();
 
     let next = '';
+    const frames: FrameRequestCallback[] = [];
+    const frame = spyOn(globalThis, 'requestAnimationFrame').mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    try {
+      await act(async () => {
+        const applied = await ref.current!.applyEdits(appendRequest(version, paragraph.paraId));
+        if (applied.ok) next = applied.version;
+      });
+      expect(next).not.toBe('');
+      expect(marker()!.dataset).toMatchObject({ version, snapshot: next });
+      expect(geometries.at(-1)!.layout.version).toBe(version);
+      expect(geometries.at(-1)!.toOverlayRect(unit)).not.toBeNull();
+      expect(contexts.at(-1)!.geometry).toBeNull();
+    } finally {
+      frame.mockRestore();
+    }
     await act(async () => {
-      const applied = await ref.current!.applyEdits(appendRequest(version, paragraph.paraId));
-      if (applied.ok) next = applied.version;
+      for (const callback of frames.splice(0)) callback(performance.now());
     });
     await until(() => marker()?.dataset.version === next);
     const afterEdit = layouts.slice(layouts.lastIndexOf(version) + 1);

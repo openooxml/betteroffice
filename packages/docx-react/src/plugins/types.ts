@@ -341,6 +341,10 @@ export interface DocxPluginDefinition<S> {
   initialize?(context: DocxPluginContext<S>): MaybePromise<void>;
   onEvent?(context: DocxPluginContext<S>, event: DocxPluginEvent): MaybePromise<void>;
   panel?: DocxPluginPanel<S>;
+  /**
+   * Stays mounted while an edit or preview change lays out: `geometry` is then the layout the
+   * pages still show, whose `toOverlayRect` answers until the new layout replaces it.
+   */
   overlay?: ComponentType<{ context: DocxPluginContext<S>; geometry: DocxPluginGeometry }>;
   getSidebarItems?(context: DocxPluginContext<S>): readonly DocxPluginSidebarItem<S>[];
   commands?: readonly DocxPluginCommand<S>[];

@@ -78,6 +78,8 @@ export interface DocxPluginHostBinding {
   sidebarItems: ReactSidebarItem[];
   /** The editor's own rendered-DOM context. */
   renderedDomContext: RenderedDomContext | null;
+  /** The geometry overlays draw with while the host waits for a layout of the document. */
+  heldGeometry: DocxPluginGeometry | null;
   overlayLayerRef: (element: HTMLDivElement | null) => void;
   /** Receives each rendered-DOM context the paged editor builds. */
   onRenderedDomContext(context: RenderedDomContext, queries: DisplayListQueries): void;
@@ -318,7 +320,11 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
                     presented: isPresented(dom.context.pagesContainer, dom.queries.displayList),
                   }
                 : null;
-            }
+            },
+            () =>
+              host.layoutId() === null &&
+              latest.current.zoom === currentLayout.zoom &&
+              dom.context.pagesContainer.isConnected
           )
         : null,
     // `moved` rebuilds the geometry when its elements move without a new frame.
@@ -326,6 +332,13 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     [host, currentLayout, dom, options.queries, layer, moved]
   );
   geometryRef.current = geometry;
+  // Overlays keep the layout the host last adopted until it adopts the next one.
+  const adoptedRef = useRef<{ session: YrsSession; geometry: DocxPluginGeometry } | null>(null);
+  if (geometry && options.session && host.layoutId() === geometry.layout.id) {
+    adoptedRef.current = { session: options.session, geometry };
+  }
+  const heldGeometry =
+    adoptedRef.current?.session === options.session ? adoptedRef.current.geometry : null;
 
   useEffect(() => {
     host.layoutChanged(currentLayout);
@@ -399,6 +412,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     activations: managed ? activations : NO_ACTIVATIONS,
     sidebarItems,
     renderedDomContext: dom?.context ?? null,
+    heldGeometry,
     overlayLayerRef: setLayer,
     onRenderedDomContext,
     beginLoad,

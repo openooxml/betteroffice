@@ -2554,6 +2554,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               activations={pluginHost.activations}
               target={pluginOverlayTarget}
               layerRef={pluginHost.overlayLayerRef}
+              heldGeometry={pluginHost.heldGeometry}
             />
           </CanvasPagedArea>
         }
