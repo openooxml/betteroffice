@@ -316,11 +316,24 @@ interface FacadeDeltaSeed {
   hasHandle(): boolean;
   /** Nearest ancestor facade that held the handle when this one was created. */
   donor(): DisplayListQueries | null;
-  /** `successor` now owns this generation: never open/adopt a handle here. */
-  supersede(successor: DisplayListQueries): void;
-  /** The facade that superseded this one, if any. */
-  successor(): DisplayListQueries | null;
+  /** A successor now owns this generation: never open/adopt a handle here. */
+  supersede(): void;
+  /** The newest facade of this facade's line of successive layouts. */
+  lineage: FacadeLineage;
   disposed(): boolean;
+}
+
+/** Shared by a facade and every facade built from it; weak, so no layout outlives its holders. */
+interface FacadeLineage {
+  newest: { deref(): DisplayListQueries | undefined } | null;
+}
+
+function weakly(queries: DisplayListQueries): { deref(): DisplayListQueries | undefined } {
+  const Ref = (globalThis as { WeakRef?: new (target: object) => { deref(): object | undefined } })
+    .WeakRef;
+  if (!Ref) return { deref: () => queries };
+  const ref = new Ref(queries);
+  return { deref: () => ref.deref() as DisplayListQueries | undefined };
 }
 
 const facadeDeltaSeeds = new WeakMap<DisplayListQueries, FacadeDeltaSeed>();
@@ -583,7 +596,6 @@ export function createDisplayListQueries(
   let handle: number | null = null;
   let handleAttempted = false;
   let superseded = false;
-  let successor: DisplayListQueries | null = null;
   let disposed = false;
   // lets dispose() cancel the finalizer below so a handle is never double-closed
   const finalizerToken = {};
@@ -595,7 +607,11 @@ export function createDisplayListQueries(
   // of the chain.
   let donorFacade: DisplayListQueries | null = null;
   const previousSeed = previous ? facadeDeltaSeeds.get(previous) : undefined;
-  if (previousSeed) donorFacade = previousSeed.hasHandle() ? previous! : previousSeed.donor();
+  if (previousSeed) {
+    donorFacade = previousSeed.hasHandle() ? previous! : previousSeed.donor();
+    previousSeed.supersede();
+  }
+  const lineage: FacadeLineage = previousSeed?.lineage ?? { newest: null };
 
   const source = (): DisplayListQuerySource | null => resident ?? eng;
 
@@ -828,13 +844,10 @@ export function createDisplayListQueries(
    */
   const handedOff = (): DisplayListQueries | null | undefined => {
     if (resident || !superseded || handle !== null) return undefined;
-    let next = successor;
-    let seed = next ? facadeDeltaSeeds.get(next) : undefined;
-    while (seed?.successor()) {
-      next = seed.successor();
-      seed = next ? facadeDeltaSeeds.get(next) : undefined;
-    }
-    return next && seed && !seed.disposed() ? next : null;
+    const newest = lineage.newest?.deref();
+    return newest && newest !== queries && !facadeDeltaSeeds.get(newest)?.disposed()
+      ? newest
+      : null;
   };
 
   const residentQuery = (query: () => string, label: string): string | null => {
@@ -1379,11 +1392,10 @@ export function createDisplayListQueries(
     engine: () => eng,
     hasHandle: () => handle !== null,
     donor: () => donorFacade,
-    supersede: (next) => {
+    supersede: () => {
       superseded = true;
-      successor = next;
     },
-    successor: () => successor,
+    lineage,
     disposed: () => disposed,
     takeHandle: () => {
       const transferred = handle;
@@ -1396,7 +1408,7 @@ export function createDisplayListQueries(
       return transferred;
     },
   });
-  previousSeed?.supersede(queries);
+  lineage.newest = weakly(queries);
 
   return queries;
 }
