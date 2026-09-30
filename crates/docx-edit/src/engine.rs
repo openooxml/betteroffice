@@ -1764,20 +1764,16 @@ impl EngineSession {
         };
         let default_family =
             docx_layout::measure_blocks::default_font_family(&measurement.defaults);
-        let mut requirements = BTreeMap::new();
-        let mut preview_superset_safe = true;
+        let mut collector = docx_layout::measure_blocks::FontRequirementCollector::default();
         if cache_key.is_some() {
-            preview_superset_safe &=
-                docx_layout::measure_blocks::collect_preview_font_requirements_into(
-                    input.measured.iter().map(|measured| &measured.block),
-                    default_family,
-                    &mut requirements,
-                );
-        } else {
-            docx_layout::measure_blocks::collect_font_requirements_into(
+            collector.collect_preview(
                 input.measured.iter().map(|measured| &measured.block),
                 default_family,
-                &mut requirements,
+            );
+        } else {
+            collector.collect(
+                input.measured.iter().map(|measured| &measured.block),
+                default_family,
             );
         }
         if let Some(body_story) = body_story {
@@ -1815,18 +1811,9 @@ impl EngineSession {
             for story in stories {
                 self.with_lowered_story(&story, &render_env, |blocks| {
                     if cache_key.is_some() {
-                        preview_superset_safe &=
-                            docx_layout::measure_blocks::collect_preview_font_requirements_into(
-                                blocks,
-                                default_family,
-                                &mut requirements,
-                            );
+                        collector.collect_preview(blocks, default_family);
                     } else {
-                        docx_layout::measure_blocks::collect_font_requirements_into(
-                            blocks,
-                            default_family,
-                            &mut requirements,
-                        );
+                        collector.collect(blocks, default_family);
                     }
                 })
                 .map_err(|error| error.to_string())?;
@@ -1840,15 +1827,14 @@ impl EngineSession {
                             .expect("resident story exists after lowering")
                             .revealable_blocks,
                     );
-                    preview_superset_safe &=
-                        docx_layout::measure_blocks::collect_preview_font_requirements_into(
-                            revealable.iter(),
-                            default_family,
-                            &mut requirements,
-                        );
+                    collector.collect_preview(revealable.iter(), default_family);
                 }
             }
         }
+        let requirements = collector.finish();
+        let preview_superset_safe = requirements
+            .values()
+            .all(|requirement| requirement.scripts.is_empty());
         if let Some((doc_epoch, request_fingerprint)) = cache_key
             && !preview_superset_safe
         {
