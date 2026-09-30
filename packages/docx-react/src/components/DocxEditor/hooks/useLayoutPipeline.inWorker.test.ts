@@ -401,3 +401,37 @@ test('a new session lays out while the replaced one still has a worker pass queu
   expect(doc.laidOutHere).toEqual([]);
   expect(errors).toEqual([]);
 });
+
+test('a font warm-up pass never lays out here, even without a worker', async () => {
+  const { doc, worker, errors, hook, frame, shown } = await opened();
+
+  act(() => hook.result.current.scheduleWarmLayout());
+  await frame();
+  expect(worker.map((pass) => pass.at)).toEqual([1, 1]);
+  act(() => worker[1]!.fail());
+  await frame();
+  expect(doc.laidOutHere).toEqual([]);
+
+  doc.workerAvailable = false;
+  act(() => hook.result.current.scheduleWarmLayout());
+  await frame();
+  expect(doc.laidOutHere).toEqual([]);
+
+  doc.version = 2;
+  act(() => {
+    hook.result.current.scheduleWarmLayout();
+    hook.result.current.scheduleLayout('local', true);
+  });
+  await frame();
+  expect(doc.laidOutHere).toEqual([2]);
+
+  doc.workerAvailable = true;
+  act(() => hook.result.current.scheduleWarmLayout());
+  act(() => hook.result.current.runLayoutPipeline());
+  expect(worker.map((pass) => pass.at)).toEqual([1, 1, 2]);
+  act(() => worker[2]!.fail());
+  await frame();
+  expect(doc.laidOutHere).toEqual([2, 2]);
+  expect(shown()).toBe('2');
+  expect(errors).toEqual([]);
+});

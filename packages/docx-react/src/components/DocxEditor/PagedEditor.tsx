@@ -745,9 +745,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onAnchorPositionsChange,
     });
     runLayoutPipelineRef.current = yrsCore.session ? runLayoutPipeline : null;
-    scheduleWarmLayoutRef.current = yrsCore.session
-      ? () => scheduleLayout('remote', true)
-      : null;
+    scheduleWarmLayoutRef.current = yrsCore.session ? scheduleWarmLayout : null;
     const handleLocalCaretInterrupt = useCallback(() => {
       cancelPendingScrollRestore();
       onCaretInterrupt?.();

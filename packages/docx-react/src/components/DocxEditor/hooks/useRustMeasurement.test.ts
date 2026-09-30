@@ -41,7 +41,17 @@ describe('useRustMeasurement warm requirements', () => {
     italic: false,
   };
 
-  async function prepared(loadWarm: () => Promise<ArrayBuffer>) {
+  const later: ResidentFontRequirement = {
+    key: 'later',
+    family: 'Later',
+    bold: false,
+    italic: false,
+  };
+
+  async function prepared(
+    loadWarm: () => Promise<ArrayBuffer>,
+    loadLater: () => Promise<ArrayBuffer> = () => new Promise<ArrayBuffer>(() => {})
+  ) {
     let registered = 0;
     const calls = { warmLoads: 0, warmPasses: 0, requiredPasses: 0 };
     const engine: RustTextEngine = {
@@ -50,6 +60,7 @@ describe('useRustMeasurement warm requirements', () => {
     };
     const fontProvider = {
       resolve: (family: string) => () => {
+        if (family === 'Later') return loadLater();
         if (family !== 'Warm') return Promise.resolve(bytesOf(family));
         calls.warmLoads++;
         return loadWarm();
@@ -93,6 +104,16 @@ describe('useRustMeasurement warm requirements', () => {
     });
     result.current.residentMeasurementConfig([regular], [warm]);
     expect(calls).toEqual({ warmLoads: 1, warmPasses: 1, requiredPasses: 0 });
+  });
+
+  test('a warm font that never settles does not hold back another that loads', async () => {
+    const { result, calls } = await prepared(() => Promise.resolve(bytesOf('warm')));
+    result.current.residentMeasurementConfig([regular], [later, warm]);
+    await waitFor(() => expect(calls.warmPasses).toBe(1));
+    expect(result.current.residentMeasurementConfig([regular])?.fontChains).toEqual({
+      regular: [1],
+      warm: [2],
+    });
   });
 
   test('a warm font that never settles never blocks plain requirements', async () => {

@@ -183,24 +183,23 @@ export function useRustMeasurement(
         required.set(requirement.key, requirement);
         return true;
       });
-      if (warmNotReady.length > 0) {
-        const key = `warm:${JSON.stringify(warmNotReady.map(({ key }) => key).sort())}`;
-        if (!requirementWarmupsRef.current.has(key)) {
-          // A warm font that fails settles as absent, as a required one does; one that never
-          // settles stays out of every config.
-          const settled = source
-            .prepareFontRequirements(warmNotReady)
-            .then(
-              () => undefined,
-              () => undefined
-            )
-            .finally(() => {
-              if (sourceRef.current !== source || requiredRef.current !== required) return;
-              requirementWarmupsRef.current.delete(key);
-              scheduleWarmLayoutRef.current?.();
-            });
-          requirementWarmupsRef.current.set(key, settled);
-        }
+      // Each warm font settles on its own: one that fails counts as absent, as a required one
+      // does, and one that never settles stays out of every config without holding the others.
+      for (const requirement of warmNotReady) {
+        const key = `warm:${requirement.key}`;
+        if (requirementWarmupsRef.current.has(key)) continue;
+        const settled = source
+          .prepareFontRequirements([requirement])
+          .then(
+            () => undefined,
+            () => undefined
+          )
+          .finally(() => {
+            if (sourceRef.current !== source || requiredRef.current !== required) return;
+            requirementWarmupsRef.current.delete(key);
+            scheduleWarmLayoutRef.current?.();
+          });
+        requirementWarmupsRef.current.set(key, settled);
       }
       if (ready) return ready;
       const key = JSON.stringify(requirements);
