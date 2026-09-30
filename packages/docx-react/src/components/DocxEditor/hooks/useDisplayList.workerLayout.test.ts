@@ -4,7 +4,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import type { YrsSession } from '@betteroffice/docx/yrs';
+import { preloadDocxEngine } from '@betteroffice/docx/yrs';
+import { takePreloadedResidentEngineWorker, type YrsSession } from '@betteroffice/docx/yrs';
 import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
@@ -28,6 +29,7 @@ beforeAll(() =>
 
 afterEach(() => {
   cleanup();
+  takePreloadedResidentEngineWorker()?.destroy();
   globalThis.Worker = originalWorker;
 });
 
@@ -44,12 +46,15 @@ const REQUEST = JSON.stringify({
 
 class FakeWorker {
   static last: FakeWorker | null = null;
+  static instances: FakeWorker[] = [];
   onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror = null;
   posted: ResidentEngineWorkerRequest[] = [];
+  terminated = false;
   constructor() {
     FakeWorker.last = this;
+    FakeWorker.instances.push(this);
   }
   postMessage(request: ResidentEngineWorkerRequest): void {
     this.posted.push(request);
@@ -57,7 +62,9 @@ class FakeWorker {
   reply(response: ResidentEngineWorkerResponse): void {
     this.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
   }
-  terminate(): void {}
+  terminate(): void {
+    this.terminated = true;
+  }
 }
 
 function setup() {
@@ -88,6 +95,103 @@ function setup() {
   globalThis.Worker = FakeWorker as unknown as typeof Worker;
   return { native, layoutJson, frame, engine, adopted };
 }
+
+test('workerFor adopts the spare once and the next session spawns fresh', async () => {
+  const first = setup();
+  const second = setup();
+  const initialWorkers = FakeWorker.instances.length;
+  const warming = preloadDocxEngine();
+  const spare = FakeWorker.last!;
+  expect(spare.posted.map((request) => request.type)).toEqual(['warm']);
+  spare.reply({ id: spare.posted[0].id, ok: true });
+  await warming;
+  const hook = renderHook(() =>
+    useRustDisplayList(null, undefined, undefined, undefined, null)
+  );
+  const reply = (worker: FakeWorker, source: typeof first): void => {
+    worker.reply({
+      id: worker.posted.at(-1)!.id,
+      ok: true,
+      frame: source.frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null },
+      selection: null,
+      layoutRevision: 1,
+      layoutJson: source.layoutJson,
+    });
+  };
+  try {
+    const firstLayout = hook.result.current.layoutInWorker(first.engine, REQUEST);
+    expect(FakeWorker.last).toBe(spare);
+    expect(spare.posted.map((request) => request.type)).toEqual(['warm', 'bootstrap']);
+    reply(spare, first);
+    expect(await firstLayout).not.toBeNull();
+
+    const secondLayout = hook.result.current.layoutInWorker(second.engine, REQUEST);
+    const fresh = FakeWorker.last!;
+    expect(fresh).not.toBe(spare);
+    expect(spare.terminated).toBe(true);
+    expect(fresh.posted.map((request) => request.type)).toEqual(['bootstrap']);
+    expect(FakeWorker.instances.length - initialWorkers).toBe(2);
+    reply(fresh, second);
+    expect(await secondLayout).not.toBeNull();
+
+    const warmingReplacement = preloadDocxEngine();
+    const unusedSpare = FakeWorker.last!;
+    unusedSpare.reply({ id: unusedSpare.posted[0].id, ok: true });
+    await warmingReplacement;
+    const replacementLayout = hook.result.current.layoutInWorker(first.engine, REQUEST);
+    const replacement = FakeWorker.last!;
+    expect(replacement).not.toBe(unusedSpare);
+    expect(replacement.posted.map((request) => request.type)).toEqual(['bootstrap']);
+    reply(replacement, first);
+    expect(await replacementLayout).not.toBeNull();
+    const remaining = takePreloadedResidentEngineWorker();
+    expect(remaining).not.toBeNull();
+    remaining?.destroy();
+  } finally {
+    hook.unmount();
+    first.native.free();
+    second.native.free();
+  }
+});
+
+test('two display hooks cannot adopt the same spare', async () => {
+  const first = setup();
+  const second = setup();
+  const warming = preloadDocxEngine();
+  const spare = FakeWorker.last!;
+  spare.reply({ id: spare.posted[0].id, ok: true });
+  await warming;
+  const firstHook = renderHook(() => useRustDisplayList(null));
+  const secondHook = renderHook(() => useRustDisplayList(null));
+  try {
+    const firstLayout = firstHook.result.current.layoutInWorker(first.engine, REQUEST);
+    const secondLayout = secondHook.result.current.layoutInWorker(second.engine, REQUEST);
+    const fresh = FakeWorker.last!;
+    expect(fresh).not.toBe(spare);
+    for (const [worker, source] of [[spare, first], [fresh, second]] as const) {
+      worker.reply({
+        id: worker.posted.at(-1)!.id,
+        ok: true,
+        frame: source.frame.slice().buffer,
+        caret: { frameEpoch: 1, caretRect: null },
+        selection: null,
+        layoutRevision: 1,
+        layoutJson: source.layoutJson,
+      });
+    }
+    expect(await firstLayout).not.toBeNull();
+    expect(await secondLayout).not.toBeNull();
+    firstHook.unmount();
+    expect(spare.terminated).toBe(true);
+    expect(fresh.terminated).toBe(false);
+  } finally {
+    firstHook.unmount();
+    secondHook.unmount();
+    first.native.free();
+    second.native.free();
+  }
+});
 
 test('a worker-run layout arrives with its frame and needs no second worker pass', async () => {
   const { native, layoutJson, frame, engine, adopted } = setup();

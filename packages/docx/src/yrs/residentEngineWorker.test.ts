@@ -15,7 +15,13 @@ beforeAll(async () => {
   const frameDelta = resolve(import.meta.dir, '../layout/render/frameDelta.ts');
   const modules: Record<string, string> = {
     './residentEngineSession':
-      'export const createResidentEngineSession = async (heapLimitBytes) => ((testHarness.heapLimits ??= []).push(heapLimitBytes), testHarness.session);',
+      `export const createResidentEngineSession = async (heapLimitBytes) => {
+        await testHarness.preload();
+        testHarness.sessionsCreated += 1;
+        (testHarness.heapLimits ??= []).push(heapLimitBytes);
+        return testHarness.session;
+      };`,
+    './wasm/index': 'export const preloadEditWasm = () => testHarness.preload();',
     '../layout/render/glyphCache':
       'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; } }',
     '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.memories;',
@@ -79,6 +85,23 @@ function worker() {
     },
   };
   const harness = {
+    initializations: 0,
+    sessionsCreated: 0,
+    wasmReady: false,
+    failWarm: null as Error | null,
+    preloadBlock: null as Promise<void> | null,
+    async preload(): Promise<void> {
+      await harness.preloadBlock;
+      if (harness.failWarm) {
+        const error = harness.failWarm;
+        harness.failWarm = null;
+        throw error;
+      }
+      if (!harness.wasmReady) {
+        harness.initializations += 1;
+        harness.wasmReady = true;
+      }
+    },
     delta: null as DecodedFrameDelta | null,
     caret: null as YrsResidentCaretRect | null,
     rasterized: [] as number[],
@@ -91,6 +114,10 @@ function worker() {
       setPartialDocument() {},
       clearFonts() {},
       layoutDocumentJson() {},
+      layoutDocumentWithRegionsRetained() {},
+      retainedHeadersFootersJson(): string | undefined {
+        return undefined;
+      },
       onUpdate() {
         return () => {};
       },
@@ -253,6 +280,52 @@ function deferred() {
   return { promise, resolve };
 }
 
+describe('resident worker warmup', () => {
+  test('initializes wasm without creating a session, then bootstraps a frame', async () => {
+    const w = worker();
+    expect(await w.send({ type: 'warm' })).toMatchObject({ ok: true });
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect(await w.build([])).toMatchObject({
+      ok: false,
+      error: 'Resident engine worker is not initialized',
+    });
+    expect(await w.bootstrap()).toMatchObject({ ok: true, layoutRevision: 1 });
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(1);
+    expect((await w.attach([1])).ok).toBe(true);
+    expect(w.harness.rasterized).toEqual([1]);
+  });
+
+  test('retries initialization after a failed warm, including a wasm runtime error', async () => {
+    const w = worker();
+    w.harness.failWarm = new WebAssembly.RuntimeError('init failed');
+    const failed = await w.send({ type: 'warm' });
+    expect(failed).toMatchObject({ ok: false, error: 'init failed' });
+    expect(failed).not.toHaveProperty('terminal');
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect((await w.bootstrap()).ok).toBe(true);
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(1);
+  });
+
+  test('queues bootstrap behind an in-flight warm', async () => {
+    const w = worker();
+    const loading = deferred();
+    w.harness.preloadBlock = loading.promise;
+    const warm = w.send({ type: 'warm' });
+    const bootstrap = w.bootstrap();
+    await Promise.resolve();
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect(w.answered).toEqual([]);
+    loading.resolve();
+    expect((await warm).ok).toBe(true);
+    expect((await bootstrap).ok).toBe(true);
+    expect(w.answered).toEqual([1, 2]);
+    expect(w.harness.initializations).toBe(1);
+  });
+});
+
 describe('resident worker page damage', () => {
   test('paints each page once while a three-page window crosses twelve pages', async () => {
     const w = worker();
@@ -398,6 +471,8 @@ describe('resident worker page damage', () => {
 describe('resident worker layout ownership', () => {
   test('returns the layout it ran and completes the frame extras from it', async () => {
     const w = worker();
+    expect((await w.send({ type: 'warm' })).ok).toBe(true);
+    expect(w.harness.sessionsCreated).toBe(0);
     const extras: string[] = [];
     const layoutJson = JSON.stringify({
       layout: { pages: [] },
@@ -405,8 +480,14 @@ describe('resident worker layout ownership', () => {
       notesConverged: true,
     });
     let epoch = 0;
+    const layouts: string[] = [];
     Object.assign(w.harness.session, {
-      layoutDocumentWithRegionsRetainedJson: () => layoutJson,
+      layoutDocumentWithRegionsRetainedJson: () => {
+        layouts.push('reply');
+        return layoutJson;
+      },
+      layoutDocumentWithRegionsRetained: () => layouts.push('retained'),
+      retainedHeadersFootersJson: () => JSON.stringify({ parts: [] }),
       residentCaretSnapshot: () => ({ frameEpoch: epoch, caretRect: null }),
       buildDisplayListFrame: (input: string) => {
         extras.push(input);
@@ -445,6 +526,8 @@ describe('resident worker layout ownership', () => {
       layoutExtras: JSON.stringify({ resolvedCommentIds: [4], fontChains: { 'a|0|0': [1] } }),
     });
     expect(reply.ok && reply.layoutJson).toBe(layoutJson);
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(1);
     expect(extras).toEqual([
       '{"headersFooters":{"parts":[]},"fontChains":{"a|0|0":[1]},"resolvedCommentIds":[4]}',
     ]);
@@ -458,6 +541,7 @@ describe('resident worker layout ownership', () => {
     });
     expect(plain.ok && plain.layoutJson).toBeUndefined();
     expect(extras.at(-1)).toBe('given');
+    expect(layouts).toEqual(['reply', 'retained']);
   });
 
   test('marks a replica as a preview or not before it lays it out', async () => {
@@ -466,10 +550,7 @@ describe('resident worker layout ownership', () => {
     Object.assign(w.harness.session, {
       loadState: () => calls.push('load'),
       setPartialDocument: (partial: boolean) => calls.push(`partial:${partial}`),
-      layoutDocumentWithRegionsRetainedJson: () => {
-        calls.push('layout');
-        return JSON.stringify({ layout: { pages: [] }, notesConverged: true });
-      },
+      layoutDocumentWithRegionsRetained: () => calls.push('layout'),
     });
     const snapshot = {
       clientId: 1,
@@ -506,6 +587,7 @@ describe('resident worker layout ownership', () => {
     let epoch = 0;
     const provisional = '{"layout":{"pages":[1]},"notesConverged":true,"provisional":true}';
     const full = '{"layout":{"pages":[1,2]},"notesConverged":true}';
+    let headersFooters = '{"parts":["full"]}';
     Object.assign(w.harness.session, {
       layoutDocumentWithRegionsPrefixRetainedJson: (_input: string, pages: number) => {
         calls.push(`prefix:${pages}`);
@@ -515,6 +597,7 @@ describe('resident worker layout ownership', () => {
         calls.push('full');
         return full;
       },
+      retainedHeadersFootersJson: () => headersFooters,
       residentCaretSnapshot: () => ({ frameEpoch: epoch, caretRect: null }),
       buildDisplayListFrame: (input: string) => {
         extras.push(input);
@@ -576,9 +659,49 @@ describe('resident worker layout ownership', () => {
     });
     await w.send({ type: 'buildFrame', extras: 'given', expectedFrameEpoch: 3, paintCaret: false });
     expect(calls.slice(2)).toEqual(['prefix:3', 'full']);
+    // A later edit changes what the session retains; the completed layout's reply keeps its own.
+    headersFooters = '{"parts":["edited"]}';
     const late = await w.send({ type: 'completeLayout', expectedFrameEpoch: 4, paintCaret: false });
     expect(late.ok && late.layoutJson).toBe(full);
+    expect(extras.at(-1)).toBe('{"headersFooters":{"parts":["full"]}}');
     expect(calls).toHaveLength(4);
+
+    await w.send({
+      type: 'bootstrap',
+      expectedFrameEpoch: 0,
+      extras: '',
+      snapshot,
+      layoutExtras: '{}',
+      provisionalPages: 3,
+    });
+    Object.assign(w.harness.session, {
+      setSelection: () => {},
+      applyInput: (_text: string, expected: number) => {
+        calls.push('input');
+        const session = w.harness.session as unknown as {
+          buildDisplayListFrame: (input: string, expected: number) => Uint8Array;
+        };
+        return session.buildDisplayListFrame('input', expected);
+      },
+    });
+    // A header caret needs no body caret geometry from the stub.
+    const loc = { story: 'header1', paraId: '1', offset: 0 };
+    const selection = { anchor: loc, head: loc };
+    await w.send({
+      type: 'applyInput',
+      text: 'x',
+      selection,
+      expectedFrameEpoch: epoch,
+      profile: false,
+      paintCaret: false,
+    });
+    expect(calls.slice(4)).toEqual(['prefix:3', 'full', 'input']);
+    // The edit re-paginated: a completion built now would pair its cached headers with the new pages.
+    const framesBefore = extras.length;
+    const afterEdit = await w.send({ type: 'completeLayout', expectedFrameEpoch: epoch, paintCaret: false });
+    expect(afterEdit.ok && afterEdit.frame).toBeUndefined();
+    expect(afterEdit.ok && afterEdit.layoutJson).toBeUndefined();
+    expect(extras).toHaveLength(framesBefore);
   });
 });
 
