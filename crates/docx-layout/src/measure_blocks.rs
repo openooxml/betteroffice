@@ -1677,6 +1677,9 @@ fn table_floating_zone_at_x(
     x: f64,
     column_width: Option<f64>,
 ) -> FloatingZone {
+    let margin_right_of_table = x + measure.total_width + floating.right_from_text.unwrap_or(12.0);
+    let margin_left_of_table = content_width - x + floating.left_from_text.unwrap_or(12.0);
+    let main_text_on_right = x < content_width / 2.0;
     let text_on_right = column_width
         .filter(|width| width.is_finite() && *width > 0.0 && *width == content_width)
         .filter(|_| {
@@ -1691,23 +1694,27 @@ fn table_floating_zone_at_x(
                 }
         })
         .filter(|width| measure.total_width > *width / 2.0)
+        // Only where the side main picks leaves no room at all, so its text
+        // runs full width under the table.
+        .filter(|width| {
+            let main_margin = if main_text_on_right {
+                margin_right_of_table
+            } else {
+                margin_left_of_table
+            };
+            main_margin >= width.max(1.0)
+        })
         .and_then(|width| {
             let (left_space, right_space) =
                 table_wrap_gaps(floating, measure.total_width, width, x);
             (left_space >= MIN_WRAP_SEGMENT_WIDTH || right_space >= MIN_WRAP_SEGMENT_WIDTH)
                 .then_some(right_space >= left_space)
         })
-        .unwrap_or_else(|| x < content_width / 2.0);
+        .unwrap_or(main_text_on_right);
     let (left_margin, right_margin) = if text_on_right {
-        (
-            x + measure.total_width + floating.right_from_text.unwrap_or(12.0),
-            0.0,
-        )
+        (margin_right_of_table, 0.0)
     } else {
-        (
-            0.0,
-            content_width - x + floating.left_from_text.unwrap_or(12.0),
-        )
+        (0.0, margin_left_of_table)
     };
     let top_y = floating.tblp_y.unwrap_or(0.0);
     FloatingZone {
@@ -2336,7 +2343,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn wide_floating_tables_wrap_in_the_larger_cleared_gap() {
+    fn wide_floating_tables_with_no_room_on_their_side_wrap_in_the_larger_gap() {
         let measure = TableExtent {
             rows: Vec::new(),
             column_widths: vec![360.0],
@@ -2347,9 +2354,10 @@ mod tests {
             (0.0, 9.0, 13.0, (373.0, 0.0)),
             (240.0, 9.0, 13.0, (0.0, 369.0)),
             (100.0, 9.0, 13.0, (473.0, 0.0)),
-            (140.0, 9.0, 13.0, (0.0, 469.0)),
-            (120.0, 9.0, 13.0, (0.0, 489.0)),
+            (140.0, 9.0, 13.0, (513.0, 0.0)),
+            (120.0, 9.0, 13.0, (493.0, 0.0)),
             (120.0, 9.0, 9.0, (489.0, 0.0)),
+            (230.0, 9.0, 13.0, (0.0, 379.0)),
         ] {
             let table = serde_json::from_value(json!({
                 "id": "float", "rows": [],
@@ -2365,7 +2373,7 @@ mod tests {
         for (spec, expected) in [
             ("left", (373.0, 0.0)),
             ("right", (0.0, 369.0)),
-            ("center", (0.0, 489.0)),
+            ("center", (493.0, 0.0)),
         ] {
             let table = serde_json::from_value(json!({
                 "id": "float", "rows": [],
@@ -2489,16 +2497,16 @@ mod tests {
     #[test]
     fn wide_floating_tables_beside_negative_indents_keep_main_margins() {
         for (indent, expected) in [
-            (json!({}), (0.0, 469.0)),
-            (json!({"right": -100}), (513.0, 0.0)),
-            (json!({"left": 20, "hanging": 40}), (513.0, 0.0)),
+            (json!({}), (0.0, 369.0)),
+            (json!({"right": -100}), (0.0, 0.0)),
+            (json!({"left": 20, "hanging": 40}), (0.0, 0.0)),
         ] {
             let blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
                 {
                     "kind": "table", "id": "float", "columnWidths": [360], "layoutMode": "fixed",
                     "rows": [{"id": "row", "height": 100, "heightRule": "exact", "cells": []}],
                     "floating": {
-                        "horzAnchor": "text", "tblpX": 140, "leftFromText": 9, "rightFromText": 13
+                        "horzAnchor": "text", "tblpX": 240, "leftFromText": 9, "rightFromText": 13
                     }
                 },
                 {"kind": "paragraph", "id": "text", "attrs": {"indent": indent}, "runs": []},

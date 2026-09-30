@@ -4314,7 +4314,7 @@ mod tests {
                     "kind": "table", "id": "float", "columnWidths": [360], "layoutMode": "fixed",
                     "rows": [{"id": "row", "height": 100, "heightRule": "exact", "cells": []}],
                     "floating": {
-                        "horzAnchor": anchor, "tblpXSpec": "center", "vertAnchor": "text", "tblpY": 1,
+                        "horzAnchor": anchor, "tblpXSpec": "right", "vertAnchor": "text", "tblpY": 1,
                         "leftFromText": 9, "rightFromText": 13
                     }
                 },
@@ -4375,7 +4375,7 @@ mod tests {
         ] {
             assert_eq!(
                 measured_table_wrap_margins("column", "left", json!([section])),
-                (493.0, 0.0)
+                (0.0, 0.0)
             );
         }
     }
@@ -4388,7 +4388,7 @@ mod tests {
         );
         assert_eq!(
             measured_table_wrap_margins("text", "left", json!([section])),
-            (493.0, 0.0)
+            (0.0, 0.0)
         );
     }
 
@@ -4397,7 +4397,7 @@ mod tests {
         let section = table_wrap_section(1220.0, json!({"count": 2, "gap": 20}));
         assert_eq!(
             measured_table_wrap_margins("text", "center", json!([section])),
-            (493.0, 0.0)
+            (0.0, 0.0)
         );
     }
 
@@ -4406,7 +4406,7 @@ mod tests {
         let section = table_wrap_section(600.0, serde_json::Value::Null);
         assert_eq!(
             measured_table_wrap_margins("text", "left", json!([section])),
-            (0.0, 489.0)
+            (0.0, 369.0)
         );
     }
 
@@ -4447,7 +4447,7 @@ mod tests {
         third["sectionStart"] = json!("continuous");
         assert_eq!(
             measured_table_wrap_margins("text", "left", json!([first, second, third])),
-            (493.0, 0.0)
+            (0.0, 0.0)
         );
     }
 
