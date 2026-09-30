@@ -4,6 +4,9 @@ import {
   RESIDENT_WORKER_SILENCE_MS,
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
+  preloadResidentEngineWorker,
+  retainPreloadedResidentEngineWorker,
+  takePreloadedResidentEngineWorker,
   ResidentWorkerOutOfMemoryError,
   type ResidentEngineWorkerPort,
 } from './residentEngineWorkerClient';
@@ -13,11 +16,16 @@ import type {
 } from './residentEngineWorkerProtocol';
 
 class FakeWorker implements ResidentEngineWorkerPort {
+  static instances: FakeWorker[] = [];
   onmessage: ResidentEngineWorkerPort['onmessage'] = null;
   onerror: ResidentEngineWorkerPort['onerror'] = null;
   onmessageerror: ResidentEngineWorkerPort['onmessageerror'] = null;
   readonly posted: ResidentEngineWorkerRequest[] = [];
   terminated = false;
+
+  constructor(readonly url?: string | URL, readonly options?: WorkerOptions) {
+    FakeWorker.instances.push(this);
+  }
 
   postMessage(message: ResidentEngineWorkerRequest): void {
     this.posted.push(message);
@@ -41,9 +49,11 @@ const timers = new Map<number, Timer>();
 let nextTimer = 1;
 const realSetTimeout = globalThis.setTimeout;
 const realClearTimeout = globalThis.clearTimeout;
+const originalWorker = globalThis.Worker;
 
 beforeEach(() => {
   timers.clear();
+  FakeWorker.instances = [];
   globalThis.setTimeout = ((callback: () => void, ms: number) => {
     const id = nextTimer++;
     timers.set(id, { callback, ms });
@@ -55,6 +65,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  takePreloadedResidentEngineWorker()?.destroy();
+  globalThis.Worker = originalWorker;
   globalThis.setTimeout = realSetTimeout;
   globalThis.clearTimeout = realClearTimeout;
 });
@@ -107,6 +119,166 @@ function setup() {
   const client = new ResidentEngineWorkerClient(worker);
   return { worker, client };
 }
+
+describe('warmup', () => {
+  test('waits for warm without marking a session ready or bootstrapped', async () => {
+    const { worker, client } = setup();
+    const warm = client.warm();
+    expect(worker.posted).toEqual([{ id: 1, type: 'warm' }]);
+    expect(client.isReady()).toBe(false);
+    expect(client.bootstrapSent()).toBe(false);
+    worker.reply({ id: worker.lastId(), ok: true });
+    await warm;
+    expect(client.isReady()).toBe(false);
+    expect(client.remoteStateVector()).toBeNull();
+    const bootstrap = client.bootstrap(snapshot, '');
+    worker.reply(frameReply(worker.lastId()));
+    await bootstrap;
+    expect(client.isReady()).toBe(true);
+  });
+
+  test('a rejected warm leaves bootstrap usable', async () => {
+    const { worker, client } = setup();
+    const warm = client.warm();
+    worker.reply({ id: worker.lastId(), ok: false, error: 'init failed' });
+    await expect(warm).rejects.toThrow('init failed');
+    const bootstrap = client.bootstrap(snapshot, '');
+    worker.reply(frameReply(worker.lastId()));
+    await bootstrap;
+    expect(worker.terminated).toBe(false);
+    expect(client.isReady()).toBe(true);
+  });
+});
+
+describe('preloaded worker', () => {
+  function installWorker(): void {
+    globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  }
+
+  async function preloaded(): Promise<FakeWorker> {
+    installWorker();
+    const warm = preloadResidentEngineWorker();
+    const worker = FakeWorker.instances.at(-1)!;
+    worker.reply({ id: worker.lastId(), ok: true });
+    await warm;
+    return worker;
+  }
+
+  test('keeps one spare and consumes it exactly once', async () => {
+    installWorker();
+    const first = preloadResidentEngineWorker();
+    const second = preloadResidentEngineWorker();
+    expect(first).toBe(second);
+    expect(FakeWorker.instances).toHaveLength(1);
+    const worker = FakeWorker.instances[0];
+    expect(String(worker.url).endsWith('/yrs/residentEngineWorker.mjs')).toBe(true);
+    expect(worker.options).toEqual({ type: 'module', name: 'openooxml-resident-engine' });
+    worker.reply({ id: worker.lastId(), ok: true });
+    await first;
+    const client = takePreloadedResidentEngineWorker();
+    expect(client).not.toBeNull();
+    expect(takePreloadedResidentEngineWorker()).toBeNull();
+    expect(timers.size).toBe(0);
+    client?.destroy();
+  });
+
+  test('drops a failed spare so the next preload creates a fresh worker', async () => {
+    installWorker();
+    const warm = preloadResidentEngineWorker();
+    const failed = FakeWorker.instances[0];
+    failed.reply({ id: failed.lastId(), ok: false, error: 'init failed' });
+    await expect(warm).rejects.toThrow('init failed');
+    expect(failed.terminated).toBe(true);
+    expect(takePreloadedResidentEngineWorker()).toBeNull();
+    const next = await preloaded();
+    expect(next).not.toBe(failed);
+    expect(FakeWorker.instances).toHaveLength(2);
+  });
+
+  test('an adopted spare can retry bootstrap after its pending warm fails', async () => {
+    installWorker();
+    const warm = preloadResidentEngineWorker();
+    const worker = FakeWorker.instances[0];
+    const client = takePreloadedResidentEngineWorker()!;
+    const bootstrap = client.bootstrap(snapshot, '');
+    worker.reply({ id: worker.posted[0].id, ok: false, error: 'init failed' });
+    await expect(warm).rejects.toThrow('init failed');
+    worker.reply(frameReply(worker.lastId()));
+    await bootstrap;
+    expect(worker.terminated).toBe(false);
+    expect(client.isReady()).toBe(true);
+    client.destroy();
+  });
+
+  test('does not adopt a spare made by another Worker constructor', async () => {
+    const worker = await preloaded();
+    class OtherWorker extends FakeWorker {}
+    globalThis.Worker = OtherWorker as unknown as typeof Worker;
+    expect(takePreloadedResidentEngineWorker()).toBeNull();
+    expect(worker.terminated).toBe(true);
+    const fresh = new ResidentEngineWorkerClient();
+    expect(FakeWorker.instances.at(-1)).toBeInstanceOf(OtherWorker);
+    fresh.destroy();
+  });
+
+  test('does not adopt a spare that crashed after warming', async () => {
+    const worker = await preloaded();
+    worker.onerror?.({ message: 'out of memory' } as ErrorEvent);
+    expect(takePreloadedResidentEngineWorker()).toBeNull();
+    expect(worker.terminated).toBe(true);
+    const next = await preloaded();
+    expect(next).not.toBe(worker);
+  });
+
+  test('keeps the spare through StrictMode cleanup and frees it after the last owner leaves', async () => {
+    const worker = await preloaded();
+    const release = retainPreloadedResidentEngineWorker();
+    release();
+    release();
+    await preloadResidentEngineWorker();
+    const remounted = retainPreloadedResidentEngineWorker();
+    const secondOwner = retainPreloadedResidentEngineWorker();
+    expireTimers();
+    expect(worker.terminated).toBe(false);
+    remounted();
+    expireTimers();
+    expect(worker.terminated).toBe(false);
+    secondOwner();
+    expireTimers();
+    expect(worker.terminated).toBe(true);
+    expect(takePreloadedResidentEngineWorker()).toBeNull();
+  });
+
+  test('releasing an owner cannot terminate an adopted worker or a later spare', async () => {
+    const adopted = await preloaded();
+    const release = retainPreloadedResidentEngineWorker();
+    const client = takePreloadedResidentEngineWorker()!;
+    const spare = await preloaded();
+    const releaseSpare = retainPreloadedResidentEngineWorker();
+    release();
+    expireTimers();
+    expect(adopted.terminated).toBe(false);
+    expect(spare.terminated).toBe(false);
+    releaseSpare();
+    expireTimers();
+    expect(spare.terminated).toBe(true);
+    client.destroy();
+  });
+
+  test('expires an unused public preload', async () => {
+    const worker = await preloaded();
+    expireTimers();
+    expect(worker.terminated).toBe(true);
+    expect(takePreloadedResidentEngineWorker()).toBeNull();
+  });
+
+  test('skips worker startup where Worker is unavailable', async () => {
+    globalThis.Worker = undefined as unknown as typeof Worker;
+    await preloadResidentEngineWorker();
+    expect(FakeWorker.instances).toHaveLength(0);
+    expect(takePreloadedResidentEngineWorker()).toBeNull();
+  });
+});
 
 describe('watchdog', () => {
   test('queued requests share one silence budget that each reply restarts', async () => {
