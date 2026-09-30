@@ -239,9 +239,15 @@ export class ResidentEngineWorkerClient {
    */
   async completeLayout(
     expectedFrameEpoch: number,
-    paintCaret = false
+    paintCaret = false,
+    sliceBlocks?: number
   ): Promise<ResidentEngineWorkerFrame | null> {
-    const response = await this.request({ type: 'completeLayout', expectedFrameEpoch, paintCaret });
+    const response = await this.request({
+      type: 'completeLayout',
+      expectedFrameEpoch,
+      paintCaret,
+      ...(sliceBlocks ? { sliceBlocks } : {}),
+    });
     return response.frame ? frameResult(response) : null;
   }
 
