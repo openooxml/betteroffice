@@ -125,6 +125,45 @@ test('overlapping header/footer widgets stack beneath body widgets of either kin
   }
 });
 
+test('a covered header checkbox mirror is inert and hidden until the cover goes', () => {
+  const page: DisplayPage = {
+    pageIndex: 0, width: 100, height: 100,
+    primitives: [{ kind: 'rect', x: 25, y: 10, w: 10, h: 20, fill: '#fff' }],
+    header: {
+      rId: 'rIdHeader', kind: 'header', y: 0, height: 40,
+      primitives: [10, 30].map((x): DisplayPrimitive => ({
+        kind: 'rect', x, y: 10, w: 20, h: 20, fill: '#fff',
+        inlineSdtWidget: { kind: 'checkbox', groupId: 'header', pos: 1, checked: false },
+      })),
+    },
+  };
+  const mirrors = buildMirrorPage(page).querySelectorAll<HTMLElement>('.layout-inline-sdt-widget');
+  expect(mirrors.length).toBe(2);
+  const overlay = buildInteractiveOverlayPage(page)
+    .querySelector<HTMLButtonElement>('.layout-inline-sdt-widget')!;
+  for (const element of [...mirrors, overlay]) {
+    expect(element.style.visibility).toBe('hidden');
+    expect(element.style.pointerEvents).toBe('none');
+    expect(element.tabIndex).toBe(-1);
+    expect(element.hasAttribute('inert')).toBe(true);
+    expect(element.getAttribute('aria-hidden')).toBe('true');
+    expect(element.getAttribute('aria-disabled')).toBe('true');
+  }
+  expect(overlay.disabled).toBe(true);
+
+  page.primitives = [];
+  for (const restored of buildMirrorPage(page).querySelectorAll<HTMLElement>('.layout-inline-sdt-widget')) {
+    expect(restored.style.visibility).not.toBe('hidden');
+    expect(restored.style.pointerEvents).not.toBe('none');
+    expect(restored.hasAttribute('tabindex')).toBe(false);
+    expect(restored.hasAttribute('inert')).toBe(false);
+    expect(restored.hasAttribute('aria-hidden')).toBe(false);
+    expect(restored.hasAttribute('aria-disabled')).toBe(false);
+    expect(restored.getAttribute('role')).toBe('checkbox');
+    expect(restored.getAttribute('aria-checked')).toBe('false');
+  }
+});
+
 test("a page's links-only mirror holds the full mirror's links and ids, in order", () => {
   const links = (root: HTMLElement) =>
     Array.from(root.querySelectorAll('a'), (a) => [a.getAttribute('href'), a.id, a.textContent]);

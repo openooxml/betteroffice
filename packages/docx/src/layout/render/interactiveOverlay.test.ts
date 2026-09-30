@@ -1,7 +1,13 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, expect, test } from 'bun:test';
-import type { DisplayPage, DisplayPrimitive, ImagePrimitive, TextRunPrimitive } from './displayList';
-import { buildInteractiveOverlayPage } from './interactiveOverlay';
+import type {
+  DisplayPage,
+  DisplayPrimitive,
+  ImagePrimitive,
+  ShapePrimitive,
+  TextRunPrimitive,
+} from './displayList';
+import { buildInteractiveOverlayPage, interactiveOverlayHasTabStops } from './interactiveOverlay';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -39,6 +45,9 @@ function expectHidden(button: HTMLButtonElement): void {
   expect(button.style.pointerEvents).toBe('none');
   expect(button.tabIndex).toBe(-1);
   expect(button.disabled).toBe(true);
+  expect(button.hasAttribute('inert')).toBe(true);
+  expect(button.getAttribute('aria-hidden')).toBe('true');
+  expect(button.getAttribute('aria-disabled')).toBe('true');
 }
 
 function expectActive(button: HTMLButtonElement): void {
@@ -46,6 +55,9 @@ function expectActive(button: HTMLButtonElement): void {
   expect(button.style.pointerEvents).toBe('auto');
   expect(button.tabIndex).toBe(0);
   expect(button.disabled).toBe(false);
+  expect(button.hasAttribute('inert')).toBe(false);
+  expect(button.hasAttribute('aria-hidden')).toBe(false);
+  expect(button.hasAttribute('aria-disabled')).toBe(false);
 }
 
 test('body images hide covered header checkboxes', () => {
@@ -148,6 +160,61 @@ test('only primitives with paint and positive area occlude controls', () => {
   }
 });
 
+test('body picture fills with zero opacity do not hide header controls', () => {
+  const shape: ShapePrimitive = {
+    kind: 'shape', x: 100, y: 20, w: 20, h: 20,
+    geometryPath: [
+      { type: 'move', x: 100, y: 20 }, { type: 'line', x: 120, y: 20 },
+      { type: 'line', x: 120, y: 40 }, { type: 'line', x: 100, y: 40 }, { type: 'close' },
+    ],
+    fillPaint: { kind: 'picture', pictureRelId: 'rIdPicture', pictureOpacity: 0 },
+  };
+  expectHidden(headerWidget([{
+    ...shape, fillPaint: { ...shape.fillPaint, pictureOpacity: 1 },
+  }]));
+  expectActive(headerWidget([shape]));
+});
+
+test('whitespace-only body text does not hide header controls', () => {
+  for (const text of [' ', '\t\n', '\u00a0\u2003']) {
+    const runs: DisplayPrimitive[] = [{
+      kind: 'text', text, x: 100, baselineY: 35, width: 60,
+      font: '16px sans-serif', color: '#000',
+    }, {
+      kind: 'glyphRun', fontId: 1, size: 16, color: '#000', text,
+      glyphs: [{ id: 1, x: 100, y: 35, cluster: 0, advance: 60 }],
+    }];
+    for (const run of runs) expectActive(headerWidget([run]));
+  }
+});
+
+test('a page whose only inline control is covered has no tab stop', () => {
+  const page = pageWith([image()]);
+  expectHidden(buildInteractiveOverlayPage(page)
+    .querySelector<HTMLButtonElement>('.layout-inline-sdt-widget')!);
+  expect(interactiveOverlayHasTabStops(page)).toBe(false);
+  page.primitives = [];
+  expect(interactiveOverlayHasTabStops(page)).toBe(true);
+  expectActive(buildInteractiveOverlayPage(page)
+    .querySelector<HTMLButtonElement>('.layout-inline-sdt-widget')!);
+});
+
+test('covered boundary controls do not contribute tab stops', () => {
+  for (const sdtType of ['checkbox', 'repeatingSection']) {
+    const page = pageWith([image()]);
+    page.header!.primitives = [{
+      kind: 'rect', x: 100, y: 20, w: 60, h: 40, fill: '#fff',
+      sdt: { groupId: 'header', sdtType, repeatingItem: sdtType === 'repeatingSection' },
+    }];
+    const buttons = buildInteractiveOverlayPage(page).querySelectorAll<HTMLButtonElement>('button');
+    expect(buttons.length).toBe(sdtType === 'checkbox' ? 1 : 2);
+    for (const button of buttons) expectHidden(button);
+    expect(interactiveOverlayHasTabStops(page)).toBe(false);
+    page.primitives = [];
+    expect(interactiveOverlayHasTabStops(page)).toBe(true);
+  }
+});
+
 test('boundary controls use their own centers for occlusion', () => {
   const page = pageWith([image({ x: 140, y: 42, w: 20, h: 16 })]);
   page.header!.primitives = [{
@@ -158,6 +225,7 @@ test('boundary controls use their own centers for occlusion', () => {
   expectHidden(overlay.querySelector<HTMLButtonElement>('[data-sdt-repeat="remove"]')!);
   expectActive(overlay.querySelector<HTMLButtonElement>('[data-sdt-repeat="add"]')!);
   expectActive(overlay.querySelector<HTMLButtonElement>('.layout-sdt-widget')!);
+  expect(interactiveOverlayHasTabStops(page)).toBe(true);
 
   page.primitives = [image({ x: 124, y: 36, w: 12, h: 8 })];
   const centerCovered = buildInteractiveOverlayPage(page);

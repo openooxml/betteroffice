@@ -64,6 +64,24 @@ interface SdtExtent {
 interface WidgetExtent {
   attrs: InlineSdtWidgetAttrs;
   rect: GeoRect;
+  primitives: DisplayPrimitive[];
+}
+
+interface ControlExtent {
+  rect: GeoRect;
+  occluded: boolean;
+}
+
+interface BoundaryExtent extends SdtExtent {
+  kind: ReturnType<typeof blockWidgetKind>;
+  widget?: ControlExtent;
+  repeats: ControlExtent[];
+}
+
+interface InteractiveOverlayLayer {
+  lowerLayer: boolean;
+  boundaries: BoundaryExtent[];
+  widgets: Array<WidgetExtent & { occluded: boolean }>;
 }
 
 /**
@@ -99,25 +117,67 @@ export function buildInteractiveOverlayPage(
     event.stopPropagation();
   });
 
-  const layers = pagePrimitiveLayers(page);
-  const body = layers[3]!;
-  for (const [layer, primitives] of layers.entries()) {
-    const groups = collectSdtExtents(primitives);
-    for (const extent of [...groups.values()].sort(compareSdtExtents)) {
-      const boundary = renderBoundary(extent, doc, options.labels, layer < 3 ? body : undefined);
+  for (const [layer, controls] of collectInteractiveOverlayLayers(page).entries()) {
+    for (const extent of controls.boundaries) {
+      const boundary = renderBoundary(extent, doc, options.labels, controls.lowerLayer);
       boundary.style.zIndex = String(layer);
       root.appendChild(boundary);
     }
 
-    const widgets = collectWidgetExtents(primitives);
-    for (const extent of widgets.values()) {
+    for (const extent of controls.widgets) {
       const widget = renderInlineWidget(extent, doc, options.labels);
       widget.style.zIndex = String(layer);
-      if (layer < 3) hideCoveredControl(widget, extent.rect, body);
+      if (extent.occluded) hideOccludedControl(widget);
       root.appendChild(widget);
     }
   }
   return root;
+}
+
+export function collectInteractiveOverlayLayers(page: DisplayPage): InteractiveOverlayLayer[] {
+  const layers = pagePrimitiveLayers(page);
+  const body = layers[3]!;
+  return layers.map((primitives, layer) => {
+    const lowerLayer = layer < 3;
+    const controlExtent = (rect: GeoRect): ControlExtent => ({
+      rect,
+      occluded: lowerLayer && bodyPaintsRectCenter(body, rect),
+    });
+    const boundaries = [...collectSdtExtents(primitives).values()]
+      .sort(compareSdtExtents)
+      .map((extent): BoundaryExtent => {
+        const { kind, repeat } = boundaryControls(extent.attrs);
+        const { rect } = extent;
+        const right = rect.x + Math.max(1, rect.w) - BOUNDARY_CONTROL_INSET;
+        const bottom = rect.y + Math.max(1, rect.h) - BOUNDARY_CONTROL_INSET;
+        return {
+          ...extent,
+          kind,
+          widget: kind
+            ? controlExtent({
+                x: right - BOUNDARY_WIDGET_SIZE,
+                y: rect.y + BOUNDARY_CONTROL_INSET,
+                w: BOUNDARY_WIDGET_SIZE,
+                h: BOUNDARY_WIDGET_SIZE,
+              })
+            : undefined,
+          repeats: repeat
+            ? [0, 1].map((index) => controlExtent({
+                x: right - REPEAT_BUTTON_SIZE -
+                  (1 - index) * (REPEAT_BUTTON_SIZE + REPEAT_BUTTON_GAP),
+                y: bottom - REPEAT_BUTTON_SIZE,
+                w: REPEAT_BUTTON_SIZE,
+                h: REPEAT_BUTTON_SIZE,
+              }))
+            : [],
+        };
+      });
+    const widgets = [...collectWidgetExtents(primitives).values()].map((extent) => ({
+      ...extent,
+      occluded: lowerLayer && bodyPaintsRectCenter(body, extent.rect),
+    }));
+    return { lowerLayer, boundaries, widgets };
+  });
 }
 
 function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean {
@@ -130,10 +190,10 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
     if (primitive.clipGroup?.clip && (primitive.clipGroup.opacity ?? 1) <= 0) return false;
     switch (primitive.kind) {
       case 'text':
-        if (!primitive.text) return false;
+        if (!primitive.text.trim()) return false;
         break;
       case 'glyphRun':
-        if (!primitive.glyphs.length) return false;
+        if (!primitive.glyphs.length || !primitive.text.trim()) return false;
         break;
       case 'rect':
         if (!primitive.fill || primitive.fill === 'transparent' || primitive.fill === 'none') {
@@ -146,7 +206,10 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
         if (!primitive.geometryPath.length) return false;
         if (paint?.kind === 'none') return false;
         if (paint?.kind === 'gradient' || paint?.kind === 'pattern') break;
-        if (paint?.kind === 'picture' && (paint.pictureSrc || paint.pictureRelId)) break;
+        if (paint?.kind === 'picture' && (paint.pictureSrc || paint.pictureRelId)) {
+          if ((paint.pictureOpacity ?? 1) <= 0) return false;
+          break;
+        }
         if (!fill || fill === 'transparent' || fill === 'none') return false;
         break;
       }
@@ -171,12 +234,14 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
   });
 }
 
-function hideCoveredControl(button: HTMLButtonElement, rect: GeoRect, body: DisplayPrimitive[]): void {
-  if (!bodyPaintsRectCenter(body, rect)) return;
-  button.style.visibility = 'hidden';
-  button.style.pointerEvents = 'none';
-  button.tabIndex = -1;
-  button.disabled = true;
+export function hideOccludedControl(element: HTMLElement): void {
+  element.style.visibility = 'hidden';
+  element.style.pointerEvents = 'none';
+  element.tabIndex = -1;
+  element.setAttribute('inert', '');
+  element.setAttribute('aria-hidden', 'true');
+  element.setAttribute('aria-disabled', 'true');
+  if (element.tagName === 'BUTTON') (element as HTMLButtonElement).disabled = true;
 }
 
 function pagePrimitiveLayers(page: DisplayPage): DisplayPrimitive[][] {
@@ -223,8 +288,10 @@ function collectWidgetExtents(primitives: DisplayPrimitive[]): Map<string, Widge
     if (!attrs || !rect) continue;
     const key = `${attrs.groupId}:${attrs.pos}:${attrs.controlKind ?? attrs.kind}`;
     const current = widgets.get(key);
-    if (current) current.rect = unionRect(current.rect, rect);
-    else widgets.set(key, { attrs, rect: { ...rect } });
+    if (current) {
+      current.rect = unionRect(current.rect, rect);
+      current.primitives.push(primitive);
+    } else widgets.set(key, { attrs, rect: { ...rect }, primitives: [primitive] });
   }
   return widgets;
 }
@@ -234,14 +301,12 @@ function compareSdtExtents(a: SdtExtent, b: SdtExtent): number {
 }
 
 function renderBoundary(
-  extent: SdtExtent,
+  extent: BoundaryExtent,
   doc: Document,
   labels: InteractiveOverlayLabels | undefined,
-  body: DisplayPrimitive[] | undefined
+  lowerLayer: boolean
 ): HTMLElement {
-  const { attrs, rect } = extent;
-  const right = rect.x + Math.max(1, rect.w) - BOUNDARY_CONTROL_INSET;
-  const bottom = rect.y + Math.max(1, rect.h) - BOUNDARY_CONTROL_INSET;
+  const { attrs, rect, kind } = extent;
   const box = doc.createElement('div');
   box.className = 'layout-block-sdt-box layout-canvas-sdt-box';
   stampSdtAttrs(box, attrs);
@@ -256,7 +321,6 @@ function renderBoundary(
     box.appendChild(chip);
   }
 
-  const { kind, repeat } = boundaryControls(attrs);
   if (kind) {
     const trigger = doc.createElement('button');
     trigger.type = 'button';
@@ -277,51 +341,32 @@ function renderBoundary(
     trigger.textContent =
       kind === 'dropdown' ? '▾' : kind === 'date' ? '▣' : attrs.checked ? '☒' : '☐';
     trigger.style.pointerEvents = 'auto';
-    if (body) {
-      trigger.style.width = `${BOUNDARY_WIDGET_SIZE}px`;
-      trigger.style.height = `${BOUNDARY_WIDGET_SIZE}px`;
+    if (lowerLayer && extent.widget) {
+      trigger.style.width = `${extent.widget.rect.w}px`;
+      trigger.style.height = `${extent.widget.rect.h}px`;
       trigger.style.boxSizing = 'border-box';
-      hideCoveredControl(
-        trigger,
-        {
-          x: right - BOUNDARY_WIDGET_SIZE,
-          y: rect.y + BOUNDARY_CONTROL_INSET,
-          w: BOUNDARY_WIDGET_SIZE,
-          h: BOUNDARY_WIDGET_SIZE,
-        },
-        body
-      );
     }
+    if (extent.widget?.occluded) hideOccludedControl(trigger);
     box.appendChild(trigger);
   }
 
-  if (repeat) {
+  if (extent.repeats.length) {
     const controls = doc.createElement('div');
     controls.className = 'layout-sdt-repeat-controls';
-    controls.style.pointerEvents = body ? 'none' : 'auto';
+    controls.style.pointerEvents = lowerLayer ? 'none' : 'auto';
     const buttons = [
       repeatButton(doc, attrs, 'add', '＋', labels?.addRepeatingItem, authoredName),
       repeatButton(doc, attrs, 'remove', '✕', labels?.removeRepeatingItem, authoredName),
     ];
     for (const [index, button] of buttons.entries()) {
-      if (body) {
-        button.style.width = `${REPEAT_BUTTON_SIZE}px`;
-        button.style.height = `${REPEAT_BUTTON_SIZE}px`;
+      const control = extent.repeats[index]!;
+      if (lowerLayer) {
+        button.style.width = `${control.rect.w}px`;
+        button.style.height = `${control.rect.h}px`;
         button.style.boxSizing = 'border-box';
         button.style.pointerEvents = 'auto';
-        hideCoveredControl(
-          button,
-          {
-            x:
-              right - REPEAT_BUTTON_SIZE -
-              (buttons.length - 1 - index) * (REPEAT_BUTTON_SIZE + REPEAT_BUTTON_GAP),
-            y: bottom - REPEAT_BUTTON_SIZE,
-            w: REPEAT_BUTTON_SIZE,
-            h: REPEAT_BUTTON_SIZE,
-          },
-          body
-        );
       }
+      if (control.occluded) hideOccludedControl(button);
       controls.appendChild(button);
     }
     box.appendChild(controls);
@@ -427,13 +472,14 @@ function boundaryControls(attrs: SdtAttrs): {
 
 /** Whether `buildInteractiveOverlayPage(page)` holds a control Tab stops at. */
 export function interactiveOverlayHasTabStops(page: DisplayPage): boolean {
-  const primitives = pagePrimitiveLayers(page).flat();
-  for (const extent of collectSdtExtents(primitives).values()) {
-    const { kind, repeat } = boundaryControls(extent.attrs);
-    if (kind || repeat) return true;
-  }
-  for (const extent of collectWidgetExtents(primitives).values()) {
-    if (extent.attrs.locked !== true) return true;
+  for (const layer of collectInteractiveOverlayLayers(page)) {
+    for (const extent of layer.boundaries) {
+      if (extent.widget && !extent.widget.occluded) return true;
+      if (extent.repeats.some((control) => !control.occluded)) return true;
+    }
+    for (const extent of layer.widgets) {
+      if (!extent.occluded && extent.attrs.locked !== true) return true;
+    }
   }
   return false;
 }
