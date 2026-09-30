@@ -155,6 +155,80 @@ test('a session handed over keeps its worker and shows the old pages until the n
   }
 });
 
+test('a session handed over never takes the worker back from its successor', async () => {
+  FakeWorker.created = [];
+  globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  const preview = hostWithPage(9516, 'Preview page');
+  const full = hostWithPage(9517, 'Full page');
+  const handoffFrom = { current: null as YrsSession | null };
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source, resolved }) =>
+        useRustDisplayList(
+          layout,
+          undefined,
+          undefined,
+          resolved,
+          source,
+          undefined,
+          undefined,
+          handoffFrom
+        ),
+      {
+        initialProps: {
+          layout: null as Layout | null,
+          source: null as YrsSession | null,
+          resolved: undefined as ReadonlySet<number> | undefined,
+        },
+      }
+    );
+    const reply = (host: ReturnType<typeof hostWithPage>, index: number) => {
+      const worker = FakeWorker.created[0]!;
+      worker.reply({
+        id: worker.posted[index]!.id,
+        ok: true,
+        frame: host.frame.slice().buffer,
+        caret: { frameEpoch: 1, caretRect: null },
+        selection: null,
+        layoutRevision: 1,
+        layoutJson: host.layoutJson,
+      });
+    };
+    const previewPending = result.current.layoutInWorker(preview.engine, REQUEST);
+    reply(preview, 0);
+    const previewLayout = (await previewPending!)!.layout;
+    await act(async () => {
+      rerender({ layout: previewLayout, source: preview.engine, resolved: undefined });
+    });
+    await waitFor(() => expect(text(result.current.displayList)).toContain('Preview'));
+
+    handoffFrom.current = preview.engine;
+    const fullPending = result.current.layoutInWorker(full.engine, REQUEST);
+    // A preview redraw after the handover, such as a changed set of resolved comments.
+    await act(async () => {
+      rerender({ layout: previewLayout, source: preview.engine, resolved: new Set([1]) });
+    });
+    expect(result.current.layoutInWorker(preview.engine, REQUEST)).toBeNull();
+    expect(FakeWorker.created).toHaveLength(1);
+    const worker = FakeWorker.created[0]!;
+    expect(worker.posted.map((request) => request.type)).toEqual(['bootstrap', 'bootstrap']);
+    expect(text(result.current.displayList)).toContain('Preview');
+
+    reply(full, 1);
+    const fullLayout = (await fullPending!)!.layout;
+    await act(async () => {
+      rerender({ layout: fullLayout, source: full.engine, resolved: undefined });
+    });
+    await waitFor(() => expect(text(result.current.displayList)).toContain('Full'));
+    expect(FakeWorker.created).toHaveLength(1);
+    expect(worker.posted.map((request) => request.type)).not.toContain('destroy');
+    unmount();
+  } finally {
+    preview.native.free();
+    full.native.free();
+  }
+});
+
 test('glyph outlines and decoded images come from the session whose pages are shown', async () => {
   FakeWorker.created = [];
   globalThis.Worker = FakeWorker as unknown as typeof Worker;

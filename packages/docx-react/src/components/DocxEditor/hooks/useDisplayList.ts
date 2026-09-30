@@ -354,6 +354,8 @@ export function useRustDisplayList(
     return load;
   }, []);
   const spawnedWorkerEnginesRef = useRef(new WeakSet<YrsSession>());
+  // Sessions whose worker and page surfaces a successor took over: they never take one back.
+  const handedOverEnginesRef = useRef(new WeakSet<YrsSession>());
   // The worker for `hostEngine`: its own, the one of the session it
   // takes over from, a spare, or a new one.
   const workerFor = useCallback(
@@ -364,6 +366,7 @@ export function useRustDisplayList(
       const replacement = spawnedWorkerEnginesRef.current.has(hostEngine);
       spawnedWorkerEnginesRef.current.add(hostEngine);
       if (current && handoffFromRef?.current === current.engine) {
+        handedOverEnginesRef.current.add(current.engine);
         current.client.rebootstrap();
         workerRef.current = { engine: hostEngine, client: current.client, load };
         return workerRef.current;
@@ -1135,7 +1138,8 @@ export function useRustDisplayList(
         !canUseResidentEngineWorker() ||
         !isWorkerHostEngine(hostEngine) ||
         !hostEngine.adoptResidentWorkerLayout ||
-        workerFallbackEngineRef.current === hostEngine
+        workerFallbackEngineRef.current === hostEngine ||
+        handedOverEnginesRef.current.has(hostEngine)
       ) {
         return null;
       }
@@ -1446,7 +1450,10 @@ export function useRustDisplayList(
     const paintToken = paintedCaretMachine.token();
     let pending: Promise<BuiltDisplay>;
     const outOfMemory = residentEngine ? outOfMemoryRef.current.get(residentEngine) : null;
-    if (outOfMemory && residentEngine) {
+    if (residentEngine && handedOverEnginesRef.current.has(residentEngine)) {
+      // Its successor paints these surfaces now, and its first frame replaces this one.
+      pending = Promise.reject(new SupersededPreviewError());
+    } else if (outOfMemory && residentEngine) {
       // A replaced document's failure fails nothing of the one being loaded.
       pending = Promise.reject(
         sessionLoad(residentEngine) === documentLoadsRef.current
