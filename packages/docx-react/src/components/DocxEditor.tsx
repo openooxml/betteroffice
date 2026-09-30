@@ -1117,12 +1117,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const shownRef = useRef({
     displayList: canvasRenderer.displayList,
     engine: canvasRenderer.presentedEngine,
-    layoutEngine: canvasRenderer.layoutEngine,
   });
   shownRef.current = {
     displayList: canvasRenderer.displayList,
     engine: canvasRenderer.presentedEngine,
-    layoutEngine: canvasRenderer.layoutEngine,
   };
   useEffect(() => {
     const offPresented = onPresented((displayList) => {
@@ -1132,10 +1130,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     // Pages of the opening session that fail to paint fail the load, as its render errors do.
     const offFailed = onReplayFailed((displayList, error) => {
       const shown = shownRef.current;
-      if (displayList !== shown.displayList || !shown.layoutEngine) return;
+      if (displayList !== shown.displayList || !shown.engine) return;
       failOpeningRef.current(
         error instanceof Error ? error : new Error(String(error)),
-        shown.layoutEngine
+        shown.engine
       );
     });
     return () => {
