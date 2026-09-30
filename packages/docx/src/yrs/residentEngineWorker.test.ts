@@ -639,6 +639,7 @@ describe('sliced layout completion', () => {
       residentCaretSnapshot: () => ({ frameEpoch: epoch, caretRect: null }),
       buildDisplayListFrame: () => {
         epoch += 1;
+        // One page, as a provisional frame shows its prefix.
         w.harness.delta = {
           protocolVersion: 1,
           full: true,
@@ -646,8 +647,17 @@ describe('sliced layout completion', () => {
           baseFrameEpoch: 0,
           docEpoch: epoch,
           layoutEpoch: epoch,
-          pageCount: 0,
-          operations: [],
+          pageCount: 1,
+          operations: [
+            {
+              kind: 'upsert',
+              pageId: 1n,
+              pageIndex: 0,
+              fingerprint: BigInt(epoch),
+              primitiveIds: new BigUint64Array(),
+              page: { pageIndex: 0, width: 100, height: 100, primitives: [] },
+            },
+          ],
           bytes: new Uint8Array(),
         };
         return new Uint8Array([0]);
@@ -687,6 +697,28 @@ describe('sliced layout completion', () => {
     expect(calls[2]).toBe('pages');
     expect(calls.slice(3).every((call) => call.startsWith('resume:'))).toBe(true);
     expect(calls).not.toContain('whole');
+  });
+
+  test('a page past the provisional frame finishes the pass first and answers it first', async () => {
+    const { w, calls, onResume, bootstrap } = steppedWorker(100);
+    await bootstrap();
+    const order: string[] = [];
+    let pages: Promise<unknown> | undefined;
+    onResume.push(() => {
+      pages = w
+        .send({ type: 'buildPages', pages: [5], expectedFrameEpoch: 1, paintCaret: false })
+        .then(() => order.push('pages'));
+    });
+    const completed = await w
+      .send({ type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 2 })
+      .then((reply) => {
+        order.push('complete');
+        return reply;
+      });
+    await pages;
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(order).toEqual(['complete', 'pages']);
+    expect(calls).toEqual(['begin', 'resume:2', 'resume:100', 'pages']);
   });
 
   test('an update in between begins the pass again on the new state', async () => {

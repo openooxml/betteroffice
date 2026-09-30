@@ -194,6 +194,11 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'buildPages') {
+    // Pages of the provisional frame build between steps; one past it needs the rest.
+    const shown = retainedFrame?.pages.length ?? 0;
+    if (incompleteLayout && request.pages.some((page) => page >= shown)) {
+      await completeProvisionalLayout();
+    }
     pendingUpdates = [];
     const started = performance.now();
     const frame = session.buildDisplayPagesFrame(request.pages, request.expectedFrameEpoch);
