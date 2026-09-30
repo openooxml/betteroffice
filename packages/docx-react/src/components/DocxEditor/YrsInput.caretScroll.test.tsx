@@ -13,6 +13,7 @@ import {
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import { YrsInput, type YrsInputProps, type YrsInputRef } from './YrsInput';
+import { deferWorkerOpenReplica } from './internals/workerOpenReplica';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -40,7 +41,12 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-async function mount(readOnly: boolean, seedSelection: boolean, replicaReady = true) {
+async function mount(
+  readOnly: boolean,
+  seedSelection: boolean,
+  replicaReady = true,
+  props: Partial<YrsInputProps> = {}
+) {
   const session = await createYrsSession();
   sessions.push(session);
   if (replicaReady) session.openDocx(bytes, true);
@@ -83,7 +89,8 @@ async function mount(readOnly: boolean, seedSelection: boolean, replicaReady = t
     isReady: () => replicaReadyRef.current,
     caretRect,
     pageSize: () => ({ width: 800, height: 3000 }),
-  } satisfies Pick<DisplayListQueries, 'isReady' | 'caretRect' | 'pageSize'>;
+    verticalMove: () => null,
+  } satisfies Pick<DisplayListQueries, 'isReady' | 'caretRect' | 'pageSize' | 'verticalMove'>;
   const map = () => createYrsInputPositionMap('body', session.paragraphSpans('body'));
   const displayPositionToLoc: YrsInputProps['displayPositionToLoc'] = (position) =>
     displayPositionToYrsLoc(map(), position);
@@ -106,6 +113,7 @@ async function mount(readOnly: boolean, seedSelection: boolean, replicaReady = t
       canvasHostRef={canvasHostRef}
       onStateChange={onStateChange}
       onDirectInput={() => {}}
+      {...props}
     />
   );
   const view = render(inputFor());
@@ -140,16 +148,16 @@ test('a read-only replica lands without a selection or scrolling when seeding is
 test.each([
   ['read-only', true],
   ['editable', false],
-] as const)('a %s input seeds a caret at the story start without scrolling', async (_, readOnly) => {
+] as const)('a %s input seeds a caret at the story start and scrolls to it', async (_, readOnly) => {
   const { scroller, scrollTop, expectCaret } = await mount(readOnly, true);
   expectCaret(0);
-  expect(scroller.scrollTop).toBe(scrollTop);
+  expect(scroller.scrollTop).toBeGreaterThan(scrollTop);
 });
 
 test('keepSelectionInPlace suppresses scrolling for one selection', async () => {
-  const { input, scroller, scrollTop, expectCaret } = await mount(false, true);
+  const { input, scroller, expectCaret } = await mount(false, true);
   expectCaret(0);
-  expect(scroller.scrollTop).toBe(scrollTop);
+  const scrollTop = scroller.scrollTop;
   act(() => {
     input.current!.setSelectionFromDisplay(2);
     input.current!.keepSelectionInPlace();
@@ -179,4 +187,200 @@ test('read-only, the first keyboard move on a replica without a caret scrolls in
   });
   expect(session.selection()).not.toBeNull();
   expect(scroller.scrollTop).toBeGreaterThan(scrollTop);
+});
+
+// A read-only input on a replica that loads on demand; `record` stands in for a gesture the pages
+// recorded meanwhile, which the host applies before input that waited.
+async function mountOnDemand() {
+  let epoch = 0;
+  let pending: [number, number] | null = null;
+  const replayed: Array<[number, number]> = [];
+  const requestReplica = mock(() => {});
+  const mounted = await mount(true, false, false, {
+    requestReplica,
+    inputEpoch: () => epoch,
+    applyPendingSelection: () => {
+      if (!pending) return;
+      const [anchor, head] = pending;
+      pending = null;
+      replayed.push([anchor, head]);
+      mounted.input.current!.setSelectionFromDisplay(anchor, head);
+      mounted.input.current!.keepSelectionInPlace();
+    },
+  });
+  const { session, input, view, inputFor, replicaReadyRef } = mounted;
+  let settle!: (loaded: boolean) => void;
+  const replica = deferWorkerOpenReplica(
+    session,
+    () =>
+      new Promise<() => void>((resolve, reject) => {
+        settle = (loaded) =>
+          loaded
+            ? resolve(() => session.openDocx(bytes, true))
+            : reject(new Error('The handoff failed'));
+      }),
+    () => {
+      throw new Error('The fallback failed');
+    },
+    () => {
+      replicaReadyRef.current = true;
+    },
+    { active: () => true, request: () => replica.start() }
+  );
+  const finish = async (loaded: boolean) => {
+    await act(async () => {
+      settle(loaded);
+      await input.current!.flushPendingInput();
+    });
+    act(() => view.rerender(inputFor()));
+  };
+  return {
+    ...mounted,
+    requestReplica,
+    replayed,
+    textarea: view.getByTestId('yrs-input'),
+    record: (anchor: number, head = anchor) => {
+      pending = [anchor, head];
+    },
+    supersede: () => {
+      epoch += 1;
+      pending = null;
+    },
+    loc: (offset: number) => ({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset }),
+    load: () => finish(true),
+    fail: () => finish(false),
+  };
+}
+
+test('keys pressed while the replica loads follow the recorded gesture once it has, in order', async () => {
+  const t = await mountOnDemand();
+  t.record(3);
+  act(() => {
+    fireEvent.keyDown(t.textarea, { key: 'ArrowRight' });
+    fireEvent.keyDown(t.textarea, { key: 'ArrowRight', shiftKey: true });
+  });
+  expect(t.requestReplica).toHaveBeenCalled();
+  expect(t.session.selection()).toBeNull();
+  expect(t.input.current!.hasPendingInput()).toBe(true);
+
+  await t.load();
+  expect(t.replayed).toEqual([[3, 3]]);
+  expect(t.session.selection()).toEqual({ anchor: t.loc(3), head: t.loc(4) });
+});
+
+test('a line move pressed while the replica loads moves from the recorded caret', async () => {
+  const t = await mountOnDemand();
+  t.record(3);
+  act(() => {
+    fireEvent.keyDown(t.textarea, { key: 'ArrowDown' });
+  });
+
+  await t.load();
+  expect(t.replayed).toEqual([[3, 3]]);
+  expect(t.session.selection()?.head.paraId).toBe(t.session.paragraphs('body')[1]!.paraId);
+});
+
+test('select all pressed after a click while the replica loads selects the whole story', async () => {
+  const t = await mountOnDemand();
+  t.record(3);
+  act(() => {
+    fireEvent.keyDown(t.textarea, { key: 'a', ctrlKey: true });
+  });
+
+  await t.load();
+  const map = createYrsInputPositionMap('body', t.session.paragraphSpans('body'));
+  const first = map.paragraphs[0]!;
+  const last = map.paragraphs[map.paragraphs.length - 1]!;
+  expect(t.replayed).toEqual([[3, 3]]);
+  expect(t.session.selection()).toEqual({
+    anchor: { story: 'body', paraId: first.paraId, offset: 0 },
+    head: { story: 'body', paraId: last.paraId, offset: last.length },
+  });
+});
+
+test('a copy while the replica loads writes the text the replayed drag selects', async () => {
+  const written: Array<Record<string, Promise<Blob>>> = [];
+  const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  const scope = globalThis as { ClipboardItem?: unknown };
+  const clipboardItem = scope.ClipboardItem;
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: {
+      write: async (items: Array<{ data: Record<string, Promise<Blob>> }>) => {
+        written.push(items[0]!.data);
+      },
+    },
+  });
+  scope.ClipboardItem = class {
+    constructor(readonly data: Record<string, Promise<Blob>>) {}
+  };
+  try {
+    const t = await mountOnDemand();
+    t.record(2, 6);
+    let notPrevented = true;
+    act(() => {
+      notPrevented = fireEvent.keyDown(t.textarea, { key: 'c', ctrlKey: true });
+    });
+    expect(notPrevented).toBe(false);
+    expect(written).toHaveLength(1);
+
+    await t.load();
+    const text = t.session.paragraphs('body')[0]!.text.slice(1, 5);
+    expect(text).toHaveLength(4);
+    expect(await (await written[0]!['text/plain']!).text()).toBe(text);
+  } finally {
+    if (descriptor) Object.defineProperty(navigator, 'clipboard', descriptor);
+    else delete (navigator as { clipboard?: unknown }).clipboard;
+    scope.ClipboardItem = clipboardItem;
+  }
+});
+
+test('newer input drops keys still waiting for the replica', async () => {
+  const t = await mountOnDemand();
+  t.record(3);
+  act(() => {
+    fireEvent.keyDown(t.textarea, { key: 'ArrowRight' });
+  });
+  t.supersede();
+  t.record(5);
+  act(() => {
+    fireEvent.keyDown(t.textarea, { key: 'ArrowLeft' });
+  });
+
+  await t.load();
+  expect(t.replayed).toEqual([[5, 5]]);
+  expect(t.session.selection()).toEqual({ anchor: t.loc(3), head: t.loc(3) });
+});
+
+test.each([false, true])(
+  'a key that waited for the replica scrolls to its caret unless the reader scrolled since (%p)',
+  async (scrolled) => {
+    const t = await mountOnDemand();
+    act(() => {
+      fireEvent.keyDown(t.textarea, { key: 'End', ctrlKey: true });
+    });
+    if (scrolled) {
+      act(() => {
+        t.scroller.querySelector('.canvas-page')!.dispatchEvent(new Event('wheel', { bubbles: true }));
+      });
+    }
+
+    await t.load();
+    expect(t.session.selection()).not.toBeNull();
+    if (scrolled) expect(t.scroller.scrollTop).toBe(t.scrollTop);
+    else expect(t.scroller.scrollTop).toBeGreaterThan(t.scrollTop);
+  }
+);
+
+test('a replica that fails to load drops the keys waiting for it', async () => {
+  const t = await mountOnDemand();
+  t.record(3);
+  act(() => {
+    fireEvent.keyDown(t.textarea, { key: 'a', ctrlKey: true });
+  });
+
+  await t.fail();
+  expect(t.replayed).toEqual([]);
+  expect(t.session.selection()).toBeNull();
+  expect(t.input.current!.hasPendingInput()).toBe(false);
 });

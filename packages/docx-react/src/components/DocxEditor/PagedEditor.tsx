@@ -1479,7 +1479,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // header/footer double-clicks, word/paragraph multi-click, and
     // right-click → host context-menu.
     const {
+      applyPendingSelection,
       bumpInputEpoch,
+      handleEditorKeyDown,
       inputEpoch,
       handlePagesContextMenu,
       handleTableInsertClick,
@@ -1582,7 +1584,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
      */
     const handleKeyDown = useCallback(
       (e: React.KeyboardEvent) => {
-        bumpInputEpoch();
+        handleEditorKeyDown(e);
         if (readOnly) return;
         // The hidden textarea owns every keyboard/IME event for both body and
         // header/footer roots. Do not re-interpret its bubbled events.
@@ -1618,7 +1620,13 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           if (sc) sc.scrollTop = sc.scrollHeight;
         }
       },
-      [bumpInputEpoch, cancelPendingScrollRestore, readOnly, getScrollContainer, focusBodyInput]
+      [
+        handleEditorKeyDown,
+        cancelPendingScrollRestore,
+        readOnly,
+        getScrollContainer,
+        focusBodyInput,
+      ]
     );
 
     /**
@@ -1851,6 +1859,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     usePagedEditorRefApi({
       bumpInputEpoch,
       inputEpoch,
+      readerSurface: getScrollContainer,
       ref,
       yrsInputRef,
       layout,
@@ -1957,6 +1966,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           readOnly={readOnly || (!!partEdit && activeYrsRootStory === 'body')}
           replicaReadyRef={yrsCore.experimentalWorkerOpen ? yrsCore.replicaReadyRef : undefined}
           requestReplica={yrsCore.hydrateOnDemand ? yrsCore.requestReplica : undefined}
+          inputEpoch={inputEpoch}
+          applyPendingSelection={applyPendingSelection}
           seedSelection={!yrsCore.hydrateOnDemand}
           session={yrsCore.session}
           story={activeYrsRootStory}

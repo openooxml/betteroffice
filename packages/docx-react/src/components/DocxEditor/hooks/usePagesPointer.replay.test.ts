@@ -521,6 +521,24 @@ test('input on the pages or the focused hidden input keeps a pending gesture', (
   }
 });
 
+test.each([
+  ['the hidden input keeps', 'paged-editor__yrs-input', true],
+  ['another control in the editor drops', 'table-insert-button', false],
+] as const)('a key at %s a pending gesture', (_, className, keeps) => {
+  const { opts, selections } = options();
+  const view = renderHook(() => usePagesPointer(opts));
+  const target = document.createElement('textarea');
+  target.className = className;
+  click(1);
+  act(() =>
+    view.result.current.handleEditorKeyDown({ target } as unknown as React.KeyboardEvent)
+  );
+
+  opts.replicaReady = true;
+  view.rerender();
+  expect(selections).toEqual(keeps ? [[20, 20, 'body']] : []);
+});
+
 test('replaying a gesture preserves focus in another input', () => {
   const { opts, selections, focused } = options();
   const view = renderHook(() => usePagesPointer(opts));
@@ -688,6 +706,7 @@ function refApiOptions(
     ref,
     bumpInputEpoch: pointer.bumpInputEpoch,
     inputEpoch: pointer.inputEpoch,
+    readerSurface: () => host,
     yrsInputRef: opts.yrsInputRef,
     layout: null,
     runLayoutPipeline: () => {},
@@ -856,10 +875,10 @@ test.each(['wheel', 'touchmove', 'keydown'])(
       usePagedEditorRefApi(refApiOptions(opts, ref, pointer));
       return pointer;
     });
-    const remove = spyOn(document, 'removeEventListener');
+    const remove = spyOn(host, 'removeEventListener');
     try {
       act(() => ref.current!.highlightRange(20, 45));
-      act(() => document.body.dispatchEvent(new Event(type, { bubbles: true })));
+      act(() => host.firstElementChild!.dispatchEvent(new Event(type, { bubbles: true })));
       await act(async () => {
         loaded();
         await awaitWorkerOpenReplica(session);
@@ -869,6 +888,45 @@ test.each(['wheel', 'touchmove', 'keydown'])(
       expect(remove.mock.calls.filter(([name]) => name === type)).toHaveLength(1);
     } finally {
       remove.mockRestore();
+    }
+  }
+);
+
+test.each(['wheel', 'pointerdown', 'keydown'])(
+  "%s in the host's own UI keeps a highlight asked while the replica loads",
+  async (type) => {
+    let loaded!: () => void;
+    const session = {
+      cellSelection: () => null,
+      version: () => 'v1',
+    } as unknown as YrsSession;
+    const { opts, selections } = options({ yrsSession: session });
+    const replica = deferWorkerOpenReplica(
+      session,
+      () => new Promise<() => void>((resolve) => { loaded = () => resolve(() => {}); }),
+      () => {},
+      () => { opts.replicaReady = true; },
+      { active: () => true, request: () => replica.start() }
+    );
+    const ref = createRef<PagedEditorRef>();
+    const view = renderHook(() => {
+      const pointer = usePagesPointer(opts);
+      usePagedEditorRefApi(refApiOptions(opts, ref, pointer));
+      return pointer;
+    });
+    const hostUi = document.createElement('input');
+    document.body.append(hostUi);
+    try {
+      act(() => ref.current!.highlightRange(20, 45));
+      act(() => hostUi.dispatchEvent(new Event(type, { bubbles: true })));
+      await act(async () => {
+        loaded();
+        await awaitWorkerOpenReplica(session);
+      });
+      view.rerender();
+      expect(selections).toEqual([[20, 45, 'body']]);
+    } finally {
+      hostUi.remove();
     }
   }
 );

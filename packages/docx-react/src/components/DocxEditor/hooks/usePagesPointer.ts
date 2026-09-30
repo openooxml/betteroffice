@@ -92,7 +92,10 @@ export interface UsePagesPointerOptions {
 }
 
 export interface UsePagesPointerReturn {
+  applyPendingSelection: () => void;
   bumpInputEpoch: () => void;
+  /** The editor's keydown, which supersedes a pending gesture unless the hidden input takes it. */
+  handleEditorKeyDown: (e: React.KeyboardEvent) => void;
   /** Advances on every input that supersedes a pending gesture. */
   inputEpoch: () => number;
   handlePagesMouseDown: (e: React.MouseEvent) => void;
@@ -230,6 +233,15 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     }
   }, [clearPendingGesture]);
   const inputEpoch = useCallback(() => inputEpochRef.current, []);
+  // A key at the hidden input follows a pending gesture; any other key in the editor replaces it.
+  const handleEditorKeyDown = useCallback(
+    (e: React.KeyboardEvent): void => {
+      if (!(e.target instanceof Element && e.target.closest('.paged-editor__yrs-input'))) {
+        bumpInputEpoch();
+      }
+    },
+    [bumpInputEpoch]
+  );
   const listenForOutsideInput = useCallback(() => {
     if (pendingGestureCleanupRef.current) return;
     const onInput = (event: Event) => {
@@ -452,8 +464,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     [resolveTarget, setCaretPosition, setSelectionRects, syncYrsInputState, yrsSession]
   );
 
-  useEffect(() => {
-    if (!replicaReady) return;
+  const replayPendingGesture = (): void => {
     const pending = pendingGestureRef.current;
     clearPendingGesture();
     if (!pending || pending.epoch !== inputEpochRef.current) return;
@@ -501,19 +512,20 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     yrsInputRef.current?.keepSelectionInPlace();
     const active = document.activeElement;
     if (!active || active === document.body || yrsInputRef.current?.isFocused()) focusInput();
-  }, [
-    clearPendingGesture,
-    extendCellSelection,
-    focusInput,
-    getYrsPositionProjection,
-    replicaReady,
-    resolveTarget,
-    scrollToPositionImpl,
-    setTextSelection,
-    yrsInputRef,
-    yrsRootStory,
-    yrsSession,
-  ]);
+  };
+  const replayPendingGestureRef = useRef(replayPendingGesture);
+  replayPendingGestureRef.current = replayPendingGesture;
+  const replicaPendingRef = useRef(replicaPending);
+  replicaPendingRef.current = replicaPending;
+  // Input that waited for the replica applies the gesture recorded before it first.
+  const applyPendingSelection = useCallback((): void => {
+    if (pendingGestureRef.current && !replicaPendingRef.current?.()) {
+      replayPendingGestureRef.current();
+    }
+  }, []);
+  useEffect(() => {
+    if (replicaReady) replayPendingGestureRef.current();
+  }, [replicaReady]);
 
   const handlePagesMouseDown = useCallback(
     (e: React.MouseEvent) => {
@@ -1139,7 +1151,9 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
   }, [canvasHostRef, displayListQueries]);
 
   return {
+    applyPendingSelection,
     bumpInputEpoch,
+    handleEditorKeyDown,
     inputEpoch,
     handlePagesMouseDown,
     handlePagesMouseMove,

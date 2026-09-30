@@ -69,6 +69,7 @@ export interface PagedEditorCommandBridge {
 interface RefApiInputs {
   bumpInputEpochRef: React.RefObject<(() => void) | undefined>;
   inputEpochRef: React.RefObject<(() => number) | undefined>;
+  readerSurfaceRef: React.RefObject<(() => HTMLElement | null) | undefined>;
   workerOpenEnabledRef: React.RefObject<boolean>;
   yrsInputRef: React.RefObject<YrsInputRef | null>;
   layout: Layout | null;
@@ -121,6 +122,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
   const {
     bumpInputEpochRef,
     inputEpochRef,
+    readerSurfaceRef,
     yrsInputRef,
     workerOpenEnabledRef,
     layout,
@@ -288,11 +290,12 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
       const onReaderInput = (): void => {
         navigated = true;
       };
+      const surface = readerSurfaceRef.current?.() ?? null;
       for (const type of READER_INPUT) {
-        document.addEventListener(type, onReaderInput, { capture: true, passive: true });
+        surface?.addEventListener(type, onReaderInput, { capture: true, passive: true });
       }
       const stop = (): void => {
-        for (const type of READER_INPUT) document.removeEventListener(type, onReaderInput, true);
+        for (const type of READER_INPUT) surface?.removeEventListener(type, onReaderInput, true);
       };
       void awaitWorkerOpenReplica(session)?.then(
         () => {
@@ -336,6 +339,8 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
 export interface UsePagedEditorRefApiOptions {
   bumpInputEpoch?: () => void;
   inputEpoch?: () => number;
+  /** The pages' scroll container, where the reader's own navigation happens. */
+  readerSurface?: () => HTMLElement | null;
   ref: React.Ref<PagedEditorRef>;
   yrsInputRef: React.RefObject<YrsInputRef | null>;
   layout: Layout | null;
@@ -369,6 +374,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   const {
     bumpInputEpoch,
     inputEpoch,
+    readerSurface,
     ref,
     yrsInputRef,
     layout,
@@ -397,6 +403,8 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   bumpInputEpochRef.current = bumpInputEpoch;
   const inputEpochRef = useRef(inputEpoch);
   inputEpochRef.current = inputEpoch;
+  const readerSurfaceRef = useRef(readerSurface);
+  readerSurfaceRef.current = readerSurface;
   const workerOpenEnabledRef = useRef(experimentalWorkerOpen);
   workerOpenEnabledRef.current = experimentalWorkerOpen;
   const documentFromYrsRef = useRef(documentFromYrs);
@@ -423,6 +431,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   const inputs = {
     bumpInputEpochRef,
     inputEpochRef,
+    readerSurfaceRef,
     workerOpenEnabledRef,
     yrsInputRef,
     layout,
