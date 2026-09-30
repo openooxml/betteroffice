@@ -133,7 +133,8 @@ interface HarnessProps {
   collaboration?: DocxEditorCollaborationOptions;
   readOnly?: boolean;
   resolvedCommentIds?: ReadonlySet<number>;
-  gateReplica?: boolean;
+  /** Holds the replica as while the shown engine's completion is still to be asked of the worker. */
+  holdReplica?: boolean;
 }
 
 function useHarness(props: HarnessProps) {
@@ -180,7 +181,7 @@ function useHarness(props: HarnessProps) {
       workerOpen: props.experimentalWorkerOpen ? {
         openInWorker,
         renderedFrame: renderer.status === 'ready' ? renderer.displayList : null,
-        ...(props.gateReplica ? { pendingCompletion: renderer.pendingCompletion } : {}),
+        ...(props.holdReplica ? { pendingCompletion: renderer.presentedEngine } : {}),
       } : undefined,
     }
   );
@@ -570,29 +571,27 @@ test('a preloaded spare worker takes the open that starts alongside the preview'
   }
 });
 
-test('the replica loads once the rest of a provisional layout is asked of the worker', async () => {
+test('the replica waits while the shown engine is still to ask the worker for the rest of its layout', async () => {
   const { posted } = installWorker();
   const frames = holdFrames();
   try {
-    const { result, unmount } = renderHook(useHarness, {
-      initialProps: { ...initialProps, source: longBytes, gateReplica: true },
-    });
+    const props = { ...initialProps, source: longBytes, holdReplica: true };
+    const { result, rerender, unmount } = renderHook(useHarness, { initialProps: props });
     await waitFor(() => expect(result.current.host).not.toBeNull());
     const full = result.current.core.session!;
     act(() => result.current.pipeline.runLayoutPipeline());
     await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(full));
-    expect(result.current.renderer.pendingCompletion).toBe(full);
     act(() => result.current.presentFrame());
     act(() => frames.run());
     act(() => frames.run());
+    await act(async () => {});
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
-    await waitFor(() => expect(result.current.renderer.pendingCompletion).toBeNull());
-    expect(posted.some((request) => request.type === 'completeLayout')).toBe(true);
+    expect(result.current.core.replicaReady).toBe(false);
+    rerender({ ...props, holdReplica: false });
     act(() => frames.run());
     act(() => frames.run());
     await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
-    const types = posted.map((request) => request.type);
-    expect(types.indexOf('completeLayout')).toBeLessThan(types.indexOf('encodeState'));
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(true);
     expect(result.current.mainOpens).toEqual([false]);
     expect(result.current.errors).toEqual([]);
     unmount();
