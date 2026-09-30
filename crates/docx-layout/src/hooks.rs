@@ -135,8 +135,15 @@ fn get_header_rows_height(measure: &TableExtent, header_row_count: usize) -> f64
 }
 
 /// Per row, the height of the keep-with-next row chain it starts (0 inside
-/// or outside a chain), which placement keeps on one page.
-pub(crate) fn row_keep_heights(block: &TableBlock, measure: &TableExtent) -> Vec<f64> {
+/// or outside a chain), which placement keeps on one page: its rows through
+/// the last one that keeps with the next, then the next row's smallest slice
+/// in a column `capacity` tall, as Word keeps a row with the next row's start.
+pub(crate) fn row_keep_heights(
+    block: &TableBlock,
+    measure: &TableExtent,
+    breaks: &RowBreaks,
+    capacity: f64,
+) -> Vec<f64> {
     let mut heights = vec![0.0_f64; measure.rows.len()];
     for index in (0..measure.rows.len().saturating_sub(1)).rev() {
         let keeps_next = block.rows.get(index).is_some_and(|row| {
@@ -146,8 +153,12 @@ pub(crate) fn row_keep_heights(block: &TableBlock, measure: &TableExtent) -> Vec
             })
         });
         if keeps_next {
-            heights[index] =
-                measure.rows[index].height + heights[index + 1].max(measure.rows[index + 1].height);
+            let next = if heights[index + 1] > 0.0 {
+                heights[index + 1]
+            } else {
+                breaks.fresh_slice(index + 1, 0.0, capacity)
+            };
+            heights[index] = measure.rows[index].height + next;
         }
     }
     for index in 0..heights.len() {
@@ -218,7 +229,7 @@ fn layout_table_with_position(
     let header_rows_height = get_header_rows_height(measure, header_row_count);
     let breaks = RowBreaks::new(block, measure);
     let first_fragment_height = first_table_fragment_height(block, measure, &breaks.kept);
-    let keep_heights = row_keep_heights(block, measure);
+    let keep_heights = row_keep_heights(block, measure, &breaks, paginator.get_column_capacity());
 
     let mut row_index = 0usize;
     let mut consumed = 0.0f64; // px of rows[row_index] already placed on a previous fragment

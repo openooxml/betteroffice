@@ -66,6 +66,54 @@ fn page_lines(name: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Per page, the table fragments' row ranges and heights in points.
+fn table_fragments(name: &str) -> Vec<Vec<(u64, u64, f64)>> {
+    let bytes = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/keep-next")
+            .join(format!("{name}.docx")),
+    )
+    .unwrap();
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let package = docx_parse::parse_docx_s9_wire(&bytes, Default::default())
+        .unwrap()
+        .document
+        .package;
+    let engine = EngineSession::new(76600);
+    seed_from_docx(engine.doc(), &bytes).unwrap();
+    let request = json!({
+        "bodyStory": "body", "renderEnv": {},
+        "regions": {"sections": [{"properties": package.document.final_section_properties}], "settings": package.settings},
+        "measurement": {"fontChains": {"arial|0|0": [font]}, "defaults": {"fontFamily": "Arial", "fontSize": 12}}
+    });
+    let output: Value = serde_json::from_str(
+        &engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap(),
+    )
+    .unwrap();
+    output["layout"]["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|page| {
+            page["fragments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|fragment| fragment["kind"] == "table")
+                .map(|fragment| {
+                    (
+                        fragment["rowStart"].as_u64().unwrap(),
+                        fragment["rowEnd"].as_u64().unwrap(),
+                        fragment["height"].as_f64().unwrap() * 0.75,
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
 fn pages(breaks: &[(&str, &str)]) -> Vec<(String, String)> {
     breaks
         .iter()
@@ -102,5 +150,16 @@ fn a_chain_of_headings_collapses_the_gaps_between_them() {
     assert_eq!(
         page_lines("keep-next-chain-fits"),
         pages(&[("Line 001", "Line 052"), ("Line 053", "Line 080")])
+    );
+}
+
+/// A row whose last paragraph keeps with the next row needs only the next
+/// row's first line below it: with three lines of room, Word puts the
+/// two-line first row and the first of the second row's four lines on page 1.
+#[test]
+fn a_row_keeps_with_the_first_line_of_the_next_row() {
+    assert_eq!(
+        table_fragments("keep-next-row-first-line-fits"),
+        vec![vec![(0, 2, 36.0)], vec![(1, 2, 36.0)]]
     );
 }

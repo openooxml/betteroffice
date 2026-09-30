@@ -295,7 +295,9 @@ fn table_leading_slice(block: &TableBlock, measure: &TableExtent, capacity: f64)
     for (row, keep) in measure
         .rows
         .iter()
-        .zip(crate::hooks::row_keep_heights(block, measure))
+        .zip(crate::hooks::row_keep_heights(
+            block, measure, &breaks, capacity,
+        ))
         .take(headers + 1)
     {
         if keep > 0.0 && top + keep <= capacity {
