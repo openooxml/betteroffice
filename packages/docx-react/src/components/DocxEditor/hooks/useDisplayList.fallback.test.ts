@@ -675,7 +675,7 @@ test('the media resolver follows the current session before its replacement layo
   URL.revokeObjectURL = () => {};
   try {
     const { result, rerender, unmount } = renderHook(() =>
-      useCanvasRenderer(undefined, undefined, undefined, mediaSessionRef)
+      useCanvasRenderer(undefined, undefined, undefined, undefined, mediaSessionRef)
     );
     act(() => result.current.onLayoutComputed(null, first));
     const retainedResolver = result.current.resolveImage;

@@ -66,6 +66,12 @@ import { useCanvasOverlayTarget } from './DocxEditor/internals/useCanvasOverlayT
 import { isWithinPageArea } from './DocxEditor/internals/pageAreaRouting';
 import { useImageActions } from './DocxEditor/hooks/useImageActions';
 import { useDocxEditorRefApi } from './DocxEditor/hooks/useDocxEditorRefApi';
+import {
+  useMemoryPressure,
+  type DocxMemoryBudget,
+  type DocxMemoryPressure,
+  type DocxMemoryStats,
+} from './DocxEditor/memoryStats';
 import { commandOutcome, useDocxCommandBinding } from './DocxEditor/hooks/useDocxCommands';
 import type {
   PagedEditorCommandBridge,
@@ -184,6 +190,17 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   onSelectionChange?: (state: SelectionState | null) => void;
   /** Callback on error */
   onError?: (error: Error) => void;
+  /**
+   * Called when the fullest wasm memory, on the main thread or in the resident
+   * worker, crosses a `memoryBudget` level or drops back below it. Silent while
+   * memory stays under the warning level.
+   */
+  onMemoryPressure?: (pressure: DocxMemoryPressure) => void;
+  /**
+   * Levels for `onMemoryPressure`, 75% and 90% of 4 GiB by default, and an
+   * optional limit on the resident worker's allocations.
+   */
+  memoryBudget?: DocxMemoryBudget;
   /** Callback when fonts are loaded */
   onFontsLoaded?: () => void;
   /** Color theme mode for UI styling. `'system'` follows the OS preference. */
@@ -462,6 +479,8 @@ export interface DocxEditorRef {
    * first pages before the rest is laid out. See {@link whenLayoutComplete}.
    */
   getTotalPages: () => number;
+  /** The editor's wasm memories on the main thread and in its resident worker. */
+  getMemoryStats: () => DocxMemoryStats;
   /**
    * Resolves with the page count once the whole document, as it is now, is laid out and its
    * pages are ready to paint. Waits for the layout the editor runs on its own and never asks for
@@ -743,6 +762,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onChange,
     onSelectionChange,
     onError,
+    onMemoryPressure,
+    memoryBudget,
     onFontsLoaded: onFontsLoadedCallback,
     colorMode = 'light',
     theme,
@@ -891,11 +912,16 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     rustFontChainsProviderRef,
     resolvedIdsForRender,
     () => pagedEditorRef.current?.relayout(),
+    memoryBudget?.workerLimitBytes,
     mediaSessionRef
   );
   useEffect(() => {
     if (canvasRenderer.error) onError?.(canvasRenderer.error);
   }, [canvasRenderer.error, onError]);
+  useMemoryPressure(onMemoryPressure, memoryBudget, canvasRenderer.workerMemory, [
+    canvasRenderer.frame,
+    canvasRenderer.error,
+  ]);
 
   const [yrsTrackedChangesResult, setYrsTrackedChangesResult] = useState<TrackedChangesResult>(
     () => ({
@@ -1077,6 +1103,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     collaboration,
     {
       isCurrentLoad,
+      onSession: canvasRenderer.recordSession,
       onHostDocument: acceptHostDocument,
       onError: failHostDocument,
     },
@@ -1638,6 +1665,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     commands: commandController.store,
     modeRef: writeModeRef,
     allowHostProposalsRef,
+    workerMemory: canvasRenderer.workerMemory,
     settledDisplayList: canvasRenderer.settledDisplayList,
     awaitingDocument,
   });

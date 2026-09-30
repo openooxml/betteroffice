@@ -79,6 +79,7 @@ export * from './inputPositionMap';
 export {
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
+  ResidentWorkerOutOfMemoryError,
   canUseResidentEngineWorker,
   type ResidentEngineWorkerApplyResult,
   type ResidentEngineWorkerFrame,
@@ -89,6 +90,12 @@ export {
   residentCaretDeviceRect,
   type ResidentCaretPaintStyle,
 } from './residentCaret';
+export {
+  WASM32_MEMORY_LIMIT_BYTES,
+  wasmModuleMemories,
+  type WasmHeapStats,
+  type WasmModuleMemory,
+} from '../wasm/loadWasmAsset';
 export { documentToYrs } from './documentToYrs';
 export { yrsToDocument } from './yrsToDocument';
 export * from './paragraphIdentity';
