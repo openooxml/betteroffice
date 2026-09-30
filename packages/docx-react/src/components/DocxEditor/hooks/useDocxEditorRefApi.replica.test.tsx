@@ -98,6 +98,15 @@ function apiFor(
       contentChangeSubscribersRef: { current: new Set() },
       selectionChangeSubscribersRef: { current: new Set() },
       getCachedStyleResolver: createStyleResolver,
+      hostSearch: {
+        search: async () => ({ query: '', options: { caseSensitive: false }, total: 0, current: -1 }),
+        searchNext: () => null,
+        searchPrevious: () => null,
+        searchGoTo: () => null,
+        clearSearch: () => {},
+        getSearchState: () => null,
+        onSearchChange: () => () => {},
+      },
       commentIdAllocator: createCommentIdAllocator(),
       commands: UNAVAILABLE_DOCX_COMMANDS,
       modeRef: { current: mode },
@@ -166,13 +175,14 @@ test('every public ref API is classified for replica access', async () => {
   const { api } = await pendingReplica();
   expect(Object.keys(api).sort()).toEqual(Object.keys(DOCX_REF_REPLICA_ACCESS).sort());
   expect(Object.keys(DOCX_REF_REPLICA_ACCESS).sort()).toEqual([
-    'addComment', 'applyEdits', 'applyFormatting', 'commands', 'exportStructuredWithPages',
+    'addComment', 'applyEdits', 'applyFormatting', 'clearSearch', 'commands', 'exportStructuredWithPages',
     'findContentControls', 'findInDocument', 'findText', 'flushPendingInput', 'focus',
     'getComments', 'getCurrentPage', 'getDocument', 'getEditorRef', 'getMemoryStats', 'getPageContent',
-    'getPositionAtPoint', 'getProposals', 'getSelectionInfo', 'getTotalPages', 'getZoom',
+    'getPositionAtPoint', 'getProposals', 'getSearchState', 'getSelectionInfo', 'getTotalPages', 'getZoom',
     'highlightRange', 'insertBreak', 'listContentControls', 'loadDocument', 'loadDocumentBuffer',
-    'onContentChange', 'onSelectionChange', 'openPrintPreview', 'print', 'proposeChange',
+    'onContentChange', 'onSearchChange', 'onSelectionChange', 'openPrintPreview', 'print', 'proposeChange',
     'proposeChanges', 'readParagraphs', 'replyToComment', 'resolveComment', 'save',
+    'search', 'searchGoTo', 'searchNext', 'searchPrevious',
     'scrollToChangeId', 'scrollToCommentId', 'scrollToPage', 'scrollToParaId', 'scrollToPosition',
     'setParagraphStyle', 'setProposalStates', 'setZoom', 'validateEdits', 'whenLayoutComplete',
   ].sort());

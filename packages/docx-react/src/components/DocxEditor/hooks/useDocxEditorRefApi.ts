@@ -28,6 +28,7 @@ import type { EditorMode } from '../internals/editing-modes';
 import type { SelectionState } from '../types';
 import { readMemoryStats } from '../memoryStats';
 import { documentPageCount } from './documentPageCount';
+import type { DocxHostSearch } from './useHostSearch';
 import { awaitWorkerOpenReplica, ensureWorkerOpenReplica } from '../internals/workerOpenReplica';
 
 export const DOCX_REF_REPLICA_ACCESS = {
@@ -75,6 +76,13 @@ export const DOCX_REF_REPLICA_ACCESS = {
   findInDocument: 'sync',
   getSelectionInfo: 'sync',
   getComments: 'independent',
+  search: 'await',
+  searchNext: 'independent',
+  searchPrevious: 'independent',
+  searchGoTo: 'independent',
+  clearSearch: 'independent',
+  getSearchState: 'independent',
+  onSearchChange: 'independent',
   onContentChange: 'independent',
   onSelectionChange: 'independent',
 } as const satisfies Record<keyof DocxEditorRef, 'await' | 'sync' | 'independent' | 'commands'>;
@@ -313,6 +321,7 @@ export function useDocxEditorRefApi({
   settledDisplayList,
   awaitingDocument,
   experimentalWorkerOpen = false,
+  hostSearch,
 }: {
   ref: React.ForwardedRef<DocxEditorRef>;
   document: Document | null;
@@ -351,6 +360,7 @@ export function useDocxEditorRefApi({
   /** Whether a document load has not yet produced its first layout. */
   awaitingDocument?: () => boolean;
   experimentalWorkerOpen?: boolean;
+  hostSearch: DocxHostSearch;
 }) {
   const opening = (): boolean => openingRef?.current === true;
   const pagedEditorRef = useMemo<React.RefObject<PagedEditorRef | null>>(
@@ -645,6 +655,7 @@ export function useDocxEditorRefApi({
         selectionChangeSubscribersRef.current.add(listener);
         return () => selectionChangeSubscribersRef.current.delete(listener);
       },
+      ...hostSearch,
     }, pagedEditorRef, experimentalWorkerOpen),
     [
       document,
@@ -661,6 +672,7 @@ export function useDocxEditorRefApi({
       settledDisplayList,
       awaitingDocument,
       experimentalWorkerOpen,
+      hostSearch,
     ]
   );
 }
