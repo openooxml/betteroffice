@@ -231,6 +231,10 @@ function projectSession(session: YrsSession): YrsSidebarProjection {
     return session.storySegments(story);
   };
   const roots = geometryRoots(session, segmentsByStory);
+  // Only the stories a root indexes are read again.
+  for (const story of segmentsByStory.keys()) {
+    if (!roots.has(story)) segmentsByStory.delete(story);
+  }
 
   const paragraphsForStory = (story: string): Map<string, ParagraphDisplaySpan> | null => {
     const root = roots.get(story)?.story;
@@ -247,6 +251,10 @@ function projectSession(session: YrsSession): YrsSidebarProjection {
       // gated sidebar read must not fall back to it. Leave that story unplaced.
       paragraphMaps.set(root, null);
       return null;
+    } finally {
+      for (const [story, owner] of roots) {
+        if (owner.story === root) segmentsByStory.delete(story);
+      }
     }
   };
 
