@@ -305,8 +305,13 @@ fn parse_run_contents(element: &XmlElement) -> Vec<RunContent> {
                     .unwrap_or_default()
                     .to_owned(),
             }),
-            "footnoteReference" => output.push(parse_note_reference(child, false)),
-            "endnoteReference" => output.push(parse_note_reference(child, true)),
+            "footnoteReference" | "endnoteReference" => {
+                if let Some(reference) =
+                    parse_note_reference(child, child.local_name() == "endnoteReference")
+                {
+                    output.push(reference);
+                }
+            }
             "fldChar" => output.push(parse_field_char(child)),
             "instrText" => output.push(RunContent::InstrText {
                 text: text_node_content(child),
@@ -352,15 +357,13 @@ fn parse_break(element: &XmlElement) -> RunContent {
     RunContent::Break { break_type, clear }
 }
 
-fn parse_note_reference(element: &XmlElement, endnote: bool) -> RunContent {
-    let id = element
-        .parse_numeric_attribute(Some("w"), "id", 1.0)
-        .unwrap_or(0.0);
+fn parse_note_reference(element: &XmlElement, endnote: bool) -> Option<RunContent> {
+    let id = element.parse_numeric_attribute(Some("w"), "id", 1.0)?;
     let custom_mark_follows = element
         .attribute(Some("w"), "customMarkFollows")
         .filter(|raw| !matches_ci(raw, &["0", "false", "off"]))
         .map(|_| true);
-    if endnote {
+    Some(if endnote {
         RunContent::EndnoteRef {
             id,
             custom_mark_follows,
@@ -370,7 +373,7 @@ fn parse_note_reference(element: &XmlElement, endnote: bool) -> RunContent {
             id,
             custom_mark_follows,
         }
-    }
+    })
 }
 
 fn parse_field_char(element: &XmlElement) -> RunContent {
@@ -1137,6 +1140,12 @@ pub struct ContentPosition {
     pub offset: Option<f64>,
 }
 
+pub(crate) fn has_bookmark_id(element: &XmlElement) -> bool {
+    element
+        .parse_numeric_attribute(Some("w"), "id", 1.0)
+        .is_some()
+}
+
 pub fn parse_bookmark_start(element: &XmlElement) -> BookmarkStart {
     BookmarkStart {
         node_type: BookmarkStartType::BookmarkStart,
@@ -1273,11 +1282,17 @@ pub fn parse_hyperlink(
                 structured.push(InlineNode::Run(run));
             }
             "bookmarkStart" => {
+                if !has_bookmark_id(child) {
+                    continue;
+                }
                 let bookmark = parse_bookmark_start(child);
                 children.push(InlineNode::BookmarkStart(bookmark.clone()));
                 structured.push(InlineNode::BookmarkStart(bookmark));
             }
             "bookmarkEnd" => {
+                if !has_bookmark_id(child) {
+                    continue;
+                }
                 let bookmark = parse_bookmark_end(child);
                 children.push(InlineNode::BookmarkEnd(bookmark.clone()));
                 structured.push(InlineNode::BookmarkEnd(bookmark));
@@ -2058,6 +2073,9 @@ pub fn parse_inline_container(
                 }
             }
             "bookmarkStart" => {
+                if !has_bookmark_id(child) {
+                    continue;
+                }
                 let node = InlineNode::BookmarkStart(parse_bookmark_start(child));
                 match fields.last_mut() {
                     Some(active) => active.absorb(node, Vec::new()),
@@ -2065,6 +2083,9 @@ pub fn parse_inline_container(
                 }
             }
             "bookmarkEnd" => {
+                if !has_bookmark_id(child) {
+                    continue;
+                }
                 let node = InlineNode::BookmarkEnd(parse_bookmark_end(child));
                 match fields.last_mut() {
                     Some(active) => active.absorb(node, Vec::new()),
@@ -2326,6 +2347,92 @@ mod tests {
         .root()
         .unwrap()
         .clone()
+    }
+
+    #[test]
+    fn keeps_note_reference_zero_and_drops_references_without_an_id() {
+        let run = parse_run(
+            &root(
+                r#"<w:r xmlns:w="w"><w:footnoteReference/><w:footnoteReference w:id="x"/><w:footnoteReference w:id="0" w:customMarkFollows="1"/><w:t>A</w:t><w:endnoteReference w:id="0"/><w:endnoteReference/><w:endnoteReference w:id="x"/></w:r>"#,
+            ),
+            None,
+            None,
+            None,
+        )
+        .run;
+        assert_eq!(
+            run.content,
+            [
+                RunContent::FootnoteRef {
+                    id: 0.0,
+                    custom_mark_follows: Some(true),
+                },
+                RunContent::Text {
+                    text: "A".to_owned(),
+                    preserve_space: None,
+                },
+                RunContent::EndnoteRef {
+                    id: 0.0,
+                    custom_mark_follows: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_bookmark_zero_and_drops_bookmarks_without_an_id() {
+        let content = r#"<w:bookmarkStart/><w:bookmarkStart w:id="x"/><w:bookmarkStart w:id="0" w:name="zero"/><w:r><w:t>A😀</w:t></w:r><w:bookmarkEnd w:id="0"/><w:bookmarkEnd/><w:bookmarkEnd w:id="x"/>"#;
+        let limits = ParseLimits::default();
+        let budget = ParseBudget::new(&limits);
+        let nodes = parse_inline_container(
+            &root(&format!(r#"<w:p xmlns:w="w">{content}</w:p>"#)),
+            None,
+            None,
+            None,
+            None,
+            "word/document.xml",
+            &budget,
+            0,
+        )
+        .unwrap();
+        assert_eq!(nodes.len(), 3);
+        let InlineNode::BookmarkStart(start) = &nodes[0] else {
+            panic!("bookmark start")
+        };
+        assert_eq!(start.id, 0.0);
+        assert_eq!(start.name, "zero");
+        assert_eq!(start.position.as_ref().unwrap().offset, Some(0.0));
+        let InlineNode::BookmarkEnd(end) = &nodes[2] else {
+            panic!("bookmark end")
+        };
+        assert_eq!(end.id, 0.0);
+        assert_eq!(end.position.as_ref().unwrap().offset, Some(3.0));
+
+        let hyperlink = parse_hyperlink(
+            &root(&format!(
+                r#"<w:hyperlink xmlns:w="w" w:anchor="zero">{content}</w:hyperlink>"#
+            )),
+            None,
+            None,
+            None,
+            None,
+            "word/document.xml",
+            &budget,
+        )
+        .unwrap();
+        assert_eq!(hyperlink.children.len(), 3);
+        assert_eq!(
+            hyperlink.structured_children.as_ref().unwrap(),
+            &hyperlink.children
+        );
+        let InlineNode::BookmarkStart(start) = &hyperlink.children[0] else {
+            panic!("bookmark start")
+        };
+        assert_eq!(start.id, 0.0);
+        let InlineNode::BookmarkEnd(end) = &hyperlink.children[2] else {
+            panic!("bookmark end")
+        };
+        assert_eq!(end.id, 0.0);
     }
 
     #[test]
