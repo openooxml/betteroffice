@@ -69,9 +69,9 @@ impl RetainedPackage {
     /// The inflated bytes of the part at `position` in [`RetainedPackage::parts`].
     pub fn read(&self, position: usize) -> Result<Vec<u8>, String> {
         let part = self.part(position)?;
-        let limit = part.size.min(MAX_TOTAL_UNCOMPRESSED_BYTES);
-        let mut bytes = Vec::with_capacity(usize::try_from(limit.min(PREALLOCATED)).unwrap_or(0));
-        self.inflate(part, limit + 1, &mut bytes)?;
+        let mut bytes =
+            Vec::with_capacity(usize::try_from(part.size.min(PREALLOCATED)).unwrap_or(0));
+        self.inflate(part, part.size + 1, &mut bytes)?;
         if bytes.len() as u64 != part.size {
             return Err(format!(
                 "{} inflates to other than its declared {} bytes",
@@ -84,15 +84,23 @@ impl RetainedPackage {
     /// At most the first `len` inflated bytes of the part at `position`.
     pub fn read_prefix(&self, position: usize, len: usize) -> Result<Vec<u8>, String> {
         let part = self.part(position)?;
-        let mut bytes = Vec::with_capacity(len);
-        self.inflate(part, len as u64, &mut bytes)?;
+        let limit = part.size.min(len as u64);
+        let mut bytes = Vec::with_capacity(usize::try_from(limit.min(PREALLOCATED)).unwrap_or(0));
+        self.inflate(part, limit, &mut bytes)?;
         Ok(bytes)
     }
 
     fn part(&self, position: usize) -> Result<&PackagePart, String> {
-        self.parts
+        let part = self
+            .parts
             .get(position)
-            .ok_or_else(|| format!("no package part at {position}"))
+            .ok_or_else(|| format!("no package part at {position}"))?;
+        if part.size > MAX_TOTAL_UNCOMPRESSED_BYTES {
+            return Err(format!(
+                "inflated size exceeds {MAX_TOTAL_UNCOMPRESSED_BYTES} bytes"
+            ));
+        }
+        Ok(part)
     }
 
     fn inflate(&self, part: &PackagePart, limit: u64, out: &mut Vec<u8>) -> Result<(), String> {

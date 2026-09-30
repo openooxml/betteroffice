@@ -214,7 +214,7 @@ fn a_media_table_parse_equals_the_default_one_read_through_its_tokens() {
     // The inline picture and the VML picture in the body, the TIFF, and the
     // shape's picture fill; the watermark and the comment arrive resolved.
     assert_eq!(replaced, 4);
-    assert_eq!(count_data_urls(&serde_json::to_value(&tokens).unwrap()), 2);
+    assert_eq!(count_data_urls(&serde_json::to_value(&tokens).unwrap()), 3);
     assert_eq!(actual, expected);
 }
 

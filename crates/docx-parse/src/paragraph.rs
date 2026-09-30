@@ -1041,7 +1041,7 @@ fn parse_drawing_owned(
         }
         let media = drawing.as_ref().map(|context| context.media);
         return Ok(
-            vml_image_content(element, relationships, media, budget.media_table())
+            vml_image_content(element, relationships, media, Some(budget))
                 .map(|image| RunContent::Drawing {
                     image: Box::new(image),
                 })

@@ -228,10 +228,14 @@ pub fn media_table_parts(
 ) -> Result<(Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
     let parts =
         ooxml_opc::unzip_parts_where(data, ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES, |path| {
-            !is_media_path(path)
+            !is_media_path(path) || is_xml_part(path)
         })
         .map_err(ParseError::Container)?;
-    let inflated = parts.iter().map(|(_, bytes)| bytes.len() as u64).sum();
+    let inflated = parts
+        .iter()
+        .filter(|(path, _)| !is_media_path(path))
+        .map(|(_, bytes)| bytes.len() as u64)
+        .sum();
     let package =
         ooxml_opc::RetainedPackage::new(Arc::clone(data)).map_err(ParseError::Container)?;
     let table = MediaTable::new(package, inflated).map_err(ParseError::Container)?;
@@ -551,6 +555,9 @@ fn parse_s9_package(
         template_variables,
         warnings,
     };
+    if let Some(error) = budget.media_read_error() {
+        return Err(ParseError::Container(error));
+    }
     if let Some(table) = media_table {
         resolve_host_media(&mut document.package, table)?;
     }
@@ -776,6 +783,12 @@ fn ordered_map<T: Serialize>(entries: &[(String, T)]) -> Result<CanonicalValue, 
         .map(CanonicalValue::OrderedMap)
 }
 
+/// Whether the parser may read `path` as markup, wherever it sits.
+fn is_xml_part(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".xml") || lower.ends_with(".rels")
+}
+
 /// Gives the watermarks and comments of a package parsed against `table`
 /// the `data:` URLs their tokens stand for, since both reach the host as
 /// parsed.
@@ -790,45 +803,64 @@ fn resolve_host_media(package: &mut S9PackageWire, table: &MediaTable) -> Result
             data_url: Some(data_url),
             ..
         }) = story.watermark.as_mut()
-            && let Some(resolved) = table.resolve(data_url)
+            && let Some(resolved) = resolve_token(data_url, table)?
         {
             *data_url = resolved;
         }
     }
     for comment in package.document.comments.iter_mut().flatten() {
-        let mut content = serde_json::to_value(&comment.content)
+        let mut value = serde_json::to_value(&*comment)
             .map_err(|error| ParseError::Canonical(error.to_string()))?;
-        if resolve_value_media(&mut content, table) {
-            comment.content = serde_json::from_value(content)
+        if resolve_value_media(&mut value, table)? {
+            *comment = serde_json::from_value(value)
                 .map_err(|error| ParseError::Canonical(error.to_string()))?;
         }
     }
     Ok(())
 }
 
+/// The `data:` URL a token names, or `None` for any other string.
+fn resolve_token(src: &str, table: &MediaTable) -> Result<Option<String>, ParseError> {
+    match crate::media::media_token_index(src).filter(|index| *index < table.len()) {
+        Some(index) => table
+            .data_url(index)
+            .map(Some)
+            .map_err(ParseError::Container),
+        None => Ok(None),
+    }
+}
+
 /// Replaces every token under a `src` key in `value`; whether any was.
-fn resolve_value_media(value: &mut serde_json::Value, table: &MediaTable) -> bool {
-    match value {
+fn resolve_value_media(
+    value: &mut serde_json::Value,
+    table: &MediaTable,
+) -> Result<bool, ParseError> {
+    Ok(match value {
         serde_json::Value::Object(fields) => {
             let mut changed = false;
             for (key, field) in fields.iter_mut() {
                 if key == "src"
                     && let serde_json::Value::String(src) = field
-                    && let Some(resolved) = table.resolve(src)
                 {
-                    *src = resolved;
-                    changed = true;
+                    if let Some(resolved) = resolve_token(src, table)? {
+                        *src = resolved;
+                        changed = true;
+                    }
                 } else {
-                    changed |= resolve_value_media(field, table);
+                    changed |= resolve_value_media(field, table)?;
                 }
             }
             changed
         }
-        serde_json::Value::Array(items) => items.iter_mut().fold(false, |changed, item| {
-            resolve_value_media(item, table) | changed
-        }),
+        serde_json::Value::Array(items) => {
+            let mut changed = false;
+            for item in items {
+                changed |= resolve_value_media(item, table)?;
+            }
+            changed
+        }
         _ => false,
-    }
+    })
 }
 
 fn canonical_media(entries: &[(String, Arc<MediaFile>)]) -> Result<CanonicalValue, ParseError> {
