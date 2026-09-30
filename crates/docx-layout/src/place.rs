@@ -1941,6 +1941,62 @@ mod pagination_rule_tests {
     }
 
     #[test]
+    fn a_carried_row_slice_that_rounding_fits_between_bands_is_placed() {
+        let paragraphs = [
+            (vec![10.3], false),
+            (vec![10.1, 25.0], true),
+            (vec![20.0], false),
+        ];
+        let blocks: Vec<_> = paragraphs
+            .iter()
+            .enumerate()
+            .map(|(index, (_, keep))| {
+                json!({ "kind": "paragraph", "id": 40 + index,
+                    "runs": [{ "kind": "text", "text": "x", "fmt": {} }],
+                    "attrs": { "keepLines": keep, "widowControl": false } })
+            })
+            .collect();
+        let extents: Vec<_> = paragraphs
+            .iter()
+            .map(|(lines, _)| {
+                json!({ "kind": "paragraph",
+                    "lines": lines.iter().copied().map(line).collect::<Vec<_>>(),
+                    "totalHeight": lines.iter().sum::<f64>() })
+            })
+            .collect();
+        let height: f64 = paragraphs.iter().flat_map(|(lines, _)| lines).sum();
+        let mut value: Input = serde_json::from_value(json!({
+            "measured": [{
+                "block": { "kind": "table", "id": 2, "columnWidths": [100], "rows": [
+                    { "id": 20, "cells": [{ "id": 30, "blocks": blocks,
+                        "padding": {"top": 0, "right": 0, "bottom": 0, "left": 0} }] }] },
+                "measure": { "kind": "table", "columnWidths": [100], "totalWidth": 100,
+                    "totalHeight": height, "rows": [{ "height": height, "cells": [
+                        { "width": 100, "height": height, "blocks": extents }] }] },
+            }],
+            "options": {
+                "pageSize": {"w": 500, "h": 650},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "sectionPageFloatBands": [{"default": [
+                    {"top": 116, "bottom": 200}, {"top": 235.1, "bottom": 300}]}],
+            },
+        }))
+        .unwrap();
+        let result = layout_document(&mut value).unwrap();
+        let fragments: Vec<_> = result
+            .pages
+            .iter()
+            .flat_map(|page| &page.fragments)
+            .filter_map(|fragment| match fragment {
+                Fragment::Table(table) => Some(table),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fragments.last().map(|table| table.row_end), Some(1));
+        assert!(result.pages.len() <= 2);
+    }
+
+    #[test]
     fn a_paragraph_split_across_columns_paints_its_float_in_each_column() {
         let floating = |height: f64, lines: usize| {
             json!({

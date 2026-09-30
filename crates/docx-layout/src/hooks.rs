@@ -222,11 +222,8 @@ fn layout_table_with_position(
 
     let mut row_index = 0usize;
     let mut consumed = 0.0f64; // px of rows[row_index] already placed on a previous fragment
-    // Room `ensure_fits` granted at the cursor that rounding left out of the budget.
-    let mut granted_floor = 0.0f64;
 
     'rows: while row_index < rows.len() {
-        let floor = std::mem::take(&mut granted_floor);
         let state_idx = paginator.get_current();
         let is_first_fragment = row_index == 0 && consumed == 0.0;
         // The tallest stretch a fresh column offers between float bands.
@@ -303,8 +300,7 @@ fn layout_table_with_position(
         } else {
             0.0
         };
-        let available_height =
-            (paginator.get_available_height() - pending_spacing - header_overhead).max(floor);
+        let available_height = paginator.get_available_height() - pending_spacing - header_overhead;
 
         let start_row = row_index;
         let clip_top = consumed;
@@ -403,10 +399,19 @@ fn layout_table_with_position(
                 let slice = minimum_row_slice(block, measure, &breaks.kept, cur, start_off);
                 if !paginator.has_float_bands() {
                     paginator.advance_for_overflow();
-                } else if !fit_moved_cursor(paginator, slice + header_overhead + pending_spacing) {
-                    granted_floor = used + slice;
+                    continue 'rows;
                 }
-                continue 'rows;
+                if fit_moved_cursor(paginator, slice + header_overhead + pending_spacing) {
+                    continue 'rows;
+                }
+                // `ensure_fits` grants the slice at the cursor where rounding
+                // left it out of the budget: place it here.
+                used += slice.min(remaining);
+                row_end = cur + 1;
+                if slice < remaining {
+                    clip_bottom = Some(start_off + slice);
+                    last_row_partial = true;
+                }
             } else {
                 // Paragraph rules that leave no break in a column yield to whole lines.
                 // If no line fits, overflow instead of looping.
