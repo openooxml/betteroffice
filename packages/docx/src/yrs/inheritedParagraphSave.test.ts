@@ -5,7 +5,7 @@ import { parseDocx } from '../docx';
 import { repackDocx } from '../docx/rezip';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { readDocxContainer } from '../docx/zipContainer';
-import type { Document, Paragraph } from '../types/document';
+import type { Document } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { documentToYrs } from './documentToYrs';
 import { createYrsSession, type YrsSession } from './index';
@@ -185,24 +185,24 @@ for (const seeder of ['native', 'projected'] as const) {
       }
     });
 
-    test(`${seeder} ${save} preserves authored toggles and alignment through three reopen cycles`, async () => {
-      let bytes = fixture('', '<w:jc w:val="center"/><w:keepNext/><w:widowControl w:val="0"/>');
+    test(`${seeder} ${save} writes edits that differ from inherited values through three reopen cycles`, async () => {
+      let bytes = fixture();
       for (let cycle = 0; cycle < 3; cycle += 1) {
         bytes = await saveOnce(bytes, seeder, save, cycle === 0 ? (session) => {
           const first = session.paragraphs('body')[0]!;
           const position = { paraId: first.paraId, offset: 0 };
-          session.setParagraphAttr(first.paraId, 'alignment', 'center');
           session.setParagraphAttrs({ story: 'body', start: position, end: position }, {
-            other: { widowControl: false, keepNext: false },
+            spaceAfter: 0,
+            alignment: 'right',
+            indentLeft: 720,
           });
         } : undefined);
-        const xml = documentXml(bytes);
-        expect(xml).not.toContain('<w:spacing');
-        const savedParagraphs = paragraphs(xml);
-        expect(savedParagraphs[0]).toContain('<w:jc w:val="center"/>');
-        expect(savedParagraphs[0]).toContain('<w:keepNext w:val="0"/>');
-        expect(savedParagraphs[0]).toContain('<w:widowControl w:val="0"/>');
-        expect(savedParagraphs[1]).not.toContain('<w:pPr');
+        const [edited, untouched] = paragraphs(documentXml(bytes));
+        expect(edited).toContain('w:after="0"');
+        expect(edited).not.toContain('w:line=');
+        expect(edited).toContain('<w:jc w:val="right"/>');
+        expect(edited).toContain('w:left="720"');
+        expect(untouched).not.toContain('<w:pPr');
       }
     });
 
@@ -219,61 +219,21 @@ for (const seeder of ['native', 'projected'] as const) {
         expect(documentXml(bytes)).not.toContain('<w:spacing');
       }
     });
-
-    test(`${seeder} ${save} writes edits equal to inherited values through three reopen cycles`, async () => {
-      let bytes = fixture();
-      for (let cycle = 0; cycle < 3; cycle += 1) {
-        bytes = await saveOnce(bytes, seeder, save, cycle === 0 ? (session) => {
-          const first = session.paragraphs('body')[0]!;
-          const position = { paraId: first.paraId, offset: 0 };
-          session.setParagraphAttrs({ story: 'body', start: position, end: position }, {
-            spaceAfter: 200,
-            lineSpacing: 276,
-            lineSpacingRule: 'auto',
-          });
-        } : undefined);
-        const xml = documentXml(bytes);
-        expect(spacingTags(xml)).toEqual([
-          '<w:spacing w:after="200" w:afterLines="0" w:line="276" w:lineRule="auto" w:afterAutospacing="0"/>',
-        ]);
-        expect(paragraphs(xml)[1]).not.toContain('<w:spacing');
-      }
-    });
   }
 }
 
-test('save projection excludes resolved properties absent from direct formatting', () => {
-  const resolved = {
+test('the save projection leaves out values that only restate inherited ones', () => {
+  const inherited = {
     spaceAfter: 200,
     lineSpacing: 276,
     lineSpacingRule: 'auto' as const,
     alignment: 'center' as const,
-    pageBreakBefore: true,
-    widowControl: false,
-    autoSpaceDE: false,
-    autoSpaceDN: false,
-    bidi: true,
   };
-  expect(paragraphAttrsToFormatting({ ...resolved, _originalFormatting: {} })).toEqual({});
-  expect(paragraphAttrsToFormatting({ ...resolved, _originalFormatting: { spaceAfter: 0 } }))
-    .toEqual({ spaceAfter: 0 });
-});
-
-test('seeders preserve the same direct formatting and resolved defaults', async () => {
-  const bytes = fixture('<w:spacing w:after="0"/>');
-  const parsed = await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false });
-  const native = await createYrsSession({ clientId: 66102 });
-  const projected = await createYrsSession({ clientId: 66102 });
-  try {
-    native.seedFromDocx(bytes);
-    documentToYrs(projected, parsed);
-    expect(native.storySegments('body')).toEqual(projected.storySegments('body'));
-    expect((native.materializeDocx()!.package.document.content[0] as Paragraph).formatting)
-      .toBeUndefined();
-    expect(native.paragraphs('body')[0]!.properties._originalFormatting).toEqual({});
-    expect(native.paragraphs('body')[2]!.properties._originalFormatting).toMatchObject({ spaceAfter: 0 });
-  } finally {
-    native.destroy();
-    projected.destroy();
-  }
+  expect(paragraphAttrsToFormatting({ ...inherited }, inherited)).toBeUndefined();
+  expect(paragraphAttrsToFormatting({ ...inherited, spaceAfter: 0, lineSpacingRule: 'exact' }, inherited))
+    .toEqual(expect.objectContaining({ spaceAfter: 0, lineSpacing: 276, lineSpacingRule: 'exact' }));
+  expect(paragraphAttrsToFormatting({ ...inherited, _originalFormatting: { spaceAfter: 200 } }, inherited))
+    .toEqual({ spaceAfter: 200 });
+  expect(paragraphAttrsToFormatting({ ...inherited, alignment: 'right', _originalFormatting: {} }, inherited))
+    .toEqual({ alignment: 'right' });
 });

@@ -1026,7 +1026,7 @@ function paragraphAttrs(
     listLevelNumFmts: paragraph.listRendering?.levelNumFmts || null,
     listAbstractNumId: paragraph.listRendering?.abstractNumId ?? null,
     listStartOverride: paragraph.listRendering?.startOverride ?? null,
-    _originalFormatting: formatting ?? {},
+    _originalFormatting: formatting ?? null,
   };
 
   if (styleResolver) {

@@ -280,56 +280,6 @@ fn set_or_remove(txn: &mut TransactionMut<'_>, map: &MapRef, key: &str, value: O
     }
 }
 
-pub(crate) fn sync_direct_paragraph_property(
-    txn: &mut TransactionMut<'_>,
-    map: &MapRef,
-    key: &str,
-) {
-    if !crate::seed::style_resolved_keys().any(|resolved| resolved == key)
-        && !matches!(
-            key,
-            "pStyle"
-                | "styleId"
-                | "numPr"
-                | "numPrFromStyle"
-                | "indentLeftChars"
-                | "indentRightChars"
-                | "indentFirstLineChars"
-                | "hangingIndentChars"
-                | "frame"
-                | "suppressLineNumbers"
-                | "suppressAutoHyphens"
-                | "runProperties"
-        )
-    {
-        return;
-    }
-    let Some(Out::Any(Any::Map(original))) = map.get(txn, "_originalFormatting") else {
-        return;
-    };
-    let mut original = (*original).clone();
-    let value = match map.get(txn, key) {
-        Some(Out::Any(Any::Number(value))) if key == "hangingIndent" => {
-            Some(Any::Bool(value != 0.0))
-        }
-        Some(Out::Any(value)) if value != Any::Null && value != Any::Undefined => Some(value),
-        _ => None,
-    };
-    match value {
-        Some(value) => {
-            original.insert(formatting_key(key).to_owned(), value);
-        }
-        None => {
-            original.remove(formatting_key(key));
-        }
-    }
-    if key == "numPr" {
-        original.remove("numPrFromStyle");
-        map.remove(txn, "numPrFromStyle");
-    }
-    map.insert(txn, "_originalFormatting", Any::Map(Arc::new(original)));
-}
-
 /// Writes a style's paragraph-attribute projection: each
 /// [`STYLE_CONTROLLED_PARA_ATTRS`] key is reset to the projection's value or
 /// cleared when it has none, and any extra key (list attributes) is applied as
@@ -353,14 +303,22 @@ fn apply_paragraph_attr_projection(
     }
     if let Some(Out::Any(Any::Map(original))) = map.get(txn, "_originalFormatting") {
         let mut original = (*original).clone();
-        for key in STYLE_CONTROLLED_PARA_ATTRS
-            .into_iter()
-            .chain(attrs.keys().map(String::as_str))
-        {
-            original.remove(formatting_key(key));
-        }
-        if let Some(Out::Any(style)) = map.get(txn, "pStyle") {
-            original.insert("styleId".to_owned(), style);
+        for key in [
+            "spaceBefore",
+            "spaceAfter",
+            "spaceBeforeLines",
+            "spaceAfterLines",
+            "beforeAutospacing",
+            "afterAutospacing",
+        ] {
+            match attrs.get(key) {
+                Some(value) if *value != Any::Null => {
+                    original.insert(key.to_owned(), value.clone());
+                }
+                _ => {
+                    original.remove(key);
+                }
+            }
         }
         map.insert(txn, "_originalFormatting", Any::Map(Arc::new(original)));
     }
@@ -487,7 +445,6 @@ impl EditingDoc {
                 for (key, _) in &props {
                     orig_map.remove(&mut txn, key);
                 }
-                orig_map.insert(&mut txn, "_originalFormatting", Any::Map(Arc::default()));
                 orig_map.insert(&mut txn, "pStyle", next.style_id.as_str());
                 apply_paragraph_attr_projection(&mut txn, &orig_map, &next.paragraph_attrs)?;
                 orig_map.remove(&mut txn, BORDERS);
@@ -495,24 +452,7 @@ impl EditingDoc {
                 // Blank-attr inheritance: keep only the inherited subset; dtf reduced to the
                 // font/size/color carry. Borders fall out of the sweep.
                 for (key, value) in &props {
-                    if key == "_originalFormatting" {
-                        if let Any::Map(original) = value {
-                            let mut direct = (**original).clone();
-                            direct.retain(|key, _| {
-                                INHERITED_PARA_ATTRS
-                                    .iter()
-                                    .any(|inherited| formatting_key(inherited) == key.as_str())
-                            });
-                            if let Some(value) =
-                                direct.get("runProperties").and_then(style_carry_dtf)
-                            {
-                                direct.insert("runProperties".to_owned(), value);
-                            } else {
-                                direct.remove("runProperties");
-                            }
-                            orig_map.insert(&mut txn, key.clone(), Any::Map(Arc::new(direct)));
-                        }
-                    } else if !INHERITED_PARA_ATTRS.contains(&key.as_str()) {
+                    if !INHERITED_PARA_ATTRS.contains(&key.as_str()) {
                         orig_map.remove(&mut txn, key);
                     } else if key == DEFAULT_TEXT_FORMATTING {
                         set_or_remove(
@@ -527,7 +467,6 @@ impl EditingDoc {
         } else {
             // Mid-paragraph split keeps the second half's pPr; Word never propagates w:pBdr.
             orig_map.remove(&mut txn, BORDERS);
-            sync_direct_paragraph_property(&mut txn, &orig_map, BORDERS);
         }
         orig_map.remove(&mut txn, SOURCE_PARA_ID);
         orig_map.remove(&mut txn, PARA_ORIGIN);
@@ -762,7 +701,6 @@ impl EditingDoc {
             target
                 .map
                 .insert(&mut txn, TABS, Any::Array(Arc::from(stops)));
-            sync_direct_paragraph_property(&mut txn, &target.map, TABS);
         }
         Ok(Receipt::default())
     }
@@ -787,7 +725,6 @@ impl EditingDoc {
                     .map
                     .insert(&mut txn, TABS, Any::Array(Arc::from(stops)));
             }
-            sync_direct_paragraph_property(&mut txn, &target.map, TABS);
         }
         Ok(Receipt::default())
     }
@@ -808,7 +745,6 @@ impl EditingDoc {
             target
                 .map
                 .insert(&mut txn, INDENT_LEFT, Any::Number(current + step));
-            sync_direct_paragraph_property(&mut txn, &target.map, INDENT_LEFT);
         }
         Ok(Receipt::default())
     }
@@ -833,7 +769,6 @@ impl EditingDoc {
             } else {
                 target.map.remove(&mut txn, INDENT_LEFT);
             }
-            sync_direct_paragraph_property(&mut txn, &target.map, INDENT_LEFT);
         }
         Ok(Receipt::default())
     }
@@ -860,7 +795,6 @@ impl EditingDoc {
                     target.map.remove(&mut txn, DEFAULT_TEXT_FORMATTING);
                 }
             }
-            sync_direct_paragraph_property(&mut txn, &target.map, DEFAULT_TEXT_FORMATTING);
         }
         Ok(Receipt::default())
     }
@@ -954,7 +888,6 @@ impl StylePlan {
 fn formatting_key(key: &str) -> &str {
     match key {
         DEFAULT_TEXT_FORMATTING => "runProperties",
-        "pStyle" => "styleId",
         key => key,
     }
 }
@@ -1189,7 +1122,7 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
         lower: F,
     ) {
         match patch {
-            Patch::Keep => return,
+            Patch::Keep => {}
             Patch::Clear => {
                 map.remove(txn, key);
             }
@@ -1197,7 +1130,6 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
                 map.insert(txn, key.to_owned(), lower(value));
             }
         }
-        sync_direct_paragraph_property(txn, map, key);
     }
     apply(txn, map, "alignment", &delta.alignment, |v| {
         Any::from(v.as_str())
@@ -1239,8 +1171,19 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
                 map.insert(txn, auto_key, Any::Bool(false));
             }
         }
-        for key in [key, lines_key, auto_key] {
-            sync_direct_paragraph_property(txn, map, key);
+        if let Some(Out::Any(Any::Map(original))) = map.get(txn, "_originalFormatting") {
+            let mut original = (*original).clone();
+            for key in [key, lines_key, auto_key] {
+                match map.get(txn, key) {
+                    Some(Out::Any(value)) => {
+                        original.insert(key.to_owned(), value);
+                    }
+                    _ => {
+                        original.remove(key);
+                    }
+                }
+            }
+            map.insert(txn, "_originalFormatting", Any::Map(Arc::new(original)));
         }
     }
     apply(txn, map, INDENT_LEFT, &delta.indent_left, |v| {
@@ -1274,7 +1217,6 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
     );
     for (key, value) in &delta.other {
         set_or_remove(txn, map, key, value.clone());
-        sync_direct_paragraph_property(txn, map, key);
     }
 }
 
@@ -1344,116 +1286,5 @@ fn number_prop<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> Option<f64> {
         Some(Out::Any(Any::Number(value))) => Some(value),
         Some(Out::Any(Any::BigInt(value))) => Some(value as f64),
         _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn imported_paragraph() -> (EditingDoc, ParagraphId) {
-        let doc = EditingDoc::new(1067);
-        let id = doc.create_story("body", "QA", "Normal", "left").unwrap();
-        doc.set_paragraph_attr(&id, "spaceAfter", Any::Number(200.0))
-            .unwrap();
-        doc.set_paragraph_attr(&id, "lineSpacing", Any::Number(276.0))
-            .unwrap();
-        doc.set_paragraph_attr(&id, "_originalFormatting", Any::Map(Arc::default()))
-            .unwrap();
-        (doc, id)
-    }
-
-    fn direct(doc: &EditingDoc, index: usize) -> HashMap<String, Any> {
-        let paragraphs = doc.paragraphs("body").unwrap();
-        let Any::Map(direct) = &paragraphs[index].properties["_originalFormatting"] else {
-            panic!("missing direct formatting")
-        };
-        (**direct).clone()
-    }
-
-    #[test]
-    fn paragraph_edits_author_equal_inherited_values_and_clear_overrides() {
-        let (doc, id) = imported_paragraph();
-        let ctx = EditCtx::local("Author", "");
-        let selector = ParaSelector::One(id.clone());
-        doc.set_paragraph_attrs(
-            &ctx,
-            &selector,
-            &ParaAttrDelta {
-                space_after: Patch::Set(200.0),
-                line_spacing: Patch::Set(276.0),
-                line_spacing_rule: Patch::Set("auto".to_owned()),
-                indent_left: Patch::Set(0.0),
-                other: BTreeMap::from([("keepNext".to_owned(), Some(Any::Bool(false)))]),
-                ..ParaAttrDelta::default()
-            },
-        )
-        .unwrap();
-        let properties = direct(&doc, 0);
-        assert_eq!(properties["spaceAfter"], Any::Number(200.0));
-        assert_eq!(properties["lineSpacing"], Any::Number(276.0));
-        assert_eq!(properties["lineSpacingRule"], Any::from("auto"));
-        assert_eq!(properties["indentLeft"], Any::Number(0.0));
-        assert_eq!(properties["keepNext"], Any::Bool(false));
-        assert!(!properties.contains_key("alignment"));
-        doc.set_paragraph_attrs(
-            &ctx,
-            &selector,
-            &ParaAttrDelta {
-                space_after: Patch::Clear,
-                line_spacing: Patch::Clear,
-                line_spacing_rule: Patch::Clear,
-                ..ParaAttrDelta::default()
-            },
-        )
-        .unwrap();
-        let properties = direct(&doc, 0);
-        for key in [
-            "spaceAfter",
-            "spaceAfterLines",
-            "afterAutospacing",
-            "lineSpacing",
-            "lineSpacingRule",
-        ] {
-            assert!(!properties.contains_key(key));
-        }
-        doc.set_paragraph_attr(&id, "widowControl", Any::Bool(false))
-            .unwrap();
-        assert_eq!(direct(&doc, 0)["widowControl"], Any::Bool(false));
-        doc.set_paragraph_attr(&id, "widowControl", Any::Null)
-            .unwrap();
-        assert!(!direct(&doc, 0).contains_key("widowControl"));
-    }
-
-    #[test]
-    fn paragraph_style_projection_and_empty_split_keep_spacing_inherited() {
-        let (doc, id) = imported_paragraph();
-        let ctx = EditCtx::local("Author", "");
-        doc.set_paragraph_attr(&id, "spaceAfter", Any::Number(200.0))
-            .unwrap();
-        doc.apply_paragraph_style(
-            &ctx,
-            &ParaSelector::One(id),
-            &ResolvedStyleProjection {
-                style_id: "Spaced".to_owned(),
-                known: true,
-                paragraph_attrs: BTreeMap::from([
-                    ("spaceAfter".to_owned(), Any::Number(480.0)),
-                    ("lineSpacing".to_owned(), Any::Number(360.0)),
-                ]),
-                ..ResolvedStyleProjection::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            direct(&doc, 0),
-            HashMap::from([("styleId".to_owned(), Any::from("Spaced"))])
-        );
-        doc.split_paragraph(&ctx, Position::new("body", 2), None)
-            .unwrap();
-        assert_eq!(direct(&doc, 1), direct(&doc, 0));
-        let paragraphs = doc.paragraphs("body").unwrap();
-        assert_eq!(paragraphs[1].properties["spaceAfter"], Any::Number(480.0));
-        assert_eq!(paragraphs[1].properties["lineSpacing"], Any::Number(360.0));
     }
 }

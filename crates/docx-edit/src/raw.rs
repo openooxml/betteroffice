@@ -612,10 +612,7 @@ fn apply_raw_op_absolute(
                 }
             }
             let retyped = guard_embed_write(&embed, txn, [(key.as_str(), &value)])?;
-            embed.insert(txn, key.clone(), value);
-            if is_pilcrow(&embed, txn) {
-                crate::ops::paragraph::sync_direct_paragraph_property(txn, &embed, &key);
-            }
+            embed.insert(txn, key, value);
             if retyped {
                 embed.remove(txn, "value");
             }

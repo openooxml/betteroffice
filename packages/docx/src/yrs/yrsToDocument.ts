@@ -2,6 +2,7 @@
 
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
 
+import { createStyleResolver, type StyleResolver } from '../styles';
 import { isRawXml } from '../types/content/rawXml';
 import { pixelsToEmu } from '../utils/units';
 import {
@@ -24,6 +25,7 @@ import type {
   BlockContent,
   Paragraph,
   ParagraphContent,
+  ParagraphFormatting,
   Run,
   RunContent,
   HorizontalRuleContent,
@@ -1658,7 +1660,8 @@ function paragraphFromStory(
   items: InlineItem[],
   commentBoundaries: CommentBoundary[],
   baseParagraph: Paragraph | undefined,
-  revisionIds?: RevisionIds
+  revisionIds?: RevisionIds,
+  inherited?: ParagraphFormatting
 ): Paragraph {
   const attrs = paragraphAttrs(properties);
   let content = buildParagraphContent(items, revisionIds);
@@ -1702,7 +1705,7 @@ function paragraphFromStory(
     textId: baseParagraph?.textId,
     ...(baseParagraph?.extraAttributes ? { extraAttributes: baseParagraph.extraAttributes } : {}),
     ...(baseParagraph?.paraIdAttribute ? { paraIdAttribute: baseParagraph.paraIdAttribute } : {}),
-    formatting: paragraphAttrsToFormatting(attrs),
+    formatting: paragraphAttrsToFormatting(attrs, inherited),
     content,
   };
   if (baseParagraph?.renderedPageBreakBefore) paragraph.renderedPageBreakBefore = true;
@@ -2238,6 +2241,8 @@ class SaveContext {
   /** Per story, the comment ranges of it and of the stories nested in it, which key its blocks. */
   private readonly subtreeComments = new Map<string, Map<string, unknown>>();
   private readonly memo: SessionProjectionMemo;
+  private readonly styles: StyleResolver;
+  private readonly inherited = new Map<string, ParagraphFormatting | undefined>();
 
   constructor(
     private readonly session: YrsSession,
@@ -2250,6 +2255,7 @@ class SaveContext {
     this.baseParagraphs = collectBaseParagraphs(this.baseStories);
     this.comments = commentRanges(session, base.package.document.comments, commentIds);
     this.memo = sessionProjectionMemo(session);
+    this.styles = createStyleResolver(base.package.styles);
     for (const [story, ranges] of this.comments) {
       const seen = new Set<string>();
       for (
@@ -2284,6 +2290,20 @@ class SaveContext {
       }
     }
     return contents;
+  }
+
+  /**
+   * What a paragraph of `storyId` with style `styleId` inherits from
+   * docDefaults and its style; none in table cells and content controls,
+   * whose paragraphs can inherit from a table style too.
+   */
+  private inheritedFormatting(storyId: string, styleId: unknown): ParagraphFormatting | undefined {
+    if (NESTED_STORY_ID.test(storyId)) return undefined;
+    const key = typeof styleId === 'string' ? styleId : '';
+    if (!this.inherited.has(key)) {
+      this.inherited.set(key, this.styles.resolveParagraphStyle(key || null).paragraphFormatting);
+    }
+    return this.inherited.get(key);
   }
 
   storyToBlocks(storyId: string): BlockContent[] {
@@ -2410,7 +2430,8 @@ class SaveContext {
             items,
             boundaries,
             baseParagraph,
-            this.revisionIds
+            this.revisionIds,
+            this.inheritedFormatting(storyId, segment.properties.pStyle)
           );
           projectedBlocks.set(paragraph, { inputs: snapshot, sessionKey: segment.paraId });
         }
