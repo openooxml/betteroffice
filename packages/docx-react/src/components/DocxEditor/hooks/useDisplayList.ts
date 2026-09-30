@@ -1879,10 +1879,17 @@ export function useRustDisplayList(
             }
             if (since === undefined || now - since < SESSION_LAYOUT_WAIT_MS) {
               setTimeout(() => {
-                if (generationRef.current === generation) setSessionLayoutRetry((retry) => retry + 1);
+                if (
+                  generationRef.current === generation &&
+                  documentLoadsRef.current === documentLoad
+                ) {
+                  setSessionLayoutRetry((retry) => retry + 1);
+                }
               }, SESSION_LAYOUT_RETRY_MS);
               throw new SessionLayoutPendingError();
             }
+            // Another document's load is under way: this one's failure is stale.
+            if (documentLoadsRef.current !== documentLoad) throw new SessionLayoutPendingError();
           }
           throw error;
         }
