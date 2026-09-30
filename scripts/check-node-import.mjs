@@ -55,6 +55,7 @@ function importTarget(value) {
 function subpaths(exportsField) {
   const conditional =
     typeof exportsField === 'string' ||
+    Array.isArray(exportsField) ||
     Object.keys(exportsField).some((key) => !key.startsWith('.'));
   return conditional ? [['.', exportsField]] : Object.entries(exportsField);
 }

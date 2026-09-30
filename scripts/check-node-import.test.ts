@@ -29,6 +29,10 @@ test('every export is imported or refused, never skipped', () => {
   ]);
 });
 
+test('a root export array is refused', () => {
+  expect(importPlan({ name: '@betteroffice/fixture', exports: [] }).failures).toHaveLength(1);
+});
+
 test('the editor stylesheet is the one export left out', () => {
   const plan = importPlan({
     name: '@betteroffice/docx-react',
