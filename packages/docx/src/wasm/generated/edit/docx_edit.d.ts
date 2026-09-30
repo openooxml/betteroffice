@@ -580,6 +580,11 @@ export class EditSession {
      */
     load_json(stories_json: string): string;
     /**
+     * Lays this replica's `data:` image sources out as the `media:{n}` tokens
+     * another replica seeded them from.
+     */
+    load_media_sources(json: string): void;
+    /**
      * `{"start","end"}` — the paragraph's span in story-global UTF-16 units.
      * `end` is the index of its own pilcrow, so `end - start` is the
      * paragraph length and the upper bound of a Loc `offset` in it. Errors
@@ -600,6 +605,26 @@ export class EditSession {
      * the engine's message for input it cannot measure.
      */
     measure_paragraph_json(input: string): string;
+    /**
+     * The bytes a `media:{n}` image source displays, as the part's
+     * [`EditSession::media_type`]; `undefined` for any other source or a
+     * part that cannot be read.
+     */
+    media_bytes(token: string): Uint8Array | undefined;
+    /**
+     * The `data:` URL a `media:{n}` image source stands for.
+     */
+    media_data_url(token: string): string | undefined;
+    /**
+     * The digests mapping the `data:` URLs this replica seeded to
+     * `media:{n}` tokens, for [`EditSession::load_media_sources`]; empty
+     * when it seeded none.
+     */
+    media_sources_json(): string;
+    /**
+     * The media type of [`EditSession::media_bytes`].
+     */
+    media_type(token: string): string | undefined;
     /**
      * Merges the rectangle the [`TableRange`] `range_json` covers into its
      * top-left cell, whose story survives; the other cells' stories are
@@ -938,6 +963,12 @@ export class EditSession {
      * Errors when that position holds no image.
      */
     set_image_geometry_at(story: string, para_id: string, offset: number, geometry_json: string): void;
+    /**
+     * Whether [`EditSession::open_docx`] seeds images as `media:{n}` tokens,
+     * which only a replica opened from the same package resolves, instead of
+     * `data:` URLs. Off by default.
+     */
+    set_media_tokens(enabled: boolean): void;
     /**
      * Sets one paragraph property to any JSON value on `para_id`'s pilcrow,
      * searching every story. Unlike
@@ -1502,9 +1533,14 @@ export interface InitOutput {
     readonly editsession_list_revisions: (a: number) => [number, number, number, number];
     readonly editsession_load: (a: number, b: number, c: number) => [number, number];
     readonly editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_load_media_sources: (a: number, b: number, c: number) => [number, number];
     readonly editsession_locate_paragraph: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_materialize_docx: (a: number) => [number, number, number, number];
     readonly editsession_measure_paragraph_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_media_bytes: (a: number, b: number, c: number) => [number, number];
+    readonly editsession_media_data_url: (a: number, b: number, c: number) => [number, number];
+    readonly editsession_media_sources_json: (a: number) => [number, number];
+    readonly editsession_media_type: (a: number, b: number, c: number) => [number, number];
     readonly editsession_merge_cells: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_new: (a: number) => [number, number, number];
@@ -1551,6 +1587,7 @@ export interface InitOutput {
     readonly editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_set_image_geometry: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_set_image_geometry_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+    readonly editsession_set_media_tokens: (a: number, b: number) => void;
     readonly editsession_set_paragraph_attr: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly editsession_set_paragraph_attrs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
     readonly editsession_set_partial_document: (a: number, b: number) => void;

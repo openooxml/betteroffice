@@ -60,13 +60,13 @@ fn fresh_generation() -> String {
 }
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
-fn entropy() -> [u64; 2] {
+pub(crate) fn entropy() -> [u64; 2] {
     let draw = || (js_sys::Math::random() * 9_007_199_254_740_992.0) as u64;
     [draw() ^ ((js_sys::Date::now() as u64) << 11), draw()]
 }
 
 #[cfg(not(all(feature = "wasm", target_arch = "wasm32")))]
-fn entropy() -> [u64; 2] {
+pub(crate) fn entropy() -> [u64; 2] {
     use std::hash::{BuildHasher, Hasher};
     static OPENINGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let opening = OPENINGS.fetch_add(1, Ordering::Relaxed);
@@ -353,6 +353,10 @@ pub(crate) struct SourceIndex {
 }
 
 impl SourceIndex {
+    pub(crate) fn bytes(&self) -> Arc<[u8]> {
+        Arc::clone(&self.bytes)
+    }
+
     pub(crate) fn new(
         package_sha256: String,
         bytes: Arc<[u8]>,
@@ -545,13 +549,8 @@ fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
         .collect()
 }
 
-/// SHA-256 over every segment of a story exactly as
-/// [`EditingDoc::story_segments`] hands it to the save projection: each
-/// text, paragraph mark and embed with its full payload and its full
-/// attribute map (tracked insertions and deletions, formatting), map keys
-/// sorted and nulls kept. The one exclusion is the paragraph identity the
-/// save plan patches in place: the segments already leave out the session
-/// key, Word paragraph ID, source ID and editor-only marker.
+/// SHA-256 of save segments, expanding media tokens, sorting map keys and keeping nulls.
+/// [`EditingDoc::story_segments`] already excludes paragraph identities.
 fn story_fingerprint(doc: &EditingDoc, story: &str) -> Option<[u8; 32]> {
     use sha2::{Digest, Sha256};
     fn ordered(value: &Any) -> serde_json::Value {
@@ -571,8 +570,12 @@ fn story_fingerprint(doc: &EditingDoc, story: &str) -> Option<[u8; 32]> {
                 .collect(),
         )
     }
+    let mut segments = doc.story_segments(story).ok()?;
+    if let Some(media) = doc.media_table() {
+        crate::media::write_segment_data_urls(&mut segments, &media).ok()?;
+    }
     let mut hasher = Sha256::new();
-    for segment in doc.story_segments(story).ok()? {
+    for segment in segments {
         let content = match &segment.content {
             crate::SegmentContent::Text(text) => serde_json::json!({ "text": text }),
             crate::SegmentContent::Pilcrow(properties) => {
@@ -2261,6 +2264,61 @@ mod tests {
 
     fn ctx() -> EditCtx {
         EditCtx::local("", DATE)
+    }
+
+    #[test]
+    fn media_sources_have_the_same_fingerprint_in_both_seed_modes() {
+        let bytes =
+            ooxml_opc::rezip_parts(&[("word/media/picture.png".to_owned(), vec![1, 2, 3, 4])])
+                .unwrap();
+        let table = docx_parse::media::MediaTable::new(
+            ooxml_opc::RetainedPackage::new(Arc::from(bytes)).unwrap(),
+        )
+        .unwrap();
+        let url = table.data_url(0).unwrap();
+        for key in [
+            "src",
+            "shapeJson",
+            "chartJson",
+            "fieldData",
+            "propertiesJson",
+        ] {
+            let document = |src: &str| {
+                let doc = EditingDoc::new(7);
+                doc.create_story("body", "", "Normal", "left").unwrap();
+                let value = if key == "src" {
+                    src.to_owned()
+                } else {
+                    serde_json::json!({"nested": [{"src": src, "label": "media:0"}]}).to_string()
+                };
+                doc.apply_raw_ops(
+                    "body",
+                    vec![crate::RawOp::InsertEmbed {
+                        index: 0,
+                        kind: "image".into(),
+                        payload: vec![(key.into(), Any::String(value.into()))],
+                        attrs: Default::default(),
+                    }],
+                    &ctx(),
+                )
+                .unwrap();
+                doc
+            };
+            let default = document(&url);
+            let expected = story_fingerprint(&default, "body").unwrap();
+            let segments = default.story_segments("body").unwrap();
+            default.install_media(table.clone());
+            assert_eq!(story_fingerprint(&default, "body"), Some(expected), "{key}");
+            let mut normalized = segments.clone();
+            crate::media::write_segment_data_urls(&mut normalized, &table).unwrap();
+            assert_eq!(normalized, segments, "{key}");
+            let tokens = document("media:0");
+            tokens.install_media(table.clone());
+            assert_eq!(story_fingerprint(&tokens, "body"), Some(expected), "{key}");
+            let changed = document("data:image/png;base64,AQIDBQ==");
+            changed.install_media(table.clone());
+            assert_ne!(story_fingerprint(&changed, "body"), Some(expected), "{key}");
+        }
     }
 
     fn session(story: &str, key: &str) -> ParagraphRef {

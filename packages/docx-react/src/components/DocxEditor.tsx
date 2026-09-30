@@ -185,6 +185,13 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
    */
   experimentalWorkerOpen?: boolean;
   /**
+   * Opens images as `media:{n}` tokens read from the document file instead of
+   * `data:` URLs, keeping them out of the document state and its updates.
+   * Every client of a shared room must open the same file on a version that
+   * reads them. Read when a document opens. Off by default.
+   */
+  mediaTokens?: boolean;
+  /**
    * Callback when a DOCX file is selected through `File > Open` or Cmd/Ctrl+O.
    * Pass it to route the picked file through your own import pipeline. Omit it
    * to keep the built-in local document load behavior.
@@ -773,6 +780,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     downloadOnSave = true,
     collaboration,
     experimentalWorkerOpen = false,
+    mediaTokens,
     onOpen,
     author = 'User',
     onChange,
@@ -1151,6 +1159,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             renderedFrame: canvasRenderer.status === 'ready' ? canvasRenderer.displayList : null,
           }
         : undefined,
+      mediaTokens,
     }
   );
   // Until the full session's pages are shown, the editor takes no input and its
@@ -1220,6 +1229,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   } = useFileIO({
     pagedEditorRef,
     resolveImage: canvasRenderer.resolveImage,
+    shownImageResolver: canvasRenderer.imageResolverForShownFrame,
     fontFamilies: fontAliases,
     comments,
     documentName,
