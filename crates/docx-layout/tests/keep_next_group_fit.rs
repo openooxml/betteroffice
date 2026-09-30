@@ -1,5 +1,5 @@
-//! A keep-with-next run moves to the next page only when it would fit there
-//! whole, measured as placement lays it out on a fresh page.
+//! A keep-with-next run that cannot finish moves off an occupied column.
+//! Oversized runs split from the new column, or in place when already empty.
 
 use serde_json::{Value, json};
 

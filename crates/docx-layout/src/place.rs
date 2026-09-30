@@ -856,7 +856,6 @@ fn place(
             let state_idx = paginator.get_current();
             let page_content_height =
                 paginator.state(state_idx).content_limit - paginator.state(state_idx).content_top;
-            let page_has_content = paginator.page_fragment_count(state_idx) > 0;
             let group_height = hooks::measure_keep_with_next_group_at(
                 group,
                 measured,
@@ -871,6 +870,12 @@ fn place(
                 0.0,
                 page_content_height,
             )?;
+            let oversized = fresh_page_height > page_content_height;
+            let page_has_content = if oversized {
+                paginator.current_column_has_flow_content()
+            } else {
+                paginator.page_fragment_count(state_idx) > 0
+            };
             let must_advance = hooks::keep_with_next_group_must_advance_from(
                 group_height,
                 fresh_page_height,
@@ -879,7 +884,9 @@ fn place(
                 page_has_content,
             )?;
             if must_advance {
-                if paginator.has_float_bands() {
+                if oversized {
+                    paginator.advance_for_overflow();
+                } else if paginator.has_float_bands() {
                     paginator.ensure_fits(group_height);
                 } else {
                     // advance until a column holds the run or a fresh page opens
@@ -1205,9 +1212,9 @@ fn paragraph_fragment_height(before: f64, lines_height: f64) -> f64 {
 /// the float instead of over it. A paragraph with no measured lines still emits
 /// a zero-height fragment, because its spacing must still advance the pen.
 ///
-/// Two rules can move lines before they are placed. `w:keepLines` advances to a
-/// fresh column when the whole paragraph fits a column but not the space left
-/// here. Widow and orphan control keeps two- and three-line paragraphs together
+/// Two rules can move lines before they are placed. `w:keepLines` advances from
+/// an occupied column when oversized, or when it fits a whole column but not
+/// the remaining space. Widow and orphan control keeps short paragraphs together
 /// unless they turn `w:widowControl` off. For longer paragraphs, a lone opening
 /// line moves the paragraph on when two lines would fit there, and a lone trailing line is
 /// avoided by pushing one more line down, provided the fragment keeps more than
@@ -1269,8 +1276,14 @@ fn layout_paragraph(
             .leading_spacing(space_before)
             .max(state.deferred_spacing)
             + paragraph_height;
+        let page_content_height = state.content_limit - state.content_top;
+        let oversized_keep_lines = block.attrs.as_ref().and_then(|attrs| attrs.keep_lines)
+            == Some(true)
+            && paragraph_height > page_content_height;
         let capacity = paginator.get_column_capacity();
-        if paragraph_height <= capacity && required > paginator.get_available_height() {
+        if oversized_keep_lines && paginator.current_column_has_flow_content() {
+            paginator.advance_for_overflow();
+        } else if paragraph_height <= capacity && required > paginator.get_available_height() {
             paginator.ensure_fits(required);
         }
     }
@@ -2907,13 +2920,12 @@ mod pagination_rule_tests {
     #[test]
     fn oversized_keep_lines_terminates_and_remains_visible() {
         let result = layout(vec![paragraph(1, 10, 40.0, json!({ "keepLines": true }))]);
-        assert!(!result.pages.is_empty());
-        let fragments = result
-            .pages
-            .iter()
-            .flat_map(|page| page.fragments.iter())
-            .count();
-        assert_eq!(fragments, 5);
+        assert_eq!(result.pages.len(), 5);
+        assert_eq!(
+            paragraph_slices(&result, 1.0),
+            vec![(0, 0, 2), (1, 2, 4), (2, 4, 6), (3, 6, 8), (4, 8, 10)]
+        );
+        assert!(result.pages.iter().all(|page| page.fragments.len() == 1));
     }
 
     #[test]
@@ -2954,6 +2966,239 @@ mod pagination_rule_tests {
                 })
             })
             .collect()
+    }
+
+    const KEEP_LINE_HEIGHT: f64 = 10.0;
+
+    fn oversized_input(measured: Vec<serde_json::Value>) -> Input {
+        let mut value = input(measured);
+        value.options.page_size = Some(Size { w: 200.0, h: 600.0 });
+        value
+    }
+
+    fn oversized_run(keep_next: bool) -> Vec<serde_json::Value> {
+        (100..160)
+            .map(|id| {
+                paragraph(
+                    id,
+                    1,
+                    KEEP_LINE_HEIGHT,
+                    json!({"keepNext": keep_next && id < 159, "widowControl": false}),
+                )
+            })
+            .collect()
+    }
+
+    fn oversized_paragraph(keep_lines: bool) -> serde_json::Value {
+        paragraph(
+            100,
+            60,
+            KEEP_LINE_HEIGHT,
+            json!({"keepLines": keep_lines, "widowControl": false}),
+        )
+    }
+
+    fn paragraph_positions(result: &Layout, id: f64) -> Vec<(usize, f64, usize, usize)> {
+        result
+            .pages
+            .iter()
+            .enumerate()
+            .flat_map(|(page_index, page)| {
+                page.fragments.iter().filter_map(move |fragment| match fragment {
+                    Fragment::Paragraph(p)
+                        if matches!(p.block_id, crate::types::BlockId::Num(value) if value == id) =>
+                    {
+                        Some((page_index, p.x, p.from_line, p.to_line))
+                    }
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    fn assert_run_positions(
+        result: &Layout,
+        head: (usize, f64),
+        tail: (usize, f64),
+        first_bullets: u32,
+    ) {
+        for id in 100..160 {
+            let (page, x) = if id <= 100 + first_bullets {
+                head
+            } else {
+                tail
+            };
+            assert_eq!(
+                paragraph_positions(result, f64::from(id)),
+                vec![(page, x, 0, 1)],
+                "block {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_keeps_at_document_start_do_not_open_a_blank_page() {
+        let run = layout_document(&mut oversized_input(oversized_run(true))).unwrap();
+        assert_eq!(run.pages.len(), 2);
+        assert_run_positions(&run, (0, 10.0), (1, 10.0), 57);
+        let paragraph =
+            layout_document(&mut oversized_input(vec![oversized_paragraph(true)])).unwrap();
+        assert_eq!(paragraph.pages.len(), 2);
+        assert_eq!(
+            paragraph_slices(&paragraph, 100.0),
+            vec![(0, 0, 58), (1, 58, 60)]
+        );
+        assert!(
+            run.pages
+                .iter()
+                .chain(&paragraph.pages)
+                .all(|page| !page.fragments.is_empty())
+        );
+    }
+
+    #[test]
+    fn oversized_head_with_both_keeps_advances_only_once() {
+        let mut head = oversized_paragraph(true);
+        head["block"]["attrs"]["keepNext"] = json!(true);
+        let result = layout_document(&mut oversized_input(vec![
+            paragraph(1, 20, KEEP_LINE_HEIGHT, json!({"widowControl": false})),
+            head,
+            paragraph(101, 1, KEEP_LINE_HEIGHT, json!({"widowControl": false})),
+        ]))
+        .unwrap();
+        assert_eq!(result.pages.len(), 3);
+        assert_eq!(
+            paragraph_slices(&result, 100.0),
+            vec![(1, 0, 58), (2, 58, 60)]
+        );
+        assert_eq!(paragraph_slices(&result, 101.0), vec![(2, 0, 1)]);
+    }
+
+    #[test]
+    fn float_obstruction_does_not_make_keep_lines_oversized() {
+        let mut value = oversized_input(vec![
+            paragraph(1, 20, KEEP_LINE_HEIGHT, json!({"widowControl": false})),
+            paragraph(
+                100,
+                40,
+                KEEP_LINE_HEIGHT,
+                json!({"keepLines": true, "widowControl": false}),
+            ),
+        ]);
+        value.options.section_page_float_bands = Some(
+            serde_json::from_value(json!([{
+                "default": [{"top": 210, "bottom": 310}],
+            }]))
+            .unwrap(),
+        );
+        let result = layout_document(&mut value).unwrap();
+        assert_eq!(result.pages.len(), 2);
+        assert_eq!(
+            paragraph_slices(&result, 100.0),
+            vec![(0, 0, 28), (1, 28, 40)]
+        );
+        let Fragment::Paragraph(first) = &result.pages[0].fragments[1] else {
+            panic!("paragraph expected");
+        };
+        assert_eq!(first.y, 310.0);
+    }
+
+    #[test]
+    fn oversized_keeps_use_current_column_flow_content() {
+        for keep_next in [true, false] {
+            for (break_column, fill_second) in [(false, false), (true, false), (true, true)] {
+                let mut measured = vec![json!({
+                    "block": {"kind": "pageBreak", "id": "origin"},
+                    "measure": {"kind": "pageBreak"},
+                })];
+                measured.push(paragraph(
+                    1,
+                    if fill_second { 58 } else { 20 },
+                    KEEP_LINE_HEIGHT,
+                    json!({"widowControl": false}),
+                ));
+                if break_column {
+                    measured.push(json!({
+                        "block": {"kind": "columnBreak", "id": "column"},
+                        "measure": {"kind": "columnBreak"},
+                    }));
+                }
+                if fill_second {
+                    measured.push(paragraph(
+                        2,
+                        20,
+                        KEEP_LINE_HEIGHT,
+                        json!({"widowControl": false}),
+                    ));
+                }
+                measured.extend(if keep_next {
+                    oversized_run(true)
+                } else {
+                    vec![oversized_paragraph(true)]
+                });
+                let mut value = oversized_input(measured);
+                value.options.columns =
+                    Some(serde_json::from_value(json!({"count": 2, "gap": 20})).unwrap());
+                let result = layout_document(&mut value).unwrap();
+                assert_eq!(result.pages.len(), 2);
+                assert_eq!(
+                    paragraph_positions(&result, 1.0),
+                    vec![(0, 10.0, 0, if fill_second { 58 } else { 20 })]
+                );
+                if fill_second {
+                    assert_eq!(paragraph_positions(&result, 2.0), vec![(0, 110.0, 0, 20)]);
+                }
+                let (head, tail) = if fill_second {
+                    ((1, 10.0), (1, 110.0))
+                } else {
+                    ((0, 110.0), (1, 10.0))
+                };
+                if keep_next {
+                    assert_run_positions(&result, head, tail, 57);
+                } else {
+                    assert_eq!(
+                        paragraph_positions(&result, 100.0),
+                        vec![(head.0, head.1, 0, 58), (tail.0, tail.1, 58, 60)]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_keeps_match_checkpoint_resumes_after_a_prefix_page() {
+        for keep_next in [true, false] {
+            let blocks = |text| {
+                let mut measured = vec![
+                    paragraph(0, 58, KEEP_LINE_HEIGHT, json!({"widowControl": false})),
+                    json!({
+                        "block": {"kind": "pageBreak", "id": "prefix"},
+                        "measure": {"kind": "pageBreak"},
+                    }),
+                    paragraph(1, 20, KEEP_LINE_HEIGHT, json!({"widowControl": false})),
+                ];
+                let mut kept = if keep_next {
+                    oversized_run(true)
+                } else {
+                    vec![oversized_paragraph(true)]
+                };
+                kept[0]["block"]["runs"][0]["text"] = json!(text);
+                measured.extend(kept);
+                measured
+            };
+            let previous = assert_incremental_matches_full_with(
+                json!({"pageSize": {"w": 200, "h": 600}}),
+                blocks("x"),
+                blocks("y"),
+                &[3],
+            );
+            assert_eq!(previous.layout.pages.len(), 4);
+            assert!(
+                previous.checkpoints.iter().any(|checkpoint| {
+                    checkpoint.block_index == 2 && checkpoint.page_index == 1
+                })
+            );
+        }
     }
 
     #[test]

@@ -137,6 +137,7 @@ pub struct Paginator {
     page_start_spacing_spent: f64,
     /// The column the current page's first fragment landed in.
     page_start_column: usize,
+    current_column_has_flow_content: bool,
     numbering_parity_offset: bool,
     pub pages: Vec<Page>,
     states: Vec<FlowState>,
@@ -195,6 +196,7 @@ impl Paginator {
             leading_spacing_spent: 0.0,
             page_start_spacing_spent: 0.0,
             page_start_column: 0,
+            current_column_has_flow_content: false,
             numbering_parity_offset: false,
             pages: Vec::new(),
             states: Vec::new(),
@@ -592,6 +594,7 @@ impl Paginator {
         state.pen_y = content_top;
         state.content_top = content_top;
         state.content_limit = content_limit;
+        self.current_column_has_flow_content = false;
         self.column_region_top = content_top;
         self.column_region_bottom = content_top;
     }
@@ -710,6 +713,7 @@ impl Paginator {
             deferred_spacing: 0.0,
         };
 
+        self.current_column_has_flow_content = false;
         self.pages.push(page);
         self.states.push(state);
         self.opens_section.push(opens_section);
@@ -738,6 +742,10 @@ impl Paginator {
     /// Read a state by index.
     pub fn state(&self, idx: usize) -> &FlowState {
         &self.states[idx]
+    }
+
+    pub fn current_column_has_flow_content(&self) -> bool {
+        self.current_column_has_flow_content
     }
 
     /// Number of fragments already on the state's page.
@@ -831,6 +839,7 @@ impl Paginator {
             state.column_index += 1;
             state.pen_y = region_top;
             state.deferred_spacing = 0.0;
+            self.current_column_has_flow_content = false;
             self.column_capacities[idx] = None;
             return (idx, false);
         }
@@ -895,6 +904,7 @@ impl Paginator {
         fragment.set_xy(x, y);
         let page_index = self.states[idx].page_index;
         self.pages[page_index].fragments.push(fragment);
+        self.current_column_has_flow_content = true;
         if self.pages[page_index].fragments.len() == 1 {
             self.page_start_spacing_spent = self.leading_spacing_spent;
             self.page_start_column = self.states[idx].column_index;
@@ -997,6 +1007,7 @@ impl Paginator {
         state.pen_y = self.column_region_top;
         state.column_index = 0;
         state.content_limit = content_limit;
+        self.current_column_has_flow_content = false;
         self.column_capacities[idx] = None;
     }
 
