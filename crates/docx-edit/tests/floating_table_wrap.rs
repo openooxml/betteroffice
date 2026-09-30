@@ -59,9 +59,33 @@ fn metrics(bytes: &[u8]) -> (f64, usize) {
         .as_array()
         .unwrap()
         .iter()
-        .find(|primitive| primitive["kind"] == "text" && primitive["text"] == "MARKER HEADING")
-        .expect("MARKER HEADING on page one");
-    (marker["baselineY"].as_f64().unwrap() * 0.75, anchor_lines)
+        .find(|primitive| {
+            matches!(primitive["kind"].as_str(), Some("text" | "glyphRun"))
+                && primitive["text"]
+                    .as_str()
+                    .is_some_and(|text| text.trim_start().starts_with("MARKER"))
+        })
+        .unwrap_or_else(|| {
+            let texts: Vec<_> = display["pages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|page| {
+                    page["primitives"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter_map(|primitive| primitive["text"].as_str())
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            panic!("MARKER HEADING on page one, page texts {texts:?}")
+        });
+    let baseline = marker["baselineY"]
+        .as_f64()
+        .or_else(|| marker["glyphs"][0]["y"].as_f64())
+        .unwrap();
+    (baseline * 0.75, anchor_lines)
 }
 
 fn assert_matches_word(name: &str) {
