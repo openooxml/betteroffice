@@ -231,8 +231,14 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
         break;
       }
       case 'image':
-      case 'decoration':
         break;
+      case 'decoration': {
+        // Only a solid rule or highlight fills its box; the others are segmented strokes.
+        const { color, style, dashed, dotted } = primitive;
+        if ((style ?? 'solid') !== 'solid' || dashed || dotted) return false;
+        if (!color || color === 'transparent' || color === 'none') return false;
+        break;
+      }
       default:
         return false;
     }

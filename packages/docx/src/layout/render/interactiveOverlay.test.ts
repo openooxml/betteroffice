@@ -1,6 +1,7 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, expect, test } from 'bun:test';
 import type {
+  DecorationPrimitive,
   DisplayPage,
   DisplayPrimitive,
   ImagePrimitive,
@@ -287,6 +288,23 @@ test('a body image hides header controls only inside the rectangle it paints', (
   ] as Partial<ImagePrimitive>[]) {
     expectHidden(headerWidget([image(extra)]));
   }
+});
+
+test('a body decoration hides header controls only where it fills its box', () => {
+  const decoration = (extra: Partial<DecorationPrimitive>): DecorationPrimitive => ({
+    kind: 'decoration', deco: 'highlight', x: 100, y: 20, w: 60, h: 40, color: '#ffff00', ...extra,
+  });
+  for (const extra of [
+    { dashed: true },
+    { dotted: true },
+    { style: 'double' },
+    { color: 'transparent' },
+    { color: '' },
+  ] as Partial<DecorationPrimitive>[]) {
+    expectActive(headerWidget([decoration(extra)]));
+  }
+  expectHidden(headerWidget([decoration({})]));
+  expectHidden(headerWidget([decoration({ style: 'solid' })]));
 });
 
 test('body picture fills with zero opacity do not hide header controls', () => {
