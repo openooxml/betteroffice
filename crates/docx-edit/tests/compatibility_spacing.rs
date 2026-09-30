@@ -206,7 +206,8 @@ fn table_compatibility_preserves_unflagged_measurement_and_allows_cell_spacing()
     assert_eq!(fragment(&default, "TABLE END"), (1, 240.0));
     assert_eq!(default_measure, &enabled["measured"][2]["measure"]);
     for (output, fixture) in [(&default, "table-default"), (&enabled, "table-enabled")] {
-        let measured: MeasuredBlock = serde_json::from_value(output["measured"][2].clone()).unwrap();
+        let measured: MeasuredBlock =
+            serde_json::from_value(output["measured"][2].clone()).unwrap();
         let (LayoutBlock::Table(table), BlockExtent::Table(extent)) =
             (&measured.block, &measured.measure)
         else {
