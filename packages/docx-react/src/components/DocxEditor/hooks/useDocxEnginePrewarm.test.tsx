@@ -119,7 +119,7 @@ test('byte arrival retries warm in parallel with the main-thread open', async ()
         onError: (error) => errors.push(error),
       });
     },
-    { initialProps: { bytes: null } }
+    { initialProps: { bytes: null as Uint8Array | null } }
   );
   try {
     const failed = FakeWorker.instances[0];
@@ -156,7 +156,7 @@ test('disabled prewarming creates no spare when bytes arrive', async () => {
       useDocxEnginePrewarm(false);
       useDocxEnginePrewarmOnBytes(false, bytes);
     },
-    { initialProps: { bytes: null } }
+    { initialProps: { bytes: null as Uint8Array | null } }
   );
   hook.rerender({ bytes: Uint8Array.of(1, 2, 3) });
   await act(async () => {});
