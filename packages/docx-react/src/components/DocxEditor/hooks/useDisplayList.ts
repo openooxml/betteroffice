@@ -94,7 +94,7 @@ export interface UseRustDisplayListResult {
   resetSettled(failure?: Error | null): void;
   /** True from a document load until the loaded document's first layout arrives. */
   awaitingDocument(): boolean;
-  /** Ties a new editing session to the document load now under way. */
+  /** Ties a session, as it is created, to the document load now under way. */
   recordSession(session: YrsSession | null): void;
   /** Worker-computed caret tagged to `frame`. */
   caret: YrsResidentCaretSnapshot | null;
@@ -322,8 +322,8 @@ export function useRustDisplayList(
     /** The document load its session belongs to. */
     load: number;
   } | null>(null);
-  // The document load each session belongs to: the one under way when the
-  // editor recorded it, else when it was first laid out or displayed.
+  // The document load each session belongs to: the one under way when it was
+  // created, as the editor records it, else when it was first laid out or shown.
   const sessionLoadsRef = useRef(new WeakMap<YrsSession, number>());
   const sessionLoad = useCallback((session: YrsSession): number => {
     let load = sessionLoadsRef.current.get(session);
@@ -1328,8 +1328,13 @@ export function useRustDisplayList(
     const paintToken = paintedCaretMachine.token();
     let pending: Promise<BuiltDisplay>;
     const outOfMemory = residentEngine ? outOfMemoryRef.current.get(residentEngine) : null;
-    if (outOfMemory) {
-      pending = Promise.reject(outOfMemory);
+    if (outOfMemory && residentEngine) {
+      // A replaced document's failure fails nothing of the one being loaded.
+      pending = Promise.reject(
+        sessionLoad(residentEngine) === documentLoadsRef.current
+          ? outOfMemory
+          : new SupersededPreviewError()
+      );
     } else if (!overrides?.build && probe && canUseResidentEngineWorker()) {
       const hostEngine = residentEngine;
       if (!hostEngine) throw new Error('Resident worker snapshot requires a host engine');

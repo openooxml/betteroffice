@@ -605,6 +605,41 @@ test("a replaced session's first worker, started after the next load began, fail
   }
 });
 
+test("a replaced document's standing out-of-memory failure fails nothing of the next load", async () => {
+  const { native, inputs, frame, engine } = setup();
+  const warnings = spyOn(console, 'warn').mockImplementation(() => {});
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, rerender, unmount } = renderHook(
+      ({ layout }) => useRustDisplayList(layout, overrides, undefined, undefined, engine),
+      { initialProps: { layout: inputs.layout as Layout } }
+    );
+    await act(async () => FakeWorker.spawned[0]!.replyFrame(frame(100), 100));
+    await act(async () => rerender({ layout: { ...inputs.layout } }));
+    await act(async () => FakeWorker.spawned[0]!.outOfMemory());
+    await act(async () => FakeWorker.spawned[1]!.outOfMemory());
+    await waitFor(() => expect(result.current.error).toBeInstanceOf(ResidentWorkerOutOfMemoryError));
+
+    act(() => result.current.resetSettled());
+    let waited: unknown = 'pending';
+    void result.current.settledDisplayList(null, null).then(
+      () => (waited = 'settled'),
+      (error: unknown) => (waited = error)
+    );
+    // The replaced document lays out once more before the next one arrives.
+    await act(async () => rerender({ layout: { ...inputs.layout } }));
+    await act(async () => {});
+    expect(waited).toBe('pending');
+    expect(FakeWorker.spawned).toHaveLength(2);
+    unmount();
+  } finally {
+    warnings.mockRestore();
+    errors.mockRestore();
+    native.free();
+  }
+});
+
 test("an out-of-memory failure from a replaced document's worker leaves the new worker alone", async () => {
   const { native, inputs, frame, engine } = setup();
   const other = { ...engine } as YrsSession;
