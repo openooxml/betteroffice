@@ -26,6 +26,7 @@ import { applyEditBatch, applyProposalCall, flushedSession, modeRefusal } from '
 import type { EditorMode } from '../internals/editing-modes';
 import type { SelectionState } from '../types';
 import { documentPageCount } from './documentPageCount';
+import type { DocxHostSearch } from './useHostSearch';
 
 type LocatedParagraph = {
   story: string;
@@ -183,6 +184,7 @@ export function useDocxEditorRefApi({
   allowHostProposalsRef,
   settledDisplayList,
   awaitingDocument,
+  hostSearch,
 }: {
   ref: React.ForwardedRef<DocxEditorRef>;
   document: Document | null;
@@ -214,6 +216,7 @@ export function useDocxEditorRefApi({
   settledDisplayList?: (relayout: null, timeoutMs: number | null) => Promise<DisplayList>;
   /** Whether a document load has not yet produced its first layout. */
   awaitingDocument?: () => boolean;
+  hostSearch: DocxHostSearch;
 }) {
   const hostProposalsAllowed = () =>
     modeRef.current !== 'viewing' || allowHostProposalsRef.current === true;
@@ -490,6 +493,7 @@ export function useDocxEditorRefApi({
         selectionChangeSubscribersRef.current.add(listener);
         return () => selectionChangeSubscribersRef.current.delete(listener);
       },
+      ...hostSearch,
     }),
     [
       document,
@@ -504,6 +508,7 @@ export function useDocxEditorRefApi({
       commands,
       settledDisplayList,
       awaitingDocument,
+      hostSearch,
     ]
   );
 }

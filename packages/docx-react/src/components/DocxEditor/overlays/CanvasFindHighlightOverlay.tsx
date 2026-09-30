@@ -1,31 +1,33 @@
 /**
- * Canvas-mode find/replace match highlighting.
+ * Canvas-mode find match highlighting.
  *
- * This component draws find highlights directly over the visible canvas pages:
- * every match's display range is resolved to
- * page-local rects through the display-list `range_rects` query and each rect is
- * projected into `overlayTarget` coordinates via the live per-page `<canvas>`
- * rect — the exact projection `CanvasSelectionOverlay` uses, so highlights land
- * on the glyphs regardless of the page column's centering, the sidebar-open
- * shift, or zoom.
+ * Draws find highlights over the canvas pages in view and one page either
+ * side: only the matches in those pages' position range are resolved to
+ * page-local rects through the display-list `range_rects` query, so the cost
+ * follows what is on screen, not the match count. Each rect is projected into
+ * `overlayTarget` coordinates via the live per-page `<canvas>` rect, the
+ * projection `CanvasSelectionOverlay` uses, so highlights land on the glyphs
+ * regardless of the page column's centering, the sidebar-open shift, or zoom.
+ * The set is recomputed when the pages in view change or move.
  *
  * The current match gets the `.docx-find-highlight-current` token; the rest get
- * `.docx-find-highlight` — the same single-source-of-truth classes the DOM
- * find path defines in `packages/docx/src/styles/editor.css`. Non-interactive
- * (pointer-events: none) so it never steals the caret.
- *
- * Renders nothing on the default DOM-painter path: it is only mounted once the
- * canvas overlay target resolves (canvas active).
- *
+ * `.docx-find-highlight`, the classes the DOM find path defines in
+ * `packages/docx/src/styles/editor.css`. Non-interactive (pointer-events: none)
+ * so it never steals the caret.
  */
 
-import { useLayoutEffect, useState } from 'react';
+import { useLayoutEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   displayPageCanvas,
   type DisplayListQueries,
   type DisplayListRect,
 } from '@betteroffice/docx/layout/render';
+import { observePageWindow } from './pageWindowObserver';
+import {
+  buildRemotePresencePageMetrics,
+  remotePresencePagePositionRange,
+} from './remotePresenceGeometry';
 
 /** One find match, addressed by its live display range. */
 export interface CanvasFindMatch {
@@ -34,8 +36,8 @@ export interface CanvasFindMatch {
 }
 
 export interface CanvasFindHighlightOverlayProps {
-  /** All matches in document order, each carrying its live display range. */
-  matches: CanvasFindMatch[];
+  /** All matches, each carrying its live display range. */
+  matches: readonly CanvasFindMatch[];
   /** Index of the active match (styled distinctly), or -1 for none. */
   currentIndex: number;
   /** Portal target — `editorContentRef.current`, sharing the canvas host's top-left. */
@@ -58,6 +60,45 @@ interface ProjectedRect {
   isCurrent: boolean;
 }
 
+/** Match indices in display order, with the furthest end reached up to each. */
+export function displayOrder(matches: readonly CanvasFindMatch[]): {
+  order: number[];
+  reach: number[];
+} {
+  const order = matches.map((_, index) => index);
+  if (matches.some((match, index) => index > 0 && match.displayFrom < matches[index - 1].displayFrom)) {
+    order.sort((a, b) => matches[a].displayFrom - matches[b].displayFrom || a - b);
+  }
+  const reach: number[] = [];
+  for (const index of order) {
+    reach.push(Math.max(reach.at(-1) ?? -Infinity, matches[index].displayTo));
+  }
+  return { order, reach };
+}
+
+/** Indices of the matches overlapping `[from, to)`, in display order. */
+export function matchesInRange(
+  matches: readonly CanvasFindMatch[],
+  { order, reach }: ReturnType<typeof displayOrder>,
+  from: number,
+  to: number
+): number[] {
+  let low = 0;
+  let high = order.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (reach[middle] <= from) low = middle + 1;
+    else high = middle;
+  }
+  const found: number[] = [];
+  for (let index = low; index < order.length; index += 1) {
+    const match = matches[order[index]];
+    if (match.displayFrom >= to) break;
+    if (match.displayTo > from) found.push(order[index]);
+  }
+  return found;
+}
+
 export function CanvasFindHighlightOverlay({
   matches,
   currentIndex,
@@ -68,6 +109,7 @@ export function CanvasFindHighlightOverlay({
   zoom,
 }: CanvasFindHighlightOverlayProps) {
   const [rects, setRects] = useState<ProjectedRect[]>([]);
+  const order = useMemo(() => displayOrder(matches), [matches]);
 
   useLayoutEffect(() => {
     const host = canvasHostRef.current;
@@ -75,14 +117,24 @@ export function CanvasFindHighlightOverlay({
       setRects([]);
       return;
     }
-
-    const recompute = () => {
+    const displayList = displayListQueries.displayList;
+    const metrics = buildRemotePresencePageMetrics(displayList, zoom);
+    let shown: string | null = null;
+    return observePageWindow(host, metrics, (pageWindow, moved) => {
+      const key = pageWindow ? `${pageWindow.start}:${pageWindow.end}` : '';
+      if (!moved && key === shown) return;
+      shown = key;
+      const range = pageWindow ? remotePresencePagePositionRange(displayList, pageWindow) : null;
+      if (!pageWindow || !range) {
+        setRects([]);
+        return;
+      }
       const targetRect = overlayTarget.getBoundingClientRect();
       // Project a page-local (px) rect on `pageIndex` into `overlayTarget`
-      // coordinates via the live `<canvas>` rect — identical to
-      // CanvasSelectionOverlay. The rect already folds in centering, the
-      // sidebar shift, and zoom (canvas CSS width = page * zoom ⇒ scale = zoom).
-      const project = (r: DisplayListRect): ProjectedRect | null => {
+      // coordinates via the live `<canvas>` rect, as CanvasSelectionOverlay
+      // does. The rect already folds in centering, the sidebar shift, and zoom.
+      const project = (r: DisplayListRect, isCurrent: boolean): ProjectedRect | null => {
+        if (r.pageIndex < pageWindow.start || r.pageIndex > pageWindow.end) return null;
         const canvasEl = displayPageCanvas(host, r.pageIndex);
         const size = displayListQueries.pageSize(r.pageIndex);
         if (!canvasEl || !size) return null;
@@ -94,37 +146,29 @@ export function CanvasFindHighlightOverlay({
           top: canvasRect.top - targetRect.top + r.y * scaleY,
           width: r.width * scaleX,
           height: r.height * scaleY,
-          isCurrent: false,
+          isCurrent,
         };
       };
-
       const next: ProjectedRect[] = [];
-      for (let i = 0; i < matches.length; i++) {
-        const m = matches[i];
-        const isCurrent = i === currentIndex;
+      for (const index of matchesInRange(matches, order, range.from, range.to)) {
+        const m = matches[index];
         for (const r of displayListQueries.rangeRects(m.displayFrom, m.displayTo)) {
-          const p = project(r);
-          if (p) next.push({ ...p, isCurrent });
+          const p = project(r, index === currentIndex);
+          if (p) next.push(p);
         }
       }
       setRects(next);
-    };
-
-    recompute();
-
-    // Same recompute triggers as CanvasSelectionOverlay: host/target resize,
-    // and the sidebar/zoom transition that ends with a bubbling `transitionend`.
-    const ro = new ResizeObserver(recompute);
-    ro.observe(host);
-    ro.observe(overlayTarget);
-    window.addEventListener('resize', recompute);
-    host.addEventListener('transitionend', recompute);
-    return () => {
-      ro.disconnect();
-      window.removeEventListener('resize', recompute);
-      host.removeEventListener('transitionend', recompute);
-    };
-  }, [matches, currentIndex, overlayTarget, canvasHostRef, displayListQueries, sidebarOpen, zoom]);
+    }, 8);
+  }, [
+    matches,
+    order,
+    currentIndex,
+    overlayTarget,
+    canvasHostRef,
+    displayListQueries,
+    sidebarOpen,
+    zoom,
+  ]);
 
   if (rects.length === 0) return null;
 

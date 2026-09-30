@@ -601,12 +601,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       (loc: YrsLoc): number | null => {
         const map = yrsCore.inputPositionMap(loc.story);
         if (!map) return null;
-        const local = yrsLocToLocalDisplayPosition(map, loc);
         const rootStory =
           loc.story === 'body' || loc.story.startsWith('body:') ? 'body' : activeYrsRootStory;
         return (
           getYrsPositionProjectionRef.current(rootStory)?.positionForLoc(loc) ??
-          (loc.story === rootStory ? local : null)
+          (loc.story === rootStory ? yrsLocToLocalDisplayPosition(map, loc) : null)
         );
       },
       [activeYrsRootStory, yrsCore.inputPositionMap]
