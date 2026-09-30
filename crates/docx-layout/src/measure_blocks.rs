@@ -429,13 +429,16 @@ fn collect_paragraph_font_requirements(
         let bold = formatting.bold.unwrap_or(false);
         let italic = formatting.italic.unwrap_or(false);
         let slots = formatting.font_slots.as_ref();
-        let slot_use = text.map_or_else(FontSlotUse::default, |text| {
+        let complex_script = formatting.complex_script.unwrap_or(false);
+        let mut slot_use = text.map_or_else(FontSlotUse::default, |text| {
             font_slot_use(
                 &text.text,
-                formatting.complex_script.unwrap_or(false),
+                complex_script,
                 slots.and_then(|slots| slots.hint.as_deref()),
             )
         });
+        // Text typed into a complex-script run measures with its cs slot too.
+        slot_use.complex_script |= complex_script;
         let cs_bold = formatting.bold_cs.unwrap_or(bold);
         let cs_italic = formatting.italic_cs.unwrap_or(italic);
         let mut name = |family: &str, bold: bool, italic: bool, reached: bool| {
@@ -4247,15 +4250,17 @@ mod tests {
                     "eastAsia": "SimSun", "cs": "Traditional Arabic", "hint": "eastAsia"
                 }
             }));
-            assert_eq!(
-                keys,
-                [
-                    "aptos|1|0",
-                    "arial|1|0",
-                    "calibri|0|0",
-                    "times new roman|1|0"
-                ]
-            );
+            let mut expected = vec![
+                "aptos|1|0",
+                "arial|1|0",
+                "calibri|0|0",
+                "times new roman|1|0",
+            ];
+            // Text typed after the tab inherits the run and measures with its cs slot.
+            if complex_script {
+                expected.push("traditional arabic|1|0");
+            }
+            assert_eq!(keys, expected, "{complex_script}");
         }
     }
 
@@ -4334,7 +4339,12 @@ mod tests {
                 "fontFamily": "Aptos", "italic": true, "complexScript": true,
                 "fontSlots": {"eastAsia": "SimSun", "cs": "Traditional Arabic", "hint": "eastAsia"}
             }));
-            assert_eq!(keys, ["aptos|0|1", "calibri|0|0"], "{fallback:?}");
+            // A complex-script run keeps its cs slot for text typed into it.
+            assert_eq!(
+                keys,
+                ["aptos|0|1", "calibri|0|0", "traditional arabic|0|1"],
+                "{fallback:?}"
+            );
         }
     }
 
