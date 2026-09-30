@@ -1314,7 +1314,7 @@ for (const scoped of [true, false]) {
       const after = yrsToDocument(main, before);
       expect(after.package.document.content).not.toBe(before.package.document.content);
       expect(rebuilt.sort()).toEqual(scoped ? ['body'] : ['body', 'body:t0:r0c0']);
-      expect(texts(main, 'accepted')).toEqual(['Hello earth']);
+      expect(texts(main, 'accepted')).toEqual(['Hello earth', '']);
       expect(texts(main, 'accepted', 'body:t0:r0c0')).toEqual(['cell value']);
     }
   );
