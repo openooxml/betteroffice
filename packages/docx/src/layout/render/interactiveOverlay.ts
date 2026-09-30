@@ -10,7 +10,14 @@
  * `dataset`, or `setAttribute`; no HTML strings are parsed.
  */
 
-import type { DisplayPage, DisplayPrimitive, InlineSdtWidgetAttrs, SdtAttrs } from './displayList';
+import type {
+  DisplayPage,
+  DisplayPrimitive,
+  GlyphRunPrimitive,
+  InlineSdtWidgetAttrs,
+  SdtAttrs,
+  TextRunPrimitive,
+} from './displayList';
 import {
   clipPaintsPoint,
   displayPrimitiveRect,
@@ -190,10 +197,12 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
     if (primitive.clipGroup?.clip && (primitive.clipGroup.opacity ?? 1) <= 0) return false;
     switch (primitive.kind) {
       case 'text':
-        if (!primitive.text.trim()) return false;
+        if (!primitive.text.trim() || textPaintsNothing(primitive)) return false;
         break;
       case 'glyphRun':
-        if (!primitive.glyphs.length || !primitive.text.trim()) return false;
+        if (!primitive.glyphs.length || !primitive.text.trim() || textPaintsNothing(primitive)) {
+          return false;
+        }
         break;
       case 'rect':
         if (!primitive.fill || primitive.fill === 'transparent' || primitive.fill === 'none') {
@@ -232,6 +241,16 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
       clipPaintsPoint(primitive, x, y)
     );
   });
+}
+
+/** A run whose glyphs have no fill and no outline, as the canvas paints it. */
+function textPaintsNothing(run: TextRunPrimitive | GlyphRunPrimitive): boolean {
+  const effects = run.modernEffects;
+  return (
+    effects?.textFill?.kind === 'none' &&
+    !run.textOutline &&
+    (!effects.textOutline || effects.textOutline.noFill === true)
+  );
 }
 
 export function hideOccludedControl(element: HTMLElement): void {
@@ -341,11 +360,6 @@ function renderBoundary(
     trigger.textContent =
       kind === 'dropdown' ? '▾' : kind === 'date' ? '▣' : attrs.checked ? '☒' : '☐';
     trigger.style.pointerEvents = 'auto';
-    if (lowerLayer && extent.widget) {
-      trigger.style.width = `${extent.widget.rect.w}px`;
-      trigger.style.height = `${extent.widget.rect.h}px`;
-      trigger.style.boxSizing = 'border-box';
-    }
     if (extent.widget?.occluded) hideOccludedControl(trigger);
     box.appendChild(trigger);
   }
@@ -360,12 +374,7 @@ function renderBoundary(
     ];
     for (const [index, button] of buttons.entries()) {
       const control = extent.repeats[index]!;
-      if (lowerLayer) {
-        button.style.width = `${control.rect.w}px`;
-        button.style.height = `${control.rect.h}px`;
-        button.style.boxSizing = 'border-box';
-        button.style.pointerEvents = 'auto';
-      }
+      if (lowerLayer) button.style.pointerEvents = 'auto';
       if (control.occluded) hideOccludedControl(button);
       controls.appendChild(button);
     }

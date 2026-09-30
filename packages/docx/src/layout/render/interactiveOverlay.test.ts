@@ -188,6 +188,22 @@ test('whitespace-only body text does not hide header controls', () => {
   }
 });
 
+test('body text with no fill and no outline does not hide header controls', () => {
+  const none = { modernEffects: { textFill: { kind: 'none' as const } } };
+  const runs: DisplayPrimitive[] = [{
+    kind: 'text', text: 'covered', x: 100, baselineY: 35, width: 60,
+    font: '16px sans-serif', color: '#000',
+  }, {
+    kind: 'glyphRun', fontId: 1, size: 16, color: '#000', text: 'covered',
+    glyphs: [{ id: 1, x: 100, y: 35, cluster: 0, advance: 60 }],
+  }];
+  for (const run of runs) {
+    expectHidden(headerWidget([run]));
+    expectActive(headerWidget([{ ...run, ...none } as DisplayPrimitive]));
+    expectHidden(headerWidget([{ ...run, ...none, textOutline: true } as DisplayPrimitive]));
+  }
+});
+
 test('a page whose only inline control is covered has no tab stop', () => {
   const page = pageWith([image()]);
   expectHidden(buildInteractiveOverlayPage(page)
