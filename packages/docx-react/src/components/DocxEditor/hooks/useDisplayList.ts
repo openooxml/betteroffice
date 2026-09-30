@@ -28,6 +28,7 @@ import {
   residentCaretSnapshotForFrame,
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
+  takePreloadedResidentEngineWorker,
   ResidentWorkerOutOfMemoryError,
   sameYrsSelection,
   type ResidentCaretPaintStyle,
@@ -336,6 +337,26 @@ export function useRustDisplayList(
     }
     return load;
   }, []);
+  const spawnedWorkerEnginesRef = useRef(new WeakSet<YrsSession>());
+  const workerFor = useCallback(
+    (hostEngine: YrsSession) => {
+      if (workerRef.current?.engine !== hostEngine) {
+        workerRef.current?.client.destroy();
+        // A successor that fails to construct leaves no destroyed client current.
+        workerRef.current = null;
+        const replacement = spawnedWorkerEnginesRef.current.has(hostEngine);
+        spawnedWorkerEnginesRef.current.add(hostEngine);
+        const spare = replacement ? null : takePreloadedResidentEngineWorker();
+        workerRef.current = {
+          engine: hostEngine,
+          client: spare ?? new ResidentEngineWorkerClient(),
+          load: sessionLoad(hostEngine),
+        };
+      }
+      return workerRef.current;
+    },
+    [sessionLoad]
+  );
   const workerFallbackEngineRef = useRef<YrsSession | null>(null);
   // No worker starts once the hook is gone, whatever failure arrives late.
   const unmountedRef = useRef(false);
@@ -1057,17 +1078,7 @@ export function useRustDisplayList(
       }
       const outOfMemory = outOfMemoryRef.current.get(hostEngine);
       if (outOfMemory) return Promise.reject(outOfMemory);
-      if (workerRef.current?.engine !== hostEngine) {
-        workerRef.current?.client.destroy();
-        // A successor that fails to construct leaves no destroyed client current.
-        workerRef.current = null;
-        workerRef.current = {
-          engine: hostEngine,
-          client: new ResidentEngineWorkerClient(),
-          load: sessionLoad(hostEngine),
-        };
-      }
-      const owner = workerRef.current;
+      const owner = workerFor(hostEngine);
       const worker = owner.client;
       const bootstrapping = !worker.bootstrapSent();
       const previousFrame = bootstrapping ? null : snapshotRef.current.frame;
@@ -1198,7 +1209,7 @@ export function useRustDisplayList(
       paintedCaretMachine,
       queryEpochGate,
       replaceOutOfMemoryWorker,
-      sessionLoad,
+      workerFor,
     ]
   );
   const layoutInWorkerRef = useRef(layoutInWorker);
@@ -1414,17 +1425,7 @@ export function useRustDisplayList(
         return buildOnMainThread();
       };
       const requestWorkerFrame = (): Promise<BuiltDisplay> => {
-        if (workerRef.current?.engine !== hostEngine) {
-          workerRef.current?.client.destroy();
-          // A successor that fails to construct leaves no destroyed client current.
-          workerRef.current = null;
-          workerRef.current = {
-            engine: hostEngine,
-            client: new ResidentEngineWorkerClient(),
-            load: sessionLoad(hostEngine),
-          };
-        }
-        const owner = workerRef.current;
+        const owner = workerFor(hostEngine);
         requested = owner;
         const worker = owner.client;
         const extras = encodeDisplayListFrameExtras(buildInputs);
@@ -1617,6 +1618,7 @@ export function useRustDisplayList(
     replaceOutOfMemoryWorker,
     requestSettleRelayout,
     sessionLoad,
+    workerFor,
   ]);
 
   const resetSettled = useCallback(
