@@ -144,7 +144,7 @@ fn lower_shape(
         .map(|start| (Some(start as f64), Some((start + 1) as f64)))
         .unwrap_or((None, None));
     let mut nested_sequences = Vec::new();
-    let inner_text = shape_inner_text(shape, &block_id, &mut nested_sequences);
+    let inner_text = shape_inner_text(shape, &block_id, &mut nested_sequences, env);
     let mut seen = HashSet::new();
     nested_sequences.retain(|name| seen.insert(name.clone()));
     let position = shape_position(shape);
@@ -383,6 +383,7 @@ fn shape_inner_text(
     shape: &Value,
     block_id: &str,
     nested_sequences: &mut Vec<String>,
+    env: &RenderEnv,
 ) -> Option<Vec<ParagraphBlock>> {
     let text_body = object(shape, "textBody")?;
     let content = text_body.get("content")?.as_array()?;
@@ -394,6 +395,7 @@ fn shape_inner_text(
             0,
             &mut blocks,
             nested_sequences,
+            env,
         );
     }
     Some(blocks)
@@ -407,6 +409,7 @@ fn push_shape_body_block(
     depth: usize,
     output: &mut Vec<ParagraphBlock>,
     nested_sequences: &mut Vec<String>,
+    env: &RenderEnv,
 ) {
     if depth > MAX_SHAPE_BODY_DEPTH {
         return;
@@ -422,6 +425,7 @@ fn push_shape_body_block(
                             depth + 1,
                             output,
                             nested_sequences,
+                            env,
                         );
                     }
                 }
@@ -435,10 +439,11 @@ fn push_shape_body_block(
                     depth + 1,
                     output,
                     nested_sequences,
+                    env,
                 );
             }
         }
-        _ => output.push(shape_paragraph(block, block_id, nested_sequences)),
+        _ => output.push(shape_paragraph(block, block_id, nested_sequences, env)),
     }
 }
 
@@ -446,6 +451,7 @@ fn shape_paragraph(
     paragraph: &Value,
     block_id: String,
     nested_sequences: &mut Vec<String>,
+    env: &RenderEnv,
 ) -> ParagraphBlock {
     let alignment = object(paragraph, "formatting")
         .and_then(|value| string_in(value, "alignment"))
@@ -454,11 +460,36 @@ fn shape_paragraph(
             "left" | "center" | "right" => Some(value),
             _ => None,
         });
-    let runs = array(paragraph, "content")
+    let mut runs: Vec<Run> = array(paragraph, "content")
         .into_iter()
         .flatten()
         .flat_map(|content| shape_content_runs(content, 0, nested_sequences))
         .collect();
+    runs.retain_mut(|run| {
+        let formatting = match run {
+            Run::Text(run) => &mut run.fmt,
+            Run::Tab(run) => &mut run.fmt,
+            Run::Field(field) => {
+                if field.fmt.hidden == Some(true) && !env.show_hidden_text {
+                    nested_sequences.extend(
+                        field
+                            .instruction
+                            .as_deref()
+                            .and_then(docx_layout::sequence_fields::sequence_name),
+                    );
+                    nested_sequences.extend(field.nested_sequences.iter().cloned());
+                }
+                &mut field.fmt
+            }
+            _ => return true,
+        };
+        if env.show_hidden_text {
+            formatting.hidden = None;
+            true
+        } else {
+            formatting.hidden != Some(true)
+        }
+    });
     ParagraphBlock {
         sdt_groups: None,
         id: BlockId::Str(block_id),
@@ -642,7 +673,7 @@ fn shape_run_formatting(source: Option<&Value>) -> RunFormatting {
         return RunFormatting::default();
     };
     let mut output = Map::new();
-    for key in ["bold", "italic", "strike"] {
+    for key in ["bold", "italic", "strike", "hidden"] {
         if bool_in(source, key) == Some(true) {
             output.insert(key.to_owned(), Value::Bool(true));
         }
@@ -1320,6 +1351,7 @@ mod tests {
                     &body,
                     "body:p:0".to_owned(),
                     &mut Vec::new(),
+                    &RenderEnv::default(),
                 )),
             ];
             number_sequence_fields(&mut blocks);

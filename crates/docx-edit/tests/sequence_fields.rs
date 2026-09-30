@@ -1,5 +1,6 @@
 use docx_edit::bridge::{RenderEnv, yrs_doc_to_layout_blocks};
 use docx_edit::{EditingDoc, seed_from_docx};
+use docx_layout::types::{LayoutBlock, Run};
 use serde_json::Value;
 
 const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -57,7 +58,7 @@ fn document(body: &str) -> Vec<u8> {
 
 /// The results of the body's SEQ fields in lowering order, each with whether
 /// it sits in a text box or shape.
-fn boxed_sequence_results(body: &str) -> Vec<(bool, String)> {
+fn boxed_sequence_results_in(blocks: &[LayoutBlock]) -> Vec<(bool, String)> {
     fn collect(value: &Value, boxed: bool, out: &mut Vec<(bool, String)>) {
         match value {
             Value::Object(map) if map.get("rawType").and_then(Value::as_str) == Some("SEQ") => {
@@ -72,12 +73,35 @@ fn boxed_sequence_results(body: &str) -> Vec<(bool, String)> {
             _ => {}
         }
     }
-    let doc = EditingDoc::new(1);
-    seed_from_docx(&doc, &document(body)).unwrap();
-    let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
     let mut results = Vec::new();
     collect(&serde_json::to_value(blocks).unwrap(), false, &mut results);
     results
+}
+
+fn lowered_body(body: &str, show_hidden_text: bool, hydrated: bool) -> Vec<LayoutBlock> {
+    let doc = EditingDoc::new(1);
+    seed_from_docx(&doc, &document(body)).unwrap();
+    let doc = if hydrated {
+        let peer = EditingDoc::new(2);
+        peer.apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        peer
+    } else {
+        doc
+    };
+    yrs_doc_to_layout_blocks(
+        &doc,
+        "body",
+        &RenderEnv {
+            show_hidden_text,
+            ..RenderEnv::default()
+        },
+    )
+    .unwrap()
+}
+
+fn boxed_sequence_results(body: &str) -> Vec<(bool, String)> {
+    boxed_sequence_results_in(&lowered_body(body, false, false))
 }
 
 fn sequence_results(body: &str) -> Vec<String> {
@@ -164,6 +188,136 @@ fn a_sequence_with_a_nested_field_keeps_its_cached_results() {
     ]
     .concat();
     assert_eq!(sequence_results(&body), ["7", "7", "1"]);
+}
+
+#[test]
+fn a_body_projected_sequence_result_is_not_duplicated() {
+    for result in [
+        r#"<w:hyperlink w:anchor="top"><w:r><w:t>1</w:t></w:r></w:hyperlink>"#,
+        r#"<w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple>"#,
+    ] {
+        let projected = field("SEQ Figure").replacen("<w:r><w:t>7</w:t></w:r>", result, 1);
+        let body = format!("<w:p>{projected}</w:p>");
+        for hydrated in [false, true] {
+            let blocks = lowered_body(&body, false, hydrated);
+            let text: String = blocks
+                .iter()
+                .filter_map(|block| match block {
+                    LayoutBlock::Paragraph(paragraph) => Some(&paragraph.runs),
+                    _ => None,
+                })
+                .flatten()
+                .filter_map(|run| match run {
+                    Run::Text(text) => Some(text.text.as_str()),
+                    Run::Field(field) => field.fallback.as_deref(),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(text, "1");
+            assert_eq!(boxed_sequence_results_in(&blocks), [(false, String::new())]);
+        }
+    }
+}
+
+#[test]
+fn hidden_sequence_fields_keep_visible_cached_results() {
+    let hidden = r#"<w:fldSimple w:instr="SEQ Figure"><w:r><w:rPr><w:vanish/></w:rPr><w:t>1</w:t></w:r></w:fldSimple>"#;
+    let visible = r#"<w:fldSimple w:instr="SEQ Figure"><w:r><w:t>2</w:t></w:r></w:fldSimple>"#;
+    for boxed in [false, true] {
+        let body = if boxed {
+            format!("<w:p>{}</w:p><w:p>{visible}</w:p>", text_box(hidden))
+        } else {
+            format!("<w:p>{hidden}</w:p><w:p>{visible}</w:p>")
+        };
+        for hydrated in [false, true] {
+            for show_hidden_text in [false, true] {
+                let blocks = lowered_body(&body, show_hidden_text, hydrated);
+                let mut expected = Vec::new();
+                if show_hidden_text {
+                    expected.push((boxed, "1".to_owned()));
+                }
+                expected.push((false, "2".to_owned()));
+                assert_eq!(boxed_sequence_results_in(&blocks), expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn hidden_fields_keep_nested_hyperlink_sequences_opaque() {
+    let hidden = format!(
+        r#"<w:fldSimple w:instr="QUOTE"><w:r><w:rPr><w:vanish/></w:rPr><w:t>7</w:t></w:r>{}</w:fldSimple>"#,
+        hyperlink_sequence_with_sdt_instruction()
+    );
+    for boxed in [false, true] {
+        let hidden = if boxed {
+            text_box(&hidden)
+        } else {
+            hidden.clone()
+        };
+        let body = [
+            format!("<w:p>{hidden}</w:p>"),
+            paragraph(&field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>2</w:t>", 1)),
+            paragraph(&field("SEQ Table")),
+        ]
+        .concat();
+        for hydrated in [false, true] {
+            for show_hidden_text in [false, true] {
+                assert_eq!(
+                    boxed_sequence_results_in(&lowered_body(&body, show_hidden_text, hydrated)),
+                    [(false, "2"), (false, "1")].map(|(boxed, result)| (boxed, result.to_owned()))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn hidden_text_boxes_keep_sequences_with_typed_or_raw_hyperlink_fields_opaque() {
+    for hidden in [
+        field("SEQ Figure"),
+        hyperlink_sequence(),
+        hyperlink_sequence_with_sdt_instruction(),
+    ] {
+        let hidden_box = text_box(&hidden).replacen(
+            "<w:r><w:drawing>",
+            "<w:r><w:rPr><w:vanish/></w:rPr><w:drawing>",
+            1,
+        );
+        let body = [
+            format!("<w:p>{hidden_box}</w:p>"),
+            paragraph(&field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>2</w:t>", 1)),
+            paragraph(&field("SEQ Table")),
+        ]
+        .concat();
+        for hydrated in [false, true] {
+            assert_eq!(
+                boxed_sequence_results_in(&lowered_body(&body, false, hydrated)),
+                [(false, "2"), (false, "1")].map(|(boxed, result)| (boxed, result.to_owned()))
+            );
+        }
+    }
+}
+
+#[test]
+fn hidden_sequences_preserve_stale_cached_results_only_for_the_affected_sequence() {
+    let body = [
+        r#"<w:p><w:fldSimple w:instr="SEQ Figure"><w:r><w:rPr><w:vanish/></w:rPr><w:t>1</w:t></w:r></w:fldSimple></w:p>"#.to_owned(),
+        paragraph(&field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>9</w:t>", 1)),
+        paragraph(&field("SEQ Table")),
+    ]
+    .concat();
+    for hydrated in [false, true] {
+        assert_eq!(
+            boxed_sequence_results_in(&lowered_body(&body, false, hydrated)),
+            [(false, "9"), (false, "1")].map(|(boxed, result)| (boxed, result.to_owned()))
+        );
+        assert_eq!(
+            boxed_sequence_results_in(&lowered_body(&body, true, hydrated)),
+            [(false, "1"), (false, "2"), (false, "1")]
+                .map(|(boxed, result)| (boxed, result.to_owned()))
+        );
+    }
 }
 
 #[test]

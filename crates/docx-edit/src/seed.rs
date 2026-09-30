@@ -1960,6 +1960,15 @@ fn field_to_units(
             .collect(),
     );
     let (mut payload, marks) = field_payload(&visible, style_formatting, source);
+    if let Some(name) = string(field(Some(value), "instruction"))
+        .and_then(docx_layout::sequence_fields::sequence_name)
+    {
+        let mut nested = nested_sequence_names(value);
+        if !nested.contains(&name) {
+            nested.push(name);
+        }
+        payload.insert("nestedSequences".to_owned(), json!(nested));
+    }
     payload.insert(
         "fieldData".to_owned(),
         Value::String(source_json(value, source)),

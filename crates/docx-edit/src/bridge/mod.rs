@@ -329,6 +329,10 @@ pub fn yrs_doc_to_mapped_layout_blocks(
     let txn = doc.yrs_doc().transact();
     let mut active_stories = BTreeSet::new();
     let mut map = LoweringMap::default();
+    let mut opaque_sequences: BTreeSet<String> = source
+        .as_ref()
+        .map(|source| source.opaque_sequences().iter().cloned().collect())
+        .unwrap_or_default();
     let (mut blocks, _) = lower_story(
         &txn,
         story_id,
@@ -338,16 +342,13 @@ pub fn yrs_doc_to_mapped_layout_blocks(
         &mut list_state,
         CellEdges::default(),
         &mut map,
+        &mut opaque_sequences,
     )?;
     // Word numbers SEQ fields in the main text only.
     if story_id == "body" {
-        let opaque_sequences = source
-            .as_ref()
-            .map(|source| source.opaque_sequences())
-            .unwrap_or_default();
         docx_layout::sequence_fields::number_sequence_fields_with_opaque(
             &mut blocks,
-            opaque_sequences.iter().cloned(),
+            opaque_sequences,
         );
     }
     map.finish();
@@ -370,6 +371,7 @@ fn lower_story<T: ReadTxn>(
     list_state: &mut ListState,
     cell_edges: CellEdges,
     map: &mut LoweringMap,
+    opaque_sequences: &mut BTreeSet<String>,
 ) -> Result<(Vec<LayoutBlock>, u64), BridgeError> {
     if !active_stories.insert(story_id.to_owned()) {
         return Err(BridgeError::RecursiveStory(story_id.to_owned()));
@@ -429,6 +431,7 @@ fn lower_story<T: ReadTxn>(
                         paragraph_pm_units,
                         list_state,
                         (map, story_slot),
+                        opaque_sequences,
                     );
                     let values = pilcrow_values(&pilcrow, txn);
                     suppress_cell_edge_spacing(
@@ -492,6 +495,7 @@ fn lower_story<T: ReadTxn>(
                         active_stories,
                         unnumbered.as_mut().unwrap_or(&mut *list_state),
                         map,
+                        opaque_sequences,
                     )?;
                     if !hidden {
                         blocks.push(LayoutBlock::Table(lowered));
@@ -595,6 +599,7 @@ fn lower_story<T: ReadTxn>(
                             after: cell_edges.after && story_index + 1 == story.len(txn),
                         },
                         map,
+                        opaque_sequences,
                     )?;
                     stamp_sdt_group(&mut child_blocks, group);
                     if !previewed_out && !hidden_field_blocks.contains(&child_story) {
@@ -1046,6 +1051,7 @@ fn lower_table<T: ReadTxn>(
     active_stories: &mut BTreeSet<String>,
     list_state: &mut ListState,
     map: &mut LoweringMap,
+    opaque_sequences: &mut BTreeSet<String>,
 ) -> Result<(TableBlock, u64), BridgeError> {
     let tbl_pr_value = shared_any(table, txn, "tblPr")
         .ok_or_else(|| malformed_table(parent_story, story_index, "missing tblPr"))?;
@@ -1158,6 +1164,7 @@ fn lower_table<T: ReadTxn>(
                     after: true,
                 },
                 map,
+                opaque_sequences,
             )?;
 
             let width_value = map_number(tc_pr, "width");
@@ -2305,6 +2312,29 @@ fn push_text_chunks(
     }
 }
 
+fn collect_shape_sequences(shape: &ShapeBlock, opaque_sequences: &mut BTreeSet<String>) {
+    opaque_sequences.extend(shape.nested_sequences.iter().cloned());
+    for run in shape
+        .inner_text
+        .iter()
+        .flatten()
+        .flat_map(|paragraph| &paragraph.runs)
+    {
+        if let Run::Field(field) = run {
+            opaque_sequences.extend(
+                field
+                    .instruction
+                    .as_deref()
+                    .and_then(docx_layout::sequence_fields::sequence_name),
+            );
+            opaque_sequences.extend(field.nested_sequences.iter().cloned());
+        }
+    }
+    for child in &shape.children {
+        collect_shape_sequences(child, opaque_sequences);
+    }
+}
+
 /// Emits the blocks one paragraph contributes. Anchored children are lifted
 /// out ahead of it and leave it whole; in-flow ones break it into the text
 /// segments around them, each carrying the same pilcrow properties.
@@ -2321,6 +2351,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
     paragraph_pm_units: u32,
     list_state: &mut ListState,
     (map, story_slot): (&mut LoweringMap, u32),
+    opaque_sequences: &mut BTreeSet<String>,
 ) -> Vec<LayoutBlock> {
     let source = map.paragraphs.len() as u32;
     map.paragraphs.push((
@@ -2336,8 +2367,34 @@ fn flush_paragraph_parts<T: ReadTxn>(
             }
         }
     } else {
-        raw_runs.retain(|run| run.formatting.hidden != Some(true));
-        drawings.retain(|drawing| !drawing.hidden);
+        raw_runs.retain(|run| {
+            if run.formatting.hidden != Some(true) {
+                return true;
+            }
+            if let RawRunKind::Field {
+                instruction,
+                nested_sequences,
+                ..
+            } = &run.kind
+            {
+                opaque_sequences.extend(
+                    instruction
+                        .as_deref()
+                        .and_then(docx_layout::sequence_fields::sequence_name),
+                );
+                opaque_sequences.extend(nested_sequences.iter().cloned());
+            }
+            false
+        });
+        drawings.retain(|drawing| {
+            if !drawing.hidden {
+                return true;
+            }
+            if let LayoutBlock::Shape(shape) = &drawing.block {
+                collect_shape_sequences(shape, opaque_sequences);
+            }
+            false
+        });
     }
     for drawing in &drawings {
         let pm_start = paragraph_pm_start + 1 + u64::from(drawing.pm_offset);

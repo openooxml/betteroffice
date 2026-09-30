@@ -657,6 +657,10 @@ function fieldToUnits(
   });
   const visible = { ...value, fieldResult: result.filter((child): child is Run => child.type === 'run') };
   const field = fieldPayload(visible, styleFormatting);
+  const name = sequenceName(value.instruction ?? '');
+  if (name !== undefined) {
+    field.payload.nestedSequences = [...new Set([...nestedSequenceNames(value), name])];
+  }
   field.payload.fieldData = JSON.stringify(value);
   field.payload.resultProjection = { id: projectionId, children };
   units.push(embedUnit('field', field.payload, field.marks));

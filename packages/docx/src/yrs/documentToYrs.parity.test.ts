@@ -155,6 +155,66 @@ describe('DOCX engine seeding', () => {
     }
   });
 
+  it.each(['hyperlink', 'simpleField'])('keeps projected SEQ owners opaque when seeding and hydrating (%s)', async (kind) => {
+    const result = kind === 'hyperlink'
+      ? '<w:hyperlink w:anchor="top"><w:r><w:t>1</w:t></w:r></w:hyperlink>'
+      : '<w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple>';
+    const bytes = sequencePackage(`<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> SEQ Figure </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>${result}<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>`);
+    const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const engine = await createYrsSession({ clientId: 47015 });
+    const projected = await createYrsSession({ clientId: 47016 });
+    const hydrated = await createYrsSession({ clientId: 47017 });
+    try {
+      engine.seedFromDocx(bytes);
+      documentToYrs(projected, parsed);
+      hydrated.openDocx(bytes, false);
+      hydrated.loadState(projected.encodeState());
+      for (const session of [engine, projected, hydrated]) {
+        const owner = session.storySegments('body').find((segment) =>
+          segment.kind === 'embed' &&
+          segment.embedKind === 'field' &&
+          segment.payload.fieldType === 'SEQ'
+        );
+        expect(owner?.kind === 'embed' && owner.payload.nestedSequences).toEqual(['figure']);
+        const blocks = session.yrsBlocksForStory('body', {}) as LayoutBlock[];
+        const text = blocks.flatMap((block) => block.kind === 'paragraph' ? block.runs : [])
+          .map((run) => run.kind === 'text' ? run.text : run.kind === 'field' ? run.fallback ?? '' : '')
+          .join('');
+        expect(text).toBe('1');
+      }
+    } finally {
+      engine.destroy();
+      projected.destroy();
+      hydrated.destroy();
+    }
+  });
+
+  it('keeps the visible caption at 2 when hidden SEQs are seeded and hydrated', async () => {
+    const bytes = sequencePackage('<w:p><w:fldSimple w:instr="SEQ Figure"><w:r><w:rPr><w:vanish/></w:rPr><w:t>1</w:t></w:r></w:fldSimple></w:p><w:p><w:fldSimple w:instr="SEQ Figure"><w:r><w:t>2</w:t></w:r></w:fldSimple></w:p>');
+    const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const engine = await createYrsSession({ clientId: 47018 });
+    const projected = await createYrsSession({ clientId: 47019 });
+    const hydrated = await createYrsSession({ clientId: 47020 });
+    try {
+      engine.seedFromDocx(bytes);
+      documentToYrs(projected, parsed);
+      hydrated.openDocx(bytes, false);
+      hydrated.loadState(projected.encodeState());
+      for (const session of [engine, projected, hydrated]) {
+        for (const showHiddenText of [false, true]) {
+          const blocks = session.yrsBlocksForStory('body', { showHiddenText }) as LayoutBlock[];
+          const results = blocks.flatMap((block) => block.kind === 'paragraph' ? block.runs : [])
+            .flatMap((run) => run.kind === 'field' && run.rawType === 'SEQ' ? [run.fallback] : []);
+          expect(results).toEqual(showHiddenText ? ['1', '2'] : ['2']);
+        }
+      }
+    } finally {
+      engine.destroy();
+      projected.destroy();
+      hydrated.destroy();
+    }
+  });
+
   it.each(['run', 'sdt', 'nested hyperlink'])('seeds and hydrates raw hyperlink SEQs nested in a simple field (%s)', async (wrapper) => {
     const instruction = '<w:r><w:instrText> SEQ Figure </w:instrText></w:r>';
     const content = wrapper === 'nested hyperlink'
