@@ -10,8 +10,24 @@
  * `dataset`, or `setAttribute`; no HTML strings are parsed.
  */
 
-import type { DisplayPage, DisplayPrimitive, InlineSdtWidgetAttrs, SdtAttrs } from './displayList';
-import { glyphRunRect, lineRect, textRunRect, type GeoRect } from './displayListGeometry';
+import type {
+  DisplayPage,
+  DisplayPrimitive,
+  GlyphRunPrimitive,
+  ImagePrimitive,
+  InlineSdtWidgetAttrs,
+  SdtAttrs,
+  ShapePrimitive,
+  TextRunPrimitive,
+} from './displayList';
+import {
+  clipPaintsPoint,
+  displayPrimitiveRect,
+  glyphRunRect,
+  lineRect,
+  textRunRect,
+  type GeoRect,
+} from './displayListGeometry';
 
 export interface InteractiveOverlayLabels {
   /** Accessible name for a repeating-section add button. */
@@ -44,6 +60,10 @@ export function applyInteractiveSdtFocus(
 /** The only pointer-active elements the overlay renders. */
 const INTERACTIVE_SELECTOR =
   '.layout-sdt-widget, .layout-inline-sdt-widget, .layout-sdt-repeat-btn';
+const BOUNDARY_CONTROL_INSET = 2;
+const BOUNDARY_WIDGET_SIZE = 18;
+const REPEAT_BUTTON_SIZE = 16;
+const REPEAT_BUTTON_GAP = 2;
 
 interface SdtExtent {
   attrs: SdtAttrs;
@@ -53,6 +73,24 @@ interface SdtExtent {
 interface WidgetExtent {
   attrs: InlineSdtWidgetAttrs;
   rect: GeoRect;
+  primitives: DisplayPrimitive[];
+}
+
+interface ControlExtent {
+  rect: GeoRect;
+  occluded: boolean;
+}
+
+interface BoundaryExtent extends SdtExtent {
+  kind: ReturnType<typeof blockWidgetKind>;
+  widget?: ControlExtent;
+  repeats: ControlExtent[];
+}
+
+interface InteractiveOverlayLayer {
+  lowerLayer: boolean;
+  boundaries: BoundaryExtent[];
+  widgets: Array<WidgetExtent & { occluded: boolean }>;
 }
 
 /**
@@ -88,25 +126,242 @@ export function buildInteractiveOverlayPage(
     event.stopPropagation();
   });
 
-  const primitives = pagePrimitives(page);
-  const groups = collectSdtExtents(primitives);
-  for (const extent of [...groups.values()].sort(compareSdtExtents)) {
-    root.appendChild(renderBoundary(extent, doc, options.labels));
-  }
+  for (const [layer, controls] of collectInteractiveOverlayLayers(page).entries()) {
+    for (const extent of controls.boundaries) {
+      const boundary = renderBoundary(extent, doc, options.labels, controls.lowerLayer);
+      boundary.style.zIndex = String(layer);
+      root.appendChild(boundary);
+    }
 
-  const widgets = collectWidgetExtents(primitives);
-  for (const extent of widgets.values()) {
-    root.appendChild(renderInlineWidget(extent, doc, options.labels));
+    for (const extent of controls.widgets) {
+      const widget = renderInlineWidget(extent, doc, options.labels);
+      widget.style.zIndex = String(layer);
+      if (extent.occluded) hideOccludedControl(widget);
+      root.appendChild(widget);
+    }
   }
   return root;
 }
 
-function pagePrimitives(page: DisplayPage): DisplayPrimitive[] {
+export function collectInteractiveOverlayLayers(page: DisplayPage): InteractiveOverlayLayer[] {
+  const layers = pagePrimitiveLayers(page);
+  const body = layers[3]!;
+  return layers.map((primitives, layer) => {
+    const lowerLayer = layer < 3;
+    const controlExtent = (rect: GeoRect): ControlExtent => ({
+      rect,
+      occluded: lowerLayer && bodyPaintsRectCenter(body, rect),
+    });
+    const boundaries = [...collectSdtExtents(primitives).values()]
+      .sort(compareSdtExtents)
+      .map((extent): BoundaryExtent => {
+        const { kind, repeat } = boundaryControls(extent.attrs);
+        const { rect } = extent;
+        const right = rect.x + Math.max(1, rect.w) - BOUNDARY_CONTROL_INSET;
+        const bottom = rect.y + Math.max(1, rect.h) - BOUNDARY_CONTROL_INSET;
+        return {
+          ...extent,
+          kind,
+          widget: kind
+            ? controlExtent({
+                x: right - BOUNDARY_WIDGET_SIZE,
+                y: rect.y + BOUNDARY_CONTROL_INSET,
+                w: BOUNDARY_WIDGET_SIZE,
+                h: BOUNDARY_WIDGET_SIZE,
+              })
+            : undefined,
+          repeats: repeat
+            ? [0, 1].map((index) => controlExtent({
+                x: right - REPEAT_BUTTON_SIZE -
+                  (1 - index) * (REPEAT_BUTTON_SIZE + REPEAT_BUTTON_GAP),
+                y: bottom - REPEAT_BUTTON_SIZE,
+                w: REPEAT_BUTTON_SIZE,
+                h: REPEAT_BUTTON_SIZE,
+              }))
+            : [],
+        };
+      });
+    const widgets = [...collectWidgetExtents(primitives).values()].map((extent) => ({
+      ...extent,
+      occluded: lowerLayer && bodyPaintsRectCenter(body, extent.rect),
+    }));
+    return { lowerLayer, boundaries, widgets };
+  });
+}
+
+function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean {
+  const x = rect.x + Math.max(1, rect.w) / 2;
+  const y = rect.y + Math.max(1, rect.h) / 2;
+  return body.some((primitive) => {
+    if ('opacity' in primitive && primitive.opacity !== undefined && primitive.opacity <= 0) {
+      return false;
+    }
+    if (primitive.clipGroup?.clip && (primitive.clipGroup.opacity ?? 1) <= 0) return false;
+    switch (primitive.kind) {
+      case 'text':
+      case 'glyphRun':
+        if (!primitive.text.trim() || textPaintsNothing(primitive)) return false;
+        // A turned or compressed run paints outside or short of its box.
+        if ((primitive.rotationDeg ?? 0) % 360 !== 0) return false;
+        if (primitive.horizontalScale !== undefined && !(primitive.horizontalScale >= 100)) {
+          return false;
+        }
+        if (primitive.kind === 'glyphRun' && !primitive.glyphs.length) return false;
+        break;
+      case 'rect':
+        if (!primitive.fill || primitive.fill === 'transparent' || primitive.fill === 'none') {
+          return false;
+        }
+        break;
+      case 'shape': {
+        const paint = primitive.fillPaint;
+        const fill = paint?.color ?? primitive.fill;
+        if (paint?.kind === 'none') return false;
+        if (paint?.kind === 'gradient' || paint?.kind === 'pattern') break;
+        if (paint?.kind === 'picture' && (paint.pictureSrc || paint.pictureRelId)) {
+          if ((paint.pictureOpacity ?? 1) <= 0) return false;
+          // An inset or a crop past the source paints only part of the shape, tiled fills
+          // included: past the tile cap the canvas stretches them.
+          const inset = paint.pictureStretchRect;
+          const sides = [inset?.left, inset?.top, inset?.right, inset?.bottom];
+          if (sides.some((side) => (side ?? 0) > 0) || !cropFillsFrame(paint.pictureSrcRect)) {
+            return false;
+          }
+          break;
+        }
+        if (!fill || fill === 'transparent' || fill === 'none') return false;
+        break;
+      }
+      case 'image':
+        break;
+      case 'decoration': {
+        // Only a solid rule or highlight fills its box; the others are segmented strokes.
+        const { color, style, dashed, dotted } = primitive;
+        if ((style ?? 'solid') !== 'solid' || dashed || dotted) return false;
+        if (!color || color === 'transparent' || color === 'none') return false;
+        break;
+      }
+      default:
+        return false;
+    }
+    const painted =
+      primitive.kind === 'shape'
+        ? shapeFillRect(primitive)
+        : primitive.kind === 'image'
+          ? imagePaintRect(primitive)
+          : displayPrimitiveRect(primitive);
+    return (
+      painted !== null &&
+      Number.isFinite(painted.w) &&
+      Number.isFinite(painted.h) &&
+      painted.w > 0 &&
+      painted.h > 0 &&
+      x >= painted.x &&
+      x <= painted.x + painted.w &&
+      y >= painted.y &&
+      y <= painted.y + painted.h &&
+      clipPaintsPoint(primitive, x, y)
+    );
+  });
+}
+
+/**
+ * The rectangle a shape's fill paints, when its path is exactly an axis-aligned
+ * rectangle turned by a multiple of 180 degrees; any other path covers nothing.
+ */
+/**
+ * The frame an image paints over whole, as the canvas draws it: none for a non-rectangular image,
+ * a turn other than a half-turn, or a crop that leaves part of the frame bare.
+ */
+function imagePaintRect(image: ImagePrimitive): GeoRect | null {
+  const finite = (value: number | undefined, fallback: number) =>
+    value !== undefined && Number.isFinite(value) ? value : fallback;
+  if (image.shapeType !== undefined && image.shapeType !== 'rect') return null;
+  if (finite(image.rotationDeg, 0) % 180 !== 0 || !cropFillsFrame(image.crop)) return null;
+  return {
+    x: finite(image.contentFrame?.x, image.x),
+    y: finite(image.contentFrame?.y, image.y),
+    w: finite(image.contentFrame?.w, image.w),
+    h: finite(image.contentFrame?.h, image.h),
+  };
+}
+
+/** Whether a source crop draws over its whole frame: an outset side leaves a gutter. */
+function cropFillsFrame(
+  crop: { left?: number; top?: number; right?: number; bottom?: number } | undefined
+): boolean {
+  if (!crop) return true;
+  const side = (value: number | undefined) => (Number.isFinite(value) ? (value as number) : 0);
+  const [left, top, right, bottom] = [crop.left, crop.top, crop.right, crop.bottom].map(side);
+  return (
+    left >= 0 && top >= 0 && right >= 0 && bottom >= 0 && left + right < 1 && top + bottom < 1
+  );
+}
+
+function shapeFillRect(shape: ShapePrimitive): GeoRect | null {
+  const rotation = shape.transform?.rotation ?? 0;
+  if (!Number.isFinite(rotation) || rotation % 180 !== 0) return null;
+  const commands = shape.geometryPath;
+  const end = commands.at(-1)?.type === 'close' ? commands.length - 1 : commands.length;
+  const corners: Array<[number, number]> = [];
+  for (let index = 0; index < end; index++) {
+    const command = commands[index]!;
+    if (command.type !== 'move' && command.type !== 'line') return null;
+    if ((command.type === 'move') !== (index === 0)) return null;
+    corners.push([command.x, command.y]);
+  }
+  const first = corners[0];
+  const last = corners.at(-1);
+  if (corners.length === 5 && first && last && first[0] === last[0] && first[1] === last[1]) {
+    corners.pop();
+  }
+  if (corners.length !== 4) return null;
+  const xs = [...new Set(corners.map(([x]) => x))];
+  const ys = [...new Set(corners.map(([, y]) => y))];
+  if (xs.length !== 2 || ys.length !== 2) return null;
+  if (new Set(corners.map(([x, y]) => `${x},${y}`)).size !== 4) return null;
+  const sides = corners.every(([x, y], index) => {
+    const [nextX, nextY] = corners[(index + 1) % 4]!;
+    return (x === nextX) !== (y === nextY);
+  });
+  if (!sides) return null;
+  let left = Math.min(...xs);
+  let top = Math.min(...ys);
+  const width = Math.abs(xs[0]! - xs[1]!);
+  const height = Math.abs(ys[0]! - ys[1]!);
+  // The canvas turns and flips a shape about its box's center.
+  const halfTurn = Math.abs(rotation % 360) === 180;
+  if (Boolean(shape.transform?.flipH) !== halfTurn) left = 2 * shape.x + shape.w - left - width;
+  if (Boolean(shape.transform?.flipV) !== halfTurn) top = 2 * shape.y + shape.h - top - height;
+  return { x: left, y: top, w: width, h: height };
+}
+
+/** A run with no glyph fill: whether its outline paints differs by canvas path, so it covers nothing. */
+function textPaintsNothing(run: TextRunPrimitive | GlyphRunPrimitive): boolean {
+  return run.modernEffects?.textFill?.kind === 'none';
+}
+
+export function hideOccludedControl(element: HTMLElement): void {
+  element.style.visibility = 'hidden';
+  element.style.pointerEvents = 'none';
+  element.tabIndex = -1;
+  element.setAttribute('inert', '');
+  element.setAttribute('aria-hidden', 'true');
+  element.setAttribute('aria-disabled', 'true');
+  if (element.tagName === 'BUTTON') (element as HTMLButtonElement).disabled = true;
+}
+
+function pagePrimitiveLayers(page: DisplayPage): DisplayPrimitive[][] {
+  const watermarkPrimitiveCount = Math.min(
+    page.watermarkPrimitiveCount ?? 0,
+    page.primitives.length
+  );
   return [
-    ...page.primitives,
-    ...(page.header?.primitives ?? []),
-    ...(page.footer?.primitives ?? []),
-    ...(page.noteAreas ?? []).flatMap((area) => [
+    page.primitives.slice(0, watermarkPrimitiveCount),
+    page.header?.primitives ?? [],
+    page.footer?.primitives ?? [],
+    page.primitives.slice(watermarkPrimitiveCount),
+    ...(page.noteAreas ?? []).map((area) => [
       ...(area.separatorPrimitives ?? []),
       ...(area.primitives ?? []),
     ]),
@@ -140,8 +395,10 @@ function collectWidgetExtents(primitives: DisplayPrimitive[]): Map<string, Widge
     if (!attrs || !rect) continue;
     const key = `${attrs.groupId}:${attrs.pos}:${attrs.controlKind ?? attrs.kind}`;
     const current = widgets.get(key);
-    if (current) current.rect = unionRect(current.rect, rect);
-    else widgets.set(key, { attrs, rect: { ...rect } });
+    if (current) {
+      current.rect = unionRect(current.rect, rect);
+      current.primitives.push(primitive);
+    } else widgets.set(key, { attrs, rect: { ...rect }, primitives: [primitive] });
   }
   return widgets;
 }
@@ -151,11 +408,12 @@ function compareSdtExtents(a: SdtExtent, b: SdtExtent): number {
 }
 
 function renderBoundary(
-  extent: SdtExtent,
+  extent: BoundaryExtent,
   doc: Document,
-  labels: InteractiveOverlayLabels | undefined
+  labels: InteractiveOverlayLabels | undefined,
+  lowerLayer: boolean
 ): HTMLElement {
-  const { attrs, rect } = extent;
+  const { attrs, rect, kind } = extent;
   const box = doc.createElement('div');
   box.className = 'layout-block-sdt-box layout-canvas-sdt-box';
   stampSdtAttrs(box, attrs);
@@ -170,7 +428,6 @@ function renderBoundary(
     box.appendChild(chip);
   }
 
-  const { kind, repeat } = boundaryControls(attrs);
   if (kind) {
     const trigger = doc.createElement('button');
     trigger.type = 'button';
@@ -191,19 +448,24 @@ function renderBoundary(
     trigger.textContent =
       kind === 'dropdown' ? '▾' : kind === 'date' ? '▣' : attrs.checked ? '☒' : '☐';
     trigger.style.pointerEvents = 'auto';
+    if (extent.widget?.occluded) hideOccludedControl(trigger);
     box.appendChild(trigger);
   }
 
-  if (repeat) {
+  if (extent.repeats.length) {
     const controls = doc.createElement('div');
     controls.className = 'layout-sdt-repeat-controls';
-    controls.style.pointerEvents = 'auto';
-    controls.appendChild(
-      repeatButton(doc, attrs, 'add', '＋', labels?.addRepeatingItem, authoredName)
-    );
-    controls.appendChild(
-      repeatButton(doc, attrs, 'remove', '✕', labels?.removeRepeatingItem, authoredName)
-    );
+    controls.style.pointerEvents = lowerLayer ? 'none' : 'auto';
+    const buttons = [
+      repeatButton(doc, attrs, 'add', '＋', labels?.addRepeatingItem, authoredName),
+      repeatButton(doc, attrs, 'remove', '✕', labels?.removeRepeatingItem, authoredName),
+    ];
+    for (const [index, button] of buttons.entries()) {
+      const control = extent.repeats[index]!;
+      if (lowerLayer) button.style.pointerEvents = 'auto';
+      if (control.occluded) hideOccludedControl(button);
+      controls.appendChild(button);
+    }
     box.appendChild(controls);
   }
   return box;
@@ -307,13 +569,14 @@ function boundaryControls(attrs: SdtAttrs): {
 
 /** Whether `buildInteractiveOverlayPage(page)` holds a control Tab stops at. */
 export function interactiveOverlayHasTabStops(page: DisplayPage): boolean {
-  const primitives = pagePrimitives(page);
-  for (const extent of collectSdtExtents(primitives).values()) {
-    const { kind, repeat } = boundaryControls(extent.attrs);
-    if (kind || repeat) return true;
-  }
-  for (const extent of collectWidgetExtents(primitives).values()) {
-    if (extent.attrs.locked !== true) return true;
+  for (const layer of collectInteractiveOverlayLayers(page)) {
+    for (const extent of layer.boundaries) {
+      if (extent.widget && !extent.widget.occluded) return true;
+      if (extent.repeats.some((control) => !control.occluded)) return true;
+    }
+    for (const extent of layer.widgets) {
+      if (!extent.occluded && extent.attrs.locked !== true) return true;
+    }
   }
   return false;
 }

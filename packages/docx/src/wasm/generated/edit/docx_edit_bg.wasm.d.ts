@@ -143,6 +143,7 @@ export const editsession_set_selection: (a: number, b: number, c: number, d: num
 export const editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];
 export const editsession_set_update_observer: (a: number, b: any) => [number, number];
+export const editsession_settle_revisions_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_split_cell: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_split_paragraph: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
 export const editsession_start_update_event_observation: (a: number) => [number, number];

@@ -303,11 +303,13 @@ plain- and rich-text controls with `setContentControlText` steps through
 
 ## Host proposals
 
-`DocxEditorRef.proposeChanges()`, `setProposalStates()` and `getProposals()` flush
-pending input, then run the session's host proposals: a round of tracked changes
-grouped by the host's proposal ids, shown with the editor's tracked-change
-highlighting, and decisions that show accepted proposals as plain text and hide
-rejected ones without changing the document or undo history. Set
+`DocxEditorRef.proposeChanges()`, `setProposalStates()`, `withdrawProposals()` and
+`getProposals()` flush pending input, then run the session's host proposals: a
+round of tracked changes grouped by the host's proposal ids, shown with the
+editor's tracked-change highlighting, and decisions that show accepted proposals
+as plain text and hide rejected ones without changing the document or undo
+history. `withdrawProposals()` settles finished proposals as their decisions show
+them, outside undo history, so the next round searches the text the reader saw. Set
 `allowHostProposals` to use them in a read-only or viewing editor; typing,
 `applyEdits`, commands and plugin writes stay blocked there. Proposals never save
 or open the comments sidebar.
@@ -336,7 +338,7 @@ if (round.ok) {
 ```
 
 The input, result and refusal-code types (`DocxProposalRequest`, `DocxProposalResult`,
-`DocxProposalStateRequest`, `DocxProposalSnapshot`, `DocxProposalFailure`, and related
+`DocxProposalStateRequest`, `DocxProposalWithdrawRequest`, `DocxProposalSnapshot`, `DocxProposalFailure`, and related
 types) are re-exported from `@betteroffice/docx-react` -- no need to import
 `@betteroffice/docx/yrs` directly just to type host proposal code.
 
