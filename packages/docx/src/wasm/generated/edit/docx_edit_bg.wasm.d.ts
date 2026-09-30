@@ -18,6 +18,7 @@ export const editsession_apply_seed_raw_ops: (a: number, b: number, c: number, d
 export const editsession_apply_update: (a: number, b: number, c: number) => [number, number];
 export const editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_begin_opening: (a: number, b: number, c: number) => void;
+export const editsession_begin_region_layout: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_build_display_list_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_build_display_pages_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -107,6 +108,7 @@ export const editsession_resolve_comment: (a: number, b: number, c: number) => [
 export const editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const editsession_resolve_paragraph_anchor: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_resolve_sticky_position: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+export const editsession_resume_region_layout: (a: number, b: number) => [number, number, number, number];
 export const editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
 export const editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
