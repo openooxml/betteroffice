@@ -265,16 +265,21 @@ function shapeFillsItsBox(shape: ShapePrimitive): boolean {
   if (corners.length !== 4) return false;
   const xs = [shape.x, shape.x + shape.w];
   const ys = [shape.y, shape.y + shape.h];
-  const seen = new Set<number>();
-  for (const [index, corner] of corners.entries()) {
+  const cells: Array<[number, number]> = [];
+  for (const corner of corners) {
     const column = xs.findIndex((x) => near(x, corner.x));
     const row = ys.findIndex((y) => near(y, corner.y));
     if (column < 0 || row < 0) return false;
-    seen.add(column * 2 + row);
-    const next = corners[(index + 1) % 4]!;
-    if (!near(corner.x, next.x) && !near(corner.y, next.y)) return false;
+    cells.push([column, row]);
   }
-  return seen.size === 4;
+  // Four distinct corners, each edge moving along one side of the box.
+  return (
+    new Set(cells.map(([column, row]) => column * 2 + row)).size === 4 &&
+    cells.every(([column, row], index) => {
+      const [nextColumn, nextRow] = cells[(index + 1) % 4]!;
+      return (column === nextColumn) !== (row === nextRow);
+    })
+  );
 }
 
 /** A run with no glyph fill: whether its outline paints differs by canvas path, so it covers nothing. */

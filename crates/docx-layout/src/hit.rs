@@ -1271,21 +1271,26 @@ fn shape_fills_its_box(shape: &ShapePrimitive) -> bool {
     let (left, top) = (px(&shape.x), px(&shape.y));
     let xs = [left, left + px(&shape.w)];
     let ys = [top, top + px(&shape.h)];
-    let mut seen = [false; 4];
-    for (index, &(x, y)) in corners.iter().enumerate() {
+    let mut cells = Vec::with_capacity(4);
+    for &(x, y) in &corners {
         let (Some(column), Some(row)) = (
             xs.iter().position(|&edge| near(edge, x)),
             ys.iter().position(|&edge| near(edge, y)),
         ) else {
             return false;
         };
+        cells.push((column, row));
+    }
+    // Four distinct corners, each edge moving along one side of the box.
+    let mut seen = [false; 4];
+    for &(column, row) in &cells {
         seen[column * 2 + row] = true;
-        let (next_x, next_y) = corners[(index + 1) % 4];
-        if !near(x, next_x) && !near(y, next_y) {
-            return false;
-        }
     }
     seen.iter().all(|&corner| corner)
+        && (0..4).all(|index| {
+            let ((column, row), (next_column, next_row)) = (cells[index], cells[(index + 1) % 4]);
+            (column == next_column) != (row == next_row)
+        })
 }
 
 /// A run with no glyph fill: whether its outline paints differs by canvas path, so it covers nothing.
@@ -2337,6 +2342,13 @@ mod tests {
             {"type": "line", "x": 160, "y": 440}, {"type": "line", "x": 100, "y": 480},
             {"type": "close"}
         ]);
+        let mut narrow_bowtie = shape(None, Some("#ff0000"));
+        narrow_bowtie["w"] = serde_json::json!(0.011);
+        narrow_bowtie["geometryPath"] = serde_json::json!([
+            {"type": "move", "x": 100.002, "y": 440}, {"type": "line", "x": 100.011, "y": 480},
+            {"type": "line", "x": 100.011, "y": 440}, {"type": "line", "x": 100.002, "y": 480},
+            {"type": "close"}
+        ]);
         let mut rotated = shape(None, Some("#ff0000"));
         rotated["transform"] = serde_json::json!({"rotation": 45});
         let mut turned = shape(None, Some("#ff0000"));
@@ -2373,6 +2385,7 @@ mod tests {
             (120.0, no_path),
             (140.0, triangle),
             (140.0, bowtie),
+            (100.0055, narrow_bowtie),
             (120.0, rotated),
         ] {
             let dl = band_page("footer", 420.0, vec![primitive]);
