@@ -2,4 +2,4 @@
 "@betteroffice/docx": patch
 ---
 
-An unmounted or replaced `DocxEditor` no longer stays in memory with its rendered pages, which could happen when it unmounted before its latest layout was queried.
+Fixes a memory leak that could retain an unmounted or replaced `DocxEditor` and its rendered pages.
