@@ -3,10 +3,13 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
+import { unzipContainer } from '../docx/wasm';
 import { preloadEditWasm } from '../wasm/edit';
+import { createProposalRegistry } from './proposals';
 import {
   createYrsSession,
   proposalRevisionPreview,
+  saveYrsDocx,
   type DocxOccurrence,
   type DocxProposalInput,
   type DocxProposalResult,
@@ -42,6 +45,30 @@ const DOCUMENT = [
   )}</w:tr></w:tbl>`,
   paragraph('00000005', run('a '.repeat(200).trimEnd())),
   paragraph('00000006', run('Tail')),
+].join('');
+
+const SMALL_MARK = '<w:pPr><w:rPr><w:sz w:val="18"/></w:rPr></w:pPr>';
+
+/** Empty paragraphs to fill, and paragraphs whose only content still counts as text. */
+const FILLABLE = [
+  `<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr>${cell(
+    paragraph('0000F001', SMALL_MARK)
+  )}</w:tr></w:tbl>`,
+  paragraph('0000F002', ''),
+  paragraph('0000F003', `<w:hyperlink w:anchor="target">${run('link')}</w:hyperlink>`),
+  paragraph('0000F004', `<w:sdt><w:sdtPr/><w:sdtContent>${run('ctl')}</w:sdtContent></w:sdt>`),
+  paragraph('0000F005', `<w:fldSimple w:instr=" PAGE ">${run('1')}</w:fldSimple>`),
+  paragraph(
+    '0000F006',
+    `<w:ins w:id="41" w:author="Bob" w:date="2026-09-01T00:00:00Z">${run('new')}</w:ins>`
+  ),
+  paragraph('0000F007', ''),
+  paragraph('0000F007', ''),
+  paragraph('0000F008', run('Keep this sentence.')),
+  paragraph(
+    '0000F009',
+    `<w:del w:id="42" w:author="Bob" w:date="2026-09-01T00:00:00Z"><w:r><w:delText>gone</w:delText></w:r></w:del>`
+  ),
 ].join('');
 
 function fixture(body = DOCUMENT): Uint8Array {
@@ -252,7 +279,7 @@ describe('YrsSession host proposals', () => {
     }
     expect(propose(missing, replace('empty', '00000002', '', 'b'))).toMatchObject({
       ok: false,
-      failure: { code: 'invalid-step', proposalId: 'empty' },
+      failure: { code: 'missing-target', proposalId: 'empty' },
     });
     expect(state(missing)).toEqual(unchanged);
   });
@@ -647,6 +674,210 @@ describe('YrsSession host proposals', () => {
         proposals: [{ id: 'x' } as never],
       })
     ).toThrow(TypeError);
+  });
+
+  it('fills an empty paragraph through an empty search in its mark formatting', async () => {
+    const session = await open(fixture(FILLABLE));
+    const snapshot = snapshotOf(
+      propose(
+        session,
+        replace('cell', '0000F001', '', 'Cell fill'),
+        replace('body', '0000F002', '', 'Body fill', 1)
+      )
+    );
+    const story = snapshot.proposals[0]!.paragraph.story;
+    expect(story).toBe('body:t0:r0c0');
+    expect(texts(session, 'accepted', story)).toEqual(['Cell fill']);
+    expect(texts(session, 'original', story)).toEqual(['']);
+    expect(texts(session, 'accepted')[0]).toBe('Body fill');
+    const segment = (story: string, text: string) =>
+      session
+        .storySegments(story)
+        .find((entry) => entry.kind === 'text' && entry.text === text)!.attributes;
+    expect(segment(story, 'Cell fill')).toMatchObject({
+      fontSize: { size: 18 },
+      ins: { author: 'Atira' },
+    });
+    expect(segment('body', 'Body fill').fontSize ?? null).toBeNull();
+    const xml = new TextDecoder().decode(
+      unzipContainer((await saveYrsDocx(session)).bytes)['word/document.xml']
+    );
+    const filled = xml.slice(0, xml.indexOf('>Cell fill<'));
+    const run = filled.slice(Math.max(filled.lastIndexOf('<w:r>'), filled.lastIndexOf('<w:r ')));
+    expect(run).toContain('<w:sz w:val="18"/>');
+  });
+
+  it('fills only an empty paragraph, at its first occurrence', async () => {
+    const session = await open(fixture(FILLABLE));
+    const unchanged = state(session);
+    for (const paraId of ['0000F003', '0000F004', '0000F005', '0000F006', '0000F008']) {
+      expect(propose(session, replace(paraId, paraId, '', 'x'))).toMatchObject({
+        ok: false,
+        failure: { code: 'missing-target', proposalId: paraId },
+      });
+    }
+    expect(propose(session, replace('second', '0000F002', '', 'x', 2))).toMatchObject({
+      ok: false,
+      failure: { code: 'missing-target', proposalId: 'second' },
+    });
+    expect(propose(session, replace('twin', '0000F007', '', 'x'))).toMatchObject({
+      ok: false,
+      failure: { code: 'ambiguous-target', proposalId: 'twin' },
+    });
+    expect(propose(session, replace('struck', '0000F009', '', 'x'))).toMatchObject({
+      ok: false,
+      failure: { code: 'tracked-revision-conflict', proposalId: 'struck' },
+    });
+    expect(
+      propose(
+        session,
+        replace('one', '0000F002', '', 'x'),
+        replace('two', '0000F002', '', 'y')
+      )
+    ).toMatchObject({ ok: false, failure: { code: 'overlapping-steps' } });
+    expect(state(session)).toEqual(unchanged);
+  });
+
+  it('withdraws proposals as their decisions preview them, outside undo history', async () => {
+    const session = await open();
+    snapshotOf(
+      propose(
+        session,
+        replace('rejected', '00000003', 'this', 'that'),
+        replace('accepted', '00000006', 'Tail', 'End'),
+        insert('undecided', '00000001', 'end', '!'),
+        replace('kept', '00000002', 'and', 'or'),
+        replace('cell', '0000C001', 'value', 'text')
+      )
+    );
+    snapshotOf(
+      decide(session, [
+        { id: 'rejected', state: 'rejected' },
+        { id: 'accepted', state: 'accepted' },
+        { id: 'cell', state: 'rejected' },
+      ])
+    );
+    expect(propose(session, replace('again', '00000003', 'this', 'the'))).toMatchObject({
+      ok: false,
+      failure: { code: 'missing-target' },
+    });
+    await saveYrsDocx(session);
+    const events: DocxProposalSnapshot[] = [];
+    session.onProposalChange((snapshot) => events.push(snapshot));
+    const before = session.version();
+    const withdrawn = snapshotOf(
+      session.withdrawProposals({
+        expectVersion: before,
+        ids: ['rejected', 'accepted', 'undecided', 'cell', 'unknown'],
+      })
+    );
+    expect(withdrawn.version).not.toBe(before);
+    expect(withdrawn.previewVersion).toBe(2);
+    expect(withdrawn.proposals.map((record) => record.id)).toEqual(['kept']);
+    expect(events.map((event) => event.proposals.length)).toEqual([1]);
+    expect(texts(session, 'original')).toEqual([
+      'Hello world',
+      'aaaa and aaaa',
+      'Keep this sentence.',
+      'First twin',
+      'Second twin',
+      'a '.repeat(200).trimEnd(),
+      'End',
+    ]);
+    expect(texts(session, 'accepted')[1]).toBe('aaaa or aaaa');
+    expect(texts(session, 'accepted', 'body:t0:r0c0')).toEqual(['cell value']);
+    expect(new Set(session.listRevisions().map((revision) => revision.revisionId))).toEqual(
+      new Set(withdrawn.proposals[0]!.revisionIds)
+    );
+    expect(session.canUndo()).toBe(false);
+    const saved = new TextDecoder().decode(
+      unzipContainer((await saveYrsDocx(session)).bytes)['word/document.xml']
+    );
+    expect(saved.match(/<w:(ins|del) /g)).toHaveLength(2);
+    expect(saved).not.toContain('>that<');
+    expect(saved).not.toContain('>Tail<');
+    expect(saved).not.toContain('>text<');
+
+    snapshotOf(propose(session, replace('again', '00000003', 'this', 'the')));
+    expect(texts(session, 'accepted')[2]).toBe('Keep the sentence.');
+    const retried = session.getProposals();
+    expect(
+      session.withdrawProposals({ expectVersion: before, ids: ['rejected', 'accepted'] })
+    ).toEqual({ ok: true, snapshot: retried });
+    expect(
+      session.withdrawProposals({ expectVersion: before, ids: ['again'] })
+    ).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+    expect(session.getProposals()).toEqual(retried);
+    expect(() => session.withdrawProposals({ expectVersion: before } as never)).toThrow(TypeError);
+  });
+
+  it('refuses to withdraw a proposal whose revision also marks a paragraph change', async () => {
+    const session = await open();
+    const [record] = snapshotOf(
+      propose(session, replace('styled', '00000003', 'this', 'that'))
+    ).proposals;
+    const mark = { paraId: '00000003', offset: 0 };
+    session.setParagraphAttrs(
+      { story: 'body', start: mark, end: mark },
+      { alignment: 'right' },
+      { name: SUGGEST.author, date: SUGGEST.date }
+    );
+    const changed = session.listRevisions().find((revision) => revision.kind === 'pPrChange');
+    expect(record!.revisionIds).toContain(changed!.revisionId);
+    const unchanged = state(session);
+    expect(
+      session.withdrawProposals({ expectVersion: session.version(), ids: ['styled'] })
+    ).toMatchObject({
+      ok: false,
+      failure: { code: 'tracked-revision-conflict', proposalId: 'styled' },
+    });
+    expect(state(session)).toEqual(unchanged);
+  });
+
+  it('settles a revision two withdrawn proposals share as the preview shows it', async () => {
+    const session = await open();
+    const settled: (readonly string[])[][] = [];
+    const registry = createProposalRegistry({
+      version: () => session.version(),
+      resolveParagraphAnchor: (anchor) => session.resolveParagraphAnchor(anchor),
+      findText: (request) => session.findText(request),
+      readParagraphs: (request) => session.readParagraphs(request),
+      applyEdits: (request) => {
+        const result = session.applyEdits(request);
+        if (!result.ok) return result;
+        return {
+          ...result,
+          receipts: result.receipts.map((receipt) => ({ ...receipt, revisionIds: ['shared'] })),
+        };
+      },
+      listRevisions: () => [],
+      settleRevisions: (accept, reject) => settled.push([accept, reject]),
+    });
+    for (const [id, paraId] of [
+      ['first', '00000003'],
+      ['second', '00000006'],
+    ] as const) {
+      snapshotOf(
+        registry.propose({
+          expectVersion: session.version(),
+          proposals: [insert(id, paraId, 'end', '!')],
+        })
+      );
+    }
+    const decided = snapshotOf(
+      registry.setStates({
+        expectVersion: session.version(),
+        expectPreviewVersion: registry.snapshot().previewVersion,
+        changes: [
+          { id: 'first', state: 'accepted' },
+          { id: 'second', state: 'rejected' },
+        ],
+      })
+    );
+    expect(proposalRevisionPreview(decided)).toEqual({ shared: 'rejected' });
+
+    snapshotOf(registry.withdraw({ expectVersion: session.version(), ids: ['first', 'second'] }));
+    expect(settled).toEqual([[[], ['shared']]]);
   });
 
   it('forgets proposals when the session opens another document', async () => {

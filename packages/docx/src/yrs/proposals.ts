@@ -2,7 +2,8 @@
  * Host proposals: tracked changes a host proposes by paragraph anchor and search, grouped by the
  * host's proposal ids. A round resolves against one version and applies as one atomic batch
  * outside undo history. Decisions only change how the proposals' revisions render: the
- * revisions stay in the document, and the document version and history are untouched.
+ * revisions stay in the document, and the document version and history are untouched until the
+ * host withdraws the proposals.
  */
 
 import type {
@@ -14,6 +15,8 @@ import type {
   DocxEditSuggestion,
   DocxFindTextRequest,
   DocxFindTextResult,
+  DocxReadParagraphsRequest,
+  DocxReadParagraphsResult,
   DocxTextMatch,
 } from './edits';
 import type {
@@ -28,8 +31,10 @@ export type DocxProposalState = 'proposed' | 'accepted' | 'rejected';
 export type DocxOccurrence = 'first' | 'all' | number;
 
 /**
- * One proposal. `replaceText` with `replaceWith: ''` deletes; `insertText` offsets are UTF-16
- * units of the paragraph's accepted text.
+ * One proposal. `replaceText` with `replaceWith: ''` deletes; with `search: ''` it fills a
+ * paragraph whose accepted text is empty (an inline atom counts as text), where the empty search
+ * matches once, at offset 0. `insertText` offsets are UTF-16 units of the paragraph's accepted
+ * text.
  */
 export type DocxProposalInput = {
   id: string;
@@ -78,6 +83,12 @@ export type DocxProposalResult =
   | { ok: true; snapshot: DocxProposalSnapshot }
   | { ok: false; version: string; failure: DocxProposalFailure };
 
+/** Ids that name no proposal are ignored, so a retried withdrawal changes nothing. */
+export interface DocxProposalWithdrawRequest {
+  expectVersion: string;
+  ids: readonly string[];
+}
+
 export interface DocxProposalStateRequest {
   expectVersion: string;
   expectPreviewVersion: number;
@@ -92,13 +103,18 @@ export interface DocxProposalSession {
   version(): string;
   resolveParagraphAnchor(anchor: DocxParagraphAnchor): DocxParagraphAnchorResult;
   findText(request: DocxFindTextRequest): DocxFindTextResult;
+  readParagraphs(request: DocxReadParagraphsRequest): DocxReadParagraphsResult;
   applyEdits(request: DocxEditRequest): DocxEditResult;
+  listRevisions(): readonly { revisionId: string; kind: string }[];
+  /** Accepts and rejects revisions for good, outside undo history; unknown ids are skipped. */
+  settleRevisions(accept: readonly string[], reject: readonly string[]): void;
 }
 
 /** @internal */
 export interface DocxProposalRegistry {
   propose(request: DocxProposalRequest): DocxProposalResult;
   setStates(request: DocxProposalStateRequest): DocxProposalResult;
+  withdraw(request: DocxProposalWithdrawRequest): DocxProposalResult;
   snapshot(): DocxProposalSnapshot;
   subscribe(listener: (snapshot: DocxProposalSnapshot) => void): () => void;
   /** Forgets every proposal, as when the session opens another document. */
@@ -355,12 +371,7 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
         )}; use 'first', 'all' or a number from 1`
       );
     }
-    if (input.search === '') {
-      return failure(
-        'invalid-step',
-        `proposal ${input.id} searches for empty text; use insertText`
-      );
-    }
+    if (input.search === '') return fill(input, anchor, occurrence);
     const found = session.findText({
       text: input.search,
       within: { kind: 'paragraph', story, paraId },
@@ -396,6 +407,39 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
         text: input.replaceWith,
         suggest,
       })),
+    };
+  };
+
+  /** The one empty match of an empty search: offset 0 of a paragraph whose accepted text is empty. */
+  const fill = (
+    input: DocxProposalInput & { op: 'replaceText' },
+    { story, paraId }: DocxSessionParagraphAnchor,
+    occurrence: DocxOccurrence
+  ): Planned => {
+    const read = session.readParagraphs({ story, paraIds: [paraId], view: 'accepted' });
+    if (!read.ok) return { failure: { ...read.failure, proposalId: input.id } };
+    const empty = read.paragraphs.length === 1 && read.paragraphs[0]!.text === '';
+    if (!empty || (typeof occurrence === 'number' && occurrence > 1)) {
+      return {
+        failure: {
+          code: 'missing-target',
+          message: empty
+            ? `proposal ${input.id}: occurrence ${occurrence} of empty text was not found; its paragraph has 1`
+            : `proposal ${input.id} fills a paragraph that is not empty`,
+          proposalId: input.id,
+        },
+      };
+    }
+    const at = { paraId, offset: 0 };
+    return {
+      steps: [
+        {
+          op: 'replaceText',
+          target: { kind: 'range', story, start: at, end: at, view: 'accepted' },
+          text: input.replaceWith,
+          suggest: { author: input.suggest.author, date: input.suggest.date },
+        },
+      ],
     };
   };
 
@@ -569,9 +613,79 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     return { ok: true, snapshot: snapshot() };
   };
 
+  /**
+   * Settles each withdrawn proposal as its decision previews it, so the document reads as the
+   * preview did: accepted revisions apply, rejected and undecided ones are removed.
+   */
+  const withdraw = (request: DocxProposalWithdrawRequest): DocxProposalResult => {
+    if (!request || typeof request !== 'object' || !Array.isArray(request.ids)) {
+      throw new TypeError('a withdrawal request needs an ids array');
+    }
+    for (const id of request.ids) {
+      if (typeof id !== 'string') throw new TypeError('a proposal id must be a string');
+    }
+    const withdrawn = [...new Set(request.ids)].filter((id) => records.has(id));
+    if (withdrawn.length === 0) return { ok: true, snapshot: snapshot() };
+    if (request.expectVersion !== session.version()) {
+      return refuse({
+        code: 'stale-version',
+        message: 'the document changed since the expected version was read',
+      });
+    }
+    const leaving = new Set(withdrawn);
+    const kept = new Map<string, string>();
+    for (const [id, { record }] of records) {
+      if (leaving.has(id)) continue;
+      for (const revisionId of record.revisionIds) kept.set(revisionId, id);
+    }
+    const owners = new Map<string, string>();
+    for (const id of withdrawn) {
+      const { record } = records.get(id)!;
+      for (const revisionId of record.revisionIds) {
+        const other = kept.get(revisionId);
+        if (other !== undefined) {
+          return refuse({
+            code: 'tracked-revision-conflict',
+            message: `proposal ${id} shares revision ${revisionId} with proposal ${other}`,
+            proposalId: id,
+          });
+        }
+        owners.set(revisionId, id);
+      }
+    }
+    const shown = proposalRevisionPreview(snapshot()) ?? {};
+    const settling = [...owners.keys()];
+    const accept = settling.filter((revisionId) => shown[revisionId] === 'accepted');
+    const reject = settling.filter((revisionId) => shown[revisionId] !== 'accepted');
+    const foreign = session
+      .listRevisions()
+      .find(
+        ({ revisionId, kind }) =>
+          owners.has(revisionId) && kind !== 'insertion' && kind !== 'deletion'
+      );
+    if (foreign) {
+      const id = owners.get(foreign.revisionId)!;
+      return refuse({
+        code: 'tracked-revision-conflict',
+        message: `proposal ${id} shares revision ${foreign.revisionId} with a ${foreign.kind} change made outside the proposals`,
+        proposalId: id,
+      });
+    }
+    if (accept.length > 0 || reject.length > 0) session.settleRevisions(accept, reject);
+    let decided = false;
+    for (const id of withdrawn) {
+      decided ||= records.get(id)!.record.state !== 'proposed';
+      records.delete(id);
+    }
+    if (decided) previewVersion += 1;
+    notify();
+    return { ok: true, snapshot: snapshot() };
+  };
+
   return {
     propose,
     setStates,
+    withdraw,
     snapshot,
     subscribe(listener) {
       if (typeof listener !== 'function')

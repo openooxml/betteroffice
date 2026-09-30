@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use yrs::types::Attrs;
-use yrs::{Any, Map, MapPrelim, Text, TextRef, TransactionMut};
+use yrs::{Any, Map, MapPrelim, Out, ReadTxn, Text, TextRef, TransactionMut};
 
 use crate::format::{FormatPolicy, HYPERLINK, PROTECTED_ATTRS};
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
@@ -81,6 +81,39 @@ fn policy_attrs(chunks: &[Chunk], at: u32, policy: &FormatPolicy) -> Vec<(String
             attrs
         }
     }
+}
+
+/// [`policy_attrs`], except that inheriting into a paragraph without content takes its mark's run
+/// formatting, as Word types into an empty paragraph.
+fn insertion_attrs<T: ReadTxn>(
+    chunks: &[Chunk],
+    at: u32,
+    policy: &FormatPolicy,
+    txn: &T,
+) -> Vec<(String, Any)> {
+    if matches!(policy, FormatPolicy::Inherit) {
+        let unit_at = |index: u32| {
+            chunks
+                .iter()
+                .find(|chunk| chunk.start <= index && index < chunk.end())
+        };
+        let opens_paragraph = at
+            .checked_sub(1)
+            .and_then(unit_at)
+            .is_none_or(|chunk| match &chunk.kind {
+                ChunkKind::Pilcrow(_) => true,
+                ChunkKind::Embed(Some(map)) => crate::map_string(map, txn, KIND_KEY)
+                    .is_some_and(|kind| crate::segments::is_block_embed(&kind)),
+                _ => false,
+            });
+        if opens_paragraph
+            && let Some(ChunkKind::Pilcrow(mark)) = unit_at(at).map(|chunk| &chunk.kind)
+            && let Some(Out::Any(defaults)) = mark.get(txn, "defaultTextFormatting")
+        {
+            return crate::seed::mark_run_attrs(&defaults);
+        }
+    }
+    policy_attrs(chunks, at, policy)
 }
 
 fn stamped_attrs(formatting: Vec<(String, Any)>, ins: Option<Any>) -> Attrs {
@@ -266,7 +299,7 @@ impl EditingDoc {
                 })
                 .unwrap_or_else(|| self.next_id())
         });
-        let formatting = policy_attrs(&chunks, at.index, &policy);
+        let formatting = insertion_attrs(&chunks, at.index, &policy, &txn);
         let ins = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
@@ -386,7 +419,7 @@ impl EditingDoc {
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect()
             })
-            .unwrap_or_else(|| policy_attrs(&chunks, range.start, &FormatPolicy::Inherit));
+            .unwrap_or_else(|| insertion_attrs(&chunks, range.start, &FormatPolicy::Inherit, &txn));
 
         let revision = revision_id
             .as_ref()

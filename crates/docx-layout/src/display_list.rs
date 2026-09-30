@@ -2451,8 +2451,9 @@ struct ShapeFillIn {
     background_color: Option<String>,
     #[serde(default)]
     picture_rel_id: Option<String>,
-    /// resolved SAFE embedded picture source (`data:`/`blob:` minted by the
-    /// parser from embedded parts; never an external target)
+    /// resolved SAFE embedded picture source (`data:`/`blob:` or a `media:{n}`
+    /// part token, minted by the parser from embedded parts; never an external
+    /// target)
     #[serde(default)]
     picture_src: Option<String>,
     #[serde(default)]
@@ -8107,12 +8108,12 @@ fn shape_fill_paint(fill: Option<&ShapeFillIn>) -> Option<Value> {
         }
     }
     // resolved picture-fill source: pass through only parser-minted embedded
-    // schemes (data:/blob:) so a hand-crafted input cannot smuggle an external
-    // URL to the canvas image resolver
+    // schemes (data:/blob:, or a media:{n} part token) so a hand-crafted input
+    // cannot smuggle an external URL to the canvas image resolver
     if let Some(src) = fill
         .picture_src
         .as_ref()
-        .filter(|src| src.starts_with("data:") || src.starts_with("blob:"))
+        .filter(|src| src.starts_with("data:") || src.starts_with("blob:") || is_media_token(src))
     {
         paint.insert("pictureSrc".to_string(), Value::String(src.clone()));
     }
@@ -8132,6 +8133,13 @@ fn shape_fill_paint(fill: Option<&ShapeFillIn>) -> Option<Value> {
         paint.insert("themeRefIndex".to_string(), Value::Number(index.into()));
     }
     (!paint.is_empty()).then_some(Value::Object(paint))
+}
+
+/// A `media:{n}` token naming a package part the host resolves.
+fn is_media_token(src: &str) -> bool {
+    src.strip_prefix("media:").is_some_and(|digits| {
+        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 fn shape_stroke_paint(stroke: Option<&ShapeStrokeIn>) -> Option<Value> {

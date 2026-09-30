@@ -249,6 +249,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const inputLifetimeRef = useRef({ session, enabled, mounted: true });
   inputLifetimeRef.current.session = session;
   inputLifetimeRef.current.enabled = enabled;
+  // A resident edit that answers after the input unmounted or its document was replaced
+  // finishes nothing: the session it started on may be freed.
+  const isCurrentInput = useCallback(
+    (started: YrsSession | null): boolean =>
+      inputLifetimeRef.current.mounted && inputLifetimeRef.current.session === started,
+    []
+  );
   const storedFormattingByParagraphRef = useRef(new Map<string, YrsStoredFormatting>());
   const onPendingInputChangeRef = useRef(onPendingInputChange);
   onPendingInputChangeRef.current = onPendingInputChange;
@@ -291,12 +298,16 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     pendingResidentDeleteRef.current = null;
   }, []);
 
+  // An operation still queued when the input lets go of its session starts nothing.
   const enqueueInputOperation = useCallback(
     (operation: () => void | Promise<void>): void => {
       sealInputBatches();
-      inputOperationQueueRef.current?.enqueue(operation);
+      const admitted = session;
+      inputOperationQueueRef.current?.enqueue(() =>
+        isCurrentInput(admitted) ? operation() : undefined
+      );
     },
-    [sealInputBatches]
+    [isCurrentInput, sealInputBatches, session]
   );
 
   const advanceInteractionEpoch = useCallback((): void => {
@@ -560,6 +571,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           applyResidentInput
         ) {
           const applied = await applyResidentInput(inputText);
+          if (!isCurrentInput(session)) return;
           if (applied) finishResidentMutation(applied);
           else commitCompatibilityInput();
           return;
@@ -599,6 +611,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       finishMutation,
       finishResidentMutation,
       inputPositionMap,
+      isCurrentInput,
       isSuggesting,
       readOnly,
       session,
@@ -631,6 +644,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             : caret.offset < map.paragraphs[index].length || index + 1 < paragraphs.length;
         if (hasTarget && isBodyFlowStory(activeStory) && !isSuggesting && applyResidentDelete) {
           const applied = await applyResidentDelete(direction, remaining);
+          if (!isCurrentInput(session)) return;
           if (applied) {
             finishResidentMutation(applied);
             remaining -= Math.max(1, applied.deletedUnits ?? remaining);
@@ -694,6 +708,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       finishMutation,
       finishResidentMutation,
       inputPositionMap,
+      isCurrentInput,
       isSuggesting,
       readOnly,
       session,
@@ -801,6 +816,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
               ? { queries: currentQueries, frameEpoch: displayListFrameEpochRef.current }
               : null
           : null;
+        if (!isCurrentInput(session)) return;
         if (
           verticalDirection &&
           interactionEpoch !== undefined &&
@@ -898,6 +914,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       enqueueInputOperation,
       ensureSelection,
       inputPositionMap,
+      isCurrentInput,
       locToDisplayPosition,
       resolveDisplayTarget,
       session,
@@ -1081,7 +1098,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       compositionCommitRef.current =
         event.currentTarget.value || event.data || compositionCommitRef.current;
       queueMicrotask(() => {
-        if (!compositionPendingRef.current || inputLifetimeRef.current.session !== session) return;
+        if (!compositionPendingRef.current || !isCurrentInput(session)) return;
         const text = textareaRef.current?.value || compositionCommitRef.current;
         // Reset the browser model before applying the document op. A trailing
         // post-composition beforeinput therefore observes an empty model and
@@ -1095,7 +1112,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         onPendingInputChangeRef.current?.(inputOperationQueueRef.current?.hasPending() ?? false);
       });
     },
-    [insertText, session]
+    [insertText, isCurrentInput, session]
   );
 
   const handleInput = useCallback(

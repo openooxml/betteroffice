@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, expect, test } from 'bun:test';
+import { afterAll, afterEach, expect, spyOn, test } from 'bun:test';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type {
   DisplayListQueries,
@@ -129,6 +129,54 @@ function unbuiltQueries(built: boolean | number[], anchor: DisplayListRect): Dis
   } as unknown as DisplayListQueries;
 }
 
+function revealApi() {
+  const { scroller, host, scrolls } = pagedDom();
+  const placeholder = { pageIndex: 6, x: 20, y: 20, width: 0, height: 0 };
+  const match = { pageIndex: 6, x: 20, y: 900, width: 0, height: 16 };
+  const hook = renderHook(
+    ({ displayListQueries }) =>
+      usePagedScrollApi({
+        pagesContainerRef: { current: host },
+        yrsInputRef: { current: null },
+        yrsSession: null,
+        yrsLocToDisplayPosition: () => null,
+        getScrollContainer: () => scroller,
+        displayListQueries,
+      }),
+    { initialProps: { displayListQueries: unbuiltQueries(false, placeholder) } }
+  );
+  return { ...hook, scroller, scrolls, placeholder, match };
+}
+
+test('a reveal follows an unbuilt page past three seconds only with a signal', async () => {
+  let now = 0;
+  const clock = spyOn(performance, 'now').mockImplementation(() => now);
+  try {
+    for (const withSignal of [true, false]) {
+      now = 0;
+      const { result, rerender, unmount, scroller, scrolls, match } = revealApi();
+      const abort = new AbortController();
+      await act(async () => {
+        expect(result.current.revealPositionImpl(500, withSignal ? abort.signal : undefined)).toBe('scrolled');
+      });
+      expect(scrolls).toHaveLength(1);
+
+      now = 4000;
+      await act(async () => rerender({ displayListQueries: unbuiltQueries(true, match) }));
+      expect(scrolls).toHaveLength(withSignal ? 2 : 1);
+      if (withSignal) {
+        const matchTop = 6000 - scroller.scrollTop + match.y;
+        expect(matchTop).toBeGreaterThanOrEqual(0);
+        expect(matchTop + match.height).toBeLessThanOrEqual(400);
+      }
+      unmount();
+      scroller.remove();
+    }
+  } finally {
+    clock.mockRestore();
+  }
+});
+
 test('a position on an unbuilt page is scrolled to again once the page is built', async () => {
   const { scroller, host, scrolls } = pagedDom();
   const placeholder = { pageIndex: 6, x: 20, y: 20, width: 0, height: 0 };
@@ -220,4 +268,40 @@ test('a user scroll or a later navigation drops the pending refinement', async (
   expect(result.current.revealPositionImpl(600)).toBe('unsupported');
   await act(async () => rerender({ displayListQueries: unbuiltQueries(true, match) }));
   expect(scrolls).toHaveLength(2);
+});
+
+test('aborting a reveal stops following an unbuilt page after three seconds', async () => {
+  let now = 0;
+  const clock = spyOn(performance, 'now').mockImplementation(() => now);
+  try {
+    const { result, rerender, scroller, scrolls, placeholder, match } = revealApi();
+    const abort = new AbortController();
+    await act(async () => {
+      expect(result.current.revealPositionImpl(500, abort.signal)).toBe('scrolled');
+    });
+    expect(scrolls).toHaveLength(1);
+
+    now = 4000;
+    await act(async () =>
+      rerender({ displayListQueries: unbuiltQueries(false, { ...placeholder, pageIndex: 8 }) })
+    );
+    expect(scrolls).toHaveLength(2);
+    abort.abort();
+    await act(async () =>
+      rerender({ displayListQueries: unbuiltQueries(true, { ...match, pageIndex: 8 }) })
+    );
+    expect(scrolls).toHaveLength(2);
+
+    const kept = new AbortController();
+    await act(async () => rerender({ displayListQueries: unbuiltQueries(false, placeholder) }));
+    await act(async () => {
+      result.current.revealPositionImpl(500, kept.signal);
+    });
+    now = 8000;
+    await act(async () => rerender({ displayListQueries: unbuiltQueries(true, match) }));
+    expect(scrolls).toHaveLength(4);
+    scroller.remove();
+  } finally {
+    clock.mockRestore();
+  }
 });

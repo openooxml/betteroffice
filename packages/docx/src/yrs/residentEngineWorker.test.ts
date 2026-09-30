@@ -113,6 +113,7 @@ function worker() {
     memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
       loadState() {},
+      loadMediaSources(_json: string) {},
       setPartialDocument() {},
       setDisplayWindow(start: number, end: number) {
         harness.displayWindows.push([start, end]);
@@ -234,12 +235,16 @@ function worker() {
       harness.rasterized = [];
       harness.presented = [];
     },
-    async bootstrap(pageCount = 3, heapLimitBytes?: number) {
+    async bootstrap(
+      pageCount = 3,
+      { keepSurfaces = false, heapLimitBytes }: { keepSurfaces?: boolean; heapLimitBytes?: number } = {}
+    ) {
       delta(Array.from({ length: pageCount }, (_, index) => index + 1), true, 100, pageCount);
       return send({
         type: 'bootstrap',
         expectedFrameEpoch: 0,
         extras: '',
+        ...(keepSurfaces ? { keepSurfaces } : {}),
         ...(heapLimitBytes !== undefined ? { heapLimitBytes } : {}),
         snapshot: {
           clientId: 1,
@@ -398,6 +403,18 @@ describe('resident worker page damage', () => {
       ).ok
     ).toBe(true);
     expect(w.harness.windowedIncrementalBuilds).toEqual([false, true, false, true, false]);
+  });
+
+  test('a bootstrap that keeps surfaces paints the next document into the attached canvases', async () => {
+    const w = worker();
+    await w.bootstrap(3);
+    await w.attach([1, 2]);
+    w.resetCalls();
+    expect((await w.bootstrap(3, { keepSurfaces: true })).ok).toBe(true);
+    expect(w.harness.presented).toEqual([1, 2]);
+    w.resetCalls();
+    await w.bootstrap(3);
+    expect(w.harness.presented).toEqual([]);
   });
 
   test('paints each page once while a three-page window crosses twelve pages', async () => {
@@ -653,6 +670,36 @@ describe('resident worker layout ownership', () => {
     expect(calls).toEqual(['load', 'partial:false', 'layout']);
   });
 
+  test('lays out the media sources a snapshot carries, and clears them when it carries none', async () => {
+    const w = worker();
+    const loaded: string[] = [];
+    Object.assign(w.harness.session, {
+      loadMediaSources: (json: string) => loaded.push(json),
+      layoutDocumentWithRegionsRetainedJson: () =>
+        JSON.stringify({ layout: { pages: [] }, notesConverged: true }),
+    });
+    const snapshot = {
+      clientId: 1,
+      state: new Uint8Array(),
+      fontsRevision: 0,
+      fonts: [],
+      renderInputs: [],
+      measureInputs: [],
+      layoutInput: '{}',
+      layoutWithRegions: true,
+      layoutRevision: 1,
+      selection: null,
+    };
+    await w.send({
+      type: 'bootstrap',
+      expectedFrameEpoch: 0,
+      extras: '{}',
+      snapshot: { ...snapshot, mediaSources: '{"sources":1}' },
+    });
+    await w.send({ type: 'sync', expectedFrameEpoch: 0, extras: '{}', paintCaret: false, snapshot });
+    expect(loaded).toEqual(['{"sources":1}', '']);
+  });
+
   test('finishes a provisional layout on request and before other work', async () => {
     const w = worker();
     const extras: string[] = [];
@@ -781,7 +828,7 @@ describe('resident worker layout ownership', () => {
 describe('resident worker memory', () => {
   test('a bootstrap starts the session under its heap limit', async () => {
     const w = worker();
-    await w.bootstrap(3, 1024);
+    await w.bootstrap(3, { heapLimitBytes: 1024 });
     await w.bootstrap();
     expect((w.harness as { heapLimits?: unknown[] }).heapLimits).toEqual([1024, undefined]);
   });

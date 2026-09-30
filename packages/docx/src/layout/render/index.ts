@@ -143,7 +143,10 @@ export {
   type DisplayPageHostOptions,
 } from './canvasPointer';
 
-export { createCanvasImageResolver } from './canvasImageResolver';
+export {
+  createCanvasImageResolver,
+  type CanvasImageResolverOptions,
+} from './canvasImageResolver';
 
 export {
   computeA11yAnnouncements,

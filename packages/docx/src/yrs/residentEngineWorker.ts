@@ -186,7 +186,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'bootstrap') {
     if (!request.opened) {
-      destroySession();
+      destroySession(request.keepSurfaces === true);
       // The worker is a genuine yrs peer. Reusing the main replica's client id
       // makes a fast structural input race overlap one client's clock range and
       // corrupt the update; a fresh id lets yrs merge queued/local operations
@@ -453,6 +453,7 @@ function hydrate(
   completedLayout = null;
   if (loadState) session.loadState(snapshot.state);
   session.setPartialDocument(snapshot.partialDocument === true);
+  session.loadMediaSources(snapshot.mediaSources ?? '');
   if (snapshot.fontsRevision !== fontsRevision) {
     // A mismatched revision always carries the full font set (the client only
     // omits fonts when it knows this session's applied revision matches).
@@ -679,7 +680,11 @@ function subscribe(): void {
   unsubscribe = session.onUpdate((update) => pendingUpdates.push(update.slice()));
 }
 
-function destroySession(): void {
+/**
+ * Drops the document. `keepSurfaces` keeps the attached page canvases, still
+ * showing the old pages, for a document that replaces it page for page.
+ */
+function destroySession(keepSurfaces = false): void {
   unsubscribe?.();
   unsubscribe = null;
   session?.destroy();
@@ -693,10 +698,12 @@ function destroySession(): void {
   completedLayout = null;
   retainedFrame = null;
   glyphCache = null;
-  offscreenCanvases.clear();
   offscreenBackBuffers.clear();
   pendingOffscreenPageIds.clear();
-  activeOffscreenPageIds.clear();
+  if (!keepSurfaces) {
+    offscreenCanvases.clear();
+    activeOffscreenPageIds.clear();
+  }
   caretPaintRect = null;
   paintedCaretPageId = null;
   paintedCaretKey = null;

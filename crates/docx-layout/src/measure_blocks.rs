@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offset};
-use crate::floating_objects::MIN_WRAP_SEGMENT_WIDTH;
+use crate::floating_objects::{MIN_WRAP_SEGMENT_WIDTH, table_wrap_gaps};
 use crate::table_grid::{
     content_sized_columns, count_table_columns, grow_content_sized_columns, resolve_cell_grid,
     resolve_table_column_widths, resolve_table_width_px,
@@ -379,6 +379,8 @@ pub fn has_floating_zones(
     Ok(!extract_floating_zones(
         blocks,
         content_width,
+        &[],
+        &[],
         config,
         page_geometry,
         &BTreeMap::new(),
@@ -402,9 +404,28 @@ pub fn measure_blocks_with_shape_offsets(
     page_geometry: Option<&FloatPageGeometry>,
     shape_offsets: &BTreeMap<usize, f64>,
 ) -> Result<Vec<BlockExtent>, String> {
+    measure_blocks_with_table_wrap_frames(blocks, widths, &[], config, page_geometry, shape_offsets)
+}
+
+/// Float measurement with known single-column table frames.
+pub fn measure_blocks_with_table_wrap_frames(
+    blocks: &mut [LayoutBlock],
+    widths: &[f64],
+    table_wrap_frames: &[bool],
+    config: &MeasurementConfig,
+    page_geometry: Option<&FloatPageGeometry>,
+    shape_offsets: &BTreeMap<usize, f64>,
+) -> Result<Vec<BlockExtent>, String> {
     let default_width = widths.first().copied().unwrap_or(0.0);
-    let extracted =
-        extract_floating_zones(blocks, default_width, config, page_geometry, shape_offsets)?;
+    let extracted = extract_floating_zones(
+        blocks,
+        default_width,
+        widths,
+        table_wrap_frames,
+        config,
+        page_geometry,
+        shape_offsets,
+    )?;
     let (paragraph_zones, zones_by_anchor) = group_floating_zones(extracted);
     let marks = section_break_marks(blocks);
     measure_float_flow(
@@ -439,6 +460,8 @@ pub fn floating_zone_kinds(
     let zones = extract_floating_zones(
         blocks,
         content_width,
+        &[],
+        &[],
         config,
         page_geometry,
         &BTreeMap::new(),
@@ -463,9 +486,32 @@ pub fn measure_float_segment(
     page_geometry: Option<&FloatPageGeometry>,
     section_break_marks: &[bool],
 ) -> Result<Option<Vec<BlockExtent>>, String> {
+    measure_float_segment_with_table_wrap_frames(
+        blocks,
+        widths,
+        default_width,
+        &[],
+        config,
+        page_geometry,
+        section_break_marks,
+    )
+}
+
+/// Segment measurement with known single-column table frames.
+pub fn measure_float_segment_with_table_wrap_frames(
+    blocks: &mut [LayoutBlock],
+    widths: &[f64],
+    default_width: f64,
+    table_wrap_frames: &[bool],
+    config: &MeasurementConfig,
+    page_geometry: Option<&FloatPageGeometry>,
+    section_break_marks: &[bool],
+) -> Result<Option<Vec<BlockExtent>>, String> {
     let extracted = extract_floating_zones(
         blocks,
         default_width,
+        widths,
+        table_wrap_frames,
         config,
         page_geometry,
         &BTreeMap::new(),
@@ -665,10 +711,22 @@ impl FloatFlow {
         config: &MeasurementConfig,
         page_geometry: Option<&FloatPageGeometry>,
     ) -> Result<Self, String> {
+        Self::with_table_wrap_frames(blocks, widths, &[], config, page_geometry)
+    }
+
+    pub fn with_table_wrap_frames(
+        blocks: &[LayoutBlock],
+        widths: &[f64],
+        table_wrap_frames: &[bool],
+        config: &MeasurementConfig,
+        page_geometry: Option<&FloatPageGeometry>,
+    ) -> Result<Self, String> {
         let default_width = widths.first().copied().unwrap_or(0.0);
         let extracted = extract_floating_zones(
             blocks,
             default_width,
+            widths,
+            table_wrap_frames,
             config,
             page_geometry,
             &BTreeMap::new(),
@@ -1294,6 +1352,8 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
 fn extract_floating_zones(
     blocks: &[LayoutBlock],
     content_width: f64,
+    widths: &[f64],
+    table_wrap_frames: &[bool],
     config: &MeasurementConfig,
     page_geometry: Option<&FloatPageGeometry>,
     shape_offsets: &BTreeMap<usize, f64>,
@@ -1305,7 +1365,17 @@ fn extract_floating_zones(
                 extract_image_zones(paragraph, block_index, content_width, &mut zones);
             }
             LayoutBlock::Table(table) => {
-                extract_table_zone(table, block_index, content_width, config, &mut zones)?;
+                extract_table_zone(
+                    table,
+                    block_index,
+                    content_width,
+                    widths
+                        .get(block_index)
+                        .copied()
+                        .filter(|_| table_wrap_frames.get(block_index) == Some(&true)),
+                    config,
+                    &mut zones,
+                )?;
             }
             LayoutBlock::TextBox(text_box) => extract_text_box_zone(
                 text_box,
@@ -1508,10 +1578,46 @@ fn extract_image_zones(
     }
 }
 
+/// Per block, whether its float flow (up to the next [`resets_float_flow`]
+/// block) holds a paragraph with a negative indent. Painting lets such a line
+/// run past a wrap margin, so its tables keep main's wrap side: a frame flag
+/// passed to [`measure_blocks_with_table_wrap_frames`] must be false there.
+pub fn negative_indent_float_flows(blocks: &[&LayoutBlock]) -> Vec<bool> {
+    let mut flows = vec![false; blocks.len()];
+    let mut start = 0;
+    for index in 1..=blocks.len() {
+        if index == blocks.len() || resets_float_flow(blocks[index]) {
+            let negative = blocks[start..index]
+                .iter()
+                .any(|block| has_negative_side_indent(block));
+            flows[start..index].fill(negative);
+            start = index;
+        }
+    }
+    flows
+}
+
+fn has_negative_side_indent(block: &LayoutBlock) -> bool {
+    let LayoutBlock::Paragraph(paragraph) = block else {
+        return false;
+    };
+    let Some(indent) = paragraph
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.indent.as_ref())
+    else {
+        return false;
+    };
+    let left = indent.left.unwrap_or(0.0);
+    let first = left + indent.first_line.unwrap_or(0.0) - indent.hanging.unwrap_or(0.0);
+    left < 0.0 || first < 0.0 || indent.right.unwrap_or(0.0) < 0.0
+}
+
 fn extract_table_zone(
     table: &TableBlock,
     block_index: usize,
     content_width: f64,
+    column_width: Option<f64>,
     config: &MeasurementConfig,
     zones: &mut Vec<AnchoredFloatingZone>,
 ) -> Result<(), String> {
@@ -1520,7 +1626,7 @@ fn extract_table_zone(
     }
     let mut measured_table = table.clone();
     let measure = measure_table(&mut measured_table, content_width, config)?;
-    if let Some(mut zone) = table_floating_zone(table, &measure, content_width) {
+    if let Some(mut zone) = table_floating_zone(table, &measure, content_width, column_width) {
         (zone.left_margin, zone.right_margin) =
             clamp_margins(zone.left_margin, zone.right_margin, content_width);
         zones.push(AnchoredFloatingZone {
@@ -1536,6 +1642,7 @@ fn table_floating_zone(
     table: &TableBlock,
     measure: &TableExtent,
     content_width: f64,
+    column_width: Option<f64>,
 ) -> Option<FloatingZone> {
     let floating = table.floating.as_ref()?;
     let x = if let Some(value) = floating.tblp_x {
@@ -1559,6 +1666,7 @@ fn table_floating_zone(
         measure,
         content_width,
         x,
+        column_width,
     ))
 }
 
@@ -1567,17 +1675,46 @@ fn table_floating_zone_at_x(
     measure: &TableExtent,
     content_width: f64,
     x: f64,
+    column_width: Option<f64>,
 ) -> FloatingZone {
-    let (left_margin, right_margin) = if x < content_width / 2.0 {
-        (
-            x + measure.total_width + floating.right_from_text.unwrap_or(12.0),
-            0.0,
-        )
+    let margin_right_of_table = x + measure.total_width + floating.right_from_text.unwrap_or(12.0);
+    let margin_left_of_table = content_width - x + floating.left_from_text.unwrap_or(12.0);
+    let main_text_on_right = x < content_width / 2.0;
+    let text_on_right = column_width
+        .filter(|width| width.is_finite() && *width > 0.0 && *width == content_width)
+        .filter(|_| {
+            floating.horz_anchor.as_deref() == Some("text")
+                && !matches!(floating.tblp_x_spec.as_deref(), Some("inside" | "outside"))
+                && match floating.tblp_x {
+                    Some(offset) => offset.is_finite(),
+                    None => matches!(
+                        floating.tblp_x_spec.as_deref(),
+                        Some("left" | "right" | "center")
+                    ),
+                }
+        })
+        .filter(|width| measure.total_width > *width / 2.0)
+        // Only where the side main picks leaves no room at all, so its text
+        // runs full width under the table.
+        .filter(|width| {
+            let main_margin = if main_text_on_right {
+                margin_right_of_table
+            } else {
+                margin_left_of_table
+            };
+            main_margin >= width.max(1.0)
+        })
+        .and_then(|width| {
+            let (left_space, right_space) =
+                table_wrap_gaps(floating, measure.total_width, width, x);
+            (left_space >= MIN_WRAP_SEGMENT_WIDTH || right_space >= MIN_WRAP_SEGMENT_WIDTH)
+                .then_some(right_space >= left_space)
+        })
+        .unwrap_or(main_text_on_right);
+    let (left_margin, right_margin) = if text_on_right {
+        (margin_right_of_table, 0.0)
     } else {
-        (
-            0.0,
-            content_width - x + floating.left_from_text.unwrap_or(12.0),
-        )
+        (0.0, margin_left_of_table)
     };
     let top_y = floating.tblp_y.unwrap_or(0.0);
     FloatingZone {
@@ -1835,7 +1972,7 @@ fn measure_cell_blocks_with_table_floats(
                 measure.total_width,
                 content_width,
             );
-            let mut zone = table_floating_zone_at_x(floating, measure, content_width, x);
+            let mut zone = table_floating_zone_at_x(floating, measure, content_width, x, None);
             zone.top_y += y;
             zone.bottom_y += y;
             zones.push(zone);
@@ -2204,6 +2341,416 @@ fn cell_border_height(cell: &crate::types::TableCell) -> f64 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn wide_floating_tables_with_no_room_on_their_side_wrap_in_the_larger_gap() {
+        let measure = TableExtent {
+            rows: Vec::new(),
+            column_widths: vec![360.0],
+            total_width: 360.0,
+            total_height: 160.0,
+        };
+        for (x, left_distance, right_distance, expected) in [
+            (0.0, 9.0, 13.0, (373.0, 0.0)),
+            (240.0, 9.0, 13.0, (0.0, 369.0)),
+            (100.0, 9.0, 13.0, (473.0, 0.0)),
+            (140.0, 9.0, 13.0, (513.0, 0.0)),
+            (120.0, 9.0, 13.0, (493.0, 0.0)),
+            (120.0, 9.0, 9.0, (489.0, 0.0)),
+            (230.0, 9.0, 13.0, (0.0, 379.0)),
+        ] {
+            let table = serde_json::from_value(json!({
+                "id": "float", "rows": [],
+                "floating": {
+                    "horzAnchor": "text", "tblpX": x,
+                    "leftFromText": left_distance, "rightFromText": right_distance
+                }
+            }))
+            .unwrap();
+            let zone = table_floating_zone(&table, &measure, 600.0, Some(600.0)).unwrap();
+            assert_eq!((zone.left_margin, zone.right_margin), expected, "x={x}");
+        }
+        for (spec, expected) in [
+            ("left", (373.0, 0.0)),
+            ("right", (0.0, 369.0)),
+            ("center", (493.0, 0.0)),
+        ] {
+            let table = serde_json::from_value(json!({
+                "id": "float", "rows": [],
+                "floating": {
+                    "horzAnchor": "text", "tblpXSpec": spec,
+                    "leftFromText": 9, "rightFromText": 13
+                }
+            }))
+            .unwrap();
+            let zone = table_floating_zone(&table, &measure, 600.0, Some(600.0)).unwrap();
+            assert_eq!((zone.left_margin, zone.right_margin), expected, "{spec}");
+        }
+    }
+
+    #[test]
+    fn narrow_floating_tables_keep_their_existing_margins() {
+        for width in [80.0, 299.0, 300.0] {
+            let measure = TableExtent {
+                rows: Vec::new(),
+                column_widths: vec![width],
+                total_width: width,
+                total_height: 160.0,
+            };
+            for x in [0.0, 120.0, 299.0, 300.0, 600.0 - width] {
+                let table = serde_json::from_value(json!({
+                    "id": "float", "rows": [],
+                    "floating": {
+                        "horzAnchor": "text", "tblpX": x,
+                        "leftFromText": 9.4, "rightFromText": 13.2
+                    }
+                }))
+                .unwrap();
+                let zone = table_floating_zone(&table, &measure, 600.0, Some(600.0)).unwrap();
+                let expected: (f64, f64) = if x < 300.0 {
+                    (x + width + 13.2, 0.0)
+                } else {
+                    (0.0, 600.0 - x + 9.4)
+                };
+                assert_eq!(zone.left_margin.to_bits(), expected.0.to_bits());
+                assert_eq!(zone.right_margin.to_bits(), expected.1.to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn floating_tables_with_two_small_gaps_keep_their_margins() {
+        let measure = TableExtent {
+            rows: Vec::new(),
+            column_widths: vec![540.0],
+            total_width: 540.0,
+            total_height: 160.0,
+        };
+        for (floating, expected) in [
+            (
+                json!({"horzAnchor": "text", "tblpXSpec": "center"}),
+                (582.0, 0.0),
+            ),
+            (
+                json!({"horzAnchor": "text", "tblpXSpec": "center", "leftFromText": 7, "rightFromText": 7}),
+                (577.0, 0.0),
+            ),
+        ] {
+            let table = serde_json::from_value(json!({
+                "id": "float", "rows": [], "floating": floating
+            }))
+            .unwrap();
+            let zone = table_floating_zone(&table, &measure, 600.0, Some(600.0)).unwrap();
+            assert_eq!((zone.left_margin, zone.right_margin), expected);
+        }
+    }
+
+    #[test]
+    fn wide_floating_tables_outside_the_column_frame_keep_their_margins() {
+        let measure = TableExtent {
+            rows: Vec::new(),
+            column_widths: vec![360.0],
+            total_width: 360.0,
+            total_height: 160.0,
+        };
+        for (anchor, column_width, expected) in [
+            (Some("page"), Some(600.0), (522.0, 0.0)),
+            (None, Some(600.0), (522.0, 0.0)),
+            (Some("margin"), Some(600.0), (522.0, 0.0)),
+            (Some("margin"), None, (522.0, 0.0)),
+            (Some("text"), Some(600.0), (522.0, 0.0)),
+            (Some("column"), Some(600.0), (522.0, 0.0)),
+            (Some("text"), Some(800.0), (522.0, 0.0)),
+            (Some("text"), None, (522.0, 0.0)),
+        ] {
+            let table = serde_json::from_value(json!({
+                "id": "float", "rows": [],
+                "floating": {
+                    "horzAnchor": anchor, "tblpX": 150, "leftFromText": 12, "rightFromText": 12
+                }
+            }))
+            .unwrap();
+            let zone = table_floating_zone(&table, &measure, 600.0, column_width).unwrap();
+            assert_eq!(
+                (zone.left_margin, zone.right_margin),
+                expected,
+                "{anchor:?} {column_width:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wide_floating_tables_with_unknown_section_frames_keep_main_margins() {
+        let blocks: Vec<LayoutBlock> = serde_json::from_value(json!([{
+            "kind": "table", "id": "float", "columnWidths": [360], "layoutMode": "fixed",
+            "rows": [{"id": "row", "height": 100, "heightRule": "exact", "cells": []}],
+            "floating": {
+                "horzAnchor": "text", "tblpXSpec": "center", "leftFromText": 9, "rightFromText": 13
+            }
+        }]))
+        .unwrap();
+        let flow = FloatFlow::new(&blocks, &[600.0], &MeasurementConfig::default(), None).unwrap();
+        let zone = &flow.paragraph_zones[&0][0];
+        assert_eq!((zone.left_margin, zone.right_margin), (493.0, 0.0));
+    }
+
+    #[test]
+    fn wide_floating_tables_beside_negative_indents_keep_main_margins() {
+        for (indent, expected) in [
+            (json!({}), (0.0, 369.0)),
+            (json!({"right": -100}), (0.0, 0.0)),
+            (json!({"left": 20, "hanging": 40}), (0.0, 0.0)),
+        ] {
+            let blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+                {
+                    "kind": "table", "id": "float", "columnWidths": [360], "layoutMode": "fixed",
+                    "rows": [{"id": "row", "height": 100, "heightRule": "exact", "cells": []}],
+                    "floating": {
+                        "horzAnchor": "text", "tblpX": 240, "leftFromText": 9, "rightFromText": 13
+                    }
+                },
+                {"kind": "paragraph", "id": "text", "attrs": {"indent": indent}, "runs": []},
+                {"kind": "pageBreak", "id": "break"},
+                {"kind": "paragraph", "id": "later", "attrs": {"indent": {"right": -100}}, "runs": []}
+            ]))
+            .unwrap();
+            let frames: Vec<bool> = negative_indent_float_flows(&blocks.iter().collect::<Vec<_>>())
+                .into_iter()
+                .map(|negative| !negative)
+                .collect();
+            assert_eq!(frames[2..], [false, false]);
+            let flow = FloatFlow::with_table_wrap_frames(
+                &blocks,
+                &[600.0; 4],
+                &frames,
+                &MeasurementConfig::default(),
+                None,
+            )
+            .unwrap();
+            let zone = &flow.paragraph_zones[&0][0];
+            assert_eq!((zone.left_margin, zone.right_margin), expected);
+        }
+    }
+
+    #[test]
+    fn cell_table_floats_keep_main_wrap_sides() {
+        let font = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font])]),
+            defaults: json!({"fontFamily": "Liberation Sans", "fontSize": 12}),
+            ..Default::default()
+        };
+        for (anchor, expected) in [("text", (493.0, 0.0)), ("margin", (493.0, 0.0))] {
+            let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+                {
+                    "kind": "table", "id": "float", "columnWidths": [360], "layoutMode": "fixed",
+                    "rows": [{"id": "row", "height": 100, "heightRule": "exact", "cells": []}],
+                    "floating": {
+                        "horzAnchor": anchor, "tblpXSpec": "center", "vertAnchor": "text", "tblpY": 1,
+                        "leftFromText": 9, "rightFromText": 13
+                    }
+                },
+                {"kind": "paragraph", "id": "text", "runs": [{"kind": "text", "text": "short line"}]}
+            ]))
+            .unwrap();
+            let measures =
+                measure_cell_blocks_with_table_floats(&mut blocks, 600.0, &config).unwrap();
+            let BlockExtent::Paragraph(paragraph) = &measures[1] else {
+                panic!()
+            };
+            let line = &paragraph.lines[0];
+            assert_ne!(line.synthetic_fallback, Some(true));
+            assert_eq!(
+                (
+                    line.left_offset.unwrap_or(0.0),
+                    line.right_offset.unwrap_or(0.0)
+                ),
+                expected,
+                "{anchor}"
+            );
+        }
+    }
+
+    #[test]
+    fn wide_floating_tables_with_unstable_positions_keep_their_margins() {
+        let measure = TableExtent {
+            rows: Vec::new(),
+            column_widths: vec![360.0],
+            total_width: 360.0,
+            total_height: 100.0,
+        };
+        for (position, expected) in [
+            (json!({"tblpXSpec": "outside"}), (613.0_f64, 0.0_f64)),
+            (json!({"tblpXSpec": "inside"}), (373.0, 0.0)),
+            (json!({"tblpXSpec": "outside", "tblpX": 150}), (523.0, 0.0)),
+            (json!({"tblpXSpec": "inside", "tblpX": 150}), (523.0, 0.0)),
+            (json!({}), (493.0, 0.0)),
+            (json!({"tblpXSpec": "unknown"}), (493.0, 0.0)),
+        ] {
+            let mut floating = json!({
+                "horzAnchor": "text", "leftFromText": 9, "rightFromText": 13
+            });
+            floating
+                .as_object_mut()
+                .unwrap()
+                .extend(position.as_object().unwrap().clone());
+            let table = serde_json::from_value(json!({
+                "id": "float", "rows": [], "justification": "center", "floating": floating
+            }))
+            .unwrap();
+            let zone = table_floating_zone(&table, &measure, 600.0, Some(600.0)).unwrap();
+            assert_eq!(
+                zone.left_margin.to_bits(),
+                expected.0.to_bits(),
+                "{position}"
+            );
+            assert_eq!(
+                zone.right_margin.to_bits(),
+                expected.1.to_bits(),
+                "{position}"
+            );
+        }
+    }
+
+    #[test]
+    fn margin_anchored_tables_in_unequal_columns_keep_their_margins_without_geometry_too() {
+        let geometry = FloatPageGeometry {
+            page_width: 800.0,
+            margin_left: 100.0,
+            page_height: 800.0,
+            margin_top: 100.0,
+            content_height: 600.0,
+        };
+        for (column_width, table_width, expected) in [
+            (360.0, 200.0, (293.0_f64, 0.0_f64)),
+            (280.0, 180.0, (243.0, 0.0)),
+        ] {
+            let blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+                {"kind": "columnBreak", "id": "break"},
+                {
+                    "kind": "table", "id": "float", "columnWidths": [table_width], "layoutMode": "fixed",
+                    "rows": [{"id": "row", "height": 100, "heightRule": "exact", "cells": []}],
+                    "floating": {
+                        "horzAnchor": "margin", "tblpXSpec": "center",
+                        "vertAnchor": "text", "tblpY": 1,
+                        "leftFromText": 9, "rightFromText": 13
+                    }
+                },
+                {"kind": "paragraph", "id": "text", "runs": [{"kind": "text", "text": "test"}]}
+            ]))
+            .unwrap();
+            for page_geometry in [Some(&geometry), None] {
+                let flow = FloatFlow::new(
+                    &blocks,
+                    &[column_width; 3],
+                    &MeasurementConfig::default(),
+                    page_geometry,
+                )
+                .unwrap();
+                let zone = &flow.paragraph_zones[&1][0];
+                assert_eq!(zone.left_margin.to_bits(), expected.0.to_bits());
+                assert_eq!(zone.right_margin.to_bits(), expected.1.to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn outside_anchored_tables_on_even_pages_keep_their_margins() {
+        let blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+            {"kind": "pageBreak", "id": "page-two"},
+            {
+                "kind": "table", "id": "float", "columnWidths": [360], "layoutMode": "fixed",
+                "rows": [{"id": "row", "height": 100, "heightRule": "exact", "cells": []}],
+                "floating": {
+                    "horzAnchor": "text", "tblpXSpec": "outside",
+                    "vertAnchor": "text", "tblpY": 1,
+                    "leftFromText": 9, "rightFromText": 13
+                }
+            },
+            {
+                "kind": "paragraph", "id": "text", "attrs": {"alignment": "right"},
+                "runs": [{"kind": "text", "text": "test"}]
+            }
+        ]))
+        .unwrap();
+        let geometry = FloatPageGeometry {
+            page_width: 800.0,
+            margin_left: 100.0,
+            page_height: 800.0,
+            margin_top: 100.0,
+            content_height: 600.0,
+        };
+        let flow = FloatFlow::new(
+            &blocks,
+            &[600.0; 3],
+            &MeasurementConfig::default(),
+            Some(&geometry),
+        )
+        .unwrap();
+        let zone = &flow.paragraph_zones[&1][0];
+        assert_eq!(zone.left_margin.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(zone.right_margin.to_bits(), 0.0_f64.to_bits());
+    }
+
+    #[test]
+    fn later_section_tables_with_a_different_column_width_keep_their_margins() {
+        let blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+            {"kind": "paragraph", "id": "first-section", "runs": []},
+            {
+                "kind": "sectionBreak", "id": "second-section", "type": "nextPage",
+                "pageSize": {"w": 1000, "h": 800},
+                "margins": {"top": 100, "right": 100, "bottom": 100, "left": 100}
+            },
+            {
+                "kind": "table", "id": "float", "columnWidths": [300], "layoutMode": "fixed",
+                "rows": [{"id": "row", "height": 100, "heightRule": "exact", "cells": []}],
+                "floating": {
+                    "horzAnchor": "text", "tblpXSpec": "center",
+                    "vertAnchor": "text", "tblpY": 1,
+                    "leftFromText": 9, "rightFromText": 13
+                }
+            },
+            {
+                "kind": "paragraph", "id": "text", "attrs": {"alignment": "right"},
+                "runs": [{"kind": "text", "text": "test"}]
+            }
+        ]))
+        .unwrap();
+        let widths = [400.0, 400.0, 800.0, 800.0];
+        let geometry = FloatPageGeometry {
+            page_width: 600.0,
+            margin_left: 100.0,
+            page_height: 800.0,
+            margin_top: 100.0,
+            content_height: 600.0,
+        };
+        let config = MeasurementConfig::default();
+        let flow = FloatFlow::new(&blocks, &widths, &config, Some(&geometry)).unwrap();
+        let zone = &flow.paragraph_zones[&2][0];
+        assert_eq!(zone.left_margin.to_bits(), 363.0_f64.to_bits());
+        assert_eq!(zone.right_margin.to_bits(), 0.0_f64.to_bits());
+        let segment = extract_floating_zones(
+            &blocks[1..],
+            400.0,
+            &widths[1..],
+            &[],
+            &config,
+            Some(&geometry),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            segment[0].zone.left_margin.to_bits(),
+            zone.left_margin.to_bits()
+        );
+        assert_eq!(
+            segment[0].zone.right_margin.to_bits(),
+            zone.right_margin.to_bits()
+        );
+    }
 
     #[test]
     fn a_paragraph_anchored_band_hangs_off_its_own_anchor_not_an_earlier_one() {
