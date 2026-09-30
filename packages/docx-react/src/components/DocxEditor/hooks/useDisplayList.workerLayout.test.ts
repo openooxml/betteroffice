@@ -1599,7 +1599,7 @@ test('with worker open, a provisional layout names its engine until the rest is 
       layoutJson,
       layoutProvisional: true,
     });
-    const provisional = await pending!;
+    const provisional = await act(() => pending!);
     await act(async () => {
       rerender({ layout: provisional!.layout, source: engine });
     });
@@ -1754,7 +1754,7 @@ test('a rejected completion after reload preserves the new session frame, querie
       layoutJson,
       layoutProvisional: true,
     });
-    const provisional = (await layout)!;
+    const provisional = (await act(() => layout))!;
     await act(async () => { rerender({ layout: provisional.layout, source: engine }); });
     await waitFor(() => expect(result.current.frame).not.toBeNull());
     await act(async () => {
