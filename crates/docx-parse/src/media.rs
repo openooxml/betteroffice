@@ -54,61 +54,33 @@ struct MediaPart {
     /// with the package.
     image: bool,
     mime_type: &'static str,
-    display: Option<Arc<[u8]>>,
+    display: Option<Vec<u8>>,
 }
 
 impl MediaTable {
     /// The media of `package`. The images it leaves compressed must fit the
     /// container budget by their declared sizes.
     pub fn new(package: RetainedPackage) -> Result<Self, String> {
-        let mut parts = Vec::new();
-        let mut images = 0_u64;
-        for (position, (path, size)) in package.parts().enumerate() {
-            if !is_media_path(path) {
-                continue;
-            }
-            let prefix = package.read_prefix(position, SNIFFED_BYTES)?;
-            let image = is_image(&prefix);
-            if image {
-                images = images.saturating_add(size);
-                if images > MAX_TOTAL_UNCOMPRESSED_BYTES {
-                    return Err(budget_exceeded());
-                }
-            }
-            parts.push((path.to_owned(), position, size, image, prefix));
+        let scan = MediaScan::new(package, MAX_TOTAL_UNCOMPRESSED_BYTES)?;
+        let total = scan
+            .parts
+            .iter()
+            .filter(|part| part.transcode)
+            .fold(scan.images, |total, part| total.saturating_add(part.size));
+        if total > MAX_TOTAL_UNCOMPRESSED_BYTES {
+            return Err(budget_exceeded());
         }
-        let mut warnings = Vec::new();
-        let parts = parts
-            .into_iter()
-            .map(|(path, position, size, image, prefix)| {
-                let mime_type = media_mime_type(&path);
-                let (mime_type, display) = if transcodes(&prefix, mime_type) {
-                    let data = package.read(position)?;
-                    let (display, mime_type, warning) = display_form(&data, mime_type, &path);
-                    warnings.extend(warning);
-                    let display = match display {
-                        Cow::Owned(display) => display.into(),
-                        Cow::Borrowed(_) => Arc::from(data),
-                    };
-                    (mime_type, Some(display))
-                } else {
-                    (mime_type, None)
-                };
-                Ok(MediaPart {
-                    path,
-                    position,
-                    size,
-                    image,
-                    mime_type,
-                    display,
-                })
+        let mut parts = scan
+            .parts
+            .iter()
+            .filter(|part| part.transcode)
+            .map(|part| {
+                scan.package
+                    .read(part.position)
+                    .map(|bytes| (part.path.clone(), bytes))
             })
             .collect::<Result<Vec<_>, String>>()?;
-        Ok(Self {
-            package,
-            parts: parts.into(),
-            warnings: warnings.into(),
-        })
+        scan.finish(&mut parts)
     }
 
     /// Whether the package's part at `path` is an image the table reads
@@ -208,6 +180,115 @@ impl MediaTable {
             }
         }
         media
+    }
+}
+
+/// Media metadata and the budget reserved for images kept compressed.
+pub(crate) struct MediaScan {
+    package: RetainedPackage,
+    parts: Vec<ScannedPart>,
+    budget: u64,
+    images: u64,
+}
+
+struct ScannedPart {
+    path: String,
+    position: usize,
+    size: u64,
+    image: bool,
+    transcode: bool,
+}
+
+impl MediaScan {
+    /// Fails when compressed images' declared sizes exceed `budget`.
+    pub(crate) fn new(package: RetainedPackage, budget: u64) -> Result<Self, String> {
+        let budget = budget.min(MAX_TOTAL_UNCOMPRESSED_BYTES);
+        let mut parts = Vec::new();
+        let mut images = 0_u64;
+        for (position, (path, size)) in package.parts().enumerate() {
+            if !is_media_path(path) {
+                continue;
+            }
+            let prefix = package.read_prefix(position, SNIFFED_BYTES)?;
+            let image = is_image(&prefix);
+            let transcode = transcodes(&prefix, media_mime_type(path));
+            if image && !transcode {
+                images = images.saturating_add(size);
+                if images > budget {
+                    return Err(format!("inflated size exceeds {budget} bytes"));
+                }
+            }
+            parts.push(ScannedPart {
+                path: path.to_owned(),
+                position,
+                size,
+                image,
+                transcode,
+            });
+        }
+        Ok(Self {
+            package,
+            parts,
+            budget,
+            images,
+        })
+    }
+
+    /// Whether the image at `path` stays compressed during extraction.
+    pub(crate) fn keeps_compressed(&self, path: &str) -> bool {
+        self.parts
+            .iter()
+            .any(|part| part.image && !part.transcode && part.path == path)
+    }
+
+    /// What the images left compressed leave of the budget.
+    pub(crate) fn remaining_budget(&self) -> u64 {
+        self.budget - self.images
+    }
+
+    /// Moves transcode inputs from the bounded extraction into the table.
+    pub(crate) fn finish(
+        self,
+        inflated: &mut Vec<(String, Vec<u8>)>,
+    ) -> Result<MediaTable, String> {
+        let package = self.package;
+        let mut warnings = Vec::new();
+        let parts = self
+            .parts
+            .into_iter()
+            .map(|part| {
+                let mime_type = media_mime_type(&part.path);
+                let (mime_type, display) = if part.transcode {
+                    let index = inflated
+                        .iter()
+                        .position(|(path, _)| path == &part.path)
+                        .ok_or_else(|| format!("missing inflated media part {}", part.path))?;
+                    let data = inflated.remove(index).1;
+                    let (display, mime_type, warning) = display_form(&data, mime_type, &part.path);
+                    warnings.extend(warning);
+                    let display = match display {
+                        Cow::Owned(display) => display,
+                        Cow::Borrowed(_) => data,
+                    };
+                    (mime_type, Some(display))
+                } else {
+                    (mime_type, None)
+                };
+                Ok(MediaPart {
+                    path: part.path,
+                    position: part.position,
+                    size: part.size,
+                    image: part.image,
+                    mime_type,
+                    display,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(MediaTable {
+            package,
+            parts: parts.into(),
+            warnings: warnings.into(),
+        })
     }
 }
 
