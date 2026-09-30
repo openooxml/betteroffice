@@ -15,7 +15,7 @@ import type { RustFontChainsProvider } from './hooks/useRustMeasurement';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { DisplayList, DisplayListQueries } from '@betteroffice/docx/layout/render';
 import type { YrsResidentCaretSnapshot } from '@betteroffice/docx/yrs';
-import type { LayoutInWorker, ResidentFrameApplyResult } from './hooks/useDisplayList';
+import type { FontRequirementsInWorker, LayoutInWorker, ResidentFrameApplyResult } from './hooks/useDisplayList';
 import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import {
   InlineHeaderFooterEditor,
@@ -109,6 +109,7 @@ export function DocxEditorPagedArea({
   onTotalPagesChange,
   onLayoutComputed,
   layoutInWorker,
+  fontRequirementsInWorker,
   onError,
   applyResidentInput,
   applyResidentDelete,
@@ -203,6 +204,7 @@ export function DocxEditorPagedArea({
   onLayoutComputed?: (layout: Layout | null) => void;
   /** Hands layout passes to the resident worker. */
   layoutInWorker?: LayoutInWorker;
+  fontRequirementsInWorker?: FontRequirementsInWorker;
   applyResidentInput?: (text: string) => Promise<ResidentFrameApplyResult | null>;
   applyResidentDelete?: (
     direction: 'backward' | 'forward'
@@ -365,7 +367,11 @@ export function DocxEditorPagedArea({
   );
 
   const floatingCommentButton =
-    partEditTarget == null && floatingCommentBtn != null && !isAddingComment && !readOnly ? (
+    partEditTarget == null &&
+    floatingCommentBtn != null &&
+    !isAddingComment &&
+    !readOnly &&
+    yrsCore.replicaReady ? (
       <Tooltip content="Add comment" side="bottom" delayMs={300}>
         <button
           type="button"
@@ -468,6 +474,7 @@ export function DocxEditorPagedArea({
         onTotalPagesChange={onTotalPagesChange}
         onLayoutComputed={onLayoutComputed}
         layoutInWorker={layoutInWorker}
+        fontRequirementsInWorker={fontRequirementsInWorker}
         onError={onError}
         applyResidentInput={applyResidentInput}
         applyResidentDelete={applyResidentDelete}

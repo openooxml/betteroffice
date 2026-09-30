@@ -51,6 +51,7 @@ import type {
   PagedEditorCommandBridge,
   PagedEditorSelectedImage,
 } from './usePagedEditorRefApi';
+import { workerOpenReplicaPending } from '../internals/workerOpenReplica';
 
 /** Outcome of the built-in save workflow. */
 export type DocxSaveOutcome = 'saved' | 'requested' | 'failed';
@@ -62,6 +63,7 @@ type StyleResolver = ReturnType<typeof createStyleResolver>;
 
 /** Everything the command binding reads from the editor, refreshed every render. */
 export interface DocxCommandInputs {
+  experimentalWorkerOpen?: boolean;
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   bridgeRef: React.RefObject<PagedEditorCommandBridge | null>;
   isLoading: boolean;
@@ -747,15 +749,24 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
 
     return {
       environment,
-      ordered: (id, args) =>
-        !IMMEDIATE_COMMANDS.has(id) &&
-        !(
-          id === 'tableAction' &&
-          (args === 'splitCell' ||
-            (typeof args === 'object' &&
-              args !== null &&
-              (args as { type?: string }).type === 'openTableProperties'))
-        ),
+      ordered: (id, args) => {
+        const session = latest.current.session;
+        if (
+          latest.current.experimentalWorkerOpen && session && workerOpenReplicaPending(session) &&
+          (id === 'find' || id === 'replace' || id === 'insertImage' ||
+            id === 'imageProperties' || id === 'pageSetup' || id === 'watermark')
+        ) return true;
+        return (
+          !IMMEDIATE_COMMANDS.has(id) &&
+          !(
+            id === 'tableAction' &&
+            (args === 'splitCell' ||
+              (typeof args === 'object' &&
+                args !== null &&
+                (args as { type?: string }).type === 'openTableProperties'))
+          )
+        );
+      },
       admit(operation) {
         const editor = bridge();
         if (!editor) return Promise.reject(new DocxCommandAdmissionError('editor-unavailable'));

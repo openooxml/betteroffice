@@ -186,6 +186,11 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   /** Configure the Yrs collaboration replica used by the editor. */
   collaboration?: DocxEditorCollaborationOptions;
   /**
+   * Open DOCX files in the resident worker. Off by default.
+   * @experimental
+   */
+  experimentalWorkerOpen?: boolean;
+  /**
    * Opens images as `media:{n}` tokens read from the document file instead of
    * `data:` URLs, keeping them out of the document state and its updates.
    * Every client of a shared room must open the same file on a version that
@@ -813,6 +818,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onSaveRequest,
     downloadOnSave = true,
     collaboration,
+    experimentalWorkerOpen = false,
     mediaTokens,
     onOpen,
     author = 'User',
@@ -973,7 +979,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     resolvedIdsForRender,
     () => pagedEditorRef.current?.relayout(),
     memoryBudget?.workerLimitBytes,
-    handoffFromRef
+    handoffFromRef,
+    experimentalWorkerOpen
   );
   // The full session failing to lay out or render as it opens fails the
   // load, which reports it. Each render error is handled once: one the
@@ -1194,11 +1201,20 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       onSession: canvasRenderer.recordSession,
       onHostDocument: acceptHostDocument,
       onError: failHostDocument,
+      onReplicaError: (error, generation) => {
+        if (isCurrentLoad(generation)) reportLayoutError(error);
+      },
     },
     {
       previewFirstPage,
       heldEngine: canvasRenderer.layoutEngine,
       shownEngine: canvasRenderer.presentedEngine,
+      workerOpen: experimentalWorkerOpen
+        ? {
+            openInWorker: canvasRenderer.openInWorker,
+            renderedFrame: canvasRenderer.status === 'ready' ? canvasRenderer.displayList : null,
+          }
+        : undefined,
       mediaTokens,
     }
   );
@@ -1280,7 +1296,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   useCompatibilityWarm(
     yrsCore.session,
     canvasRenderer.status === 'ready' ? canvasRenderer.displayList : null,
-    Boolean(onChange) || contentSubscriberCount > 0,
+    yrsCore.replicaReady && (Boolean(onChange) || contentSubscriberCount > 0),
     yrsCore.scheduleCompatibilityWarm,
     yrsCore.cancelCompatibilityWarm
   );
@@ -1318,6 +1334,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   }, []);
 
   const commands = useDocxCommandBinding({
+    experimentalWorkerOpen,
     pagedEditorRef,
     bridgeRef: commandBridgeRef,
     isLoading: state.isLoading || opening,
@@ -1710,6 +1727,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     session:
       yrsCore.session &&
       !opening &&
+      yrsCore.replicaReady &&
       yrsCore.sessionGeneration === yrsSeedGeneration &&
       history.state &&
       !state.isLoading &&
@@ -1823,6 +1841,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   });
 
   useDocxEditorRefApi({
+    experimentalWorkerOpen,
     ref,
     document: history.state,
     documentFromYrs: yrsCore.documentFromYrs,
@@ -2323,7 +2342,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           sectionProps: history.state?.package.document?.finalSectionProperties,
           zoom: state.zoom,
           unit: rulerUnit,
-          editable: !readOnly,
+          editable: !readOnly && yrsCore.replicaReady,
           onLeftMarginChange: handleLeftMarginChange,
           onRightMarginChange: handleRightMarginChange,
           indentLeft: state.paragraphIndentLeft,
@@ -2340,7 +2359,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           sectionProps: initialSectionProperties,
           zoom: state.zoom,
           unit: rulerUnit,
-          editable: !readOnly,
+          editable: !readOnly && yrsCore.replicaReady,
           onTopMarginChange: handleTopMarginChange,
           onBottomMarginChange: handleBottomMarginChange,
         }}
@@ -2376,7 +2395,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             }}
             sidebarOpen={sidebarOpen}
             zoom={state.zoom}
-            interactive={!readOnly}
+            interactive={!readOnly && yrsCore.replicaReady}
             fontFamilies={fontAliases}
           >
             <DocxEditorPagedArea
@@ -2445,6 +2464,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               }}
               onLayoutComputed={canvasRenderer.onLayoutComputed}
               layoutInWorker={canvasRenderer.layoutInWorker}
+              fontRequirementsInWorker={
+                experimentalWorkerOpen ? canvasRenderer.fontRequirementsInWorker : undefined
+              }
               applyResidentInput={canvasRenderer.applyInput}
               applyResidentDelete={canvasRenderer.applyDelete}
               displayListQueries={canvasRenderer.queries}
@@ -2465,7 +2487,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               setIsAddingComment={setIsAddingComment}
               setFloatingCommentBtn={setFloatingCommentBtn}
             />
-            {!readOnly && (
+            {!readOnly && yrsCore.replicaReady && (
               <ContentControlWidgets
                 containerRef={containerRef}
                 applyYrsValue={(pmPos, value, embedId) =>
