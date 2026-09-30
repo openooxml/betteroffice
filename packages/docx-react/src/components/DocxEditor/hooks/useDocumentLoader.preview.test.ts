@@ -72,7 +72,7 @@ test('comments load from the full document, not from its preview', async () => {
   const generation = result.current.yrsSeedGeneration;
 
   await act(async () => {
-    result.current.acceptHostDocument(preview, generation, { preview: true });
+    result.current.acceptHostDocument(preview, generation, undefined, { preview: true });
   });
   expect(loaded).toEqual([]);
   expect(sidebar).toEqual([true]);
@@ -118,7 +118,7 @@ test('a load whose full open fails keeps nothing of its preview', async () => {
   });
   const generation = result.current.loader.yrsSeedGeneration;
   await act(async () => {
-    result.current.loader.acceptHostDocument(preview, generation, { preview: true });
+    result.current.loader.acceptHostDocument(preview, generation, undefined, { preview: true });
   });
   expect(result.current.history.state).toBe(preview.document);
 
@@ -165,7 +165,7 @@ test("a preview's font loads stop once its load's full document is accepted", as
   });
   const generation = result.current.yrsSeedGeneration;
   await act(async () => {
-    result.current.acceptHostDocument(preview, generation, { preview: true });
+    result.current.acceptHostDocument(preview, generation, undefined, { preview: true });
     result.current.acceptHostDocument(full, generation);
     await new Promise((done) => setTimeout(done, 50));
   });

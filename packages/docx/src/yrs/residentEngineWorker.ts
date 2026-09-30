@@ -34,6 +34,8 @@ import {
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 let session: ResidentEngineSession | null = null;
+/** Set while the session holds the document `open` seeded, with the heap limit it used. */
+let openedDocument: { heapLimitBytes?: number } | null = null;
 let unsubscribe: (() => void) | null = null;
 let pendingUpdates: Uint8Array[] = [];
 let layoutRevision = 0;
@@ -163,18 +165,49 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     destroySession();
     return;
   }
+  if (request.type === 'open') {
+    // One document per worker, so every queued request addresses the one it was sent for.
+    if (session) {
+      throw new Error('Resident engine worker already holds a document');
+    }
+    const opening = await createResidentEngineSession(request.heapLimitBytes);
+    let hostJson: string;
+    try {
+      hostJson = opening.openDocx(new Uint8Array(request.bytes), request.digest, request.generation);
+    } catch (error) {
+      if (!(error instanceof WebAssembly.RuntimeError)) opening.destroy();
+      throw error;
+    }
+    session = opening;
+    openedDocument = { heapLimitBytes: request.heapLimitBytes };
+    const stateVector = exactBuffer(session.encodeStateVector());
+    reply({ id: request.id, ok: true, hostJson, stateVector }, [stateVector]);
+    return;
+  }
   if (request.type === 'bootstrap') {
-    destroySession(request.keepSurfaces === true);
-    // The worker is a genuine yrs peer. Reusing the main replica's client id
-    // makes a fast structural input race overlap one client's clock range and
-    // corrupt the update; a fresh id lets yrs merge queued/local operations
-    // safely while the main replica applies worker updates with local origin.
-    session = await createResidentEngineSession(request.heapLimitBytes);
+    if (!request.opened) {
+      destroySession(request.keepSurfaces === true);
+      // The worker is a genuine yrs peer. Reusing the main replica's client id
+      // makes a fast structural input race overlap one client's clock range and
+      // corrupt the update; a fresh id lets yrs merge queued/local operations
+      // safely while the main replica applies worker updates with local origin.
+      session = await createResidentEngineSession(request.heapLimitBytes);
+    } else if (!session || !openedDocument) {
+      throw new Error('Resident engine worker has no opened document');
+    } else if (
+      request.heapLimitBytes !== undefined &&
+      request.heapLimitBytes !== openedDocument.heapLimitBytes
+    ) {
+      throw new Error('Resident engine worker opened its document under another heap limit');
+    }
+    unsubscribe?.();
+    unsubscribe = null;
     if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
     const { layoutJson, provisional } = hydrate(
       request.snapshot,
       request.provisionalPages,
-      request.layoutExtras !== undefined
+      request.layoutExtras !== undefined,
+      request.opened !== true
     );
     if (provisional) {
       incompleteLayout = {
@@ -201,6 +234,21 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       request.layoutExtras === undefined ? undefined : (layoutJson ?? undefined),
       provisional
     );
+    return;
+  }
+  if (request.type === 'fontRequirements') {
+    if (!session) throw new Error('Resident engine worker is not initialized');
+    reply({
+      id: request.id,
+      ok: true,
+      requirementsJson: session.layoutFontRequirementsJson(request.layoutInput),
+    });
+    return;
+  }
+  if (request.type === 'encodeState') {
+    if (!session) throw new Error('Resident engine worker is not initialized');
+    const state = exactBuffer(session.encodeState());
+    reply({ id: request.id, ok: true, state }, [state]);
     return;
   }
   if (request.type === 'eraseCaret') {
@@ -392,13 +440,14 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
 function hydrate(
   snapshot: YrsResidentWorkerSnapshot,
   provisionalPages?: number,
-  reply = true
+  reply = true,
+  loadState = true
 ): { layoutJson: string | null; provisional: boolean } {
   if (!session) throw new Error('Resident engine worker is not initialized');
   supersedeSlicedCompletion();
   incompleteLayout = null;
   completedLayout = null;
-  session.loadState(snapshot.state);
+  if (loadState) session.loadState(snapshot.state);
   session.setPartialDocument(snapshot.partialDocument === true);
   if (snapshot.fontsRevision !== fontsRevision) {
     // A mismatched revision always carries the full font set (the client only
@@ -629,6 +678,7 @@ function destroySession(keepSurfaces = false): void {
   unsubscribe = null;
   session?.destroy();
   session = null;
+  openedDocument = null;
   pendingUpdates = [];
   layoutRevision = 0;
   fontsRevision = -1;

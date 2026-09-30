@@ -56,7 +56,7 @@ test('a first-page preview opens first, cannot save, and hands over once it has 
       undefined,
       {
         isCurrentLoad: () => true,
-        onHostDocument: (_host, _generation, options) => hosts.push(options?.preview === true),
+        onHostDocument: (_host, _generation, _session, options) => hosts.push(options?.preview === true),
       },
       { previewFirstPage: true }
     )
@@ -210,7 +210,7 @@ test('without the option the document opens in full at once', async () => {
   const { result, unmount } = renderHook(() =>
     useYrsCoreSession(true, null, null, PAGES, 1, undefined, {
       isCurrentLoad: () => true,
-      onHostDocument: (_host, _generation, options) => hosts.push(options?.preview === true),
+      onHostDocument: (_host, _generation, _session, options) => hosts.push(options?.preview === true),
     })
   );
   await waitFor(() => expect(result.current.session).not.toBeNull());
@@ -231,7 +231,7 @@ test('a document the preview refuses opens in full at once', async () => {
       undefined,
       {
         isCurrentLoad: () => true,
-        onHostDocument: (_host, _generation, options) => hosts.push(options?.preview === true),
+        onHostDocument: (_host, _generation, _session, options) => hosts.push(options?.preview === true),
       },
       { previewFirstPage: true }
     )

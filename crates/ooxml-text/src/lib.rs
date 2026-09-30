@@ -70,8 +70,9 @@ pub use caps::{
 pub use font_store::{FontError, FontId, FontMetrics, FontStore, RequestedLineMetrics};
 pub use line_break::{BreakOpportunity, break_opportunities, presentation_break_opportunities};
 pub use measure::{
-    FontChains, MeasureError, MeasureInput, MeasureRequest, ParagraphExtentOut, TypesetRowOut,
-    measure_paragraph, measure_paragraph_json, measure_paragraph_typed,
+    FontChains, FontSlotUse, MeasureError, MeasureInput, MeasureRequest, ParagraphExtentOut,
+    TypesetRowOut, font_slot_use, measure_paragraph, measure_paragraph_json,
+    measure_paragraph_typed,
 };
 pub use outline::{GlyphOutline, PathCmd};
 pub use shape::{ShapeDirection, ShapeFeature, ShapedGlyph, shape, shape_with_direction};

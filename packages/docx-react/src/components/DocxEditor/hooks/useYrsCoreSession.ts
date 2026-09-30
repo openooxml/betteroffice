@@ -63,6 +63,7 @@ interface YrsCoreSessionCallbacks {
   onHostDocument?: (
     host: YrsDocxHost,
     generation: number,
+    session: YrsSession,
     options?: { preview: boolean }
   ) => void;
   /** `opened`: the load's full document was already accepted. */
@@ -421,7 +422,9 @@ export function useYrsCoreSession(
           setSession(opened.session);
           setPreviewing(true);
           setSessionGeneration(seedGeneration);
-          callbacksRef.current?.onHostDocument?.(opened.host, seedGeneration, { preview: true });
+          callbacksRef.current?.onHostDocument?.(opened.host, seedGeneration, opened.session, {
+            preview: true,
+          });
           await painted;
           if (paintWaitRef.current?.session === opened.session) paintWaitRef.current = null;
           // Two frames: a worker canvas's commit can reach the screen a frame
@@ -483,7 +486,7 @@ export function useYrsCoreSession(
         setSession(next);
         setPreviewing(false);
         setSessionGeneration(seedGeneration);
-        if (host) callbacksRef.current?.onHostDocument?.(host, seedGeneration);
+        if (host) callbacksRef.current?.onHostDocument?.(host, seedGeneration, next);
       })
       .catch((error) => {
         console.error('[yrs] failed to start the editing session', error);
