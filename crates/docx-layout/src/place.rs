@@ -819,6 +819,12 @@ fn place(
         paginator.mark_balanced_region();
     }
 
+    let keep_followers: std::collections::BTreeSet<usize> = plan
+        .keep_with_next
+        .groups_by_head
+        .values()
+        .filter_map(|group| group.follower)
+        .collect();
     for (i, mb) in measured.iter().enumerate().skip(start_index) {
         let mut checkpointed_page = None;
         if let Some((page_index, page_number, flow)) = paginator.clean_page_start() {
@@ -910,7 +916,9 @@ fn place(
                         "layoutParagraph: expected paragraph measure".into(),
                     ));
                 };
-                layout_paragraph(block, measure, paginator)?;
+                let kept_with_previous = plan.keep_with_next.interior_members.contains(&i)
+                    || keep_followers.contains(&i);
+                layout_paragraph(block, measure, paginator, kept_with_previous)?;
             }
 
             LayoutBlock::Table(block) => {
@@ -1228,6 +1236,7 @@ fn layout_paragraph(
     block: &ParagraphBlock,
     measure: &ParagraphExtent,
     paginator: &mut Paginator,
+    kept_with_previous: bool,
 ) -> Result<(), LayoutError> {
     // an unknown run kind can't be re-emitted faithfully in resolved lines
     if block.runs.iter().any(|r| matches!(r, Run::Unsupported)) {
@@ -1281,6 +1290,7 @@ fn layout_paragraph(
         let oversized_keep_lines = block.attrs.as_ref().and_then(|attrs| attrs.keep_lines)
             == Some(true)
             && paragraph_height > page_content_height
+            && !kept_with_previous
             && !paginator.balances_region();
         let capacity = paginator.get_column_capacity();
         if oversized_keep_lines && paginator.current_column_has_flow_content() {
@@ -3036,6 +3046,27 @@ mod pagination_rule_tests {
                 "block {id}"
             );
         }
+    }
+
+    #[test]
+    fn oversized_keep_lines_follower_stays_below_its_heading() {
+        let heading = paragraph(
+            1,
+            1,
+            KEEP_LINE_HEIGHT,
+            json!({"keepNext": true, "widowControl": false}),
+        );
+        let result = layout_document(&mut oversized_input(vec![
+            heading,
+            oversized_paragraph(true),
+        ]))
+        .unwrap();
+        assert_eq!(result.pages.len(), 2);
+        assert_eq!(paragraph_slices(&result, 1.0), vec![(0, 0, 1)]);
+        assert_eq!(
+            paragraph_slices(&result, 100.0),
+            vec![(0, 0, 57), (1, 57, 60)]
+        );
     }
 
     #[test]
