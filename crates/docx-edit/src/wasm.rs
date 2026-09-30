@@ -1353,6 +1353,9 @@ impl EditSession {
                 .doc()
                 .retain_source_docx_with_digest(Arc::clone(&source), digest.clone());
             self.engine.doc().install_media(media);
+            self.engine
+                .doc()
+                .set_media_sources(crate::media::MediaSources::default());
             drop(envelope);
             fonts
         };
