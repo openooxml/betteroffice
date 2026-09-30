@@ -41,7 +41,7 @@ export interface YrsCoreSession {
 
 interface YrsCoreSessionCallbacks {
   isCurrentLoad?: (generation: number) => boolean;
-  onHostDocument?: (host: YrsDocxHost, generation: number) => void;
+  onHostDocument?: (host: YrsDocxHost, generation: number, session: YrsSession) => void;
   onError?: (error: Error, generation: number) => void;
 }
 
@@ -229,7 +229,7 @@ export function useYrsCoreSession(
         facadeRef.current = yrs;
         setSession(next);
         setSessionGeneration(seedGeneration);
-        if (host) callbacksRef.current?.onHostDocument?.(host, seedGeneration);
+        if (host) callbacksRef.current?.onHostDocument?.(host, seedGeneration, next);
       })
       .catch((error) => {
         console.error('[yrs] failed to start the editing session', error);

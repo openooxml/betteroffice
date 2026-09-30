@@ -4575,7 +4575,8 @@ type SourceRoot = (String, SourceStoryKind, Option<String>);
 struct LoweredDocx {
     context: LoweringContext,
     referenced_fonts: BTreeSet<String>,
-    script_fonts: ScriptFontUse,
+    /// `None` for a seed whose caller does not report unused script fonts.
+    script_fonts: Option<ScriptFontUse>,
     roots: Vec<SourceRoot>,
     relationships: Vec<(String, docx_parse::Relationship)>,
     read: ReadSource,
@@ -4622,7 +4623,7 @@ fn lower_docx(
     Ok(LoweredDocx {
         context,
         referenced_fonts,
-        script_fonts,
+        script_fonts: Some(script_fonts),
         roots,
         relationships,
         read,
@@ -4636,7 +4637,9 @@ pub(crate) fn seed_parsed_docx_with(
     envelope: docx_parse::S9WireEnvelope,
     parts: Option<&SourceParts>,
 ) -> Result<Vec<String>, String> {
-    seed_lowered(document, lower_docx(envelope, parts)?, None).map(|fonts| fonts.referenced)
+    let mut lowered = lower_docx(envelope, parts)?;
+    lowered.script_fonts = None;
+    seed_lowered(document, lowered, None).map(|fonts| fonts.referenced)
 }
 
 /// The fonts a seeded document references, and those of them it names only
@@ -4671,7 +4674,7 @@ fn seed_lowered(
         .map_err(|error| error.to_string())?;
     let mut batches = Vec::with_capacity(context.plans.len());
     for plan in context.plans {
-        let (story_id, ops, fonts) = seed_plan(plan, Some(&mut script_fonts))?;
+        let (story_id, ops, fonts) = seed_plan(plan, script_fonts.as_mut())?;
         batches.push((story_id, ops));
         referenced_fonts.extend(fonts);
     }
@@ -4703,7 +4706,9 @@ fn seed_lowered(
         }
     }
     Ok(SeededFonts {
-        unused_script: script_fonts.unused(&referenced_fonts),
+        unused_script: script_fonts
+            .map(|scan| scan.unused(&referenced_fonts))
+            .unwrap_or_default(),
         referenced: referenced_fonts.into_iter().collect(),
     })
 }
@@ -5186,6 +5191,7 @@ pub(crate) fn seed_preview_envelope(
 ) -> Result<Vec<String>, String> {
     let mut lowered = lower_docx(envelope, None)?;
     retain_referenced_body_stories(&mut lowered.context.plans);
+    lowered.script_fonts = None;
     seed_lowered(document, lowered, None).map(|fonts| fonts.referenced)
 }
 

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { Comment } from '@betteroffice/docx/types/content';
-import type { YrsDocxHost } from '@betteroffice/docx/yrs';
+import type { YrsDocxHost, YrsSession } from '@betteroffice/docx/yrs';
 import {
   extractEmbeddedFontFaces,
   extractFontsFromDocument,
@@ -138,7 +138,7 @@ export function useDocumentLoader({
   );
 
   const acceptHostDocument = useCallback(
-    (host: YrsDocxHost, generation: number) => {
+    (host: YrsDocxHost, generation: number, session?: Pick<YrsSession, 'onUpdate'>) => {
       if (!loadGeneration.complete(generation)) return;
       const doc = host.document;
       history.reset(doc);
@@ -151,6 +151,20 @@ export function useDocumentLoader({
       setDocumentFonts(
         [...new Map(documentFonts.map((font) => [font.name.toLowerCase(), font])).values()]
       );
+      const isCurrent = () => loadGeneration.isCurrent(generation);
+      const skipped = new Set(session ? host.unusedScriptFonts?.map(fontKey) : undefined);
+      const isSkipped = (family: string) => skipped.has(fontKey(family));
+      const loadSkipped =
+        session && skipped.size > 0
+          ? afterFirstUpdate(session, () => {
+              if (!isCurrent()) return;
+              fontScope
+                .loadFontsWithMapping(
+                  [...host.referencedFonts, ...extractFontsFromDocument(doc)].filter(isSkipped)
+                )
+                .catch((error) => console.warn('Failed to load document fonts:', error));
+            })
+          : undefined;
       loadDocumentFontsInOrder(
         loadEmbeddedFontFamilies(
           doc.package.fontTable,
@@ -158,11 +172,11 @@ export function useDocumentLoader({
           host.fontTableRelationshipsXml,
           fontScope
         ),
-        () => loadGeneration.isCurrent(generation),
+        isCurrent,
         setFontAliases,
         () => {
-          const unused = new Set(host.unusedScriptFonts?.map(fontKey));
-          const used = (family: string) => !unused.has(fontKey(family));
+          loadSkipped?.();
+          const used = (family: string) => !isSkipped(family);
           return Promise.all([
             fontScope.loadFontsWithMapping(host.referencedFonts.filter(used)),
             fontScope.loadFontsWithMapping([...extractFontsFromDocument(doc)].filter(used)),
@@ -267,6 +281,28 @@ export function useDocumentLoader({
 const NO_FONT_ALIASES: ReadonlyMap<string, string> = new Map();
 
 const fontKey = (family: string): string => family.trim().toLowerCase();
+
+/**
+ * Runs `load` once `session`'s document has changed, locally or remotely,
+ * and the returned callback has been called: an edit can give a font skipped
+ * at open text to draw.
+ */
+function afterFirstUpdate(
+  session: Pick<YrsSession, 'onUpdate'>,
+  load: () => void
+): () => void {
+  let updated = false;
+  let ready = false;
+  const unsubscribe = session.onUpdate(() => {
+    unsubscribe();
+    updated = true;
+    if (ready) load();
+  });
+  return () => {
+    ready = true;
+    if (updated) load();
+  };
+}
 
 /**
  * Takes the aliases of a document's embedded faces once they registered, and

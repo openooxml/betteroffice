@@ -49,7 +49,10 @@ test("a parsed document's fonts load after the previous document's faces are rel
   fontScope.dispose();
 });
 
-async function fontsLoadedFor(unusedScriptFonts?: string[]): Promise<Set<string>> {
+async function fontsLoadedFor(
+  unusedScriptFonts?: string[],
+  { updates = 0, session = true }: { updates?: number; session?: boolean } = {}
+): Promise<Set<string>> {
   const fontScope = createFontLoadScope();
   const asked = new Set<string>();
   fontScope.loadFontsWithMapping = async (families) => {
@@ -77,8 +80,24 @@ async function fontsLoadedFor(unusedScriptFonts?: string[]): Promise<Set<string>
     embeddedFonts: new Map(),
     ...(unusedScriptFonts ? { unusedScriptFonts } : {}),
   };
-  act(() => result.current.acceptHostDocument(host as never, result.current.yrsSeedGeneration));
+  const listeners = new Set<() => void>();
+  const updateSource = {
+    onUpdate: (listener: () => void) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+  act(() =>
+    result.current.acceptHostDocument(
+      host as never,
+      result.current.yrsSeedGeneration,
+      session ? (updateSource as never) : undefined
+    )
+  );
   await waitFor(() => expect(asked.has('Calibri')).toBe(true));
+  for (let update = 0; update < updates; update++) {
+    for (const listener of [...listeners]) listener();
+  }
   fontScope.dispose();
   return asked;
 }
@@ -86,4 +105,13 @@ async function fontsLoadedFor(unusedScriptFonts?: string[]): Promise<Set<string>
 test('a seeded document loads none of the fonts it names only for script text it lacks', async () => {
   expect(await fontsLoadedFor(['Batang', '바탕'])).toEqual(new Set(['Calibri']));
   expect(await fontsLoadedFor()).toEqual(new Set(['Batang', 'Calibri', '바탕']));
+  expect(await fontsLoadedFor(['Batang', '바탕'], { session: false })).toEqual(
+    new Set(['Batang', 'Calibri', '바탕'])
+  );
+});
+
+test('the fonts skipped at open load once the document first changes', async () => {
+  expect(await fontsLoadedFor(['Batang', '바탕'], { updates: 2 })).toEqual(
+    new Set(['Batang', 'Calibri', '바탕'])
+  );
 });
