@@ -2306,6 +2306,9 @@ impl EngineSession {
         let mut deltas = HashMap::new();
         let run = {
             let mut previous = self.pagination.borrow_mut();
+            // A preview shows the document at its source positions, so a block whose
+            // content is unchanged but whose positions moved shows other source: it is
+            // placed afresh rather than shifted.
             if revision_preview_key.is_some_and(|key| key != previous.revision_preview_key)
                 && incremental_eligible(&previous, &input, input_options_fingerprint)
             {
@@ -2317,13 +2320,8 @@ impl EngineSession {
                     .zip(&retained.measured)
                 {
                     if *fingerprint == *retained_fingerprint
-                        && crate::fingerprint::positions_fingerprint(
-                            &next.block,
-                            next.block.pm_start(),
-                        )? != crate::fingerprint::positions_fingerprint(
-                            &retained.block,
-                            retained.block.pm_start(),
-                        )?
+                        && crate::fingerprint::fingerprint_with_positions(&next.block)?
+                            != crate::fingerprint::fingerprint_with_positions(&retained.block)?
                     {
                         *fingerprint ^= 1;
                     }

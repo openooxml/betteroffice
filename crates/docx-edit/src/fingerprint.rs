@@ -33,67 +33,46 @@ const TAG_BYTES: u64 = 12;
 pub(crate) fn fingerprint_without_positions<T: Serialize + ?Sized>(
     value: &T,
 ) -> Result<u64, String> {
-    let mut hasher = Hasher::<false>::new();
+    let mut hasher = Hasher::new();
     value.serialize(&mut hasher).map_err(|error| error.0)?;
     Ok(hasher.finish())
 }
 
-/// Fingerprint of `value`'s positions relative to `origin`, the enclosing block's
-/// pm position a retained display shifts by; absolute without one.
-pub(crate) fn positions_fingerprint<T: Serialize + ?Sized>(
-    value: &T,
-    origin: Option<f64>,
-) -> Result<u64, String> {
-    let mut hasher = Hasher::<true>::new();
-    hasher.origin = origin;
+/// Fingerprint of `value` with its absolute document positions included, so it
+/// also tells where each part of the value sits.
+pub(crate) fn fingerprint_with_positions<T: Serialize + ?Sized>(value: &T) -> Result<u64, String> {
+    let mut hasher = Hasher::new();
+    hasher.keep_positions = true;
     value.serialize(&mut hasher).map_err(|error| error.0)?;
     Ok(hasher.finish())
 }
 
-fn position_key(key: &str) -> Option<usize> {
-    POSITION_KEYS.iter().position(|position| *position == key)
+fn is_position_key(key: &str) -> bool {
+    POSITION_KEYS.contains(&key)
 }
 
 /// SipHash-1-3 with fixed keys: deterministic within a process, which is all
 /// a session-local fingerprint needs.
-struct Hasher<const RELATIVE_POSITIONS: bool = false> {
+struct Hasher {
     inner: DefaultHasher,
-    position_family: Option<usize>,
-    origin: Option<f64>,
+    keep_positions: bool,
 }
 
-impl<const RELATIVE_POSITIONS: bool> Hasher<RELATIVE_POSITIONS> {
+impl Hasher {
     fn new() -> Self {
         Self {
             inner: DefaultHasher::new(),
-            position_family: None,
-            origin: None,
+            keep_positions: false,
         }
     }
 
     fn word(&mut self, word: u64) {
-        if !RELATIVE_POSITIONS {
-            self.inner.write_u64(word);
-        }
+        self.inner.write_u64(word);
     }
 
     fn bytes(&mut self, bytes: &[u8]) {
-        if !RELATIVE_POSITIONS {
-            self.inner.write_u64(bytes.len() as u64);
-            self.inner.write(bytes);
-        }
-    }
-
-    fn relative_position(&mut self, value: f64) {
-        if self.position_family.is_some() {
-            let relative = self.origin.map_or(value, |origin| value - origin);
-            self.inner.write_u64(TAG_F64);
-            self.inner.write_u64(if relative == 0.0 {
-                0
-            } else {
-                relative.to_bits()
-            });
-        }
+        self.inner.write_u64(bytes.len() as u64);
+        self.inner.write(bytes);
     }
 
     fn finish(&self) -> u64 {
@@ -122,32 +101,26 @@ impl ser::Error for Error {
 /// (and dropped with its value) whatever type serialized it.
 struct KeyProbe {
     key: Hasher,
-    position: Option<usize>,
+    position: bool,
 }
 
 impl KeyProbe {
     fn new() -> Self {
         Self {
             key: Hasher::new(),
-            position: None,
+            position: false,
         }
     }
 }
 
-struct Container<'a, const RELATIVE_POSITIONS: bool> {
-    hasher: &'a mut Hasher<RELATIVE_POSITIONS>,
+struct Container<'a> {
+    hasher: &'a mut Hasher,
     skip_value: bool,
-    position: Option<usize>,
 }
 
-impl<const RELATIVE_POSITIONS: bool> Container<'_, RELATIVE_POSITIONS> {
+impl<'a> Container<'a> {
     fn field<T: Serialize + ?Sized>(&mut self, key: &str, value: &T) -> Result<(), Error> {
-        let position = position_key(key);
-        if RELATIVE_POSITIONS {
-            self.position = position;
-            return self.value(value);
-        }
-        if position.is_some() {
+        if !self.hasher.keep_positions && is_position_key(key) {
             return Ok(());
         }
         self.hasher.word(TAG_KEY);
@@ -158,9 +131,9 @@ impl<const RELATIVE_POSITIONS: bool> Container<'_, RELATIVE_POSITIONS> {
     fn key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), Error> {
         let mut probe = KeyProbe::new();
         key.serialize(&mut probe)?;
-        self.position = probe.position;
-        self.skip_value = !RELATIVE_POSITIONS && probe.position.is_some();
-        if !RELATIVE_POSITIONS && probe.position.is_none() {
+        let skip = probe.position && !self.hasher.keep_positions;
+        self.skip_value = skip;
+        if !skip {
             self.hasher.word(TAG_KEY);
             self.hasher.word(probe.key.finish());
         }
@@ -171,18 +144,6 @@ impl<const RELATIVE_POSITIONS: bool> Container<'_, RELATIVE_POSITIONS> {
         if std::mem::take(&mut self.skip_value) {
             return Ok(());
         }
-        if RELATIVE_POSITIONS {
-            let position = self.position.take();
-            if let Some(key) = position {
-                self.hasher.inner.write_u64(TAG_KEY);
-                self.hasher.inner.write_u64(key as u64);
-            }
-            let previous_family = self.hasher.position_family;
-            self.hasher.position_family = position.map(|key| key / 2);
-            let result = value.serialize(&mut *self.hasher);
-            self.hasher.position_family = previous_family;
-            return result;
-        }
         value.serialize(&mut *self.hasher)
     }
 
@@ -192,16 +153,16 @@ impl<const RELATIVE_POSITIONS: bool> Container<'_, RELATIVE_POSITIONS> {
     }
 }
 
-impl<'a, const RELATIVE_POSITIONS: bool> Serializer for &'a mut Hasher<RELATIVE_POSITIONS> {
+impl<'a> Serializer for &'a mut Hasher {
     type Ok = ();
     type Error = Error;
-    type SerializeSeq = Container<'a, RELATIVE_POSITIONS>;
-    type SerializeTuple = Container<'a, RELATIVE_POSITIONS>;
-    type SerializeTupleStruct = Container<'a, RELATIVE_POSITIONS>;
-    type SerializeTupleVariant = Container<'a, RELATIVE_POSITIONS>;
-    type SerializeMap = Container<'a, RELATIVE_POSITIONS>;
-    type SerializeStruct = Container<'a, RELATIVE_POSITIONS>;
-    type SerializeStructVariant = Container<'a, RELATIVE_POSITIONS>;
+    type SerializeSeq = Container<'a>;
+    type SerializeTuple = Container<'a>;
+    type SerializeTupleStruct = Container<'a>;
+    type SerializeTupleVariant = Container<'a>;
+    type SerializeMap = Container<'a>;
+    type SerializeStruct = Container<'a>;
+    type SerializeStructVariant = Container<'a>;
 
     fn serialize_bool(self, value: bool) -> Result<(), Error> {
         self.word(if value { TAG_TRUE } else { TAG_FALSE });
@@ -217,10 +178,6 @@ impl<'a, const RELATIVE_POSITIONS: bool> Serializer for &'a mut Hasher<RELATIVE_
         self.serialize_i64(value.into())
     }
     fn serialize_i64(self, value: i64) -> Result<(), Error> {
-        if RELATIVE_POSITIONS {
-            self.relative_position(value as f64);
-            return Ok(());
-        }
         self.word(TAG_I64);
         self.word(value as u64);
         Ok(())
@@ -235,10 +192,6 @@ impl<'a, const RELATIVE_POSITIONS: bool> Serializer for &'a mut Hasher<RELATIVE_
         self.serialize_u64(value.into())
     }
     fn serialize_u64(self, value: u64) -> Result<(), Error> {
-        if RELATIVE_POSITIONS {
-            self.relative_position(value as f64);
-            return Ok(());
-        }
         self.word(TAG_U64);
         self.word(value);
         Ok(())
@@ -247,10 +200,6 @@ impl<'a, const RELATIVE_POSITIONS: bool> Serializer for &'a mut Hasher<RELATIVE_
         self.serialize_f64(value.into())
     }
     fn serialize_f64(self, value: f64) -> Result<(), Error> {
-        if RELATIVE_POSITIONS {
-            self.relative_position(value);
-            return Ok(());
-        }
         if value.is_finite() {
             self.word(TAG_F64);
             self.word(value.to_bits());
@@ -273,18 +222,15 @@ impl<'a, const RELATIVE_POSITIONS: bool> Serializer for &'a mut Hasher<RELATIVE_
         Ok(())
     }
     fn serialize_none(self) -> Result<(), Error> {
-        if RELATIVE_POSITIONS && self.position_family.is_some() {
-            self.inner.write_u64(TAG_NULL);
-        } else {
-            self.word(TAG_NULL);
-        }
+        self.word(TAG_NULL);
         Ok(())
     }
     fn serialize_some<T: Serialize + ?Sized>(self, value: &T) -> Result<(), Error> {
         value.serialize(self)
     }
     fn serialize_unit(self) -> Result<(), Error> {
-        self.serialize_none()
+        self.word(TAG_NULL);
+        Ok(())
     }
     fn serialize_unit_struct(self, _: &'static str) -> Result<(), Error> {
         self.serialize_unit()
@@ -315,27 +261,21 @@ impl<'a, const RELATIVE_POSITIONS: bool> Serializer for &'a mut Hasher<RELATIVE_
         let mut container = Container {
             hasher: self,
             skip_value: false,
-            position: None,
         };
         container.field(variant, value)?;
         container.end()
     }
-    fn serialize_seq(self, _: Option<usize>) -> Result<Container<'a, RELATIVE_POSITIONS>, Error> {
+    fn serialize_seq(self, _: Option<usize>) -> Result<Container<'a>, Error> {
         self.word(TAG_ARRAY);
         Ok(Container {
             hasher: self,
             skip_value: false,
-            position: None,
         })
     }
-    fn serialize_tuple(self, len: usize) -> Result<Container<'a, RELATIVE_POSITIONS>, Error> {
+    fn serialize_tuple(self, len: usize) -> Result<Container<'a>, Error> {
         self.serialize_seq(Some(len))
     }
-    fn serialize_tuple_struct(
-        self,
-        _: &'static str,
-        len: usize,
-    ) -> Result<Container<'a, RELATIVE_POSITIONS>, Error> {
+    fn serialize_tuple_struct(self, _: &'static str, len: usize) -> Result<Container<'a>, Error> {
         self.serialize_seq(Some(len))
     }
     fn serialize_tuple_variant(
@@ -344,25 +284,20 @@ impl<'a, const RELATIVE_POSITIONS: bool> Serializer for &'a mut Hasher<RELATIVE_
         _: u32,
         variant: &'static str,
         len: usize,
-    ) -> Result<Container<'a, RELATIVE_POSITIONS>, Error> {
+    ) -> Result<Container<'a>, Error> {
         self.word(TAG_OBJECT);
         self.word(TAG_KEY);
         self.bytes(variant.as_bytes());
         self.serialize_seq(Some(len))
     }
-    fn serialize_map(self, _: Option<usize>) -> Result<Container<'a, RELATIVE_POSITIONS>, Error> {
+    fn serialize_map(self, _: Option<usize>) -> Result<Container<'a>, Error> {
         self.word(TAG_OBJECT);
         Ok(Container {
             hasher: self,
             skip_value: false,
-            position: None,
         })
     }
-    fn serialize_struct(
-        self,
-        _: &'static str,
-        len: usize,
-    ) -> Result<Container<'a, RELATIVE_POSITIONS>, Error> {
+    fn serialize_struct(self, _: &'static str, len: usize) -> Result<Container<'a>, Error> {
         self.serialize_map(Some(len))
     }
     fn serialize_struct_variant(
@@ -371,7 +306,7 @@ impl<'a, const RELATIVE_POSITIONS: bool> Serializer for &'a mut Hasher<RELATIVE_
         _: u32,
         variant: &'static str,
         len: usize,
-    ) -> Result<Container<'a, RELATIVE_POSITIONS>, Error> {
+    ) -> Result<Container<'a>, Error> {
         self.word(TAG_OBJECT);
         self.word(TAG_KEY);
         self.bytes(variant.as_bytes());
@@ -379,7 +314,7 @@ impl<'a, const RELATIVE_POSITIONS: bool> Serializer for &'a mut Hasher<RELATIVE_
     }
 }
 
-impl<const RELATIVE_POSITIONS: bool> ser::SerializeSeq for Container<'_, RELATIVE_POSITIONS> {
+impl ser::SerializeSeq for Container<'_> {
     type Ok = ();
     type Error = Error;
     fn serialize_element<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Error> {
@@ -390,7 +325,7 @@ impl<const RELATIVE_POSITIONS: bool> ser::SerializeSeq for Container<'_, RELATIV
     }
 }
 
-impl<const RELATIVE_POSITIONS: bool> ser::SerializeTuple for Container<'_, RELATIVE_POSITIONS> {
+impl ser::SerializeTuple for Container<'_> {
     type Ok = ();
     type Error = Error;
     fn serialize_element<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Error> {
@@ -401,9 +336,7 @@ impl<const RELATIVE_POSITIONS: bool> ser::SerializeTuple for Container<'_, RELAT
     }
 }
 
-impl<const RELATIVE_POSITIONS: bool> ser::SerializeTupleStruct
-    for Container<'_, RELATIVE_POSITIONS>
-{
+impl ser::SerializeTupleStruct for Container<'_> {
     type Ok = ();
     type Error = Error;
     fn serialize_field<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Error> {
@@ -414,9 +347,7 @@ impl<const RELATIVE_POSITIONS: bool> ser::SerializeTupleStruct
     }
 }
 
-impl<const RELATIVE_POSITIONS: bool> ser::SerializeTupleVariant
-    for Container<'_, RELATIVE_POSITIONS>
-{
+impl ser::SerializeTupleVariant for Container<'_> {
     type Ok = ();
     type Error = Error;
     fn serialize_field<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Error> {
@@ -428,7 +359,7 @@ impl<const RELATIVE_POSITIONS: bool> ser::SerializeTupleVariant
     }
 }
 
-impl<const RELATIVE_POSITIONS: bool> ser::SerializeMap for Container<'_, RELATIVE_POSITIONS> {
+impl ser::SerializeMap for Container<'_> {
     type Ok = ();
     type Error = Error;
     fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), Error> {
@@ -442,7 +373,7 @@ impl<const RELATIVE_POSITIONS: bool> ser::SerializeMap for Container<'_, RELATIV
     }
 }
 
-impl<const RELATIVE_POSITIONS: bool> ser::SerializeStruct for Container<'_, RELATIVE_POSITIONS> {
+impl ser::SerializeStruct for Container<'_> {
     type Ok = ();
     type Error = Error;
     fn serialize_field<T: Serialize + ?Sized>(
@@ -457,9 +388,7 @@ impl<const RELATIVE_POSITIONS: bool> ser::SerializeStruct for Container<'_, RELA
     }
 }
 
-impl<const RELATIVE_POSITIONS: bool> ser::SerializeStructVariant
-    for Container<'_, RELATIVE_POSITIONS>
-{
+impl ser::SerializeStructVariant for Container<'_> {
     type Ok = ();
     type Error = Error;
     fn serialize_field<T: Serialize + ?Sized>(
@@ -487,7 +416,7 @@ impl Serializer for &mut KeyProbe {
     type SerializeStructVariant = ser::Impossible<(), Error>;
 
     fn serialize_str(self, value: &str) -> Result<(), Error> {
-        self.position = position_key(value);
+        self.position = is_position_key(value);
         self.key.serialize_str(value)
     }
     fn serialize_bool(self, value: bool) -> Result<(), Error> {
@@ -609,7 +538,7 @@ mod tests {
     use serde::Serialize;
     use serde_json::json;
 
-    use super::{fingerprint_without_positions as fingerprint, positions_fingerprint};
+    use super::fingerprint_without_positions as fingerprint;
 
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -648,47 +577,29 @@ mod tests {
     }
 
     #[test]
+    fn a_positioned_fingerprint_tells_where_each_part_sits() {
+        use super::fingerprint_with_positions as positioned;
+        let base = positioned(&run("text", 1.0)).unwrap();
+        assert_eq!(base, positioned(&run("text", 1.0)).unwrap());
+        assert_ne!(base, positioned(&run("text", 2.0)).unwrap());
+        // The same position owned by another part of the value.
+        let owner = |first: Option<f64>, second: Option<f64>| json!([{ "text": "a", "pmStart": first }, { "text": "b", "pmStart": second }]);
+        assert_ne!(
+            positioned(&owner(Some(101.0), None)).unwrap(),
+            positioned(&owner(None, Some(101.0))).unwrap()
+        );
+        assert_eq!(
+            fingerprint(&owner(Some(101.0), None)).unwrap(),
+            fingerprint(&owner(None, Some(101.0))).unwrap()
+        );
+    }
+
+    #[test]
     fn absolute_positions_do_not_change_the_fingerprint() {
         assert_eq!(
             fingerprint(&run("text", 1.0)),
             fingerprint(&run("text", 90.0))
         );
-    }
-
-    #[test]
-    fn positions_ignore_a_shift_of_the_whole_block() {
-        let base = positions_fingerprint(&run("text", 1.0), Some(1.0)).unwrap();
-        assert_eq!(
-            base,
-            positions_fingerprint(&run("other text", 90.0), Some(90.0)).unwrap()
-        );
-        let mut doc_moved = run("text", 1.0);
-        doc_moved.fmt.doc_start = Some(101.0);
-        doc_moved.extra["nested"][0]["docEnd"] = json!(101.0);
-        assert_ne!(base, positions_fingerprint(&doc_moved, Some(1.0)).unwrap());
-
-        // Without an enclosing origin positions stay absolute, nested pm ones too.
-        let nested = |position: f64| json!({ "docStart": position, "inner": [{ "pmStart": position, "pmEnd": position + 1.0 }] });
-        assert_ne!(
-            positions_fingerprint(&nested(100.0), None).unwrap(),
-            positions_fingerprint(&nested(200.0), None).unwrap()
-        );
-    }
-
-    #[test]
-    fn positions_detect_moves_within_the_block() {
-        let base = positions_fingerprint(&run("text", 1.0), Some(1.0)).unwrap();
-        let mut moved = run("text", 1.0);
-        moved.extra["pmEnd"] = json!(6.0);
-        assert_ne!(base, positions_fingerprint(&moved, Some(1.0)).unwrap());
-
-        let mut moved = run("text", 1.0);
-        moved.extra["nested"][0]["docEnd"] = json!(2.0);
-        assert_ne!(base, positions_fingerprint(&moved, Some(1.0)).unwrap());
-
-        let mut missing = run("text", 1.0);
-        missing.fmt.doc_start = None;
-        assert_ne!(base, positions_fingerprint(&missing, Some(1.0)).unwrap());
     }
 
     #[test]
