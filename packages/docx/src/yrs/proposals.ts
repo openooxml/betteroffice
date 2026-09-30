@@ -75,6 +75,12 @@ export interface DocxProposalSnapshot {
   proposals: readonly DocxProposalRecord[];
 }
 
+/** @internal */
+export interface DocxProposalRegistryState {
+  previewVersion: number;
+  entries: { record: DocxProposalRecord; key: string }[];
+}
+
 export type DocxProposalFailure = Omit<DocxEditFailure, 'code'> & {
   code: DocxEditFailureCode | 'stale-preview' | 'unknown-proposal' | 'proposal-id-conflict';
   proposalId?: string;
@@ -119,6 +125,10 @@ export interface DocxProposalRegistry {
   setStates(request: DocxProposalStateRequest): DocxProposalResult;
   withdraw(request: DocxProposalWithdrawRequest): DocxProposalResult;
   snapshot(): DocxProposalSnapshot;
+  /** @internal */
+  exportState(): DocxProposalRegistryState;
+  /** @internal */
+  mirror(mirror: { version: string; proposals: DocxProposalRegistryState } | null): void;
   subscribe(listener: (snapshot: DocxProposalSnapshot) => void): () => void;
   /** Forgets every proposal, as when the session opens another document. */
   reset(): void;
@@ -530,13 +540,14 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
   const records = new Map<string, { record: DocxProposalRecord; key: string }>();
   const listeners = new Set<(snapshot: DocxProposalSnapshot) => void>();
   let previewVersion = 0;
+  let mirrored: { version: string; proposals: DocxProposalRegistryState } | null = null;
   let notifying = false;
   let renotify = false;
 
   const snapshot = (): DocxProposalSnapshot => ({
-    version: session.version(),
-    previewVersion,
-    proposals: [...records.values()].map(({ record }) => ({
+    version: mirrored?.version ?? session.version(),
+    previewVersion: mirrored?.proposals.previewVersion ?? previewVersion,
+    proposals: (mirrored?.proposals.entries ?? [...records.values()]).map(({ record }) => ({
       ...record,
       paragraph: { ...record.paragraph },
       revisionIds: [...record.revisionIds],
@@ -577,7 +588,12 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     failure,
   });
 
+  const ensureOwned = (): void => {
+    if (mirrored) throw new Error('proposals are held by the resident worker');
+  };
+
   const propose = (request: DocxProposalRequest): DocxProposalResult => {
+    ensureOwned();
     if (!request || typeof request !== 'object' || !Array.isArray(request.proposals)) {
       throw new TypeError('a proposal request needs a proposals array');
     }
@@ -642,6 +658,7 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
   };
 
   const setStates = (request: DocxProposalStateRequest): DocxProposalResult => {
+    ensureOwned();
     if (!request || typeof request !== 'object' || !Array.isArray(request.changes)) {
       throw new TypeError('a proposal state request needs a changes array');
     }
@@ -708,6 +725,7 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
    * preview did: accepted revisions apply, rejected and undecided ones are removed.
    */
   const withdraw = (request: DocxProposalWithdrawRequest): DocxProposalResult => {
+    ensureOwned();
     if (!request || typeof request !== 'object' || !Array.isArray(request.ids)) {
       throw new TypeError('a withdrawal request needs an ids array');
     }
@@ -772,6 +790,23 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     setStates,
     withdraw,
     snapshot,
+    exportState() {
+      return structuredClone(
+        mirrored?.proposals ?? { previewVersion, entries: [...records.values()] }
+      );
+    },
+    mirror(mirror) {
+      const before = JSON.stringify(canonical(snapshot()));
+      if (mirror) {
+        mirrored = structuredClone(mirror);
+      } else if (mirrored) {
+        records.clear();
+        for (const entry of mirrored.proposals.entries) records.set(entry.record.id, entry);
+        previewVersion = mirrored.proposals.previewVersion;
+        mirrored = null;
+      }
+      if (JSON.stringify(canonical(snapshot())) !== before) notify();
+    },
     subscribe(listener) {
       if (typeof listener !== 'function')
         throw new TypeError('proposal listener must be a function');
@@ -781,13 +816,14 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
       };
     },
     reset() {
-      if (records.size === 0) return;
+      if (mirrored || records.size === 0) return;
       if ([...records.values()].some(({ record }) => record.state !== 'proposed'))
         previewVersion += 1;
       records.clear();
       notify();
     },
     destroy() {
+      mirrored = null;
       records.clear();
       listeners.clear();
     },

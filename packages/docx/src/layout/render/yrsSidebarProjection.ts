@@ -1,5 +1,10 @@
 import type { YrsLoc, YrsSession, YrsStorySegment } from '../../yrs';
 
+type SidebarReader = Pick<
+  YrsSession,
+  'storyIds' | 'storySegments' | 'version' | 'paragraphs' | 'locateParagraph'
+>;
+
 /** A yrs location projected into the position space used by the display list. */
 export interface YrsSidebarDisplayPoint {
   story: string;
@@ -64,7 +69,7 @@ function childStories(payload: Record<string, unknown>): string[] {
 }
 
 function geometryRoots(
-  session: YrsSession,
+  session: SidebarReader,
   segmentsByStory: Map<string, YrsStorySegment[]>
 ): Map<string, StoryGeometryRoot> {
   const storyIds = session.storyIds();
@@ -200,7 +205,7 @@ function indexStory(
 }
 
 const projections = new WeakMap<
-  YrsSession,
+  SidebarReader,
   { version: string; projection: YrsSidebarProjection }
 >();
 
@@ -210,7 +215,7 @@ const projections = new WeakMap<
  * and block-SDT stories are recursively sized so container tokens are included.
  * A session gets the same projection back until its document changes.
  */
-export function createYrsSidebarProjection(session: YrsSession): YrsSidebarProjection {
+export function createYrsSidebarProjection(session: SidebarReader): YrsSidebarProjection {
   const version = session.version();
   const cached = projections.get(session);
   if (cached?.version === version) return cached.projection;
@@ -219,7 +224,7 @@ export function createYrsSidebarProjection(session: YrsSession): YrsSidebarProje
   return projection;
 }
 
-function projectSession(session: YrsSession): YrsSidebarProjection {
+function projectSession(session: SidebarReader): YrsSidebarProjection {
   const paragraphMaps = new Map<string, Map<string, ParagraphDisplaySpan> | null>();
   const segmentsByStory = new Map<string, YrsStorySegment[]>();
   const segmentsOf: StorySegmentsReader = (story) => {

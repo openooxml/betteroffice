@@ -6,14 +6,14 @@ import {
   createYrsSession,
   displayPositionToYrsLoc,
   type YrsSession,
-} from '@betteroffice/docx/yrs';
-import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '@betteroffice/docx/docx/rezip/parts';
+} from './index';
+import { preloadEditWasm } from '../wasm/edit';
+import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { YrsPositionProjection } from './yrsPositionProjection';
 
 const WASM = resolve(
   import.meta.dir,
-  '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm'
+  '../wasm/generated/edit/docx_edit_bg.wasm'
 );
 
 const OFFICE_DOC = 'application/vnd.openxmlformats-officedocument';

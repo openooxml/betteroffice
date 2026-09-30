@@ -173,6 +173,108 @@ afterEach(() => {
 });
 
 describe('proposal registry', () => {
+  it('mirrors exported records and hands their dedupe keys and preview version back', async () => {
+    const session = await open();
+    const engine = roundEngine(session);
+    const source = createProposalRegistry(engine);
+    const inputs = [
+      replace('first', '00000001', 'world', 'earth'),
+      insert('second', '00000006', 'end', '!'),
+    ];
+    snapshotOf(source.propose({ expectVersion: session.version(), proposals: inputs }));
+    const original = snapshotOf(source.setStates({
+      expectVersion: session.version(),
+      expectPreviewVersion: 0,
+      changes: [{ id: 'first', state: 'accepted' }],
+    }));
+    const exported = source.exportState();
+    expect(exported.entries.map(({ record }) => record.id)).toEqual(['first', 'second']);
+    expect(exported.entries.every(({ key }) => typeof key === 'string')).toBe(true);
+    exported.entries[0]!.record.paragraph.paraId = 'changed';
+    (exported.entries[0]!.record.revisionIds as string[]).push('changed');
+    exported.entries[0]!.record.state = 'rejected';
+    expect(source.snapshot()).toEqual(original);
+
+    const registry = createProposalRegistry(engine);
+    const events: DocxProposalSnapshot[] = [];
+    registry.subscribe((snapshot) => events.push(snapshot));
+    const mirror = { version: 'worker-v1', proposals: source.exportState() };
+    registry.mirror(mirror);
+    expect(registry.snapshot()).toEqual({ ...original, version: mirror.version });
+    expect(events).toHaveLength(1);
+    registry.mirror(structuredClone(mirror));
+    registry.reset();
+    expect(events).toHaveLength(1);
+    expect(() => registry.propose({ expectVersion: mirror.version, proposals: inputs })).toThrow(
+      'proposals are held by the resident worker'
+    );
+    expect(() => registry.setStates({
+      expectVersion: mirror.version,
+      expectPreviewVersion: 1,
+      changes: [],
+    })).toThrow('proposals are held by the resident worker');
+    expect(() => registry.withdraw({ expectVersion: mirror.version, ids: [] })).toThrow(
+      'proposals are held by the resident worker'
+    );
+
+    mirror.proposals.entries[0]!.record.paragraph.paraId = 'external';
+    const copied = registry.exportState();
+    copied.entries[0]!.record.state = 'rejected';
+    expect(registry.snapshot()).toEqual({ ...original, version: 'worker-v1' });
+    const next = { version: 'worker-v2', proposals: source.exportState() };
+    registry.mirror(next);
+    expect(events).toHaveLength(2);
+    next.proposals.previewVersion = 2;
+    registry.mirror(next);
+    expect(events).toHaveLength(3);
+    next.proposals.entries[1]!.record.state = 'rejected';
+    registry.mirror(next);
+    expect(events).toHaveLength(4);
+    registry.mirror(structuredClone(next));
+    expect(events).toHaveLength(4);
+
+    registry.mirror(null);
+    expect(events).toHaveLength(5);
+    expect(registry.snapshot()).toEqual({
+      version: session.version(),
+      previewVersion: 2,
+      proposals: next.proposals.entries.map(({ record }) => record),
+    });
+    registry.mirror(null);
+    expect(events).toHaveLength(5);
+    expect(snapshotOf(registry.propose({ expectVersion: 'stale', proposals: inputs }))).toEqual(
+      registry.snapshot()
+    );
+    expect(registry.propose({
+      expectVersion: session.version(),
+      proposals: [{ ...inputs[0]!, op: 'replaceText', search: 'world', replaceWith: 'other' }],
+    })).toMatchObject({ ok: false, failure: { code: 'proposal-id-conflict' } });
+    expect(events).toHaveLength(5);
+    expect(snapshotOf(registry.setStates({
+      expectVersion: session.version(),
+      expectPreviewVersion: 2,
+      changes: [{ id: 'first', state: 'proposed' }],
+    })).previewVersion).toBe(3);
+    expect(events).toHaveLength(6);
+    source.destroy();
+    registry.destroy();
+  });
+
+  it('notifies only visible changes when a mirror starts and ends', async () => {
+    const session = await open();
+    const registry = createProposalRegistry(roundEngine(session));
+    const events: DocxProposalSnapshot[] = [];
+    registry.subscribe((snapshot) => events.push(snapshot));
+    registry.mirror({ version: session.version(), proposals: registry.exportState() });
+    registry.mirror(null);
+    expect(events).toEqual([]);
+    registry.mirror({ version: 'worker', proposals: registry.exportState() });
+    expect(events).toHaveLength(1);
+    registry.mirror(null);
+    expect(events).toHaveLength(2);
+    registry.destroy();
+  });
+
   it('shares every proposal read and the apply in one scope when provided', () => {
     for (const shared of [true, false]) {
       const events: string[] = [];

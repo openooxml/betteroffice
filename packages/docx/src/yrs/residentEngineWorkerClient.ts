@@ -6,20 +6,22 @@ import type {
 } from './index';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type {
+  ResidentDocumentRead,
+  ResidentDocumentReadValues,
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerRequestWithoutId,
   ResidentEngineWorkerResponse,
   ResidentProposalOperation,
-  ResidentProposalOutcome,
+  ResidentProposalResponse,
 } from './residentEngineWorkerProtocol';
+import type { DocxProposalRegistryState } from './proposals';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 
 /** @internal */
-export interface ResidentProposalReply {
-  outcome: ResidentProposalOutcome;
-  version: string;
+export interface ResidentProposalReply
+  extends Omit<ResidentProposalResponse, 'updates' | 'stateVector'> {
   updates: Uint8Array[];
-  changedStories: string[];
+  stateVector: Uint8Array;
 }
 
 export interface ResidentEngineWorkerFrame {
@@ -156,8 +158,9 @@ export class ResidentEngineWorkerClient {
       if (response.ok && response.caret) {
         this.answeredFrameEpoch = Math.max(this.answeredFrameEpoch, response.caret.frameEpoch);
       }
-      if (response.ok && response.stateVector && response.id >= this.lastSnapshotId) {
-        this.remoteVector = new Uint8Array(response.stateVector);
+      if (response.ok && response.id >= this.lastSnapshotId) {
+        const stateVector = response.proposal?.stateVector ?? response.stateVector;
+        if (stateVector) this.remoteVector = new Uint8Array(stateVector);
       }
       if (!response.ok && response.terminal) {
         this.fail(
@@ -298,24 +301,46 @@ export class ResidentEngineWorkerClient {
   }
 
   /** @internal */
-  async executeProposal(operation: ResidentProposalOperation): Promise<ResidentProposalReply> {
+  async proposal(operation: ResidentProposalOperation): Promise<ResidentProposalReply> {
     if (!this.bootstrapped) {
       throw new ResidentWorkerFailureError('Resident engine worker has not laid out its document');
     }
-    const response = await this.request({ type: 'executeProposal', operation });
-    if (
-      response.outcome === undefined ||
-      response.version === undefined ||
-      response.updates === undefined ||
-      response.changedStories === undefined
-    ) {
+    const response = await this.request({ type: 'proposal', operation });
+    if (!response.proposal) {
       throw new ResidentWorkerFailureError('Resident engine worker omitted the proposal result');
     }
     return {
-      outcome: response.outcome,
+      ...response.proposal,
+      updates: response.proposal.updates.map((update) => new Uint8Array(update)),
+      stateVector: new Uint8Array(response.proposal.stateVector),
+    };
+  }
+
+  /** @internal */
+  async documentRead<K extends ResidentDocumentRead['kind']>(
+    read: ResidentDocumentRead & { kind: K }
+  ): Promise<{ version: string; value: ResidentDocumentReadValues[K] }> {
+    const response = await this.request({ type: 'documentRead', read });
+    if (!response.read) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted the document read');
+    }
+    return response.read as { version: string; value: ResidentDocumentReadValues[K] };
+  }
+
+  /** @internal */
+  async handOver(): Promise<{
+    state: Uint8Array;
+    version: string;
+    proposals: DocxProposalRegistryState;
+  }> {
+    const response = await this.request({ type: 'encodeState' });
+    if (!response.state || response.version === undefined || !response.proposals) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted its document handoff');
+    }
+    return {
+      state: new Uint8Array(response.state),
       version: response.version,
-      updates: response.updates.map((update) => new Uint8Array(update)),
-      changedStories: response.changedStories,
+      proposals: response.proposals,
     };
   }
 
