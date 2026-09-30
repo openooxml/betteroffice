@@ -193,3 +193,22 @@ describe('useCompatibilityWarm', () => {
     expect(calls.filter((call) => call === 'schedule')).toHaveLength(1);
   });
 });
+
+test('a new session is reported before it is seeded', async () => {
+  const bytes = fixture();
+  const events: string[] = [];
+  const reported: YrsSession[] = [];
+  const hook = renderHook(() =>
+    useYrsCoreSession(true, null, null, bytes, 1, undefined, {
+      onSession: (session) => {
+        reported.push(session);
+        events.push('session');
+      },
+      onHostDocument: () => events.push('host'),
+    })
+  );
+  await waitFor(() => expect(hook.result.current.session).not.toBeNull());
+  expect(events).toEqual(['session', 'host']);
+  expect(reported).toEqual([hook.result.current.session!]);
+  hook.unmount();
+});
