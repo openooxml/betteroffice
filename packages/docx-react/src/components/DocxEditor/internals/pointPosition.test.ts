@@ -16,6 +16,7 @@ import { preloadLayoutWasm } from '@betteroffice/docx/wasm/layout';
 import {
   createYrsInputPositionMap,
   createYrsSession,
+  resolveYrsPointPosition,
   displayPositionToYrsLoc,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
@@ -211,6 +212,7 @@ describe('point positions as edit targets', () => {
         view: 'accepted',
       },
     });
+    expect(resolveYrsPointPosition(session, position!, session.version())).toEqual(position);
     expect(session.selection()).toBeNull();
 
     const result = session.applyEdits({

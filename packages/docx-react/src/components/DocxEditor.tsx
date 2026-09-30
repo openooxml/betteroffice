@@ -38,6 +38,7 @@ import type {
   YrsLoc,
   YrsSession,
   YrsStoryRange,
+  DocxParagraphMatch,
 } from '@betteroffice/docx/yrs';
 import type { BundledFontProvider } from '@betteroffice/docx/layout';
 import {
@@ -441,13 +442,6 @@ export interface DocxDocumentChange {
   version: string;
 }
 
-/** A paragraph {@link DocxEditorRef.findParagraphs} matched, with the handle the paragraph helpers take. */
-export interface DocxParagraphMatch {
-  paraId: string;
-  match: string;
-  before: string;
-  after: string;
-}
 
 /** One page's text and paragraphs, from {@link DocxEditorRef.readPageContent}. */
 export interface DocxPageContent {
@@ -895,6 +889,7 @@ function imageDialogTarget(
 }
 
 export type { EditorMode } from './DocxEditor/internals/editing-modes';
+export type { DocxParagraphMatch } from '@betteroffice/docx/yrs';
 import type { EditorMode } from './DocxEditor/internals/editing-modes';
 
 function displayRangeToYrsRange(

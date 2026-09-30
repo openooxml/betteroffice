@@ -6,6 +6,8 @@ import { useRef, type ReactNode } from 'react';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
   createYrsSession,
+  findParagraphs,
+  resolveYrsPointPosition,
   createYrsInputPositionMap,
   displayPositionToYrsLoc,
   yrsLocToDisplayPosition,
@@ -14,6 +16,11 @@ import {
   type ResidentProposalReply,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
+import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
+import type { WorkerOpenedDocument } from './useDisplayList';
+import { markPresented, stampSourceVersion } from '../internals/layoutProvenance';
+import { readPointPosition } from '../internals/pointPosition';
+import { beginWorkerProposalHandover, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { Document } from '@betteroffice/docx/types/document';
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
@@ -640,4 +647,77 @@ test('getEditorRef immediately inserts text after synchronously finishing the re
   expect(replica.pending).toBe(false);
   expect(opens).toEqual([true]);
   expect(session.paragraphs('body')[0]!.text).toStartWith('Immediate ');
+});
+
+
+test('paragraph and point twins read the worker without loading a replica, then fall back after hand-over', async () => {
+  const h = await pendingReplica('viewing', false, true);
+  const { api, session, worker, pagedEditorRef, events } = h;
+  const reads: string[] = [];
+  const workerVersion = worker.version();
+  const emptyRegistry = { previewVersion: 0, entries: [] };
+  const resident = {
+    proposal: async () => ({
+      mirror: { version: workerVersion, proposals: emptyRegistry },
+      changedStories: [], updates: [], stateVector: new Uint8Array(),
+      geometry: { version: workerVersion, previewVersion: 0, proposals: '[]', targets: {}, hidden: [] },
+    }),
+    documentRead: async (read: Parameters<WorkerOpenedDocument['documentRead']>[0]) => {
+      reads.push(read.kind);
+      const value = read.kind === 'findParagraphs'
+        ? findParagraphs(worker, read.query, read)
+        : read.kind === 'pointPosition'
+          ? resolveYrsPointPosition(worker, read.hit, read.expectVersion)
+          : null;
+      return { version: workerVersion, value };
+    },
+    handOver: async () => ({ state: worker.encodeState(), version: workerVersion, proposals: emptyRegistry }),
+  } as unknown as WorkerOpenedDocument;
+  registerWorkerProposalAuthority(session, resident, {
+    laidOut: async () => {}, current: () => true, relayout: () => {},
+    adopted: () => {}, handedOver: () => {}, contentChanged: () => {},
+  });
+  let loads = 0;
+  const replica = deferWorkerOpenReplica(session, async () => {
+    const handover = await beginWorkerProposalHandover(session)!;
+    return () => {
+      loads += 1;
+      session.openDocx(bytes, false);
+      session.loadState(handover.state);
+      handover.complete();
+    };
+  }, () => { throw new Error('unexpected synchronous hydration'); }, () => {}, {
+    active: () => true, request: () => replica.start(),
+  });
+  const host = {};
+  const queries = { displayList: { pages: [] } } as unknown as DisplayListQueries;
+  stampSourceVersion(queries, workerVersion);
+  markPresented(host, queries.displayList);
+  const hit = { position: 2, pageIndex: 0, region: 'body' } as const;
+  const editor = pagedEditorRef.current!;
+  editor.hasPendingInput = () => false;
+  editor.readPositionAtPoint = async () => readPointPosition(editor, hit, host, queries);
+  editor.getPositionAtPoint = () => resolveYrsPointPosition(session, hit, session.version());
+
+  let answers!: [Awaited<ReturnType<DocxEditorRef['findParagraphs']>>, Awaited<ReturnType<DocxEditorRef['readPositionAtPoint']>>];
+  await act(async () => {
+    answers = await Promise.all([api.findParagraphs('Page'), api.readPositionAtPoint(100, 100)]);
+  });
+  expect(answers[0]).toEqual(findParagraphs(worker, 'Page'));
+  expect(answers[0].length).toBeGreaterThan(0);
+  expect(answers[1]).toEqual(resolveYrsPointPosition(worker, hit, workerVersion));
+  expect(answers[1]).not.toBeNull();
+  expect(reads).toEqual(['findParagraphs', 'pointPosition']);
+  expect(session.storyIds()).toEqual([]);
+  expect(loads).toBe(0);
+  expect(events).toEqual([]);
+
+  await act(async () => { replica.start(); await replica.ready; });
+  expect(loads).toBe(1);
+  await act(async () => {
+    expect(await api.findParagraphs('Page')).toEqual(api.findInDocument('Page'));
+    expect(await api.readPositionAtPoint(100, 100)).toEqual(api.getPositionAtPoint(100, 100));
+  });
+  expect(reads).toEqual(['findParagraphs', 'pointPosition']);
+  expect(events).toEqual(['flush', 'flush']);
 });

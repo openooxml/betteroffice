@@ -617,3 +617,81 @@ test('a call made before the hand-over began runs in the worker ahead of it', as
   expect((await after).version).toBe('main-3');
   expect(h.events).toEqual(['snapshot', 'propose', 'withdraw', 'handOver']);
 });
+
+
+test('paragraph search and point reads wait for initialization and retain request order', async () => {
+  const laidOut = deferred<void>();
+  const h = harness(() => laidOut.promise);
+  const matches = [{ paraId: 'p1', match: 'Needle', before: '', after: '' }];
+  const hit = { position: 1, pageIndex: 0, region: 'body' } as const;
+  const point = { ...hit, version: 'worker-1', target: {
+    kind: 'range', story: 'body', start: { paraId: 'p1', offset: 0 },
+    end: { paraId: 'p1', offset: 0 }, view: 'accepted',
+  } };
+  h.worker.documentRead.mockImplementation(async (read) => {
+    h.events.push(read.kind);
+    return { version: 'worker-1', value: read.kind === 'findParagraphs' ? matches : point } as never;
+  });
+  const search = h.authority.findParagraphs('Needle', { caseSensitive: true, limit: 1 }, unusedMain);
+  const position = h.authority.pointPosition(hit, 'worker-1', unusedMain);
+  await new Promise((done) => setTimeout(done, 0));
+  expect(h.worker.documentRead).not.toHaveBeenCalled();
+  laidOut.resolve();
+  expect(await search).toEqual(matches);
+  expect(await position).toEqual(point);
+  expect(h.worker.documentRead.mock.calls.map(([read]) => read)).toEqual([
+    { kind: 'findParagraphs', query: 'Needle', caseSensitive: true, limit: 1 },
+    { kind: 'pointPosition', hit, expectVersion: 'worker-1' },
+  ]);
+  expect(h.events).toEqual(['snapshot', 'findParagraphs', 'pointPosition']);
+});
+
+test('search and point reads queued after hand-over use the replica and rewrite its version', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  const posted = deferred<void>();
+  const release = deferred<void>();
+  deferWorkerOpenReplica(h.session, async () => {
+    const handover = await beginWorkerProposalHandover(h.session)!;
+    posted.resolve();
+    await release.promise;
+    return () => { h.mainVersion('main-2'); handover.complete(); };
+  }, () => { throw new Error('unexpected fallback'); }, () => {});
+  const opening = requestWorkerOpenReplica(h.session);
+  await posted.promise;
+  const findMain = mock(async () => []);
+  const pointMain = mock(async () => null);
+  const hit = { position: 1, pageIndex: 0, region: 'body' } as const;
+  const search = h.authority.findParagraphs('needle', { limit: 1 }, findMain);
+  const position = h.authority.pointPosition(hit, 'worker-2', pointMain);
+  expect(findMain).not.toHaveBeenCalled();
+  expect(pointMain).not.toHaveBeenCalled();
+  release.resolve();
+  await opening;
+  expect(await search).toEqual([]);
+  expect(await position).toBeNull();
+  expect(findMain.mock.calls).toEqual([['needle', { limit: 1 }]]);
+  expect(pointMain.mock.calls).toEqual([[hit, 'main-2']]);
+  expect(h.worker.documentRead).not.toHaveBeenCalled();
+});
+
+test('search and point reads reject a worker result after document replacement', async () => {
+  for (const kind of ['findParagraphs', 'pointPosition']) {
+    const h = harness();
+    await h.authority.initialize();
+    const pending = deferred<unknown>();
+    const posted = deferred<void>();
+    h.worker.documentRead.mockImplementation(async () => {
+      posted.resolve();
+      return await pending.promise as never;
+    });
+    const read = kind === 'findParagraphs'
+      ? h.authority.findParagraphs('needle', undefined, unusedMain)
+      : h.authority.pointPosition({ position: 1, pageIndex: 0, region: 'body' }, 'worker-1', unusedMain);
+    const rejected = expect(read).rejects.toThrow('The document changed while applying proposals');
+    await posted.promise;
+    h.replace();
+    pending.resolve({ version: 'worker-1', value: null });
+    await rejected;
+  }
+});

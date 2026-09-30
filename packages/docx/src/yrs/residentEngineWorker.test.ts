@@ -7,6 +7,7 @@ import type {
   DocxParagraphAnchor,
   DocxProposalInput,
   YrsResidentCaretRect,
+  YrsStoryRange,
 } from './index';
 import type {
   ResidentEngineWorkerRequest,
@@ -849,6 +850,80 @@ describe('resident worker layout ownership', () => {
     expect(afterEdit.ok && afterEdit.frame).toBeUndefined();
     expect(afterEdit.ok && afterEdit.layoutJson).toBeUndefined();
     expect(extras).toHaveLength(framesBefore);
+  });
+});
+
+describe('resident worker document reads', () => {
+  test('findParagraphs uses the resident reader and preserves matching options', async () => {
+    const w = worker();
+    Object.assign(w.harness.session, {
+      proposalEngine: { version: () => 'worker-1' },
+      geometryReader: {
+        storyIds: () => ['body', 'hf:rId1', 'body:t0:r0c0'],
+        paragraphs: (story: string) => story === 'body'
+          ? [{ paraId: 'p1', text: 'A Needle here' }, { paraId: 'p2', text: 'needle needle' }]
+          : [{ paraId: story, text: 'NEEDLE' }],
+      },
+    });
+    await w.bootstrap();
+    const read = await w.send({ type: 'documentRead', read: { kind: 'findParagraphs', query: 'needle' } });
+    expect(read.ok && read.read).toEqual({ version: 'worker-1', value: [
+      { paraId: 'p1', match: 'Needle', before: 'A ', after: ' here' },
+      { paraId: 'body:t0:r0c0', match: 'NEEDLE', before: '', after: '' },
+    ] });
+    const limited = await w.send({
+      type: 'documentRead', read: { kind: 'findParagraphs', query: 'Needle', caseSensitive: true, limit: 1 },
+    });
+    expect(limited.ok && limited.read?.value).toEqual([
+      { paraId: 'p1', match: 'Needle', before: 'A ', after: ' here' },
+    ]);
+  });
+
+  test('pointPosition projects body and region hits into accepted offsets and rejects stale or unmappable hits', async () => {
+    const w = worker();
+    const ranges: YrsStoryRange[] = [];
+    Object.assign(w.harness.session, {
+      proposalEngine: { version: () => 'worker-1' },
+      geometryReader: {
+        version: () => 'worker-1',
+        hasStory: (story: string) => story === 'body' || story === 'hf:rId1',
+        storySegments: () => [
+          { kind: 'text', text: 'gone words' },
+          { kind: 'pilcrow', paraId: 'p1', properties: {} },
+        ],
+        paragraphSpans: () => [{ paraId: 'p1', length: 10 }],
+      },
+      selectionText: (range: YrsStoryRange) => {
+        ranges.push(range);
+        return { before: 'wo' };
+      },
+    });
+    await w.bootstrap();
+    const hit = { position: 8, pageIndex: 0, region: 'body' } as const;
+    const read = await w.send({ type: 'documentRead', read: { kind: 'pointPosition', hit, expectVersion: 'worker-1' } });
+    expect(read.ok && read.read).toEqual({ version: 'worker-1', value: {
+      ...hit, version: 'worker-1', target: {
+        kind: 'range', story: 'body', start: { paraId: 'p1', offset: 2 },
+        end: { paraId: 'p1', offset: 2 }, view: 'accepted',
+      },
+    } });
+    expect(ranges).toEqual([{
+      story: 'body', start: { story: 'body', paraId: 'p1', offset: 7 },
+      end: { story: 'body', paraId: 'p1', offset: 7 },
+    }]);
+    const header = await w.send({ type: 'documentRead', read: {
+      kind: 'pointPosition', hit: { ...hit, region: 'header', rId: 'rId1' }, expectVersion: 'worker-1',
+    } });
+    expect(header.ok && header.read?.value).toMatchObject({ target: { story: 'hf:rId1' } });
+    for (const read of [
+      { kind: 'pointPosition', hit, expectVersion: 'stale' },
+      { kind: 'pointPosition', hit: { ...hit, position: 100 }, expectVersion: 'worker-1' },
+      { kind: 'pointPosition', hit: { ...hit, region: 'header' }, expectVersion: 'worker-1' },
+    ] as const) {
+      const refused = await w.send({ type: 'documentRead', read });
+      expect(refused.ok && refused.read).toEqual({ version: 'worker-1', value: null });
+    }
+    expect(ranges).toHaveLength(2);
   });
 });
 

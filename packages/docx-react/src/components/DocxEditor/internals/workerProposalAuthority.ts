@@ -1,4 +1,7 @@
 import type {
+  DocxFindParagraphsOptions,
+  DocxParagraphMatch,
+  DocxResolvedPointPosition,
   DocxParagraphAnchor,
   DocxParagraphAnchorResult,
   DocxParagraphIdentitySnapshot,
@@ -14,6 +17,7 @@ import type {
   YrsSession,
   resolveNavigationTarget,
 } from '@betteroffice/docx/yrs';
+import type { PointPosition } from '@betteroffice/docx/plugin-api';
 import type { WorkerOpenedDocument } from '../hooks/useDisplayList';
 import {
   awaitWorkerOpenReplica,
@@ -47,6 +51,16 @@ export interface WorkerProposalAuthority {
     request: DocxReadParagraphsRequest,
     main: (request: DocxReadParagraphsRequest) => Promise<DocxReadParagraphsResult>
   ): Promise<DocxReadParagraphsResult>;
+  findParagraphs(
+    query: string,
+    options: DocxFindParagraphsOptions | undefined,
+    main: (query: string, options?: DocxFindParagraphsOptions) => Promise<DocxParagraphMatch[]>
+  ): Promise<DocxParagraphMatch[]>;
+  pointPosition(
+    hit: PointPosition,
+    expectVersion: string,
+    main: (hit: PointPosition, expectVersion: string) => Promise<DocxResolvedPointPosition | null>
+  ): Promise<DocxResolvedPointPosition | null>;
   paragraphIdentities(
     main: () => Promise<DocxParagraphIdentitySnapshot>
   ): Promise<DocxParagraphIdentitySnapshot>;
@@ -226,6 +240,16 @@ export function registerWorkerProposalAuthority(
       assertCurrent();
       return read.value;
     }, () => main(request)),
+    findParagraphs: (query, options, main) => route(async () => {
+      const read = await worker.documentRead({ ...options, kind: 'findParagraphs', query });
+      assertCurrent();
+      return read.value;
+    }, () => main(query, options)),
+    pointPosition: (hit, expectVersion, main) => route(async () => {
+      const read = await worker.documentRead({ kind: 'pointPosition', hit, expectVersion });
+      assertCurrent();
+      return read.value;
+    }, () => main(hit, authority.handedOverRequest({ expectVersion }).expectVersion)),
     paragraphIdentities: (main) => route(async () => {
       const read = await worker.documentRead({ kind: 'paragraphIdentities' });
       assertCurrent();

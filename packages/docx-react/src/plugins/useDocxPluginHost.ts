@@ -29,7 +29,7 @@ import {
   sourceVersionOf,
 } from '../components/DocxEditor/internals/layoutProvenance';
 import { displayWindowOf } from '../components/DocxEditor/internals/displayWindow';
-import { resolvePointPosition } from '../components/DocxEditor/internals/pointPosition';
+import { readPointPosition, resolvePointPosition } from '../components/DocxEditor/internals/pointPosition';
 import { workerProposalAuthority } from '../components/DocxEditor/internals/workerProposalAuthority';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { SelectionState } from '../components/DocxEditor/types';
@@ -355,7 +355,23 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
         heldCandidate() === created &&
         latest.current.zoom === currentLayout.zoom &&
         dom.context.pagesContainer.isConnected &&
-        (isPresented(dom.context.pagesContainer, shownList) || queriesCurrentRef.current)
+        (isPresented(dom.context.pagesContainer, shownList) || queriesCurrentRef.current),
+      (hit) => readPointPosition(
+        latest.current.pagedEditorRef.current,
+        hit,
+        dom.context.pagesContainer,
+        dom.queries,
+        () => domRef.current === dom && host.layoutId() === currentLayout.id
+      ),
+      async () => {
+        const editor = latest.current.pagedEditorRef.current;
+        const session = editor?.getYrsSession();
+        if (editor?.hasPendingInput()) {
+          await editor.flushPendingInput();
+          if (latest.current.pagedEditorRef.current?.getYrsSession() !== session) return false;
+        }
+        return !!editor && !!session;
+      }
     );
     return created;
     // `moved` rebuilds the geometry when its elements move without a new frame.

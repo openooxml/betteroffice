@@ -10,6 +10,7 @@ import {
   proposalRevisionPreview,
   type DocxSessionParagraphAnchor,
   type DocxTextRange,
+  type DocxResolvedPointPosition,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import {
@@ -141,6 +142,41 @@ describe('plugin overlay geometry', () => {
       () => null
     );
     expect(geometry.getPositionAtPoint(1, 1)).toBeNull();
+  });
+
+  test('async point reads preserve layout identity and refuse changes during either await', async () => {
+    const pages = document.createElement('div');
+    const layer = document.createElement('div');
+    const source = queries();
+    const hit = { position: 1, pageIndex: 0, region: 'body' } as const;
+    const point: DocxResolvedPointPosition = { ...hit, version: 'v1', target: {
+      kind: 'range', story: 'body', start: { paraId: 'p1', offset: 0 },
+      end: { paraId: 'p1', offset: 0 }, view: 'accepted',
+    } };
+    const dom = { pagesContainer: pages, zoom: 1, getPositionAtPoint: () => hit } as RenderedDomContext;
+    const layout = { id: 'layout-1', version: 'v1', previewVersion: 0, zoom: 1, pageCount: 1 };
+    for (const changed of ['none', 'flush', 'read']) {
+      let shown = true;
+      const calls: string[] = [];
+      const geometry = createPluginGeometry(
+        layout, dom, layer, () => shown, () => null, source, () => null, () => false,
+        async (position) => {
+          calls.push('read');
+          expect(position).toEqual(hit);
+          if (changed === 'read') shown = false;
+          return point;
+        },
+        async () => {
+          calls.push('flush');
+          if (changed === 'flush') shown = false;
+          return true;
+        }
+      );
+      expect(await geometry.readPositionAtPoint(10, 10)).toEqual(
+        changed === 'none' ? { ...point, layoutId: 'layout-1' } : null
+      );
+      expect(calls).toEqual(changed === 'flush' ? ['flush'] : ['flush', 'read']);
+    }
   });
 
   test('the mirror fallback answers in container pixels under an ancestor CSS zoom', () => {

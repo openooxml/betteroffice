@@ -80,6 +80,8 @@ export * from './readTypes';
 export * from './structuredExport';
 export * from './pagedExport';
 export * from './inputPositionMap';
+export * from './findParagraphs';
+export * from './pointPosition';
 export {
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,

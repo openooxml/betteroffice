@@ -140,7 +140,7 @@ import { SidebarRevisionReads } from './internals/sidebarRevisionReads';
 import { storySegmentSource, YrsStorySegmentCache } from './internals/yrsStorySegmentCache';
 import { partEditStory, type NoteEdit, type PartEdit } from './partEdit';
 import type { DocxEditorCollaborationOptions, DocxPointPosition } from './types';
-import { positionAtClientPoint } from './internals/pointPosition';
+import { positionAtClientPoint, readPositionAtClientPoint } from './internals/pointPosition';
 
 export { DEFAULT_PAGE_WIDTH };
 
@@ -393,6 +393,8 @@ export interface PagedEditorRef {
    * version; retry after {@link flushPendingInput} or on the next frame.
    */
   getPositionAtPoint(clientX: number, clientY: number): DocxPointPosition | null;
+  /** Reads a hit through the document authority. @internal */
+  readPositionAtPoint(clientX: number, clientY: number): Promise<DocxPointPosition | null>;
   /** Live authoritative yrs session. */
   getYrsSession(): YrsSession | null;
   /** Commits accepted input and selection; waits for active IME composition. */
@@ -1842,6 +1844,12 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       renderEnv: yrsRenderEnv,
     });
 
+    const pointPositionQueriesRef = useRef(displayListQueries);
+    pointPositionQueriesRef.current = displayListQueries;
+    const pointPositionSessionRef = useRef(yrsCore.session);
+    pointPositionSessionRef.current = yrsCore.session;
+    const pointPositionZoomRef = useRef(zoom);
+    pointPositionZoomRef.current = zoom;
     const displayPositionToYrsLoc = (position: number | PointPosition): YrsLoc | null => {
       const target = projectYrsDisplayPosition(position, getYrsPositionProjection);
       return target ? yrsCore.displayPositionToLoc(target.displayPosition, target.story) : null;
@@ -1874,6 +1882,22 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       applyYrsCommand,
       getYrsPositionProjection: () => getYrsPositionProjection('body'),
       displayPositionToYrsLoc,
+      readPositionAtPoint: (clientX, clientY) =>
+        readPositionAtClientPoint(
+          {
+            getYrsSession: () => pointPositionSessionRef.current,
+            displayPositionToYrsLoc,
+            hasPendingInput: () => yrsInputRef.current?.hasPendingInput() ?? false,
+            flushPendingInput: async () => { await yrsInputRef.current?.flushPendingInput(); },
+          },
+          canvasHostRef?.current,
+          displayListQueries,
+          zoom,
+          clientX,
+          clientY,
+          () => pointPositionQueriesRef.current === displayListQueries &&
+            pointPositionZoomRef.current === zoom && pointPositionSessionRef.current === yrsCore.session
+        ),
       getPositionAtPoint: (clientX, clientY) =>
         positionAtClientPoint(
           {

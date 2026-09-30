@@ -167,7 +167,9 @@ export function createPluginGeometry(
   resolve: (hit: PointPosition | null) => DocxPointPosition | null,
   queries: DisplayListQueries,
   access: () => AnchorGeometryAccess | null,
-  held: () => boolean = () => false
+  held: () => boolean = () => false,
+  read: (hit: PointPosition | null) => Promise<DocxPointPosition | null> = async (hit) => resolve(hit),
+  flush: () => Promise<boolean> = async () => true
 ): DocxPluginGeometry {
   const shown = () => dom.zoom === layout.zoom && current();
   const projector = createCanvasHostProjector(dom.pagesContainer, queries, dom.zoom);
@@ -361,7 +363,14 @@ export function createPluginGeometry(
   };
   return {
     ...geometry,
-    readPositionAtPoint: async (clientX, clientY) => geometry.getPositionAtPoint(clientX, clientY),
+    readPositionAtPoint: async (clientX, clientY) => {
+      if (!shown()) return null;
+      const flushed = await flush();
+      if (!flushed || !shown()) return null;
+      const position = await read(dom.getPositionAtPoint?.(clientX, clientY) ?? null);
+      if (!shown()) return null;
+      return position ? { ...position, layoutId: layout.id } : null;
+    },
     readAnchorGeometry: async (target) => geometry.getAnchorGeometry(target),
   };
 }

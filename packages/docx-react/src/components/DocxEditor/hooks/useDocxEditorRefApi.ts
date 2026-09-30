@@ -16,6 +16,7 @@ import type {
   YrsStoryRange,
   WasmModuleMemory,
 } from '@betteroffice/docx/yrs';
+import { findParagraphs } from '@betteroffice/docx/yrs';
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import type { DocxInput, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
 import type { DisplayList } from '@betteroffice/docx/layout/render';
@@ -152,13 +153,14 @@ const UNSELECTED_TWINS: ReadonlySet<keyof DocxEditorRef> = new Set(['readSelecti
 
 /** Adds each async twin: it flushes pending input, then answers as its synchronous member. */
 function withAsyncTwins(
-  api: Omit<DocxEditorRef, DocxRefAsyncTwin>,
+  api: Omit<DocxEditorRef, DocxRefAsyncTwin> & Partial<Pick<DocxEditorRef, DocxRefAsyncTwin>>,
   flush: () => Promise<void>
 ): DocxEditorRef {
   const twins: Partial<Record<DocxRefAsyncTwin, unknown>> = {};
   for (const [member, twin] of Object.entries(DOCX_REF_ASYNC_TWINS) as Array<
     [keyof typeof DOCX_REF_ASYNC_TWINS, DocxRefAsyncTwin]
   >) {
+    if (api[twin]) continue;
     const call = api[member] as (...args: unknown[]) => unknown;
     twins[twin] = async (...args: unknown[]) => {
       if (!HOST_STATE_TWINS.has(twin)) await flush();
@@ -224,6 +226,7 @@ function withDeadline(ready: Promise<void>, timeoutMs: number | undefined): Prom
 const WORKER_PROPOSAL_ACCESS: ReadonlySet<keyof DocxEditorRef> = new Set([
   'proposeChanges', 'setProposalStates', 'withdrawProposals', 'getProposals',
   'readParagraphs', 'getParagraphIdentities', 'resolveParagraphAnchors',
+  'findParagraphs', 'readPositionAtPoint',
 ]);
 
 function gateReplicaAccess(
@@ -563,6 +566,10 @@ export function useDocxEditorRefApi({
     }
     return onWorker(authority, main);
   };
+  const findInDocument: DocxEditorRef['findInDocument'] = (query, options) => {
+    const session = pagedEditorRef.current?.getYrsSession();
+    return session ? findParagraphs(session, query, options) : [];
+  };
   const flushForTwin = async () => {
     const flushed = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen);
     if (!flushed.ok && flushed.code !== 'editor-unavailable') throw flushed.error;
@@ -654,6 +661,13 @@ export function useDocxEditorRefApi({
       },
 
       exportStructuredWithPages: (options) => exportWithPages(pagedEditorRef, options, experimentalWorkerOpen),
+      readPositionAtPoint: async (clientX, clientY) => {
+        if (proposalAuthority()) {
+          return pagedEditorRef.current?.readPositionAtPoint(clientX, clientY) ?? null;
+        }
+        await flushForTwin();
+        return pagedEditorRef.current?.getPositionAtPoint(clientX, clientY) ?? null;
+      },
       getPositionAtPoint: (clientX, clientY) =>
         pagedEditorRef.current?.getPositionAtPoint(clientX, clientY) ?? null,
 
@@ -824,28 +838,13 @@ export function useDocxEditorRefApi({
         pagedEditorRef.current?.scrollToChangeId(revisionId) ?? false,
       highlightRange: (from, to) => pagedEditorRef.current?.highlightRange(from, to),
 
-      findInDocument: (query, options) => {
-        const session = pagedEditorRef.current?.getYrsSession();
-        if (!session || !query) return [];
-        const caseSensitive = options?.caseSensitive ?? false;
-        const needle = caseSensitive ? query : query.toLowerCase();
-        const limit = options?.limit ?? 20;
-        const results: ReturnType<DocxEditorRef['findInDocument']> = [];
-        for (const story of bodyStoryIds(session)) {
-          for (const paragraph of session.paragraphs(story)) {
-            if (results.length >= limit) return results;
-            const haystack = caseSensitive ? paragraph.text : paragraph.text.toLowerCase();
-            const offset = haystack.indexOf(needle);
-            if (offset < 0 || haystack.indexOf(needle, offset + 1) >= 0) continue;
-            results.push({
-              paraId: paragraph.paraId,
-              match: paragraph.text.slice(offset, offset + query.length),
-              before: paragraph.text.slice(Math.max(0, offset - 40), offset),
-              after: paragraph.text.slice(offset + query.length, offset + query.length + 40),
-            });
-          }
-        }
-        return results;
+      findInDocument,
+      findParagraphs: (query, options) => {
+        const main = async (input: string, searchOptions?: typeof options) => {
+          await flushForTwin();
+          return findInDocument(input, searchOptions);
+        };
+        return proposalAuthority()?.findParagraphs(query, options, main) ?? main(query, options);
       },
 
       getSelectionInfo: () => {

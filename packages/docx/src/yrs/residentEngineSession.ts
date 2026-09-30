@@ -52,6 +52,7 @@ export type ResidentEngineSession = Pick<
   | 'residentDeletedUnits'
   | 'resumeRegionLayout'
   | 'selection'
+  | 'selectionText'
   | 'setDisplayRetainBuiltPages'
   | 'setDisplayWindow'
   | 'setSelection'
@@ -208,6 +209,10 @@ export async function createResidentEngineSession(
     residentCaretSnapshot: () =>
       JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
     selection: () => JSON.parse(session.selection()) as YrsSelection | null,
+    selectionText: (range) =>
+      JSON.parse(session.selection_text_json(
+        range.story, range.start.paraId, range.start.offset, range.end.paraId, range.end.offset
+      )) as ReturnType<YrsSession['selectionText']>,
     applyInput: (text, expectedFrameEpoch) => {
       ensureUndo();
       return session.apply_input(text, expectedFrameEpoch);

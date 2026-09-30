@@ -5,6 +5,8 @@ import {
   createResidentEngineSession,
   type ResidentEngineSession,
 } from './residentEngineSession';
+import { findParagraphs } from './findParagraphs';
+import { resolveYrsPointPosition } from './pointPosition';
 import { preloadEditWasm } from './wasm/index';
 import {
   createProposalRegistry,
@@ -353,6 +355,16 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         break;
       case 'readParagraphs':
         value = engine.readParagraphs(request.read.request);
+        break;
+      case 'findParagraphs':
+        value = findParagraphs(session.geometryReader, request.read.query, request.read);
+        break;
+      case 'pointPosition':
+        value = resolveYrsPointPosition(
+          { ...session.geometryReader, selectionText: session.selectionText },
+          request.read.hit,
+          request.read.expectVersion
+        );
         break;
       case 'navigationTarget':
         value = resolveNavigationTarget(

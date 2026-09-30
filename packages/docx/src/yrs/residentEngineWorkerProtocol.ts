@@ -4,6 +4,9 @@ import type {
   YrsResidentWorkerSnapshot,
   YrsSelection,
 } from './index';
+import type { PointPosition } from '../plugin-api';
+import type { DocxFindParagraphsOptions, DocxParagraphMatch } from './findParagraphs';
+import type { DocxResolvedPointPosition } from './pointPosition';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 import type {
@@ -43,6 +46,8 @@ export type ResidentDocumentRead =
   | { kind: 'paragraphIdentities' }
   | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
   | { kind: 'readParagraphs'; request: DocxReadParagraphsRequest }
+  | ({ kind: 'findParagraphs'; query: string } & DocxFindParagraphsOptions)
+  | { kind: 'pointPosition'; hit: PointPosition; expectVersion: string }
   | { kind: 'navigationTarget'; story: string; paraId: string };
 
 /** @internal */
@@ -50,6 +55,8 @@ export interface ResidentDocumentReadValues {
   paragraphIdentities: DocxParagraphIdentitySnapshot;
   resolveParagraphAnchors: { results: DocxParagraphAnchorResult[] };
   readParagraphs: DocxReadParagraphsResult;
+  findParagraphs: DocxParagraphMatch[];
+  pointPosition: DocxResolvedPointPosition | null;
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
 }
 
