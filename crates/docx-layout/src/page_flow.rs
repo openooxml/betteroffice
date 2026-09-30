@@ -746,7 +746,7 @@ impl Paginator {
     fn column_capacity(&self, idx: usize) -> f64 {
         let state = &self.states[idx];
         let mut top = state.content_top;
-        let mut capacity = 0.0_f64;
+        let mut capacity = f64::NEG_INFINITY;
         for band in &self.float_bands[idx] {
             if band.bottom <= top || band.top >= state.content_limit {
                 continue;
@@ -1239,6 +1239,23 @@ mod tests {
             paginator.states[idx].page_index,
             paginator.states[idx].pen_y,
         )
+    }
+
+    #[test]
+    fn an_inverted_content_area_keeps_its_negative_capacity() {
+        let mut paginator = Paginator::new(
+            Size { w: 500.0, h: 500.0 },
+            margins(96.0, 96.0),
+            columns(),
+            None,
+        )
+        .unwrap();
+        let idx = paginator.get_current();
+        let state = &mut paginator.states[idx];
+        (state.content_top, state.content_limit, state.pen_y) = (300.0, 200.0, 300.0);
+        assert_eq!(paginator.column_capacity(idx), -100.0);
+        let idx = paginator.ensure_fits(0.0);
+        assert_eq!(paginator.states[idx].page_index, 0);
     }
 
     #[test]
