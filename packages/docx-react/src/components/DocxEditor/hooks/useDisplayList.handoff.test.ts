@@ -3,7 +3,11 @@ import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
-import type { DisplayList, ImageResolver } from '@betteroffice/docx/layout/render';
+import {
+  loadRustDisplayListQueryEngine,
+  type DisplayList,
+  type ImageResolver,
+} from '@betteroffice/docx/layout/render';
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import type {
@@ -97,7 +101,16 @@ test('a session handed over keeps its worker and shows the old pages until the n
   const full = hostWithPage(9511, 'Full page');
   const handoffFrom = { current: null as YrsSession | null };
   const shown: Array<DisplayList | null> = [];
+  const warnings = spyOn(console, 'warn').mockImplementation(() => {});
   try {
+    const { preloadLayoutWasm } = await import('@betteroffice/docx/wasm/layout');
+    await preloadLayoutWasm(
+      new Uint8Array(
+        readFileSync(
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+        )
+      )
+    );
     const { result, rerender, unmount } = renderHook(
       ({ layout, source }) => {
         const hook = useRustDisplayList(
@@ -136,10 +149,38 @@ test('a session handed over keeps its worker and shows the old pages until the n
     await layOut(preview, 0);
     await waitFor(() => expect(text(result.current.displayList)).toContain('Preview'));
     const firstShown = shown.findIndex((list) => list !== null);
+    const stale = result.current.queries!;
+    await stale.whenReady();
+    stale.prime();
+    expect(stale.rangeRects(1, 2).length).toBeGreaterThan(0);
 
     handoffFrom.current = preview.engine;
     await layOut(full, 1);
     await waitFor(() => expect(text(result.current.displayList)).toContain('Full'));
+    const live = result.current.queries!;
+    await live.whenReady();
+    live.prime();
+    expect(live).not.toBe(stale);
+    expect(text(stale.displayList)).toContain('Preview');
+    expect(text(live.displayList)).toContain('Full');
+    expect(live.rangeRects(1, 2).length).toBeGreaterThan(0);
+
+    const queryEngine = await loadRustDisplayListQueryEngine();
+    const reads = [
+      spyOn(queryEngine, 'rangeRectsByHandle'),
+      spyOn(queryEngine, 'hitTestRegionsByHandle'),
+      spyOn(queryEngine, 'rangeRectsJson'),
+      spyOn(queryEngine, 'hitTestRegionsJson'),
+    ];
+    warnings.mockClear();
+    try {
+      expect(stale.rangeRects(1, 2)).toEqual([]);
+      expect(stale.hitTestRegions(0, 100, 100)).toBeNull();
+      for (const read of reads) expect(read).not.toHaveBeenCalled();
+      expect(warnings).not.toHaveBeenCalled();
+    } finally {
+      for (const read of reads) read.mockRestore();
+    }
 
     expect(FakeWorker.created).toHaveLength(1);
     const worker = FakeWorker.created[0]!;
@@ -148,8 +189,11 @@ test('a session handed over keeps its worker and shows the old pages until the n
     expect(worker.posted[0]).not.toHaveProperty('keepSurfaces');
     // No render between the two documents shows an empty page list.
     expect(shown.slice(firstShown).every((list) => list !== null)).toBe(true);
+    stale.dispose();
+    live.dispose();
     unmount();
   } finally {
+    warnings.mockRestore();
     preview.native.free();
     full.native.free();
   }
