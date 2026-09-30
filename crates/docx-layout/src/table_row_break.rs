@@ -116,7 +116,8 @@ pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> 
 /// in a whole column, which Word then breaks at any line. A floating table
 /// keeps whole-line breaks throughout.
 /// Whether row `r`'s `w:trHeight` minimum, not its cells' content, sets its
-/// measured height.
+/// measured height. A row a vertically merged cell covers can grow with that
+/// cell's content, so it keeps its line breaks.
 fn minimum_height_governs(
     block: &TableBlock,
     measure: &TableExtent,
@@ -131,6 +132,12 @@ fn minimum_height_governs(
     else {
         return false;
     };
+    if resolved
+        .iter()
+        .any(|grid| grid.row_span > 1 && grid.row_index <= r && r < grid.row_index + grid.row_span)
+    {
+        return false;
+    }
     let (mut content, mut padding) = (0.0_f64, 0.0_f64);
     for grid in resolved.iter().filter(|grid| grid.row_index == r) {
         let (Some(cell), Some(measured)) = (
@@ -139,9 +146,6 @@ fn minimum_height_governs(
         ) else {
             continue;
         };
-        if grid.row_span > 1 {
-            continue;
-        }
         content = content.max(measured.height);
         padding = padding.max(
             cell.padding
@@ -757,6 +761,15 @@ mod tests {
             let info = build_table_row_break_info(&block, &measure);
             assert_eq!(info.break_offsets[0].len() == 1, atomic, "{lines} lines");
         }
+    }
+
+    #[test]
+    fn a_minimum_height_row_a_merged_cell_covers_keeps_its_line_breaks() {
+        let (mut block, mut measure) = build_table(40, [20.0, 20.0, 760.0]);
+        block.rows[2].height = Some(60.0);
+        measure.rows[2].cells[0].height = LINE;
+        let info = build_table_row_break_info(&block, &measure);
+        assert!(info.break_offsets[2].len() > 1);
     }
 
     #[test]
