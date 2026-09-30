@@ -261,7 +261,10 @@ test('anchor and navigation reads retain the worker version and input order', as
   expect(await h.authority.resolveParagraphAnchors(anchors, unusedMain)).toEqual({
     version: 'worker-3', results,
   });
-  expect(h.worker.documentRead.mock.calls[0]![0]).toEqual({ kind: 'resolveParagraphAnchors', anchors });
+  expect(h.worker.documentRead.mock.calls[0]![0]).toEqual<{
+    kind: 'resolveParagraphAnchors';
+    anchors: typeof anchors;
+  }>({ kind: 'resolveParagraphAnchors', anchors });
   expect(await h.authority.navigationTarget('body', 'missing', () => 'unsupported')).toEqual({
     version: 'worker-3', target: 'missing-target',
   });

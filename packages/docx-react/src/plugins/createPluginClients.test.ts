@@ -372,7 +372,7 @@ describe('plugin read and navigation clients', () => {
     const stale = {
       ok: false,
       failure: { code: 'stale-version', message: 'The document changed after that version' },
-    };
+    } as const;
     expect(
       await env.clients.navigation.scrollToParagraph(target, { expectVersion: 'older' })
     ).toEqual(stale);

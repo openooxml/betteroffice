@@ -1,5 +1,5 @@
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
-import { resolveNavigationTarget, type YrsLoc, type YrsSession } from '@betteroffice/docx/yrs';
+import { resolveNavigationTarget, type YrsSession } from '@betteroffice/docx/yrs';
 import { grantsCommand, grantsEditBatch, grantsWrite } from '../../../../shared/plugin-host/grants';
 import type { InvocationRefusal, PluginInvocation } from '../../../../shared/plugin-host/runtime';
 import {
@@ -102,7 +102,7 @@ function navigationFailure(code: DocxPluginNavigationFailureCode, message: strin
 export function resolveParagraph(
   session: YrsSession,
   target: { story: string; paraId: string }
-): { loc: YrsLoc; position: number } | DocxPluginNavigationFailureCode {
+): ReturnType<typeof resolveNavigationTarget> {
   const { story, paraId } = target ?? {};
   return resolveNavigationTarget(session, story, paraId);
 }

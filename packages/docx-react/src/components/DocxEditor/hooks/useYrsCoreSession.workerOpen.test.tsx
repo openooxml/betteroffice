@@ -247,7 +247,7 @@ function useHarness(props: HarnessProps) {
     flushPendingInput: async () => {},
     syncYrsInputState: () => true,
     refreshWorkerLayout: () => relayout.current?.(),
-  } as PagedEditorRef : null;
+  } as unknown as PagedEditorRef : null;
   const ref = useRef<DocxEditorRef>(null);
   useDocxEditorRefApi({
     experimentalWorkerOpen: props.experimentalWorkerOpen,

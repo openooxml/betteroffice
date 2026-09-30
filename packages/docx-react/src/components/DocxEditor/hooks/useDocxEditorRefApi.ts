@@ -7,6 +7,7 @@ import type {
   DocxLayoutMap,
   DocxPageExportOptions,
   DocxPagedStructuredContent,
+  DocxProposalResult,
   DocxTextTarget,
   YrsInlineFormatDelta,
   YrsLoc,
