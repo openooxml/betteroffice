@@ -18,6 +18,8 @@ use typed_page::encode_page;
 #[cfg(test)]
 use typed_page::hash_page;
 
+use crate::media::MediaSources;
+
 pub const FRAME_DELTA_VERSION: u16 = 1;
 pub const FRAME_HEADER_LEN: usize = 80;
 pub const PAGE_OP_LEN: usize = 48;
@@ -165,8 +167,9 @@ pub fn encode_frame_delta(
     epochs: FrameEpochs,
     full: bool,
     next_page_id: &mut u64,
+    media: &MediaSources,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
-    encode_frame_delta_inner(list, previous, epochs, full, next_page_id, None)
+    encode_frame_delta_inner(list, previous, epochs, full, next_page_id, None, media)
 }
 
 /// Incremental encoder that fully prepares only display-rebuilt pages. Clean
@@ -179,6 +182,7 @@ pub fn encode_frame_delta_incremental(
     epochs: FrameEpochs,
     next_page_id: &mut u64,
     rebuilt_pages: &HashSet<usize>,
+    media: &MediaSources,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
     encode_frame_delta_inner(
         list,
@@ -187,6 +191,7 @@ pub fn encode_frame_delta_incremental(
         false,
         next_page_id,
         Some(&|index| rebuilt_pages.contains(&index)),
+        media,
     )
 }
 
@@ -200,6 +205,7 @@ pub fn encode_frame_delta_pages(
     epochs: FrameEpochs,
     next_page_id: &mut u64,
     rebuilt: &dyn Fn(usize) -> bool,
+    media: &MediaSources,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
     let mut data = FrameData::default();
     let prepared = prepare_pages(
@@ -210,8 +216,9 @@ pub fn encode_frame_delta_pages(
         false,
         false,
         &mut data,
+        media,
     )?;
-    encode_prepared(list, previous, epochs, false, prepared, data)
+    encode_prepared(list, previous, epochs, false, prepared, data, media)
 }
 
 fn encode_frame_delta_inner(
@@ -221,6 +228,7 @@ fn encode_frame_delta_inner(
     full: bool,
     next_page_id: &mut u64,
     rebuilt_pages: Option<&dyn Fn(usize) -> bool>,
+    media: &MediaSources,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
     let mut data = FrameData::default();
     let prepared = prepare_pages(
@@ -231,8 +239,9 @@ fn encode_frame_delta_inner(
         true,
         full,
         &mut data,
+        media,
     )?;
-    encode_prepared(list, previous, epochs, full, prepared, data)
+    encode_prepared(list, previous, epochs, full, prepared, data, media)
 }
 
 fn encode_prepared(
@@ -242,6 +251,7 @@ fn encode_prepared(
     full: bool,
     prepared: Vec<PreparedPage<'_>>,
     data: FrameData,
+    media: &MediaSources,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
     let mut ops = Vec::new();
     if !full {
@@ -308,6 +318,7 @@ fn encode_prepared(
                             &page.snapshot.primitive_ids,
                             &mut strings,
                             &mut out,
+                            media,
                         )?
                         .0
                     }
@@ -511,6 +522,7 @@ fn prepare_pages<'a>(
     match_anchors: bool,
     full: bool,
     data: &mut FrameData,
+    media: &MediaSources,
 ) -> Result<Vec<PreparedPage<'a>>, String> {
     let anchors = page_anchors(list);
     // Anchors are unique within one snapshot list (page_anchors suffixes an
@@ -588,8 +600,13 @@ fn prepare_pages<'a>(
         let (fingerprint, visual_fingerprint, primitive_ids) = if full_prepare {
             let primitive_ids: Rc<[u64]> = primitive_ids(page, page_id).into();
             let mark = (data.out.len(), data.strings.mark());
-            let (page_emitted, hashes) =
-                emit_page(page, &primitive_ids, &mut data.strings, &mut data.out)?;
+            let (page_emitted, hashes) = emit_page(
+                page,
+                &primitive_ids,
+                &mut data.strings,
+                &mut data.out,
+                media,
+            )?;
             emitted = Some((page_emitted, mark));
             (hashes.fingerprint, hashes.visual_fingerprint, primitive_ids)
         } else {
@@ -643,6 +660,7 @@ fn emit_page(
     primitive_ids: &[u64],
     strings: &mut StringTable,
     out: &mut Vec<u8>,
+    media: &MediaSources,
 ) -> Result<(EmittedPage, typed_page::PageHashes), String> {
     align(out, 8);
     let primitive_ids_offset = out.len();
@@ -650,7 +668,7 @@ fn emit_page(
         write_u64(out, *id);
     }
     let payload_offset = out.len();
-    let hashes = encode_page(page, strings, out)?;
+    let hashes = encode_page(page, strings, out, media)?;
     Ok((
         EmittedPage {
             primitive_ids_offset,
@@ -1702,7 +1720,7 @@ mod tests {
 
                 let mut table = StringTable::default();
                 let mut out = Vec::new();
-                encode_page(page, &mut table, &mut out).unwrap();
+                encode_page(page, &mut table, &mut out, &MediaSources::default()).unwrap();
                 let strings = table.into_strings();
                 let mut reference_strings = BTreeSet::new();
                 collect_strings(&value, &mut reference_strings);
@@ -1733,7 +1751,15 @@ mod tests {
             base_frame_epoch: 0,
         };
         let mut next_id = 0;
-        let (_, snapshot) = encode_frame_delta(&before, &[], epochs, true, &mut next_id).unwrap();
+        let (_, snapshot) = encode_frame_delta(
+            &before,
+            &[],
+            epochs,
+            true,
+            &mut next_id,
+            &MediaSources::default(),
+        )
+        .unwrap();
         let (bytes, _) = encode_frame_delta(
             &after,
             &snapshot,
@@ -1744,6 +1770,7 @@ mod tests {
             },
             false,
             &mut next_id,
+            &MediaSources::default(),
         )
         .unwrap();
         assert_eq!(bytes[FRAME_HEADER_LEN], PAGE_OP_UPSERT);
@@ -1779,7 +1806,7 @@ mod tests {
         let page = &list.pages[0];
         let mut table = StringTable::default();
         let mut out = Vec::new();
-        encode_page(page, &mut table, &mut out).unwrap();
+        encode_page(page, &mut table, &mut out, &MediaSources::default()).unwrap();
         let strings = table.into_strings();
         let mut cursor = 0;
         let decoded = decode_typed(&out, &mut cursor, &strings);
@@ -1843,8 +1870,20 @@ mod tests {
         let alone = hash_page(&list.pages[1]).unwrap();
         let mut table = StringTable::default();
         let mut out = Vec::new();
-        encode_page(&list.pages[0], &mut table, &mut out).unwrap();
-        let after = encode_page(&list.pages[1], &mut table, &mut out).unwrap();
+        encode_page(
+            &list.pages[0],
+            &mut table,
+            &mut out,
+            &MediaSources::default(),
+        )
+        .unwrap();
+        let after = encode_page(
+            &list.pages[1],
+            &mut table,
+            &mut out,
+            &MediaSources::default(),
+        )
+        .unwrap();
         assert_eq!(alone.fingerprint, after.fingerprint);
         assert_eq!(alone.visual_fingerprint, after.visual_fingerprint);
     }
@@ -1906,8 +1945,15 @@ mod tests {
             base_frame_epoch: frame_epoch - 1,
         };
         let mut next_id = 0;
-        let (_, snapshot) =
-            encode_frame_delta(&before, &[], epochs(1), true, &mut next_id).unwrap();
+        let (_, snapshot) = encode_frame_delta(
+            &before,
+            &[],
+            epochs(1),
+            true,
+            &mut next_id,
+            &MediaSources::default(),
+        )
+        .unwrap();
         let delta = |rebuilt: &[usize]| {
             let mut next_id = next_id;
             encode_frame_delta_incremental(
@@ -1916,6 +1962,7 @@ mod tests {
                 epochs(2),
                 &mut next_id,
                 &rebuilt.iter().copied().collect(),
+                &MediaSources::default(),
             )
             .unwrap()
         };
@@ -1983,24 +2030,43 @@ mod tests {
             base_frame_epoch: frame_epoch - 1,
         };
         let mut next_id = 0;
-        let (_, snapshots) =
-            encode_frame_delta(&pages(&[0, 1, 2, 3, 4]), &[], epochs(1), true, &mut next_id)
-                .unwrap();
+        let (_, snapshots) = encode_frame_delta(
+            &pages(&[0, 1, 2, 3, 4]),
+            &[],
+            epochs(1),
+            true,
+            &mut next_id,
+            &MediaSources::default(),
+        )
+        .unwrap();
         let (_, snapshots) = encode_frame_delta_pages(
             &pages(&[0, 1, 2, 3, 4, 7, 8]),
             &snapshots,
             epochs(2),
             &mut next_id,
             &|index| index == 7 || index == 8,
+            &MediaSources::default(),
         )
         .unwrap();
         let built = pages(&[0, 1, 2, 3, 4, 5, 7, 8]);
-        let (_, snapshots) =
-            encode_frame_delta_pages(&built, &snapshots, epochs(3), &mut next_id, &|index| {
-                index == 5
-            })
-            .unwrap();
-        let (_, fresh) = encode_frame_delta(&built, &[], epochs(3), true, &mut 0).unwrap();
+        let (_, snapshots) = encode_frame_delta_pages(
+            &built,
+            &snapshots,
+            epochs(3),
+            &mut next_id,
+            &|index| index == 5,
+            &MediaSources::default(),
+        )
+        .unwrap();
+        let (_, fresh) = encode_frame_delta(
+            &built,
+            &[],
+            epochs(3),
+            true,
+            &mut 0,
+            &MediaSources::default(),
+        )
+        .unwrap();
         for (retained, fresh) in snapshots.iter().zip(&fresh) {
             assert_eq!(retained.page_index, fresh.page_index);
             assert_eq!(retained.fingerprint, fresh.fingerprint);
@@ -2042,15 +2108,22 @@ mod tests {
             base_frame_epoch: frame_epoch - 1,
         };
         let mut next_id = 0;
-        let (_, snapshots) =
-            encode_frame_delta(&pages(&[0, 1, 2, 3, 4]), &[], epochs(1), true, &mut next_id)
-                .unwrap();
+        let (_, snapshots) = encode_frame_delta(
+            &pages(&[0, 1, 2, 3, 4]),
+            &[],
+            epochs(1),
+            true,
+            &mut next_id,
+            &MediaSources::default(),
+        )
+        .unwrap();
         let (_, snapshots) = encode_frame_delta_pages(
             &pages(&[0, 1, 2, 3, 4, 8, 9]),
             &snapshots,
             epochs(2),
             &mut next_id,
             &|index| index == 8 || index == 9,
+            &MediaSources::default(),
         )
         .unwrap();
         let built = pages(&[0, 1, 2, 3, 4, 6, 8, 9]);
@@ -2060,9 +2133,18 @@ mod tests {
             epochs(3),
             &mut next_id,
             &HashSet::from([6]),
+            &MediaSources::default(),
         )
         .unwrap();
-        let (_, fresh) = encode_frame_delta(&built, &[], epochs(3), true, &mut 0).unwrap();
+        let (_, fresh) = encode_frame_delta(
+            &built,
+            &[],
+            epochs(3),
+            true,
+            &mut 0,
+            &MediaSources::default(),
+        )
+        .unwrap();
         for (retained, fresh) in snapshots.iter().zip(&fresh) {
             assert_eq!(retained.page_index, fresh.page_index);
             assert_eq!(retained.fingerprint, fresh.fingerprint);
@@ -2096,8 +2178,15 @@ mod tests {
             base_frame_epoch: frame_epoch - 1,
         };
         let mut next_id = 0;
-        let (_, snapshots) =
-            encode_frame_delta(&list([8, 30]), &[], epochs(1), true, &mut next_id).unwrap();
+        let (_, snapshots) = encode_frame_delta(
+            &list([8, 30]),
+            &[],
+            epochs(1),
+            true,
+            &mut next_id,
+            &MediaSources::default(),
+        )
+        .unwrap();
 
         let (unchanged, snapshots) = encode_frame_delta_incremental(
             &list([8, 30]),
@@ -2105,6 +2194,7 @@ mod tests {
             epochs(2),
             &mut next_id,
             &HashSet::new(),
+            &MediaSources::default(),
         )
         .unwrap();
         assert_eq!(u32_at(&unchanged, 52), 0);
@@ -2115,6 +2205,7 @@ mod tests {
             epochs(3),
             &mut next_id,
             &HashSet::new(),
+            &MediaSources::default(),
         )
         .unwrap();
         assert_eq!(u32_at(&moved, 52), 1);
@@ -2130,8 +2221,15 @@ mod tests {
             frame_epoch: 6,
             base_frame_epoch: 0,
         };
-        let (bytes, snapshot) =
-            encode_frame_delta(&list("hello"), &[], epochs, true, &mut next_id).unwrap();
+        let (bytes, snapshot) = encode_frame_delta(
+            &list("hello"),
+            &[],
+            epochs,
+            true,
+            &mut next_id,
+            &MediaSources::default(),
+        )
+        .unwrap();
         assert_eq!(&bytes[0..4], b"FDV1");
         assert_eq!(u32_at(&bytes, 8) as usize, bytes.len());
         assert_eq!(u32_at(&bytes, 12), FRAME_FLAG_FULL);
@@ -2160,6 +2258,7 @@ mod tests {
             },
             false,
             &mut next_id,
+            &MediaSources::default(),
         )
         .unwrap();
         assert_eq!(u32_at(&again, 12), 0);
@@ -2177,8 +2276,15 @@ mod tests {
             frame_epoch: 1,
             base_frame_epoch: 0,
         };
-        let (first, snapshot) =
-            encode_frame_delta(&list("hello"), &[], epochs, true, &mut next_id).unwrap();
+        let (first, snapshot) = encode_frame_delta(
+            &list("hello"),
+            &[],
+            epochs,
+            true,
+            &mut next_id,
+            &MediaSources::default(),
+        )
+        .unwrap();
         let first_primitive_offset = u32_at(&first, FRAME_HEADER_LEN + 28) as usize;
         let primitive_id = u64_at(&first, first_primitive_offset);
 
@@ -2193,6 +2299,7 @@ mod tests {
             },
             false,
             &mut next_id,
+            &MediaSources::default(),
         )
         .unwrap();
         assert_eq!(u32_at(&delta, 52), 1);
@@ -2213,8 +2320,15 @@ mod tests {
             frame_epoch: 1,
             base_frame_epoch: 0,
         };
-        let (_, snapshot) =
-            encode_frame_delta(&list_at_position(2), &[], epochs, true, &mut next_id).unwrap();
+        let (_, snapshot) = encode_frame_delta(
+            &list_at_position(2),
+            &[],
+            epochs,
+            true,
+            &mut next_id,
+            &MediaSources::default(),
+        )
+        .unwrap();
 
         let (delta, next) = encode_frame_delta(
             &list_at_position(12),
@@ -2227,6 +2341,7 @@ mod tests {
             },
             false,
             &mut next_id,
+            &MediaSources::default(),
         )
         .unwrap();
 
@@ -2324,10 +2439,25 @@ mod tests {
             frame_epoch,
             base_frame_epoch: frame_epoch - 1,
         };
-        let (_, snapshot) = encode_frame_delta(before, &[], epochs(1), true, &mut next_id).unwrap();
-        encode_frame_delta(after, &snapshot, epochs(2), false, &mut next_id)
-            .unwrap()
-            .0
+        let (_, snapshot) = encode_frame_delta(
+            before,
+            &[],
+            epochs(1),
+            true,
+            &mut next_id,
+            &MediaSources::default(),
+        )
+        .unwrap();
+        encode_frame_delta(
+            after,
+            &snapshot,
+            epochs(2),
+            false,
+            &mut next_id,
+            &MediaSources::default(),
+        )
+        .unwrap()
+        .0
     }
 
     #[test]
@@ -2401,6 +2531,7 @@ mod tests {
             epochs,
             true,
             &mut next_id,
+            &MediaSources::default(),
         )
         .unwrap();
 
@@ -2415,6 +2546,7 @@ mod tests {
             },
             false,
             &mut next_id,
+            &MediaSources::default(),
         )
         .unwrap();
 
@@ -2441,6 +2573,7 @@ mod tests {
             },
             true,
             &mut next_id,
+            &MediaSources::default(),
         )
         .unwrap();
 
@@ -2455,6 +2588,7 @@ mod tests {
             },
             false,
             &mut next_id,
+            &MediaSources::default(),
         )
         .unwrap();
 

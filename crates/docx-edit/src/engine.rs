@@ -98,6 +98,8 @@ struct ResidentRegionState {
     /// [`layout_options_fingerprint`] of `request_json`.
     request_fingerprint: String,
     headers_footers: Option<serde_json::Value>,
+    /// Whether the pass's emissions keep `media:{n}` tokens on the wire.
+    media_tokens: bool,
     /// Inputs retained from the last full region pass so a plain body-text
     /// edit can relayout residently. `None` when the pass was not
     /// resident-body or the document shape rules the fast path out.
@@ -246,6 +248,8 @@ struct ResidentLayoutInput {
     block_fingerprints: Vec<u64>,
     /// The doc epoch and lowering map `input` was built from.
     lowering: Option<(u64, Rc<LoweringMap>)>,
+    /// Whether the lowering environment asks for `media:{n}` tokens.
+    media_tokens: bool,
 }
 
 #[derive(Serialize)]
@@ -264,15 +268,26 @@ fn serialize_region_layout(
     layout: &Layout,
     headers_footers: Option<&serde_json::Value>,
     notes_converged: bool,
+    media: &crate::media::MediaSources,
+    media_tokens: bool,
 ) -> Result<String, String> {
-    serde_json::to_string(&RegionLayoutOutput {
+    let output = RegionLayoutOutput {
         measured: &input.measured,
         options: &input.options,
         layout,
         headers_footers,
         notes_converged,
-    })
-    .map_err(|error| format!("serialize: {error}"))
+    };
+    if media_tokens {
+        return serde_json::to_string(&output).map_err(|error| format!("serialize: {error}"));
+    }
+    let mut value = serde_json::to_value(&output).map_err(|error| format!("serialize: {error}"))?;
+    for key in ["measured", "headersFooters"] {
+        if let Some(entry) = value.get_mut(key) {
+            media.materialize_value(entry);
+        }
+    }
+    serde_json::to_string(&value).map_err(|error| format!("serialize: {error}"))
 }
 
 fn reservation_options(reserved: &OrderedMap<u32, f64>) -> Option<BTreeMap<String, f64>> {
@@ -890,6 +905,8 @@ fn extend_input_for_header_footer(
 #[derive(Debug, Default)]
 struct PaginationState {
     input: Option<LayoutInput>,
+    /// Whether the wire emissions of `input` keep `media:{n}` tokens.
+    media_tokens: bool,
     /// Fingerprint of the measurement config that produced the retained
     /// `input` arena; the region path only reuses extents measured under an
     /// identical config.
@@ -925,6 +942,8 @@ struct PaginationState {
 #[derive(Debug, Default)]
 struct DisplayState {
     list: Option<DisplayList>,
+    /// Whether `list`'s media sources reach the wire as `media:{n}` tokens.
+    media_tokens: bool,
     resident_input: Option<docx_layout::display_list::ResidentDisplayInput>,
     frame_epoch: u64,
     display_builds: u64,
@@ -1944,11 +1963,21 @@ impl EngineSession {
             .stories
             .get_mut(story)
             .expect("resident story exists after lowering");
+        let media_tokens = lowered.env.media_tokens;
+        let media = lowered.media.clone();
         Ok(lowered
             .serialized_blocks
             .get_or_insert_with(|| {
-                serde_json::to_string(&lowered.blocks)
-                    .expect("LayoutBlock serialization is infallible after lowering")
+                if media_tokens {
+                    serde_json::to_string(&lowered.blocks)
+                        .expect("LayoutBlock serialization is infallible after lowering")
+                } else {
+                    let mut value = serde_json::to_value(&lowered.blocks)
+                        .expect("LayoutBlock serialization is infallible after lowering");
+                    media.materialize_value(&mut value);
+                    serde_json::to_string(&value)
+                        .expect("LayoutBlock serialization is infallible after lowering")
+                }
             })
             .clone())
     }
@@ -2236,6 +2265,8 @@ impl EngineSession {
                 .expect("layout retained after successful pagination"),
             state.headers_footers.as_ref(),
             notes_converged,
+            &self.doc.media_sources(),
+            state.media_tokens,
         )
     }
 
@@ -2259,14 +2290,23 @@ impl EngineSession {
     /// The retained region layout's `headersFooters`, serialized as its
     /// retained reply carries them.
     pub fn retained_headers_footers_json(&self) -> Result<Option<String>, String> {
-        self.regions
-            .borrow()
-            .as_ref()
-            .and_then(|state| state.headers_footers.as_ref())
-            .map(|value| {
-                serde_json::to_string(value).map_err(|error| format!("serialize: {error}"))
-            })
-            .transpose()
+        let regions = self.regions.borrow();
+        let Some(state) = regions.as_ref() else {
+            return Ok(None);
+        };
+        let Some(value) = state.headers_footers.as_ref() else {
+            return Ok(None);
+        };
+        if state.media_tokens {
+            return serde_json::to_string(value)
+                .map(Some)
+                .map_err(|error| format!("serialize: {error}"));
+        }
+        let mut value = value.clone();
+        self.doc.media_sources().materialize_value(&mut value);
+        serde_json::to_string(&value)
+            .map(Some)
+            .map_err(|error| format!("serialize: {error}"))
     }
 
     /// [`Self::layout_document_with_regions_retained_json`] over only as much
@@ -2371,7 +2411,7 @@ impl EngineSession {
             #[serde(skip_serializing_if = "std::ops::Not::not")]
             provisional: bool,
         }
-        serde_json::to_string(&RetainedRegionLayoutOutput {
+        let output = RetainedRegionLayoutOutput {
             layout: pagination
                 .layout
                 .as_ref()
@@ -2379,8 +2419,16 @@ impl EngineSession {
             headers_footers: state.headers_footers.as_ref(),
             notes_converged,
             provisional: pass.provisional,
-        })
-        .map_err(|error| format!("serialize: {error}"))
+        };
+        if state.media_tokens {
+            return serde_json::to_string(&output).map_err(|error| format!("serialize: {error}"));
+        }
+        let mut value =
+            serde_json::to_value(&output).map_err(|error| format!("serialize: {error}"))?;
+        if let Some(headers_footers) = value.get_mut("headersFooters") {
+            self.doc.media_sources().materialize_value(headers_footers);
+        }
+        serde_json::to_string(&value).map_err(|error| format!("serialize: {error}"))
     }
 
     /// The retained measured arena and layout options, for a host taking the
@@ -2397,11 +2445,19 @@ impl EngineSession {
             measured: &'a [MeasuredBlock],
             options: &'a docx_layout::types::LayoutOptions,
         }
-        serde_json::to_string(&RetainedKernelInputs {
+        let output = RetainedKernelInputs {
             measured: &input.measured,
             options: &input.options,
-        })
-        .map_err(|error| format!("serialize: {error}"))
+        };
+        if pagination.media_tokens {
+            return serde_json::to_string(&output).map_err(|error| format!("serialize: {error}"));
+        }
+        let mut value =
+            serde_json::to_value(&output).map_err(|error| format!("serialize: {error}"))?;
+        if let Some(measured) = value.get_mut("measured") {
+            self.doc.media_sources().materialize_value(measured);
+        }
+        serde_json::to_string(&value).map_err(|error| format!("serialize: {error}"))
     }
 
     /// The full region pass minus the JSON envelope: pagination, note
@@ -2709,7 +2765,13 @@ impl EngineSession {
             }))
         .then(|| input.clone());
         let (mut initial_layout, mut arena) = if refs.is_empty() {
-            self.layout_document_value_with_fingerprints(input, block_fingerprints.clone())?;
+            self.layout_document_value_with_fingerprints(
+                input,
+                block_fingerprints.clone(),
+                parsed_render_env
+                    .as_ref()
+                    .is_none_or(|env| env.media_tokens),
+            )?;
             let layout = self
                 .pagination
                 .borrow_mut()
@@ -2778,7 +2840,13 @@ impl EngineSession {
             } else {
                 block_fingerprints
             };
-            self.layout_document_value_with_fingerprints(final_input, fingerprints)?;
+            self.layout_document_value_with_fingerprints(
+                final_input,
+                fingerprints,
+                parsed_render_env
+                    .as_ref()
+                    .is_none_or(|env| env.media_tokens),
+            )?;
         } else {
             self.pagination.borrow_mut().layout = Some(stabilized.layout);
         }
@@ -2834,6 +2902,9 @@ impl EngineSession {
             request_json: input_json,
             request_fingerprint,
             headers_footers,
+            media_tokens: parsed_render_env
+                .as_ref()
+                .is_none_or(|env| env.media_tokens),
             fast_path: regional.map(|(regional, render_env)| RegionFastPathState {
                 regions: Rc::new(regions),
                 measurement: Rc::new(measurement),
@@ -3108,7 +3179,7 @@ impl EngineSession {
     /// and `apply_input`.
     fn layout_document_value(&self, input: LayoutInput) -> Result<(), String> {
         let block_fingerprints = measured_fingerprints(&input)?;
-        self.layout_document_value_with_fingerprints(input, block_fingerprints)
+        self.layout_document_value_with_fingerprints(input, block_fingerprints, true)
     }
 
     /// Paginate a resident measured arena whose clean block fingerprints were
@@ -3118,6 +3189,7 @@ impl EngineSession {
         &self,
         mut input: LayoutInput,
         mut block_fingerprints: Vec<u64>,
+        media_tokens: bool,
     ) -> Result<(), String> {
         if block_fingerprints.len() != input.measured.len() {
             return Err("resident pagination fingerprints do not match measured blocks".to_owned());
@@ -3193,6 +3265,7 @@ impl EngineSession {
         } = run;
         let mut pagination = self.pagination.borrow_mut();
         pagination.input = Some(input);
+        pagination.media_tokens = media_tokens;
         pagination.measured_with = None;
         pagination.lowered_from = None;
         pagination.input_lowering = None;
@@ -3301,6 +3374,7 @@ impl EngineSession {
                 },
             )?;
             resident.lowering = Some(lowering);
+            resident.media_tokens = env.media_tokens;
             Ok(resident)
         })
         .map_err(|error| error.to_string())?
@@ -3462,6 +3536,7 @@ impl EngineSession {
             },
             block_fingerprints,
             lowering: None,
+            media_tokens: false,
         })
     }
 
@@ -3736,7 +3811,11 @@ impl EngineSession {
             return self.build_display_list_frame(&extras, expected_frame_epoch);
         }
         let resident = self.resident_layout_input(story)?;
-        self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
+        self.layout_document_value_with_fingerprints(
+            resident.input,
+            resident.block_fingerprints,
+            resident.media_tokens,
+        )?;
         self.pagination.borrow_mut().input_lowering = resident.lowering;
         let extras = self
             .display
@@ -3866,6 +3945,7 @@ impl EngineSession {
                     ) {
                         Ok(mut resident) => {
                             resident.lowering = Some(lowering);
+                            resident.media_tokens = env.media_tokens;
                             Ok(Some((resident, previous_pages, widths)))
                         }
                         Err(_) => Ok(None),
@@ -3879,7 +3959,11 @@ impl EngineSession {
         };
         phase(RegionResidentPhase::Measured);
         let previous_capture = self.capture.borrow_mut().take();
-        self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
+        self.layout_document_value_with_fingerprints(
+            resident.input,
+            resident.block_fingerprints,
+            resident.media_tokens,
+        )?;
         let mut pagination = self.pagination.borrow_mut();
         pagination.input_lowering = resident.lowering;
         // The fast path measures through the region config too, so its
@@ -3916,16 +4000,24 @@ impl EngineSession {
         let fields = value
             .as_object_mut()
             .ok_or_else(|| "resident display extras must be an object".to_owned())?;
-        let headers_footers = self
-            .regions
-            .borrow()
+        let regions_state = self.regions.borrow();
+        let headers_footers = regions_state
             .as_ref()
             .and_then(|state| state.headers_footers.clone());
-        let shown = if let Some(headers_footers) = headers_footers {
+        let shown = if let Some(mut headers_footers) = headers_footers {
+            if !regions_state
+                .as_ref()
+                .is_some_and(|state| state.media_tokens)
+            {
+                self.doc
+                    .media_sources()
+                    .materialize_value(&mut headers_footers);
+            }
             fields.insert("headersFooters".to_owned(), headers_footers)
         } else {
             fields.remove("headersFooters")
         };
+        drop(regions_state);
         let rebuilt = serde_json::to_string(&value)
             .map_err(|error| format!("serialize display extras: {error}"))?;
         if rebuilt == extras {
@@ -3991,6 +4083,7 @@ impl EngineSession {
             self.layout_document_value_with_fingerprints(
                 resident.input,
                 resident.block_fingerprints,
+                resident.media_tokens,
             )?;
             self.pagination.borrow_mut().input_lowering = resident.lowering;
             let finished = now();
@@ -4032,6 +4125,7 @@ impl EngineSession {
             serde_json::to_string(&list).map_err(|error| format!("serialize: {error}"))?;
         let mut display = self.display.borrow_mut();
         display.list = Some(list);
+        display.media_tokens = true;
         display.resident_input = None;
         display.frame_epoch = display.frame_epoch.wrapping_add(1);
         display.display_builds = display.display_builds.wrapping_add(1);
@@ -4067,6 +4161,7 @@ impl EngineSession {
                 .layout
                 .as_ref()
                 .ok_or_else(|| "resident layout is not built".to_owned())?;
+            let media_tokens = pagination.media_tokens;
             let mut display = self.display.borrow_mut();
             let caret = if display.windowed_incremental_builds && display.window.is_some() {
                 self.resident_caret_head
@@ -4162,6 +4257,7 @@ impl EngineSession {
                         )?;
                     display.resident_input = Some(resident_input);
                     display.list = Some(list);
+                    display.media_tokens = media_tokens;
                 }
                 let rebuilt_display_pages = if incremental {
                     rebuilt_pages
@@ -4184,6 +4280,7 @@ impl EngineSession {
                     )?;
                 display.resident_input = Some(resident_input);
                 display.list = Some(list);
+                display.media_tokens = media_tokens;
                 (false, layout.pages.len(), HashSet::new())
             }
         };
@@ -4212,6 +4309,11 @@ impl EngineSession {
         // Split borrows: the encoder reads the retained list and the previous
         // snapshots in place — no per-frame deep clone of the snapshot set.
         let display = &mut *display;
+        let media = if display.media_tokens {
+            crate::media::MediaSources::default()
+        } else {
+            self.doc.media_sources()
+        };
         let previous_pages = &display.pages;
         let list = display
             .list
@@ -4231,9 +4333,17 @@ impl EngineSession {
                     epochs,
                     &mut next_page_id,
                     &rebuilt_pages,
+                    &media,
                 )?
             } else {
-                encode_frame_delta(list, previous_pages, epochs, full, &mut next_page_id)?
+                encode_frame_delta(
+                    list,
+                    previous_pages,
+                    epochs,
+                    full,
+                    &mut next_page_id,
+                    &media,
+                )?
             };
         display.pages = pages;
         display.next_page_id = next_page_id;
@@ -4311,16 +4421,33 @@ impl EngineSession {
         };
         let mut next_page_id = display.next_page_id;
         let display = &mut *display;
+        let media = if display.media_tokens {
+            crate::media::MediaSources::default()
+        } else {
+            self.doc.media_sources()
+        };
         let list = display
             .list
             .as_ref()
             .expect("display list built before FrameDelta encoding");
         let (bytes, snapshots) = if !full && display.pages.len() == list.pages.len() {
-            encode_frame_delta_pages(list, &display.pages, epochs, &mut next_page_id, &|index| {
-                rebuilt.contains(&index)
-            })?
+            encode_frame_delta_pages(
+                list,
+                &display.pages,
+                epochs,
+                &mut next_page_id,
+                &|index| rebuilt.contains(&index),
+                &media,
+            )?
         } else {
-            encode_frame_delta(list, &display.pages, epochs, full, &mut next_page_id)?
+            encode_frame_delta(
+                list,
+                &display.pages,
+                epochs,
+                full,
+                &mut next_page_id,
+                &media,
+            )?
         };
         display.pages = snapshots;
         display.next_page_id = next_page_id;
@@ -5059,7 +5186,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            first, expected,
+            first.parse::<serde_json::Value>().unwrap(),
+            expected.parse::<serde_json::Value>().unwrap(),
             "resident output must match the uncached lowering"
         );
         let second = engine.lower_story_json("body", &env).unwrap();
@@ -5645,6 +5773,8 @@ mod tests {
                 pagination.layout.as_ref().unwrap(),
                 regions_state.as_ref().unwrap().headers_footers.as_ref(),
                 true,
+                &engine.doc.media_sources(),
+                regions_state.as_ref().unwrap().media_tokens,
             )
             .unwrap()
         };
@@ -7495,6 +7625,8 @@ mod tests {
                 pagination.layout.as_ref().unwrap(),
                 regions_state.as_ref().unwrap().headers_footers.as_ref(),
                 true,
+                &engine.doc.media_sources(),
+                regions_state.as_ref().unwrap().media_tokens,
             )
             .unwrap()
         };
