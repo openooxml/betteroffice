@@ -48,7 +48,6 @@ const MAGIC: [u8; 4] = *b"FDV1";
 const MAX_U32: usize = u32::MAX as usize;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-const MIX_MULTIPLIER: u64 = 0x9e37_79b9_7f4a_7c15;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FramePageSnapshot {
@@ -1376,11 +1375,15 @@ fn hash_visual_page_value(value: &Value) -> u64 {
     hash
 }
 
-/// One step of the page fingerprints. For a fixed `word` it is a bijection
-/// of `state`, so changing any single word changes the result.
+/// One step of the page fingerprints: the SplitMix64 finalizer over
+/// `state ^ word`. For a fixed `word` it is a bijection of `state`, so changing
+/// any single word changes the result, and its avalanche keeps a change in one
+/// word from being cancelled by a change in the next.
 fn mix(state: u64, word: u64) -> u64 {
-    let state = (state ^ word).wrapping_mul(MIX_MULTIPLIER);
-    state ^ (state >> 32)
+    let mut state = state ^ word;
+    state = (state ^ (state >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    state = (state ^ (state >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    state ^ (state >> 31)
 }
 
 fn string_hash(value: &str) -> u64 {
@@ -1854,6 +1857,22 @@ mod tests {
         let moved: DisplayList = serde_json::from_value(value).unwrap();
         let before = hash_page(&list.pages[0]).unwrap();
         let after = hash_page(&moved.pages[0]).unwrap();
+        assert_ne!(before.fingerprint, after.fingerprint);
+        assert_ne!(before.visual_fingerprint, after.visual_fingerprint);
+    }
+
+    #[test]
+    fn a_glyph_change_spread_over_two_coordinates_changes_both_fingerprints() {
+        let glyph_at = |x: f64, y: f64| {
+            let mut value = serde_json::to_value(rich_list()).unwrap();
+            let glyph = &mut value["pages"][0]["primitives"][0]["glyphs"][1];
+            glyph["x"] = serde_json::json!(x);
+            glyph["y"] = serde_json::json!(y);
+            let list: DisplayList = serde_json::from_value(value).unwrap();
+            hash_page(&list.pages[0]).unwrap()
+        };
+        let before = glyph_at(1.0, 1.0);
+        let after = glyph_at(-1.0, f64::from_bits(0xbff0_0000_8000_0000));
         assert_ne!(before.fingerprint, after.fingerprint);
         assert_ne!(before.visual_fingerprint, after.visual_fingerprint);
     }
