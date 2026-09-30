@@ -9,8 +9,18 @@ import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerRequestWithoutId,
   ResidentEngineWorkerResponse,
+  ResidentProposalOperation,
+  ResidentProposalOutcome,
 } from './residentEngineWorkerProtocol';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
+
+/** @internal */
+export interface ResidentProposalReply {
+  outcome: ResidentProposalOutcome;
+  version: string;
+  updates: Uint8Array[];
+  changedStories: string[];
+}
 
 export interface ResidentEngineWorkerFrame {
   frame: Uint8Array;
@@ -285,6 +295,28 @@ export class ResidentEngineWorkerClient {
       throw new ResidentWorkerFailureError('Resident engine worker omitted the font requirements');
     }
     return response.requirementsJson;
+  }
+
+  /** @internal */
+  async executeProposal(operation: ResidentProposalOperation): Promise<ResidentProposalReply> {
+    if (!this.bootstrapped) {
+      throw new ResidentWorkerFailureError('Resident engine worker has not laid out its document');
+    }
+    const response = await this.request({ type: 'executeProposal', operation });
+    if (
+      response.outcome === undefined ||
+      response.version === undefined ||
+      response.updates === undefined ||
+      response.changedStories === undefined
+    ) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted the proposal result');
+    }
+    return {
+      outcome: response.outcome,
+      version: response.version,
+      updates: response.updates.map((update) => new Uint8Array(update)),
+      changedStories: response.changedStories,
+    };
   }
 
   /** The worker's whole document state as one yrs v1 update. */

@@ -92,7 +92,8 @@ test.each([false, true])(
       preview.insertText({ story: 'body', paraId: paragraph.paraId, offset: 0 }, 'x')
     ).toThrow(/display-only/);
 
-    expect(workerOpens).toBe(0);
+    // The worker opens the full document while the preview paints.
+    await waitFor(() => expect(workerOpens).toBe(workerOpen ? 1 : 0));
     expect(mainOpens).toEqual([]);
     const requestFrame = globalThis.requestAnimationFrame;
     const frames: FrameRequestCallback[] = [];
@@ -101,11 +102,11 @@ test.each([false, true])(
       await act(async () => {
         result.current.notifyFramePresented(preview);
       });
-      expect(workerOpens).toBe(0);
+      expect(workerOpens).toBe(workerOpen ? 1 : 0);
       expect(mainOpens).toEqual([]);
       expect(frames).toHaveLength(1);
       act(() => frames.shift()!(performance.now()));
-      expect(workerOpens).toBe(0);
+      expect(workerOpens).toBe(workerOpen ? 1 : 0);
       expect(mainOpens).toEqual([]);
       act(() => frames.shift()!(performance.now()));
     } finally {

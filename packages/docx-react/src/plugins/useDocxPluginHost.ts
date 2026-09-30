@@ -23,7 +23,11 @@ import type { RenderedDomContext } from '@betteroffice/docx/plugin-api';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import type { DocxCommandController } from '../commands/createDocxCommandStore';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
-import { isPresented, sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
+import {
+  isPresented,
+  onPresented,
+  sourceVersionOf,
+} from '../components/DocxEditor/internals/layoutProvenance';
 import { displayWindowOf } from '../components/DocxEditor/internals/displayWindow';
 import { resolvePointPosition } from '../components/DocxEditor/internals/pointPosition';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
@@ -78,6 +82,8 @@ export interface DocxPluginHostBinding {
   sidebarItems: ReactSidebarItem[];
   /** The editor's own rendered-DOM context. */
   renderedDomContext: RenderedDomContext | null;
+  /** The geometry overlays draw with while the host's own layout is behind or not yet built. */
+  heldGeometry: DocxPluginGeometry | null;
   overlayLayerRef: (element: HTMLDivElement | null) => void;
   /** Receives each rendered-DOM context the paged editor builds. */
   onRenderedDomContext(context: RenderedDomContext, queries: DisplayListQueries): void;
@@ -101,6 +107,13 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   const translateRef = useRef(translate);
   translateRef.current = translate;
   const geometryRef = useRef<DocxPluginGeometry | null>(null);
+  const adoptedRef = useRef<{ session: YrsSession; geometry: DocxPluginGeometry } | null>(null);
+  const queriesCurrentRef = useRef(false);
+  const heldCandidate = (): DocxPluginGeometry | null => {
+    const held = adoptedRef.current;
+    const { session, layoutError } = latest.current;
+    return held && held.session === session && !layoutError ? held.geometry : null;
+  };
   const layoutRef = useRef<DocxPluginLayout | null>(null);
   const formattingRef = useRef<SelectionState | null>(null);
   const layoutListeners = useRef(new Set<() => void>());
@@ -287,45 +300,67 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   const currentLayout = layoutStable.current;
   layoutRef.current = currentLayout;
 
-  const geometry = useMemo(
-    () =>
-      currentLayout && dom && dom.queries === options.queries && layer
-        ? createPluginGeometry(
-            currentLayout,
-            dom.context,
-            layer,
-            () =>
-              host.layoutId() === currentLayout.id &&
-              host.previewVersion() === currentLayout.previewVersion &&
-              latest.current.zoom === currentLayout.zoom &&
-              domRef.current === dom &&
-              dom.context.pagesContainer.isConnected,
-            (hit) =>
-              resolvePointPosition(
-                latest.current.pagedEditorRef.current,
-                hit,
-                dom.context.pagesContainer,
-                dom.queries
-              ),
-            dom.queries,
-            () => {
-              const editor = latest.current.pagedEditorRef.current;
-              const session = editor?.getYrsSession();
-              return editor && session
-                ? {
-                    session,
-                    editor,
-                    presented: isPresented(dom.context.pagesContainer, dom.queries.displayList),
-                  }
-                : null;
+  const geometry = useMemo(() => {
+    if (!currentLayout || !dom || dom.queries !== options.queries || !layer) return null;
+    const shownList = dom.queries.displayList;
+    const created: DocxPluginGeometry = createPluginGeometry(
+      currentLayout,
+      dom.context,
+      layer,
+      () =>
+        host.layoutId() === currentLayout.id &&
+        host.previewVersion() === currentLayout.previewVersion &&
+        latest.current.zoom === currentLayout.zoom &&
+        domRef.current === dom &&
+        dom.context.pagesContainer.isConnected,
+      (hit) =>
+        resolvePointPosition(
+          latest.current.pagedEditorRef.current,
+          hit,
+          dom.context.pagesContainer,
+          dom.queries
+        ),
+      dom.queries,
+      () => {
+        const editor = latest.current.pagedEditorRef.current;
+        const session = editor?.getYrsSession();
+        return editor && session
+          ? {
+              session,
+              editor,
+              presented: isPresented(dom.context.pagesContainer, dom.queries.displayList),
             }
-          )
-        : null,
+          : null;
+      },
+      () =>
+        heldCandidate() === created &&
+        latest.current.zoom === currentLayout.zoom &&
+        dom.context.pagesContainer.isConnected &&
+        (isPresented(dom.context.pagesContainer, shownList) || queriesCurrentRef.current)
+    );
+    return created;
     // `moved` rebuilds the geometry when its elements move without a new frame.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [host, currentLayout, dom, options.queries, layer, moved]
-  );
+  }, [host, currentLayout, dom, options.queries, layer, moved]);
   geometryRef.current = geometry;
+  // Overlays keep the geometry the host last adopted until geometry for its next layout exists.
+  const adopted = geometry && host.layoutId() === geometry.layout.id ? geometry : null;
+  const heldGeometry = adopted ?? heldCandidate();
+  useLayoutEffect(() => {
+    if (adopted && options.session) {
+      adoptedRef.current = { session: options.session, geometry: adopted };
+    } else if (!managed || !heldCandidate()) {
+      adoptedRef.current = null;
+    }
+    // Pages that show a layout of the current version get its geometry next.
+    queriesCurrentRef.current = layout !== null;
+  });
+  // A frame painted during the hold may retire the held geometry.
+  const holding = !adopted && heldGeometry !== null;
+  useEffect(() => {
+    if (!holding) return;
+    return onPresented(() => host.geometryChanged());
+  }, [host, holding]);
 
   useEffect(() => {
     host.layoutChanged(currentLayout);
@@ -399,6 +434,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     activations: managed ? activations : NO_ACTIVATIONS,
     sidebarItems,
     renderedDomContext: dom?.context ?? null,
+    heldGeometry,
     overlayLayerRef: setLayer,
     onRenderedDomContext,
     beginLoad,

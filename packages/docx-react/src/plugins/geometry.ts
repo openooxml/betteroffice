@@ -148,7 +148,11 @@ function lastInReadingOrder(rects: readonly DisplayListRect[]): DisplayListRect 
   return last && { ...last, x: last.x + last.width, width: 0 };
 }
 
-/** Geometry of the current frame; visible unbuilt pages wait for exact content. */
+/**
+ * Geometry of the current frame; visible unbuilt pages wait for exact content. While `held`,
+ * overlays still draw this layout until geometry for the next one exists, so `toOverlayRect`
+ * answers; hit tests and anchors wait for the new layout.
+ */
 export function createPluginGeometry(
   layout: DocxPluginLayout,
   dom: RenderedDomContext,
@@ -156,7 +160,8 @@ export function createPluginGeometry(
   current: () => boolean,
   resolve: (hit: PointPosition | null) => DocxPointPosition | null,
   queries: DisplayListQueries,
-  access: () => AnchorGeometryAccess | null
+  access: () => AnchorGeometryAccess | null,
+  held: () => boolean = () => false
 ): DocxPluginGeometry {
   const shown = () => dom.zoom === layout.zoom && current();
   const projector = createCanvasHostProjector(dom.pagesContainer, queries, dom.zoom);
@@ -222,7 +227,9 @@ export function createPluginGeometry(
     layout,
     dom,
     toOverlayRect: (rect) =>
-      shown() ? toOverlayRect(dom.pagesContainer, layer, dom.zoom, rect) : null,
+      shown() || (dom.zoom === layout.zoom && held())
+        ? toOverlayRect(dom.pagesContainer, layer, dom.zoom, rect)
+        : null,
     getPositionAtPoint(clientX, clientY) {
       if (!shown()) return null;
       const position = resolve(dom.getPositionAtPoint?.(clientX, clientY) ?? null);

@@ -49,6 +49,9 @@
 //! must be minted only while serializing OOXML. A paragraph's Word `w14:paraId` is a separate
 //! binding on its pilcrow, never derived from its internal ID; see [`ParagraphIdentity`].
 
+#[cfg(test)]
+extern crate self as docx_edit;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -509,6 +512,12 @@ impl<T> EpochCache<T> {
         }
         self.entries.insert(story_id.into(), value);
     }
+}
+
+pub(crate) enum UpdateOrigin {
+    Remote,
+    Local,
+    Host,
 }
 
 /// A single yrs replica of the DOCX editing model.
@@ -1178,19 +1187,23 @@ impl EditingDoc {
     pub fn apply_update_v1(&self, bytes: &[u8]) -> EditResult<()> {
         let update = Update::decode_v1(bytes)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
-        self.integrate_update(update, false)
+        self.integrate_update(update, UpdateOrigin::Remote)
     }
 
     /// Applies an update, then repairs any paragraph identities it duplicated.
-    pub(crate) fn integrate_update(&self, update: Update, local: bool) -> EditResult<()> {
+    pub(crate) fn integrate_update(&self, update: Update, origin: UpdateOrigin) -> EditResult<()> {
         let watch = identity::IdentityWatch::new(self);
         let reanchored = comment_references::CommentWatch::new(self);
-        let result = if local {
-            self.doc
+        let result = match origin {
+            UpdateOrigin::Remote => self.doc.transact_mut().apply_update(update),
+            UpdateOrigin::Local => self
+                .doc
                 .transact_mut_with(self.client_id)
-                .apply_update(update)
-        } else {
-            self.doc.transact_mut().apply_update(update)
+                .apply_update(update),
+            UpdateOrigin::Host => self
+                .doc
+                .transact_mut_with(batch::HOST_ORIGIN)
+                .apply_update(update),
         };
         result.map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         if watch.changed() {
@@ -1244,7 +1257,14 @@ impl EditingDoc {
     pub fn apply_local_update_v1(&self, bytes: &[u8]) -> EditResult<()> {
         let update = Update::decode_v1(bytes)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
-        self.integrate_update(update, true)
+        self.integrate_update(update, UpdateOrigin::Local)
+    }
+
+    /// Integrates another replica's host batch outside local undo history.
+    pub fn apply_host_update_v1(&self, bytes: &[u8]) -> EditResult<()> {
+        let update = Update::decode_v1(bytes)
+            .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        self.integrate_update(update, UpdateOrigin::Host)
     }
 
     fn next_id(&self) -> String {
@@ -2228,6 +2248,41 @@ mod tests {
         assert_eq!(main.paragraphs("body").unwrap()[0].text, "before after");
         assert!(undo.undo());
         assert_eq!(main.paragraphs("body").unwrap()[0].text, "before");
+    }
+
+    #[test]
+    fn host_worker_update_preserves_earlier_local_undo() {
+        let main = seed("before");
+        let mut undo = main.undo_manager();
+        main.insert_text(
+            &local("main"),
+            Position::new("body", 6),
+            " local",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        let worker = EditingDoc::new(200);
+        worker
+            .apply_update_v1(&main.encode_state_as_update_v1())
+            .unwrap();
+        worker
+            .insert_text(
+                &local("worker"),
+                Position::new("body", 0),
+                "host ",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+        main.apply_host_update_v1(&worker.encode_state_as_update_v1())
+            .unwrap();
+
+        assert_eq!(
+            main.paragraphs("body").unwrap()[0].text,
+            "host before local"
+        );
+        assert!(undo.undo());
+        assert_eq!(main.paragraphs("body").unwrap()[0].text, "host before");
+        assert!(!undo.undo());
     }
 
     #[test]

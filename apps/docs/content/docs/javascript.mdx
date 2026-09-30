@@ -186,7 +186,9 @@ shows toolbar contributions with
 `useDocxCommand` and `useDocxCommandState` accept contributed ids.
 
 **Coordinates.** `context.geometry` exists only while a rendered layout shows
-the current version. `geometry.dom` (a `RenderedDomContext`) answers in
+the current version. An overlay may render during a pending layout with that and
+`context.snapshot.layout` null, its `geometry` prop then being the previous
+layout's. `geometry.dom` (a `RenderedDomContext`) answers in
 pages-container units divided by zoom, and `geometry.toOverlayRect(rect)`
 converts such a rectangle into pixels of the unscaled overlay layer, or returns
 `null` once that layout is no longer rendered. `geometry.getPositionAtPoint`

@@ -121,6 +121,25 @@ fn pages(breaks: &[(&str, &str)]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// A keepNext heading before a table needs room for the first row's smallest
+/// slice only: one line, two under widow control, the whole row when it cannot
+/// split. The heading has 1-3 lines of room above an 8-line (2-line) row.
+#[test]
+fn a_heading_keeps_with_the_first_slice_of_a_table_row() {
+    for (name, heading_stays) in [
+        ("keep-next-table-row-line-fits", true),
+        ("keep-next-table-short-row-line-fits", true),
+        ("keep-next-table-row-widow-fits", true),
+        ("keep-next-table-row-widow-moves", false),
+        ("keep-next-table-row-cant-split-moves", false),
+    ] {
+        let lines = page_lines(name);
+        assert_eq!(lines.len(), 2, "{name}");
+        assert_eq!(lines[0].1 == "H", heading_stays, "{name}: {lines:?}");
+        assert_eq!(lines[1].0 == "H", !heading_stays, "{name}: {lines:?}");
+    }
+}
+
 #[test]
 fn a_heading_counts_its_space_after_once() {
     assert_eq!(
@@ -161,5 +180,14 @@ fn a_row_keeps_with_the_first_line_of_the_next_row() {
     assert_eq!(
         table_fragments("keep-next-row-first-line-fits"),
         vec![vec![(0, 2, 36.0)], vec![(1, 2, 36.0)]]
+    );
+}
+
+#[test]
+fn a_page_break_before_the_follower_leaves_the_heading_in_place() {
+    // 57 lines, a keepNext heading, then a paragraph with pageBreakBefore
+    assert_eq!(
+        page_lines("keep-next-page-break-before"),
+        pages(&[("F01", "H"), ("B", "B")])
     );
 }

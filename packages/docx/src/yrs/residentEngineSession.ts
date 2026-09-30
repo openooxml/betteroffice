@@ -9,6 +9,9 @@ import type {
   CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
+import type { DocxEditResult, DocxFindTextResult, DocxReadParagraphsResult } from './edits';
+import type { DocxParagraphAnchorResult } from './paragraphIdentity';
+import type { DocxProposalSession } from './proposals';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
 
@@ -43,8 +46,11 @@ export type ResidentEngineSession = Pick<
   | 'setDisplayRetainBuiltPages'
   | 'setDisplayWindow'
   | 'setSelection'
+  | 'storiesChangedSince'
   | 'yrsBlocksForStory'
 > & {
+  /** @internal */
+  proposalEngine: DocxProposalSession;
   /** The region layout of only as much of the body as fills `pages` pages. */
   layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
   /** Limit incremental rebuilds to the display window and caret pages. Off by default. */
@@ -89,7 +95,46 @@ export async function createResidentEngineSession(
     observing = true;
   };
 
+  const proposalEngine: DocxProposalSession = {
+    version: () => session.version(),
+    resolveParagraphAnchor: (anchor) =>
+      JSON.parse(
+        session.resolve_paragraph_anchor(JSON.stringify(anchor))
+      ) as DocxParagraphAnchorResult,
+    findText: (request) =>
+      JSON.parse(session.find_text_json(JSON.stringify(request))) as DocxFindTextResult,
+    readParagraphs: (request) =>
+      JSON.parse(session.read_paragraphs_json(JSON.stringify(request))) as DocxReadParagraphsResult,
+    applyEdits: (request) =>
+      JSON.parse(session.apply_edits_json(JSON.stringify(request))) as DocxEditResult,
+    listRevisions: () =>
+      JSON.parse(session.list_revisions()) as ReturnType<DocxProposalSession['listRevisions']>,
+    revisionStamps: (ids) =>
+      JSON.parse(session.revision_stamps_json(JSON.stringify(ids))) as ReturnType<
+        NonNullable<DocxProposalSession['revisionStamps']>
+      >,
+    settleRevisions: (accept, reject) => {
+      session.settle_revisions_json(JSON.stringify({ accept, reject }));
+    },
+    ...(typeof session.begin_shared_reads === 'function' &&
+    typeof session.end_shared_reads === 'function'
+      ? {
+          sharedReads: <R>(read: () => R): R => {
+            session.begin_shared_reads();
+            try {
+              return read();
+            } finally {
+              session.end_shared_reads();
+            }
+          },
+        }
+      : {}),
+  };
+
   return {
+    proposalEngine,
+    storiesChangedSince: (since) =>
+      JSON.parse(session.stories_changed_since(since)) as { revision: number; stories: string[] },
     openDocx: (bytes, digest, generation) =>
       resolveHostJsonCommentMedia(
         session.open_docx(bytes, true, generation, digest),

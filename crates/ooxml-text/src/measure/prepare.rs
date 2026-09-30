@@ -805,7 +805,18 @@ fn prepare_text_run(
             // Release the previous rebuilt chain before allocating the next, so
             // a run never holds two of them at once.
             oversized = Vec::new();
-            let resolved = input.chain_for(family, bold, italic)?;
+            let resolved = match input.chain_for(family, bold, italic) {
+                // Text can reach a script slot after its fonts were collected
+                // (a resident edit); it measures with the run's own family.
+                Err(_) if matches!(slot, FontSlot::EastAsia | FontSlot::Cs) => {
+                    let base = family_for_slot(run, FontSlot::HAnsi, &input.defaults.font_family);
+                    input
+                        .chain_for(base, bold, italic)
+                        .or_else(|_| input.chain_for(base, run.bold, run.italic))
+                        .or_else(|_| input.chain_for(base, false, false))?
+                }
+                resolved => resolved?,
+            };
             validate_chain(store, &resolved)?;
             if resolved.len() <= MAX_KEPT_CHAIN_IDS {
                 slot_chains[index] = Some(resolved);
