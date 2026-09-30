@@ -11,10 +11,10 @@ use crate::table_grid::{
     resolve_table_column_widths, resolve_table_width_px,
 };
 use crate::types::{
-    BlockExtent, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition, LayoutBlock,
-    ParagraphBlock, ParagraphExtent, ParagraphSpacing, Run, ShapeBlock, ShapeExtent, TableBlock,
-    TableCellExtent, TableExtent, TableRowExtent, TextBoxBlock, TextBoxExtent, TypesetBidiSlice,
-    TypesetClusterAdvance, TypesetRow, TypesetRowSegment, TypesetRunAdvance,
+    BlockExtent, BlockId, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition,
+    LayoutBlock, ParagraphBlock, ParagraphExtent, ParagraphSpacing, Run, ShapeBlock, ShapeExtent,
+    TableBlock, TableCellExtent, TableExtent, TableRowExtent, TextBoxBlock, TextBoxExtent,
+    TypesetBidiSlice, TypesetClusterAdvance, TypesetRow, TypesetRowSegment, TypesetRunAdvance,
 };
 use ooxml_text::{LineBox, LineSpacingRule, apply_spacing_rule};
 
@@ -118,9 +118,29 @@ pub fn collect_preview_font_requirements_into<'a>(
     default_family: &str,
     requirements: &mut BTreeMap<String, FontRequirement>,
 ) {
+    let blocks: Vec<&LayoutBlock> = blocks.into_iter().collect();
+    // A preview hiding the drawings that split a paragraph joins its segments.
+    let mut segment_scripts = HashMap::<String, Vec<String>>::new();
+    for block in &blocks {
+        walk_paragraphs(std::slice::from_ref(*block), &mut |paragraph| {
+            if let BlockId::Str(id) = &paragraph.id
+                && !id.is_empty()
+            {
+                let scripts = segment_scripts.entry(id.clone()).or_default();
+                for script in paragraph_scripts_with_han_fallback(paragraph, true) {
+                    if !scripts.contains(&script) {
+                        scripts.push(script);
+                    }
+                }
+            }
+        });
+    }
     for block in blocks {
         walk_paragraphs(std::slice::from_ref(block), &mut |paragraph| {
-            let scripts = paragraph_scripts_with_han_fallback(paragraph, true);
+            let scripts = match &paragraph.id {
+                BlockId::Str(id) if !id.is_empty() => segment_scripts[id].clone(),
+                _ => paragraph_scripts_with_han_fallback(paragraph, true),
+            };
             collect_paragraph_font_requirements(paragraph, &scripts, default_family, requirements);
             let Some(attrs) = &paragraph.attrs else {
                 return;

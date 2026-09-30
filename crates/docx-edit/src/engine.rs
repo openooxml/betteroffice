@@ -26,13 +26,15 @@ use docx_layout::regions::{
 };
 use docx_layout::types::{
     BlockExtent, BlockId, ColumnLayout, Input as LayoutInput, Layout, LayoutBlock, MeasuredBlock,
-    NoteAreaContract, ParagraphBlock, ParagraphExtent, Run, SectionPageMargins, ShapeBlock,
+    NoteAreaContract, ParagraphExtent, Run, SectionPageMargins,
 };
 use serde::Serialize;
 use yrs::Subscription;
 
 use crate::EditingDoc;
-use crate::bridge::{BridgeError, LoweringMap, RenderEnv, yrs_doc_to_mapped_layout_blocks};
+use crate::bridge::{
+    BridgeError, LoweringMap, RenderEnv, yrs_doc_to_mapped_layout_blocks_with_suppressed,
+};
 use crate::frame_delta::{
     FrameEpochs, FramePageSnapshot, encode_frame_delta, encode_frame_delta_incremental,
     encode_frame_delta_pages,
@@ -52,6 +54,8 @@ struct LoweredStory {
     blocks: Rc<Vec<LayoutBlock>>,
     /// Where the blocks' positions came from, recorded by the same lowering.
     map: Rc<LoweringMap>,
+    /// Cached field results the lowering suppressed, which a revision preview can reveal.
+    suppressed_field_results: Rc<Vec<LayoutBlock>>,
     /// Lazily serialized layout blocks.
     serialized_blocks: Option<String>,
 }
@@ -1136,32 +1140,6 @@ fn block_key(id: &BlockId) -> Cow<'_, str> {
     }
 }
 
-/// Whether `blocks` hold a field whose cached result lowering suppresses.
-fn holds_numeric_field(blocks: &[LayoutBlock]) -> bool {
-    fn paragraph(block: &ParagraphBlock) -> bool {
-        block.runs.iter().any(|run| {
-            matches!(run, Run::Field(field) if field
-                .instruction
-                .as_deref()
-                .is_some_and(crate::seed::numeric_field_instruction))
-        })
-    }
-    fn shape(block: &ShapeBlock) -> bool {
-        block.inner_text.iter().flatten().any(paragraph) || block.children.iter().any(shape)
-    }
-    blocks.iter().any(|block| match block {
-        LayoutBlock::Paragraph(block) => paragraph(block),
-        LayoutBlock::Table(table) => table
-            .rows
-            .iter()
-            .flat_map(|row| &row.cells)
-            .any(|cell| holds_numeric_field(&cell.blocks)),
-        LayoutBlock::TextBox(text_box) => text_box.content.iter().any(paragraph),
-        LayoutBlock::Shape(block) => shape(block),
-        _ => false,
-    })
-}
-
 fn paragraph_identity(block: &LayoutBlock) -> Option<(&BlockId, Option<f64>)> {
     match block {
         LayoutBlock::Paragraph(paragraph)
@@ -1468,7 +1446,8 @@ impl EngineSession {
         epoch: u64,
         env: &RenderEnv,
     ) -> Result<(), BridgeError> {
-        let (blocks, map) = yrs_doc_to_mapped_layout_blocks(&self.doc, story, env)?;
+        let (blocks, map, suppressed_field_results) =
+            yrs_doc_to_mapped_layout_blocks_with_suppressed(&self.doc, story, env)?;
         let mut render = self.render.borrow_mut();
         render.cache_misses = render.cache_misses.wrapping_add(1);
         render.stories.insert(
@@ -1478,6 +1457,7 @@ impl EngineSession {
                 env: env.clone(),
                 blocks: Rc::new(blocks),
                 map: Rc::new(map),
+                suppressed_field_results: Rc::new(suppressed_field_results),
                 serialized_blocks: None,
             },
         );
@@ -1714,34 +1694,34 @@ impl EngineSession {
                 format!("{prefix}:{}", content.id)
             }));
             for story in stories {
-                let numeric_fields = self
-                    .with_lowered_story(&story, &render_env, |blocks| {
-                        if cache_key.is_some() {
-                            docx_layout::measure_blocks::collect_preview_font_requirements_into(
-                                blocks,
-                                default_family,
-                                &mut requirements,
-                            );
-                            holds_numeric_field(blocks)
-                        } else {
-                            docx_layout::measure_blocks::collect_font_requirements_into(
-                                blocks,
-                                default_family,
-                                &mut requirements,
-                            );
-                            false
-                        }
-                    })
-                    .map_err(|error| error.to_string())?;
-                if numeric_fields {
-                    let suppressed = crate::bridge::yrs_doc_to_suppressed_field_result_blocks(
-                        self.doc(),
-                        &story,
-                        &render_env,
-                    )
-                    .map_err(|error| error.to_string())?;
+                self.with_lowered_story(&story, &render_env, |blocks| {
+                    if cache_key.is_some() {
+                        docx_layout::measure_blocks::collect_preview_font_requirements_into(
+                            blocks,
+                            default_family,
+                            &mut requirements,
+                        );
+                    } else {
+                        docx_layout::measure_blocks::collect_font_requirements_into(
+                            blocks,
+                            default_family,
+                            &mut requirements,
+                        );
+                    }
+                })
+                .map_err(|error| error.to_string())?;
+                if cache_key.is_some() {
+                    let suppressed = Rc::clone(
+                        &self
+                            .render
+                            .borrow()
+                            .stories
+                            .get(&story)
+                            .expect("resident story exists after lowering")
+                            .suppressed_field_results,
+                    );
                     docx_layout::measure_blocks::collect_preview_font_requirements_into(
-                        &suppressed,
+                        suppressed.iter(),
                         default_family,
                         &mut requirements,
                     );
@@ -5976,7 +5956,16 @@ mod tests {
 
     #[test]
     fn preview_font_preflight_covers_suppressed_numeric_field_results() {
-        let engine = EngineSession::new(1367);
+        assert_preview_font_preflight_covers_numeric_field_results(1367, false);
+    }
+
+    #[test]
+    fn preview_font_preflight_covers_suppressed_results_of_a_hidden_numeric_field() {
+        assert_preview_font_preflight_covers_numeric_field_results(1368, true);
+    }
+
+    fn assert_preview_font_preflight_covers_numeric_field_results(seed: u64, hidden: bool) {
+        let engine = EngineSession::new(seed);
         let cached = serde_json::json!({
             "type": "paragraph", "content": [font_preflight_run("漢", "Preview Field")]
         });
@@ -6015,13 +6004,17 @@ mod tests {
                 vec![crate::RawOp::Format {
                     index: 0,
                     len: 1,
-                    attrs: Attrs::from([(
-                        "ins".into(),
-                        Any::from_json(
-                            r#"{"id":"9","author":"Ann","date":"2026-09-29T12:00:00Z"}"#,
-                        )
-                        .unwrap(),
-                    )]),
+                    attrs: Attrs::from_iter(
+                        [(
+                            "ins".into(),
+                            Any::from_json(
+                                r#"{"id":"9","author":"Ann","date":"2026-09-29T12:00:00Z"}"#,
+                            )
+                            .unwrap(),
+                        )]
+                        .into_iter()
+                        .chain(hidden.then(|| ("hidden".into(), Any::Bool(true)))),
+                    ),
                 }],
                 &crate::EditCtx::local("", ""),
             )
@@ -6050,6 +6043,59 @@ mod tests {
         ] {
             assert!(exact.iter().any(|requirement| requirement.key == key));
         }
+    }
+
+    #[test]
+    fn preview_font_preflight_covers_segments_a_hidden_drawing_joins() {
+        let engine = EngineSession::new(1369);
+        let blocks = [serde_json::json!({
+            "type": "paragraph",
+            "content": [
+                font_preflight_run("A", "Courier New"),
+                font_preflight_run("漢", "Preview Han")
+            ]
+        })];
+        crate::seed::seed_blocks(engine.doc(), None, &[("body".to_owned(), &blocks)]).unwrap();
+        let shape = serde_json::json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200},
+            "textBody": {"content": [{
+                "paraId": "p1",
+                "content": [{"type": "run", "content": [{"type": "text", "text": "hi"}]}]
+            }]}
+        });
+        engine
+            .doc()
+            .apply_raw_ops(
+                "body",
+                vec![crate::RawOp::InsertEmbed {
+                    index: 1,
+                    kind: "shape".to_owned(),
+                    payload: vec![("shapeJson".to_owned(), Any::from(shape.to_string()))],
+                    attrs: Attrs::from([(
+                        "ins".into(),
+                        Any::from_json(
+                            r#"{"id":"7","author":"Ann","date":"2026-09-29T12:00:00Z"}"#,
+                        )
+                        .unwrap(),
+                    )]),
+                }],
+                &crate::EditCtx::local("", ""),
+            )
+            .unwrap();
+        let markup =
+            crate::bridge::yrs_doc_to_layout_blocks(engine.doc(), "body", &RenderEnv::default())
+                .unwrap();
+        assert!(matches!(markup[1], LayoutBlock::Shape(_)));
+        let exact = assert_preview_font_preflight_covers(
+            &engine,
+            "7",
+            crate::bridge::RevisionPreview::Rejected,
+        );
+        assert!(exact.iter().any(|requirement| {
+            requirement.key == "courier new|0|0"
+                && requirement.scripts.contains(&"cjk-sc".to_owned())
+        }));
     }
 
     #[test]

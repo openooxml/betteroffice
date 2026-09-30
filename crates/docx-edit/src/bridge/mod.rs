@@ -323,14 +323,15 @@ pub fn yrs_doc_to_mapped_layout_blocks(
     yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut None)
 }
 
-pub(crate) fn yrs_doc_to_suppressed_field_result_blocks(
+/// [`yrs_doc_to_mapped_layout_blocks`] plus the cached field results it suppresses.
+pub(crate) fn yrs_doc_to_mapped_layout_blocks_with_suppressed(
     doc: &EditingDoc,
     story_id: &str,
     env: &RenderEnv,
-) -> Result<Vec<LayoutBlock>, BridgeError> {
+) -> Result<(Vec<LayoutBlock>, LoweringMap, Vec<LayoutBlock>), BridgeError> {
     let mut suppressed = Some(Vec::new());
-    yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut suppressed)?;
-    Ok(suppressed.unwrap())
+    let (blocks, map) = yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut suppressed)?;
+    Ok((blocks, map, suppressed.unwrap_or_default()))
 }
 
 fn yrs_doc_to_mapped_layout_blocks_inner(
