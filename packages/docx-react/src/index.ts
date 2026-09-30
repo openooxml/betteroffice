@@ -130,6 +130,12 @@ export type {
   DocxSearchState,
 } from './components/DocxEditor/hooks/useHostSearch';
 export type {
+  DocxMemoryBudget,
+  DocxMemoryPressure,
+  DocxMemoryPressureLevel,
+  DocxMemoryStats,
+} from './components/DocxEditor/memoryStats';
+export type {
   RenderedDomContext,
   PositionCoordinates,
   PointPosition,
