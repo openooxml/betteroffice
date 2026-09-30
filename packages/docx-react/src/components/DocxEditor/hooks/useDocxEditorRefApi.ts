@@ -28,6 +28,7 @@ import type { EditorMode } from '../internals/editing-modes';
 import type { SelectionState } from '../types';
 import { readMemoryStats } from '../memoryStats';
 import { documentPageCount } from './documentPageCount';
+import type { DocxHostSearch } from './useHostSearch';
 import { awaitWorkerOpenReplica, ensureWorkerOpenReplica } from '../internals/workerOpenReplica';
 
 export const DOCX_REF_REPLICA_ACCESS = {
@@ -75,9 +76,36 @@ export const DOCX_REF_REPLICA_ACCESS = {
   findInDocument: 'sync',
   getSelectionInfo: 'sync',
   getComments: 'independent',
+  search: 'await',
+  searchNext: 'independent',
+  searchPrevious: 'independent',
+  searchGoTo: 'independent',
+  clearSearch: 'independent',
+  getSearchState: 'independent',
+  onSearchChange: 'independent',
   onContentChange: 'independent',
   onSelectionChange: 'independent',
 } as const satisfies Record<keyof DocxEditorRef, 'await' | 'sync' | 'independent' | 'commands'>;
+
+function withDeadline(ready: Promise<void>, timeoutMs: number | undefined): Promise<void> {
+  if (timeoutMs === undefined) return ready;
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error('The document did not finish rendering')),
+      timeoutMs
+    );
+    ready.then(
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
 
 function gateReplicaAccess(
   api: DocxEditorRef,
@@ -98,11 +126,26 @@ function gateReplicaAccess(
           else {
             const ready = awaitWorkerOpenReplica(session);
             if (ready) {
-              return ready.then(() => {
+              const timeoutMs =
+                key === 'whenLayoutComplete'
+                  ? (args[0] as { timeoutMs?: number } | undefined)?.timeoutMs
+                  : undefined;
+              const started = Date.now();
+              return withDeadline(ready, timeoutMs).then(() => {
                 if (pagedEditorRef.current?.getYrsSession() !== session) {
                   throw new Error('The document changed while opening the replica');
                 }
-                return Reflect.apply(call, api, args);
+                // The layout deadline covers the replica wait.
+                const rest =
+                  timeoutMs === undefined
+                    ? args
+                    : [
+                        {
+                          ...(args[0] as object),
+                          timeoutMs: Math.max(0, timeoutMs - (Date.now() - started)),
+                        },
+                      ];
+                return Reflect.apply(call, api, rest);
               });
             }
           }
@@ -278,6 +321,7 @@ export function useDocxEditorRefApi({
   settledDisplayList,
   awaitingDocument,
   experimentalWorkerOpen = false,
+  hostSearch,
 }: {
   ref: React.ForwardedRef<DocxEditorRef>;
   document: Document | null;
@@ -316,6 +360,7 @@ export function useDocxEditorRefApi({
   /** Whether a document load has not yet produced its first layout. */
   awaitingDocument?: () => boolean;
   experimentalWorkerOpen?: boolean;
+  hostSearch: DocxHostSearch;
 }) {
   const opening = (): boolean => openingRef?.current === true;
   const pagedEditorRef = useMemo<React.RefObject<PagedEditorRef | null>>(
@@ -610,6 +655,7 @@ export function useDocxEditorRefApi({
         selectionChangeSubscribersRef.current.add(listener);
         return () => selectionChangeSubscribersRef.current.delete(listener);
       },
+      ...hostSearch,
     }, pagedEditorRef, experimentalWorkerOpen),
     [
       document,
@@ -626,6 +672,7 @@ export function useDocxEditorRefApi({
       settledDisplayList,
       awaitingDocument,
       experimentalWorkerOpen,
+      hostSearch,
     ]
   );
 }

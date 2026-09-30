@@ -318,6 +318,30 @@ interface FacadeDeltaSeed {
   donor(): DisplayListQueries | null;
   /** A successor now owns this generation: never open/adopt a handle here. */
   supersede(): void;
+  /** The newest facade of this facade's line of successive layouts. */
+  lineage: FacadeLineage;
+  /** The document the line lays out, as the caller named it. */
+  line: object | null;
+  disposed(): boolean;
+}
+
+/** Shared by a facade and every facade built from it; weak, so no layout outlives its holders. */
+interface FacadeLineage {
+  newest: WeakTo<DisplayListQueries> | null;
+}
+
+type WeakTo<T> = { deref(): T | undefined };
+
+const WeakRefCtor = (globalThis as { WeakRef?: new <T extends object>(target: T) => WeakTo<T> })
+  .WeakRef;
+
+/** A native WeakRef: a wrapping closure would share a context that keeps the target alive. */
+function weakly(queries: DisplayListQueries): WeakTo<DisplayListQueries> {
+  return WeakRefCtor ? new WeakRefCtor(queries) : strongly(queries);
+}
+
+function strongly(queries: DisplayListQueries): WeakTo<DisplayListQueries> {
+  return { deref: () => queries };
 }
 
 const facadeDeltaSeeds = new WeakMap<DisplayListQueries, FacadeDeltaSeed>();
@@ -541,11 +565,16 @@ function pagesTouchingPositions(
  * facade takes over the previous parsed list and patches only the pages that
  * changed. The donor facade's remaining queries degrade to its own JSON-arg
  * path (same stale-list semantics it always had after replacement).
+ *
+ * `line` names the document the list lays out, such as its load. A facade of another
+ * document starts a new line and ends the previous one, so a facade of the
+ * replaced document never answers from the new one.
  */
 export function createDisplayListQueries(
   list: DisplayList,
   engine?: RustDisplayListQueryEngine | ResidentDisplayListQueryEngine,
-  previous?: DisplayListQueries | null
+  previous?: DisplayListQueries | null,
+  line?: object | null
 ): DisplayListQueries {
   let json: string | null = null;
   const getJson = (): string => {
@@ -590,13 +619,14 @@ export function createDisplayListQueries(
   // superseded keeps stale-closure queries on it from stealing the handle out
   // of the chain.
   let donorFacade: DisplayListQueries | null = null;
-  if (previous) {
-    const previousSeed = facadeDeltaSeeds.get(previous);
-    if (previousSeed) {
-      donorFacade = previousSeed.hasHandle() ? previous : previousSeed.donor();
-      previousSeed.supersede();
-    }
+  const previousSeed = previous ? facadeDeltaSeeds.get(previous) : undefined;
+  if (previousSeed) {
+    donorFacade = previousSeed.hasHandle() ? previous! : previousSeed.donor();
+    previousSeed.supersede();
   }
+  const sameLine = previousSeed !== undefined && previousSeed.line === (line ?? null);
+  if (previousSeed && !sameLine) previousSeed.lineage.newest = null;
+  const lineage: FacadeLineage = sameLine ? previousSeed.lineage : { newest: null };
 
   const source = (): DisplayListQuerySource | null => resident ?? eng;
 
@@ -821,6 +851,30 @@ export function createDisplayListQueries(
     }
   };
 
+  /**
+   * Where a superseded facade's queries go once its successor holds the handle:
+   * the newest live facade, so a stale caller gets the current layout instead of
+   * this whole list serialised for every call. Undefined while this facade
+   * answers itself; null when no live facade is left, which answers nothing.
+   */
+  const handedOff = (): DisplayListQueries | null | undefined => {
+    if (resident || !superseded || handle !== null) return undefined;
+    // never names this facade: the finalizer's closure context must not retain it
+    const newest = lineage.newest?.deref();
+    return newest && !facadeDeltaSeeds.get(newest)?.disposed() ? newest : null;
+  };
+
+  /** A list-only read, answered from the live facade once this one handed off its handle. */
+  const viaLive =
+    <A extends unknown[], R>(
+      local: (...args: A) => R,
+      remote: (live: DisplayListQueries, ...args: A) => R
+    ) =>
+    (...args: A): R => {
+      const live = handedOff();
+      return live ? remote(live, ...args) : local(...args);
+    };
+
   const residentQuery = (query: () => string, label: string): string | null => {
     if (isDead()) return null;
     try {
@@ -837,6 +891,8 @@ export function createDisplayListQueries(
   };
 
   const hitTestRegions = (pageIndex: number, x: number, y: number): DisplayListRegionHit | null => {
+    const live = handedOff();
+    if (live !== undefined) return live?.hitTestRegions(pageIndex, x, y) ?? null;
     if (resident) {
       return parseQuery(
         residentQuery(
@@ -858,6 +914,8 @@ export function createDisplayListQueries(
   };
 
   const rangeRects = (from: number, to: number): DisplayListRect[] => {
+    const live = handedOff();
+    if (live !== undefined) return live?.rangeRects(from, to) ?? [];
     if (resident) {
       return parseQuery(
         residentQuery(() => resident.displayRangeRectsJson(from, to), 'range_rects'),
@@ -879,6 +937,8 @@ export function createDisplayListQueries(
     direction: 'up' | 'down',
     goalX?: number
   ): DisplayListVerticalMove | null => {
+    const live = handedOff();
+    if (live !== undefined) return live?.verticalMove(position, direction, goalX) ?? null;
     const resolvedGoalX = goalX ?? Number.NaN;
     if (resident) {
       return parseQuery(
@@ -909,6 +969,15 @@ export function createDisplayListQueries(
     from: number,
     to: number
   ): DisplayListRect[] => {
+    const live = handedOff();
+    if (live !== undefined) {
+      if (!live) return [];
+      return region === 'header' || region === 'footer'
+        ? live.hfRangeRects(region, partId, from, to)
+        : region === 'footnote' || region === 'endnote'
+          ? live.noteRangeRects(region, Number(partId), from, to)
+          : [];
+    }
     if (resident) {
       return parseQuery(
         residentQuery(
@@ -1021,6 +1090,8 @@ export function createDisplayListQueries(
   };
 
   const caretRect = (pos: number): DisplayListRect | null => {
+    const live = handedOff();
+    if (live !== undefined) return live?.caretRect(pos) ?? null;
     const forward = rangeRects(pos, pos + 1);
     if (forward.length > 0) {
       // left edge of the first covered slice is the caret
@@ -1043,6 +1114,8 @@ export function createDisplayListQueries(
   };
 
   const anchorRect = (pos: number): DisplayListRect | null => {
+    const live = handedOff();
+    if (live !== undefined) return live?.anchorRect(pos) ?? null;
     // [pos, pos+2) covers both "node position + first char at pos+1" and a
     // blank paragraph's zero-length marker at pos+1
     const forward = rangeRects(pos, pos + 2);
@@ -1291,7 +1364,9 @@ export function createDisplayListQueries(
   };
 
   const queries: DisplayListQueries = {
-    displayList: list,
+    get displayList() {
+      return handedOff()?.displayList ?? list;
+    },
     isReady: () => (resident !== null || eng !== null) && sourceError === null,
     sourceState: () =>
       sourceError
@@ -1300,24 +1375,40 @@ export function createDisplayListQueries(
           ? { status: 'ready' }
           : { status: 'loading' },
     whenReady: () => readyPromise,
-    pageCount: () => list.pages.length,
+    pageCount: () => {
+      const live = handedOff();
+      return live ? live.pageCount() : list.pages.length;
+    },
     pageSize: (pageIndex: number) => {
+      const live = handedOff();
+      if (live) return live.pageSize(pageIndex);
       const page = list.pages[pageIndex];
       return page ? { width: page.width, height: page.height } : null;
     },
-    pageBounds,
-    contentBounds,
-    columnBounds,
-    paragraphRects,
-    visualLines,
-    visualLinesOnPage,
-    visualLineExtent: (pageIndex: number) => {
-      const page = list.pages[pageIndex];
-      return page ? visualLineExtent(page) : null;
+    pageBounds: (pageIndex: number) => {
+      const live = handedOff();
+      return live ? live.pageBounds(pageIndex) : pageBounds(pageIndex);
     },
-    visualLineAtPosition,
-    imageAtPoint,
-    imageByPos,
+    contentBounds: viaLive(contentBounds, (live, pageIndex) => live.contentBounds(pageIndex)),
+    columnBounds: viaLive(columnBounds, (live, pageIndex) => live.columnBounds(pageIndex)),
+    paragraphRects: viaLive(paragraphRects, (live, pos) => live.paragraphRects(pos)),
+    visualLines: viaLive(visualLines, (live) => live.visualLines()),
+    visualLinesOnPage: (pageIndex: number) => {
+      const live = handedOff();
+      return live ? live.visualLinesOnPage(pageIndex) : visualLinesOnPage(pageIndex);
+    },
+    visualLineExtent: viaLive(
+      (pageIndex: number) => {
+        const page = list.pages[pageIndex];
+        return page ? visualLineExtent(page) : null;
+      },
+      (live, pageIndex) => live.visualLineExtent(pageIndex)
+    ),
+    visualLineAtPosition: viaLive(visualLineAtPosition, (live, pos) =>
+      live.visualLineAtPosition(pos)
+    ),
+    imageAtPoint: viaLive(imageAtPoint, (live, ...args) => live.imageAtPoint(...args)),
+    imageByPos: viaLive(imageByPos, (live, ...args) => live.imageByPos(...args)),
     hitTestRegions,
     verticalMove,
     rangeRects,
@@ -1347,6 +1438,9 @@ export function createDisplayListQueries(
     supersede: () => {
       superseded = true;
     },
+    lineage,
+    line: line ?? null,
+    disposed: () => disposed,
     takeHandle: () => {
       const transferred = handle;
       if (transferred !== null) {
@@ -1358,6 +1452,7 @@ export function createDisplayListQueries(
       return transferred;
     },
   });
+  lineage.newest = weakly(queries);
 
   return queries;
 }

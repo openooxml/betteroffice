@@ -423,8 +423,11 @@ export interface PagedEditorRef {
   relayout(options?: { onHost?: boolean }): void;
   /** Scroll the visible pages to bring a display position into view. */
   scrollToPosition(position: number): void;
-  /** Scrolls a display position into view without moving focus or selection, saying why not. */
-  revealDisplayPosition(position: number): RevealPositionOutcome;
+  /**
+   * Scrolls a display position into view without moving focus or selection, saying why not.
+   * Aborting `signal` stops following the position while its page is still being built.
+   */
+  revealDisplayPosition(position: number, signal?: AbortSignal): RevealPositionOutcome;
   /**
    * Scroll to the paragraph identified by Word `w14:paraId`.
    * Pass `options.highlight` to briefly flash rendered paragraph fragments.
@@ -607,12 +610,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       (loc: YrsLoc): number | null => {
         const map = yrsCore.inputPositionMap(loc.story);
         if (!map) return null;
-        const local = yrsLocToLocalDisplayPosition(map, loc);
         const rootStory =
           loc.story === 'body' || loc.story.startsWith('body:') ? 'body' : activeYrsRootStory;
         return (
           getYrsPositionProjectionRef.current(rootStory)?.positionForLoc(loc) ??
-          (loc.story === rootStory ? local : null)
+          (loc.story === rootStory ? yrsLocToLocalDisplayPosition(map, loc) : null)
         );
       },
       [activeYrsRootStory, yrsCore.inputPositionMap]

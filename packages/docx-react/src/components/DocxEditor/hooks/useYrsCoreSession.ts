@@ -105,6 +105,8 @@ const PREVIEW_BODY_BLOCKS = 200;
 const PREVIEW_PAINT_TIMEOUT_MS = 2000;
 /** Bounds the wait for the painted preview to reach the screen; hidden tabs get no frames. */
 const PREVIEW_FRAME_WAIT_MS = 100;
+/** Bounds the wait for a worker frame to reach the screen before the replica hydrates. */
+const REPLICA_FRAME_WAIT_MS = 1000;
 /**
  * How long a preview waits for the full session, from the end of its own
  * paint. A full open that has not produced one by then fails the load; once
@@ -642,10 +644,14 @@ export function useYrsCoreSession(
       const timer = setTimeout(() => pending.start(), 0);
       return () => clearTimeout(timer);
     }
+    const bound = setTimeout(() => pending.start(), REPLICA_FRAME_WAIT_MS);
     let frameId = requestAnimationFrame(() => {
       frameId = requestAnimationFrame(() => pending.start());
     });
-    return () => cancelAnimationFrame(frameId);
+    return () => {
+      clearTimeout(bound);
+      cancelAnimationFrame(frameId);
+    };
   }, [openInWorker, session, workerOpen?.renderedFrame, previewing, handoffFrom, options?.shownEngine]);
 
   const notifyFramePresented = useCallback((engine: unknown): void => {

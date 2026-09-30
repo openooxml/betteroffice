@@ -13,6 +13,7 @@ import type { PagedEditorRef } from '../PagedEditor';
 import { createCommentIdAllocator } from '../commentFactories';
 import type { EditorMode } from '../internals/editing-modes';
 import { useDocxEditorRefApi } from './useDocxEditorRefApi';
+import type { DocxHostSearch } from './useHostSearch';
 import type { Comment } from '@betteroffice/docx/types/content';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -111,6 +112,7 @@ async function setup(options: {
   const hook = renderHook(() => {
     const ref = useRef<DocxEditorRef>(null);
     useDocxEditorRefApi({
+      hostSearch: {} as DocxHostSearch,
       ref,
       document: null,
       documentFromYrs: () => null,
