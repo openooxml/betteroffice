@@ -12,6 +12,31 @@ export function sourceVersionOf(target: object | null | undefined): string | nul
   return target ? (sourceVersions.get(target) ?? null) : null;
 }
 
+const supersededLayouts = new WeakSet<object>();
+
+/** Records that the document changed past `layout` before it was shown. */
+export function markSupersededLayout(layout: object): void {
+  supersededLayouts.add(layout);
+}
+
+/** Whether the document changed past `layout` before it was shown; such a layout never settles. */
+export function isSupersededLayout(layout: object | null | undefined): boolean {
+  return layout ? supersededLayouts.has(layout) : false;
+}
+
+const queuedLayoutSessions = new WeakSet<object>();
+
+/** Records whether a pass for `session` that waited behind a worker pass has yet to start. */
+export function markLayoutQueued(session: object, queued: boolean): void {
+  if (queued) queuedLayoutSessions.add(session);
+  else queuedLayoutSessions.delete(session);
+}
+
+/** Whether a layout pass for `session` is queued; nothing shown meanwhile settles. */
+export function isLayoutQueued(session: object | null | undefined): boolean {
+  return session ? queuedLayoutSessions.has(session) : false;
+}
+
 const revisionPreviewKeys = new WeakMap<object, string>();
 
 /** A canonical key for a revision preview; '' when nothing is previewed. */
