@@ -875,3 +875,105 @@ describe('sliced layout completion', () => {
     expect(calls).toEqual(['whole']);
   });
 });
+
+describe('resident worker opening', () => {
+  const provisional = '{"layout":{"pages":[1]},"notesConverged":true,"provisional":true}';
+  const snapshot = {
+    clientId: 1,
+    state: new Uint8Array([5]),
+    fontsRevision: 1,
+    fonts: [new Uint8Array([9])],
+    renderInputs: [],
+    measureInputs: [],
+    layoutInput: '{"request":1}',
+    layoutWithRegions: true,
+    layoutRevision: 1,
+    selection: null,
+  };
+
+  function openingWorker() {
+    const w = worker();
+    const calls: string[] = [];
+    Object.assign(w.harness.session, {
+      openDocx: (bytes: Uint8Array, digest?: string) => {
+        calls.push(`open:${bytes.join(',')}:${digest}`);
+        return '{"host":1}';
+      },
+      layoutFontRequirementsJson: (input: string) => {
+        calls.push(`requirements:${input}`);
+        return '[{"key":"a"}]';
+      },
+      loadState: () => calls.push('loadState'),
+      registerFont: () => {
+        calls.push('font');
+        return 1;
+      },
+      layoutDocumentWithRegionsPrefixRetainedJson: (input: string) => {
+        calls.push(`prefix:${input}`);
+        return provisional;
+      },
+      encodeState: () => new Uint8Array([7, 8]),
+    });
+    w.harness.delta = {
+      protocolVersion: 1,
+      full: true,
+      frameEpoch: 1,
+      baseFrameEpoch: 0,
+      docEpoch: 1,
+      layoutEpoch: 1,
+      pageCount: 0,
+      operations: [],
+      bytes: new Uint8Array(),
+    };
+    return { w, calls };
+  }
+
+  test('opens a package, lays it out without a state to load, and hands its state over', async () => {
+    const { w, calls } = openingWorker();
+    const opened = await w.send({
+      type: 'open',
+      bytes: new Uint8Array([1, 2, 3]).buffer,
+      digest: 'abc',
+    });
+    expect(opened.ok && opened.hostJson).toBe('{"host":1}');
+    expect(opened.ok && opened.stateVector).toBeDefined();
+    const requirements = await w.send({ type: 'fontRequirements', layoutInput: '{"request":1}' });
+    expect(requirements.ok && requirements.requirementsJson).toBe('[{"key":"a"}]');
+
+    const framed = await w.send({
+      type: 'bootstrap',
+      opened: true,
+      snapshot,
+      extras: '',
+      layoutExtras: '{}',
+      expectedFrameEpoch: 0,
+      provisionalPages: 3,
+    });
+    expect(framed.ok && framed.layoutProvisional).toBe(true);
+    expect(calls).toEqual([
+      'open:1,2,3:abc',
+      'requirements:{"request":1}',
+      'font',
+      'prefix:{"request":1}',
+    ]);
+
+    const state = await w.send({ type: 'encodeState' });
+    expect(state.ok && [...new Uint8Array(state.state!)]).toEqual([7, 8]);
+  });
+
+  test('a bootstrap of an opened document fails, and keeps the worker, when nothing was opened', async () => {
+    const { w, calls } = openingWorker();
+    const refused = await w.send({
+      type: 'bootstrap',
+      opened: true,
+      snapshot,
+      extras: '',
+      expectedFrameEpoch: 0,
+    });
+    expect(refused.ok).toBe(false);
+    expect(!refused.ok && refused.terminal).toBeFalsy();
+    expect(calls).toEqual([]);
+    const opened = await w.send({ type: 'open', bytes: new Uint8Array([4]).buffer });
+    expect(opened.ok).toBe(true);
+  });
+});

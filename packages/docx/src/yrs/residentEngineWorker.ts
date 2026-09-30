@@ -126,15 +126,42 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     destroySession();
     return;
   }
-  if (request.type === 'bootstrap') {
+  if (request.type === 'open') {
     destroySession();
-    // The worker is a genuine yrs peer. Reusing the main replica's client id
-    // makes a fast structural input race overlap one client's clock range and
-    // corrupt the update; a fresh id lets yrs merge queued/local operations
-    // safely while the main replica applies worker updates with local origin.
     session = await createResidentEngineSession();
+    // Seeding is the document itself, which the main replica loads as one state.
+    const hostJson = session.openDocx(
+      new Uint8Array(request.bytes),
+      request.digest,
+      request.generation
+    );
+    reply({
+      id: request.id,
+      ok: true,
+      hostJson,
+      stateVector: exactBuffer(session.encodeStateVector()),
+    });
+    return;
+  }
+  if (request.type === 'bootstrap') {
+    if (!request.opened) {
+      destroySession();
+      // The worker is a genuine yrs peer. Reusing the main replica's client id
+      // makes a fast structural input race overlap one client's clock range and
+      // corrupt the update; a fresh id lets yrs merge queued/local operations
+      // safely while the main replica applies worker updates with local origin.
+      session = await createResidentEngineSession();
+    } else if (!session) {
+      throw new Error('Resident engine worker has no opened document');
+    }
+    unsubscribe?.();
+    unsubscribe = null;
     if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
-    const { layoutJson, provisional } = hydrate(request.snapshot, request.provisionalPages);
+    const { layoutJson, provisional } = hydrate(
+      request.snapshot,
+      request.provisionalPages,
+      request.opened !== true
+    );
     if (provisional) {
       incompleteLayout = {
         layoutInput: request.snapshot.layoutInput,
@@ -160,6 +187,21 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       request.layoutExtras === undefined ? undefined : (layoutJson ?? undefined),
       provisional
     );
+    return;
+  }
+  if (request.type === 'fontRequirements') {
+    if (!session) throw new Error('Resident engine worker is not initialized');
+    reply({
+      id: request.id,
+      ok: true,
+      requirementsJson: session.layoutFontRequirementsJson(request.layoutInput),
+    });
+    return;
+  }
+  if (request.type === 'encodeState') {
+    if (!session) throw new Error('Resident engine worker is not initialized');
+    const state = exactBuffer(session.encodeState());
+    reply({ id: request.id, ok: true, state }, [state]);
     return;
   }
   if (request.type === 'eraseCaret') {
@@ -346,13 +388,14 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
  */
 function hydrate(
   snapshot: YrsResidentWorkerSnapshot,
-  provisionalPages?: number
+  provisionalPages?: number,
+  loadState = true
 ): { layoutJson: string | null; provisional: boolean } {
   if (!session) throw new Error('Resident engine worker is not initialized');
   supersedeSlicedCompletion();
   incompleteLayout = null;
   completedLayout = null;
-  session.loadState(snapshot.state);
+  if (loadState) session.loadState(snapshot.state);
   session.setPartialDocument(snapshot.partialDocument === true);
   if (snapshot.fontsRevision !== fontsRevision) {
     // A mismatched revision always carries the full font set (the client only

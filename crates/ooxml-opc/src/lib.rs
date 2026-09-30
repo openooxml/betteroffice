@@ -28,6 +28,8 @@ pub const MAX_TOTAL_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 
 /// No legitimate package carries this many parts.
 const MAX_ENTRY_COUNT: usize = 5000;
+/// The most deflate expands a byte to.
+const MAX_DEFLATE_RATIO: u64 = 1032;
 
 /// Reject absolute, drive-letter, and any `..` entry name (checked on both
 /// separators, since producers may emit backslashes).
@@ -116,7 +118,13 @@ pub fn unzip_parts_where(
 
         // read at most (budget - total) + 1 bytes: one over the limit proves a bomb
         let remaining = budget - total;
-        let mut buf = Vec::new();
+        // Sized from the declared size, which a lying header can raise only as far
+        // as deflate expands the entry's compressed bytes.
+        let declared = entry
+            .size()
+            .min(entry.compressed_size().saturating_mul(MAX_DEFLATE_RATIO))
+            .min(remaining + 1);
+        let mut buf = Vec::with_capacity(usize::try_from(declared).unwrap_or(0));
         entry
             .by_ref()
             .take(remaining + 1)
