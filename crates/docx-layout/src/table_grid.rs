@@ -512,6 +512,7 @@ fn resolve_autofit_column_widths(
         let mut cells = resolve_cell_grid(table_block);
         cells.sort_by_key(|cell| (cell.col_span, cell.column_index));
         let mut below_cell_floor = false;
+        let mut below_rigid_floor = false;
         for grid_cell in cells {
             let cell = &table_block.rows[grid_cell.row_index].cells[grid_cell.cell_index];
             let padding = cell
@@ -521,7 +522,8 @@ fn resolve_autofit_column_widths(
                     padding.left + padding.right
                 });
             let mut floor = padding + widest_inline_image(&cell.blocks).max(1.0);
-            if holds_rigid_content(&cell.blocks) {
+            let rigid = holds_rigid_content(&cell.blocks);
+            if rigid {
                 floor = floor.max(
                     cell.min_content_width
                         .or(content_widths
@@ -539,6 +541,7 @@ fn resolve_autofit_column_widths(
                 .take(grid_cell.col_span)
                 .sum();
             below_cell_floor |= cell_width < floor;
+            below_rigid_floor |= rigid && cell_width < floor;
             add_span_constraint(
                 &mut column_floors,
                 grid_cell.column_index,
@@ -546,7 +549,9 @@ fn resolve_autofit_column_widths(
                 floor,
             );
         }
-        if below_cell_floor && content_width >= column_floors.iter().sum::<f64>() {
+        if below_rigid_floor
+            || (below_cell_floor && content_width >= column_floors.iter().sum::<f64>())
+        {
             return None;
         }
         return Some(widths);
@@ -1246,9 +1251,13 @@ mod tests {
                 {"kind": "image", "src": "", "width": 200, "height": 40}
             ]}
         ]}]}]});
-        for (grid, content, minimum, other) in [
-            ([300.0, 300.0], image, 300.0, 498.35),
-            ([200.0, 400.0], nested, 200.0, 1510.16),
+        let sibling = json!([{"kind": "paragraph", "id": 3, "runs": [
+            {"kind": "image", "src": "", "width": 1, "height": 1}
+        ]}]);
+        for (grid, content, minimum, other, other_blocks) in [
+            ([300.0, 300.0], image.clone(), 300.0, 498.35, json!([])),
+            ([200.0, 400.0], nested, 200.0, 1510.16, json!([])),
+            ([300.0, 300.0], image, 300.0, 498.35, sibling),
         ] {
             let block: TableBlock = serde_json::from_value(json!({
                 "id": 0, "layoutMode": "autofit", "gridWidths": grid,
@@ -1258,7 +1267,8 @@ mod tests {
                      "minContentWidth": minimum, "maxContentWidth": minimum,
                      "preferredWidth": {"value": 0, "type": "auto"},
                      "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0}},
-                    {"id": 1, "blocks": [], "minContentWidth": other, "maxContentWidth": other,
+                    {"id": 1, "blocks": other_blocks,
+                     "minContentWidth": other, "maxContentWidth": other,
                      "preferredWidth": {"value": 0, "type": "auto"},
                      "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0}}
                 ]}]
