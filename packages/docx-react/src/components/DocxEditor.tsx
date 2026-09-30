@@ -1223,7 +1223,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       workerOpen: experimentalWorkerOpen
         ? {
             openInWorker: canvasRenderer.openInWorker,
-            renderedFrame: canvasRenderer.status === 'ready' ? canvasRenderer.displayList : null,
+            // The replica loads once the rest of a provisional layout is asked
+            // of the worker, which lays it out meanwhile.
+            renderedFrame:
+              canvasRenderer.status === 'ready' && !canvasRenderer.completionPending
+                ? canvasRenderer.displayList
+                : null,
           }
         : undefined,
       mediaTokens,
