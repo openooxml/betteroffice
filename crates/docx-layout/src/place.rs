@@ -98,6 +98,9 @@ struct ConvergenceInput<'a> {
     keep_with_next: &'a crate::keep_together::KeepWithNextScan,
     measured: &'a [MeasuredBlock],
     previous_pages: &'a [crate::types::Page],
+    /// The last dirty block looked up, with the latest resumable checkpoint
+    /// ahead of its restart.
+    resume_before: std::cell::Cell<Option<(usize, Option<usize>)>>,
 }
 
 /// Where a placement walk met the retained layout.
@@ -157,15 +160,24 @@ impl ConvergenceInput<'_> {
         let dirty = self.dirty?;
         let next_dirty =
             *dirty.get(dirty.partition_point(|&index| index < checkpoint.block_index))?;
-        let restart = restart_index(self.keep_with_next, next_dirty);
-        let end = self
-            .previous_checkpoints
-            .partition_point(|resume| resume.block_index < restart);
-        let resume = self.previous_checkpoints[..end]
-            .iter()
-            .rev()
-            .take_while(|resume| resume.page_index > previous.page_index)
-            .find(|resume| resumable(resume, self.measured, self.previous_pages))?;
+        let resume_index = match self.resume_before.get() {
+            Some((dirty_index, resume)) if dirty_index == next_dirty => resume,
+            _ => {
+                let restart = restart_index(self.keep_with_next, next_dirty);
+                let end = self
+                    .previous_checkpoints
+                    .partition_point(|resume| resume.block_index < restart);
+                let resume = self.previous_checkpoints[..end]
+                    .iter()
+                    .rposition(|resume| resumable(resume, self.measured, self.previous_pages));
+                self.resume_before.set(Some((next_dirty, resume)));
+                resume
+            }
+        };
+        let resume = &self.previous_checkpoints[resume_index?];
+        if resume.page_index <= previous.page_index {
+            return None;
+        }
         Some(Convergence::Skip {
             previous: previous.clone(),
             resume: resume.clone(),
@@ -177,7 +189,8 @@ impl ConvergenceInput<'_> {
 /// Whether placement restarted at `checkpoint` lays out what follows as the walk
 /// that recorded it did. A queued section geometry belongs to the page after the
 /// checkpoint's; a block that opened a page whose geometry differs from the page
-/// before was fitted under the earlier geometry; and a floating or anchored object
+/// before was fitted under the earlier geometry; a table's rows were fitted
+/// against the room left on the page before; and a floating or anchored object
 /// that opened its page would be placed again from its anchor's offset. The first
 /// page restarts from the document's origin instead.
 fn resumable(
@@ -202,11 +215,7 @@ fn resumable(
         && flow.pending_columns.is_none()
         && measured
             .get(checkpoint.block_index)
-            .is_some_and(|block| match &block.block {
-                LayoutBlock::Paragraph(_) => true,
-                LayoutBlock::Table(table) => table.floating.is_none(),
-                _ => false,
-            })
+            .is_some_and(|block| matches!(block.block, LayoutBlock::Paragraph(_)))
 }
 
 /// Checkpoints in placement order: by block, then by page for a block that
@@ -606,6 +615,7 @@ pub fn layout_document_incremental_ranges(
             keep_with_next: &plan.keep_with_next,
             measured: &input.measured,
             previous_pages: &previous_layout.pages,
+            resume_before: std::cell::Cell::new(None),
         };
         let placement = place(
             &input.measured,
@@ -2090,6 +2100,43 @@ mod pagination_rule_tests {
             ]
         };
         assert_incremental_matches_full(blocks(), blocks(), &[0, 5]);
+    }
+
+    #[test]
+    fn placement_does_not_resume_at_a_table_whose_row_moved_to_its_page() {
+        let lines = 8;
+        let table = json!({
+            "block": {
+                "kind": "table", "id": 90,
+                "rows": [{ "id": 91, "cells": [{ "id": 92, "blocks": [paragraph(93, lines, 20.0, json!({}))["block"]] }] }],
+                "columnWidths": [180],
+            },
+            "measure": {
+                "kind": "table", "columnWidths": [180],
+                "totalWidth": 180, "totalHeight": lines as f64 * 20.0,
+                "rows": [{ "height": lines as f64 * 20.0, "cells": [{
+                    "width": 180, "height": lines as f64 * 20.0,
+                    "blocks": [paragraph(93, lines, 20.0, json!({}))["measure"]],
+                }] }],
+            },
+        });
+        let blocks = || {
+            let mut blocks: Vec<_> = (0..24)
+                .map(|id| paragraph(id, 1, 20.0, json!({})))
+                .collect();
+            blocks.push(paragraph(24, 1, 15.0, json!({})));
+            blocks.push(table.clone());
+            blocks.push(paragraph(25, 3, 20.0, json!({})));
+            blocks
+        };
+        let full = layout_document_checkpointed(&mut input(blocks())).unwrap();
+        assert!(
+            full.checkpoints
+                .iter()
+                .any(|checkpoint| checkpoint.block_index == 25)
+        );
+        assert_incremental_matches_full(blocks(), blocks(), &[0, 26]);
+        assert_incremental_matches_full(blocks(), blocks(), &[26]);
     }
 
     #[test]
