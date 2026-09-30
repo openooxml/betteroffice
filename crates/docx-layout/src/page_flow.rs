@@ -459,22 +459,24 @@ impl Paginator {
         opens_section: bool,
         page_number: u32,
     ) {
-        let bands = self.page_float_bands(opens_section, page_number);
+        let mut bands = self.page_float_bands(opens_section, page_number);
         let height = self.page_size.h;
         let mut top = margins.top;
-        while let Some(band) = bands
-            .iter()
-            .find(|band| band.top <= top && band.bottom > top)
-        {
-            top = band.bottom;
+        bands.sort_by(|a, b| a.top.total_cmp(&b.top));
+        for band in &bands {
+            if band.top > top {
+                break;
+            }
+            top = top.max(band.bottom);
         }
         let edge = height - margins.bottom;
         let mut bottom = edge;
-        while let Some(band) = bands
-            .iter()
-            .find(|band| band.bottom >= bottom && band.top < bottom)
-        {
-            bottom = band.top;
+        bands.sort_by(|a, b| b.bottom.total_cmp(&a.bottom));
+        for band in &bands {
+            if band.bottom < bottom {
+                break;
+            }
+            bottom = bottom.min(band.top);
         }
         if top < bottom {
             margins.top = top;
@@ -1177,6 +1179,62 @@ mod tests {
         let mut folded = margins(96.0, 96.1);
         paginator.fold_edge_float_bands(&mut folded, false, 1);
         assert_eq!((folded.top, folded.bottom), (120.0, 96.1));
+    }
+
+    #[test]
+    fn folding_adjacent_bands_reaches_both_chain_ends() {
+        let mut paginator = Paginator::new(
+            Size { w: 500.0, h: 500.0 },
+            margins(96.0, 96.0),
+            columns(),
+            None,
+        )
+        .unwrap();
+        paginator.set_section_page_float_bands(vec![SectionPageFloatBands {
+            default: (0..64)
+                .flat_map(|index| {
+                    let offset = f64::from(index);
+                    [
+                        PageFloatBand {
+                            top: 96.0 + offset,
+                            bottom: 97.0 + offset,
+                            odd_page: None,
+                        },
+                        PageFloatBand {
+                            top: 403.0 - offset,
+                            bottom: 404.0 - offset,
+                            odd_page: None,
+                        },
+                    ]
+                })
+                .collect(),
+            ..Default::default()
+        }]);
+        let mut folded = margins(96.0, 96.0);
+        paginator.fold_edge_float_bands(&mut folded, false, 1);
+        assert_eq!((folded.top, folded.bottom), (160.0, 160.0));
+    }
+
+    #[test]
+    fn folding_keeps_margins_when_bands_close_the_body() {
+        let mut paginator = Paginator::new(
+            Size { w: 500.0, h: 500.0 },
+            margins(96.0, 96.0),
+            columns(),
+            None,
+        )
+        .unwrap();
+        paginator.set_section_page_float_bands(vec![SectionPageFloatBands {
+            default: vec![PageFloatBand {
+                top: 96.0,
+                bottom: 404.0,
+                odd_page: None,
+            }],
+            ..Default::default()
+        }]);
+        let mut folded = margins(96.0, 96.0);
+        paginator.fold_edge_float_bands(&mut folded, false, 1);
+        assert_eq!(folded, margins(96.0, 96.0));
     }
 
     #[test]

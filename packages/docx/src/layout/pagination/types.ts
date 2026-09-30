@@ -1620,6 +1620,12 @@ export type LayoutOptions = {
   footnoteReservedHeights?: Map<number, number>;
   /** Section break type for the body-level (final) section (for section transition logic). */
   bodyBreakType?: 'continuous' | 'nextPage' | 'evenPage' | 'oddPage' | 'nextColumn';
+  sectionPageFloatBands?: Array<{
+    default: Array<{ top: number; bottom: number; oddPage?: boolean }>;
+    first?: Array<{ top: number; bottom: number; oddPage?: boolean }>;
+    even?: Array<{ top: number; bottom: number; oddPage?: boolean }>;
+    anchorMargins?: PageMargins;
+  }>;
   /** Effective section states, indexed by section. Undefined = legacy globals. */
   sections?: Array<{
     sectionId?: string;

@@ -121,7 +121,7 @@ pub fn measure_header_footer(
     apply_contextual_spacing_blocks(&mut blocks);
     let mut detached = float_detached_top_and_bottom_images(&mut blocks);
     let mut measures = measure_blocks(&mut blocks, content_width, config)?;
-    while restore_overlapping_detached_images(&mut blocks, &measures, &mut detached, metrics) {
+    if restore_overlapping_detached_images(&mut blocks, &measures, &mut detached, metrics) {
         measures = measure_blocks(&mut blocks, content_width, config)?;
     }
     let height = measures.iter().map(extent_height).sum();
@@ -185,7 +185,25 @@ fn float_detached_top_and_bottom_images(
             }
         }
     }
+    if detached_images.len() > 16 {
+        restore_detached_images(blocks, &mut detached_images);
+    }
     detached_images
+}
+
+fn restore_detached_images(
+    blocks: &mut [LayoutBlock],
+    detached: &mut Vec<(usize, usize, Option<String>)>,
+) {
+    for (block_index, run_index, previous) in detached.drain(..) {
+        let LayoutBlock::Paragraph(paragraph) = &mut blocks[block_index] else {
+            unreachable!();
+        };
+        let Run::Image(image) = &mut paragraph.runs[run_index] else {
+            unreachable!();
+        };
+        image.display_mode = previous;
+    }
 }
 
 fn restore_overlapping_detached_images(
@@ -227,8 +245,7 @@ fn restore_overlapping_detached_images(
         HeaderFooterKind::Footer => metrics.page_size.h - distance - flow_height,
     };
     let geom = float_geometry(metrics);
-    let mut restored = false;
-    detached.retain(|(block_index, run_index, previous)| {
+    let overlaps = detached.iter().any(|(block_index, run_index, _)| {
         let LayoutBlock::Paragraph(paragraph) = &blocks[*block_index] else {
             return false;
         };
@@ -251,7 +268,7 @@ fn restore_overlapping_detached_images(
         );
         let bottom = top + image.height + image.dist_bottom.unwrap_or(0.0).max(0.0);
         let top = top - image.dist_top.unwrap_or(0.0).max(0.0);
-        let overlaps = unmeasured_text
+        unmeasured_text
             || image.rotation_bounds.is_some()
             || image.inline_shape.is_some()
             || !image.width.is_finite()
@@ -263,20 +280,12 @@ fn restore_overlapping_detached_images(
             || bounds
                 .iter()
                 .flatten()
-                .any(|&(y, end)| flow_top + y < bottom && flow_top + end > top);
-        if overlaps {
-            let LayoutBlock::Paragraph(paragraph) = &mut blocks[*block_index] else {
-                unreachable!();
-            };
-            let Run::Image(image) = &mut paragraph.runs[*run_index] else {
-                unreachable!();
-            };
-            image.display_mode.clone_from(previous);
-            restored = true;
-        }
-        !overlaps
+                .any(|&(y, end)| flow_top + y < bottom && flow_top + end > top)
     });
-    restored
+    if overlaps {
+        restore_detached_images(blocks, detached);
+    }
+    overlaps
 }
 
 pub fn resolve_header_footer_field_widths(
@@ -546,7 +555,7 @@ fn image_visual_top(
 }
 
 fn emu_to_pixels(value: f64) -> f64 {
-    (value * 96.0 / 914_400.0).round()
+    value / 914_400.0 * 96.0
 }
 
 fn float_geometry(metrics: HeaderFooterMetrics<'_>) -> crate::display_list::PageFloatGeom {
@@ -882,19 +891,23 @@ mod tests {
         header_footer_with_blocks(HeaderFooterKind::Header, blocks)
     }
 
-    fn header_footer_with_blocks(
-        kind: HeaderFooterKind,
-        blocks: Vec<serde_json::Value>,
-    ) -> (HeaderFooterVariant, Size, PageMargins) {
+    fn header_footer_measurement_config() -> MeasurementConfig {
         let font_id = crate::register_measure_font(include_bytes!(
             "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
         ))
         .unwrap();
-        let config = serde_json::from_value(json!({
+        serde_json::from_value(json!({
             "fontChains": {"liberation sans|0|0": [font_id]},
             "defaults": {"fontFamily": "Liberation Sans", "fontSize": 12}
         }))
-        .unwrap();
+        .unwrap()
+    }
+
+    fn header_footer_with_blocks(
+        kind: HeaderFooterKind,
+        blocks: Vec<serde_json::Value>,
+    ) -> (HeaderFooterVariant, Size, PageMargins) {
+        let config = header_footer_measurement_config();
         let size = Size { w: 500.0, h: 500.0 };
         let margins = PageMargins {
             top: 96.0,
@@ -921,6 +934,38 @@ mod tests {
         .unwrap()
         .unwrap();
         (variant, size, margins)
+    }
+
+    #[test]
+    fn in_front_header_image_preserves_unrounded_visual_top() {
+        let (variant, size, margins) = header_footer_with_blocks(
+            HeaderFooterKind::Header,
+            vec![json!({
+                "kind": "paragraph", "id": "anchor",
+                "attrs": {"spacing": {"line": 16, "lineRule": "exact"}},
+                "runs": [
+                    {"kind": "text", "text": "Anchor"},
+                    {"kind": "image", "src": "image", "width": 100, "height": 100,
+                     "wrapType": "inFront",
+                     "position": {"vertical": {"relativeTo": "page", "posOffset": 453390}}}
+                ]
+            })],
+        );
+        assert!((variant.visual_top + 0.4).abs() < 1e-9);
+        assert!((variant.visual_bottom - 99.6).abs() < 1e-9);
+        let serialized = serde_json::to_value(&variant).unwrap();
+        assert!((serialized["visualTop"].as_f64().unwrap() + 0.4).abs() < 1e-9);
+        assert!(
+            header_footer_float_bands(
+                &variant,
+                HeaderFooterMetrics {
+                    kind: HeaderFooterKind::Header,
+                    page_size: &size,
+                    margins: &margins,
+                },
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -1161,6 +1206,78 @@ mod tests {
         };
         assert_eq!(image.display_mode.as_deref(), Some("float"));
         assert_eq!(variant.flow_height, 32.0);
+    }
+
+    #[test]
+    fn seventeen_detached_images_keep_original_measurement() {
+        let blocks: Vec<_> = (0..17)
+            .map(|index| {
+                json!({
+                    "kind": "paragraph", "id": index,
+                    "attrs": {"spacing": {"line": 16, "lineRule": "exact"}},
+                    "runs": [
+                        {"kind": "text", "text": "Anchor"},
+                        {"kind": "image", "src": "image", "width": 20, "height": 20,
+                         "displayMode": if index % 2 == 0 { None } else { Some("block") },
+                         "wrapType": "topAndBottom", "distTop": 0, "distBottom": 0,
+                         "position": {"vertical": {"relativeTo": "page", "posOffset": 400 * 9525}}}
+                    ]
+                })
+            })
+            .collect();
+        let (variant, _, _) = header_footer_with_blocks(HeaderFooterKind::Header, blocks.clone());
+        let mut original: Vec<LayoutBlock> = serde_json::from_value(json!(blocks)).unwrap();
+        apply_contextual_spacing_blocks(&mut original);
+        let measures =
+            measure_blocks(&mut original, 308.0, &header_footer_measurement_config()).unwrap();
+        let expected: Vec<_> = original
+            .into_iter()
+            .zip(measures)
+            .map(|(block, measure)| MeasuredBlock { block, measure })
+            .collect();
+        assert_eq!(
+            serde_json::to_value(&variant.measured).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert_eq!(
+            variant.flow_height,
+            expected
+                .iter()
+                .map(|measured| extent_height(&measured.measure))
+                .sum::<f64>()
+        );
+    }
+
+    #[test]
+    fn overlapping_detached_image_restores_all_images() {
+        let (variant, _, _) = header_footer_with_blocks(
+            HeaderFooterKind::Header,
+            vec![json!({
+                "kind": "paragraph", "id": "anchor",
+                "attrs": {"spacing": {"line": 16, "lineRule": "exact"}},
+                "runs": [
+                    {"kind": "text", "text": "Anchor"},
+                    {"kind": "image", "src": "overlapping", "width": 100, "height": 100,
+                     "wrapType": "topAndBottom", "distTop": 0, "distBottom": 0,
+                     "position": {"vertical": {"relativeTo": "page", "posOffset": 48 * 9525}}},
+                    {"kind": "image", "src": "clear", "width": 20, "height": 20,
+                     "displayMode": "block", "wrapType": "topAndBottom",
+                     "distTop": 0, "distBottom": 0,
+                     "position": {"vertical": {"relativeTo": "page", "posOffset": 400 * 9525}}}
+                ]
+            })],
+        );
+        let LayoutBlock::Paragraph(paragraph) = &variant.measured[0].block else {
+            panic!("paragraph expected");
+        };
+        let Run::Image(overlapping) = &paragraph.runs[1] else {
+            panic!("image expected");
+        };
+        let Run::Image(clear) = &paragraph.runs[2] else {
+            panic!("image expected");
+        };
+        assert_eq!(overlapping.display_mode, None);
+        assert_eq!(clear.display_mode.as_deref(), Some("block"));
     }
 
     #[test]
