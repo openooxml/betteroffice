@@ -7324,14 +7324,20 @@ mod tests {
     /// An engine laid out over small pages: an editable first paragraph, then `fillers`
     /// one-line paragraphs. Returns it with the display extras.
     fn paged_filler_engine(client_id: u64, fillers: usize) -> (EngineSession, String) {
+        paged_engine(
+            client_id,
+            &format!(
+                "<w:p><w:r><w:t>Editable paragraph</w:t></w:r></w:p>{}",
+                "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(fillers)
+            ),
+        )
+    }
+
+    fn paged_engine(client_id: u64, body: &str) -> (EngineSession, String) {
         docx_layout::clear_measure_fonts();
         let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
         let engine = EngineSession::new(client_id);
-        let body = format!(
-            "<w:p><w:r><w:t>Editable paragraph</w:t></w:r></w:p>{}",
-            "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(fillers)
-        );
-        crate::seed::seed_from_docx(engine.doc(), &docx_bytes("", &body)).unwrap();
+        crate::seed::seed_from_docx(engine.doc(), &docx_bytes("", body)).unwrap();
         let request = serde_json::json!({
             "bodyStory": "body",
             "regions": { "sections": [{
@@ -7655,27 +7661,15 @@ mod tests {
     fn an_edit_builds_the_table_cell_caret_page_outside_the_display_window() {
         use yrs::{Assoc, IndexedSequence};
 
-        let (engine, extras) = paged_filler_engine(211, 160);
+        let (engine, extras) = paged_engine(
+            211,
+            &format!(
+                r#"<w:tbl><w:tblGrid><w:gridCol w:w="3600"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="3600" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Editable cell paragraph</w:t></w:r></w:p></w:tc></w:tr></w:tbl>{}"#,
+                "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(160)
+            ),
+        );
         let ctx = crate::EditCtx::local("", "");
-        let table = engine
-            .doc()
-            .insert_table(&ctx, crate::Position::new("body", 0), 1, 1)
-            .unwrap();
-        let cell_story = table.created_story_ids[0].clone();
-        engine
-            .doc()
-            .set_table_width(&ctx, &table.table, 3600.0)
-            .unwrap();
-        engine
-            .doc()
-            .insert_text(
-                &ctx,
-                crate::Position::new(&cell_story, 0),
-                "Editable cell paragraph",
-                crate::FormatPolicy::Inherit,
-            )
-            .unwrap();
-        engine.apply_and_layout_regions_full().unwrap();
+        let cell_story = "body:t0:r0c0".to_owned();
         engine.build_display_list_frame(&extras, 0).unwrap();
         let initial = engine.with_display_list(Clone::clone).unwrap();
         assert!(initial.pages.len() >= 11);

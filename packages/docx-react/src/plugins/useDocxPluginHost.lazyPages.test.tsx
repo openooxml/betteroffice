@@ -17,6 +17,7 @@ import { useRustDisplayList } from '../components/DocxEditor/hooks/useDisplayLis
 import {
   markPresented,
   stampRevisionPreviewKey,
+  stampSourceVersion,
 } from '../components/DocxEditor/internals/layoutProvenance';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { SelectionState } from '../components/DocxEditor/types';
@@ -147,6 +148,7 @@ async function visibleProposal(editDuringScroll: boolean): Promise<void> {
       i18n: undefined,
       onRenderedDomContextReady: undefined,
     };
+    stampSourceVersion(inputs.layout, snapshot.version);
     let autoPresent = true;
     let present: (() => void) | null = null;
     const overrides = { getInputs: () => inputs };
