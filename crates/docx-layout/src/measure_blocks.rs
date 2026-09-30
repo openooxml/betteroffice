@@ -1930,8 +1930,7 @@ fn measure_cell_blocks_with_table_floats(
                 measure.total_width,
                 content_width,
             );
-            let mut zone =
-                table_floating_zone_at_x(floating, measure, content_width, x, Some(content_width));
+            let mut zone = table_floating_zone_at_x(floating, measure, content_width, x, None);
             zone.top_y += y;
             zone.bottom_y += y;
             zones.push(zone);
@@ -2453,7 +2452,7 @@ mod tests {
     }
 
     #[test]
-    fn cell_table_floats_keep_their_single_frame_wrap_sides() {
+    fn cell_table_floats_keep_main_wrap_sides() {
         let font = crate::register_measure_font(include_bytes!(
             "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
         ))
@@ -2463,7 +2462,7 @@ mod tests {
             defaults: json!({"fontFamily": "Liberation Sans", "fontSize": 12}),
             ..Default::default()
         };
-        for (anchor, expected) in [("text", (0.0, 489.0)), ("margin", (493.0, 0.0))] {
+        for (anchor, expected) in [("text", (493.0, 0.0)), ("margin", (493.0, 0.0))] {
             let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
                 {
                     "kind": "table", "id": "float", "columnWidths": [360], "layoutMode": "fixed",
