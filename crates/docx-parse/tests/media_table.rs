@@ -5,10 +5,8 @@ use std::sync::Arc;
 
 use docx_parse::ParseLimits;
 use docx_parse::media::{build_media_map_with_warnings, media_token, media_token_index};
-#[cfg(feature = "tiff")]
-use docx_parse::s9::media_table_parts_within;
 use docx_parse::s9::{
-    S9ParseOptions, media_table_parts, parse_docx_s9_preview_from_parts,
+    S9ParseOptions, media_table_parts, media_table_parts_within, parse_docx_s9_preview_from_parts,
     parse_docx_s9_preview_with_media_table, parse_docx_s9_wire_parts_with_limits,
     parse_docx_s9_wire_with_media_table,
 };
@@ -248,6 +246,28 @@ fn images_declared_past_the_container_budget_refuse_the_package() {
         .check_budget(ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES - 100)
         .unwrap_err();
     assert!(error.contains("inflated size exceeds"), "{error}");
+}
+
+#[test]
+fn the_other_parts_inflate_within_what_compressed_images_leave_of_the_budget() {
+    let image = png(4, 4, 1);
+    let mut document = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#.to_vec();
+    document.resize(document.len() + 64, b' ');
+    let budget = document.len() as u64 + 8;
+    let bytes: Arc<[u8]> = ooxml_opc::rezip_parts(&[
+        ("word/media/image1.png".to_owned(), image.clone()),
+        ("word/document.xml".to_owned(), document),
+    ])
+    .unwrap()
+    .into();
+    let error = media_table_parts_within(&bytes, budget).unwrap_err();
+    let remaining = budget - image.len() as u64;
+    assert!(matches!(
+        error,
+        docx_parse::ParseError::Container(message)
+            if message == format!("inflated size exceeds {remaining} bytes")
+    ));
+    assert!(media_table_parts_within(&bytes, budget + image.len() as u64).is_ok());
 }
 
 #[cfg(feature = "tiff")]
