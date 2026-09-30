@@ -16,6 +16,7 @@ import type {
 } from '@betteroffice/docx/yrs';
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import type { DocxInput, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
+import type { DisplayList } from '@betteroffice/docx/layout/render';
 import type { DocxEditorRef } from '../../DocxEditor';
 import type { DocxCommandStore } from '../../../commands/types';
 import type { PagedEditorRef } from '../PagedEditor';
@@ -24,6 +25,7 @@ import { createComment } from '../commentFactories';
 import { applyEditBatch, applyProposalCall, flushedSession, modeRefusal } from '../editorBatches';
 import type { EditorMode } from '../internals/editing-modes';
 import type { SelectionState } from '../types';
+import { documentPageCount } from './documentPageCount';
 
 type LocatedParagraph = {
   story: string;
@@ -166,6 +168,7 @@ export function useDocxEditorRefApi({
   zoom,
   setZoom,
   scrollPageInfo,
+  readCurrentPage,
   loadParsedDocument,
   loadBuffer,
   comments,
@@ -179,6 +182,8 @@ export function useDocxEditorRefApi({
   commands,
   modeRef,
   allowHostProposalsRef,
+  settledDisplayList,
+  awaitingDocument,
 }: {
   ref: React.ForwardedRef<DocxEditorRef>;
   document: Document | null;
@@ -189,6 +194,8 @@ export function useDocxEditorRefApi({
   zoom: number;
   setZoom: (zoom: number) => void;
   scrollPageInfo: { currentPage: number; totalPages: number; visible: boolean };
+  /** The page the scroll position shows now, where it can be read. */
+  readCurrentPage?: () => number | null;
   loadParsedDocument: (doc: Document) => void;
   loadBuffer: (buffer: DocxInput) => Promise<void>;
   comments: Comment[];
@@ -206,6 +213,10 @@ export function useDocxEditorRefApi({
   modeRef: React.RefObject<EditorMode>;
   /** Whether proposal methods run while the editor is read-only. */
   allowHostProposalsRef: React.RefObject<boolean>;
+  /** The renderer's display list once it shows the whole current document. */
+  settledDisplayList?: (relayout: null, timeoutMs: number | null) => Promise<DisplayList>;
+  /** Whether a document load has not yet produced its first layout. */
+  awaitingDocument?: () => boolean;
 }) {
   const hostProposalsAllowed = () =>
     modeRef.current !== 'viewing' || allowHostProposalsRef.current === true;
@@ -222,8 +233,13 @@ export function useDocxEditorRefApi({
       setZoom,
       getZoom: () => zoom,
       focus: () => pagedEditorRef.current?.focus(),
-      getCurrentPage: () => scrollPageInfo.currentPage,
-      getTotalPages: () => scrollPageInfo.totalPages,
+      getCurrentPage: () => readCurrentPage?.() ?? scrollPageInfo.currentPage,
+      getTotalPages: () =>
+        awaitingDocument?.() ? 0 : documentPageCount(pagedEditorRef.current?.getLayout()),
+      whenLayoutComplete: async (options) => {
+        if (!settledDisplayList) throw new Error('This editor paints no display list');
+        return (await settledDisplayList(null, options?.timeoutMs ?? null)).pages.length;
+      },
       scrollToPage: (pageNumber) => pagedEditorRef.current?.scrollToPage(pageNumber),
       scrollToPosition: (displayPosition) =>
         pagedEditorRef.current?.scrollToPosition(displayPosition),
@@ -483,12 +499,14 @@ export function useDocxEditorRefApi({
       documentFromYrs,
       zoom,
       scrollPageInfo,
-      scrollPageInfo,
+      readCurrentPage,
       handleSave,
       loadParsedDocument,
       loadBuffer,
       comments,
       commands,
+      settledDisplayList,
+      awaitingDocument,
     ]
   );
 }
