@@ -89,6 +89,8 @@ interface WorkerOpenOptions {
   renderedFrame: object | null;
   /** The engine whose provisional layout is shown with the rest not yet asked of the worker. */
   pendingCompletion?: unknown;
+  /** The engine whose provisional layout the worker has not yet finished completing. */
+  completingLayout?: unknown;
   /** Leaves the replica unhydrated until a caller needs it; see requestReplica. */
   hydrateOnDemand?: boolean;
 }
@@ -750,7 +752,7 @@ export function useYrsCoreSession(
     if (workerOpen?.pendingCompletion === session) return;
     // Asked after the first frame and the layout's completion, so it delays neither.
     if (workerOpen?.hydrateOnDemand) {
-      revisionQueryRef.current?.();
+      if (workerOpen.completingLayout !== session) revisionQueryRef.current?.();
       return;
     }
     if (replicaWaitTimerRef.current !== null) {
@@ -770,6 +772,7 @@ export function useYrsCoreSession(
     session,
     workerOpen?.renderedFrame,
     workerOpen?.pendingCompletion,
+    workerOpen?.completingLayout,
     workerOpen?.hydrateOnDemand,
     previewing,
     handoffFrom,
