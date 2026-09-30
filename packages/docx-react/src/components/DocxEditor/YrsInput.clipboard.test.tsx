@@ -15,7 +15,7 @@ import { yrsCellStory } from './yrsCommands';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { cleanup, fireEvent, render } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render } = await import('@testing-library/react');
 const sessions: YrsSession[] = [];
 
 beforeAll(() =>
@@ -79,7 +79,7 @@ for (const readOnly of [true, false]) {
     const { data, prevented } = copy(textarea);
     expect(prevented).toBe(true);
     expect(data.get('text/plain')).toBe('Seed');
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
     expect(textarea.value).toBe('');
   });
 }
@@ -104,7 +104,7 @@ test('read-only keys never write, and Tab stays in its table cell', async () => 
   fireEvent.keyDown(textarea, { key: 'Tab' });
   expect(JSON.stringify(session.selection())).toBe(selection);
   for (const key of ['Enter', 'Backspace', 'Delete']) fireEvent.keyDown(textarea, { key });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
   expect(JSON.stringify(session.storySegments('body'))).toBe(before);
 });
 
@@ -114,7 +114,7 @@ test('read-only select all takes the document from inside a table cell', async (
   const cell = yrsCellStory(session, { ...table, row: 0, column: 0 })!;
   session.setSelection({ story: cell, paraId: session.paragraphs(cell)[0].paraId, offset: 0 });
   fireEvent.keyDown(textarea, { key: 'a', ctrlKey: true });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
   const selection = session.selection()!;
   expect([selection.anchor.story, selection.head.story]).toEqual(['body', 'body']);
   expect(selection.anchor.offset).toBe(0);
