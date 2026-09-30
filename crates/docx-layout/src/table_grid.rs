@@ -481,7 +481,69 @@ fn widest_inline_image(blocks: &[crate::types::LayoutBlock]) -> f64 {
         .fold(0.0, f64::max)
 }
 
+/// A cell's narrowest width before shrinking crops or hides its content, and
+/// whether that content is rigid (it can't rewrap at all).
+fn cell_shrink_floor(
+    table_block: &TableBlock,
+    grid_cell: &ResolvedGridCell,
+    content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
+) -> (f64, bool) {
+    let cell = &table_block.rows[grid_cell.row_index].cells[grid_cell.cell_index];
+    let padding = cell
+        .padding
+        .as_ref()
+        .map_or(2.0 * DEFAULT_CELL_PADDING_X, |padding| {
+            padding.left + padding.right
+        });
+    let floor = padding + widest_inline_image(&cell.blocks).max(1.0);
+    let rigid = holds_rigid_content(&cell.blocks);
+    if !rigid {
+        return (floor, false);
+    }
+    let minimum = cell
+        .min_content_width
+        .or(content_widths
+            .and_then(|rows| rows.get(grid_cell.row_index))
+            .and_then(|cells| cells.get(grid_cell.cell_index))
+            .copied()
+            .flatten()
+            .map(|widths| widths.0))
+        .unwrap_or(0.0);
+    (floor.max(minimum), true)
+}
+
+fn span_width(widths: &[f64], grid_cell: &ResolvedGridCell) -> f64 {
+    widths
+        .iter()
+        .skip(grid_cell.column_index)
+        .take(grid_cell.col_span)
+        .sum()
+}
+
+/// Autofit column widths, or `None` to keep the declared grid when they
+/// would crop a cell's rigid content.
 fn resolve_autofit_column_widths(
+    table_block: &TableBlock,
+    content_width: f64,
+    col_count: usize,
+    explicit_width_px: Option<f64>,
+    content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
+) -> Option<Vec<f64>> {
+    let widths = autofit_column_widths(
+        table_block,
+        content_width,
+        col_count,
+        explicit_width_px,
+        content_widths,
+    )?;
+    let crops = resolve_cell_grid(table_block).iter().any(|grid_cell| {
+        let (floor, rigid) = cell_shrink_floor(table_block, grid_cell, content_widths);
+        rigid && span_width(&widths, grid_cell) < floor
+    });
+    (!crops).then_some(widths)
+}
+
+fn autofit_column_widths(
     table_block: &TableBlock,
     content_width: f64,
     col_count: usize,
@@ -512,36 +574,9 @@ fn resolve_autofit_column_widths(
         let mut cells = resolve_cell_grid(table_block);
         cells.sort_by_key(|cell| (cell.col_span, cell.column_index));
         let mut below_cell_floor = false;
-        let mut below_rigid_floor = false;
         for grid_cell in cells {
-            let cell = &table_block.rows[grid_cell.row_index].cells[grid_cell.cell_index];
-            let padding = cell
-                .padding
-                .as_ref()
-                .map_or(2.0 * DEFAULT_CELL_PADDING_X, |padding| {
-                    padding.left + padding.right
-                });
-            let mut floor = padding + widest_inline_image(&cell.blocks).max(1.0);
-            let rigid = holds_rigid_content(&cell.blocks);
-            if rigid {
-                floor = floor.max(
-                    cell.min_content_width
-                        .or(content_widths
-                            .and_then(|rows| rows.get(grid_cell.row_index))
-                            .and_then(|cells| cells.get(grid_cell.cell_index))
-                            .copied()
-                            .flatten()
-                            .map(|widths| widths.0))
-                        .unwrap_or(0.0),
-                );
-            }
-            let cell_width: f64 = widths
-                .iter()
-                .skip(grid_cell.column_index)
-                .take(grid_cell.col_span)
-                .sum();
-            below_cell_floor |= cell_width < floor;
-            below_rigid_floor |= rigid && cell_width < floor;
+            let (floor, _) = cell_shrink_floor(table_block, &grid_cell, content_widths);
+            below_cell_floor |= span_width(&widths, &grid_cell) < floor;
             add_span_constraint(
                 &mut column_floors,
                 grid_cell.column_index,
@@ -549,9 +584,7 @@ fn resolve_autofit_column_widths(
                 floor,
             );
         }
-        if below_rigid_floor
-            || (below_cell_floor && content_width >= column_floors.iter().sum::<f64>())
-        {
+        if below_cell_floor && content_width >= column_floors.iter().sum::<f64>() {
             return None;
         }
         return Some(widths);
@@ -1276,6 +1309,29 @@ mod tests {
             .unwrap();
             assert_eq!(resolve_table_column_widths(&block, 600.0), grid.to_vec());
         }
+    }
+
+    #[test]
+    fn autofit_keeps_its_grid_when_a_preferred_width_would_crop_an_unmeasured_image() {
+        let block: TableBlock = serde_json::from_value(json!({
+            "id": 0, "layoutMode": "autofit", "gridWidths": [300, 300],
+            "rows": [{"id": 0, "cells": [
+                {"id": 0, "blocks": [{"kind": "paragraph", "id": 0, "runs": [
+                    {"kind": "image", "src": "", "width": 200, "height": 40},
+                    {"kind": "text", "text": "x"}
+                ]}],
+                 "preferredWidth": {"value": 1500, "type": "dxa"},
+                 "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0}},
+                {"id": 1, "blocks": [],
+                 "preferredWidth": {"value": 0, "type": "auto"},
+                 "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0}}
+            ]}]
+        }))
+        .unwrap();
+        assert_eq!(
+            resolve_table_column_widths(&block, 600.0),
+            vec![300.0, 300.0]
+        );
     }
 
     #[test]
