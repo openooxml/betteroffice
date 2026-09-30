@@ -156,6 +156,9 @@ export interface WorkerLayoutComputation extends LayoutComputation {
 const PROVISIONAL_LAYOUT_PAGES = 3;
 /** How long the rest of the layout waits for the first surfaces to attach. */
 const PROVISIONAL_SURFACE_WAIT_MS = 250;
+// Body blocks the first step of a provisional layout's completion measures;
+// later steps are sized to a time slice. 0 completes it in one step.
+const COMPLETION_SLICE_BLOCKS = 64;
 
 interface WorkerLayoutFrame {
   result: ResidentEngineWorkerFrame;
@@ -1015,7 +1018,9 @@ export function useRustDisplayList(
             setTimeout(resolve, PROVISIONAL_SURFACE_WAIT_MS);
           });
           const complete = surfaced
-            .then(() => worker.completeLayout(provisionalEpoch))
+            .then(() =>
+              worker.completeLayout(provisionalEpoch, false, COMPLETION_SLICE_BLOCKS)
+            )
             .then((completed) => {
               if (!completed) return null;
               const base = snapshotRef.current.frame;
