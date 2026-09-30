@@ -16,7 +16,7 @@ use crate::types::{
     TableCellExtent, TableExtent, TableRowExtent, TextBoxBlock, TextBoxExtent, TypesetBidiSlice,
     TypesetClusterAdvance, TypesetRow, TypesetRowSegment, TypesetRunAdvance,
 };
-use ooxml_text::{LineBox, LineSpacingRule, apply_spacing_rule};
+use ooxml_text::{FontSlotUse, LineBox, LineSpacingRule, apply_spacing_rule, font_slot_use};
 
 const DEFAULT_CELL_PADDING_X: f64 = 7.0;
 const DEFAULT_CELL_PADDING_Y: f64 = 0.0;
@@ -246,10 +246,19 @@ fn collect_paragraph_font_requirements(
         let Some(slots) = &formatting.font_slots else {
             continue;
         };
+        let slot_use = if let Run::Text(text) = run {
+            font_slot_use(
+                &text.text,
+                formatting.complex_script.unwrap_or(false),
+                slots.hint.as_deref(),
+            )
+        } else {
+            FontSlotUse::default()
+        };
         for family in [
             slots.ascii.as_deref(),
             slots.h_ansi.as_deref(),
-            slots.east_asia.as_deref(),
+            slots.east_asia.as_deref().filter(|_| slot_use.east_asia),
         ]
         .into_iter()
         .flatten()
@@ -259,7 +268,7 @@ fn collect_paragraph_font_requirements(
                 add_font_requirement(family, false, false, scripts, requirements);
             }
         }
-        if let Some(family) = slots.cs.as_deref() {
+        if let Some(family) = slots.cs.as_deref().filter(|_| slot_use.complex_script) {
             add_font_requirement(
                 family,
                 formatting.bold_cs.unwrap_or(bold),
@@ -3691,6 +3700,114 @@ mod tests {
             requirement["key"] == "yu mincho|0|0"
                 && requirement["scripts"] == serde_json::json!(["cjk-jp"])
         }));
+    }
+
+    fn font_requirement_keys(run: Value) -> Vec<String> {
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "p", "runs": [run]
+        }))
+        .unwrap();
+        collect_font_requirements([&block], "Calibri")
+            .into_iter()
+            .map(|requirement| requirement.key)
+            .collect()
+    }
+
+    #[test]
+    fn collects_east_asian_font_slots_only_for_east_asian_text() {
+        for (text, expected) in [
+            (
+                "Latin",
+                vec!["aptos|0|0", "arial|0|0", "calibri|0|0", "times new roman|0|0"],
+            ),
+            (
+                "漢字",
+                vec![
+                    "aptos|0|0",
+                    "arial|0|0",
+                    "calibri|0|0",
+                    "simsun|0|0",
+                    "times new roman|0|0",
+                ],
+            ),
+        ] {
+            let keys = font_requirement_keys(json!({
+                "kind": "text", "text": text, "fontFamily": "Aptos",
+                "fontSlots": {
+                    "ascii": "Arial", "hAnsi": "Times New Roman",
+                    "eastAsia": "SimSun", "cs": "Traditional Arabic"
+                }
+            }));
+            assert_eq!(keys, expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn collects_east_asian_font_slots_for_hinted_text() {
+        for (hint, expected) in [
+            (None, vec!["calibri|0|0"]),
+            (Some("eastAsia"), vec!["calibri|0|0", "simsun|0|0"]),
+        ] {
+            let keys = font_requirement_keys(json!({
+                "kind": "text", "text": "Latin \u{201c}",
+                "fontSlots": {"eastAsia": "SimSun", "hint": hint}
+            }));
+            assert_eq!(keys, expected, "{hint:?}");
+        }
+    }
+
+    #[test]
+    fn collects_complex_script_font_slots_only_when_used() {
+        for (complex_script, expected) in [
+            (None, vec!["calibri|0|0", "calibri|1|0"]),
+            (Some(false), vec!["calibri|0|0", "calibri|1|0"]),
+            (
+                Some(true),
+                vec![
+                    "calibri|0|0",
+                    "calibri|1|0",
+                    "traditional arabic|0|0",
+                    "traditional arabic|0|1",
+                ],
+            ),
+        ] {
+            let keys = font_requirement_keys(json!({
+                "kind": "text", "text": "Latin", "bold": true,
+                "boldCs": false, "italicCs": true, "complexScript": complex_script,
+                "fontSlots": {"eastAsia": "SimSun", "cs": "Traditional Arabic"}
+            }));
+            assert_eq!(keys, expected, "{complex_script:?}");
+        }
+    }
+
+    #[test]
+    fn tab_font_requirements_skip_script_slots() {
+        for complex_script in [false, true] {
+            let keys = font_requirement_keys(json!({
+                "kind": "tab", "fontFamily": "Aptos", "bold": true,
+                "complexScript": complex_script,
+                "fontSlots": {
+                    "ascii": "Arial", "hAnsi": "Times New Roman",
+                    "eastAsia": "SimSun", "cs": "Traditional Arabic", "hint": "eastAsia"
+                }
+            }));
+            assert_eq!(
+                keys,
+                ["aptos|1|0", "arial|1|0", "calibri|0|0", "times new roman|1|0"]
+            );
+        }
+    }
+
+    #[test]
+    fn field_font_requirements_skip_script_slots() {
+        for fallback in [None, Some(""), Some("Latin"), Some("漢字"), Some("\u{201c}")] {
+            let keys = font_requirement_keys(json!({
+                "kind": "field", "fieldType": "PAGE", "fallback": fallback,
+                "fontFamily": "Aptos", "italic": true, "complexScript": true,
+                "fontSlots": {"eastAsia": "SimSun", "cs": "Traditional Arabic", "hint": "eastAsia"}
+            }));
+            assert_eq!(keys, ["aptos|0|1", "calibri|0|0"], "{fallback:?}");
+        }
     }
 
     #[test]
