@@ -10611,12 +10611,15 @@ pub fn build_resident_display_list_partial_with_fonts_observed(
         .pages
         .iter()
         .enumerate()
-        .map(|(index, page)| {
-            built_pages
-                .remove(&index)
-                .unwrap_or_else(|| unbuilt_page(page, index, &blocks))
+        .map(|(index, page)| match built_pages.remove(&index) {
+            Some(built) => Ok(built),
+            None => Ok(unbuilt_page_with_span(
+                page,
+                index,
+                layout_page_position_span(&layout.pages[index], &blocks)?,
+            )),
         })
-        .collect();
+        .collect::<Result<_, String>>()?;
     observe_phase();
     Ok((
         ResidentDisplayInput { input },
@@ -10667,70 +10670,6 @@ pub fn build_resident_display_pages_with_fonts(
     Ok(wanted)
 }
 
-/// The lowest and highest body position `page`'s fragments place; table
-/// fragments read their rows from the pagination's own blocks.
-fn page_position_span(
-    page: &PageIn,
-    blocks: &HashMap<String, &crate::types::MeasuredBlock>,
-) -> Option<[i64; 2]> {
-    use crate::types::LayoutBlock;
-    let mut span: Option<[i64; 2]> = None;
-    let mut include = |start: Option<i64>, end: Option<i64>| {
-        for value in [start, end].into_iter().flatten() {
-            span = Some(span.map_or([value, value], |[low, high]| {
-                [low.min(value), high.max(value)]
-            }));
-        }
-    };
-    // The integral numbers the transcoder reads back as integers.
-    fn position(value: Option<f64>) -> Option<i64> {
-        value
-            .filter(|value| {
-                value.fract() == 0.0 && *value >= i64::MIN as f64 && *value <= i64::MAX as f64
-            })
-            .map(|value| value as i64)
-    }
-    fn block(block: &LayoutBlock, include: &mut dyn FnMut(Option<i64>, Option<i64>)) {
-        match block {
-            LayoutBlock::Paragraph(paragraph) => {
-                include(position(paragraph.pm_start), position(paragraph.pm_end))
-            }
-            LayoutBlock::Image(image) => include(position(image.pm_start), position(image.pm_end)),
-            LayoutBlock::Table(table) => rows(&table.rows, include),
-            _ => {}
-        }
-    }
-    fn rows(rows: &[crate::types::TableRow], include: &mut dyn FnMut(Option<i64>, Option<i64>)) {
-        for row in rows {
-            for cell in &row.cells {
-                for nested in &cell.blocks {
-                    block(nested, include);
-                }
-            }
-        }
-    }
-    for fragment in &page.fragments {
-        match fragment {
-            FragmentIn::Paragraph(fragment) => include(fragment.pm_start, fragment.pm_end),
-            FragmentIn::Image(fragment) => include(fragment.pm_start, fragment.pm_end),
-            FragmentIn::TextBox(fragment) => include(fragment.pm_start, fragment.pm_end),
-            FragmentIn::Shape(fragment) => include(fragment.pm_start, fragment.pm_end),
-            FragmentIn::Chart(fragment) => include(fragment.pm_start, fragment.pm_end),
-            FragmentIn::Table(fragment) => {
-                if let Some(measured) = blocks.get(&block_key(&fragment.block_id))
-                    && let LayoutBlock::Table(table) = &measured.block
-                {
-                    let end = fragment.row_end.min(table.rows.len());
-                    let start = fragment.row_start.min(end);
-                    rows(&table.rows[start..end], &mut include);
-                }
-            }
-            FragmentIn::Unsupported => {}
-        }
-    }
-    span
-}
-
 /// The pagination's measured blocks by key, first occurrence winning as in
 /// [`build_display_list_selected`].
 fn source_blocks_by_key(
@@ -10743,14 +10682,6 @@ fn source_blocks_by_key(
             .or_insert(measured);
     }
     blocks
-}
-
-fn unbuilt_page(
-    page: &PageIn,
-    page_index: usize,
-    blocks: &HashMap<String, &crate::types::MeasuredBlock>,
-) -> DisplayPage {
-    unbuilt_page_with_span(page, page_index, page_position_span(page, blocks))
 }
 
 fn unbuilt_page_with_span(
@@ -10781,9 +10712,10 @@ fn unbuilt_page_with_span(
     }
 }
 
-/// [`page_position_span`] read from a pagination page and its measured blocks,
-/// converting positions as the resident transcoder does: a non-finite one is
-/// absent and a fractional or out-of-range one is an error.
+/// The lowest and highest body position a pagination page's fragments place,
+/// with table fragments read from its measured blocks, converting positions as
+/// the resident transcoder does: a non-finite one is absent and a fractional or
+/// out-of-range one is an error.
 fn layout_page_position_span(
     page: &crate::types::Page,
     blocks: &HashMap<String, &crate::types::MeasuredBlock>,
