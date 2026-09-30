@@ -8,7 +8,7 @@ import { readDocxContainer } from '../docx/zipContainer';
 import type { Document } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { documentToYrs } from './documentToYrs';
-import { createYrsSession, type YrsSession } from './index';
+import { createYrsSession, type YrsParagraphAttrs, type YrsSession } from './index';
 import { captureSessionSave, saveYrsDocx, writeSessionSave } from './saveYrsDocx';
 import { paragraphAttrsToFormatting } from './saveFormatting';
 import { yrsToDocument } from './yrsToDocument';
@@ -24,21 +24,29 @@ beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(
   resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')
 ))));
 
-function fixture(thirdProperties = '', normalProperties = '', extraStyles = ''): Uint8Array {
+function fixture(
+  thirdProperties = '',
+  normalProperties = '',
+  extraStyles = '',
+  { styles, numbering }: { styles?: string; numbering?: string } = {}
+): Uint8Array {
   const parts: PartsMap = new Map();
   parts.set('[Content_Types].xml', toBytes(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="xml" ContentType="application/xml"/>
   <Override PartName="/word/document.xml" ContentType="${OFFICE_DOC}.wordprocessingml.document.main+xml"/>
   <Override PartName="/word/styles.xml" ContentType="${OFFICE_DOC}.wordprocessingml.styles+xml"/>
+  ${numbering ? `<Override PartName="/word/numbering.xml" ContentType="${OFFICE_DOC}.wordprocessingml.numbering+xml"/>` : ''}
 </Types>`));
   parts.set('_rels/.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="doc" Type="${R}/officeDocument" Target="word/document.xml"/>
 </Relationships>`));
   parts.set('word/_rels/document.xml.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="styles" Type="${R}/styles" Target="styles.xml"/>
+  ${numbering ? `<Relationship Id="numbering" Type="${R}/numbering" Target="numbering.xml"/>` : ''}
 </Relationships>`));
-  parts.set('word/styles.xml', toBytes(`<w:styles xmlns:w="${W}">
+  if (numbering) parts.set('word/numbering.xml', toBytes(`<w:numbering xmlns:w="${W}">${numbering}</w:numbering>`));
+  parts.set('word/styles.xml', toBytes(styles ?? `<w:styles xmlns:w="${W}">
   <w:docDefaults><w:pPrDefault><w:pPr><w:spacing w:after="200" w:line="276" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>
   <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>${normalProperties ? `<w:pPr>${normalProperties}</w:pPr>` : ''}</w:style>
   ${extraStyles}
@@ -236,4 +244,40 @@ test('the save projection leaves out values that only restate inherited ones', (
     .toEqual({ spaceAfter: 200 });
   expect(paragraphAttrsToFormatting({ ...inherited, alignment: 'right', _originalFormatting: {} }, inherited))
     .toEqual({ alignment: 'right' });
+});
+
+async function repackAfter(bytes: Uint8Array, edit: (session: YrsSession) => void): Promise<string> {
+  const session = await createYrsSession({ clientId: 66103 });
+  try {
+    session.seedFromDocx(bytes);
+    const base = session.materializeDocx()!;
+    edit(session);
+    return documentXml(new Uint8Array(await repackDocx(yrsToDocument(session, base))));
+  } finally {
+    session.destroy();
+  }
+}
+
+function setFirst(session: YrsSession, attrs: YrsParagraphAttrs): void {
+  const first = session.paragraphs('body')[0]!;
+  const position = { paraId: first.paraId, offset: 0 };
+  session.setParagraphAttrs({ story: 'body', start: position, end: position }, attrs);
+}
+
+test('a numbered paragraph keeps an indent edit that equals its style indent', async () => {
+  const numbering =
+    '<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/>' +
+    '<w:lvlText w:val="%1."/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum>' +
+    '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>';
+  const bytes = fixture('', '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:ind w:left="720"/>', '', {
+    numbering,
+  });
+  const xml = await repackAfter(bytes, (session) => setFirst(session, { indentLeft: 720 }));
+  expect(paragraphs(xml)[0]).toContain('w:left="720"');
+});
+
+test('a spacing edit is kept when the resolver synthesizes the paragraph defaults', async () => {
+  const bytes = fixture('', '', '', { styles: `<w:styles xmlns:w="${W}"/>` });
+  const xml = await repackAfter(bytes, (session) => setFirst(session, { spaceAfter: 160 }));
+  expect(paragraphs(xml)[0]).toContain('w:after="160"');
 });

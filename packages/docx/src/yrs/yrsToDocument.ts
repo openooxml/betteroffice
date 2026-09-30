@@ -2242,6 +2242,7 @@ class SaveContext {
   private readonly subtreeComments = new Map<string, Map<string, unknown>>();
   private readonly memo: SessionProjectionMemo;
   private readonly styles: StyleResolver;
+  private readonly syntheticDefaults: boolean;
   private readonly inherited = new Map<string, ParagraphFormatting | undefined>();
 
   constructor(
@@ -2256,6 +2257,9 @@ class SaveContext {
     this.comments = commentRanges(session, base.package.document.comments, commentIds);
     this.memo = sessionProjectionMemo(session);
     this.styles = createStyleResolver(base.package.styles);
+    const defaultStyle = this.styles.getDefaultParagraphStyle();
+    this.syntheticDefaults =
+      defaultStyle !== undefined && !(base.package.styles?.styles ?? []).includes(defaultStyle);
     for (const [story, ranges] of this.comments) {
       const seen = new Set<string>();
       for (
@@ -2293,13 +2297,16 @@ class SaveContext {
   }
 
   /**
-   * What a paragraph of `storyId` with style `styleId` inherits from
-   * docDefaults and its style; none in table cells and content controls,
-   * whose paragraphs can inherit from a table style too.
+   * What a paragraph of `storyId` with pilcrow `properties` inherits from
+   * docDefaults and its style. None where more can apply than the resolver
+   * sees: table cells and content controls (a table style), numbered
+   * paragraphs (the numbering level) and defaults the resolver synthesizes.
    */
-  private inheritedFormatting(storyId: string, styleId: unknown): ParagraphFormatting | undefined {
-    if (NESTED_STORY_ID.test(storyId)) return undefined;
-    const key = typeof styleId === 'string' ? styleId : '';
+  private inheritedFormatting(storyId: string, properties: Attrs): ParagraphFormatting | undefined {
+    if (NESTED_STORY_ID.test(storyId) || this.syntheticDefaults || properties.numPr != null) {
+      return undefined;
+    }
+    const key = typeof properties.pStyle === 'string' ? properties.pStyle : '';
     if (!this.inherited.has(key)) {
       this.inherited.set(key, this.styles.resolveParagraphStyle(key || null).paragraphFormatting);
     }
@@ -2431,7 +2438,7 @@ class SaveContext {
             boundaries,
             baseParagraph,
             this.revisionIds,
-            this.inheritedFormatting(storyId, segment.properties.pStyle)
+            this.inheritedFormatting(storyId, segment.properties)
           );
           projectedBlocks.set(paragraph, { inputs: snapshot, sessionKey: segment.paraId });
         }
