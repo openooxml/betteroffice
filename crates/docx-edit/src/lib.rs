@@ -105,7 +105,7 @@ pub use batch::{
 };
 pub use canonical::{CanonicalItem, checksum, project_story, story_checksum, to_canonical_bytes};
 pub use ctx::{EditCtx, EditOrigin, SuggestCtx};
-pub use engine::{EngineSession, EngineStats};
+pub use engine::{EngineSession, EngineStats, RegionLayoutProgress};
 pub use format::{
     ColorPatch, FontFamilyPatch, FormatPolicy, HYPERLINK, InlineFormatDelta, Patch, SimpleFormat,
     StrikePatch, UnderlinePatch, highlight_color_name,
@@ -142,6 +142,8 @@ pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoCaptureM
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
+#[cfg(feature = "wasm")]
+pub mod wasm_memory;
 
 const STORIES: &str = "stories";
 const COMMENTS: &str = "comments";

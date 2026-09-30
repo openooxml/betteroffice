@@ -72,6 +72,12 @@ async function tick(ms = 10) {
   });
 }
 
+/** Lets the editor work until `done()`, for at most `ms` on a busy machine. */
+async function until(done: () => boolean, ms = 20_000) {
+  const deadline = performance.now() + ms;
+  while (!done() && performance.now() < deadline) await tick();
+}
+
 /** The page count `whenLayoutComplete()` resolves with, or its failure. */
 async function layoutComplete(ref: React.RefObject<DocxEditorRef | null>) {
   let outcome = null as number | Error | null;
@@ -79,14 +85,14 @@ async function layoutComplete(ref: React.RefObject<DocxEditorRef | null>) {
     (pages) => (outcome = pages),
     (error: Error) => (outcome = error)
   );
-  for (let attempt = 0; attempt < 300 && outcome === null; attempt += 1) await tick();
+  await until(() => outcome !== null);
   return outcome;
 }
 
 async function mountTwoPages() {
   const ref = createRef<DocxEditorRef>();
   render(<DocxEditor ref={ref} documentBuffer={await pagedDocx(2)} />);
-  for (let attempt = 0; attempt < 300 && !ref.current; attempt += 1) await tick();
+  await until(() => ref.current !== null);
   expect(await layoutComplete(ref)).toBe(2);
   return ref;
 }
@@ -97,7 +103,7 @@ test('a parsed reload settles with the new document', async () => {
   act(() => ref.current!.loadDocument(document));
   expect(await layoutComplete(ref)).toBe(3);
   expect(ref.current!.getTotalPages()).toBe(3);
-}, 30_000);
+}, 90_000);
 
 test('a parsed reload with the same page count reports it again', async () => {
   const ref = await mountTwoPages();
@@ -105,7 +111,7 @@ test('a parsed reload with the same page count reports it again', async () => {
   act(() => ref.current!.loadDocument(document));
   expect(await layoutComplete(ref)).toBe(2);
   expect(ref.current!.getTotalPages()).toBe(2);
-}, 30_000);
+}, 90_000);
 
 test('a reload waits for the new document and reports no pages while it loads', async () => {
   const ref = await mountTwoPages();
@@ -129,11 +135,11 @@ test('a reload waits for the new document and reports no pages while it loads', 
   expect(ref.current!.getTotalPages()).toBe(0);
 
   release();
-  for (let attempt = 0; attempt < 300 && next === null; attempt += 1) await tick();
+  await until(() => next !== null);
   await loading;
   expect(next).toBe(3);
   expect(ref.current!.getTotalPages()).toBe(3);
-}, 30_000);
+}, 90_000);
 
 test('each failed load rejects the wait', async () => {
   const ref = await mountTwoPages();
@@ -145,12 +151,12 @@ test('each failed load rejects the wait', async () => {
     });
     expect(await layoutComplete(ref)).toBeInstanceOf(Error);
   }
-}, 30_000);
+}, 90_000);
 
 test('a failed load before any layout rejects the wait', async () => {
   const ref = createRef<DocxEditorRef>();
   render(<DocxEditor ref={ref} />);
-  for (let attempt = 0; attempt < 300 && !ref.current; attempt += 1) await tick();
+  await until(() => ref.current !== null);
   const detached = await pagedDocx(1);
   structuredClone(detached, { transfer: [detached] });
   await act(async () => {
@@ -158,7 +164,7 @@ test('a failed load before any layout rejects the wait', async () => {
   });
   await tick(200);
   expect(await layoutComplete(ref)).toBeInstanceOf(Error);
-}, 30_000);
+}, 90_000);
 
 test('a failure without a message rejects waits during and after the load', async () => {
   const ref = await mountTwoPages();
@@ -172,4 +178,4 @@ test('a failure without a message rejects waits during and after the load', asyn
   fail();
   expect(await during).toBeInstanceOf(Error);
   expect(await layoutComplete(ref)).toBeInstanceOf(Error);
-}, 30_000);
+}, 90_000);

@@ -39,7 +39,7 @@ export interface CanvasSelectionOverlayProps {
   caretPosition: CaretPosition | null;
   /** Whether the (hidden body) input is focused — drives the blink. */
   isFocused: boolean;
-  /** Hide the caret / selection in read-only mode. */
+  /** Read-only: draw a range selection but never the caret. */
   readOnly?: boolean;
   /**
    * Portal target — `editorContentRef.current`, the positioned ancestor that

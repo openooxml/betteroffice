@@ -15,8 +15,10 @@ beforeAll(async () => {
   const frameDelta = resolve(import.meta.dir, '../layout/render/frameDelta.ts');
   const modules: Record<string, string> = {
     './residentEngineSession':
-      'export const createResidentEngineSession = async () => testHarness.session;',
-    '../layout/render/glyphCache': 'export class GlyphCache {}',
+      'export const createResidentEngineSession = async (heapLimitBytes) => ((testHarness.heapLimits ??= []).push(heapLimitBytes), testHarness.session);',
+    '../layout/render/glyphCache':
+      'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; } }',
+    '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.memories;',
     '../layout/render/frameDelta': `
       export { applyFrameDeltaOwned } from ${JSON.stringify(frameDelta)};
       export const decodeFrameDelta = () => testHarness.delta;
@@ -66,11 +68,13 @@ function worker() {
   let nextId = 0;
   let frameEpoch = 0;
   const replies = new Map<number, (reply: ResidentEngineWorkerResponse) => void>();
+  const answered: number[] = [];
   const surfaces = new Map<string, Surface>();
   const scope = {
     onmessage: (_event: { data: ResidentEngineWorkerRequest }) => {},
     postMessage(reply: ResidentEngineWorkerResponse) {
-      replies.get(reply.id)!(reply);
+      answered.push(reply.id);
+      replies.get(reply.id)?.(reply);
       replies.delete(reply.id);
     },
   };
@@ -81,6 +85,7 @@ function worker() {
     presented: [] as number[],
     failRaster: null as number | null,
     failPresent: null as number | null,
+    memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
       loadState() {},
       setPartialDocument() {},
@@ -176,17 +181,19 @@ function worker() {
   return {
     harness,
     surfaces,
+    answered,
     send,
     resetCalls() {
       harness.rasterized = [];
       harness.presented = [];
     },
-    async bootstrap(pageCount = 3) {
+    async bootstrap(pageCount = 3, heapLimitBytes?: number) {
       delta(Array.from({ length: pageCount }, (_, index) => index + 1), true, 100, pageCount);
       return send({
         type: 'bootstrap',
         expectedFrameEpoch: 0,
         extras: '',
+        ...(heapLimitBytes !== undefined ? { heapLimitBytes } : {}),
         snapshot: {
           clientId: 1,
           state: new Uint8Array(),
@@ -572,5 +579,436 @@ describe('resident worker layout ownership', () => {
     const late = await w.send({ type: 'completeLayout', expectedFrameEpoch: 4, paintCaret: false });
     expect(late.ok && late.layoutJson).toBe(full);
     expect(calls).toHaveLength(4);
+  });
+});
+
+describe('resident worker memory', () => {
+  test('a bootstrap starts the session under its heap limit', async () => {
+    const w = worker();
+    await w.bootstrap(3, 1024);
+    await w.bootstrap();
+    expect((w.harness as { heapLimits?: unknown[] }).heapLimits).toEqual([1024, undefined]);
+  });
+
+  test('every reply carries the worker memory', async () => {
+    const w = worker();
+    const reply = await w.bootstrap();
+    expect(reply.memory).toEqual(w.harness.memories);
+  });
+
+  test('a trap after a failed allocation replies out of memory', async () => {
+    const w = worker();
+    await w.bootstrap();
+    w.harness.memories = [
+      { label: 'docx-edit', bufferBytes: 4294901760, liveBytes: 4172000000, peakBytes: 4172000000, failedAllocationBytes: 65536 },
+    ];
+    w.harness.session.buildDisplayListFrame = () => {
+      throw new WebAssembly.RuntimeError('unreachable');
+    };
+    const trapped = await w.build([1]);
+    expect(trapped.ok).toBe(false);
+    expect(!trapped.ok && trapped.terminal).toBe(true);
+    expect(!trapped.ok && trapped.outOfMemory).toBe(true);
+    expect(!trapped.ok && trapped.error).toBe(
+      'Resident engine worker ran out of memory allocating 65536 bytes: unreachable'
+    );
+    expect(trapped.memory).toEqual(w.harness.memories);
+  });
+
+  test('a trap that the raster paints past still answers the request as out of memory', async () => {
+    const w = worker();
+    await w.bootstrap();
+    w.harness.memories = [
+      { label: 'docx-edit', bufferBytes: 65536, liveBytes: 65000, peakBytes: 65000, failedAllocationBytes: 112 },
+    ];
+    Object.assign(w.harness.session, {
+      outlineGlyphJson: () => {
+        throw new WebAssembly.RuntimeError('unreachable');
+      },
+    });
+    const rasterize = w.harness.rasterize;
+    w.harness.rasterize = async (...args: Parameters<typeof rasterize>) => {
+      try {
+        (w.harness as { glyphs?: (fontId: number, glyphId: number) => string }).glyphs?.(1, 1);
+      } catch {
+        // painted with browser text instead
+      }
+      return rasterize(...args);
+    };
+    const attached = await w.attach([1]);
+    expect(!attached.ok && attached.terminal && attached.outOfMemory).toBe(true);
+    const next = await w.build([1]);
+    expect(!next.ok && next.terminal).toBe(true);
+  });
+
+  test('a trap the raster paints past without a failed allocation keeps the worker', async () => {
+    const w = worker();
+    await w.bootstrap();
+    Object.assign(w.harness.session, {
+      outlineGlyphJson: () => {
+        throw new WebAssembly.RuntimeError('unreachable');
+      },
+    });
+    const rasterize = w.harness.rasterize;
+    w.harness.rasterize = async (...args: Parameters<typeof rasterize>) => {
+      try {
+        (w.harness as { glyphs?: (fontId: number, glyphId: number) => string }).glyphs?.(1, 1);
+      } catch {
+        // painted with browser text instead
+      }
+      return rasterize(...args);
+    };
+    expect((await w.attach([1])).ok).toBe(true);
+    expect((await w.build([1])).ok).toBe(true);
+  });
+
+  test('a trap without a failed allocation is not reported as out of memory', async () => {
+    const w = worker();
+    await w.bootstrap();
+    w.harness.session.buildDisplayListFrame = () => {
+      throw new WebAssembly.RuntimeError('unreachable');
+    };
+    const trapped = await w.build([1]);
+    expect(!trapped.ok && trapped.terminal).toBe(true);
+    expect(!trapped.ok && trapped.outOfMemory).toBeUndefined();
+    expect(!trapped.ok && trapped.error).toBe('Resident engine worker trapped: unreachable');
+  });
+});
+
+describe('sliced layout completion', () => {
+  const provisional = '{"layout":{"pages":[1]},"notesConverged":true,"provisional":true}';
+  const full = '{"layout":{"pages":[1,2]},"notesConverged":true}';
+  const snapshot = {
+    clientId: 1,
+    state: new Uint8Array(),
+    fontsRevision: 0,
+    fonts: [],
+    renderInputs: [],
+    measureInputs: [],
+    layoutInput: '{}',
+    layoutWithRegions: true,
+    layoutRevision: 1,
+    selection: null,
+  };
+
+  function steppedWorker(bodyBlocks = 10) {
+    const w = worker();
+    const calls: string[] = [];
+    let epoch = 0;
+    let measured = 0;
+    let begun = false;
+    let changed = false;
+    const onResume: Array<() => void> = [];
+    Object.assign(w.harness.session, {
+      layoutDocumentWithRegionsPrefixRetainedJson: () => provisional,
+      layoutDocumentWithRegionsRetainedJson: () => {
+        calls.push('whole');
+        return full;
+      },
+      beginRegionLayout: () => {
+        calls.push('begin');
+        begun = true;
+        changed = false;
+        measured = 0;
+        return { measuredBlocks: 0, bodyBlocks };
+      },
+      resumeRegionLayout: (blocks: number) => {
+        calls.push(`resume:${Math.min(blocks, bodyBlocks)}`);
+        onResume.shift()?.();
+        if (!begun || changed) {
+          begun = false;
+          throw new Error('the document or its fonts changed since the region layout began');
+        }
+        measured = Math.min(bodyBlocks, measured + blocks);
+        if (measured < bodyBlocks) return { measuredBlocks: measured, bodyBlocks };
+        begun = false;
+        return { measuredBlocks: measured, bodyBlocks, layoutJson: full };
+      },
+      applyUpdate: () => {
+        calls.push('update');
+        changed = true;
+        return null;
+      },
+      buildDisplayPagesFrame: () => {
+        calls.push('pages');
+        return new Uint8Array([0]);
+      },
+      residentCaretSnapshot: () => ({ frameEpoch: epoch, caretRect: null }),
+      buildDisplayListFrame: () => {
+        epoch += 1;
+        // One page, as a provisional frame shows its prefix.
+        w.harness.delta = {
+          protocolVersion: 1,
+          full: true,
+          frameEpoch: epoch,
+          baseFrameEpoch: 0,
+          docEpoch: epoch,
+          layoutEpoch: epoch,
+          pageCount: 1,
+          operations: [
+            {
+              kind: 'upsert',
+              pageId: 1n,
+              pageIndex: 0,
+              fingerprint: BigInt(epoch),
+              primitiveIds: new BigUint64Array(),
+              page: { pageIndex: 0, width: 100, height: 100, primitives: [] },
+            },
+          ],
+          bytes: new Uint8Array(),
+        };
+        return new Uint8Array([0]);
+      },
+    });
+    const bootstrap = () =>
+      w.send({
+        type: 'bootstrap',
+        expectedFrameEpoch: 0,
+        extras: '',
+        snapshot,
+        layoutExtras: '{}',
+        provisionalPages: 3,
+      });
+    return { w, calls, onResume, bootstrap };
+  }
+
+  test('measures the rest in steps, running requests that arrive meanwhile between them', async () => {
+    const { w, calls, onResume, bootstrap } = steppedWorker();
+    await bootstrap();
+    const order: string[] = [];
+    onResume.push(() => {
+      void w
+        .send({ type: 'buildPages', pages: [0], expectedFrameEpoch: 1, paintCaret: false })
+        .then(() => order.push('pages'));
+    });
+    const completed = await w
+      .send({ type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 3 })
+      .then((reply) => {
+        order.push('complete');
+        return reply;
+      });
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(order).toEqual(['pages', 'complete']);
+    expect(calls[0]).toBe('begin');
+    expect(calls[1]).toBe('resume:3');
+    expect(calls[2]).toBe('pages');
+    expect(calls.slice(3).every((call) => call.startsWith('resume:'))).toBe(true);
+    expect(calls).not.toContain('whole');
+  });
+
+  test('an update in between begins the pass again on the new state', async () => {
+    const { w, calls, onResume, bootstrap } = steppedWorker();
+    await bootstrap();
+    onResume.push(() => {
+      void w.send({ type: 'applyUpdate', update: new Uint8Array([1]), selection: null });
+    });
+    const completed = await w.send({
+      type: 'completeLayout',
+      expectedFrameEpoch: 1,
+      paintCaret: false,
+      sliceBlocks: 4,
+    });
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(calls.filter((call) => call === 'begin')).toHaveLength(2);
+    expect(calls.indexOf('update')).toBeLessThan(calls.lastIndexOf('begin'));
+    expect(calls).not.toContain('whole');
+  });
+
+  test('a glyph trap while a frame request finishes the pass answers both requests once', async () => {
+    const { w, onResume, bootstrap } = steppedWorker(100);
+    await bootstrap();
+    await w.attach([1]);
+    // Presenting fails too once the trap is recorded; the trap still answers.
+    w.harness.failPresent = 1;
+    w.harness.memories = [
+      { label: 'docx-edit', bufferBytes: 65536, liveBytes: 65000, peakBytes: 65000, failedAllocationBytes: 112 },
+    ];
+    Object.assign(w.harness.session, {
+      outlineGlyphJson: () => {
+        throw new WebAssembly.RuntimeError('unreachable');
+      },
+    });
+    const rasterize = w.harness.rasterize;
+    w.harness.rasterize = async (...args: Parameters<typeof rasterize>) => {
+      try {
+        (w.harness as { glyphs?: (fontId: number, glyphId: number) => string }).glyphs?.(1, 1);
+      } catch {
+        // painted with browser text instead
+      }
+      return rasterize(...args);
+    };
+    let frame: Promise<ResidentEngineWorkerResponse> | undefined;
+    onResume.push(() => {
+      frame = w.send({ type: 'buildFrame', extras: 'given', expectedFrameEpoch: 2, paintCaret: false });
+    });
+    const completion = await w.send({
+      type: 'completeLayout',
+      expectedFrameEpoch: 1,
+      paintCaret: false,
+      sliceBlocks: 2,
+    });
+    const framed = await frame!;
+    expect(!completion.ok && completion.terminal && completion.outOfMemory).toBe(true);
+    expect(!framed.ok && framed.terminal && framed.outOfMemory).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(new Set(w.answered).size).toBe(w.answered.length);
+  });
+
+  test('a frame request finishes the pass first and answers it first', async () => {
+    const { w, calls, onResume, bootstrap } = steppedWorker(100);
+    await bootstrap();
+    const order: string[] = [];
+    let frame: Promise<unknown> | undefined;
+    onResume.push(() => {
+      frame = w
+        .send({ type: 'buildFrame', extras: 'given', expectedFrameEpoch: 2, paintCaret: false })
+        .then(() => order.push('frame'));
+    });
+    const completed = await w
+      .send({ type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 2 })
+      .then((reply) => {
+        order.push('complete');
+        return reply;
+      });
+    await frame;
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(order).toEqual(['complete', 'frame']);
+    expect(calls).toEqual(['begin', 'resume:2', 'resume:100']);
+  });
+
+  test('a completion that fails when a frame request finishes it is answered once, as is the frame request', async () => {
+    const { w, onResume, bootstrap } = steppedWorker(100);
+    await bootstrap();
+    Object.assign(w.harness.session, {
+      layoutDocumentWithRegionsRetainedJson: () => {
+        throw new Error('layout failed');
+      },
+    });
+    let frame: Promise<ResidentEngineWorkerResponse> | undefined;
+    onResume.push(() => {
+      (w.harness.session as { resumeRegionLayout?: unknown }).resumeRegionLayout = () => {
+        throw new Error('layout failed');
+      };
+      frame = w.send({ type: 'buildFrame', extras: 'given', expectedFrameEpoch: 2, paintCaret: false });
+    });
+    const completion = await w.send({
+      type: 'completeLayout',
+      expectedFrameEpoch: 1,
+      paintCaret: false,
+      sliceBlocks: 2,
+    });
+    const framed = await frame!;
+    expect(completion.ok).toBe(false);
+    expect(framed.ok).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(new Set(w.answered).size).toBe(w.answered.length);
+  });
+
+  test('a step queued behind a request that traps finishing the pass leaves the completion answered once', async () => {
+    const { w, onResume, bootstrap } = steppedWorker(100);
+    const build = w.harness.session.buildDisplayListFrame;
+    w.harness.session.buildDisplayListFrame = () => {
+      const bytes = build();
+      w.harness.delta = {
+        ...w.harness.delta!,
+        pageCount: 1,
+        operations: [
+          {
+            kind: 'upsert',
+            pageId: 1n,
+            pageIndex: 0,
+            fingerprint: BigInt(w.harness.delta!.frameEpoch),
+            primitiveIds: new BigUint64Array(),
+            page: { pageIndex: 0, width: 100, height: 100, primitives: [] },
+          },
+        ],
+      };
+      return bytes;
+    };
+    await bootstrap();
+    const raster = deferred();
+    const rasterize = w.harness.rasterize;
+    let frame: Promise<ResidentEngineWorkerResponse> | undefined;
+    onResume.push(() => {
+      w.harness.rasterize = async (...args) => {
+        await raster.promise;
+        return rasterize(...args);
+      };
+      (w.harness.session as { resumeRegionLayout?: unknown }).resumeRegionLayout = () => {
+        throw new WebAssembly.RuntimeError('unreachable');
+      };
+      // The attach holds the queue while the next step is queued behind the frame request.
+      void w.attach([1]);
+      frame = w.send({ type: 'buildFrame', extras: 'given', expectedFrameEpoch: 2, paintCaret: false });
+      setTimeout(() => raster.resolve(), 20);
+    });
+    const completion = await w.send({
+      type: 'completeLayout',
+      expectedFrameEpoch: 1,
+      paintCaret: false,
+      sliceBlocks: 2,
+    });
+    const framed = await frame!;
+    expect(completion.ok).toBe(false);
+    expect(framed.ok).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(new Set(w.answered).size).toBe(w.answered.length);
+  });
+
+  test("a superseded completion's queued step never runs the next completion", async () => {
+    const { w, calls, onResume, bootstrap } = steppedWorker(12);
+    await bootstrap();
+    let second: Promise<ResidentEngineWorkerResponse> | undefined;
+    onResume.push(() => {
+      void bootstrap();
+      second = w.send({
+        type: 'completeLayout',
+        expectedFrameEpoch: 1,
+        paintCaret: false,
+        sliceBlocks: 4,
+      });
+    });
+    const first = await w.send({
+      type: 'completeLayout',
+      expectedFrameEpoch: 1,
+      paintCaret: false,
+      sliceBlocks: 4,
+    });
+    const next = await second!;
+    expect(first.ok && first.frame).toBeUndefined();
+    expect(next.ok && next.layoutJson).toBe(full);
+    expect(calls.filter((call) => call === 'begin')).toHaveLength(2);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(new Set(w.answered).size).toBe(w.answered.length);
+  });
+
+  test('a new snapshot supersedes the pass', async () => {
+    const { w, calls, onResume, bootstrap } = steppedWorker();
+    await bootstrap();
+    onResume.push(() => {
+      void w.send({
+        type: 'sync',
+        expectedFrameEpoch: 1,
+        extras: '{}',
+        paintCaret: false,
+        snapshot: { ...snapshot, layoutWithRegions: false },
+      });
+    });
+    const superseded = await w.send({
+      type: 'completeLayout',
+      expectedFrameEpoch: 1,
+      paintCaret: false,
+      sliceBlocks: 2,
+    });
+    expect(superseded.ok && superseded.frame).toBeUndefined();
+    expect(calls).toEqual(['begin', 'resume:2']);
+  });
+
+  test('without a slice size the rest is laid out in one step', async () => {
+    const { w, calls, bootstrap } = steppedWorker();
+    await bootstrap();
+    const completed = await w.send({ type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false });
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(calls).toEqual(['whole']);
   });
 });
