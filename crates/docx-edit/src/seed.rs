@@ -4607,7 +4607,7 @@ fn visit_story(
                             StoryOptions {
                                 include_page_breaks: false,
                                 append_body_tail: false,
-                                seed_comments: false,
+                                seed_comments: options.seed_comments,
                             },
                         );
                     }
@@ -4641,7 +4641,7 @@ fn visit_story(
                     StoryOptions {
                         include_page_breaks: options.include_page_breaks,
                         append_body_tail: false,
-                        seed_comments: false,
+                        seed_comments: options.seed_comments,
                     },
                 );
                 last_kind = Some("blockSdt");

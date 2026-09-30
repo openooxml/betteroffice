@@ -48,7 +48,7 @@ const BODY =
   `<w:p w14:paraId="0C000006">${t('Go to ')}<w:hyperlink w:anchor="target">${t('page ')}` +
   `<w:fldSimple w:instr=" PAGE ">${t('7')}</w:fldSimple>${t(' of the text')}</w:hyperlink>${t(' now')}</w:p>`;
 
-function docx(body = BODY): Uint8Array {
+function docx(body = BODY, commentIds = [1]): Uint8Array {
   const parts: Record<string, string> = {
     '[Content_Types].xml':
       '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
@@ -59,7 +59,7 @@ function docx(body = BODY): Uint8Array {
     '_rels/.rels': `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`,
     'word/_rels/document.xml.rels': `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdC" Type="${REL}/comments" Target="comments.xml"/><Relationship Id="rIdH" Type="${REL}/hyperlink" Target="https://example.com/" TargetMode="External"/></Relationships>`,
     'word/document.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${NS}><w:body>${body}<w:sectPr/></w:body></w:document>`,
-    'word/comments.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:comments ${NS}><w:comment w:id="1" w:author="Reviewer"><w:p w14:paraId="0D000001">${t('Check')}</w:p></w:comment></w:comments>`,
+    'word/comments.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:comments ${NS}>${commentIds.map((id) => `<w:comment w:id="${id}" w:author="Reviewer"><w:p w14:paraId="0D00000${id}">${t('Check')}</w:p></w:comment>`).join('')}</w:comments>`,
   };
   return new Uint8Array(
     rezipPartsToArrayBuffer(new Map(Object.entries(parts).map(([name, xml]) => [name, toBytes(xml)])))
@@ -432,4 +432,27 @@ it('keeps a commented document byte-identical on a no-op save', async () => {
   const bytes = docx();
   const saved = unzipContainer((await saveYrsDocx(await open(bytes, 91020))).bytes);
   expect(saved).toEqual(unzipContainer(bytes));
+});
+
+it('keeps the ranges of comments inside a table cell and a content control after an edit elsewhere', async () => {
+  const commented = (id: number, text: string) =>
+    `<w:commentRangeStart w:id="${id}"/>${t(text)}<w:commentRangeEnd w:id="${id}"/>` +
+    `<w:r><w:commentReference w:id="${id}"/></w:r>`;
+  const body = BODY.replace(t('Cell'), commented(2, 'Cell')).replace(
+    '<w:p w14:paraId="0C000005">',
+    '<w:sdt><w:sdtPr><w:id w:val="6"/></w:sdtPr><w:sdtContent>' +
+      `<w:p w14:paraId="0C000007">${commented(3, 'Controlled')}</w:p></w:sdtContent></w:sdt>` +
+      '<w:p w14:paraId="0C000005">'
+  );
+  const session = await open(docx(body, [1, 2, 3]), 91080);
+  const { paraId } = session.paragraphs('body')[2]!;
+  session.insertText({ story: 'body', paraId, offset: 0 }, 'QA ');
+  for (const [path, saved] of await saves(session)) {
+    for (const [id, text] of [[1, 'Intro'], [2, 'Cell'], [3, 'Controlled']] as const) {
+      expect([path, id, markers(saved, id)]).toEqual([path, id, ['RangeStart', 'RangeEnd', 'Reference']]);
+      for (const reopened of [await open(saved, 91081), await seeded(saved, 91082)]) {
+        expect(anchored(reopened, String(id))).toBe(text);
+      }
+    }
+  }
 });
