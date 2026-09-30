@@ -234,9 +234,22 @@ async function exportWithPages(
     }
     return session.exportStructuredWithPagesFor(options, request);
   };
+  // A pass that changes only the revision preview lays out in the resident worker, so the
+  // session's retained layout can still preview decisions the editor no longer shows.
+  const showsMarkup = (): boolean => {
+    const request = editor().getLayoutRequest();
+    if (request === null) return false;
+    const preview = (JSON.parse(request) as { renderEnv?: { revisionPreview?: object } })
+      .renderEnv?.revisionPreview;
+    return !preview || Object.keys(preview).length === 0;
+  };
   let result = attempt();
   if (options.expectLayoutVersion !== undefined) return result;
-  if (!result.ok && LAYOUT_REFUSALS.has(result.failure.code)) {
+  if (
+    !result.ok &&
+    (LAYOUT_REFUSALS.has(result.failure.code) ||
+      (result.failure.code === 'unsupported-revision-layout' && showsMarkup()))
+  ) {
     editor().relayout({ onHost: true });
     result = attempt();
   }

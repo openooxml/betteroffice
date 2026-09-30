@@ -179,6 +179,76 @@ test('proposal decisions reach the render env and lay the document out again', a
   await settleUntil(() => env() !== null && !('revisionPreview' in env()!));
 });
 
+test('a pass that changes only the revision preview goes to the resident worker', async () => {
+  const session = await createYrsSession({ clientId: 4346 });
+  sessions.push(session);
+  const { paraId } = session.createStory('body', 'Hello world and more');
+  const paragraph = {
+    kind: 'session',
+    sessionId: session.paragraphIdentities().sessionId,
+    story: 'body',
+    paraId,
+  } as const;
+  const layouts: Layout[] = [];
+  const requests: string[] = [];
+  const editor = createRef<PagedEditorRef>();
+  render(
+    <PagedEditor
+      ref={editor}
+      document={null}
+      yrsCore={yrsCore(session)}
+      measurementFontProvider={{ resolve: () => () => Promise.resolve(fontBytes) }}
+      onLayoutComputed={(layout) => {
+        if (layout) layouts.push(layout);
+      }}
+      layoutInWorker={(_, request) => {
+        requests.push(request);
+        return null;
+      }}
+    />
+  );
+  await settleUntil(() => layouts.length > 0);
+  const opened = requests.length;
+
+  let laidOut = layouts.length;
+  await act(async () => {
+    ok(
+      session.proposeChanges({
+        expectVersion: session.version(),
+        proposals: [
+          {
+            id: 'a',
+            paragraph,
+            suggest: SUGGEST,
+            op: 'replaceText',
+            search: 'world',
+            replaceWith: 'earth',
+          },
+        ],
+      })
+    );
+    editor.current!.relayout();
+  });
+  await settleUntil(() => layouts.length > laidOut);
+  expect(requests).toHaveLength(opened);
+
+  laidOut = layouts.length;
+  let decided!: ReturnType<typeof ok>;
+  await act(async () => {
+    decided = ok(
+      session.setProposalStates({
+        expectVersion: session.version(),
+        expectPreviewVersion: 0,
+        changes: [{ id: 'a', state: 'accepted' }],
+      })
+    );
+  });
+  await settleUntil(() => layouts.length > laidOut);
+  expect(requests).toHaveLength(opened + 1);
+  const request = JSON.parse(requests.at(-1)!) as { renderEnv: Record<string, unknown> };
+  expect(request.renderEnv.revisionPreview).toEqual(proposalRevisionPreview(decided));
+});
+
 test('the render env preview changes identity only when a decision does', async () => {
   const first = await createYrsSession({ clientId: 4344 });
   const second = await createYrsSession({ clientId: 4345 });

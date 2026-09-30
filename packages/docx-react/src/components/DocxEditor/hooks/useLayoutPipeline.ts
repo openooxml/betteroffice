@@ -180,6 +180,13 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   sessionRef.current = session;
   // The document version the first pass of this session laid out.
   const openedVersionRef = useRef<{ session: YrsSession; version: string | null } | null>(null);
+  // The last layout this pipeline applied: its session, document version, and
+  // request without the revision preview.
+  const laidOutRef = useRef<{
+    session: YrsSession;
+    version: string | null;
+    request: string;
+  } | null>(null);
   const workerPrewarmRef = useRef<{ session: YrsSession; release: () => void } | null>(null);
   const releaseWorkerPrewarm = useCallback((owner: YrsSession | null) => {
     const worker = workerPrewarmRef.current;
@@ -368,6 +375,13 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         const computeInputs = { document, pageGap, session, renderEnv, measurement };
         const sourceVersion = readSessionVersion(session);
         const previewKey = revisionPreviewKey(renderEnv.revisionPreview);
+        const request = {
+          ...buildResidentRegionLayoutRequest(document, pageGap, renderEnv),
+          measurement,
+        };
+        const requestWithoutPreview = JSON.stringify(request, (key, value: unknown) =>
+          key === 'revisionPreview' ? undefined : value
+        );
 
         // Step 4+: paint + scroll/events with the computed values.
         const applyComputation = (
@@ -381,6 +395,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             workerOpenEnabledRef.current ? workerOpenSourceVersion(session, version) : version
           );
           stampRevisionPreviewKey(newLayout, previewKey);
+          laidOutRef.current = { session, version, request: requestWithoutPreview };
 
           const pagesEl = pagesContainerRef.current;
           const scrollParent =
@@ -449,28 +464,29 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         // and answers with it and its first frame.
         // The document as opened is laid out by the resident worker alone: that
         // pass also builds its first frame, so the main thread runs no layout
-        // before the first paint. Once the document changes, passes run here.
+        // before the first paint. So is a pass that changes only the revision
+        // preview of the layout last applied. Once the document changes, passes
+        // run here.
         if (openedVersionRef.current?.session !== session) {
           openedVersionRef.current = { session, version: sourceVersion };
         }
+        const laidOut = laidOutRef.current;
+        const previewOnly =
+          laidOut?.session === session &&
+          laidOut.version === sourceVersion &&
+          laidOut.request === requestWithoutPreview;
         let workerPass: ReturnType<LayoutInWorker> = null;
         if (
           !onHost &&
           sourceVersion !== null &&
-          sourceVersion ===
-            (workerOpenEnabledRef.current
-              ? workerOpenSourceVersion(session, openedVersionRef.current.version)
-              : openedVersionRef.current.version)
+          (previewOnly ||
+            sourceVersion ===
+              (workerOpenEnabledRef.current
+                ? workerOpenSourceVersion(session, openedVersionRef.current.version)
+                : openedVersionRef.current.version))
         ) {
           try {
-            workerPass =
-              layoutInWorkerRef.current?.(
-                session,
-                JSON.stringify({
-                  ...buildResidentRegionLayoutRequest(document, pageGap, renderEnv),
-                  measurement,
-                })
-              ) ?? null;
+            workerPass = layoutInWorkerRef.current?.(session, JSON.stringify(request)) ?? null;
           } catch (error) {
             console.error('[PagedEditor] Resident worker layout could not start:', error);
           }
