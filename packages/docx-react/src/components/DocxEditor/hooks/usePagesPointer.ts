@@ -647,6 +647,19 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     [applyYrsCommand, focusInput, resolveTarget, setTextSelection, tableInsertButton, yrsSession]
   );
 
+  /** Whether a text range, or a cell range holding the point, is selected. */
+  const selectionUnder = useCallback(
+    (clientX: number, clientY: number): boolean => {
+      const current = yrsInputRef.current?.displaySelection();
+      if (current && current.anchor !== current.head) return true;
+      const cells = yrsSession?.cellSelection() ?? null;
+      if (!cells || sameYrsCell(cells.anchor, cells.head)) return false;
+      const position = getPositionFromMouse(clientX, clientY);
+      return cellIsWithinYrsRange(position == null ? undefined : resolveTarget(position)?.cell, cells);
+    },
+    [getPositionFromMouse, resolveTarget, yrsInputRef, yrsSession]
+  );
+
   const handlePagesClick = useCallback(
     (e: React.MouseEvent) => {
       // Native canvas clicks move focus to the document body after mousedown.
@@ -659,8 +672,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       const host = canvasHostRef?.current ?? pagesContainerRef.current;
       const point = resolveCanvasHit(e.clientX, e.clientY, false);
       // read-only selection wins over a link: a drag that ends on one, or a double or triple click
-      const current = readOnly ? yrsInputRef.current?.displaySelection() : null;
-      const selecting = readOnly && (e.detail > 1 || (!!current && current.anchor !== current.head));
+      const selecting = readOnly && (e.detail > 1 || selectionUnder(e.clientX, e.clientY));
       if (projection && queries && host && point && !selecting) {
         // Hyperlink primitives are indexed by band, so an open note — whose
         // area the index does not cover — resolves none and falls through to
@@ -760,6 +772,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       resolveCanvasHit,
       resolveTarget,
       scrollToPositionImpl,
+      selectionUnder,
       setTextSelection,
       yrsInputRef,
       yrsRootStory,

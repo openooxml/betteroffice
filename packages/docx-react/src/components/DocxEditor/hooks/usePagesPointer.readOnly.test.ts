@@ -221,3 +221,42 @@ test('read-only selection wins over a link: double-click and a drag ending on it
   expect(run(true, 1, { anchor: 3, head: 9 })).toEqual({ links: [], words: [] });
   expect(run(false, 2, null).words).toEqual([]);
 });
+
+test('read-only selection wins over a link inside a selected cell range', () => {
+  const cell = (row: number, column: number) => ({ story: 'body', tableIndex: 0, row, column });
+  const table = {
+    size: 100,
+    targetAt: (position: number) => ({ story: 'body:t0:r1c1', displayPosition: position, cell: cell(1, 1) }),
+    tableAtPosition: () => null,
+    cellPosition: () => null,
+    nodeAt: () => null,
+  } as unknown as YrsPositionProjection;
+  const linked = fakeQueries();
+  (linked.displayList.pages[0] as { primitives: unknown[] }).primitives = [
+    { kind: 'text', text: 'link', x: 0, baselineY: 410, width: 800, font: '400 16px Calibri', color: '#000000', docStart: 1, docEnd: 5, href: 'https://example.com/' },
+  ];
+  for (const [head, followed] of [
+    [cell(1, 1), false],
+    [cell(0, 0), true],
+  ] as const) {
+    const links: string[] = [];
+    const { opts } = options({
+      displayListQueries: linked,
+      canvasOverlayTarget: document.body,
+      getYrsPositionProjection: () => table,
+      yrsSession: {
+        cellSelection: () => ({ anchor: cell(0, 0), head }),
+        setCellSelection: () => {},
+      } as unknown as YrsSession,
+      onHyperlinkClick: (link) => links.push(link.href),
+    });
+    const view = renderHook(() => usePagesPointer(opts));
+    act(() => {
+      canvasOf().dispatchEvent(
+        new MouseEvent('click', { bubbles: true, clientX: 200, clientY: 405, button: 0, detail: 1 })
+      );
+    });
+    view.unmount();
+    expect(links.length > 0).toBe(followed);
+  }
+});
