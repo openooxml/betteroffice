@@ -1,10 +1,12 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, expect, test } from 'bun:test';
+import { afterAll, expect, spyOn, test } from 'bun:test';
 import type { LayoutComputation } from '@betteroffice/docx/editor';
 import { LayoutSelectionGate, type ResidentMeasurementConfig } from '@betteroffice/docx/layout';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { YrsRenderEnv, YrsSession } from '@betteroffice/docx/yrs';
 import { isLayoutQueued, isSupersededLayout, sourceVersionOf } from '../internals/layoutProvenance';
+import { deferWorkerOpenReplica } from '../internals/workerOpenReplica';
+import type { WorkerLayoutComputation } from './useDisplayList';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -18,7 +20,7 @@ afterAll(async () => {
 interface WorkerPass {
   /** The document version the pass was asked for. */
   at: number;
-  answer(): void;
+  answer(computation?: WorkerLayoutComputation): void;
   fail(): void;
 }
 
@@ -42,8 +44,12 @@ function fakeDocument() {
 }
 
 /** A document whose version each test moves on; worker passes answer when the test says. */
-async function opened() {
+async function opened({ experimentalWorkerOpen = false, pendingReplica = false } = {}) {
   const { doc, session } = fakeDocument();
+  const replica = pendingReplica
+    ? deferWorkerOpenReplica(session, () => new Promise(() => {}), () => {}, () => {})
+    : null;
+  const ensureReplica = replica ? spyOn(replica, 'ensure') : null;
   const worker: WorkerPass[] = [];
   const errors: Error[] = [];
   const syncCoordinator = new LayoutSelectionGate();
@@ -51,6 +57,7 @@ async function opened() {
     useLayoutPipeline({
       document: null,
       session,
+      experimentalWorkerOpen,
       renderEnv: {} as YrsRenderEnv,
       pageGap: 24,
       zoom: 1,
@@ -63,11 +70,13 @@ async function opened() {
       onError: (error) => errors.push(error),
       layoutInWorker: (asked) =>
         doc.workerAvailable
-          ? new Promise<LayoutComputation | null>((resolve) => {
+          ? new Promise<WorkerLayoutComputation | null>((resolve) => {
               worker.push({
                 at: Number(asked.version()),
-                answer: () =>
-                  resolve({ layout: { pages: [] } as unknown as Layout, notesConverged: true }),
+                answer: (computation) =>
+                  resolve(computation ?? {
+                    layout: { pages: [] } as unknown as Layout, notesConverged: true,
+                  }),
                 fail: () => resolve(null),
               });
             })
@@ -79,16 +88,18 @@ async function opened() {
     act(async () => {
       await new Promise((done) => setTimeout(done, 40));
     });
-  const answer = (index: number) =>
+  const answer = (index: number, computation?: WorkerLayoutComputation) =>
     act(async () => {
-      worker[index]!.answer();
+      worker[index]!.answer(computation);
       await new Promise((done) => setTimeout(done, 0));
     });
   const shown = () => sourceVersionOf(hook.result.current.layout);
   act(() => hook.result.current.runLayoutPipeline());
   await answer(0);
   expect(shown()).toBe('1');
-  return { doc, session, worker, errors, hook, frame, answer, shown };
+  return {
+    doc, session, worker, errors, hook, frame, answer, shown, replica, ensureReplica,
+  };
 }
 
 test('host batches and remote updates lay out in the worker, local edits here', async () => {
@@ -179,6 +190,116 @@ test('updates that land while the worker lays out queue one pass for the latest 
   expect(doc.laidOutHere).toEqual([]);
   expect(errors).toEqual([]);
 });
+
+test('a stale worker reply queues one more worker pass while the replica is pending', async () => {
+  const h = await opened({ experimentalWorkerOpen: true, pendingReplica: true });
+  h.doc.version = 2;
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  expect(isLayoutQueued(h.session)).toBe(false);
+  h.doc.version = 3;
+
+  await h.answer(1);
+  expect(h.shown()).toBe('2');
+  expect(isSupersededLayout(h.hook.result.current.layout)).toBe(true);
+  expect(isLayoutQueued(h.session)).toBe(true);
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(h.ensureReplica).not.toHaveBeenCalled();
+  expect(h.replica?.pending).toBe(true);
+  expect(h.replica?.started).toBe(false);
+
+  await h.frame();
+  expect(h.worker.map((pass) => pass.at)).toEqual([1, 2, 3]);
+  expect(isLayoutQueued(h.session)).toBe(false);
+  await h.answer(2);
+  expect(h.shown()).toBe('3');
+  expect(isSupersededLayout(h.hook.result.current.layout)).toBe(false);
+  await h.frame();
+  expect(h.worker).toHaveLength(3);
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(h.ensureReplica).not.toHaveBeenCalled();
+  expect(h.replica?.pending).toBe(true);
+  expect(h.replica?.started).toBe(false);
+  expect(h.errors).toEqual([]);
+  h.hook.unmount();
+});
+
+test('a stale worker reply lays out here without a pending replica', async () => {
+  const { doc, session, worker, errors, hook, frame, answer, shown } = await opened({
+    experimentalWorkerOpen: true,
+  });
+  doc.version = 2;
+  act(() => hook.result.current.scheduleLayout('remote'));
+  await frame();
+  doc.version = 3;
+
+  await answer(1);
+  expect(shown()).toBe('3');
+  expect(isSupersededLayout(hook.result.current.layout)).toBe(false);
+  expect(isLayoutQueued(session)).toBe(false);
+  await frame();
+  expect(worker.map((pass) => pass.at)).toEqual([1, 2]);
+  expect(doc.laidOutHere).toEqual([3]);
+  expect(errors).toEqual([]);
+  hook.unmount();
+});
+
+for (const pendingReplica of [true, false]) {
+  const name = pendingReplica
+    ? 'a stale full worker layout queues another pass while the replica is pending'
+    : 'a stale full worker layout lays out here without a pending replica';
+  test(name, async () => {
+    const h = await opened({ experimentalWorkerOpen: true, pendingReplica });
+    h.doc.version = 2;
+    act(() => h.hook.result.current.scheduleLayout('remote'));
+    await h.frame();
+    let finish!: (computation: LayoutComputation | null) => void;
+    const complete = new Promise<LayoutComputation | null>((resolve) => { finish = resolve; });
+    const firstPages = { pages: [] } as unknown as Layout;
+    await h.answer(1, { layout: firstPages, notesConverged: true, complete });
+    expect(h.shown()).toBe('2');
+    expect(h.hook.result.current.layout).toBe(firstPages);
+    expect(isLayoutQueued(h.session)).toBe(false);
+    h.doc.version = 3;
+    const full = { pages: [] } as unknown as Layout;
+    await act(async () => {
+      finish({ layout: full, notesConverged: true });
+      await new Promise((done) => setTimeout(done, 0));
+    });
+
+    if (pendingReplica) {
+      expect(h.hook.result.current.layout).toBe(firstPages);
+      expect(h.shown()).toBe('2');
+      expect(isLayoutQueued(h.session)).toBe(true);
+      expect(h.doc.laidOutHere).toEqual([]);
+      expect(h.ensureReplica).not.toHaveBeenCalled();
+      expect(h.replica?.pending).toBe(true);
+      expect(h.replica?.started).toBe(false);
+      await h.frame();
+      expect(h.worker.map((pass) => pass.at)).toEqual([1, 2, 3]);
+      expect(isLayoutQueued(h.session)).toBe(false);
+      await h.answer(2);
+      expect(h.shown()).toBe('3');
+      expect(isSupersededLayout(h.hook.result.current.layout)).toBe(false);
+      await h.frame();
+      expect(h.worker).toHaveLength(3);
+      expect(h.doc.laidOutHere).toEqual([]);
+      expect(h.ensureReplica).not.toHaveBeenCalled();
+      expect(h.replica?.pending).toBe(true);
+      expect(h.replica?.started).toBe(false);
+    } else {
+      expect(h.hook.result.current.layout).not.toBe(full);
+      expect(h.shown()).toBe('3');
+      expect(isSupersededLayout(h.hook.result.current.layout)).toBe(false);
+      expect(isLayoutQueued(h.session)).toBe(false);
+      await h.frame();
+      expect(h.worker.map((pass) => pass.at)).toEqual([1, 2]);
+      expect(h.doc.laidOutHere).toEqual([3]);
+    }
+    expect(h.errors).toEqual([]);
+    h.hook.unmount();
+  });
+}
 
 test('a pass no change asked to run here waits for the worker pass in flight', async () => {
   const { doc, session, worker, errors, hook, frame, answer, shown } = await opened();

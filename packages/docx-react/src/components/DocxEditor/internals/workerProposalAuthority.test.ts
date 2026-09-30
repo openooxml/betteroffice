@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'bun:test';
 import type {
   DocxProposalRequest,
+  DocxProposalResult,
   DocxProposalSnapshot,
   ResidentProposalReply,
   YrsSession,
@@ -8,6 +9,7 @@ import type {
 import type { WorkerOpenedDocument } from '../hooks/useDisplayList';
 import {
   beginWorkerProposalHandover,
+  handedOverRequest,
   registerWorkerProposalAuthority,
   workerProposalAuthority,
 } from './workerProposalAuthority';
@@ -35,7 +37,7 @@ function reply(version = 'worker-1', changedStories: string[] = []): ResidentPro
   };
 }
 
-function harness() {
+function harness(laidOut = () => Promise.resolve()) {
   let mainVersion = 'main-1';
   let mirror: ResidentProposalReply['mirror'] | null = null;
   let registry: ResidentProposalReply['mirror']['proposals'] = { previewVersion: 0, entries: [] };
@@ -70,14 +72,18 @@ function harness() {
     }),
   };
   const relayout = mock(() => {});
+  const contentChanged = mock(() => {});
   let current = true;
   const authority = registerWorkerProposalAuthority(
     session, worker as unknown as WorkerOpenedDocument,
-    { relayout, current: () => current, adopted: () => {}, handedOver: () => {} }
+    {
+      relayout, current: () => current, laidOut, contentChanged,
+      adopted: () => {}, handedOver: () => {},
+    }
   );
   deferWorkerOpenReplica(session, () => new Promise(() => {}), () => {}, () => {});
   return {
-    session, worker, events, authority, proposalChange, relayout,
+    session, worker, events, authority, proposalChange, relayout, contentChanged,
     replace: () => { current = false; },
     mainVersion: (version: string) => { mainVersion = version; },
   };
@@ -108,6 +114,37 @@ test('initialization runs once and serializes reads after an in-flight proposal'
   await read;
   expect((await snapshot).version).toBe('worker-2');
   expect(h.events).toEqual(['snapshot', 'propose', 'paragraphIdentities']);
+});
+
+test('routed reads wait for layout and the initialization snapshot before posting', async () => {
+  const laidOut = deferred<void>();
+  const h = harness(() => laidOut.promise);
+  const snapshot = deferred<ResidentProposalReply>();
+  const posted = deferred<void>();
+  h.worker.proposal.mockImplementation(async (op) => {
+    h.events.push(op.kind);
+    posted.resolve();
+    return snapshot.promise;
+  });
+  const read = h.authority.readParagraphs({
+    story: 'body', paraIds: ['p1'], view: 'accepted',
+  }, unusedMain);
+  await new Promise((done) => setTimeout(done, 0));
+  expect(h.worker.proposal).not.toHaveBeenCalled();
+  expect(h.worker.documentRead).not.toHaveBeenCalled();
+  expect(h.events).toEqual([]);
+  expect(h.authority.initialized).toBe(false);
+
+  laidOut.resolve();
+  await posted.promise;
+  expect(h.events).toEqual(['snapshot']);
+  expect(h.worker.documentRead).not.toHaveBeenCalled();
+  snapshot.resolve(reply());
+  expect(await read).toEqual({ version: 'worker-1', paragraphs: [] });
+  expect(h.events).toEqual(['snapshot', 'readParagraphs']);
+  expect(h.worker.proposal).toHaveBeenCalledTimes(1);
+  expect(h.authority.initialized).toBe(true);
+  expect(h.contentChanged).not.toHaveBeenCalled();
 });
 
 test('an in-flight document change masks the version without notifying proposal listeners', async () => {
@@ -163,6 +200,106 @@ test('propose and withdraw relayout only when stories change', async () => {
   expect(h.relayout).toHaveBeenCalledTimes(1);
 });
 
+for (const kind of ['propose', 'withdraw', 'setStates'] as const) {
+  test(`${kind} notifies content changes once only when stories change`, async () => {
+    const h = harness();
+    await h.authority.initialize();
+    const mutate = () => {
+      switch (kind) {
+        case 'propose':
+          return h.authority.propose(request, unusedMain);
+        case 'withdraw':
+          return h.authority.withdraw({ expectVersion: 'worker-1', ids: [] }, unusedMain);
+        case 'setStates':
+          return h.authority.setStates({
+            expectVersion: 'worker-1', expectPreviewVersion: 0, changes: [],
+          }, unusedMain);
+      }
+    };
+    expect(h.contentChanged).not.toHaveBeenCalled();
+    await mutate();
+    expect(h.contentChanged).not.toHaveBeenCalled();
+
+    const changed = reply('worker-2', ['body', 'hf:header']);
+    h.worker.proposal.mockResolvedValue(changed);
+    expect(await mutate()).toEqual(changed.result!);
+    expect(h.contentChanged).toHaveBeenCalledTimes(1);
+
+    const unchanged = reply('worker-2');
+    h.worker.proposal.mockResolvedValue(unchanged);
+    expect(await mutate()).toEqual(unchanged.result!);
+    expect(h.contentChanged).toHaveBeenCalledTimes(1);
+
+    const refused = reply('worker-2');
+    refused.result = {
+      ok: false,
+      version: 'worker-2',
+      failure: { code: 'stale-version', message: 'The document changed' },
+    };
+    h.worker.proposal.mockResolvedValue(refused);
+    expect(await mutate()).toEqual(refused.result);
+    expect(h.contentChanged).toHaveBeenCalledTimes(1);
+
+    h.worker.proposal.mockRejectedValue(new Error('worker unavailable'));
+    await expect(mutate()).rejects.toThrow('worker unavailable');
+    expect(h.contentChanged).toHaveBeenCalledTimes(1);
+  });
+}
+
+test('an initialization snapshot never notifies content changes', async () => {
+  const h = harness();
+  h.worker.proposal.mockResolvedValue(reply('worker-1', ['body']));
+  await h.authority.initialize();
+  expect(h.contentChanged).not.toHaveBeenCalled();
+});
+
+test('main continuations complete in FIFO order after hand-over begins', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  const handingOver = beginWorkerProposalHandover(h.session)!;
+  const replica = deferred<() => void>();
+  deferWorkerOpenReplica(h.session, () => replica.promise, () => {
+    throw new Error('unexpected fallback');
+  }, () => {});
+  const ready = requestWorkerOpenReplica(h.session)!;
+  const pending = deferred<DocxProposalResult>();
+  const started = deferred<void>();
+  const order: string[] = [];
+  const main = mock(async () => {
+    started.resolve();
+    return pending.promise;
+  });
+  const mutation = h.authority.propose(request, main).then((result) => {
+    order.push('mutation');
+    return result;
+  });
+  const readMain = mock(async () => h.session.getProposals());
+  const read = h.authority.getProposals(readMain).then((result) => {
+    order.push('read');
+    return result;
+  });
+  const handover = await handingOver;
+  expect(main).not.toHaveBeenCalled();
+  expect(readMain).not.toHaveBeenCalled();
+  replica.resolve(() => { h.mainVersion('main-2'); handover.complete(); });
+  await ready;
+  await started.promise;
+  await new Promise((done) => setTimeout(done, 0));
+  expect(order).toEqual([]);
+  expect(main).toHaveBeenCalledTimes(1);
+  expect(readMain).not.toHaveBeenCalled();
+
+  const result = reply('main-2').result!;
+  pending.resolve(result);
+  expect(await mutation).toEqual(result);
+  expect((await read).version).toBe('main-2');
+  expect(order).toEqual(['mutation', 'read']);
+  expect(readMain).toHaveBeenCalledTimes(1);
+  expect(h.worker.proposal).toHaveBeenCalledTimes(1);
+  expect(h.worker.documentRead).not.toHaveBeenCalled();
+  expect(h.contentChanged).not.toHaveBeenCalled();
+});
+
 test('hand-over waits for the running worker call and routes queued calls to main with a version rewrite', async () => {
   const h = harness();
   await h.authority.initialize();
@@ -174,15 +311,15 @@ test('hand-over waits for the running worker call and routes queued calls to mai
   const inFlight = h.authority.propose(request, unusedMain);
   await posted.promise;
   const main = mock(async (input: DocxProposalRequest) => {
-    expect(input.expectVersion).toBe('main-2');
+    expect(handedOverRequest(h.session, input).expectVersion).toBe('main-2');
     return reply('main-2').result!;
   });
-  const queued = h.authority.propose({ ...request, expectVersion: 'worker-2' }, main);
   deferWorkerOpenReplica(h.session, async () => {
     const handover = await beginWorkerProposalHandover(h.session)!;
     return () => { h.mainVersion('main-2'); handover.complete(); };
   }, () => { throw new Error('unexpected fallback'); }, () => {});
   const ready = requestWorkerOpenReplica(h.session)!;
+  const queued = h.authority.propose({ ...request, expectVersion: 'worker-2' }, main);
   const later = h.authority.getProposals(async () => h.session.getProposals());
   expect(h.worker.handOver).not.toHaveBeenCalled();
   pending.resolve(reply('worker-2', ['body']));
@@ -196,7 +333,7 @@ test('hand-over waits for the running worker call and routes queued calls to mai
   expect(notify).toHaveBeenCalledTimes(2);
   expect(workerProposalAuthority(h.session)).toBeNull();
   const staleMain = mock(async (input: DocxProposalRequest) => {
-    expect(input.expectVersion).toBe('worker-2');
+    expect(handedOverRequest(h.session, input).expectVersion).toBe('worker-2');
     return reply('main-3').result!;
   });
   h.mainVersion('main-3');
@@ -234,6 +371,7 @@ test('a replaced document rejects the worker result', async () => {
   pending.resolve(reply('worker-2', ['body']));
   await expect(call).rejects.toThrow('The document changed while applying proposals');
   expect(h.relayout).not.toHaveBeenCalled();
+  expect(h.contentChanged).not.toHaveBeenCalled();
 });
 
 test('failed initialization rejects and is never posted twice', async () => {
@@ -242,6 +380,7 @@ test('failed initialization rejects and is never posted twice', async () => {
   await expect(h.authority.initialize()).rejects.toThrow('worker unavailable');
   await expect(h.authority.getProposals(unusedMain)).rejects.toThrow('worker unavailable');
   expect(h.worker.proposal).toHaveBeenCalledTimes(1);
+  expect(h.contentChanged).not.toHaveBeenCalled();
 });
 
 test('anchor and navigation reads retain the worker version and input order', async () => {
@@ -285,4 +424,39 @@ test('a rejected worker call restores the visible version and leaves the queue u
   await expect(call).rejects.toThrow('worker unavailable');
   expect((await h.authority.getProposals(unusedMain)).version).toBe('worker-1');
   expect(h.proposalChange).not.toHaveBeenCalled();
+  expect(h.contentChanged).not.toHaveBeenCalled();
+});
+
+test('a call made before the hand-over began runs in the worker ahead of it', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  const pending = deferred<ResidentProposalReply>();
+  const posted = deferred<void>();
+  h.worker.proposal.mockImplementation(async (op) => {
+    h.events.push(op.kind);
+    posted.resolve();
+    return pending.promise;
+  });
+  const inFlight = h.authority.propose(request, unusedMain);
+  await posted.promise;
+  h.worker.proposal.mockImplementation(async (op) => {
+    h.events.push(op.kind);
+    return reply('worker-3', ['body']);
+  });
+  const queued = h.authority.withdraw({ expectVersion: 'worker-2', ids: [] }, unusedMain);
+  deferWorkerOpenReplica(h.session, async () => {
+    const handover = await beginWorkerProposalHandover(h.session)!;
+    return () => {
+      h.mainVersion('main-3');
+      handover.complete();
+    };
+  }, () => { throw new Error('unexpected fallback'); }, () => {});
+  const ready = requestWorkerOpenReplica(h.session)!;
+  const after = h.authority.getProposals(async () => h.session.getProposals());
+  pending.resolve(reply('worker-2', ['body']));
+  await inFlight;
+  expect((await queued).ok).toBe(true);
+  await ready;
+  expect((await after).version).toBe('main-3');
+  expect(h.events).toEqual(['snapshot', 'propose', 'withdraw', 'handOver']);
 });

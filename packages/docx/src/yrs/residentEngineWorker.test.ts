@@ -2,7 +2,12 @@ import { beforeAll, describe, expect, test } from 'bun:test';
 import { resolve } from 'node:path';
 import type { DecodedFrameDelta, FramePageOperation } from '../layout/render/frameDelta';
 import type { DisplayPage } from '../layout/render/displayList';
-import type { YrsResidentCaretRect } from './index';
+import type {
+  DocxEditRequest,
+  DocxParagraphAnchor,
+  DocxProposalInput,
+  YrsResidentCaretRect,
+} from './index';
 import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerRequestWithoutId,
@@ -160,7 +165,7 @@ function worker() {
       encodeStateVector() {
         return new Uint8Array([1]);
       },
-      revisionCount() {
+      revisionCount(_excluding?: ReadonlySet<string>) {
         return 0;
       },
       destroy() {},
@@ -844,6 +849,97 @@ describe('resident worker layout ownership', () => {
     expect(afterEdit.ok && afterEdit.frame).toBeUndefined();
     expect(afterEdit.ok && afterEdit.layoutJson).toBeUndefined();
     expect(extras).toHaveLength(framesBefore);
+  });
+});
+
+describe('resident worker revision counts', () => {
+  test('revisionCount excludes revisions created by worker proposals', async () => {
+    const w = worker();
+    let version = 'proposal-1';
+    const revisions = ['document-1', 'document-2'];
+    const excluded: ReadonlySet<string>[] = [];
+    const engine = {
+      version: () => version,
+      resolveParagraphAnchor: (anchor: DocxParagraphAnchor) => ({ status: 'found', anchor }),
+      applyEdits: (request: DocxEditRequest) => {
+        version = 'proposal-2';
+        return {
+          ok: true,
+          version,
+          source: 'host',
+          changedStories: ['body'],
+          receipts: request.steps.map((_step, stepIndex) => {
+            const revisionId = `worker-${stepIndex + 1}`;
+            revisions.push(revisionId);
+            return {
+              stepIndex, changed: true, revisionIds: [revisionId],
+              newParagraphs: [], removedParagraphs: [],
+            };
+          }),
+        };
+      },
+    };
+    Object.assign(w.harness.session, {
+      proposalEngine: engine,
+      geometryReader: {
+        version: engine.version,
+        listRevisions: () => [],
+        resolveParagraphAnchor: () => ({ status: 'missing' }),
+      },
+      storiesChangedSince: () => ({ revision: 0, stories: [] }),
+    });
+    w.harness.session.revisionCount = (excluding) => {
+      expect(excluding).toBeInstanceOf(Set);
+      excluded.push(excluding!);
+      return revisions.filter((id) => !excluding!.has(id)).length;
+    };
+    expect((await w.bootstrap()).ok).toBe(true);
+    const proposed = await w.send({
+      type: 'proposal',
+      operation: {
+        kind: 'propose',
+        request: {
+          expectVersion: 'proposal-1',
+          proposals: [1, 2].map<DocxProposalInput>((index) => ({
+            id: `host-${index}`,
+            paragraph: {
+              kind: 'session', sessionId: 'session', story: 'body', paraId: `p${index}`,
+            },
+            suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+            op: 'insertText',
+            at: 'end',
+            text: '!',
+          })),
+        },
+      },
+    });
+    expect(proposed.ok && proposed.proposal?.result?.ok).toBe(true);
+    expect(proposed.ok && proposed.proposal?.mirror.proposals.entries.map(
+      ({ record }) => ({ id: record.id, revisionIds: record.revisionIds })
+    )).toEqual([
+      { id: 'host-1', revisionIds: ['worker-1'] },
+      { id: 'host-2', revisionIds: ['worker-2'] },
+    ]);
+    expect(revisions).toEqual(['document-1', 'document-2', 'worker-1', 'worker-2']);
+
+    const counted = await w.send({ type: 'revisionCount' });
+    expect(counted.ok && counted.revisionCount).toBe(2);
+    expect(excluded).toEqual([new Set(['worker-1', 'worker-2'])]);
+  });
+
+  test('revisionCount passes an empty exclusion set without a proposal registry', async () => {
+    const w = worker();
+    const revisions = ['document-1', 'document-2'];
+    const excluded: ReadonlySet<string>[] = [];
+    w.harness.session.revisionCount = (excluding) => {
+      expect(excluding).toBeInstanceOf(Set);
+      excluded.push(excluding!);
+      return revisions.filter((id) => !excluding!.has(id)).length;
+    };
+    expect((await w.bootstrap()).ok).toBe(true);
+    const counted = await w.send({ type: 'revisionCount' });
+    expect(counted.ok && counted.revisionCount).toBe(2);
+    expect(excluded).toEqual([new Set<string>()]);
   });
 });
 

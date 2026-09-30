@@ -108,17 +108,20 @@ export function registerWorkerProposalAuthority(
     return result;
   };
   const store = (reply: ResidentProposalReply): void => {
+    // Listeners the mirror notifies read the geometry that goes with it.
+    geometry = reply.geometry;
     mirror = reply.mirror;
     session.mirrorWorkerDocument(mirror);
-    geometry = reply.geometry;
     notify();
   };
-  // Calls answer in order, whichever side takes them.
+  // Calls answer in order. One made before the hand-over began runs in the worker, ahead of the
+  // hand-over; one made after waits in turn for the replica.
   const route = <T>(call: () => Promise<T>, main: () => T | Promise<T>): Promise<T> => {
     const ready = authority.initialize();
     void ready.catch(() => {});
+    const viaWorker = !handingOver;
     return enqueue(async () => {
-      if (!handingOver) {
+      if (viaWorker) {
         await ready;
         assertCurrent();
         return call();
@@ -221,12 +224,12 @@ export function registerWorkerProposalAuthority(
             assertCurrent();
             completed = true;
             hooks.handedOver(handedOver.version);
+            geometry = null;
             if (initialized) {
               session.mirrorWorkerDocument({ version: handedOver.version, proposals: handedOver.proposals });
               session.mirrorWorkerDocument(null);
               versionRewrite = { worker: handedOver.version, main: session.version() };
             }
-            geometry = null;
             notify();
           },
         };
