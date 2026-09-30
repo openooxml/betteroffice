@@ -582,6 +582,12 @@ export class EditSession {
      * keeps every part; it reflects the source file, not later edits.
      */
     materialize_docx(): string | undefined;
+    media_bytes(token: string): Uint8Array | undefined;
+    media_data_url(token: string): string | undefined;
+    media_type(token: string): string | undefined;
+    media_sources_json(): string;
+    load_media_sources(json: string): void;
+    set_media_tokens(enabled: boolean): void;
     /**
      * Measurement input JSON in, `ParagraphExtent` JSON out. Also records the
      * paragraph's immutable width/font envelope under its stable block id, so

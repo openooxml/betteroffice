@@ -353,6 +353,10 @@ pub(crate) struct SourceIndex {
 }
 
 impl SourceIndex {
+    pub(crate) fn bytes(&self) -> Arc<[u8]> {
+        Arc::clone(&self.bytes)
+    }
+
     pub(crate) fn new(
         package_sha256: String,
         bytes: Arc<[u8]>,

@@ -222,6 +222,13 @@ export interface YrsOpeningOptions {
    * as one session. Each opening mints a fresh one by default.
    */
   generation?: string;
+  /**
+   * Seeds images as `media:{n}` tokens naming their part of the package,
+   * instead of `data:` URLs, keeping them out of the document state. Only a
+   * replica opened from the same package on a version that reads tokens
+   * shows them, so every client of a shared room must be one. Off by default.
+   */
+  mediaTokens?: boolean;
 }
 
 /** SHA-256 digests of the byte copies {@link prepareDocxBytes} made, by copy. */
@@ -617,6 +624,8 @@ export interface YrsResidentWorkerSnapshot {
   layoutRevision: number;
   /** The document is a preview's cut of a package: its layouts render NUMPAGES empty. */
   partialDocument?: boolean;
+  /** Which seeded `data:` image sources lay out as `media:{n}` tokens. @internal */
+  mediaSources?: string;
 }
 
 /**
@@ -809,6 +818,12 @@ export interface YrsSelectionText {
  * One live replica of the yrs editing model. Thin typed wrapper over the
  * wasm `EditSession` — no editing logic on this side of the boundary.
  */
+/** An embedded image's bytes, as its `media:{n}` source displays them. */
+export interface YrsMediaSource {
+  bytes: Uint8Array;
+  mimeType: string;
+}
+
 export interface YrsSession extends CollaborationReplica {
   /** The yrs client id this replica writes with. */
   readonly clientId: number;
@@ -946,6 +961,18 @@ export interface YrsSession extends CollaborationReplica {
   beginOpening(generation?: string): void;
   /** Materializes the retained canonical package for compatibility APIs. */
   materializeDocx(): Document | null;
+  /**
+   * The displayed bytes and media type of the package part a `media:{n}`
+   * image source names, or `null` for any other source.
+   */
+  mediaSource(token: string): YrsMediaSource | null;
+  /** The `data:` URL a `media:{n}` image source stands for, or `null`. */
+  mediaDataUrl(token: string): string | null;
+  /**
+   * Lays this replica's `data:` image sources out as the `media:{n}` tokens a
+   * snapshot's `mediaSources` names. @internal
+   */
+  loadMediaSources(json: string): void;
   /**
    * Seeds stories and returns paragraph IDs in document order. Seeding a
    * document that has no opening yet starts one; see {@link beginOpening}.
@@ -1548,6 +1575,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     observing = false;
   };
 
+  // `data:` URLs of the opened package's `media:{n}` sources.
+  const mediaDataUrls = new Map<string, string | null>();
+
   const openDocx = (
     bytes: Uint8Array,
     seedStories: boolean,
@@ -1555,7 +1585,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   ): YrsDocxHost => {
     const source = bytes.slice();
     markDirty('all');
+    mediaDataUrls.clear();
     const json = mutate(() => {
+      session.set_media_tokens(options.mediaTokens === true);
       const opened = session.open_docx(
         source,
         seedStories,
@@ -1582,6 +1614,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     clientId,
     openDocxPreview: (bytes, blocks) => {
       markDirty('all');
+      mediaDataUrls.clear();
       const json = mutate(() => session.open_docx_preview(bytes, blocks));
       if (json === undefined) return null;
       partialDocument = true;
@@ -1710,6 +1743,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       if (!residentLayoutInput) return null;
       if (!residentLayoutWithRegions && residentRenderInputs.size === 0) return null;
       const selectionJson = session.selection();
+      const mediaSources = session.media_sources_json();
       const fontsCurrent = options?.knownFontsRevision === residentFontsRevision;
       let state: Uint8Array | null = null;
       if (options?.knownStateVector) {
@@ -1738,6 +1772,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         layoutWithRegions: residentLayoutWithRegions,
         layoutRevision: residentLayoutRevision,
         ...(partialDocument ? { partialDocument: true } : {}),
+        ...(mediaSources !== '[]' ? { mediaSources } : {}),
       };
     },
     residentWorkerProbe: () => {
@@ -1768,6 +1803,22 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         session.begin_opening(generation);
         proposals.reset();
       });
+    },
+    mediaSource: (token) => {
+      if (!token.startsWith('media:')) return null;
+      const bytes = session.media_bytes(token);
+      const mimeType = bytes && session.media_type(token);
+      return bytes && mimeType ? { bytes, mimeType } : null;
+    },
+    loadMediaSources: (json) => session.load_media_sources(json),
+    mediaDataUrl: (token) => {
+      if (!token.startsWith('media:')) return null;
+      let url = mediaDataUrls.get(token);
+      if (url === undefined) {
+        url = session.media_data_url(token) ?? null;
+        mediaDataUrls.set(token, url);
+      }
+      return url;
     },
     materializeDocx: () => {
       const source = docxSource;

@@ -1,9 +1,11 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::sync::Arc;
 
 use anyhow::Result;
 use base64::Engine as _;
+use docx_parse::media::{MediaTable, media_token_index};
 use docx_parse::{
     RelationshipTarget, is_footer_relationship, is_header_relationship, is_image_relationship,
     parse_docx_relationship_parts, resolve_relationship_target,
@@ -18,6 +20,7 @@ pub struct ImageRegistry {
     pub raw: ImageMap,
     decoded: HashMap<String, ImageData>,
     data_urls: RefCell<HashMap<String, Option<ImageData>>>,
+    media: Option<MediaTable>,
 }
 
 impl ImageRegistry {
@@ -82,19 +85,27 @@ impl ImageRegistry {
                 }
             }
         }
+        let media = ooxml_opc::RetainedPackage::new(Arc::from(docx))
+            .and_then(|package| MediaTable::new(package, 0))
+            .ok();
         Ok(Self {
             raw,
             decoded,
             data_urls: RefCell::new(HashMap::new()),
+            media,
         })
     }
 
     pub fn get(&self, scope: ImageScope<'_>, rel_id: &str) -> Option<ImageData> {
-        if rel_id.starts_with("data:") {
+        let token = media_token_index(rel_id);
+        if rel_id.starts_with("data:") || token.is_some() {
             if let Some(image) = self.data_urls.borrow().get(rel_id) {
                 return image.clone();
             }
-            let image = decode_data_url(rel_id);
+            let image = match token {
+                Some(index) => self.media_image(index),
+                None => decode_data_url(rel_id),
+            };
             self.data_urls
                 .borrow_mut()
                 .insert(rel_id.to_owned(), image.clone());
@@ -102,6 +113,17 @@ impl ImageRegistry {
         }
         let key = scoped_image_key(scope, rel_id);
         self.decoded.get(&key).cloned()
+    }
+}
+
+impl ImageRegistry {
+    /// The package's `index`th medium, which a `media:{n}` image source names.
+    fn media_image(&self, index: usize) -> Option<ImageData> {
+        let bytes = self.media.as_ref()?.bytes(index).ok()?;
+        if bytes.len() as u64 > MAX_DATA_URL_BYTES {
+            return None;
+        }
+        decode_image(&bytes)
     }
 }
 
@@ -193,5 +215,14 @@ mod tests {
         assert_eq!((first.width, first.height), (160, 80));
         assert_eq!((second.width, second.height), (160, 80));
         assert_eq!(registry.data_urls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn decodes_media_tokens_from_the_package() {
+        let package = test_fixtures::image_docx(None);
+        let registry = ImageRegistry::load(&package).unwrap();
+        let image = registry.get(ImageScope::Body, "media:0").unwrap();
+        assert_eq!((image.width, image.height), (160, 80));
+        assert!(registry.get(ImageScope::Body, "media:9").is_none());
     }
 }

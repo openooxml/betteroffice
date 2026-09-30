@@ -6457,12 +6457,13 @@ mod tests {
             .layout_document_with_regions_prefix_retained_json(&request, 3)
             .unwrap();
         let page = first_page(&preview);
-        assert!(
-            serde_json::to_string(&page)
-                .unwrap()
-                .contains("data:image/png;base64,")
-        );
+        let painted = serde_json::to_string(&page).unwrap();
+        assert!(painted.contains(r#""media:0""#) && !painted.contains("data:"));
         assert_eq!(page, first_page(&full));
+        assert_eq!(
+            preview.doc().media_table().unwrap().bytes(0).unwrap(),
+            full.doc().media_table().unwrap().bytes(0).unwrap()
+        );
         docx_layout::clear_measure_fonts();
     }
 

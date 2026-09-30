@@ -101,6 +101,10 @@ pub struct RenderEnv {
     pub doc_grid_pitch_px: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_paragraph_style_id: Option<String>,
+    /// The seeded media whose `data:` image sources lower as their
+    /// `media:{n}` tokens; lowering reads the document's when empty.
+    #[serde(skip)]
+    pub media: crate::media::MediaSources,
 }
 
 impl RenderEnv {
@@ -324,6 +328,17 @@ pub fn yrs_doc_to_mapped_layout_blocks(
         return Err(BridgeError::WrongOffsetKind);
     }
 
+    let with_media;
+    let env = match doc.media_sources() {
+        media if env.media.is_empty() && !media.is_empty() => {
+            with_media = RenderEnv {
+                media,
+                ..env.clone()
+            };
+            &with_media
+        }
+        _ => env,
+    };
     let mut list_state = ListState::new(doc.source_metadata().map(|source| source.numbering()));
     let txn = doc.yrs_doc().transact();
     let mut active_stories = BTreeSet::new();
@@ -1390,7 +1405,11 @@ fn lower_image_values(
         });
 
     ImageRun {
-        src: map_string(values, "src").unwrap_or_default(),
+        src: values
+            .get("src")
+            .and_then(any_str)
+            .map(|src| env.media.token(src).into_owned())
+            .unwrap_or_default(),
         width,
         height,
         alt: map_string(values, "alt"),

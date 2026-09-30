@@ -164,6 +164,13 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   /** Configure the Yrs collaboration replica used by the editor. */
   collaboration?: DocxEditorCollaborationOptions;
   /**
+   * Opens images as `media:{n}` tokens read from the document file instead of
+   * `data:` URLs, keeping them out of the document state and its updates.
+   * Every client of a shared room must open the same file on a version that
+   * reads them. Read when a document opens. Off by default.
+   */
+  mediaTokens?: boolean;
+  /**
    * Callback when a DOCX file is selected through `File > Open` or Cmd/Ctrl+O.
    * Pass it to route the picked file through your own import pipeline. Omit it
    * to keep the built-in local document load behavior.
@@ -730,6 +737,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onSaveRequest,
     downloadOnSave = true,
     collaboration,
+    mediaTokens,
     onOpen,
     author = 'User',
     onChange,
@@ -1067,7 +1075,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       isCurrentLoad,
       onHostDocument: acceptHostDocument,
       onError: failHostDocument,
-    }
+    },
+    mediaTokens
   );
   sessionGenerationRef.current = yrsCore.sessionGeneration;
   // Content listeners project the document on every edit; warm its base once

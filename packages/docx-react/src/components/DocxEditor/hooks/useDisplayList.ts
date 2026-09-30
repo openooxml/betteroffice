@@ -1706,7 +1706,10 @@ export function useCanvasRenderer(
     requestLayout
   );
   // Decoded images of one session's document; the next session starts empty.
-  const resolveImage = useMemo(() => createCanvasImageResolver(), [engine]);
+  const resolveImage = useMemo(
+    () => createCanvasImageResolver({ media: (token) => engine?.mediaSource?.(token) ?? null }),
+    [engine]
+  );
   const status: UseCanvasRendererResult['status'] = error
     ? 'error'
     : loading || displayList == null

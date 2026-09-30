@@ -116,6 +116,7 @@ export interface YrsSeedSources {
   bytes: Uint8Array | null;
   document: Document | null;
   initialUpdate?: Uint8Array;
+  mediaTokens?: boolean;
 }
 
 /**
@@ -127,9 +128,9 @@ export function seedYrsSession(
   seedDocumentIntoYrs: (document: Document) => void,
   seed: YrsSeedSources
 ): YrsDocxHost | null {
-  const { bytes, document, initialUpdate } = seed;
+  const { bytes, document, initialUpdate, mediaTokens } = seed;
   if (bytes) {
-    const host = session.openDocx(bytes, !initialUpdate);
+    const host = session.openDocx(bytes, !initialUpdate, mediaTokens ? { mediaTokens } : undefined);
     if (initialUpdate) session.loadState(initialUpdate.slice());
     return host;
   }
@@ -172,7 +173,8 @@ export function useYrsCoreSession(
   seedBytes: Uint8Array | null,
   seedGeneration: number,
   collaboration?: DocxEditorCollaborationOptions,
-  callbacks?: YrsCoreSessionCallbacks
+  callbacks?: YrsCoreSessionCallbacks,
+  mediaTokens?: boolean
 ): YrsCoreSession {
   const collaborationClientId = collaboration?.clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
@@ -186,6 +188,8 @@ export function useYrsCoreSession(
   const cancelCompatibilityWarmRef = useRef<(() => void) | null>(null);
   const seedBytesRef = useRef(seedBytes);
   seedBytesRef.current = seedBytes;
+  const mediaTokensRef = useRef(mediaTokens);
+  mediaTokensRef.current = mediaTokens;
   const inputPositionMapsRef = useRef(new Map<string, YrsInputPositionMap>());
   const projectionStoriesRef = useRef(new Set<string>());
   const enabledRef = useRef(enabled);
@@ -220,6 +224,7 @@ export function useYrsCoreSession(
             bytes,
             document: seedDocument,
             initialUpdate: collaborationInitialUpdate,
+            mediaTokens: mediaTokensRef.current,
           });
         } catch (error) {
           next.destroy();

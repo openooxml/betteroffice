@@ -25,6 +25,7 @@ export type ResidentEngineSession = Pick<
   | 'layoutDocumentJson'
   | 'layoutFontRequirementsJson'
   | 'layoutDocumentWithRegionsRetainedJson'
+  | 'loadMediaSources'
   | 'loadState'
   | 'setPartialDocument'
   | 'measureParagraphJson'
@@ -114,6 +115,7 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
       return { frame, profile };
     },
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
+    loadMediaSources: (json) => session.load_media_sources(json),
     loadState: (update) => session.load(update),
     applyUpdate: (update) =>
       JSON.parse(
