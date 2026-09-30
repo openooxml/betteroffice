@@ -77,7 +77,11 @@ interface RefApiInputs {
   yrsSessionRef: React.MutableRefObject<YrsSession | null>;
   yrsLocToDisplayPositionRef: React.MutableRefObject<(loc: YrsLoc) => number | null>;
   syncYrsInputStateRef: React.MutableRefObject<
-    (docChanged: boolean, dirtyStory?: string | readonly string[]) => boolean
+    (
+      docChanged: boolean,
+      dirtyStory?: string | readonly string[],
+      options?: { inWorker?: boolean }
+    ) => boolean
   >;
   applyYrsFormattingRef: React.MutableRefObject<(action: FormattingAction) => boolean>;
   applyYrsCommandRef: React.MutableRefObject<(command: YrsEditorCommand) => boolean>;
@@ -212,8 +216,8 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     hasPendingInput: () => yrsInputRef.current?.hasPendingInput() ?? false,
     getYrsStoredFormatting: () => yrsInputRef.current?.storedFormatting() ?? null,
     yrsLocToDisplayPosition: (loc) => yrsLocToDisplayPositionRef.current(loc),
-    syncYrsInputState: (docChanged, dirtyStories) =>
-      syncYrsInputStateRef.current(docChanged, dirtyStories),
+    syncYrsInputState: (docChanged, dirtyStories, options) =>
+      syncYrsInputStateRef.current(docChanged, dirtyStories, options),
     applyYrsFormatting: (action) => applyYrsFormattingRef.current(action),
     applyYrsCommand: (command) => applyYrsCommandRef.current(command),
     getLayout: () => layout,
@@ -276,7 +280,11 @@ export interface UsePagedEditorRefApiOptions {
   replicaReady?: boolean;
   experimentalWorkerOpen?: boolean;
   yrsLocToDisplayPosition: (loc: YrsLoc) => number | null;
-  syncYrsInputState: (docChanged: boolean, dirtyStory?: string | readonly string[]) => boolean;
+  syncYrsInputState: (
+    docChanged: boolean,
+    dirtyStory?: string | readonly string[],
+    options?: { inWorker?: boolean }
+  ) => boolean;
   applyYrsFormatting: (action: FormattingAction) => boolean;
   applyYrsCommand: (command: YrsEditorCommand) => boolean;
   getYrsPositionProjection: () => YrsPositionProjection | null;
