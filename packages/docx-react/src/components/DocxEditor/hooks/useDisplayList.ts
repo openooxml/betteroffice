@@ -1114,10 +1114,15 @@ export function useRustDisplayList(
         cause: unknown
       ): Promise<WorkerLayoutComputation | null> | null => {
         const current = workerRef.current;
-        // A pass of a session no worker serves any more, or of another
-        // document, fails nothing current and starts no worker.
-        if (owner.load !== documentLoadsRef.current || current?.engine !== hostEngine) return null;
-        if (cause instanceof ResidentWorkerOutOfMemoryError) {
+        if (owner.load !== documentLoadsRef.current || (current && current.engine !== hostEngine)) {
+          return null;
+        }
+        // A session whose replacement worker ran out of memory too lays out nowhere.
+        const outOfMemory = cause instanceof ResidentWorkerOutOfMemoryError;
+        if (outOfMemory && outOfMemoryRef.current.get(hostEngine)) return Promise.reject(cause);
+        // A pass of a session no worker serves any more starts no worker.
+        if (!current) return null;
+        if (outOfMemory) {
           // A newer layout, here or in a worker, replaced this pass: the host
           // drops it, and a newer worker request recovers the worker it asks.
           if (hostEngine.residentWorkerProbe()?.layoutRevision !== adoptedRevision) return null;
