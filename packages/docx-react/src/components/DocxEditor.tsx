@@ -1213,6 +1213,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   } = useFileIO({
     pagedEditorRef,
     resolveImage: canvasRenderer.resolveImage,
+    shownImageResolver: canvasRenderer.imageResolverForShownFrame,
     fontFamilies: fontAliases,
     comments,
     documentName,

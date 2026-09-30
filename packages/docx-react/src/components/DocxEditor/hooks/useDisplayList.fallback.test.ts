@@ -1144,7 +1144,7 @@ test('each session decodes its images into a cache of its own', () => {
   expect(result.current).not.toBe(firstImages);
 });
 
-test('the frame on screen keeps its session until the next session's frame lands', async () => {
+test('the frame on screen keeps its session until a frame of the next one lands', async () => {
   const first = { name: 'first' } as unknown as YrsSession;
   const next = { name: 'next' } as unknown as YrsSession;
   const firstList = { pages: [] };
@@ -1179,11 +1179,17 @@ test('the frame on screen keeps its session until the next session's frame lands
   });
   expect(result.current.displayList).toBe(firstList);
   expect(result.current.presentedEngine).toBe(first);
+  expect(result.current.shownFrameEngine()).toBe(first);
+  const settled = result.current.settledDisplayList(null, null).then((list) => ({
+    list,
+    engine: result.current.shownFrameEngine(),
+  }));
   await act(async () => {
     finishNext();
   });
   await waitFor(() => expect(result.current.displayList).toBe(nextList));
   expect(result.current.presentedEngine).toBe(next);
+  expect(await settled).toEqual({ list: nextList, engine: next });
   unmount();
 });
 
