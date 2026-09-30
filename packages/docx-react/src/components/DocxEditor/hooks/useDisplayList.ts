@@ -70,6 +70,7 @@ import {
   workerOpenSourceVersion,
 } from '../internals/workerOpenReplica';
 import { bindDisplayWindow, type DisplayWindow } from '../internals/displayWindow';
+import { nearestPages } from './pageBuildOrder';
 
 export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
   encodeState(): Promise<Uint8Array>;
@@ -1347,11 +1348,12 @@ export function useRustDisplayList(
           schedulePageBuildsWhenIdleRef.current();
           return;
         }
-        const distance = (index: number) => (index < start ? start - index : index - end + 1);
-        batch = unbuilt
-          .sort((a, b) => distance(a) - distance(b))
-          .slice(0, settling ? SETTLE_BUILD_BATCH_PAGES : BACKGROUND_BUILD_BATCH_PAGES)
-          .sort((a, b) => a - b);
+        batch = nearestPages(
+          unbuilt,
+          start,
+          end,
+          settling ? SETTLE_BUILD_BATCH_PAGES : BACKGROUND_BUILD_BATCH_PAGES
+        );
       }
       pageBuildInFlightRef.current = true;
       const dispatchedEpoch = contentEpochRef.current;
