@@ -1,12 +1,107 @@
 import { test, expect, type Page } from 'playwright/test';
-import type {
-  DocxParagraphIdentitySnapshot,
-  DocxProposalInput,
-  DocxProposalResult,
-  DocxProposalSnapshot,
-  DocxProposalState,
-} from '@betteroffice/docx/yrs';
-import type { WorkerProposalProbe } from './docx-worker-proposals-harness';
+
+interface DocxSessionParagraphAnchor {
+  kind: 'session';
+  sessionId: string;
+  story: string;
+  paraId: string;
+}
+
+interface DocxPersistedParagraphAnchor {
+  kind: 'persisted';
+  story:
+    | { partUri: string; kind: 'body' | 'header' | 'footer' }
+    | { partUri: string; kind: 'footnote' | 'endnote' | 'comment'; itemId: string };
+  paraId: string;
+}
+
+interface DocxParagraphIdentitySnapshot {
+  sessionId: string;
+  paragraphs: {
+    session: DocxSessionParagraphAnchor | null;
+    persisted: DocxPersistedParagraphAnchor | null;
+  }[];
+}
+
+type DocxProposalState = 'proposed' | 'accepted' | 'rejected';
+
+type DocxProposalInput = {
+  id: string;
+  paragraph: DocxPersistedParagraphAnchor;
+  suggest: { author: string; date: string };
+} & (
+  | { op: 'replaceText'; search: string; replaceWith: string }
+  | { op: 'insertText'; at: 'start' | 'end' | { offset: number }; text: string }
+);
+
+interface DocxProposalSnapshot {
+  version: string;
+  previewVersion: number;
+  proposals: readonly {
+    id: string;
+    state: DocxProposalState;
+    revisionIds: readonly string[];
+    changed: boolean;
+  }[];
+}
+
+type DocxProposalResult =
+  | { ok: true; snapshot: DocxProposalSnapshot }
+  | { ok: false; failure: { message: string } };
+
+interface YrsLoc {
+  story: string;
+  paraId: string;
+  offset: number;
+}
+
+interface ViewState {
+  scrollTop: number;
+  selection: { anchor: YrsLoc; head: YrsLoc } | null;
+}
+
+interface WorkerProposalProbe {
+  editor: {
+    getTotalPages(): number;
+    getParagraphIdentities(): Promise<DocxParagraphIdentitySnapshot>;
+    resolveParagraphAnchors(anchors: readonly DocxPersistedParagraphAnchor[]): Promise<{
+      version: string;
+      results: unknown[];
+    }>;
+    proposeChanges(request: {
+      expectVersion: string;
+      proposals: readonly DocxProposalInput[];
+    }): Promise<DocxProposalResult>;
+    setProposalStates(request: {
+      expectVersion: string;
+      expectPreviewVersion: number;
+      changes: readonly { id: string; state: DocxProposalState }[];
+    }): Promise<DocxProposalResult>;
+    withdrawProposals(request: {
+      expectVersion: string;
+      ids: readonly string[];
+    }): Promise<DocxProposalResult>;
+    getProposals(): Promise<DocxProposalSnapshot>;
+  } | null;
+  session: { selection(): ViewState['selection'] } | null;
+  status(): {
+    pending: boolean | null;
+    captures: number;
+    hydratedBeforeSidebar: boolean;
+    sidebarOpen: boolean;
+    sidebarOpenChanges: boolean[];
+    beforeSidebarOpen: ViewState | null;
+    layoutComplete: number | null;
+    renderedDomContextCalls: number;
+    contentChanges: { bodyContainsProposedText: boolean }[];
+    load: { version: string; sessionVersion: string; snapshotVersion: string } | null;
+    events: { load: number; 'proposal-change': number; 'layout-change': number };
+    errors: string[];
+  };
+  view(): ViewState;
+  navigate(target: { story: string; paraId: string }, expectVersion: string): Promise<{ ok: boolean } | null>;
+  toggleSidebar(): Promise<{ ok: boolean }>;
+}
 
 interface ProbeWindow {
   __workerProposalProbe: WorkerProposalProbe;
