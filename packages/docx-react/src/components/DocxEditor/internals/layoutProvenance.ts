@@ -46,17 +46,27 @@ export function readSessionVersion(
   }
 }
 
+interface PresentationOptions {
+  worker?: boolean;
+}
+
 const presentedLists = new WeakMap<object, object>();
-const presentListeners = new Set<(displayList: object) => void>();
+const presentListeners = new Set<(displayList: object, options?: PresentationOptions) => void>();
 
 /** Records that the canvas pages under `host` finished painting `displayList`. */
-export function markPresented(host: object, displayList: object): void {
+export function markPresented(
+  host: object,
+  displayList: object,
+  options?: PresentationOptions
+): void {
   presentedLists.set(host, displayList);
-  for (const listener of [...presentListeners]) listener(displayList);
+  for (const listener of [...presentListeners]) listener(displayList, options);
 }
 
 /** Calls `listener` with each display list whose pages finish painting. */
-export function onPresented(listener: (displayList: object) => void): () => void {
+export function onPresented(
+  listener: (displayList: object, options?: PresentationOptions) => void
+): () => void {
   presentListeners.add(listener);
   return () => presentListeners.delete(listener);
 }
