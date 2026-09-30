@@ -1492,7 +1492,7 @@ export function useRustDisplayList(
     [canLayoutInWorker, handoffFromRef]
   );
 
-  const layoutInWorker = useCallback<LayoutInWorker>(
+  const layoutInWorker: LayoutInWorker = useCallback<LayoutInWorker>(
     (hostEngine, request) => {
       if (!canLayoutInWorker(hostEngine) || !hostEngine.adoptResidentWorkerLayout) {
         if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(hostEngine);
@@ -1669,7 +1669,7 @@ export function useRustDisplayList(
       workerFor,
     ]
   );
-  const layoutInWorkerRef = useRef<LayoutInWorker>(layoutInWorker);
+  const layoutInWorkerRef: { current: LayoutInWorker } = useRef<LayoutInWorker>(layoutInWorker);
   layoutInWorkerRef.current = layoutInWorker;
   const prewarmableLayoutInWorker = useMemo(
     () => Object.assign(layoutInWorker, { prewarm: prewarmLayoutWorker }),
