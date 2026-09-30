@@ -75,9 +75,22 @@ api.oracleInit = async (input: number[], fonts: boolean, profile?: unknown) => {
   );
   let last = 0;
   let stable = 0;
+  // Releases without whenLayoutComplete lay the whole document out before the first paint.
+  let complete: boolean | null = null;
+  let failure: unknown = null;
   for (;;) {
     if (api.errors.length > 0) throw new Error(api.errors.join('\n'));
-    const pages = editor.current?.getTotalPages() ?? 0;
+    if (failure) throw failure;
+    if (complete === null && editor.current) {
+      complete = typeof editor.current.whenLayoutComplete !== 'function';
+      if (!complete) {
+        editor.current.whenLayoutComplete().then(
+          () => (complete = true),
+          (error: unknown) => (failure = error)
+        );
+      }
+    }
+    const pages = complete ? editor.current.getTotalPages() : 0;
     const canvas = document.querySelector<HTMLCanvasElement>(
       'canvas[data-page-index="0"]'
     );

@@ -25,7 +25,7 @@ export function useScrollPageInfo({
 }) {
   const [scrollPageInfo, setScrollPageInfo] = useState<ScrollPageInfo>({
     currentPage: 1,
-    totalPages: 1,
+    totalPages: 0,
     visible: false,
   });
   const scrollFadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);

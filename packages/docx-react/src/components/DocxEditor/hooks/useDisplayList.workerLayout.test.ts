@@ -292,3 +292,87 @@ test('a provisional layout paints first and settles only once the full layout fo
     native.free();
   }
 });
+
+function settleHarness() {
+  const displayList = { pages: [] };
+  const overrides = {
+    build: async () => displayList,
+    getInputs: (): never | undefined => ({ measured: [], options: {} }) as never,
+  };
+  const layout = (partial: boolean) =>
+    ({ pageSize: { w: 816, h: 1056 }, pages: [], ...(partial ? { partial } : {}) }) as Layout;
+  const initial = layout(false);
+  const hook = renderHook(
+    ({ layout, resolved }: { layout: Layout | null; resolved?: ReadonlySet<number> }) =>
+      useRustDisplayList(layout, overrides, undefined, resolved),
+    {
+      initialProps: { layout: initial } as {
+        layout: Layout | null;
+        resolved?: ReadonlySet<number>;
+      },
+    }
+  );
+  const settle = () => {
+    const state = { settled: false, failure: null as Error | null };
+    void hook.result.current.settledDisplayList(null, null).then(
+      () => {
+        state.settled = true;
+      },
+      (error: Error) => {
+        state.failure = error;
+      }
+    );
+    return state;
+  };
+  return { ...hook, initial, layout, settle, overrides };
+}
+
+test('a layout of part of the document never settles, even after a full one did', async () => {
+  const { rerender, layout, settle } = settleHarness();
+  const first = settle();
+  await waitFor(() => expect(first.settled).toBe(true));
+  await act(async () => {
+    rerender({ layout: layout(true) });
+  });
+  const partial = settle();
+  await act(async () => {});
+  expect(partial.settled).toBe(false);
+  await act(async () => {
+    rerender({ layout: layout(false) });
+  });
+  await waitFor(() => expect(partial.settled).toBe(true));
+});
+
+test('a reset waits for the next layout and a failure rejects', async () => {
+  const { result, rerender, initial, layout, settle, overrides } = settleHarness();
+  const first = settle();
+  await waitFor(() => expect(first.settled).toBe(true));
+  act(() => result.current.resetSettled());
+  expect(result.current.awaitingDocument()).toBe(true);
+  const next = settle();
+  // Rebuilding the replaced document's layout, as clearing its comments does,
+  // neither settles nor fails the wait.
+  await act(async () => {
+    rerender({ layout: initial, resolved: new Set([1]) });
+  });
+  const getInputs = overrides.getInputs;
+  overrides.getInputs = () => undefined;
+  await act(async () => {
+    rerender({ layout: initial, resolved: new Set([2]) });
+  });
+  overrides.getInputs = getInputs;
+  expect(next.settled).toBe(false);
+  expect(next.failure).toBeNull();
+  // The editor shows no layout while the new document's bytes load.
+  await act(async () => {
+    rerender({ layout: null });
+  });
+  expect(result.current.awaitingDocument()).toBe(true);
+  await act(async () => {
+    rerender({ layout: layout(false) });
+  });
+  await waitFor(() => expect(next.settled).toBe(true));
+  act(() => result.current.resetSettled(new Error('parse failed')));
+  const failed = settle();
+  await waitFor(() => expect(failed.failure?.message).toBe('parse failed'));
+});
