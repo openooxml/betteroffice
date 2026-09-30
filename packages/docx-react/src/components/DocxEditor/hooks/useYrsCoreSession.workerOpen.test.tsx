@@ -412,7 +412,8 @@ for (const stage of ['fontRequirements', 'bootstrap'] as const) {
     await waitFor(() => expect(result.current.renderer.error).toBeInstanceOf(ResidentWorkerOutOfMemoryError));
     const failure = result.current.renderer.error;
     expect(failure).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
-    expect(await calls).toEqual(Array.from({ length: 4 }, () => ({ status: 'rejected', reason: failure })));
+    const settled: PromiseSettledResult<unknown>[] = await calls;
+    expect(settled).toEqual(Array.from({ length: 4 }, () => ({ status: 'rejected', reason: failure })));
     expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(false);
     expect(result.current.renderer.workerMemory()).toBeNull();
     expect(workers).toHaveLength(2);
