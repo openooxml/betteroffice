@@ -1790,7 +1790,7 @@ fn table_floating_zone_at_x(
         .filter(|_| {
             matches!(
                 floating.horz_anchor.as_deref(),
-                None | Some("text" | "margin" | "column")
+                None | Some("text" | "margin")
             ) && !matches!(floating.tblp_x_spec.as_deref(), Some("inside" | "outside"))
                 && match floating.tblp_x {
                     Some(offset) => offset.is_finite(),
