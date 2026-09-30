@@ -894,7 +894,9 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
             }
             return;
           }
-          if (pendingGestureRef.current?.kind !== 'caret') clearPendingGesture();
+          if (pendingGestureRef.current?.kind !== 'caret' || !replicaPending?.()) {
+            clearPendingGesture();
+          }
           if (linkPosition != null) setTextSelection(linkPosition);
           if (href.startsWith('#')) {
             const bookmarkName = href.slice(1);

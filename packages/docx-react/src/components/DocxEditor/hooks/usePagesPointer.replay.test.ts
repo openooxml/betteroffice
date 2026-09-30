@@ -312,6 +312,34 @@ test.each([70, null])('a pending bookmark link replays with bookmark position %s
   }
 });
 
+test('a bookmark click after the replica lands consumes the pending caret', () => {
+  const queries = fakeQueries();
+  queries.displayList.pages[0]!.primitives = [{
+    kind: 'text', text: 'link', x: 0, baselineY: 410, width: 800,
+    font: '400 16px Calibri', color: '#000000', docStart: 1, docEnd: 5,
+    href: '#bookmark',
+  }];
+  const scrollToPositionImpl = mock(() => {});
+  const { opts, projection, selections } = options({
+    displayListQueries: queries,
+    scrollToPositionImpl,
+  });
+  projection.bookmarkPosition = mock(() => 70);
+  const view = renderHook(() => usePagesPointer(opts));
+
+  mouse('mousedown', 200, 405);
+  opts.replicaReady = true;
+  mouse('mouseup', 200, 405);
+  mouse('click', 200, 405);
+  expect(scrollToPositionImpl).toHaveBeenCalledTimes(1);
+  expect(scrollToPositionImpl).toHaveBeenCalledWith(70);
+  expect(selections).toEqual([[20, 20, 'body'], [71, 71, 'body']]);
+
+  view.rerender();
+  expect(selections).toEqual([[20, 20, 'body'], [71, 71, 'body']]);
+  expect(scrollToPositionImpl).toHaveBeenCalledTimes(1);
+});
+
 test.each(['pointerdown', 'keydown'])('outside %s drops a pending gesture', (type) => {
   const { opts, selections, words, focused } = options();
   const view = renderHook(() => usePagesPointer(opts));
