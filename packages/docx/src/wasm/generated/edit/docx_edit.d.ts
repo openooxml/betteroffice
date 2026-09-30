@@ -845,6 +845,10 @@ export class EditSession {
      */
     seed_from_docx(bytes: Uint8Array, generation?: string | null): string;
     /**
+     * Unions seeded opaque sequence names into document state.
+     */
+    seed_opaque_sequences(names_json: string): void;
+    /**
      * Selects a story, closing capture unless manual grouping is selected.
      */
     select_story(story: string): void;
@@ -941,6 +945,10 @@ export class EditSession {
      * position holds no embed.
      */
     set_content_control_value_at(story: string, para_id: string, offset: number, value_json: string): void;
+    /**
+     * Keep every previously built page while windowed builds are on.
+     */
+    set_display_retain_built_pages(retain: boolean): void;
     /**
      * Limit full display builds to pages `start..end` plus the pages already
      * built; the others stay unbuilt placeholders carrying their geometry
@@ -1591,6 +1599,7 @@ export interface InitOutput {
     readonly editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
     readonly editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly editsession_seed_opaque_sequences: (a: number, b: number, c: number) => [number, number];
     readonly editsession_select_story: (a: number, b: number, c: number) => void;
     readonly editsession_selection: (a: number) => [number, number, number, number];
     readonly editsession_selection_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
@@ -1603,6 +1612,7 @@ export interface InitOutput {
     readonly editsession_set_comment_ranges: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_set_content_control_value: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_set_content_control_value_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+    readonly editsession_set_display_retain_built_pages: (a: number, b: number) => void;
     readonly editsession_set_display_window: (a: number, b: number, c: number) => void;
     readonly editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_set_image_geometry: (a: number, b: number, c: number, d: number, e: number) => [number, number];

@@ -180,6 +180,14 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   sessionRef.current = session;
   // The document version the first pass of this session laid out.
   const openedVersionRef = useRef<{ session: YrsSession; version: string | null } | null>(null);
+  const workerPrewarmRef = useRef<{ session: YrsSession; release: () => void } | null>(null);
+  const releaseWorkerPrewarm = useCallback((owner: YrsSession | null) => {
+    const worker = workerPrewarmRef.current;
+    if (!worker || worker.session !== owner) return;
+    worker.release();
+    workerPrewarmRef.current = null;
+  }, []);
+  useEffect(() => () => releaseWorkerPrewarm(session), [releaseWorkerPrewarm, session]);
   // A deferred pass that had to run on this thread keeps that requirement.
   const pendingOnHostRef = useRef(false);
   onTotalPagesChangeRef.current = onTotalPagesChange;
@@ -322,11 +330,31 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           measurement = residentMeasurementConfig(requirements);
         } catch (error) {
           console.error('[PagedEditor] Resident font preflight error:', error);
+          releaseWorkerPrewarm(session);
           onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
           syncCoordinator.onLayoutComplete(currentEpoch);
           return;
         }
         if (!measurement) {
+          if (!onHost && workerPrewarmRef.current?.session !== session) {
+            const version = readSessionVersion(session);
+            if (
+              version !== null &&
+              (openedVersionRef.current?.session !== session ||
+                version ===
+                  (workerOpenEnabledRef.current
+                    ? workerOpenSourceVersion(session, openedVersionRef.current.version)
+                    : openedVersionRef.current.version))
+            ) {
+              try {
+                const release = layoutInWorkerRef.current?.prewarm?.(session);
+                if (release) {
+                  workerPrewarmRef.current?.release();
+                  workerPrewarmRef.current = { session, release };
+                }
+              } catch {}
+            }
+          }
           pendingLayoutOriginRef.current = mergeLayoutUpdateOrigin(
             pendingLayoutOriginRef.current,
             layoutUpdateOrigin
@@ -447,6 +475,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             console.error('[PagedEditor] Resident worker layout could not start:', error);
           }
         }
+        // The spare warmed while fonts loaded has been adopted by now, or is not needed.
+        releaseWorkerPrewarm(session);
         if (!workerPass) {
           layOutHere();
           syncCoordinator.onLayoutComplete(currentEpoch);
@@ -516,6 +546,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       pagesContainerRef,
       viewportLayoutRef,
       scrollRestoreController,
+      releaseWorkerPrewarm,
     ]
   );
 

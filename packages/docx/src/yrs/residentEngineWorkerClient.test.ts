@@ -122,26 +122,83 @@ function setup() {
   return { worker, client };
 }
 
-test('frame and edit requests carry the current display window', async () => {
+test('frame and edit requests carry the current display window and retention flag', async () => {
   const { worker, client } = setup();
-  const bootstrap = client.bootstrap(snapshot, '');
+  client.setRetainBuiltPages(true);
+  const bootstrap = client.bootstrap(snapshot, '', { displayWindow: [0, 5] });
+  expect(worker.posted.at(-1)).toMatchObject({
+    type: 'bootstrap',
+    displayWindow: [0, 5],
+    retainBuiltPages: true,
+  });
   worker.reply(frameReply(worker.lastId()));
   await bootstrap;
 
+  const sync = client.sync(snapshot, '', 0, false, { displayWindow: [1, 6] });
+  expect(worker.posted.at(-1)).toMatchObject({
+    type: 'sync',
+    displayWindow: [1, 6],
+    retainBuiltPages: true,
+  });
+  worker.reply(frameReply(worker.lastId()));
+  await sync;
+
   const frame = client.buildFrame('', 0, false, [8, 11]);
-  expect(worker.posted.at(-1)).toMatchObject({ type: 'buildFrame', displayWindow: [8, 11] });
+  expect(worker.posted.at(-1)).toMatchObject({
+    type: 'buildFrame',
+    displayWindow: [8, 11],
+    retainBuiltPages: true,
+  });
   worker.reply(frameReply(worker.lastId()));
   await frame;
 
   const input = client.applyInput('a', selection, 0, false, false, [9, 12]);
-  expect(worker.posted.at(-1)).toMatchObject({ type: 'applyInput', displayWindow: [9, 12] });
+  expect(worker.posted.at(-1)).toMatchObject({
+    type: 'applyInput',
+    displayWindow: [9, 12],
+    retainBuiltPages: true,
+  });
   worker.reply(frameReply(worker.lastId()));
   expect(await input).toMatchObject({ applied: true });
 
   const deletion = client.applyDelete('backward', selection, 0, false, false, 1, [10, 13]);
-  expect(worker.posted.at(-1)).toMatchObject({ type: 'applyDelete', displayWindow: [10, 13] });
+  expect(worker.posted.at(-1)).toMatchObject({
+    type: 'applyDelete',
+    displayWindow: [10, 13],
+    retainBuiltPages: true,
+  });
   worker.reply(frameReply(worker.lastId()));
   expect(await deletion).toMatchObject({ applied: true });
+
+  client.setRetainBuiltPages(false);
+  const released = client.buildFrame('', 0, false, [10, 13]);
+  expect(worker.posted.at(-1)).not.toHaveProperty('retainBuiltPages');
+  worker.reply(frameReply(worker.lastId()));
+  await released;
+
+  client.setRetainBuiltPages(true);
+  const unwindowed = client.buildFrame('', 0);
+  expect(worker.posted.at(-1)).not.toHaveProperty('retainBuiltPages');
+  worker.reply(frameReply(worker.lastId()));
+  await unwindowed;
+});
+
+test('default windowed requests omit the retention flag', async () => {
+  const { worker, client } = setup();
+  const requests = [
+    () => client.bootstrap(snapshot, '', { displayWindow: [0, 5] }),
+    () => client.sync(snapshot, '', 0, false, { displayWindow: [0, 5] }),
+    () => client.buildFrame('', 0, false, [0, 5]),
+    () => client.applyInput('a', selection, 0, false, false, [0, 5]),
+    () => client.applyDelete('backward', selection, 0, false, false, 1, [0, 5]),
+  ];
+  for (const request of requests) {
+    const pending = request();
+    expect(worker.posted.at(-1)).toHaveProperty('displayWindow', [0, 5]);
+    expect(worker.posted.at(-1)).not.toHaveProperty('retainBuiltPages');
+    worker.reply(frameReply(worker.lastId()));
+    await pending;
+  }
 });
 
 describe('warmup', () => {
@@ -790,6 +847,7 @@ describe('provisional layout', () => {
 
     const complete = client.completeLayout(4);
     expect(worker.posted[1]).toMatchObject({ type: 'completeLayout', expectedFrameEpoch: 4 });
+    expect(client.frameRequestPending()).toBe(false);
     worker.reply({ ...frameReply(worker.lastId()), layoutJson: '{"full":1}' });
     expect(await complete).toMatchObject({ layoutJson: '{"full":1}' });
 

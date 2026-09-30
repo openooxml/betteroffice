@@ -29,6 +29,8 @@ import {
   residentCaretSnapshotForFrame,
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
+  preloadResidentEngineWorker,
+  retainPreloadedResidentEngineWorker,
   takePreloadedResidentEngineWorker,
   ResidentWorkerOutOfMemoryError,
   sameYrsSelection,
@@ -151,6 +153,7 @@ export interface UseRustDisplayListResult {
    * other page arrives as geometry until it comes near.
    */
   setDisplayWindow(start: number, end: number): void;
+  setRetainBuiltPages?(retain: boolean): void;
   /** The resident worker's wasm memories as of its latest reply; null without a worker. */
   workerMemory(): WasmModuleMemory[] | null;
   /**
@@ -184,10 +187,12 @@ export interface UseRustDisplayListResult {
  * no layout of its own. Null when no worker can take it, and a null result
  * when the worker failed; either way the caller lays out on the main thread.
  */
-export type LayoutInWorker = (
+export type LayoutInWorker = ((
   session: YrsSession,
   request: string
-) => Promise<WorkerLayoutComputation | null> | null;
+) => Promise<WorkerLayoutComputation | null> | null) & {
+  prewarm?: (session: YrsSession) => (() => void) | null;
+};
 
 /**
  * A worker layout. On open it may cover only the first pages: `complete`
@@ -239,6 +244,10 @@ const SETTLE_BUILD_BATCH_PAGES = 32;
 /** Unbuilt pages built per idle period away from the viewport. */
 const BACKGROUND_BUILD_BATCH_PAGES = 16;
 const BACKGROUND_BUILD_DELAY_MS = 200;
+/** How often a page build waiting behind a newer worker frame checks again. */
+const PAGE_BUILD_RETRY_MS = 50;
+/** How long a page build waits for the display to adopt a worker frame. */
+const UNADOPTED_FRAME_WAIT_MS = 2000;
 
 type PageBuildTimer = ReturnType<typeof setTimeout> | { idle: number };
 
@@ -405,6 +414,7 @@ export function useRustDisplayList(
     stateVector?: Uint8Array;
     opening?: Promise<ResidentEngineWorkerOpened>;
   } | null>(null);
+  const retainBuiltPagesRef = useRef(false);
   // The document load each session belongs to: the one under way when it was
   // created, as the editor records it, else when it was first laid out or shown.
   const sessionLoadsRef = useRef(new WeakMap<YrsSession, number>());
@@ -450,6 +460,7 @@ export function useRustDisplayList(
         client: spare ?? new ResidentEngineWorkerClient(),
         load,
       };
+      workerRef.current.client.setRetainBuiltPages(retainBuiltPagesRef.current);
       return workerRef.current;
     },
     [handoffFromRef, sessionLoad]
@@ -485,6 +496,8 @@ export function useRustDisplayList(
   const pageBuildInFlightRef = useRef(false);
   const pageBuildTimerRef = useRef<PageBuildTimer | null>(null);
   const schedulePageBuildsWhenIdleRef = useRef<() => void>(() => {});
+  const retryPageBuildsRef = useRef<(idle: boolean) => void>(() => {});
+  const unadoptedFrameSinceRef = useRef<number | null>(null);
   const workerLayoutFramesRef = useRef(new WeakMap<Layout, WorkerLayoutFrame>());
   const completionGateRef = useRef<(() => void) | null>(null);
   const resolvedCommentIdsRef = useRef(resolvedCommentIds);
@@ -1299,6 +1312,21 @@ export function useRustDisplayList(
         if (pages[index]?.unbuilt) unbuilt.push(index);
       }
       if (unbuilt.length === 0) return;
+      // Behind a worker frame the display has not adopted, the pages would
+      // come back as a whole-document recovery frame: wait for it.
+      const framePending = worker.client.frameRequestPending();
+      if (framePending || worker.client.answeredFrame() > frame.frameEpoch) {
+        const now = performance.now();
+        if (framePending || unadoptedFrameSinceRef.current === null) {
+          unadoptedFrameSinceRef.current = now;
+        }
+        if (now - unadoptedFrameSinceRef.current < UNADOPTED_FRAME_WAIT_MS) {
+          retryPageBuildsRef.current(idle);
+          return;
+        }
+      } else {
+        unadoptedFrameSinceRef.current = null;
+      }
       let batch = unbuilt.filter((index) => index >= start && index < end);
       if (batch.length === 0) {
         const settling = settleWaitersRef.current.size > 0;
@@ -1399,6 +1427,10 @@ export function useRustDisplayList(
     },
     [buildUnbuiltPages]
   );
+  retryPageBuildsRef.current = (idle) => {
+    cancelPageBuilds(pageBuildTimerRef);
+    pageBuildTimerRef.current = setTimeout(() => buildUnbuiltPages(idle), PAGE_BUILD_RETRY_MS);
+  };
   schedulePageBuildsWhenIdleRef.current = () => {
     cancelPageBuilds(pageBuildTimerRef);
     pageBuildTimerRef.current =
@@ -1418,6 +1450,11 @@ export function useRustDisplayList(
     [schedulePageBuilds]
   );
 
+  const setRetainBuiltPages = useCallback((retain: boolean): void => {
+    retainBuiltPagesRef.current = retain;
+    workerRef.current?.client.setRetainBuiltPages(retain);
+  }, []);
+
   useEffect(() => {
     if (!snapshot.frame?.displayList.pages.some((page) => page.unbuilt)) return;
     schedulePageBuilds(pageBuildInFlightRef.current ? 50 : 16);
@@ -1425,9 +1462,9 @@ export function useRustDisplayList(
 
   useEffect(() => () => cancelPageBuilds(pageBuildTimerRef), []);
 
-  const layoutInWorker: LayoutInWorker = useCallback<LayoutInWorker>(
-    (hostEngine, request) => {
-      if (
+  const canLayoutInWorker = useCallback(
+    (hostEngine: YrsSession): boolean =>
+      !(
         overrides?.build ||
         !canUseResidentEngineWorker() ||
         !isWorkerHostEngine(hostEngine) ||
@@ -1435,7 +1472,29 @@ export function useRustDisplayList(
         (workerOpenEnabledRef.current && hostEngine.isDisplayOnly?.() === true) ||
         workerFallbackEngineRef.current === hostEngine ||
         handedOverEnginesRef.current.has(hostEngine)
-      ) {
+      ),
+    [overrides?.build]
+  );
+  const prewarmLayoutWorker = useCallback(
+    (hostEngine: YrsSession): (() => void) | null => {
+      const current = workerRef.current;
+      if (
+        !canLayoutInWorker(hostEngine) ||
+        outOfMemoryRef.current.get(hostEngine) ||
+        spawnedWorkerEnginesRef.current.has(hostEngine) ||
+        workerOpenSourcesRef.current.has(hostEngine) ||
+        current?.engine === hostEngine ||
+        (current && handoffFromRef?.current === current.engine)
+      ) return null;
+      void preloadResidentEngineWorker().catch(() => {});
+      return retainPreloadedResidentEngineWorker();
+    },
+    [canLayoutInWorker, handoffFromRef]
+  );
+
+  const layoutInWorker = useCallback<LayoutInWorker>(
+    (hostEngine, request) => {
+      if (!canLayoutInWorker(hostEngine) || !hostEngine.adoptResidentWorkerLayout) {
         if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(hostEngine);
         return null;
       }
@@ -1598,11 +1657,11 @@ export function useRustDisplayList(
         .catch(unavailable);
     },
     [
+      canLayoutInWorker,
       dropWorker,
       frameBase,
       frameExtrasInputs,
       isCurrentWorker,
-      overrides?.build,
       paintedCaretMachine,
       queryEpochGate,
       replaceOutOfMemoryWorker,
@@ -1612,6 +1671,10 @@ export function useRustDisplayList(
   );
   const layoutInWorkerRef = useRef<LayoutInWorker>(layoutInWorker);
   layoutInWorkerRef.current = layoutInWorker;
+  const prewarmableLayoutInWorker = useMemo(
+    () => Object.assign(layoutInWorker, { prewarm: prewarmLayoutWorker }),
+    [layoutInWorker, prewarmLayoutWorker]
+  );
 
   const attachOffscreenCanvases = useCallback(
     async (
@@ -1970,21 +2033,30 @@ export function useRustDisplayList(
       const prebuilt = workerLayoutFramesRef.current.get(layout);
       if (prebuilt) workerLayoutFramesRef.current.delete(layout);
       try {
+        const delta = prebuilt ? decodeFrameDelta(prebuilt.result.frame) : null;
+        const base = frameBase(hostEngine);
         // The frame is adopted only while nothing newer reached the session
-        // or the display since the worker built it.
+        // or the display since the worker built it. A whole frame (the worker
+        // sends one when a page build ran first) replaces any older base.
+        const appliesTo = !prebuilt
+          ? undefined
+          : (base?.frameEpoch ?? null) === (prebuilt.previousFrame?.frameEpoch ?? null)
+            ? prebuilt.previousFrame
+            : delta?.full && (!base || delta.frameEpoch > base.frameEpoch)
+              ? base
+              : undefined;
         if (
           prebuilt &&
+          delta &&
+          appliesTo !== undefined &&
           prebuilt.engine === hostEngine &&
           workerRef.current?.engine === hostEngine &&
           prebuilt.contentEpoch === contentEpoch &&
-          (frameBase(hostEngine)?.frameEpoch ?? null) ===
-            (prebuilt.previousFrame?.frameEpoch ?? null) &&
           prebuilt.layoutExtras === JSON.stringify(frameExtrasInputs())
         ) {
           // The worker ran this layout and built its frame in the same pass.
-          const { result, previousFrame } = prebuilt;
-          const delta = decodeFrameDelta(result.frame);
-          const nextFrame = applyFrameDelta(previousFrame, delta);
+          const { result } = prebuilt;
+          const nextFrame = applyFrameDelta(appliesTo, delta);
           pending = Promise.resolve({
             displayList: nextFrame.displayList,
             frame: nextFrame,
@@ -2177,13 +2249,14 @@ export function useRustDisplayList(
     caret: snapshot.caret,
     applyInput,
     applyDelete,
-    layoutInWorker,
+    layoutInWorker: prewarmableLayoutInWorker,
     presentedEngine,
     shownFrameEngine,
     release,
     openInWorker,
     fontRequirementsInWorker,
     setDisplayWindow,
+    setRetainBuiltPages,
     workerMemory,
     workerSurfacesActive,
     workerPresentationActive,
@@ -2374,6 +2447,7 @@ export interface UseCanvasRendererResult {
   fontRequirementsInWorker: FontRequirementsInWorker;
   /** The pages `[start, end)` near the viewport, built before the others. */
   setDisplayWindow(start: number, end: number): void;
+  setRetainBuiltPages?(retain: boolean): void;
   /** The resident worker's wasm memories as of its latest reply; null without a worker. */
   workerMemory(): WasmModuleMemory[] | null;
   setWorkerPresentationActive(active: boolean): void;
@@ -2468,6 +2542,7 @@ export function useCanvasRenderer(
     openInWorker,
     fontRequirementsInWorker,
     setDisplayWindow,
+    setRetainBuiltPages,
     workerMemory,
     workerSurfacesActive,
     workerPresentationActive,
@@ -2601,6 +2676,7 @@ export function useCanvasRenderer(
     openInWorker,
     fontRequirementsInWorker,
     setDisplayWindow,
+    setRetainBuiltPages,
     workerMemory,
     setWorkerPresentationActive,
     workerSurfacesActive,

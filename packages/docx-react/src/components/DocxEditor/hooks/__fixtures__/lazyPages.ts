@@ -54,6 +54,7 @@ export class EngineWorker {
     }
     if (
       request.type !== 'bootstrap' &&
+      request.type !== 'buildFrame' &&
       request.type !== 'buildPages' &&
       request.type !== 'applyInput'
     ) {
@@ -63,16 +64,19 @@ export class EngineWorker {
     engine.set_windowed_incremental_builds(
       'displayWindow' in request && request.displayWindow !== undefined
     );
-    if (request.type === 'bootstrap') {
-      if (request.displayWindow) engine.set_display_window(...request.displayWindow);
-      frame = engine.build_display_list_frame(request.extras, 0);
+    if ('displayWindow' in request && request.displayWindow) {
+      engine.set_display_window(...request.displayWindow);
+      engine.set_display_retain_built_pages(request.retainBuiltPages === true);
+    }
+    if (request.type === 'bootstrap') engine.reset_frame_base();
+    if (request.type === 'bootstrap' || request.type === 'buildFrame') {
+      frame = engine.build_display_list_frame(request.extras, request.expectedFrameEpoch);
     } else if (request.type === 'buildPages') {
       frame = engine.build_display_pages_frame(
         Uint32Array.from(request.pages),
         request.expectedFrameEpoch
       );
     } else {
-      if (request.displayWindow) engine.set_display_window(...request.displayWindow);
       const { anchor, head } = request.selection;
       engine.set_selection(anchor.story, anchor.paraId, anchor.offset, head.paraId, head.offset);
       frame = engine.apply_input(request.text, request.expectedFrameEpoch);

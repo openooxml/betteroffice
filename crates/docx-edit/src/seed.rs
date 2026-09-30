@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value, json};
 use yrs::types::Attrs;
-use yrs::{Any, Transact};
+use yrs::{Any, Array as _, Map as YrsMap, Out, ReadTxn, Text as _, Transact};
 
 use crate::control_source::safety_key;
 use crate::identity::{
@@ -23,6 +23,91 @@ use crate::structured::{BreakType, Revision, RevisionKind, StoryKind};
 use crate::{EditCtx, EditingDoc, RawOp};
 
 type JsonObject = BTreeMap<String, Value>;
+
+/// Marks state seeded with sequence metadata. State written before sequence numbering
+/// lacks this key and keeps cached SEQ results.
+pub(crate) const OPAQUE_SEQUENCES: &str = "opaqueSequences";
+
+/// Writes the first marker, so a seed keeps the operation ids an earlier seed of the same
+/// document gave its stories and session: replicas that seeded it before still converge.
+const SEQUENCE_METADATA_CLIENT: u64 = 0x1_0000_05e9;
+
+pub(crate) fn seed_opaque_sequences(document: &EditingDoc, names: &[String]) {
+    let mut txn = document.transact_for(&EditCtx::system(""));
+    let session = txn
+        .get_map(crate::identity::SESSION)
+        .expect("session root is declared by EditingDoc::new");
+    let previous = session.get(&txn, OPAQUE_SEQUENCES);
+    if previous.is_none() && names.is_empty() && !holds_sequence_fields(&txn) {
+        return;
+    }
+    let mut opaque_sequences: BTreeSet<String> = names.iter().cloned().collect();
+    if let Some(Out::Any(Any::Array(previous))) = &previous {
+        opaque_sequences.extend(previous.iter().filter_map(|value| match value {
+            Any::String(name) => Some(name.to_string()),
+            _ => None,
+        }));
+    }
+    let names = Any::Array(
+        opaque_sequences
+            .into_iter()
+            .map(Any::from)
+            .collect::<Vec<_>>()
+            .into(),
+    );
+    if previous.is_some() {
+        if previous != Some(Out::Any(names.clone())) {
+            session.insert(&mut txn, OPAQUE_SEQUENCES, names);
+        }
+        return;
+    }
+    drop(txn);
+    let marker = yrs::Doc::with_client_id(SEQUENCE_METADATA_CLIENT);
+    let root = marker.get_or_insert_map(crate::identity::SESSION);
+    let mut marker_txn = marker.transact_mut();
+    root.insert(&mut marker_txn, OPAQUE_SEQUENCES, names);
+    let update = marker_txn.encode_update_v1();
+    drop(marker_txn);
+    document
+        .apply_verbatim_v1(&update)
+        .expect("a one-entry session update applies");
+}
+
+/// Whether a story embeds anything that names a SEQ field (a field instruction, nested
+/// sequence names, shape text). A document without one seeds exactly as before.
+fn holds_sequence_fields<T: ReadTxn>(txn: &T) -> bool {
+    let Some(stories) = txn.get_map(crate::STORIES) else {
+        return false;
+    };
+    let mut pending: Vec<Out> = stories.iter(txn).map(|(_, value)| value).collect();
+    let mut anys: Vec<Any> = Vec::new();
+    while let Some(value) = pending.pop() {
+        match value {
+            Out::YText(text) => pending.extend(
+                text.diff(txn, yrs::types::text::YChange::identity)
+                    .into_iter()
+                    .map(|chunk| chunk.insert)
+                    .filter(|insert| !matches!(insert, Out::Any(Any::String(_)))),
+            ),
+            Out::YMap(map) => pending.extend(map.iter(txn).map(|(_, value)| value)),
+            Out::YArray(array) => pending.extend(array.iter(txn)),
+            Out::Any(any) => anys.push(any),
+            _ => {}
+        }
+    }
+    for any in &anys {
+        let mut values = vec![any];
+        while let Some(value) = values.pop() {
+            match value {
+                Any::String(text) if text.contains("SEQ") => return true,
+                Any::Array(items) => values.extend(items.iter()),
+                Any::Map(entries) => values.extend(entries.values()),
+                _ => {}
+            }
+        }
+    }
+    false
+}
 
 /// A parsed node's `w:p` occurrence in its part: read for identity, never seeded.
 const SOURCE_ORDINAL: &str = "sourceOrdinal";
@@ -99,6 +184,7 @@ struct LoweringContext {
     root: String,
     /// Every lowered paragraph in document order, nested stories in place.
     paragraphs: Vec<SeededParagraph>,
+    opaque_sequences: Vec<String>,
     source: SourceStructure,
     provenance: Provenance,
     /// Each source story's steps from its part's root element.
@@ -1528,6 +1614,123 @@ fn field_payload(
     )
 }
 
+/// The sequences of SEQ fields nested anywhere in a field's code or result.
+pub(crate) fn nested_sequence_names(field_value: &Value) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut seen = HashSet::new();
+    let mut pending = Vec::new();
+    if let Value::Object(map) = field_value {
+        pending.extend(map.values().rev().map(|value| (value, false)));
+    }
+    while let Some((value, scanned_hyperlink)) = pending.pop() {
+        match value {
+            Value::Object(map) => {
+                if matches!(
+                    string(map.get("type")),
+                    Some("complexField" | "simpleField")
+                ) && let Some(name) = string(map.get("instruction"))
+                    .and_then(docx_layout::sequence_fields::sequence_name)
+                    && seen.insert(name.clone())
+                {
+                    names.push(name);
+                }
+                if string(map.get("type")) == Some("hyperlink") && !scanned_hyperlink {
+                    names.extend(
+                        hyperlink_sequence_names(value)
+                            .into_iter()
+                            .filter(|name| seen.insert(name.clone())),
+                    );
+                }
+                let scanned_hyperlink =
+                    scanned_hyperlink || string(map.get("type")) == Some("hyperlink");
+                pending.extend(map.values().rev().map(|value| (value, scanned_hyperlink)));
+            }
+            Value::Array(values) => {
+                pending.extend(values.iter().rev().map(|value| (value, scanned_hyperlink)))
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+pub(crate) fn hyperlink_sequence_names(hyperlink: &Value) -> Vec<String> {
+    let mut pending = vec![hyperlink];
+    let mut instructions: Vec<Option<String>> = Vec::new();
+    let mut names = Vec::new();
+    while let Some(node) = pending.pop() {
+        let kind = string(field(Some(node), "type"));
+        match kind {
+            Some("hyperlink") => {
+                let children = field(Some(node), "structuredChildren")
+                    .or_else(|| field(Some(node), "children"));
+                pending.extend(array(children).iter().rev());
+            }
+            Some("inlineSdt") => {
+                pending.extend(array(field(Some(node), "content")).iter().rev());
+            }
+            Some("simpleField" | "complexField") => {
+                names.extend(
+                    string(field(Some(node), "instruction"))
+                        .and_then(docx_layout::sequence_fields::sequence_name),
+                );
+                let tree = field(Some(node), "fieldTree");
+                let result = field(field(Some(node), "structuredResult"), "inline")
+                    .or_else(|| field(field(tree, "result"), "inline"))
+                    .or_else(|| {
+                        field(
+                            Some(node),
+                            if kind == Some("simpleField") {
+                                "content"
+                            } else {
+                                "fieldResult"
+                            },
+                        )
+                    });
+                pending.extend(array(result).iter().rev());
+                if kind == Some("complexField") {
+                    let code = field(field(Some(node), "structuredCode"), "inline")
+                        .or_else(|| field(field(tree, "code"), "inline"))
+                        .or_else(|| field(Some(node), "fieldCode"));
+                    pending.extend(array(code).iter().rev());
+                }
+            }
+            Some("run") => {}
+            _ => continue,
+        }
+        if kind != Some("run") {
+            continue;
+        }
+        for content in array(field(Some(node), "content")) {
+            let instruction = match string(field(Some(content), "type")) {
+                Some("fieldChar") => match string(field(Some(content), "charType")) {
+                    Some("begin") => {
+                        instructions.push(Some(String::new()));
+                        None
+                    }
+                    Some("separate") => instructions.last_mut().and_then(Option::take),
+                    Some("end") => instructions.pop().flatten(),
+                    _ => None,
+                },
+                Some("instrText") => {
+                    if let Some(Some(instruction)) = instructions.last_mut() {
+                        instruction
+                            .push_str(string(field(Some(content), "text")).unwrap_or_default());
+                    }
+                    None
+                }
+                _ => None,
+            };
+            names.extend(
+                instruction
+                    .as_deref()
+                    .and_then(docx_layout::sequence_fields::sequence_name),
+            );
+        }
+    }
+    names
+}
+
 fn math_payload(math: &Value) -> JsonObject {
     map_from_value(json!({
         "display": nullish(field(Some(math), "display")),
@@ -1736,6 +1939,7 @@ fn hyperlink_to_units(
     styles: &StyleResolver,
     extra_marks: &[Mark],
     source: &BTreeMap<String, String>,
+    opaque_sequences: &mut Vec<String>,
 ) -> Vec<InlineUnit> {
     let mut units = Vec::new();
     let link = hyperlink_mark(hyperlink);
@@ -1754,6 +1958,7 @@ fn hyperlink_to_units(
                 }
             }
             "simpleField" | "complexField" => {
+                opaque_sequences.extend(nested_sequence_names(child));
                 let (payload, marks) = field_payload(child, style_formatting, source);
                 let marks: Vec<Mark> = marks
                     .into_iter()
@@ -1782,6 +1987,7 @@ fn field_to_units(
     styles: &StyleResolver,
     source: &BTreeMap<String, String>,
     projection_id: usize,
+    opaque_sequences: &mut Vec<String>,
 ) -> Vec<InlineUnit> {
     let result = array(field(field(Some(value), "structuredResult"), "inline"));
     let code = array(field(field(Some(value), "structuredCode"), "inline"));
@@ -1805,6 +2011,7 @@ fn field_to_units(
             )
         })
     {
+        opaque_sequences.extend(nested_sequence_names(value));
         let (payload, marks) = field_payload(value, style_formatting, source);
         return vec![embed_unit("field", payload, &marks, None, 1)];
     }
@@ -1812,8 +2019,19 @@ fn field_to_units(
     let mut children = Vec::new();
     for (index, child) in projected_children {
         let mut projected = match string(field(Some(child), "type")) {
-            Some("hyperlink") => hyperlink_to_units(child, style_formatting, styles, &[], source),
+            Some("hyperlink") => {
+                opaque_sequences.extend(hyperlink_sequence_names(child));
+                hyperlink_to_units(
+                    child,
+                    style_formatting,
+                    styles,
+                    &[],
+                    source,
+                    opaque_sequences,
+                )
+            }
             Some("simpleField") => {
+                opaque_sequences.extend(nested_sequence_names(child));
                 let (payload, marks) = field_payload(child, style_formatting, source);
                 vec![embed_unit("field", payload, &marks, None, 1)]
             }
@@ -1841,6 +2059,14 @@ fn field_to_units(
             .collect(),
     );
     let (mut payload, marks) = field_payload(&visible, style_formatting, source);
+    let sequence_owner = string(field(Some(value), "instruction"))
+        .and_then(docx_layout::sequence_fields::sequence_name)
+        .is_some();
+    opaque_sequences.extend(nested_sequence_names(if sequence_owner {
+        value
+    } else {
+        &visible
+    }));
     payload.insert(
         "fieldData".to_owned(),
         Value::String(source_json(value, source)),
@@ -1871,6 +2097,7 @@ fn tracked_to_units(
     styles: &StyleResolver,
     comment_id: Option<String>,
     source: &BTreeMap<String, String>,
+    opaque_sequences: &mut Vec<String>,
 ) -> Vec<InlineUnit> {
     let content_type = string(field(Some(content), "type")).unwrap_or_default();
     let kind = if matches!(content_type, "insertion" | "moveTo") {
@@ -1895,12 +2122,16 @@ fn tracked_to_units(
                 source,
             ));
         } else {
+            if string(field(Some(child), "type")) == Some("hyperlink") {
+                opaque_sequences.extend(hyperlink_sequence_names(child));
+            }
             let mut linked = hyperlink_to_units(
                 child,
                 style_formatting,
                 styles,
                 std::slice::from_ref(&marker),
                 source,
+                opaque_sequences,
             );
             if let Some(comment_id) = &comment_id {
                 for unit in &mut linked {
@@ -1937,6 +2168,7 @@ fn sdt_payload(
     style_formatting: Option<&Value>,
     styles: &StyleResolver,
     source: &BTreeMap<String, String>,
+    opaque_sequences: &mut Vec<String>,
 ) -> JsonObject {
     let mut content = Vec::new();
     let append = |content: &mut Vec<Value>, unit: InlineUnit| match unit.content {
@@ -1982,11 +2214,20 @@ fn sdt_payload(
                 }
             }
             "hyperlink" => {
-                for unit in hyperlink_to_units(child, style_formatting, styles, &[], source) {
+                opaque_sequences.extend(hyperlink_sequence_names(child));
+                for unit in hyperlink_to_units(
+                    child,
+                    style_formatting,
+                    styles,
+                    &[],
+                    source,
+                    opaque_sequences,
+                ) {
                     append(&mut content, unit);
                 }
             }
             "simpleField" | "complexField" => {
+                opaque_sequences.extend(nested_sequence_names(child));
                 let (payload, marks) = field_payload(child, style_formatting, source);
                 append(&mut content, embed_unit("field", payload, &marks, None, 1));
             }
@@ -1994,7 +2235,7 @@ fn sdt_payload(
                 &mut content,
                 embed_unit(
                     "sdt",
-                    sdt_payload(child, style_formatting, styles, source),
+                    sdt_payload(child, style_formatting, styles, source, opaque_sequences),
                     &[],
                     None,
                     1,
@@ -2559,7 +2800,14 @@ fn control_break_offsets(
                         at = run(inner, at, &mut offsets);
                     }
                 }
-                offset += units_width(&hyperlink_to_units(child, None, styles, &[], source));
+                offset += units_width(&hyperlink_to_units(
+                    child,
+                    None,
+                    styles,
+                    &[],
+                    source,
+                    &mut Vec::new(),
+                ));
             }
             "inlineSdt" => {
                 let (nested, below) = control_break_offsets(child, styles, source);
@@ -2673,7 +2921,8 @@ fn content_breaks(
                         output,
                     );
                 } else {
-                    offset += hyperlink_to_units(child, None, styles, &[], source).len();
+                    offset +=
+                        hyperlink_to_units(child, None, styles, &[], source, &mut Vec::new()).len();
                 }
             }
         }
@@ -2752,6 +3001,7 @@ struct ParagraphUnits {
     ppr: JsonObject,
     omitted: Vec<Omitted>,
     breaks: Vec<FlowBreak>,
+    opaque_sequences: Vec<String>,
 }
 
 fn paragraph_units(
@@ -2763,6 +3013,7 @@ fn paragraph_units(
     let mut units = Vec::new();
     let mut omitted = Vec::new();
     let mut breaks = Vec::new();
+    let mut opaque_sequences = Vec::new();
     let mut active_comments: Vec<String> = Vec::new();
     let mut boundaries = Some(Vec::new());
     let mut unit_counts = Vec::new();
@@ -2805,8 +3056,15 @@ fn paragraph_units(
             }
             "hyperlink" => {
                 boundaries = None;
-                let mut linked =
-                    hyperlink_to_units(content, style_formatting.as_ref(), styles, &[], source);
+                opaque_sequences.extend(hyperlink_sequence_names(content));
+                let mut linked = hyperlink_to_units(
+                    content,
+                    style_formatting.as_ref(),
+                    styles,
+                    &[],
+                    source,
+                    &mut opaque_sequences,
+                );
                 for unit in &mut linked {
                     unit.comment_id.clone_from(&comment_id);
                 }
@@ -2820,13 +3078,20 @@ fn paragraph_units(
                     styles,
                     source,
                     unit_counts.len(),
+                    &mut opaque_sequences,
                 ));
             }
             "inlineSdt" => {
                 boundaries = None;
                 units.push(embed_unit(
                     "sdt",
-                    sdt_payload(content, style_formatting.as_ref(), styles, source),
+                    sdt_payload(
+                        content,
+                        style_formatting.as_ref(),
+                        styles,
+                        source,
+                        &mut opaque_sequences,
+                    ),
                     &[],
                     None,
                     2,
@@ -2840,6 +3105,7 @@ fn paragraph_units(
                     styles,
                     comment_id,
                     source,
+                    &mut opaque_sequences,
                 ));
             }
             "mathEquation" => {
@@ -2874,6 +3140,7 @@ fn paragraph_units(
         units,
         omitted,
         breaks,
+        opaque_sequences,
     }
 }
 
@@ -4088,7 +4355,9 @@ fn visit_story(
                     mut ppr,
                     omitted,
                     breaks,
+                    opaque_sequences,
                 } = paragraph_units(block, &context.styles, None, &context.source_json);
+                context.opaque_sequences.extend(opaque_sequences);
                 let base = context.plans[plan_index].width();
                 let offsets: Vec<u32> = std::iter::once(0)
                     .chain(units.iter().scan(0, |width, unit| {
@@ -4742,6 +5011,7 @@ fn seed_lowered(
     document
         .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
         .map_err(|error| error.to_string())?;
+    seed_opaque_sequences(document, &context.opaque_sequences);
     document.set_media_sources(sources);
     read.pin(document);
     read.comment_writes = CommentWrites::watch(document);
@@ -4798,6 +5068,7 @@ fn scratch_context(styles: StyleResolver) -> LoweringContext {
         compatibility_mode: 12,
         root: String::new(),
         paragraphs: Vec::new(),
+        opaque_sequences: Vec::new(),
         source: SourceStructure::default(),
         provenance: Provenance::default(),
         locators: HashMap::new(),
@@ -4950,6 +5221,7 @@ fn lower_package(
         compatibility_mode,
         root: "body".to_owned(),
         paragraphs: Vec::new(),
+        opaque_sequences: Vec::new(),
         source: SourceStructure::default(),
         provenance: Provenance::default(),
         locators: HashMap::from([("body".to_owned(), vec![Step::Body])]),
@@ -5344,6 +5616,122 @@ pub(crate) fn seed_stories(document: &EditingDoc, bytes: &[u8]) -> Result<(), St
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn opaque_sequence_names_accumulate_in_document_state() {
+        let doc = EditingDoc::new(1);
+        let empty = doc.encode_state_vector_v1();
+        seed_opaque_sequences(&doc, &[]);
+        assert_eq!(doc.encode_state_vector_v1(), empty);
+        seed_opaque_sequences(&doc, &["table".into(), "figure".into(), "table".into()]);
+        {
+            let txn = doc.yrs_doc().transact();
+            assert_eq!(txn.state_vector().get(&doc.yrs_doc().client_id()), 0);
+            assert_eq!(
+                txn.state_vector()
+                    .get(&yrs::ClientID::new(SEQUENCE_METADATA_CLIENT)),
+                1
+            );
+        }
+        seed_opaque_sequences(&doc, &["other".into(), "figure".into()]);
+        let before = doc.encode_state_vector_v1();
+        seed_opaque_sequences(&doc, &[]);
+        seed_opaque_sequences(&doc, &["table".into(), "figure".into(), "other".into()]);
+        assert_eq!(doc.encode_state_vector_v1(), before);
+        doc.begin_opening(Some("opening"));
+        let txn = doc.yrs_doc().transact();
+        assert_eq!(
+            txn.get_map(crate::identity::SESSION)
+                .unwrap()
+                .get(&txn, OPAQUE_SEQUENCES),
+            Some(Out::Any(Any::Array(
+                ["figure", "other", "table"].map(Any::from).to_vec().into()
+            )))
+        );
+    }
+
+    #[test]
+    fn nested_sequence_names_keep_first_seen_order() {
+        let field = json!({"type": "complexField", "instruction": "SEQ Outer",
+        "structuredCode": {"inline": [
+            {"type": "simpleField", "instruction": "sEq \"Figure\""},
+            {"type": "complexField", "instruction": "SEQ Table"},
+            {"type": "simpleField", "instruction": "SEQ FIGURE"}
+        ]},
+        "structuredResult": {"inline": [
+            {"type": "complexField", "instruction": "SEQ TABLE"},
+            {"type": "simpleField", "instruction": "SEQ Other"}
+        ]}});
+        assert_eq!(nested_sequence_names(&field), ["figure", "table", "other"]);
+    }
+
+    #[test]
+    fn hyperlink_sequence_names_follow_inline_containers_in_order() {
+        let hyperlink = json!({"type": "hyperlink", "children": [], "structuredChildren": [
+            {"type": "run", "content": [{"type": "fieldChar", "charType": "begin"}]},
+            {"type": "inlineSdt", "content": [
+                {"type": "hyperlink", "children": [
+                    {"type": "run", "content": [{"type": "instrText", "text": " sEq \"Fig"}]}
+                ]},
+                {"type": "simpleField", "instruction": "QUOTE", "content": [],
+                    "structuredResult": {"inline": [
+                        {"type": "run", "content": [{"type": "instrText", "text": "ure\" "}]}
+                    ]}
+                }
+            ]},
+            {"type": "complexField", "instruction": "QUOTE", "fieldCode": [], "fieldResult": [],
+                "structuredCode": {"inline": [
+                    {"type": "run", "content": [
+                        {"type": "fieldChar", "charType": "begin"},
+                        {"type": "instrText", "text": "SEQ Table"}
+                    ]}
+                ]},
+                "structuredResult": {"inline": [
+                    {"type": "run", "content": [{"type": "fieldChar", "charType": "end"}]}
+                ]}
+            },
+            {"type": "run", "content": [
+                {"type": "fieldChar", "charType": "separate"},
+                {"type": "instrText", "text": "SEQ Ignored"},
+                {"type": "fieldChar", "charType": "end"}
+            ]}
+        ]});
+        assert_eq!(hyperlink_sequence_names(&hyperlink), ["table", "figure"]);
+    }
+
+    #[test]
+    fn nested_sequence_metadata_covers_all_field_views_in_inline_wrappers() {
+        let field = json!({
+            "type": "complexField", "fieldType": "QUOTE", "instruction": "QUOTE",
+            "fieldCode": [], "fieldResult": [],
+            "structuredCode": {"inline": []}, "structuredResult": {"inline": []},
+            "fieldTree": {"children": [{"result": {"inline": [
+                {"type": "simpleField", "fieldType": "SEQ", "instruction": "SEQ Figure", "content": []}
+            ]}}]}
+        });
+        for content in [
+            field.clone(),
+            json!({"type": "hyperlink", "children": [], "structuredChildren": [field.clone()]}),
+            json!({"type": "inlineSdt", "properties": {}, "content": [field]}),
+        ] {
+            let paragraph = paragraph_units(
+                &json!({"type": "paragraph", "content": [content]}),
+                &StyleResolver::new(None),
+                None,
+                &BTreeMap::new(),
+            );
+            assert_eq!(paragraph.opaque_sequences, ["figure"]);
+            for unit in paragraph.units {
+                if let UnitContent::Embed { payload, .. } = unit.content {
+                    assert!(
+                        !serde_json::to_string(&payload)
+                            .unwrap()
+                            .contains("nestedSequences")
+                    );
+                }
+            }
+        }
+    }
+
     fn seed_body(blocks: &[Value]) -> EditingDoc {
         let mut context = LoweringContext {
             styles: StyleResolver::new(None),
@@ -5353,6 +5741,7 @@ mod tests {
             compatibility_mode: 12,
             root: "body".to_owned(),
             paragraphs: Vec::new(),
+            opaque_sequences: Vec::new(),
             source: SourceStructure::default(),
             provenance: Provenance::default(),
             locators: HashMap::new(),
@@ -5640,6 +6029,7 @@ mod tests {
             compatibility_mode: 12,
             root: "body".to_owned(),
             paragraphs: Vec::new(),
+            opaque_sequences: Vec::new(),
             source: SourceStructure::default(),
             provenance: Provenance::default(),
             locators: HashMap::new(),

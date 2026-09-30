@@ -121,6 +121,7 @@ export const editsession_retained_headers_footers_json: (a: number) => [number, 
 export const editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
 export const editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+export const editsession_seed_opaque_sequences: (a: number, b: number, c: number) => [number, number];
 export const editsession_select_story: (a: number, b: number, c: number) => void;
 export const editsession_selection: (a: number) => [number, number, number, number];
 export const editsession_selection_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
@@ -133,6 +134,7 @@ export const editsession_set_column_width: (a: number, b: number, c: number, d: 
 export const editsession_set_comment_ranges: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_set_content_control_value: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_set_content_control_value_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+export const editsession_set_display_retain_built_pages: (a: number, b: number) => void;
 export const editsession_set_display_window: (a: number, b: number, c: number) => void;
 export const editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
 export const editsession_set_image_geometry: (a: number, b: number, c: number, d: number, e: number) => [number, number];

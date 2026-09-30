@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:t
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
+import { LayoutSelectionGate, type ResidentMeasurementConfig } from '@betteroffice/docx/layout';
 import { loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
@@ -10,6 +11,7 @@ import {
   ResidentEngineWorkerClient,
   takePreloadedResidentEngineWorker,
   type ResidentEngineWorkerFrame,
+  type YrsRenderEnv,
   type YrsSelection,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
@@ -18,6 +20,7 @@ import type {
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { useRustDisplayList, type ResidentFrameApplyResult } from './useDisplayList';
+import { useLayoutPipeline, type UseLayoutPipelineOptions } from './useLayoutPipeline';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -102,6 +105,202 @@ function setup(clientId = 9301, text = 'Owned layout', request = REQUEST) {
   globalThis.Worker = FakeWorker as unknown as typeof Worker;
   return { native, layoutJson, frame, engine, adopted };
 }
+
+function setupLayoutPipeline() {
+  const source = setup();
+  Object.assign(source.engine, {
+    version: () => '1',
+    layoutFontRequirementsJson: () => '[]',
+  });
+  return source;
+}
+
+function useWorkerLayoutPipeline(
+  session: YrsSession | null,
+  residentMeasurementConfig: UseLayoutPipelineOptions['residentMeasurementConfig'],
+  overrides?: Parameters<typeof useRustDisplayList>[1]
+) {
+  const display = useRustDisplayList(null, overrides);
+  return useLayoutPipeline({
+    document: null,
+    session,
+    renderEnv: {} as YrsRenderEnv,
+    pageGap: 24,
+    zoom: 1,
+    residentMeasurementConfig,
+    deferLayoutPass: () => false,
+    pagesContainerRef: { current: null },
+    viewportLayoutRef: { current: null },
+    syncCoordinator: new LayoutSelectionGate(),
+    getScrollContainer: () => null,
+    layoutInWorker: display.layoutInWorker,
+  });
+}
+
+test('unresolved fonts warm once and the first layout adopts the still-warming worker', async () => {
+  const source = setupLayoutPipeline();
+  const initialWorkers = FakeWorker.instances.length;
+  let settleFonts: () => void = () => {};
+  let measurement: ResidentMeasurementConfig | null = null;
+  const fonts = new Promise<void>((resolve) => (settleFonts = resolve)).then(() => {
+    measurement = {} as ResidentMeasurementConfig;
+  });
+  const preflight = mock(() => measurement);
+  const hook = renderHook(() => useWorkerLayoutPipeline(source.engine, preflight));
+  try {
+    act(() => {
+      hook.result.current.runLayoutPipeline();
+      hook.result.current.runLayoutPipeline();
+    });
+    const spare = FakeWorker.last!;
+    expect(preflight).toHaveBeenCalledTimes(2);
+    expect(measurement).toBeNull();
+    expect(source.adopted).toEqual([]);
+    expect(spare.posted.map((request) => request.type)).toEqual(['warm']);
+    expect(FakeWorker.instances.length - initialWorkers).toBe(1);
+    await act(async () => {
+      settleFonts();
+      await fonts;
+      hook.result.current.runLayoutPipeline();
+    });
+    expect(FakeWorker.last).toBe(spare);
+    expect(FakeWorker.instances.length - initialWorkers).toBe(1);
+    expect(spare.posted.map((request) => request.type)).toEqual(['warm', 'bootstrap']);
+    await act(async () => {
+      spare.reply({ id: spare.posted[0].id, ok: true });
+      spare.reply({
+        id: spare.posted[1].id,
+        ok: true,
+        frame: source.frame.slice().buffer,
+        caret: { frameEpoch: 1, caretRect: null },
+        selection: null,
+        layoutRevision: 1,
+        layoutJson: source.layoutJson,
+      });
+    });
+    expect(hook.result.current.layout?.pages.length).toBeGreaterThan(0);
+  } finally {
+    hook.unmount();
+    source.native.free();
+  }
+});
+
+test('session change and unmount release a font-deferred spare before another editor opens', async () => {
+  for (const ending of ['session change', 'unmount']) {
+    const first = setupLayoutPipeline();
+    const second = setup();
+    const hook = renderHook(
+      ({ session }: { session: YrsSession | null }) => useWorkerLayoutPipeline(session, () => null),
+      { initialProps: { session: first.engine as YrsSession | null } }
+    );
+    try {
+      act(() => hook.result.current.runLayoutPipeline());
+      const spare = FakeWorker.last!;
+      expect(spare.posted.map((request) => request.type)).toEqual(['warm']);
+      if (ending === 'session change') hook.rerender({ session: null });
+      else hook.unmount();
+      await waitFor(() => expect(spare.terminated).toBe(true));
+      expect(takePreloadedResidentEngineWorker()).toBeNull();
+      const next = renderHook(() => useRustDisplayList(null));
+      try {
+        const pending = next.result.current.layoutInWorker(second.engine, REQUEST);
+        const fresh = FakeWorker.last!;
+        expect(fresh).not.toBe(spare);
+        expect(fresh.posted.map((request) => request.type)).toEqual(['bootstrap']);
+        fresh.reply({
+          id: fresh.posted[0].id,
+          ok: true,
+          frame: second.frame.slice().buffer,
+          caret: { frameEpoch: 1, caretRect: null },
+          selection: null,
+          layoutRevision: 1,
+          layoutJson: second.layoutJson,
+        });
+        expect(await pending).not.toBeNull();
+      } finally {
+        next.unmount();
+      }
+    } finally {
+      hook.unmount();
+      first.native.free();
+      second.native.free();
+    }
+  }
+});
+
+test('a font-deferred spare the first layout does not adopt is released', async () => {
+  for (const ending of ['build', 'onHost', 'preflight']) {
+    const source = setupLayoutPipeline();
+    Object.assign(source.engine, {
+      layoutDocumentWithRegionsRetainedJson: () => source.layoutJson,
+    });
+    let settleFonts: () => void = () => {};
+    let measurement: ResidentMeasurementConfig | null = null;
+    const fonts = new Promise<void>((resolve) => (settleFonts = resolve)).then(() => {
+      measurement = {} as ResidentMeasurementConfig;
+    });
+    const build = mock(async () => ({ pages: [] }));
+    const hook = renderHook(
+      ({ overrides }) => useWorkerLayoutPipeline(source.engine, () => measurement, overrides),
+      { initialProps: { overrides: undefined as Parameters<typeof useRustDisplayList>[1] } }
+    );
+    try {
+      act(() => hook.result.current.runLayoutPipeline());
+      const spare = FakeWorker.last!;
+      expect(spare.posted.map((request) => request.type)).toEqual(['warm']);
+      if (ending === 'build') hook.rerender({ overrides: { build } });
+      if (ending === 'preflight') {
+        Object.assign(source.engine, {
+          layoutFontRequirementsJson: () => {
+            throw new Error('preflight failed');
+          },
+        });
+      }
+      await act(async () => {
+        settleFonts();
+        await fonts;
+      });
+      act(() => hook.result.current.runLayoutPipeline({ onHost: ending === 'onHost' }));
+      if (ending !== 'preflight') expect(hook.result.current.layout?.pages.length).toBeGreaterThan(0);
+      expect(spare.posted.map((request) => request.type)).toEqual(['warm']);
+      expect(source.adopted).toEqual([]);
+      await waitFor(() => expect(spare.terminated).toBe(true));
+      expect(takePreloadedResidentEngineWorker()).toBeNull();
+    } finally {
+      hook.unmount();
+      source.native.free();
+    }
+  }
+});
+
+test('font-deferred passes warm only when the worker path is eligible', () => {
+  const source = setupLayoutPipeline();
+  const initialWorkers = FakeWorker.instances.length;
+  const build = mock(() => { throw new Error('unexpected display build'); });
+  try {
+    for (const disabled of ['onHost', 'Worker', 'snapshot', 'adopt', 'version', 'build']) {
+      const engine = { ...source.engine };
+      if (disabled === 'snapshot') Reflect.deleteProperty(engine, 'residentWorkerSnapshot');
+      if (disabled === 'adopt') Reflect.deleteProperty(engine, 'adoptResidentWorkerLayout');
+      if (disabled === 'version') Reflect.deleteProperty(engine, 'version');
+      if (disabled === 'Worker') globalThis.Worker = undefined as unknown as typeof Worker;
+      const hook = renderHook(() =>
+        useWorkerLayoutPipeline(engine, () => null, disabled === 'build' ? { build } : undefined)
+      );
+      try {
+        act(() => hook.result.current.runLayoutPipeline({ onHost: disabled === 'onHost' }));
+        expect(FakeWorker.instances.length).toBe(initialWorkers);
+        expect(takePreloadedResidentEngineWorker()).toBeNull();
+      } finally {
+        hook.unmount();
+        globalThis.Worker = FakeWorker as unknown as typeof Worker;
+      }
+    }
+    expect(build).not.toHaveBeenCalled();
+  } finally {
+    source.native.free();
+  }
+});
 
 function setupResidentInput() {
   const document = setup();
