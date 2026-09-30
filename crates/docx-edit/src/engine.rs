@@ -1411,8 +1411,11 @@ fn measured_parts_fingerprint(block: &LayoutBlock, measure: &BlockExtent) -> Res
         block: &'a LayoutBlock,
         measure: &'a BlockExtent,
     }
-    crate::fingerprint::fingerprint_without_positions(&MeasuredParts { block, measure })
-        .map_err(|error| format!("fingerprint measured block: {error}"))
+    crate::fingerprint::fingerprint_without_positions(&(
+        MeasuredParts { block, measure },
+        relative_run_position_fingerprint(block),
+    ))
+    .map_err(|error| format!("fingerprint measured block: {error}"))
 }
 
 /// JSON equality with numbers compared by value, as a host's `1` and Rust's `1.0`.

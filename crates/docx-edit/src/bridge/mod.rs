@@ -476,7 +476,7 @@ fn lower_story<T: ReadTxn>(
                     let sectioned =
                         values.contains_key("sectPr") || values.contains_key("sectionBreakType");
                     let suppressed = hidden_field_blocks.contains(&para_id);
-                    paragraph_drawings.retain(|drawing| drawing.visible(env));
+                    retain_visible_drawings(&mut paragraph_drawings, env, opaque_sequences);
                     if !sectioned
                         && field_join
                             .as_ref()
@@ -2785,6 +2785,25 @@ fn push_text_chunks(
     }
 }
 
+/// Drops the drawings the view hides, keeping the sequences a hidden shape holds opaque.
+fn retain_visible_drawings(
+    drawings: &mut Vec<DrawingMarker>,
+    env: &RenderEnv,
+    opaque_sequences: &mut BTreeSet<String>,
+) {
+    drawings.retain(|drawing| {
+        if drawing.visible(env) {
+            return true;
+        }
+        if !drawing.revision_hidden
+            && let LayoutBlock::Shape(shape) = &drawing.block
+        {
+            collect_shape_sequences(shape, opaque_sequences);
+        }
+        false
+    });
+}
+
 fn collect_shape_sequences(shape: &ShapeBlock, opaque_sequences: &mut BTreeSet<String>) {
     opaque_sequences.extend(shape.nested_sequences.iter().cloned());
     for run in shape
@@ -2844,17 +2863,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
         story_slot,
         shared_map_string(pilcrow, txn, "paraId").unwrap_or_default(),
     ));
-    drawings.retain(|drawing| {
-        if drawing.visible(env) {
-            return true;
-        }
-        if !drawing.revision_hidden
-            && let LayoutBlock::Shape(shape) = &drawing.block
-        {
-            collect_shape_sequences(shape, opaque_sequences);
-        }
-        false
-    });
+    retain_visible_drawings(&mut drawings, env, opaque_sequences);
     for runs in std::iter::once(&mut raw_runs).chain(carried.iter_mut().map(|(_, runs)| runs)) {
         runs.retain(|run| {
             if run.visible(env) {
