@@ -90,6 +90,7 @@ pub struct ParseBudget<'a> {
     notes: usize,
     comments: usize,
     source_ordinals: bool,
+    media: Option<&'a crate::media::MediaTable>,
 }
 
 impl<'a> ParseBudget<'a> {
@@ -109,7 +110,18 @@ impl<'a> ParseBudget<'a> {
             notes: 0,
             comments: 0,
             source_ordinals: false,
+            media: None,
         }
+    }
+
+    /// Reads the bytes behind `media:{n}` image sources from `table`.
+    pub(crate) fn read_media_from(&mut self, table: &'a crate::media::MediaTable) {
+        self.media = Some(table);
+    }
+
+    /// The table `media:{n}` image sources name, when parsing with one.
+    pub(crate) fn media_table(&self) -> Option<&'a crate::media::MediaTable> {
+        self.media
     }
 
     /// Records each parsed paragraph's `w:p` occurrence in its part; see

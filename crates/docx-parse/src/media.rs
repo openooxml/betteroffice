@@ -5,11 +5,181 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use indexmap::IndexMap;
+use ooxml_opc::{MAX_TOTAL_UNCOMPRESSED_BYTES, RetainedPackage};
 use serde::{Deserialize, Serialize};
 
 use crate::relationships::RelationshipMap;
 
 pub type MediaMap = IndexMap<String, Arc<MediaFile>>;
+
+/// How a [`MediaTable`] token starts: `media:{n}` names its `n`th part.
+pub const MEDIA_TOKEN_PREFIX: &str = "media:";
+
+/// The token naming a [`MediaTable`]'s `index`th part.
+pub fn media_token(index: usize) -> String {
+    format!("{MEDIA_TOKEN_PREFIX}{index}")
+}
+
+/// The part index `token` names, when it is a `media:{n}` token in its one
+/// spelling.
+pub fn media_token_index(token: &str) -> Option<usize> {
+    let digits = token.strip_prefix(MEDIA_TOKEN_PREFIX)?;
+    let canonical = !digits.is_empty()
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+        && (digits == "0" || !digits.starts_with('0'));
+    canonical.then(|| digits.parse().ok()).flatten()
+}
+
+/// Bytes read to tell whether [`display_form`] replaces a part.
+const SNIFFED_BYTES: usize = 64;
+
+/// The `word/media/` parts of a retained package in archive order, the
+/// `n`th of which a `media:{n}` token names. A part stays compressed in the
+/// package until read, and its `data:` URL is built only when asked for.
+/// Parts browsers cannot decode are transcoded when the table is built, with
+/// the warnings [`build_media_map_with_warnings`] reports.
+#[derive(Clone, Debug)]
+pub struct MediaTable {
+    package: RetainedPackage,
+    parts: Arc<[MediaPart]>,
+    warnings: Arc<[String]>,
+}
+
+#[derive(Debug)]
+struct MediaPart {
+    path: String,
+    position: usize,
+    mime_type: &'static str,
+    display: Option<Arc<[u8]>>,
+}
+
+impl MediaTable {
+    /// The media of `package`. `inflated` is what its other parts inflated
+    /// to; with the media's declared sizes it must fit the container budget,
+    /// as inflating the whole package would.
+    pub fn new(package: RetainedPackage, inflated: u64) -> Result<Self, String> {
+        let mut parts = Vec::new();
+        let mut warnings = Vec::new();
+        let mut total = inflated;
+        for (position, (path, size)) in package.parts().enumerate() {
+            if !is_media_path(path) {
+                continue;
+            }
+            total = total.saturating_add(size);
+            if total > MAX_TOTAL_UNCOMPRESSED_BYTES {
+                return Err(format!(
+                    "inflated size exceeds {MAX_TOTAL_UNCOMPRESSED_BYTES} bytes"
+                ));
+            }
+            let mime_type = media_mime_type(path);
+            let prefix = package.read_prefix(position, SNIFFED_BYTES)?;
+            let (mime_type, display) = if transcodes(&prefix, mime_type) {
+                let data = package.read(position)?;
+                let (display, mime_type, warning) = display_form(&data, mime_type, path);
+                warnings.extend(warning);
+                let display = match display {
+                    Cow::Owned(display) => display.into(),
+                    Cow::Borrowed(_) => Arc::from(data),
+                };
+                (mime_type, Some(display))
+            } else {
+                (mime_type, None)
+            };
+            parts.push(MediaPart {
+                path: path.to_owned(),
+                position,
+                mime_type,
+                display,
+            });
+        }
+        Ok(Self {
+            package,
+            parts: parts.into(),
+            warnings: warnings.into(),
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.parts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.parts.is_empty()
+    }
+
+    /// The package path of the `index`th part.
+    pub fn path(&self, index: usize) -> Option<&str> {
+        self.parts.get(index).map(|part| part.path.as_str())
+    }
+
+    /// The media type of the bytes [`MediaTable::bytes`] returns.
+    pub fn mime_type(&self, index: usize) -> Option<&'static str> {
+        self.parts.get(index).map(|part| part.mime_type)
+    }
+
+    /// The `index`th part as displayed: its transcode, or its inflated bytes.
+    pub fn bytes(&self, index: usize) -> Result<Cow<'_, [u8]>, String> {
+        let part = self
+            .parts
+            .get(index)
+            .ok_or_else(|| format!("no media part {index}"))?;
+        match &part.display {
+            Some(display) => Ok(Cow::Borrowed(display)),
+            None => self.package.read(part.position).map(Cow::Owned),
+        }
+    }
+
+    /// The `data:` URL [`build_media_map`] gives the `index`th part.
+    pub fn data_url(&self, index: usize) -> Result<String, String> {
+        let bytes = self.bytes(index)?;
+        let mime_type = self.parts[index].mime_type;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok(format!("data:{mime_type};base64,{encoded}"))
+    }
+
+    /// The `data:` URL a `media:{n}` token stands for, or `None` for any other
+    /// string or a part that cannot be read.
+    pub fn resolve(&self, token: &str) -> Option<String> {
+        media_token_index(token)
+            .filter(|index| *index < self.len())
+            .and_then(|index| self.data_url(index).ok())
+    }
+
+    /// One warning per part that could not be transcoded for display.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// The media map image resolution reads, each part's token standing
+    /// where [`build_media_map`] puts its `data:` URL.
+    pub fn media_map(&self) -> MediaMap {
+        let mut media = MediaMap::new();
+        for (index, part) in self.parts.iter().enumerate() {
+            let file = Arc::new(MediaFile {
+                path: part.path.clone(),
+                filename: Some(
+                    part.path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&part.path)
+                        .to_owned(),
+                ),
+                mime_type: part.mime_type.to_owned(),
+                base64: String::new(),
+                data_url: media_token(index),
+            });
+            media.insert(part.path.clone(), Arc::clone(&file));
+            if let Some(normalized) = part.path.strip_prefix("word/") {
+                media.insert(normalized.to_owned(), file);
+            }
+        }
+        media
+    }
+}
+
+pub(crate) fn is_media_path(path: &str) -> bool {
+    path.to_ascii_lowercase().starts_with("word/media/")
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,7 +212,7 @@ pub fn build_media_map_with_warnings(parts: &[(String, Vec<u8>)]) -> (MediaMap, 
     let mut media = MediaMap::new();
     let mut warnings = Vec::new();
     for (path, data) in parts {
-        if !path.to_ascii_lowercase().starts_with("word/media/") {
+        if !is_media_path(path) {
             continue;
         }
         let filename = path.rsplit('/').next().unwrap_or(path).to_owned();
@@ -106,6 +276,16 @@ pub fn resolve_image_data(
         mime_type: Some(media_mime_type(target).to_owned()),
         filename,
     }
+}
+
+/// Whether [`display_form`] replaces a part whose bytes start with `prefix`.
+fn transcodes(prefix: &[u8], _mime_type: &str) -> bool {
+    #[cfg(feature = "tiff")]
+    if is_tiff(prefix) {
+        return true;
+    }
+    let _ = prefix;
+    false
 }
 
 /// Browsers have no TIFF decoder, so the display copy carries a PNG transcode.

@@ -15,7 +15,7 @@ use crate::comments::remove_orphan_comment_ranges;
 use crate::document::{DocumentBody, extract_all_template_variables, parse_document_body_compact};
 use crate::fonts::{FontTable, parse_font_table};
 use crate::header_footer::{HeaderFooter, parse_related_header_footers};
-use crate::media::{MediaFile, build_media_map_with_warnings};
+use crate::media::{MediaFile, MediaTable, build_media_map_with_warnings, is_media_path};
 use crate::notes::Note;
 use crate::numbering::{NumberingDefinitions, parse_numbering};
 use crate::paragraph::{HexIdAllocator, Paragraph};
@@ -201,9 +201,41 @@ pub fn parse_docx_s9_wire_parts_with_limits(
     limits: &ParseLimits,
 ) -> Result<(S9WireEnvelope, Vec<(String, Vec<u8>)>), ParseError> {
     let parts = ooxml_opc::unzip_parts(data).map_err(ParseError::Container)?;
-    let envelope = parse_s9_package(&parts, data, options, limits, None)?
+    let envelope = parse_s9_package(&parts, data, options, limits, None, None)?
         .expect("a whole body is never refused");
     Ok((envelope, parts))
+}
+
+/// [`parse_docx_s9_wire_parts_with_limits`] leaving the media in the package:
+/// an image names its part by a [`MediaTable`] token where it would carry a
+/// `data:` URL, and the envelope lists no media entries. Watermarks and
+/// comments, which reach the host, keep their `data:` URLs. Returns the
+/// package's other parts and its media table.
+pub fn parse_docx_s9_wire_with_media_table(
+    data: Arc<[u8]>,
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+) -> Result<(S9WireEnvelope, Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
+    let (parts, table) = media_table_parts(&data)?;
+    let envelope = parse_s9_package(&parts, &data, options, limits, None, Some(&table))?
+        .expect("a whole body is never refused");
+    Ok((envelope, parts, table))
+}
+
+/// The package's parts other than its media, inflated, and its media table.
+pub fn media_table_parts(
+    data: &Arc<[u8]>,
+) -> Result<(Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
+    let parts =
+        ooxml_opc::unzip_parts_where(data, ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES, |path| {
+            !is_media_path(path)
+        })
+        .map_err(ParseError::Container)?;
+    let inflated = parts.iter().map(|(_, bytes)| bytes.len() as u64).sum();
+    let package =
+        ooxml_opc::RetainedPackage::new(Arc::clone(data)).map_err(ParseError::Container)?;
+    let table = MediaTable::new(package, inflated).map_err(ParseError::Container)?;
+    Ok((parts, table))
 }
 
 /// Parses already inflated package parts with only the body's first
@@ -224,7 +256,25 @@ pub fn parse_docx_s9_preview_from_parts(
             "parsing parts needs a determinism seed and no canonical envelope".to_owned(),
         ));
     }
-    parse_s9_package(parts, &[], options, limits, Some(blocks))
+    parse_s9_package(parts, &[], options, limits, Some(blocks), None)
+}
+
+/// [`parse_docx_s9_preview_from_parts`] with images naming their parts by
+/// `table`'s tokens, as [`parse_docx_s9_wire_with_media_table`] does; `parts`
+/// need not hold the media.
+pub fn parse_docx_s9_preview_with_media_table(
+    parts: &[(String, Vec<u8>)],
+    table: &MediaTable,
+    blocks: usize,
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+) -> Result<Option<S9WireEnvelope>, ParseError> {
+    if options.determinism_seed.is_none() || options.include_canonical {
+        return Err(ParseError::Canonical(
+            "parsing parts needs a determinism seed and no canonical envelope".to_owned(),
+        ));
+    }
+    parse_s9_package(parts, &[], options, limits, Some(blocks), Some(table))
 }
 
 /// `None` only when `body_blocks` would cut a body the preview refuses; see
@@ -235,8 +285,17 @@ fn parse_s9_package(
     options: S9ParseOptions,
     limits: &ParseLimits,
     body_blocks: Option<usize>,
+    media_table: Option<&MediaTable>,
 ) -> Result<Option<S9WireEnvelope>, ParseError> {
+    if media_table.is_some() && options.include_canonical {
+        return Err(ParseError::Canonical(
+            "a canonical envelope needs the media inflated".to_owned(),
+        ));
+    }
     let mut budget = ParseBudget::new(limits);
+    if let Some(table) = media_table {
+        budget.read_media_from(table);
+    }
     if options.source_ordinals {
         budget.record_source_ordinals();
     }
@@ -286,7 +345,10 @@ fn parse_s9_package(
         Some((path, xml)) => parse_relationships(xml, path, &mut budget)?,
         None => RelationshipMap::new(),
     };
-    let (media, media_warnings) = build_media_map_with_warnings(parts);
+    let (media, media_warnings) = match media_table {
+        Some(table) => (table.media_map(), table.warnings().to_vec()),
+        None => build_media_map_with_warnings(parts),
+    };
     let all_xml: IndexMap<_, _> = parts
         .iter()
         .filter(|(path, _)| {
@@ -465,7 +527,7 @@ fn parse_s9_package(
     warnings.extend(smart_art.warnings);
     let warnings = (!warnings.is_empty()).then_some(warnings);
 
-    let document = S9DocumentWire {
+    let mut document = S9DocumentWire {
         package: S9PackageWire {
             document: body.into(),
             styles,
@@ -480,12 +542,18 @@ fn parse_s9_package(
             footnote_separators,
             endnote_separators,
             relationship_entries: relationships.into_iter().collect(),
-            media_entries: media.into_iter().collect(),
+            media_entries: match media_table {
+                Some(_) => Vec::new(),
+                None => media.into_iter().collect(),
+            },
             chart_entries: charts.into_iter().collect(),
         },
         template_variables,
         warnings,
     };
+    if let Some(table) = media_table {
+        resolve_host_media(&mut document.package, table)?;
+    }
 
     let (canonical_base64, canonical_sha256) = if options.include_canonical {
         let canonical = canonical_document(&document, data)?;
@@ -706,6 +774,61 @@ fn ordered_map<T: Serialize>(entries: &[(String, T)]) -> Result<CanonicalValue, 
         })
         .collect::<Result<Vec<_>, ParseError>>()
         .map(CanonicalValue::OrderedMap)
+}
+
+/// Gives the watermarks and comments of a package parsed against `table`
+/// the `data:` URLs their tokens stand for, since both reach the host as
+/// parsed.
+fn resolve_host_media(package: &mut S9PackageWire, table: &MediaTable) -> Result<(), ParseError> {
+    for (_, story) in package
+        .header_entries
+        .iter_mut()
+        .chain(package.footer_entries.iter_mut())
+        .flatten()
+    {
+        if let Some(crate::vml::Watermark::Picture {
+            data_url: Some(data_url),
+            ..
+        }) = story.watermark.as_mut()
+            && let Some(resolved) = table.resolve(data_url)
+        {
+            *data_url = resolved;
+        }
+    }
+    for comment in package.document.comments.iter_mut().flatten() {
+        let mut content = serde_json::to_value(&comment.content)
+            .map_err(|error| ParseError::Canonical(error.to_string()))?;
+        if resolve_value_media(&mut content, table) {
+            comment.content = serde_json::from_value(content)
+                .map_err(|error| ParseError::Canonical(error.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Replaces every token under a `src` key in `value`; whether any was.
+fn resolve_value_media(value: &mut serde_json::Value, table: &MediaTable) -> bool {
+    match value {
+        serde_json::Value::Object(fields) => {
+            let mut changed = false;
+            for (key, field) in fields.iter_mut() {
+                if key == "src"
+                    && let serde_json::Value::String(src) = field
+                    && let Some(resolved) = table.resolve(src)
+                {
+                    *src = resolved;
+                    changed = true;
+                } else {
+                    changed |= resolve_value_media(field, table);
+                }
+            }
+            changed
+        }
+        serde_json::Value::Array(items) => items.iter_mut().fold(false, |changed, item| {
+            resolve_value_media(item, table) | changed
+        }),
+        _ => false,
+    }
 }
 
 fn canonical_media(entries: &[(String, Arc<MediaFile>)]) -> Result<CanonicalValue, ParseError> {

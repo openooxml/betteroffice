@@ -1,5 +1,7 @@
 //! Legacy VML image and watermark parsing.
 
+use std::borrow::Cow;
+
 use base64::Engine as _;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -9,7 +11,7 @@ use crate::image::{
     Image, ImageCrop, ImageEffect, ImageEffects, ImagePosition, ImageSize, ImageWrap, PositionAxis,
     placeholder_image,
 };
-use crate::media::{MediaMap, resolve_image_data};
+use crate::media::{MediaMap, MediaTable, media_token_index, resolve_image_data};
 use crate::relationships::RelationshipMap;
 use crate::scalars::ColorValue;
 use crate::xml::{XmlElement, namespaces};
@@ -228,6 +230,16 @@ pub fn parse_vml_image_content(
     relationships: Option<&RelationshipMap>,
     media: Option<&MediaMap>,
 ) -> Option<Image> {
+    vml_image_content(picture, relationships, media, None)
+}
+
+/// [`parse_vml_image_content`] reading `media:{n}` sources from `table`.
+pub(crate) fn vml_image_content(
+    picture: &XmlElement,
+    relationships: Option<&RelationshipMap>,
+    media: Option<&MediaMap>,
+    table: Option<&MediaTable>,
+) -> Option<Image> {
     let mut shapes = Vec::new();
     collect_vml_shapes(picture, 0, &mut shapes);
     for shape in shapes.into_iter().take(MAX_VML_SHAPES) {
@@ -256,7 +268,7 @@ pub fn parse_vml_image_content(
         let mut height = css_length_to_px(style.get("height").map(String::as_str));
         if width.is_none() || height.is_none() {
             if let Some((intrinsic_width, intrinsic_height)) =
-                intrinsic_size_px(bytes_from_image_src(resolved.src.as_deref()).as_deref())
+                intrinsic_size_px(image_src_bytes(resolved.src.as_deref(), table).as_deref())
                 && intrinsic_width > 0.0
                 && intrinsic_height > 0.0
             {
@@ -703,6 +715,13 @@ fn vml_vertical_relative_to(raw: Option<&str>) -> &'static str {
         Some("line") => "line",
         _ => "paragraph",
     }
+}
+
+fn image_src_bytes(source: Option<&str>, table: Option<&MediaTable>) -> Option<Vec<u8>> {
+    if let (Some(table), Some(index)) = (table, source.and_then(media_token_index)) {
+        return table.bytes(index).ok().map(Cow::into_owned);
+    }
+    bytes_from_image_src(source)
 }
 
 fn bytes_from_image_src(source: Option<&str>) -> Option<Vec<u8>> {
