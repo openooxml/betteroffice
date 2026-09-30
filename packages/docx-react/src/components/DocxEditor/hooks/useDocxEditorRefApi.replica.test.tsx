@@ -96,6 +96,7 @@ function apiFor(
       setComments: () => {},
       setShowCommentsSidebar: () => {},
       contentChangeSubscribersRef: { current: new Set() },
+      documentChangeSubscribersRef: { current: new Set() },
       selectionChangeSubscribersRef: { current: new Set() },
       getCachedStyleResolver: createStyleResolver,
       hostSearch: {
@@ -186,7 +187,7 @@ test('every public ref API is classified for replica access', async () => {
     'search', 'searchGoTo', 'searchNext', 'searchPrevious',
     'scrollToChangeId', 'scrollToCommentId', 'scrollToPage', 'scrollToParaId', 'scrollToPosition',
     'setParagraphStyle', 'setProposalStates', 'setZoom', 'validateEdits', 'whenLayoutComplete',
-    'withdrawProposals',
+    'withdrawProposals', 'onDocumentChange',
     ...Object.values(DOCX_REF_ASYNC_TWINS),
   ].sort());
 });
@@ -197,7 +198,7 @@ test('only deprecated members and host-state members answer synchronously from t
     .map(([member]) => member)
     .filter((member) => !Object.hasOwn(DOCX_REF_ASYNC_TWINS, member));
   expect(syncDocumentMembers.sort()).toEqual(
-    ['focus', 'getEditorRef', 'openPrintPreview', 'print', 'scrollToPosition'].sort()
+    ['focus', 'getEditorRef', 'highlightRange', 'openPrintPreview', 'print', 'scrollToPosition'].sort()
   );
   for (const twin of Object.values(DOCX_REF_ASYNC_TWINS)) {
     expect(DOCX_REF_REPLICA_ACCESS[twin]).not.toBe('sync');
@@ -209,7 +210,6 @@ test('async twins wait for the replica without loading it at once, then answer a
   const pending = Promise.all([api.findParagraphs('Page'), api.readPageContent(1), api.readDocument()]);
   const completed = { value: false };
   void pending.then(() => { completed.value = true; });
-  expect(await api.readComments()).toEqual([]);
   replica.start();
   await act(async () => {});
   expect(completed.value).toBe(false);

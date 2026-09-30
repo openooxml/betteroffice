@@ -129,6 +129,7 @@ async function setup(options: {
       setComments: options.setComments ?? (() => {}),
       setShowCommentsSidebar: () => {},
       contentChangeSubscribersRef: { current: new Set() },
+      documentChangeSubscribersRef: { current: new Set() },
       selectionChangeSubscribersRef: { current: new Set() },
       getCachedStyleResolver: (() => {
         throw new Error('unused');

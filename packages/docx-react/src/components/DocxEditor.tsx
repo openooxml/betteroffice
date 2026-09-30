@@ -212,8 +212,13 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   onOpen?: (file: File) => void | Promise<void>;
   /** Author name used for comments and track changes */
   author?: string;
-  /** Callback when document changes */
+  /**
+   * Callback when document changes
+   * @deprecated Use `onDocumentChange`, and `readDocument` when the document itself is needed.
+   */
   onChange?: (document: Document) => void;
+  /** Fires after every committed edit with the document's version, without projecting the document. */
+  onDocumentChange?: (change: DocxDocumentChange) => void;
   /** Callback when selection changes */
   onSelectionChange?: (state: SelectionState | null) => void;
   /** Callback on error */
@@ -427,6 +432,11 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
    * existing registries retain their provider, so it is not per editor or tenant.
    */
   measurementFontProvider?: BundledFontProvider;
+}
+
+/** A committed edit, as `onDocumentChange` reports it. */
+export interface DocxDocumentChange {
+  version: string;
 }
 
 /** A paragraph {@link DocxEditorRef.findParagraphs} matched, with the handle the paragraph helpers take. */
@@ -689,14 +699,8 @@ export interface DocxEditorRef {
    * for a malformed range or a `from` past the document end; `to` is clamped
    * to the document size.
    * @example ref.current?.highlightRange(10, 24)
-   * @deprecated Use {@link selectRange}.
    */
   highlightRange: (from: number, to: number) => void;
-  /**
-   * Flushes pending input, then selects the display-position range `[from, to]` and scrolls its
-   * start into view, as {@link highlightRange} does.
-   */
-  selectRange: (from: number, to: number) => Promise<void>;
   /** Open print preview */
   openPrintPreview: () => void;
   /** Print the document directly */
@@ -721,13 +725,8 @@ export interface DocxEditorRef {
   replyToComment: (commentId: number, text: string, author: string) => number | null;
   /** Replies to a comment as {@link replyToComment} does, resolving the reply's id or null. */
   insertCommentReply: (commentId: number, text: string, author: string) => Promise<number | null>;
-  /**
-   * Resolve (mark as done) a comment.
-   * @deprecated Use {@link markCommentResolved}.
-   */
+  /** Resolve (mark as done) a comment. */
   resolveComment: (commentId: number) => void;
-  /** Marks a comment done, as {@link resolveComment} does. */
-  markCommentResolved: (commentId: number) => Promise<void>;
   /**
    * Suggest a tracked change. Pass `replaceWith: ''` to delete the matched text;
    * pass `search: ''` to insert at paragraph end. Returns false on missing paraId,
@@ -800,15 +799,15 @@ export interface DocxEditorRef {
    * Null when nothing is selected.
    */
   readSelectionInfo: () => Promise<DocxSelectionInfo | null>;
-  /**
-   * Get all comments.
-   * @deprecated Use {@link readComments}.
-   */
+  /** Get all comments. */
   getComments: () => Comment[];
-  /** Reads all comments, as {@link getComments} does. */
-  readComments: () => Promise<Comment[]>;
-  /** Subscribe to document changes. Fires after every committed edit. Returns unsubscribe. */
+  /**
+   * Subscribe to document changes. Fires after every committed edit. Returns unsubscribe.
+   * @deprecated Use {@link onDocumentChange}, and {@link readDocument} when the document is needed.
+   */
   onContentChange: (listener: (document: Document) => void) => () => void;
+  /** Subscribe to committed edits by version, without projecting the document. Returns unsubscribe. */
+  onDocumentChange: (listener: (change: DocxDocumentChange) => void) => () => void;
   /** Subscribe to selection changes (cursor moves / selection changes). Returns unsubscribe. */
   onSelectionChange: (listener: (selection: SelectionState | null) => void) => () => void;
   /**
@@ -958,6 +957,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onOpen,
     author = 'User',
     onChange,
+    onDocumentChange,
     onSelectionChange,
     onError,
     onMemoryPressure,
@@ -1177,6 +1177,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // onSelectionChange paths so multiple listeners (host app, MCP server, etc.)
   // can observe edits without competing for the single React prop.
   const contentChangeSubscribersRef = useRef(new Set<(doc: Document) => void>());
+  const documentChangeSubscribersRef = useRef(new Set<(change: DocxDocumentChange) => void>());
+  const onDocumentChangeRef = useRef(onDocumentChange);
+  onDocumentChangeRef.current = onDocumentChange;
   const [contentSubscriberCount, setContentSubscriberCount] = useState(0);
   const selectionChangeSubscribersRef = useRef(new Set<(s: SelectionState | null) => void>());
   const legacyProjectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1579,6 +1582,20 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     [history]
   );
 
+  const notifyDocumentVersion = useCallback(() => {
+    const session = yrsCore.session;
+    const listeners = documentChangeSubscribersRef.current;
+    if (!session || (!onDocumentChangeRef.current && listeners.size === 0)) return;
+    const change = { version: session.version() };
+    for (const listener of [onDocumentChangeRef.current, ...listeners]) {
+      try {
+        listener?.(change);
+      } catch (error) {
+        console.error('documentChange listener threw:', error);
+      }
+    }
+  }, [yrsCore.session]);
+
   const notifyDocumentChange = useCallback(
     (document: Document) => {
       onChange?.(document);
@@ -1635,11 +1652,13 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         },
         scheduleLegacyProjection
       );
+      notifyDocumentVersion();
       handleContentHousekeeping();
     },
     [
       handleContentHousekeeping,
       notifyDocumentChange,
+      notifyDocumentVersion,
       onChange,
       pushDocument,
       scheduleLegacyProjection,
@@ -1647,7 +1666,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     ]
   );
 
-  const handleYrsContentChange = useCallback(() => {
+  const projectYrsContentChange = useCallback(() => {
     if (onChange || contentChangeSubscribersRef.current.size > 0) {
       commitYrsDocumentChange(yrsCore.documentFromYrs, {
         push: pushDocument,
@@ -1662,14 +1681,19 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     pushDocument,
     yrsCore.documentFromYrs,
   ]);
+  const handleYrsContentChange = useCallback(() => {
+    notifyDocumentVersion();
+    projectYrsContentChange();
+  }, [notifyDocumentVersion, projectYrsContentChange]);
   // A worker-held change reaches document listeners once the replica holds it; without them,
   // nothing needs the replica.
   workerContentChangeRef.current = () => {
     const session = yrsCore.session;
+    notifyDocumentVersion();
     if (!session || (!onChange && contentChangeSubscribersRef.current.size === 0)) return;
     void requestWorkerOpenReplica(session)?.then(
       () => {
-        if (coreSessionRef.current === session) handleYrsContentChange();
+        if (coreSessionRef.current === session) projectYrsContentChange();
       },
       () => {}
     );
@@ -2040,6 +2064,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     setComments,
     setShowCommentsSidebar,
     contentChangeSubscribersRef,
+    documentChangeSubscribersRef,
     onContentSubscribersChange: setContentSubscriberCount,
     selectionChangeSubscribersRef,
     getCachedStyleResolver,

@@ -19,7 +19,7 @@ import type {
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import type { DocxInput, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
 import type { DisplayList } from '@betteroffice/docx/layout/render';
-import type { DocxEditorRef } from '../../DocxEditor';
+import type { DocxDocumentChange, DocxEditorRef } from '../../DocxEditor';
 import type { DocxCommandStore } from '../../../commands/types';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { CommentIdAllocator } from '../commentFactories';
@@ -90,7 +90,6 @@ export const DOCX_REF_REPLICA_ACCESS = {
   replyToComment: 'independent',
   insertCommentReply: 'independent',
   resolveComment: 'independent',
-  markCommentResolved: 'independent',
   proposeChange: 'sync',
   suggestChange: 'await',
   applyFormatting: 'sync',
@@ -108,13 +107,11 @@ export const DOCX_REF_REPLICA_ACCESS = {
   scrollToChangeId: 'sync',
   scrollToChange: 'await',
   highlightRange: 'sync',
-  selectRange: 'await',
   findInDocument: 'sync',
   findParagraphs: 'await',
   getSelectionInfo: 'sync',
   readSelectionInfo: 'await',
   getComments: 'independent',
-  readComments: 'independent',
   search: 'await',
   searchNext: 'independent',
   searchPrevious: 'independent',
@@ -123,6 +120,7 @@ export const DOCX_REF_REPLICA_ACCESS = {
   getSearchState: 'independent',
   onSearchChange: 'independent',
   onContentChange: 'independent',
+  onDocumentChange: 'independent',
   onSelectionChange: 'independent',
 } as const satisfies Record<keyof DocxEditorRef, 'await' | 'sync' | 'independent' | 'commands'>;
 
@@ -133,10 +131,8 @@ export const DOCX_REF_ASYNC_TWINS = {
   scrollToParaId: 'scrollToParagraph',
   scrollToCommentId: 'scrollToComment',
   scrollToChangeId: 'scrollToChange',
-  highlightRange: 'selectRange',
   addComment: 'insertComment',
   replyToComment: 'insertCommentReply',
-  resolveComment: 'markCommentResolved',
   proposeChange: 'suggestChange',
   findInDocument: 'findParagraphs',
   applyFormatting: 'formatText',
@@ -144,17 +140,12 @@ export const DOCX_REF_ASYNC_TWINS = {
   insertBreak: 'insertBreakAfter',
   getPageContent: 'readPageContent',
   getSelectionInfo: 'readSelectionInfo',
-  getComments: 'readComments',
 } as const satisfies Partial<Record<keyof DocxEditorRef, keyof DocxEditorRef>>;
 
 type DocxRefAsyncTwin = (typeof DOCX_REF_ASYNC_TWINS)[keyof typeof DOCX_REF_ASYNC_TWINS];
 
 /** Twins of members that read host state only, which need no input flushed first. */
-const HOST_STATE_TWINS: ReadonlySet<DocxRefAsyncTwin> = new Set([
-  'insertCommentReply',
-  'markCommentResolved',
-  'readComments',
-]);
+const HOST_STATE_TWINS: ReadonlySet<DocxRefAsyncTwin> = new Set(['insertCommentReply']);
 
 /** Twins that answer null without loading an on-demand replica nothing has asked for. */
 const UNSELECTED_TWINS: ReadonlySet<keyof DocxEditorRef> = new Set(['readSelectionInfo']);
@@ -458,6 +449,7 @@ export function useDocxEditorRefApi({
   setComments,
   setShowCommentsSidebar,
   contentChangeSubscribersRef,
+  documentChangeSubscribersRef,
   onContentSubscribersChange,
   selectionChangeSubscribersRef,
   getCachedStyleResolver,
@@ -489,6 +481,7 @@ export function useDocxEditorRefApi({
   setComments: React.Dispatch<React.SetStateAction<Comment[]>>;
   setShowCommentsSidebar: React.Dispatch<React.SetStateAction<boolean>>;
   contentChangeSubscribersRef: React.RefObject<Set<(doc: Document) => void>>;
+  documentChangeSubscribersRef: React.RefObject<Set<(change: DocxDocumentChange) => void>>;
   onContentSubscribersChange?: (count: number) => void;
   selectionChangeSubscribersRef: React.RefObject<Set<(state: SelectionState | null) => void>>;
   getCachedStyleResolver: (
@@ -860,6 +853,10 @@ export function useDocxEditorRefApi({
           onContentSubscribersChange?.(subscribers.size);
           return removed;
         };
+      },
+      onDocumentChange: (listener) => {
+        documentChangeSubscribersRef.current.add(listener);
+        return () => documentChangeSubscribersRef.current.delete(listener);
       },
       onSelectionChange: (listener) => {
         selectionChangeSubscribersRef.current.add(listener);
