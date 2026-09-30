@@ -520,6 +520,11 @@ export class EditSession {
      */
     layout_document_with_regions_prefix_retained_json(input: string, pages: number): string;
     /**
+     * [`Self::layout_document_with_regions_retained_json`] without the reply,
+     * for a caller that reads only the retained state.
+     */
+    layout_document_with_regions_retained(input: string): void;
+    /**
      * Same full region pass as [`Self::layout_document_with_regions_json`],
      * but the reply carries only `{ layout, headersFooters?, notesConverged }`
      * — the measured arena stays retained wasm-side and is fetched on demand
@@ -624,7 +629,9 @@ export class EditSession {
      * Seeding starts a new opening, with `generation` or a fresh one, so its
      * session anchors are its own; see [`EditingDoc::begin_opening`].
      *
-     * Returns `{"envelope","referencedFonts":[string, …]}`. The envelope is
+     * Returns `{"envelope","referencedFonts":[string, …],"unusedScriptFonts":[string, …]}`:
+     * `unusedScriptFonts` are the referenced fonts a seeded package names only
+     * for East Asian or complex-script text it does not contain. The envelope is
      * the parsed package with the parts the host does not need stripped —
      * body content, header/footer and note content, numbering, media and
      * charts are emptied, section entries keep only their properties — so
@@ -638,7 +645,9 @@ export class EditSession {
     /**
      * Opens `bytes` for display only, seeded from the body's first `blocks`
      * blocks (see `seed::seed_docx_preview`): the reply is the host metadata
-     * of that parse. The session keeps no source package, so it cannot save.
+     * of that parse, as [`EditSession::open_docx`] replies, with the
+     * `unusedScriptFonts` of its cut. The session keeps no source package, so
+     * it cannot save.
      * Opens nothing and replies with nothing for a document the preview
      * refuses, which opens with [`EditSession::open_docx`] instead.
      */
@@ -788,6 +797,10 @@ export class EditSession {
      * `EngineSession::resume_region_layout`.
      */
     resume_region_layout(blocks: number): string;
+    /**
+     * The retained region layout's `headersFooters` JSON, when it has any.
+     */
+    retained_headers_footers_json(): string | undefined;
     /**
      * Retained `{ measured, options }` for the main-thread display-list
      * fallback after a retained-only region layout.
@@ -1481,6 +1494,7 @@ export interface InitOutput {
     readonly editsession_layout_document_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_prefix_retained_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly editsession_layout_document_with_regions_retained: (a: number, b: number, c: number) => [number, number];
     readonly editsession_layout_document_with_regions_retained_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_font_requirements_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_list_comments: (a: number) => [number, number, number, number];
@@ -1517,6 +1531,7 @@ export interface InitOutput {
     readonly editsession_resolve_paragraph_anchor: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_resolve_sticky_position: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_resume_region_layout: (a: number, b: number) => [number, number, number, number];
+    readonly editsession_retained_headers_footers_json: (a: number) => [number, number, number, number];
     readonly editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
     readonly editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

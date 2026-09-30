@@ -63,6 +63,7 @@ const AUTO_PARAGRAPH_SPACING_PX: f64 = 14.0;
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct RenderEnv {
+    pub compatibility_flags: docx_parse::CompatibilityFlags,
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub toc_style_ids: BTreeSet<String>,
     /// Six-digit RGB values keyed by OOXML theme slot. A missing slot falls
@@ -1141,6 +1142,15 @@ fn lower_table<T: ReadTxn>(
                 map,
             )?;
 
+            if env.compatibility_flags.allow_space_of_same_style_in_table {
+                for block in &mut blocks {
+                    if let LayoutBlock::Paragraph(paragraph) = block
+                        && let Some(attrs) = &mut paragraph.attrs
+                    {
+                        attrs.contextual_spacing = Some(false);
+                    }
+                }
+            }
             let width_value = map_number(tc_pr, "width");
             let width_type = map_string(tc_pr, "widthType");
             let width =
@@ -3043,7 +3053,7 @@ fn lower_paragraph_attrs(
             .clone()
             .filter(|style| !style.is_empty());
     }
-    lower_paragraph_spacing(values, &mut result, env.paragraph_spacing_line_px);
+    lower_paragraph_spacing(values, &mut result, env);
     // Section document-grid pitch for line-height snapping, stamped at
     // lowering so incremental reuse compares resolved blocks. The engine
     // overwrites this per section after lowering.
@@ -3268,15 +3278,26 @@ fn suppress_cell_edge_spacing(
 fn lower_paragraph_spacing(
     values: &BTreeMap<String, Any>,
     result: &mut ParagraphAttrs,
-    line_px: Option<f64>,
+    env: &RenderEnv,
 ) {
-    let line_px = line_px
+    let line_px = env
+        .paragraph_spacing_line_px
         .filter(|line| line.is_finite() && *line > 0.0)
         .unwrap_or(16.0);
+    let suppress_before = env.compatibility_flags.suppress_sp_bf_after_pg_brk
+        && true_property(values, "pageBreakBeforeRun") == Some(true);
     let spacing_map = values.get("spacing").and_then(any_map);
     let auto_before = paragraph_auto_spacing(values, "beforeAutospacing");
     let auto_after = paragraph_auto_spacing(values, "afterAutospacing");
-    let before_lines = (!auto_before)
+    let (auto_before_px, auto_after_px) = if env
+        .compatibility_flags
+        .do_not_use_html_paragraph_auto_spacing
+    {
+        (twips_to_pixels(100.0), twips_to_pixels(200.0))
+    } else {
+        (AUTO_PARAGRAPH_SPACING_PX, AUTO_PARAGRAPH_SPACING_PX)
+    };
+    let before_lines = (!auto_before && !suppress_before)
         .then(|| value_number(values.get("spaceBeforeLines")))
         .flatten()
         .filter(|value| value.is_finite() && *value > 0.0);
@@ -3304,15 +3325,17 @@ fn lower_paragraph_spacing(
         let mut spacing = ParagraphSpacing {
             before_lines,
             after_lines,
-            before: if auto_before {
-                Some(AUTO_PARAGRAPH_SPACING_PX)
+            before: if suppress_before {
+                Some(0.0)
+            } else if auto_before {
+                Some(auto_before_px)
             } else {
                 before_lines
                     .map(|lines| lines * line_px / 100.0)
                     .or_else(|| before.map(twips_to_pixels))
             },
             after: if auto_after {
-                Some(AUTO_PARAGRAPH_SPACING_PX)
+                Some(auto_after_px)
             } else {
                 after_lines
                     .map(|lines| lines * line_px / 100.0)
@@ -3882,6 +3905,30 @@ mod tests {
     use crate::{EditCtx, FormatPolicy, Position, RawOp, SimpleFormat, StoryRange};
 
     const DATE: &str = "2026-07-13T12:00:00Z";
+
+    #[test]
+    fn hard_break_spacing_suppression_clears_line_units_without_changing_authored_values() {
+        let values = BTreeMap::from([
+            ("spaceBeforeLines".to_owned(), Any::Number(200.0)),
+            ("spaceAfterLines".to_owned(), Any::Number(100.0)),
+            ("pageBreakBeforeRun".to_owned(), Any::Bool(true)),
+        ]);
+        let mut env = RenderEnv {
+            paragraph_spacing_line_px: Some(32.0),
+            ..RenderEnv::default()
+        };
+        let mut attrs = ParagraphAttrs::default();
+        lower_paragraph_spacing(&values, &mut attrs, &env);
+        assert_eq!(attrs.spacing.as_ref().unwrap().before, Some(64.0));
+        env.compatibility_flags.suppress_sp_bf_after_pg_brk = true;
+        lower_paragraph_spacing(&values, &mut attrs, &env);
+        let spacing = attrs.spacing.unwrap();
+        assert_eq!(spacing.before, Some(0.0));
+        assert_eq!(spacing.before_lines, None);
+        assert_eq!(spacing.after, Some(32.0));
+        assert_eq!(spacing.after_lines, Some(100.0));
+        assert_eq!(values["spaceBeforeLines"], Any::Number(200.0));
+    }
 
     fn any_map(entries: impl IntoIterator<Item = (&'static str, Any)>) -> Any {
         Any::Map(Arc::new(

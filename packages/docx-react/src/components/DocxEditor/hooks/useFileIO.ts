@@ -176,6 +176,7 @@ export function useFileIO({
       try {
         if (!pagedEditorRef.current) return null;
         const { editor, session } = await flushedSession(pagedEditorRef);
+        if (session.isDisplayOnly?.()) throw new Error('The document is still opening');
         const projected = editor.getDocument();
         if (!projected) return null;
         const capture = projected.originalBuffer ? captureSessionSave(session) : null;
