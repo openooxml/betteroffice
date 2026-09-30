@@ -16,7 +16,10 @@ concurrency:
 jobs:
   scenarios:
     name: ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    # The corpus suite (a maturin release build of the Rust bindings, then the scenarios) runs on a
+    # fresh 8 vCPU / 8 GB kyora VM, one per job. Fork pull requests and the browser suite stay on
+    # GitHub's runners.
+    runs-on: ${{ matrix.suite == 'corpus' && !github.event.pull_request.head.repo.fork && 'kyora-8x8' || 'ubuntu-latest' }}
     timeout-minutes: 40
     strategy:
       fail-fast: false
