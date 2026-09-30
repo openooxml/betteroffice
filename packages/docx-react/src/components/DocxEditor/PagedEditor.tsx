@@ -1930,6 +1930,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           enabled
           readOnly={readOnly || (!!partEdit && activeYrsRootStory === 'body')}
           replicaReadyRef={yrsCore.experimentalWorkerOpen ? yrsCore.replicaReadyRef : undefined}
+          requestReplica={yrsCore.experimentalWorkerOpen ? yrsCore.requestReplica : undefined}
           session={yrsCore.session}
           story={activeYrsRootStory}
           isSuggesting={isSuggesting}

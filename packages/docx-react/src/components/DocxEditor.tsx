@@ -2165,25 +2165,17 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   useEffect(() => {
     if (experimentalWorkerOpen && replicaReady && showOutlineRef.current) refreshHeadings();
   }, [experimentalWorkerOpen, replicaReady, refreshHeadings, showOutlineRef]);
-  // Input on a page or in the editor's own input needs the replica; plugin overlays do not.
+  // A pointer on a page needs the replica; plugin overlays do not. The input asks for itself.
   useEffect(() => {
     const content = editorContentRef.current;
     if (!replicaPending || !content) return;
-    const onInput = (event: Event) => {
-      const target = event.target;
-      if (
-        target instanceof HTMLCanvasElement ||
-        (target instanceof Element && target.closest('.paged-editor__yrs-input') !== null)
-      ) {
+    const onPointer = (event: Event) => {
+      if (event.target instanceof Element && event.target.closest('.canvas-page') !== null) {
         requestReplica();
       }
     };
-    content.addEventListener('pointerdown', onInput, true);
-    content.addEventListener('keydown', onInput, true);
-    return () => {
-      content.removeEventListener('pointerdown', onInput, true);
-      content.removeEventListener('keydown', onInput, true);
-    };
+    content.addEventListener('pointerdown', onPointer, true);
+    return () => content.removeEventListener('pointerdown', onPointer, true);
   }, [replicaPending, requestReplica]);
 
   // Reserve 2× the left-edge allowance so the centered page clears whatever

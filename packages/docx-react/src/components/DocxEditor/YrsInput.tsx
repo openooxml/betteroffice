@@ -95,6 +95,8 @@ export interface YrsInputProps {
   enabled: boolean;
   readOnly: boolean;
   replicaReadyRef?: React.RefObject<boolean>;
+  /** Asks for the replica when input reaches the textarea before it has loaded. */
+  requestReplica?: () => void;
   session: YrsSession | null;
   story?: string;
   isSuggesting?: boolean;
@@ -215,6 +217,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     enabled,
     readOnly,
     replicaReadyRef,
+    requestReplica,
     session,
     story = 'body',
     isSuggesting = false,
@@ -245,6 +248,19 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 ) {
   const replicaReady = replicaReadyRef?.current !== false;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea || !requestReplica) return;
+    const onInput = () => {
+      if (replicaReadyRef?.current === false) requestReplica();
+    };
+    textarea.addEventListener('focus', onInput);
+    textarea.addEventListener('keydown', onInput, true);
+    return () => {
+      textarea.removeEventListener('focus', onInput);
+      textarea.removeEventListener('keydown', onInput, true);
+    };
+  }, [enabled, replicaReadyRef, requestReplica]);
   const composingRef = useRef(false);
   const compositionPendingRef = useRef(false);
   const compositionCommitRef = useRef('');

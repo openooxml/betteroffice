@@ -673,7 +673,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       const point = resolveCanvasHit(e.clientX, e.clientY, false);
       // read-only selection wins over a link: a drag that ends on one, or a double or triple click
       const selecting = readOnly && (e.detail > 1 || selectionUnder(e.clientX, e.clientY));
-      if (projection && queries && host && point && !selecting) {
+      // An external link needs only the display list, so it opens before the replica has loaded.
+      if (queries && host && point && !selecting) {
         // Hyperlink primitives are indexed by band, so an open note — whose
         // area the index does not cover — resolves none and falls through to
         // the multi-click selection below.
@@ -693,13 +694,13 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
             )
           : null;
         const href = sanitizeHref(displayHit?.href ?? '');
-        if (href) {
+        if (href && (projection || !href.startsWith('#'))) {
           e.preventDefault();
           const linkPosition = getPositionFromMouse(e.clientX, e.clientY);
           if (linkPosition != null) setTextSelection(linkPosition);
           if (href.startsWith('#')) {
             const bookmarkName = href.slice(1);
-            const targetPos = projection.bookmarkPosition(bookmarkName);
+            const targetPos = projection!.bookmarkPosition(bookmarkName);
             if (targetPos != null) {
               scrollToPositionImpl(targetPos);
               setTextSelection(targetPos + 1);
