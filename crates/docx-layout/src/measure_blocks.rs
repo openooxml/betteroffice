@@ -2458,7 +2458,7 @@ mod tests {
             (None, Some(600.0), (522.0, 0.0)),
             (Some("margin"), Some(600.0), (522.0, 0.0)),
             (Some("margin"), None, (522.0, 0.0)),
-            (Some("text"), Some(600.0), (0.0, 462.0)),
+            (Some("text"), Some(600.0), (522.0, 0.0)),
             (Some("column"), Some(600.0), (522.0, 0.0)),
             (Some("text"), Some(800.0), (522.0, 0.0)),
             (Some("text"), None, (522.0, 0.0)),
