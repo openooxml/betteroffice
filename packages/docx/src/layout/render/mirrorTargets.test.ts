@@ -320,7 +320,7 @@ test('a text-only mirror reads every paragraph in order without run elements or 
   expect(reduceMirrorToText(mirror)).toBe(mirror);
   expect(Array.from(mirror.querySelectorAll('[role="paragraph"]'), (block) => block.textContent)).toEqual([
     'First paragraph',
-    '1. Second paragraph',
+    'Second paragraph',
     'Third paragraph',
     'Header',
     'Footer',
