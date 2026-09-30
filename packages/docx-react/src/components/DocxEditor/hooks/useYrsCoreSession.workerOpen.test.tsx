@@ -437,19 +437,24 @@ test('an on-demand replica stays empty after frames and the open wait until requ
 test('tracked changes start an on-demand replica without a replica request', async () => {
   const { workers, posted } = installWorker({ holdState: true, revisionCount: 1 });
   const frames = holdFrames();
-  const { result, unmount } = renderHook(useHarness, {
-    initialProps: { ...initialProps, hydrateOnDemand: true },
-  });
+  const props = { ...initialProps, hydrateOnDemand: true, holdReplica: true };
+  const { result, rerender, unmount } = renderHook(useHarness, { initialProps: props });
   try {
     await waitFor(() => expect(result.current.host).not.toBeNull());
     const session = result.current.core.session!;
     act(() => result.current.pipeline.runLayoutPipeline());
-    await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
-    expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
     act(() => result.current.presentFrame());
     act(() => frames.run());
     act(() => frames.run());
+    await act(async () => {});
+    expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
+    rerender({ ...props, holdReplica: false });
     await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
+    rerender({ ...props, holdReplica: true });
+    rerender({ ...props, holdReplica: false });
+    await act(async () => {});
     expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
     expect(result.current.core.replicaReady).toBe(false);
     await act(async () => {
