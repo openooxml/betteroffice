@@ -31,6 +31,7 @@ fn cell_unbreakable_ranges(
     blocks: &[LayoutBlock],
     measures: &[BlockExtent],
     start_y: f64,
+    paragraph_rules: bool,
 ) -> Vec<(f64, f64)> {
     let mut ranges = Vec::new();
     let mut y = start_y;
@@ -53,7 +54,9 @@ fn cell_unbreakable_ranges(
                 ranges.push((top, y));
             }
             let lines = &ranges[first..];
-            if let (Some(&(top, _)), Some(&(_, bottom))) = (lines.first(), lines.last()) {
+            if paragraph_rules
+                && let (Some(&(top, _)), Some(&(_, bottom))) = (lines.first(), lines.last())
+            {
                 if paragraph_is_unbreakable(paragraph, extent) {
                     ranges.push((top, bottom));
                 } else if paragraph_widow_control(paragraph, extent) {
@@ -100,8 +103,26 @@ fn cell_unbreakable_ranges(
 }
 
 /// Resolves the cell grid once and collects, per row, every whole-line bottom
-/// a break is allowed to snap to.
+/// a break is allowed to snap to, where widow/orphan control and `keepLines`
+/// allow one.
 pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> TableRowBreakInfo {
+    row_break_info(block, measure, true)
+}
+
+/// [`build_table_row_break_info`] without the paragraph rules: every
+/// whole-line bottom, for a row they would leave no break in a whole column.
+pub(crate) fn build_table_row_line_break_info(
+    block: &TableBlock,
+    measure: &TableExtent,
+) -> TableRowBreakInfo {
+    row_break_info(block, measure, false)
+}
+
+fn row_break_info(
+    block: &TableBlock,
+    measure: &TableExtent,
+    paragraph_rules: bool,
+) -> TableRowBreakInfo {
     let row_count = measure.rows.len();
     // Pagination uses unrounded row offsets; border painting rounds separately.
     let mut row_tops: Vec<f64> = Vec::with_capacity(row_count + 1);
@@ -197,9 +218,12 @@ pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> 
                     add_unique(&mut offsets, off);
                 }
             }
-            for (top, bottom) in
-                cell_unbreakable_ranges(&source_cell.blocks, &measured_cell.blocks, pad_top)
-            {
+            for (top, bottom) in cell_unbreakable_ranges(
+                &source_cell.blocks,
+                &measured_cell.blocks,
+                pad_top,
+                paragraph_rules,
+            ) {
                 unbreakable_ranges.push((
                     top + content_offset - shift,
                     bottom + content_offset - shift,
@@ -309,7 +333,7 @@ mod tests {
     const LINE: f64 = 20.0;
 
     fn para() -> serde_json::Value {
-        json!({ "kind": "paragraph", "id": 0, "runs": [] })
+        json!({ "kind": "paragraph", "id": 0, "runs": [], "attrs": { "widowControl": false } })
     }
 
     fn para_with_spacing(before: f64, after: f64) -> serde_json::Value {

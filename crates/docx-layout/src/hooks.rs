@@ -11,7 +11,8 @@ use crate::cell_layout::table_compat_leading_shift;
 use crate::page_flow::Paginator;
 use crate::prescan::SectionLayoutConfig;
 use crate::table_row_break::{
-    build_table_row_break_info, first_table_fragment_height, minimum_row_slice, snap_row_break,
+    build_table_row_break_info, build_table_row_line_break_info, first_table_fragment_height,
+    minimum_row_slice, snap_row_break,
 };
 use crate::types::{
     Fragment, LayoutBlock, MeasuredBlock, SectionBreakBlock, SectionBreakType, TableBlock,
@@ -176,6 +177,7 @@ fn layout_table_with_position(
 
     let mut row_index = 0usize;
     let mut consumed = 0.0f64; // px of rows[row_index] already placed on a previous fragment
+    let mut moved_row = None;
 
     'rows: while row_index < rows.len() {
         let state_idx = paginator.get_current();
@@ -310,11 +312,38 @@ fn layout_table_with_position(
                 last_row_partial = true;
             } else if row_end > start_row {
                 // Nothing of this row fits, but earlier rows did — end before it.
+            } else if paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
+                && moved_row != Some(cur)
+            {
+                // Nothing fits below content already in this column: start the
+                // fragment in the next one.
+                moved_row = Some(cur);
+                paginator.advance_for_overflow();
+                continue 'rows;
             } else {
-                // Fresh fragment and not even one line fits: place the rest of the row
-                // with overflow rather than loop forever (oversized-row guard).
-                used += remaining;
-                row_end = cur + 1;
+                // A fresh column where widow control and `keepLines` leave no
+                // break breaks at any line, as Word breaks a paragraph taller
+                // than a page; where not even one line fits, the rest of the row
+                // overflows rather than loop forever (oversized-row guard).
+                let line_break = if cant_split {
+                    0.0
+                } else {
+                    snap_row_break(
+                        &build_table_row_line_break_info(block, measure),
+                        cur,
+                        start_off,
+                        budget,
+                    )
+                };
+                if line_break > 0.0 {
+                    used += line_break;
+                    row_end = cur + 1;
+                    clip_bottom = Some(start_off + line_break);
+                    last_row_partial = true;
+                } else {
+                    used += remaining;
+                    row_end = cur + 1;
+                }
             }
             break;
         }
