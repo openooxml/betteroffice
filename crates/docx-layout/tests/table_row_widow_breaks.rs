@@ -19,13 +19,31 @@ fn paragraph(id: usize, lines: usize, attrs: Value) -> (Value, Value) {
 
 /// A one-cell, one-row table holding a paragraph of `lines` 20px lines.
 fn table(lines: usize, attrs: Value) -> Value {
-    let (block, measure) = paragraph(10, lines, attrs);
-    let height = 20 * lines;
+    table_rows(&[(lines, attrs, json!({}))])
+}
+
+/// A one-column table whose rows each hold one paragraph of `lines` 20px
+/// lines with the given paragraph and row attributes.
+fn table_rows(spec: &[(usize, Value, Value)]) -> Value {
+    let (mut rows, mut measures) = (Vec::new(), Vec::new());
+    for (index, (lines, attrs, row)) in spec.iter().enumerate() {
+        let (block, measure) = paragraph(10 + index, *lines, attrs.clone());
+        let mut row_block = json!({"id":index,"cells":[{"id":0,"blocks":[block]}]});
+        row_block
+            .as_object_mut()
+            .unwrap()
+            .extend(row.as_object().unwrap().clone());
+        rows.push(row_block);
+        let height = 20 * lines;
+        measures.push(
+            json!({"height":height,"cells":[{"width":100,"height":height,"blocks":[measure]}]}),
+        );
+    }
+    let height: usize = spec.iter().map(|(lines, ..)| 20 * lines).sum();
     json!({
-        "block":{"kind":"table","id":"table","columnWidths":[100],
-            "rows":[{"id":0,"cells":[{"id":0,"blocks":[block]}]}]},
+        "block":{"kind":"table","id":"table","columnWidths":[100],"rows":rows},
         "measure":{"kind":"table","columnWidths":[100],"totalWidth":100,"totalHeight":height,
-            "rows":[{"height":height,"cells":[{"width":100,"height":height,"blocks":[measure]}]}]}
+            "rows":measures}
     })
 }
 
@@ -70,5 +88,33 @@ fn a_kept_paragraph_taller_than_a_page_starts_on_a_fresh_page_and_splits() {
     assert_eq!(
         fragments(vec![above, table(8, json!({"keepLines": true}))]),
         [(1, 100.0), (2, 60.0)]
+    );
+}
+
+#[test]
+fn a_cant_split_row_taller_than_a_page_still_splits_through_a_kept_paragraph() {
+    assert_eq!(
+        fragments(vec![table_rows(&[(
+            8,
+            json!({"keepLines": true}),
+            json!({"cantSplit": true})
+        )])]),
+        [(0, 100.0), (1, 60.0)]
+    );
+}
+
+#[test]
+fn a_kept_paragraph_taller_than_a_page_splits_below_its_repeated_header() {
+    let header = (1, json!({}), json!({"isHeader": true}));
+    let kept = (10, json!({"keepLines": true}), json!({}));
+    assert_eq!(
+        fragments(vec![table_rows(&[header.clone(), kept.clone()])]),
+        [(0, 100.0), (1, 100.0), (2, 60.0)]
+    );
+    let (block, measure) = paragraph(1, 2, json!({}));
+    let above = json!({"block":block,"measure":measure});
+    assert_eq!(
+        fragments(vec![above, table_rows(&[header, kept])]),
+        [(1, 100.0), (2, 100.0), (3, 60.0)]
     );
 }

@@ -1,5 +1,7 @@
 //! Whole-line table row-break geometry.
 
+use std::cell::OnceCell;
+
 use serde::Serialize;
 
 use crate::cell_layout::{cell_vertical_offset, layout_cell_content, nested_table_float_offset};
@@ -109,13 +111,49 @@ pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> 
     row_break_info(block, measure, true)
 }
 
-/// [`build_table_row_break_info`] without the paragraph rules: every
-/// whole-line bottom, for a row they would leave no break in a whole column.
-pub(crate) fn build_table_row_line_break_info(
-    block: &TableBlock,
-    measure: &TableExtent,
-) -> TableRowBreakInfo {
-    row_break_info(block, measure, false)
+/// A table's row break geometry under the paragraph rules, with every
+/// whole-line bottom built on first use for a row those rules leave no break
+/// in a whole column, which Word then breaks at any line.
+pub(crate) struct RowBreaks<'a> {
+    block: &'a TableBlock,
+    measure: &'a TableExtent,
+    pub(crate) kept: TableRowBreakInfo,
+    lines: OnceCell<TableRowBreakInfo>,
+}
+
+impl<'a> RowBreaks<'a> {
+    pub(crate) fn new(block: &'a TableBlock, measure: &'a TableExtent) -> Self {
+        Self {
+            block,
+            measure,
+            kept: build_table_row_break_info(block, measure),
+            lines: OnceCell::new(),
+        }
+    }
+
+    pub(crate) fn lines(&self) -> &TableRowBreakInfo {
+        self.lines
+            .get_or_init(|| row_break_info(self.block, self.measure, false))
+    }
+
+    /// Whether the paragraph rules alone leave `row` no break from `consumed`
+    /// on in a column `capacity` tall.
+    pub(crate) fn kept_oversized(&self, row: usize, consumed: f64, capacity: f64) -> bool {
+        let kept = minimum_row_slice(self.block, self.measure, &self.kept, row, consumed);
+        kept > capacity
+            && minimum_row_slice(self.block, self.measure, self.lines(), row, consumed) < kept
+    }
+
+    /// The smallest slice of `row` from `consumed` on that a fresh column
+    /// `capacity` tall places.
+    pub(crate) fn fresh_slice(&self, row: usize, consumed: f64, capacity: f64) -> f64 {
+        let info = if self.kept_oversized(row, consumed, capacity) {
+            self.lines()
+        } else {
+            &self.kept
+        };
+        minimum_row_slice(self.block, self.measure, info, row, consumed)
+    }
 }
 
 fn row_break_info(

@@ -11,8 +11,7 @@ use crate::cell_layout::table_compat_leading_shift;
 use crate::page_flow::Paginator;
 use crate::prescan::SectionLayoutConfig;
 use crate::table_row_break::{
-    build_table_row_break_info, build_table_row_line_break_info, first_table_fragment_height,
-    minimum_row_slice, snap_row_break,
+    RowBreaks, first_table_fragment_height, minimum_row_slice, snap_row_break,
 };
 use crate::types::{
     Fragment, LayoutBlock, MeasuredBlock, SectionBreakBlock, SectionBreakType, TableBlock,
@@ -171,8 +170,8 @@ fn layout_table_with_position(
 
     let header_row_count = tally_header_rows(block);
     let header_rows_height = get_header_rows_height(measure, header_row_count);
-    let break_info = build_table_row_break_info(block, measure);
-    let first_fragment_height = first_table_fragment_height(block, measure, &break_info);
+    let breaks = RowBreaks::new(block, measure);
+    let first_fragment_height = first_table_fragment_height(block, measure, &breaks.kept);
     let keep_heights = row_keep_heights(block, measure);
 
     let mut row_index = 0usize;
@@ -215,22 +214,28 @@ fn layout_table_with_position(
         } else {
             0.0
         };
-        let header_start_height = if first_fragment_height <= column_capacity {
-            first_fragment_height
-        } else {
-            header_rows_height
-        };
+        // A first body row the paragraph rules leave no break in a whole
+        // column starts on a fresh one, and the header band goes with it.
+        let first_body_kept_oversized = is_first_fragment
+            && header_row_count > 0
+            && header_row_count < rows.len()
+            && breaks.kept_oversized(header_row_count, 0.0, column_capacity);
+        let header_start_height =
+            if first_fragment_height <= column_capacity || first_body_kept_oversized {
+                first_fragment_height
+            } else {
+                header_rows_height
+            };
         if is_first_fragment
             && header_row_count > 0
-            && header_start_height <= column_capacity
+            && (header_start_height <= column_capacity || first_body_kept_oversized)
             && header_start_height + pending_spacing > paginator.get_available_height()
             && paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
         {
             paginator.ensure_fits(header_start_height + pending_spacing);
             continue;
         }
-        let minimum_body_slice =
-            minimum_row_slice(block, measure, &break_info, row_index, consumed);
+        let minimum_body_slice = breaks.fresh_slice(row_index, consumed, column_capacity);
         let header_overhead = if !is_first_fragment
             && row_index >= header_row_count
             && header_row_count > 0
@@ -302,7 +307,7 @@ fn layout_table_with_position(
             let placeable = if cant_split && !unavoidable_cant_split {
                 0.0
             } else {
-                snap_row_break(&break_info, cur, start_off, budget)
+                snap_row_break(&breaks.kept, cur, start_off, budget)
             };
             if placeable > 0.0 {
                 // Break this row mid-content at a whole-line boundary.
@@ -310,8 +315,16 @@ fn layout_table_with_position(
                 row_end = cur + 1;
                 clip_bottom = Some(start_off + placeable);
                 last_row_partial = true;
-            } else if row_end > start_row {
-                // Nothing of this row fits, but earlier rows did — end before it.
+            } else if row_end > start_row
+                && !(start_row == 0
+                    && clip_top == 0.0
+                    && cur == header_row_count
+                    && paginator.state(state_idx).pen_y == paginator.state(state_idx).content_top
+                    && (unavoidable_cant_split || breaks.kept_oversized(cur, 0.0, column_capacity)))
+            {
+                // Nothing of this row fits, but earlier rows did — end before it,
+                // unless they are the header band atop a fresh column, where the
+                // row breaks as it would below a repeated band.
             } else if paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
                 && moved_row != Some(cur)
             {
@@ -325,22 +338,17 @@ fn layout_table_with_position(
                 // break breaks at any line, as Word breaks a paragraph taller
                 // than a page; where not even one line fits, the rest of the row
                 // overflows rather than loop forever (oversized-row guard).
-                let line_break = if cant_split {
+                let line_break = if cant_split && !unavoidable_cant_split {
                     0.0
                 } else {
-                    snap_row_break(
-                        &build_table_row_line_break_info(block, measure),
-                        cur,
-                        start_off,
-                        budget,
-                    )
+                    snap_row_break(breaks.lines(), cur, start_off, budget)
                 };
                 if line_break > 0.0 {
                     used += line_break;
                     row_end = cur + 1;
                     clip_bottom = Some(start_off + line_break);
                     last_row_partial = true;
-                } else {
+                } else if row_end == start_row {
                     used += remaining;
                     row_end = cur + 1;
                 }
@@ -413,7 +421,7 @@ fn layout_table_with_position(
         // If content remains, advance to the next column/page so the next
         // iteration sees fresh space (the current page is exhausted).
         if row_index < rows.len() {
-            let next_slice = minimum_row_slice(block, measure, &break_info, row_index, consumed);
+            let next_slice = minimum_row_slice(block, measure, &breaks.kept, row_index, consumed);
             let next_needed = if row_index >= header_row_count
                 && header_row_count > 0
                 && header_rows_height + next_slice <= column_capacity
