@@ -1597,9 +1597,36 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       proposals.reset();
       return opened;
     });
-    const host = decodeDocxHost(json, source);
+    const host = withHostMedia(decodeDocxHost(json, source));
     docxSource = source;
     partialDocument = false;
+    return host;
+  };
+
+  const mediaDataUrl = (token: string): string | null => {
+    if (!token.startsWith('media:')) return null;
+    let url = mediaDataUrls.get(token);
+    if (url === undefined) {
+      url = session.media_data_url(token) ?? null;
+      mediaDataUrls.set(token, url);
+    }
+    return url;
+  };
+
+  // Comments reach the host as parsed, so their images carry `data:` URLs.
+  const withHostMedia = (host: YrsDocxHost): YrsDocxHost => {
+    const resolve = (value: unknown): void => {
+      if (Array.isArray(value)) {
+        for (const item of value) resolve(item);
+      } else if (value && typeof value === 'object') {
+        const record = value as Record<string, unknown>;
+        for (const [key, field] of Object.entries(record)) {
+          if (key === 'src' && typeof field === 'string') record[key] = mediaDataUrl(field) ?? field;
+          else resolve(field);
+        }
+      }
+    };
+    resolve(host.document.package.document.comments);
     return host;
   };
 
@@ -1618,7 +1645,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       const json = mutate(() => session.open_docx_preview(bytes, blocks));
       if (json === undefined) return null;
       partialDocument = true;
-      return decodeDocxHost(json, bytes);
+      return withHostMedia(decodeDocxHost(json, bytes));
     },
     setPartialDocument: (partial) => {
       partialDocument = partial;
@@ -1811,15 +1838,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       return bytes && mimeType ? { bytes, mimeType } : null;
     },
     loadMediaSources: (json) => session.load_media_sources(json),
-    mediaDataUrl: (token) => {
-      if (!token.startsWith('media:')) return null;
-      let url = mediaDataUrls.get(token);
-      if (url === undefined) {
-        url = session.media_data_url(token) ?? null;
-        mediaDataUrls.set(token, url);
-      }
-      return url;
-    },
+    mediaDataUrl,
     materializeDocx: () => {
       const source = docxSource;
       const json = session.materialize_docx();

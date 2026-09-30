@@ -9,16 +9,19 @@ import { createYrsSession, saveYrsDocx, yrsToDocument } from './index';
 
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]);
+const NS = `xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="${R}" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"`;
 const PICTURE = `<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="picture"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
 
 function fixture(): Uint8Array {
   const parts = new Map<string, Uint8Array>([
     ['[Content_Types].xml', toBytes(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`)],
     ['_rels/.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`)],
-    ['word/_rels/document.xml.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="${R}/image" Target="media/picture.png"/></Relationships>`)],
+    ['word/_rels/document.xml.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="${R}/image" Target="media/picture.png"/><Relationship Id="rIdComments" Type="${R}/comments" Target="comments.xml"/></Relationships>`)],
+    ['word/_rels/comments.xml.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="${R}/image" Target="media/picture.png"/></Relationships>`)],
+    ['word/comments.xml', toBytes(`<w:comments ${NS}><w:comment w:id="0" w:author="A" w:date="2024-01-01T00:00:00Z"><w:p>${PICTURE}</w:p></w:comment></w:comments>`)],
     ['word/media/unused.png', new Uint8Array([9, 9, 9])],
     ['word/media/picture.png', PNG],
-    ['word/document.xml', toBytes(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="${R}" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body><w:p>${PICTURE}</w:p><w:p><w:r><w:t>Text</w:t></w:r></w:p></w:body></w:document>`)],
+    ['word/document.xml', toBytes(`<w:document ${NS}><w:body><w:p>${PICTURE}</w:p><w:p><w:commentRangeStart w:id="0"/><w:r><w:t>Text</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p></w:body></w:document>`)],
   ]);
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
@@ -34,7 +37,7 @@ for (const mediaTokens of [false, true]) {
     const bytes = fixture();
     const session = await createYrsSession({ clientId: 3 });
     try {
-      session.openDocx(bytes, true, { mediaTokens });
+      const host = session.openDocx(bytes, true, { mediaTokens });
       const state = Buffer.from(session.encodeState()).toString('latin1');
       expect(state.includes('data:image/png;base64,')).toBe(!mediaTokens);
       expect(session.mediaSource('media:1')).toEqual({ bytes: PNG, mimeType: 'image/png' });
@@ -42,10 +45,13 @@ for (const mediaTokens of [false, true]) {
       const dataUrl = `data:image/png;base64,${Buffer.from(PNG).toString('base64')}`;
       expect(session.mediaDataUrl('media:1')).toBe(dataUrl);
       expect(session.mediaDataUrl(dataUrl)).toBeNull();
+      const comments = JSON.stringify(host.document.package.document.comments);
+      expect(comments.match(/"src":"[^"]*"/g)?.every((src) => src === `"src":"${dataUrl}"`)).toBe(true);
 
       const projected = yrsToDocument(session, session.materializeDocx()!);
       const content = JSON.stringify(projected.package.document.content);
       expect(content.match(/"src":"[^"]*"/g)).toEqual([`"src":"${dataUrl}"`]);
+      expect(JSON.stringify(projected.package.document.comments)).not.toContain('media:');
       expect(content).toContain('"rId":"rIdImage"');
 
       const saved = unzipContainer((await saveYrsDocx(session)).bytes);
