@@ -8,6 +8,7 @@ import {
   registerMeasureFont,
 } from '../../wasm/layout';
 import {
+  drawDisplayPage,
   drawPrimitive,
   rasterizeDisplayPageToBackBuffer,
   sizeCanvasForPage,
@@ -309,6 +310,43 @@ describe('Canvas page extents', () => {
       expect(context.scale).toHaveBeenLastCalledWith(1.5625, 1.5625);
     }
   );
+});
+
+describe('Canvas page layers', () => {
+  it('paints the header and footer under the body', async () => {
+    const painted: string[] = [];
+    const context = {
+      fillStyle: '',
+      clearRect: () => {},
+      fillRect(this: { fillStyle: string }) {
+        painted.push(this.fillStyle);
+      },
+    } as unknown as CanvasRenderingContext2D;
+    const rect = (fill: string) => ({ kind: 'rect' as const, x: 0, y: 0, w: 10, h: 10, fill });
+    await drawDisplayPage(context, {
+      pageIndex: 0,
+      width: 20,
+      height: 20,
+      background: '#fefefe',
+      primitives: [rect('behind'), rect('body'), rect('front')],
+      header: {
+        rId: 'rIdHeader',
+        kind: 'header',
+        y: 0,
+        height: 10,
+        primitives: [rect('header')],
+      },
+      footer: {
+        rId: 'rIdFooter',
+        kind: 'footer',
+        y: 10,
+        height: 10,
+        primitives: [rect('footer')],
+      },
+      noteAreas: [{ kind: 'footnote', y: 10, height: 10, primitives: [rect('note')] }],
+    } as unknown as Parameters<typeof drawDisplayPage>[1]);
+    expect(painted).toEqual(['#fefefe', 'header', 'footer', 'behind', 'body', 'front', 'note']);
+  });
 });
 
 describe('Canvas text-run slot clipping', () => {

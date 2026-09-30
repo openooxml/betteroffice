@@ -188,7 +188,11 @@ export async function rasterizeDisplayListPages(
   return canvases;
 }
 
-/** Replays a page in primitive order, including body and header/footer bands. */
+/**
+ * Replays a page in Word's layers: the header and footer, drawings in front of
+ * their text included, lie under the body, whose own primitives run from
+ * drawings behind its text to drawings in front of it.
+ */
 export async function drawDisplayPage(
   ctx: CanvasRenderingContext2D,
   page: DisplayPage,
@@ -202,6 +206,12 @@ export async function drawDisplayPage(
   for (const border of (page.pageBorders ?? []).filter((p) => p.zOrder === 'back')) {
     drawPageBorder(ctx, border);
   }
+  for (const region of [page.header, page.footer]) {
+    if (!region) continue;
+    for (const primitive of region.primitives) {
+      await drawPrimitive(ctx, primitive, options);
+    }
+  }
   for (const primitive of page.primitives) {
     await drawPrimitive(ctx, primitive, options);
   }
@@ -210,12 +220,6 @@ export async function drawDisplayPage(
       await drawPrimitive(ctx, primitive, options);
     }
     for (const primitive of area.primitives ?? []) {
-      await drawPrimitive(ctx, primitive, options);
-    }
-  }
-  for (const region of [page.header, page.footer]) {
-    if (!region) continue;
-    for (const primitive of region.primitives) {
       await drawPrimitive(ctx, primitive, options);
     }
   }
