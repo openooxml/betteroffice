@@ -18,6 +18,7 @@ import type { PagedEditorRef } from '../PagedEditor';
 import { createCommentIdAllocator } from '../commentFactories';
 import type { EditorMode } from '../internals/editing-modes';
 import { useDocxEditorRefApi } from './useDocxEditorRefApi';
+import type { DocxHostSearch } from './useHostSearch';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -92,6 +93,7 @@ async function setup(
   const hook = renderHook(() => {
     const ref = useRef<DocxEditorRef>(null);
     useDocxEditorRefApi({
+      hostSearch: {} as DocxHostSearch,
       ref,
       document: null,
       documentFromYrs: () => null,

@@ -104,6 +104,9 @@ function worker() {
     },
     delta: null as DecodedFrameDelta | null,
     caret: null as YrsResidentCaretRect | null,
+    displayWindows: [] as [number, number][],
+    retainBuiltPages: [] as boolean[],
+    windowedIncrementalBuilds: [] as boolean[],
     rasterized: [] as number[],
     presented: [] as number[],
     failRaster: null as number | null,
@@ -111,7 +114,17 @@ function worker() {
     memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
       loadState() {},
+      loadMediaSources(_json: string) {},
       setPartialDocument() {},
+      setDisplayWindow(start: number, end: number) {
+        harness.displayWindows.push([start, end]);
+      },
+      setDisplayRetainBuiltPages(retain: boolean) {
+        harness.retainBuiltPages.push(retain);
+      },
+      setWindowedIncrementalBuilds(enabled: boolean) {
+        harness.windowedIncrementalBuilds.push(enabled);
+      },
       clearFonts() {},
       layoutDocumentJson() {},
       layoutDocumentWithRegionsRetained() {},
@@ -123,6 +136,18 @@ function worker() {
       },
       buildDisplayListFrame() {
         return new Uint8Array([frameEpoch]);
+      },
+      setSelection() {},
+      applyInput() {
+        delta([1]);
+        return new Uint8Array([frameEpoch]);
+      },
+      applyDelete() {
+        delta([1]);
+        return new Uint8Array([frameEpoch]);
+      },
+      residentDeletedUnits() {
+        return 1;
       },
       residentCaretSnapshot() {
         return { frameEpoch, caretRect: harness.caret };
@@ -239,7 +264,13 @@ function worker() {
         },
       });
     },
-    build(upserts: number[], width = 100, caret: YrsResidentCaretRect | null = null) {
+    build(
+      upserts: number[],
+      width = 100,
+      caret: YrsResidentCaretRect | null = null,
+      displayWindow?: [number, number],
+      retainBuiltPages?: boolean
+    ) {
       delta(upserts, false, width);
       harness.caret = caret;
       return send({
@@ -247,6 +278,8 @@ function worker() {
         extras: '',
         expectedFrameEpoch: frameEpoch - 1,
         paintCaret: !!caret,
+        displayWindow,
+        ...(retainBuiltPages ? { retainBuiltPages } : {}),
       });
     },
     attach(active: number[], zoom = 1, color = '#000') {
@@ -331,6 +364,59 @@ describe('resident worker warmup', () => {
 });
 
 describe('resident worker page damage', () => {
+  test('frame requests opt into windowed incremental builds only with a display window', async () => {
+    const w = worker();
+    expect((await w.bootstrap()).ok).toBe(true);
+    expect(w.harness.windowedIncrementalBuilds).toEqual([false]);
+    expect((await w.build([], 100, null, [8, 11])).ok).toBe(true);
+    expect(w.harness.displayWindows).toEqual([[8, 11]]);
+    expect(w.harness.retainBuiltPages).toEqual([false]);
+    expect(w.harness.windowedIncrementalBuilds).toEqual([false, true]);
+    expect((await w.build([])).ok).toBe(true);
+    expect(w.harness.displayWindows).toEqual([[8, 11]]);
+    expect(w.harness.retainBuiltPages).toEqual([false]);
+    expect(w.harness.windowedIncrementalBuilds).toEqual([false, true, false]);
+    expect((await w.build([], 100, null, [8, 11], true)).ok).toBe(true);
+    expect(w.harness.retainBuiltPages).toEqual([false, true]);
+    expect((await w.build([], 100, null, [8, 11])).ok).toBe(true);
+    expect(w.harness.retainBuiltPages).toEqual([false, true, false]);
+  });
+
+  test('input and delete requests without a display window disable a previous opt-in', async () => {
+    const w = worker();
+    await w.bootstrap();
+    const loc = { story: 'body', paraId: 'p1', offset: 1 };
+    const options = {
+      selection: { anchor: loc, head: loc },
+      profile: false,
+      paintCaret: false,
+    };
+    expect((await w.build([], 100, caret(1), [8, 11])).ok).toBe(true);
+    expect(
+      (
+        await w.send({
+          type: 'applyInput',
+          text: 'x',
+          expectedFrameEpoch: 2,
+          ...options,
+        })
+      ).ok
+    ).toBe(true);
+    expect((await w.build([], 100, caret(1), [8, 11])).ok).toBe(true);
+    expect(
+      (
+        await w.send({
+          type: 'applyDelete',
+          direction: 'backward',
+          count: 1,
+          expectedFrameEpoch: 4,
+          ...options,
+        })
+      ).ok
+    ).toBe(true);
+    expect(w.harness.windowedIncrementalBuilds).toEqual([false, true, false, true, false]);
+  });
+
   test('a bootstrap that keeps surfaces paints the next document into the attached canvases', async () => {
     const w = worker();
     await w.bootstrap(3);
@@ -594,6 +680,36 @@ describe('resident worker layout ownership', () => {
     // A complete document synced into the same session is no longer a preview's.
     await w.send({ type: 'sync', expectedFrameEpoch: 0, extras: '{}', paintCaret: false, snapshot });
     expect(calls).toEqual(['load', 'partial:false', 'layout']);
+  });
+
+  test('lays out the media sources a snapshot carries, and clears them when it carries none', async () => {
+    const w = worker();
+    const loaded: string[] = [];
+    Object.assign(w.harness.session, {
+      loadMediaSources: (json: string) => loaded.push(json),
+      layoutDocumentWithRegionsRetainedJson: () =>
+        JSON.stringify({ layout: { pages: [] }, notesConverged: true }),
+    });
+    const snapshot = {
+      clientId: 1,
+      state: new Uint8Array(),
+      fontsRevision: 0,
+      fonts: [],
+      renderInputs: [],
+      measureInputs: [],
+      layoutInput: '{}',
+      layoutWithRegions: true,
+      layoutRevision: 1,
+      selection: null,
+    };
+    await w.send({
+      type: 'bootstrap',
+      expectedFrameEpoch: 0,
+      extras: '{}',
+      snapshot: { ...snapshot, mediaSources: '{"sources":1}' },
+    });
+    await w.send({ type: 'sync', expectedFrameEpoch: 0, extras: '{}', paintCaret: false, snapshot });
+    expect(loaded).toEqual(['{"sources":1}', '']);
   });
 
   test('finishes a provisional layout on request and before other work', async () => {

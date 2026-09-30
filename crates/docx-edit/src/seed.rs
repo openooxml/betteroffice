@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value, json};
 use yrs::types::Attrs;
-use yrs::{Any, Transact};
+use yrs::{Any, Array as _, Map as YrsMap, Out, ReadTxn, Text as _, Transact};
 
 use crate::control_source::safety_key;
 use crate::identity::{
@@ -23,6 +23,91 @@ use crate::structured::{BreakType, Revision, RevisionKind, StoryKind};
 use crate::{EditCtx, EditingDoc, RawOp};
 
 type JsonObject = BTreeMap<String, Value>;
+
+/// Marks state seeded with sequence metadata. State written before sequence numbering
+/// lacks this key and keeps cached SEQ results.
+pub(crate) const OPAQUE_SEQUENCES: &str = "opaqueSequences";
+
+/// Writes the first marker, so a seed keeps the operation ids an earlier seed of the same
+/// document gave its stories and session: replicas that seeded it before still converge.
+const SEQUENCE_METADATA_CLIENT: u64 = 0x1_0000_05e9;
+
+pub(crate) fn seed_opaque_sequences(document: &EditingDoc, names: &[String]) {
+    let mut txn = document.transact_for(&EditCtx::system(""));
+    let session = txn
+        .get_map(crate::identity::SESSION)
+        .expect("session root is declared by EditingDoc::new");
+    let previous = session.get(&txn, OPAQUE_SEQUENCES);
+    if previous.is_none() && names.is_empty() && !holds_sequence_fields(&txn) {
+        return;
+    }
+    let mut opaque_sequences: BTreeSet<String> = names.iter().cloned().collect();
+    if let Some(Out::Any(Any::Array(previous))) = &previous {
+        opaque_sequences.extend(previous.iter().filter_map(|value| match value {
+            Any::String(name) => Some(name.to_string()),
+            _ => None,
+        }));
+    }
+    let names = Any::Array(
+        opaque_sequences
+            .into_iter()
+            .map(Any::from)
+            .collect::<Vec<_>>()
+            .into(),
+    );
+    if previous.is_some() {
+        if previous != Some(Out::Any(names.clone())) {
+            session.insert(&mut txn, OPAQUE_SEQUENCES, names);
+        }
+        return;
+    }
+    drop(txn);
+    let marker = yrs::Doc::with_client_id(SEQUENCE_METADATA_CLIENT);
+    let root = marker.get_or_insert_map(crate::identity::SESSION);
+    let mut marker_txn = marker.transact_mut();
+    root.insert(&mut marker_txn, OPAQUE_SEQUENCES, names);
+    let update = marker_txn.encode_update_v1();
+    drop(marker_txn);
+    document
+        .apply_verbatim_v1(&update)
+        .expect("a one-entry session update applies");
+}
+
+/// Whether a story embeds anything that names a SEQ field (a field instruction, nested
+/// sequence names, shape text). A document without one seeds exactly as before.
+fn holds_sequence_fields<T: ReadTxn>(txn: &T) -> bool {
+    let Some(stories) = txn.get_map(crate::STORIES) else {
+        return false;
+    };
+    let mut pending: Vec<Out> = stories.iter(txn).map(|(_, value)| value).collect();
+    let mut anys: Vec<Any> = Vec::new();
+    while let Some(value) = pending.pop() {
+        match value {
+            Out::YText(text) => pending.extend(
+                text.diff(txn, yrs::types::text::YChange::identity)
+                    .into_iter()
+                    .map(|chunk| chunk.insert)
+                    .filter(|insert| !matches!(insert, Out::Any(Any::String(_)))),
+            ),
+            Out::YMap(map) => pending.extend(map.iter(txn).map(|(_, value)| value)),
+            Out::YArray(array) => pending.extend(array.iter(txn)),
+            Out::Any(any) => anys.push(any),
+            _ => {}
+        }
+    }
+    for any in &anys {
+        let mut values = vec![any];
+        while let Some(value) = values.pop() {
+            match value {
+                Any::String(text) if text.contains("SEQ") => return true,
+                Any::Array(items) => values.extend(items.iter()),
+                Any::Map(entries) => values.extend(entries.values()),
+                _ => {}
+            }
+        }
+    }
+    false
+}
 
 /// A parsed node's `w:p` occurrence in its part: read for identity, never seeded.
 const SOURCE_ORDINAL: &str = "sourceOrdinal";
@@ -99,6 +184,7 @@ struct LoweringContext {
     root: String,
     /// Every lowered paragraph in document order, nested stories in place.
     paragraphs: Vec<SeededParagraph>,
+    opaque_sequences: Vec<String>,
     source: SourceStructure,
     provenance: Provenance,
     /// Each source story's steps from its part's root element.
@@ -1186,6 +1272,15 @@ fn formatting_to_marks(formatting: Option<&Value>) -> Vec<Mark> {
     marks
 }
 
+/// The story attributes of a paragraph mark's run defaults (`defaultTextFormatting`), lowered as
+/// seeding lowers a run's formatting.
+pub(crate) fn mark_run_attrs(defaults: &Any) -> Vec<(String, Any)> {
+    serde_json::to_value(defaults)
+        .ok()
+        .and_then(|value| payload(marks_to_attrs(&formatting_to_marks(Some(&value)))).ok())
+        .unwrap_or_default()
+}
+
 fn mark_attrs(mark: &Mark) -> Value {
     Value::Object(mark.attrs.iter().cloned().collect())
 }
@@ -1519,6 +1614,123 @@ fn field_payload(
     )
 }
 
+/// The sequences of SEQ fields nested anywhere in a field's code or result.
+pub(crate) fn nested_sequence_names(field_value: &Value) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut seen = HashSet::new();
+    let mut pending = Vec::new();
+    if let Value::Object(map) = field_value {
+        pending.extend(map.values().rev().map(|value| (value, false)));
+    }
+    while let Some((value, scanned_hyperlink)) = pending.pop() {
+        match value {
+            Value::Object(map) => {
+                if matches!(
+                    string(map.get("type")),
+                    Some("complexField" | "simpleField")
+                ) && let Some(name) = string(map.get("instruction"))
+                    .and_then(docx_layout::sequence_fields::sequence_name)
+                    && seen.insert(name.clone())
+                {
+                    names.push(name);
+                }
+                if string(map.get("type")) == Some("hyperlink") && !scanned_hyperlink {
+                    names.extend(
+                        hyperlink_sequence_names(value)
+                            .into_iter()
+                            .filter(|name| seen.insert(name.clone())),
+                    );
+                }
+                let scanned_hyperlink =
+                    scanned_hyperlink || string(map.get("type")) == Some("hyperlink");
+                pending.extend(map.values().rev().map(|value| (value, scanned_hyperlink)));
+            }
+            Value::Array(values) => {
+                pending.extend(values.iter().rev().map(|value| (value, scanned_hyperlink)))
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+pub(crate) fn hyperlink_sequence_names(hyperlink: &Value) -> Vec<String> {
+    let mut pending = vec![hyperlink];
+    let mut instructions: Vec<Option<String>> = Vec::new();
+    let mut names = Vec::new();
+    while let Some(node) = pending.pop() {
+        let kind = string(field(Some(node), "type"));
+        match kind {
+            Some("hyperlink") => {
+                let children = field(Some(node), "structuredChildren")
+                    .or_else(|| field(Some(node), "children"));
+                pending.extend(array(children).iter().rev());
+            }
+            Some("inlineSdt") => {
+                pending.extend(array(field(Some(node), "content")).iter().rev());
+            }
+            Some("simpleField" | "complexField") => {
+                names.extend(
+                    string(field(Some(node), "instruction"))
+                        .and_then(docx_layout::sequence_fields::sequence_name),
+                );
+                let tree = field(Some(node), "fieldTree");
+                let result = field(field(Some(node), "structuredResult"), "inline")
+                    .or_else(|| field(field(tree, "result"), "inline"))
+                    .or_else(|| {
+                        field(
+                            Some(node),
+                            if kind == Some("simpleField") {
+                                "content"
+                            } else {
+                                "fieldResult"
+                            },
+                        )
+                    });
+                pending.extend(array(result).iter().rev());
+                if kind == Some("complexField") {
+                    let code = field(field(Some(node), "structuredCode"), "inline")
+                        .or_else(|| field(field(tree, "code"), "inline"))
+                        .or_else(|| field(Some(node), "fieldCode"));
+                    pending.extend(array(code).iter().rev());
+                }
+            }
+            Some("run") => {}
+            _ => continue,
+        }
+        if kind != Some("run") {
+            continue;
+        }
+        for content in array(field(Some(node), "content")) {
+            let instruction = match string(field(Some(content), "type")) {
+                Some("fieldChar") => match string(field(Some(content), "charType")) {
+                    Some("begin") => {
+                        instructions.push(Some(String::new()));
+                        None
+                    }
+                    Some("separate") => instructions.last_mut().and_then(Option::take),
+                    Some("end") => instructions.pop().flatten(),
+                    _ => None,
+                },
+                Some("instrText") => {
+                    if let Some(Some(instruction)) = instructions.last_mut() {
+                        instruction
+                            .push_str(string(field(Some(content), "text")).unwrap_or_default());
+                    }
+                    None
+                }
+                _ => None,
+            };
+            names.extend(
+                instruction
+                    .as_deref()
+                    .and_then(docx_layout::sequence_fields::sequence_name),
+            );
+        }
+    }
+    names
+}
+
 fn math_payload(math: &Value) -> JsonObject {
     map_from_value(json!({
         "display": nullish(field(Some(math), "display")),
@@ -1727,6 +1939,7 @@ fn hyperlink_to_units(
     styles: &StyleResolver,
     extra_marks: &[Mark],
     source: &BTreeMap<String, String>,
+    opaque_sequences: &mut Vec<String>,
 ) -> Vec<InlineUnit> {
     let mut units = Vec::new();
     let link = hyperlink_mark(hyperlink);
@@ -1745,6 +1958,7 @@ fn hyperlink_to_units(
                 }
             }
             "simpleField" | "complexField" => {
+                opaque_sequences.extend(nested_sequence_names(child));
                 let (payload, marks) = field_payload(child, style_formatting, source);
                 let marks: Vec<Mark> = marks
                     .into_iter()
@@ -1773,6 +1987,7 @@ fn field_to_units(
     styles: &StyleResolver,
     source: &BTreeMap<String, String>,
     projection_id: usize,
+    opaque_sequences: &mut Vec<String>,
 ) -> Vec<InlineUnit> {
     let result = array(field(field(Some(value), "structuredResult"), "inline"));
     let code = array(field(field(Some(value), "structuredCode"), "inline"));
@@ -1796,6 +2011,7 @@ fn field_to_units(
             )
         })
     {
+        opaque_sequences.extend(nested_sequence_names(value));
         let (payload, marks) = field_payload(value, style_formatting, source);
         return vec![embed_unit("field", payload, &marks, None, 1)];
     }
@@ -1803,8 +2019,19 @@ fn field_to_units(
     let mut children = Vec::new();
     for (index, child) in projected_children {
         let mut projected = match string(field(Some(child), "type")) {
-            Some("hyperlink") => hyperlink_to_units(child, style_formatting, styles, &[], source),
+            Some("hyperlink") => {
+                opaque_sequences.extend(hyperlink_sequence_names(child));
+                hyperlink_to_units(
+                    child,
+                    style_formatting,
+                    styles,
+                    &[],
+                    source,
+                    opaque_sequences,
+                )
+            }
             Some("simpleField") => {
+                opaque_sequences.extend(nested_sequence_names(child));
                 let (payload, marks) = field_payload(child, style_formatting, source);
                 vec![embed_unit("field", payload, &marks, None, 1)]
             }
@@ -1832,6 +2059,14 @@ fn field_to_units(
             .collect(),
     );
     let (mut payload, marks) = field_payload(&visible, style_formatting, source);
+    let sequence_owner = string(field(Some(value), "instruction"))
+        .and_then(docx_layout::sequence_fields::sequence_name)
+        .is_some();
+    opaque_sequences.extend(nested_sequence_names(if sequence_owner {
+        value
+    } else {
+        &visible
+    }));
     payload.insert(
         "fieldData".to_owned(),
         Value::String(source_json(value, source)),
@@ -1862,6 +2097,7 @@ fn tracked_to_units(
     styles: &StyleResolver,
     comment_id: Option<String>,
     source: &BTreeMap<String, String>,
+    opaque_sequences: &mut Vec<String>,
 ) -> Vec<InlineUnit> {
     let content_type = string(field(Some(content), "type")).unwrap_or_default();
     let kind = if matches!(content_type, "insertion" | "moveTo") {
@@ -1886,12 +2122,16 @@ fn tracked_to_units(
                 source,
             ));
         } else {
+            if string(field(Some(child), "type")) == Some("hyperlink") {
+                opaque_sequences.extend(hyperlink_sequence_names(child));
+            }
             let mut linked = hyperlink_to_units(
                 child,
                 style_formatting,
                 styles,
                 std::slice::from_ref(&marker),
                 source,
+                opaque_sequences,
             );
             if let Some(comment_id) = &comment_id {
                 for unit in &mut linked {
@@ -1928,6 +2168,7 @@ fn sdt_payload(
     style_formatting: Option<&Value>,
     styles: &StyleResolver,
     source: &BTreeMap<String, String>,
+    opaque_sequences: &mut Vec<String>,
 ) -> JsonObject {
     let mut content = Vec::new();
     let append = |content: &mut Vec<Value>, unit: InlineUnit| match unit.content {
@@ -1973,11 +2214,20 @@ fn sdt_payload(
                 }
             }
             "hyperlink" => {
-                for unit in hyperlink_to_units(child, style_formatting, styles, &[], source) {
+                opaque_sequences.extend(hyperlink_sequence_names(child));
+                for unit in hyperlink_to_units(
+                    child,
+                    style_formatting,
+                    styles,
+                    &[],
+                    source,
+                    opaque_sequences,
+                ) {
                     append(&mut content, unit);
                 }
             }
             "simpleField" | "complexField" => {
+                opaque_sequences.extend(nested_sequence_names(child));
                 let (payload, marks) = field_payload(child, style_formatting, source);
                 append(&mut content, embed_unit("field", payload, &marks, None, 1));
             }
@@ -1985,7 +2235,7 @@ fn sdt_payload(
                 &mut content,
                 embed_unit(
                     "sdt",
-                    sdt_payload(child, style_formatting, styles, source),
+                    sdt_payload(child, style_formatting, styles, source, opaque_sequences),
                     &[],
                     None,
                     1,
@@ -2550,7 +2800,14 @@ fn control_break_offsets(
                         at = run(inner, at, &mut offsets);
                     }
                 }
-                offset += units_width(&hyperlink_to_units(child, None, styles, &[], source));
+                offset += units_width(&hyperlink_to_units(
+                    child,
+                    None,
+                    styles,
+                    &[],
+                    source,
+                    &mut Vec::new(),
+                ));
             }
             "inlineSdt" => {
                 let (nested, below) = control_break_offsets(child, styles, source);
@@ -2664,7 +2921,8 @@ fn content_breaks(
                         output,
                     );
                 } else {
-                    offset += hyperlink_to_units(child, None, styles, &[], source).len();
+                    offset +=
+                        hyperlink_to_units(child, None, styles, &[], source, &mut Vec::new()).len();
                 }
             }
         }
@@ -2743,6 +3001,7 @@ struct ParagraphUnits {
     ppr: JsonObject,
     omitted: Vec<Omitted>,
     breaks: Vec<FlowBreak>,
+    opaque_sequences: Vec<String>,
 }
 
 fn paragraph_units(
@@ -2754,6 +3013,7 @@ fn paragraph_units(
     let mut units = Vec::new();
     let mut omitted = Vec::new();
     let mut breaks = Vec::new();
+    let mut opaque_sequences = Vec::new();
     let mut active_comments: Vec<String> = Vec::new();
     let mut boundaries = Some(Vec::new());
     let mut unit_counts = Vec::new();
@@ -2796,8 +3056,15 @@ fn paragraph_units(
             }
             "hyperlink" => {
                 boundaries = None;
-                let mut linked =
-                    hyperlink_to_units(content, style_formatting.as_ref(), styles, &[], source);
+                opaque_sequences.extend(hyperlink_sequence_names(content));
+                let mut linked = hyperlink_to_units(
+                    content,
+                    style_formatting.as_ref(),
+                    styles,
+                    &[],
+                    source,
+                    &mut opaque_sequences,
+                );
                 for unit in &mut linked {
                     unit.comment_id.clone_from(&comment_id);
                 }
@@ -2811,13 +3078,20 @@ fn paragraph_units(
                     styles,
                     source,
                     unit_counts.len(),
+                    &mut opaque_sequences,
                 ));
             }
             "inlineSdt" => {
                 boundaries = None;
                 units.push(embed_unit(
                     "sdt",
-                    sdt_payload(content, style_formatting.as_ref(), styles, source),
+                    sdt_payload(
+                        content,
+                        style_formatting.as_ref(),
+                        styles,
+                        source,
+                        &mut opaque_sequences,
+                    ),
                     &[],
                     None,
                     2,
@@ -2831,6 +3105,7 @@ fn paragraph_units(
                     styles,
                     comment_id,
                     source,
+                    &mut opaque_sequences,
                 ));
             }
             "mathEquation" => {
@@ -2865,6 +3140,7 @@ fn paragraph_units(
         units,
         omitted,
         breaks,
+        opaque_sequences,
     }
 }
 
@@ -4079,7 +4355,9 @@ fn visit_story(
                     mut ppr,
                     omitted,
                     breaks,
+                    opaque_sequences,
                 } = paragraph_units(block, &context.styles, None, &context.source_json);
+                context.opaque_sequences.extend(opaque_sequences);
                 let base = context.plans[plan_index].width();
                 let offsets: Vec<u32> = std::iter::once(0)
                     .chain(units.iter().scan(0, |width, unit| {
@@ -4528,11 +4806,37 @@ pub(crate) fn checked_package_digest(digest: &str) -> Result<String, String> {
 /// Parses a DOCX for editing with the inflated parts the identity index
 /// reads. `digest` is its [`package_digest`], so the parser does not hash the
 /// package again.
+#[cfg(any(test, feature = "wasm"))]
 pub(crate) fn parse_docx_package_with_digest(
     bytes: &[u8],
     digest: String,
 ) -> Result<(docx_parse::S9WireEnvelope, Vec<(String, Vec<u8>)>), String> {
     docx_parse::parse_docx_s9_wire_parts_with_limits(
+        bytes,
+        docx_parse::S9ParseOptions {
+            source_ordinals: true,
+            determinism_seed: Some(digest),
+            ..docx_parse::S9ParseOptions::default()
+        },
+        &docx_parse::xml::ParseLimits::default(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// [`parse_docx_package_with_digest`] leaving the media in the package: an
+/// image names its part by a `media:{n}` token of the returned table.
+pub(crate) fn parse_docx_package_with_media(
+    bytes: Arc<[u8]>,
+    digest: String,
+) -> Result<
+    (
+        docx_parse::S9WireEnvelope,
+        Vec<(String, Vec<u8>)>,
+        docx_parse::media::MediaTable,
+    ),
+    String,
+> {
+    docx_parse::parse_docx_s9_wire_with_media_table(
         bytes,
         docx_parse::S9ParseOptions {
             source_ordinals: true,
@@ -4639,7 +4943,7 @@ pub(crate) fn seed_parsed_docx_with(
 ) -> Result<Vec<String>, String> {
     let mut lowered = lower_docx(envelope, parts)?;
     lowered.script_fonts = None;
-    seed_lowered(document, lowered, None).map(|fonts| fonts.referenced)
+    seed_lowered(document, lowered, None, SeedMedia::AsParsed).map(|fonts| fonts.referenced)
 }
 
 /// The fonts a seeded document references, and those of them it names only
@@ -4650,12 +4954,26 @@ pub(crate) struct SeededFonts {
     pub(crate) unused_script: Vec<String>,
 }
 
+/// How seeding writes the images of a package parsed against a media table.
+pub(crate) enum SeedMedia<'a> {
+    /// As parsed: `media:{n}` tokens, which only a reader holding the
+    /// package resolves.
+    AsParsed,
+    /// As their parts' `data:` URLs, which every replica reads; with
+    /// `layout_tokens`, layout still carries the tokens.
+    DataUrls {
+        table: &'a docx_parse::media::MediaTable,
+        layout_tokens: bool,
+    },
+}
+
 /// Seeds every lowered story into `document` and retains the package context, with the identity
 /// index when there is one.
 fn seed_lowered(
     document: &EditingDoc,
     lowered: LoweredDocx,
     index: Option<SourceIndex>,
+    media: SeedMedia<'_>,
 ) -> Result<SeededFonts, String> {
     let LoweredDocx {
         context,
@@ -4679,9 +4997,22 @@ fn seed_lowered(
         batches.push((story_id, ops));
         referenced_fonts.extend(fonts);
     }
+    let sources = match media {
+        SeedMedia::AsParsed => crate::media::MediaSources::default(),
+        SeedMedia::DataUrls {
+            table,
+            layout_tokens,
+        } => crate::media::write_data_urls(
+            batches.iter_mut().flat_map(|(_, ops)| ops.iter_mut()),
+            table,
+            layout_tokens,
+        )?,
+    };
     document
         .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
         .map_err(|error| error.to_string())?;
+    seed_opaque_sequences(document, &context.opaque_sequences);
+    document.set_media_sources(sources);
     read.pin(document);
     read.comment_writes = CommentWrites::watch(document);
     if let Some(index) = index {
@@ -4737,6 +5068,7 @@ fn scratch_context(styles: StyleResolver) -> LoweringContext {
         compatibility_mode: 12,
         root: String::new(),
         paragraphs: Vec::new(),
+        opaque_sequences: Vec::new(),
         source: SourceStructure::default(),
         provenance: Provenance::default(),
         locators: HashMap::new(),
@@ -4889,6 +5221,7 @@ fn lower_package(
         compatibility_mode,
         root: "body".to_owned(),
         paragraphs: Vec::new(),
+        opaque_sequences: Vec::new(),
         source: SourceStructure::default(),
         provenance: Provenance::default(),
         locators: HashMap::from([("body".to_owned(), vec![Step::Body])]),
@@ -5066,7 +5399,7 @@ pub(crate) fn source_index(
     digest: Option<String>,
 ) -> Result<SourceIndex, String> {
     let digest = digest.unwrap_or_else(|| package_digest(&bytes));
-    let (envelope, parts) = parse_docx_package_with_digest(&bytes, digest.clone())?;
+    let (envelope, parts, _) = parse_docx_package_with_media(Arc::clone(&bytes), digest.clone())?;
     let ids = PackageIds::scan(&parts);
     let parts = SourceParts::new(parts);
     let lowered = lower_docx(envelope, None)?;
@@ -5090,6 +5423,7 @@ pub(crate) fn seed_parsed_docx(
     parts: Vec<(String, Vec<u8>)>,
     bytes: Arc<[u8]>,
     digest: String,
+    media: SeedMedia<'_>,
 ) -> Result<SeededFonts, String> {
     let ids = PackageIds::scan(&parts);
     let parts = SourceParts::new(parts);
@@ -5103,7 +5437,7 @@ pub(crate) fn seed_parsed_docx(
         &lowered.relationships,
         std::mem::take(&mut lowered.context.paragraphs),
     );
-    seed_lowered(document, lowered, Some(index))
+    seed_lowered(document, lowered, Some(index), media)
 }
 
 /// Opens a DOCX: seeds every story and starts a new opening with a fresh
@@ -5142,162 +5476,53 @@ pub fn seed_docx_preview(
     bytes: &[u8],
     blocks: usize,
 ) -> Result<bool, String> {
-    let Some(envelope) = parse_docx_preview(bytes, blocks)? else {
+    let Some((envelope, media)) = parse_docx_preview(Arc::from(bytes), blocks)? else {
         return Ok(false);
     };
-    seed_preview_envelope(document, envelope).map(|_| true)
+    seed_preview_envelope(document, envelope, media).map(|_| true)
 }
 
-/// The parse [`seed_docx_preview`] seeds from, or `None` when it refuses one.
+/// The parse [`seed_docx_preview`] seeds from and the media its images name,
+/// or `None` when it refuses one.
 pub(crate) fn parse_docx_preview(
-    bytes: &[u8],
+    bytes: Arc<[u8]>,
     blocks: usize,
-) -> Result<Option<docx_parse::S9WireEnvelope>, String> {
-    let is_media = |path: &str| path.to_ascii_lowercase().starts_with("word/media/");
-    let mut parts = ooxml_opc::unzip_parts_where(bytes, u64::MAX, |path| !is_media(path))?;
-    let parse = |parts: &[(String, Vec<u8>)]| {
-        docx_parse::parse_docx_s9_preview_from_parts(
-            parts,
-            blocks,
-            docx_parse::S9ParseOptions {
-                source_ordinals: true,
-                determinism_seed: Some(PREVIEW_SEED.to_owned()),
-                ..docx_parse::S9ParseOptions::default()
-            },
-            &docx_parse::xml::ParseLimits::default(),
-        )
-        .map_err(|error| error.to_string())
-    };
-    let Some(envelope) = parse(&parts)? else {
-        return Ok(None);
-    };
-    // Inflate only the images the parsed prefix and the other parts use.
-    let media = preview_media(&envelope, &parts)?;
-    if media.is_empty() {
-        return Ok(Some(envelope));
-    }
-    let inflated: u64 = parts.iter().map(|(_, data)| data.len() as u64).sum();
-    parts.extend(ooxml_opc::unzip_parts_where(
-        bytes,
-        ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES.saturating_sub(inflated),
-        |path| media.contains(&path.to_ascii_lowercase()),
-    )?);
-    parse(&parts)
+) -> Result<Option<(docx_parse::S9WireEnvelope, docx_parse::media::MediaTable)>, String> {
+    let (parts, media) =
+        docx_parse::media_table_parts(&bytes).map_err(|error| error.to_string())?;
+    let envelope = docx_parse::parse_docx_s9_preview_with_media_table(
+        &parts,
+        &media,
+        blocks,
+        docx_parse::S9ParseOptions {
+            source_ordinals: true,
+            determinism_seed: Some(PREVIEW_SEED.to_owned()),
+            ..docx_parse::S9ParseOptions::default()
+        },
+        &docx_parse::xml::ParseLimits::default(),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(envelope.map(|envelope| (envelope, media)))
 }
 
-/// Seeds a preview parse; returns the fonts it references, and those of them
-/// it names only for East Asian or complex-script text its cut does not contain.
+/// Seeds a preview parse and keeps the media its images name; returns the
+/// fonts it references, and those of them it names only for East Asian or
+/// complex-script text its cut does not contain.
 pub(crate) fn seed_preview_envelope(
     document: &EditingDoc,
     envelope: docx_parse::S9WireEnvelope,
+    media: docx_parse::media::MediaTable,
 ) -> Result<SeededFonts, String> {
     let mut lowered = lower_docx(envelope, None)?;
     retain_referenced_body_stories(&mut lowered.context.plans);
-    seed_lowered(document, lowered, None)
+    let fonts = seed_lowered(document, lowered, None, SeedMedia::AsParsed)?;
+    document.install_media(media);
+    Ok(fonts)
 }
 
 /// The seed for IDs a preview's parse generates. A preview is never saved,
 /// so it does not hash the package for the IDs a full open would generate.
 const PREVIEW_SEED: &str = "0000000000000000000000000000000000000000000000000000000000000001";
-
-/// Lowercased paths of the media a preview draws: the targets of the document
-/// relationships its parsed document names, and every medium another part
-/// relates to.
-fn preview_media(
-    envelope: &docx_parse::S9WireEnvelope,
-    parts: &[(String, Vec<u8>)],
-) -> Result<HashSet<String>, String> {
-    fn strings<'a>(value: &'a Value, found: &mut HashSet<&'a str>) {
-        match value {
-            Value::String(text) => {
-                found.insert(text);
-            }
-            Value::Object(fields) => fields.values().for_each(|value| strings(value, found)),
-            Value::Array(values) => values.iter().for_each(|value| strings(value, found)),
-            _ => {}
-        }
-    }
-    let media_path = |directory: &str, target: &str| {
-        let target = percent_decoded(target);
-        let joined = match target.strip_prefix('/') {
-            Some(absolute) => absolute.to_owned(),
-            None => format!("{directory}{target}"),
-        };
-        let mut segments: Vec<&str> = Vec::new();
-        for segment in joined.split('/') {
-            match segment {
-                ".." => {
-                    segments.pop();
-                }
-                "." | "" => {}
-                segment => segments.push(segment),
-            }
-        }
-        let path = segments.join("/").to_ascii_lowercase();
-        path.starts_with("word/media/").then_some(path)
-    };
-    let mut document =
-        serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
-    if let Some(package) = document.get_mut("package").and_then(Value::as_object_mut) {
-        package.remove("relationshipEntries");
-    }
-    let mut mentioned = HashSet::new();
-    strings(&document, &mut mentioned);
-    let mut media: HashSet<String> = envelope
-        .document
-        .package
-        .relationship_entries
-        .iter()
-        .filter(|(id, _)| mentioned.contains(id.as_str()))
-        .filter_map(|(_, relationship)| media_path("word/", &relationship.target))
-        .collect();
-    let limits = docx_parse::xml::ParseLimits::default();
-    for (path, xml) in parts {
-        let lower = path.to_ascii_lowercase();
-        let Some((directory, _)) = lower.split_once("_rels/") else {
-            continue;
-        };
-        if !lower.ends_with(".rels")
-            || lower == "_rels/.rels"
-            || lower == "word/_rels/document.xml.rels"
-        {
-            continue;
-        }
-        let mut budget = docx_parse::xml::ParseBudget::new(&limits);
-        let relationships = docx_parse::relationships::parse_relationships(xml, path, &mut budget)
-            .map_err(|error| error.to_string())?;
-        media.extend(relationships.values().filter_map(|relationship| {
-            (relationship.target_mode != Some(docx_parse::relationships::TargetMode::External))
-                .then(|| media_path(directory, &relationship.target))
-                .flatten()
-        }));
-    }
-    Ok(media)
-}
-
-/// `%XX` escapes in a relationship target, decoded.
-fn percent_decoded(target: &str) -> String {
-    let bytes = target.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        let hex = bytes
-            .get(index + 1..index + 3)
-            .and_then(|hex| std::str::from_utf8(hex).ok())
-            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
-        match (bytes[index], hex) {
-            (b'%', Some(byte)) => {
-                decoded.push(byte);
-                index += 3;
-            }
-            (byte, _) => {
-                decoded.push(byte);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&decoded).into_owned()
-}
 
 /// Drops the body's nested stories, such as table cells, that the (cut) body
 /// no longer reaches. Headers, footers, notes and comments stay whole.
@@ -5345,65 +5570,166 @@ fn retain_referenced_body_stories(plans: &mut Vec<StoryPlan>) {
     });
 }
 
+/// Seeds `bytes` as the browser editor opens them: `data:` URLs in the
+/// stories, tokens in layout.
+#[cfg(test)]
+pub(crate) fn seed_with_layout_tokens(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
+    let source: Arc<[u8]> = Arc::from(bytes);
+    let digest = package_digest(&source);
+    let (envelope, parts, media) =
+        parse_docx_package_with_media(Arc::clone(&source), digest.clone())?;
+    seed_parsed_docx(
+        document,
+        envelope,
+        parts,
+        source,
+        digest,
+        SeedMedia::DataUrls {
+            table: &media,
+            layout_tokens: true,
+        },
+    )?;
+    document.install_media(media);
+    document.begin_opening(None);
+    Ok(())
+}
+
 pub(crate) fn seed_stories(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
     let digest = package_digest(bytes);
-    let (envelope, parts) = parse_docx_package_with_digest(bytes, digest.clone())?;
-    seed_parsed_docx(document, envelope, parts, Arc::from(bytes), digest).map(|_| ())
+    let bytes: Arc<[u8]> = Arc::from(bytes);
+    let (envelope, parts, media) =
+        parse_docx_package_with_media(Arc::clone(&bytes), digest.clone())?;
+    seed_parsed_docx(
+        document,
+        envelope,
+        parts,
+        bytes,
+        digest,
+        SeedMedia::DataUrls {
+            table: &media,
+            layout_tokens: false,
+        },
+    )?;
+    document.install_media(media);
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn a_preview_inflates_the_media_its_document_and_other_parts_use() {
-        const IMAGE: &str =
-            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
-        let drawing = |id: &str| {
-            format!(
-                r#"<w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="p"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="{id}"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
-            )
-        };
-        let document = format!(
-            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>{}<w:p><w:r><w:t>After the cut</w:t></w:r></w:p>{}</w:body></w:document>"#,
-            drawing("rIdUsed"),
-            drawing("rIdLater")
-        );
-        let parts = vec![
-            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
-            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
-            ("word/_rels/document.xml.rels".to_owned(), format!(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdUsed" Type="{IMAGE}" Target="media/used.png"/><Relationship Id="rIdLater" Type="{IMAGE}" Target="media/later.png"/><Relationship Id="rIdMark" Type="{IMAGE}" Target="/word/media/Mark.PNG"/></Relationships>"#).into_bytes()),
-            ("word/document.xml".to_owned(), document.into_bytes()),
-            ("word/headers/_rels/header1.xml.rels".to_owned(), format!("<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId1' Type='{IMAGE}' Target = '../media/logo%201.png'/></Relationships>").into_bytes()),
-        ];
-        let parsed = |blocks| {
-            docx_parse::parse_docx_s9_preview_from_parts(
-                &parts,
-                blocks,
-                docx_parse::S9ParseOptions {
-                    determinism_seed: Some(PREVIEW_SEED.to_owned()),
-                    ..docx_parse::S9ParseOptions::default()
-                },
-                &docx_parse::xml::ParseLimits::default(),
-            )
-            .unwrap()
-            .unwrap()
-        };
-        let mut envelope = parsed(1);
-        let media = preview_media(&envelope, &parts).unwrap();
-        assert!(media.contains("word/media/used.png"));
-        assert!(media.contains("word/media/logo 1.png"));
-        assert!(!media.contains("word/media/later.png"));
-        // A document relationship named under any key, as a watermark's `relId` is.
-        envelope.document.warnings = Some(vec!["rIdMark".to_owned()]);
-        assert!(
-            preview_media(&envelope, &parts)
+    fn opaque_sequence_names_accumulate_in_document_state() {
+        let doc = EditingDoc::new(1);
+        let empty = doc.encode_state_vector_v1();
+        seed_opaque_sequences(&doc, &[]);
+        assert_eq!(doc.encode_state_vector_v1(), empty);
+        seed_opaque_sequences(&doc, &["table".into(), "figure".into(), "table".into()]);
+        {
+            let txn = doc.yrs_doc().transact();
+            assert_eq!(txn.state_vector().get(&doc.yrs_doc().client_id()), 0);
+            assert_eq!(
+                txn.state_vector()
+                    .get(&yrs::ClientID::new(SEQUENCE_METADATA_CLIENT)),
+                1
+            );
+        }
+        seed_opaque_sequences(&doc, &["other".into(), "figure".into()]);
+        let before = doc.encode_state_vector_v1();
+        seed_opaque_sequences(&doc, &[]);
+        seed_opaque_sequences(&doc, &["table".into(), "figure".into(), "other".into()]);
+        assert_eq!(doc.encode_state_vector_v1(), before);
+        doc.begin_opening(Some("opening"));
+        let txn = doc.yrs_doc().transact();
+        assert_eq!(
+            txn.get_map(crate::identity::SESSION)
                 .unwrap()
-                .contains("word/media/mark.png")
+                .get(&txn, OPAQUE_SEQUENCES),
+            Some(Out::Any(Any::Array(
+                ["figure", "other", "table"].map(Any::from).to_vec().into()
+            )))
         );
-        assert!(
-            preview_media(&parsed(3), &parts)
-                .unwrap()
-                .contains("word/media/later.png")
-        );
+    }
+
+    #[test]
+    fn nested_sequence_names_keep_first_seen_order() {
+        let field = json!({"type": "complexField", "instruction": "SEQ Outer",
+        "structuredCode": {"inline": [
+            {"type": "simpleField", "instruction": "sEq \"Figure\""},
+            {"type": "complexField", "instruction": "SEQ Table"},
+            {"type": "simpleField", "instruction": "SEQ FIGURE"}
+        ]},
+        "structuredResult": {"inline": [
+            {"type": "complexField", "instruction": "SEQ TABLE"},
+            {"type": "simpleField", "instruction": "SEQ Other"}
+        ]}});
+        assert_eq!(nested_sequence_names(&field), ["figure", "table", "other"]);
+    }
+
+    #[test]
+    fn hyperlink_sequence_names_follow_inline_containers_in_order() {
+        let hyperlink = json!({"type": "hyperlink", "children": [], "structuredChildren": [
+            {"type": "run", "content": [{"type": "fieldChar", "charType": "begin"}]},
+            {"type": "inlineSdt", "content": [
+                {"type": "hyperlink", "children": [
+                    {"type": "run", "content": [{"type": "instrText", "text": " sEq \"Fig"}]}
+                ]},
+                {"type": "simpleField", "instruction": "QUOTE", "content": [],
+                    "structuredResult": {"inline": [
+                        {"type": "run", "content": [{"type": "instrText", "text": "ure\" "}]}
+                    ]}
+                }
+            ]},
+            {"type": "complexField", "instruction": "QUOTE", "fieldCode": [], "fieldResult": [],
+                "structuredCode": {"inline": [
+                    {"type": "run", "content": [
+                        {"type": "fieldChar", "charType": "begin"},
+                        {"type": "instrText", "text": "SEQ Table"}
+                    ]}
+                ]},
+                "structuredResult": {"inline": [
+                    {"type": "run", "content": [{"type": "fieldChar", "charType": "end"}]}
+                ]}
+            },
+            {"type": "run", "content": [
+                {"type": "fieldChar", "charType": "separate"},
+                {"type": "instrText", "text": "SEQ Ignored"},
+                {"type": "fieldChar", "charType": "end"}
+            ]}
+        ]});
+        assert_eq!(hyperlink_sequence_names(&hyperlink), ["table", "figure"]);
+    }
+
+    #[test]
+    fn nested_sequence_metadata_covers_all_field_views_in_inline_wrappers() {
+        let field = json!({
+            "type": "complexField", "fieldType": "QUOTE", "instruction": "QUOTE",
+            "fieldCode": [], "fieldResult": [],
+            "structuredCode": {"inline": []}, "structuredResult": {"inline": []},
+            "fieldTree": {"children": [{"result": {"inline": [
+                {"type": "simpleField", "fieldType": "SEQ", "instruction": "SEQ Figure", "content": []}
+            ]}}]}
+        });
+        for content in [
+            field.clone(),
+            json!({"type": "hyperlink", "children": [], "structuredChildren": [field.clone()]}),
+            json!({"type": "inlineSdt", "properties": {}, "content": [field]}),
+        ] {
+            let paragraph = paragraph_units(
+                &json!({"type": "paragraph", "content": [content]}),
+                &StyleResolver::new(None),
+                None,
+                &BTreeMap::new(),
+            );
+            assert_eq!(paragraph.opaque_sequences, ["figure"]);
+            for unit in paragraph.units {
+                if let UnitContent::Embed { payload, .. } = unit.content {
+                    assert!(
+                        !serde_json::to_string(&payload)
+                            .unwrap()
+                            .contains("nestedSequences")
+                    );
+                }
+            }
+        }
     }
 
     fn seed_body(blocks: &[Value]) -> EditingDoc {
@@ -5415,6 +5741,7 @@ mod tests {
             compatibility_mode: 12,
             root: "body".to_owned(),
             paragraphs: Vec::new(),
+            opaque_sequences: Vec::new(),
             source: SourceStructure::default(),
             provenance: Provenance::default(),
             locators: HashMap::new(),
@@ -5702,6 +6029,7 @@ mod tests {
             compatibility_mode: 12,
             root: "body".to_owned(),
             paragraphs: Vec::new(),
+            opaque_sequences: Vec::new(),
             source: SourceStructure::default(),
             provenance: Provenance::default(),
             locators: HashMap::new(),
@@ -6005,6 +6333,103 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&passed).unwrap(),
             serde_json::to_value(&hashed).unwrap()
+        );
+    }
+
+    #[test]
+    fn seeding_data_urls_fails_on_an_image_part_that_cannot_be_read() {
+        let mut state = 0x2545_f491_u32;
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend((0..8192).map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        }));
+        let mut bytes = ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/_rels/document.xml.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/picture.png"/></Relationships>"#.to_vec()),
+            ("word/media/picture.png".to_owned(), png.clone()),
+            ("word/document.xml".to_owned(), br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="picture"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#.to_vec()),
+        ])
+        .unwrap();
+        seed_with_layout_tokens(&EditingDoc::new(9), &bytes).unwrap();
+        let late = &png[6000..6032];
+        let at = bytes
+            .windows(late.len())
+            .position(|window| window == late)
+            .expect("incompressible image bytes are stored verbatim");
+        bytes[at + 16] ^= 0xff;
+        assert!(seed_with_layout_tokens(&EditingDoc::new(10), &bytes).is_err());
+    }
+
+    #[test]
+    fn a_seeded_image_names_its_part_and_resolves_in_any_replica_of_the_package() {
+        let png = [0x89, b'P', b'N', b'G', 1, 2, 3, 4];
+        let bytes = ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/_rels/document.xml.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/picture.png"/></Relationships>"#.to_vec()),
+            ("word/media/unused.png".to_owned(), vec![9; 16]),
+            ("word/media/picture.png".to_owned(), png.to_vec()),
+            ("word/document.xml".to_owned(), br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="picture"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#.to_vec()),
+        ])
+        .unwrap();
+        let native = EditingDoc::new(6);
+        seed_from_docx(&native, &bytes).unwrap();
+        assert!(native.media_sources().is_empty());
+        let seeded = EditingDoc::new(7);
+        seed_with_layout_tokens(&seeded, &bytes).unwrap();
+        let image_src = |doc: &EditingDoc| {
+            let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+                doc,
+                "body",
+                &crate::bridge::RenderEnv {
+                    media_tokens: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let docx_layout::types::LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+                panic!("the image paragraph stays a paragraph");
+            };
+            paragraph
+                .runs
+                .iter()
+                .find_map(|run| match run {
+                    docx_layout::types::Run::Image(image) => Some(image.src.clone()),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(image_src(&seeded), "media:1");
+        let data_url = "data:image/png;base64,iVBORwECAwQ=".to_owned();
+        assert_eq!(image_src(&native), data_url);
+        assert_eq!(
+            seeded.media_table().unwrap().resolve("media:1"),
+            Some(data_url.clone())
+        );
+
+        let state = seeded.encode_state_as_update_v1();
+        assert!(
+            state
+                .windows(data_url.len())
+                .any(|window| window == data_url.as_bytes())
+        );
+
+        let replica = EditingDoc::new(8);
+        replica.apply_update_v1(&state).unwrap();
+        assert!(replica.media_table().is_none());
+        assert_eq!(image_src(&replica), data_url);
+        replica.set_media_sources(
+            crate::media::MediaSources::from_json(&seeded.media_sources().to_json()).unwrap(),
+        );
+        assert_eq!(image_src(&replica), "media:1");
+        replica.retain_source_docx(bytes);
+        assert_eq!(
+            replica.media_table().unwrap().resolve("media:1"),
+            Some(data_url)
         );
     }
 

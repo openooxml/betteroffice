@@ -794,6 +794,7 @@ impl Paginator {
         let page_index = self.states[idx].page_index;
         self.pages[page_index].fragments.push(fragment);
         if self.pages[page_index].fragments.len() == 1 {
+            self.page_start_spacing_spent = self.leading_spacing_spent;
             self.page_start_column = self.states[idx].column_index;
         }
     }

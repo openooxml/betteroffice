@@ -94,6 +94,7 @@ export interface YrsStoredFormatting {
 export interface YrsInputProps {
   enabled: boolean;
   readOnly: boolean;
+  replicaReadyRef?: React.RefObject<boolean>;
   session: YrsSession | null;
   story?: string;
   isSuggesting?: boolean;
@@ -213,6 +214,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   {
     enabled,
     readOnly,
+    replicaReadyRef,
     session,
     story = 'body',
     isSuggesting = false,
@@ -241,6 +243,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   },
   ref
 ) {
+  const replicaReady = replicaReadyRef?.current !== false;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const composingRef = useRef(false);
   const compositionPendingRef = useRef(false);
@@ -405,10 +408,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   // Body-story only: painted-caret coverage for other stories is unproven, and
   // an unhonored dispatch hold would blank the caret per keystroke there.
   const dispatchCaretInput = useCallback((): void => {
-    if (!session || readOnly) return;
+    if (!session || readOnly || replicaReadyRef?.current === false) return;
     if (session.selection()?.head.story !== 'body') return;
     onCaretInputDispatched?.();
-  }, [onCaretInputDispatched, readOnly, session]);
+  }, [onCaretInputDispatched, readOnly, session, replicaReadyRef]);
 
   const storedFormatting = useCallback((): YrsStoredFormatting | null => {
     const current = ensureSelection();
@@ -494,7 +497,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const insertText = useCallback(
     (text: string): void => {
       verticalCaretGoalRef.current.reset();
-      if (!session || readOnly || text.length === 0) return;
+      if (!session || readOnly || replicaReadyRef?.current === false || text.length === 0) return;
       dispatchCaretInput();
       const applyText = async (inputText: string) => {
         const current = ensureSelection();
@@ -614,6 +617,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       isCurrentInput,
       isSuggesting,
       readOnly,
+      replicaReadyRef,
       session,
       suggestingAuthor,
     ]
@@ -621,7 +625,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const deleteUnits = useCallback(
     async (direction: 'backward' | 'forward', count: number): Promise<void> => {
-      if (!session || readOnly) return;
+      if (!session || readOnly || replicaReadyRef?.current === false) return;
       let remaining = count;
       while (remaining > 0) {
         if (deleteSelected()) {
@@ -711,6 +715,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       isCurrentInput,
       isSuggesting,
       readOnly,
+      replicaReadyRef,
       session,
       suggestingAuthor,
     ]
@@ -740,7 +745,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     verticalCaretGoalRef.current.reset();
     dispatchCaretInput();
     enqueueInputOperation(() => {
-      if (!session || readOnly) return;
+      if (!session || readOnly || replicaReadyRef?.current === false) return;
       const selectedStart = deleteSelected();
       const current = selectedStart ?? ensureSelection()?.head;
       if (!current) return;
@@ -789,6 +794,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     finishMutation,
     nextParagraphStyleId,
     readOnly,
+    replicaReadyRef,
     session,
     suggestingAuthor,
   ]);
@@ -1280,7 +1286,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       storedFormatting,
       insertText,
       deleteSelection() {
-        if (!readOnly && deleteSelected()) {
+        if (!readOnly && replicaReadyRef?.current !== false && deleteSelected()) {
           advanceInteractionEpoch();
           finishMutation();
         }
@@ -1302,6 +1308,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       insertText,
       deleteSelected,
       readOnly,
+      replicaReadyRef,
       runAfterPendingInput,
       selectAll,
       session,
@@ -1322,18 +1329,18 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, [session, story]);
 
   useEffect(() => {
-    if (!enabled || !session) return;
+    if (!enabled || !session || !replicaReady) return;
     ensureSelection();
     emitSelection(false);
-  }, [emitSelection, enabled, ensureSelection, session]);
+  }, [emitSelection, enabled, ensureSelection, session, replicaReady]);
 
   useEffect(() => {
-    if (!enabled || !session || readOnly) return;
+    if (!enabled || !session || readOnly || !replicaReady) return;
     const frame = requestAnimationFrame(() =>
       textareaRef.current?.focus({ preventScroll: true })
     );
     return () => cancelAnimationFrame(frame);
-  }, [enabled, readOnly, session, story]);
+  }, [enabled, readOnly, session, story, replicaReady]);
 
   useEffect(() => {
     if (!enabled || !displayListQueries) return;
@@ -1422,7 +1429,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       autoCapitalize="sentences"
       autoCorrect="on"
       spellCheck
-      readOnly={readOnly || !session}
+      readOnly={readOnly || replicaReadyRef?.current === false || !session}
       rows={1}
       style={{ ...BASE_STYLE, ...positionStyle }}
       onBeforeInput={handleBeforeInput}

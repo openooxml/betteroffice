@@ -188,7 +188,7 @@ export async function rasterizeDisplayListPages(
   return canvases;
 }
 
-/** Replays a page in primitive order, including body and header/footer bands. */
+/** Replays watermark, header/footer, body and note layers. */
 export async function drawDisplayPage(
   ctx: CanvasRenderingContext2D,
   page: DisplayPage,
@@ -202,20 +202,27 @@ export async function drawDisplayPage(
   for (const border of (page.pageBorders ?? []).filter((p) => p.zOrder === 'back')) {
     drawPageBorder(ctx, border);
   }
-  for (const primitive of page.primitives) {
-    await drawPrimitive(ctx, primitive, options);
+  const watermarkPrimitiveCount = Math.min(
+    page.watermarkPrimitiveCount ?? 0,
+    page.primitives.length
+  );
+  for (let index = 0; index < watermarkPrimitiveCount; index += 1) {
+    await drawPrimitive(ctx, page.primitives[index]!, options);
+  }
+  for (const region of [page.header, page.footer]) {
+    if (!region) continue;
+    for (const primitive of region.primitives) {
+      await drawPrimitive(ctx, primitive, options);
+    }
+  }
+  for (let index = watermarkPrimitiveCount; index < page.primitives.length; index += 1) {
+    await drawPrimitive(ctx, page.primitives[index]!, options);
   }
   for (const area of page.noteAreas ?? []) {
     for (const primitive of area.separatorPrimitives ?? []) {
       await drawPrimitive(ctx, primitive, options);
     }
     for (const primitive of area.primitives ?? []) {
-      await drawPrimitive(ctx, primitive, options);
-    }
-  }
-  for (const region of [page.header, page.footer]) {
-    if (!region) continue;
-    for (const primitive of region.primitives) {
       await drawPrimitive(ctx, primitive, options);
     }
   }

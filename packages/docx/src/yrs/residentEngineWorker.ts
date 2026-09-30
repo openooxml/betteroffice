@@ -202,7 +202,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     }
     unsubscribe?.();
     unsubscribe = null;
-    if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
+    setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     const { layoutJson, provisional } = hydrate(
       request.snapshot,
       request.provisionalPages,
@@ -261,7 +261,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'sync') {
     unsubscribe?.();
     unsubscribe = null;
-    if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
+    setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     const { layoutJson } = hydrate(request.snapshot, undefined, request.layoutExtras !== undefined);
     subscribe();
     const started = performance.now();
@@ -283,6 +283,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'buildPages') {
+    setFrameDisplayWindow(session);
     // Pages of the provisional frame build between steps, as before a completion.
     pendingUpdates = [];
     const started = performance.now();
@@ -300,6 +301,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'completeLayout') {
+    setFrameDisplayWindow(session);
     if (incompleteLayout && request.sliceBlocks) {
       supersedeSlicedCompletion();
       slicedCompletion = {
@@ -319,6 +321,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'buildFrame') {
     await completeProvisionalLayout();
+    setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     pendingUpdates = [];
     const started = performance.now();
     const frame = session.buildDisplayListFrame(request.extras, request.expectedFrameEpoch);
@@ -375,6 +378,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   await completeProvisionalLayout();
   // The edit replaces the pagination a cached completion's frame would paint.
   completedLayout = null;
+  setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
   session.setSelection(request.selection.anchor, request.selection.head);
   pendingUpdates = [];
   const started = performance.now();
@@ -449,6 +453,7 @@ function hydrate(
   completedLayout = null;
   if (loadState) session.loadState(snapshot.state);
   session.setPartialDocument(snapshot.partialDocument === true);
+  session.loadMediaSources(snapshot.mediaSources ?? '');
   if (snapshot.fontsRevision !== fontsRevision) {
     // A mismatched revision always carries the full font set (the client only
     // omits fonts when it knows this session's applied revision matches).
@@ -481,6 +486,18 @@ function hydrate(
   layoutRevision = snapshot.layoutRevision;
   pendingUpdates = [];
   return { layoutJson, provisional };
+}
+
+function setFrameDisplayWindow(
+  engine: ResidentEngineSession,
+  window?: [number, number],
+  retainBuiltPages?: boolean
+): void {
+  if (window) {
+    engine.setDisplayWindow(...window);
+    engine.setDisplayRetainBuiltPages(retainBuiltPages === true);
+  }
+  engine.setWindowedIncrementalBuilds(window !== undefined);
 }
 
 /**
@@ -529,6 +546,7 @@ async function replyCompletedLayout(
     reply({ id, ok: true });
     return;
   }
+  setFrameDisplayWindow(session);
   pendingUpdates = [];
   const started = performance.now();
   const frame = session.buildDisplayListFrame(

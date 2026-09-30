@@ -1,5 +1,5 @@
 ---
-"@betteroffice/fonts": patch
+"@betteroffice/fonts": minor
 ---
 
-`resolveBundledFamilyFace` and `resolveFamily` now resolve a font family by its bundled name (e.g. `Gelasio`) as well as its Word name, returning only faces matching the requested weight and style.
+`resolveBundledFamilyFace` and `resolveFamily` also resolve a family by its bundled name (e.g. `Gelasio`), returning only faces of the requested weight and style. **BREAKING:** custom `BundledFontSource` implementations must add `resolveFamily`; the bundled providers already do.
