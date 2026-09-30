@@ -1105,7 +1105,8 @@ export class EditSession {
      * `{"themeColors":{slot: hex},"defaultTabStopTwips":number|null,
      * "pageContentHeight":number|null,"numericIds":{yrsId: number},
      * "tocStyleIds":[styleId],"showHiddenText":bool,
-     * "defaultParagraphStyleId":string}`, all
+     * "defaultParagraphStyleId":string,
+     * "revisionPreview":{revisionId: "accepted"|"rejected"}}`, all
      * optional. Errors when the story does not end in a pilcrow, holds a
      * malformed table, references itself through a cell story, or contains an
      * embed lowering does not support.

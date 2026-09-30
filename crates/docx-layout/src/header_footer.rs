@@ -6,7 +6,7 @@ use crate::measure_blocks::{MeasurementConfig, extent_height, measure_blocks, me
 use crate::paragraph_spacing::apply_contextual_spacing_blocks;
 use crate::types::{
     BlockExtent, BlockId, FieldRun, ImageRun, Layout, LayoutBlock, MeasuredBlock, PageMargins,
-    ParagraphBlock, Run, RunFormatting, Size,
+    ParagraphBlock, Run, Size,
 };
 
 const DEFAULT_HF_DISTANCE_PX: f64 = 48.0;
@@ -166,16 +166,9 @@ pub fn resolve_header_footer_field_widths(
     for variant in &mut payload.variants {
         let mut widths = Vec::new();
         for measured in &variant.measured {
-            let LayoutBlock::Paragraph(paragraph) = &measured.block else {
-                continue;
-            };
-            for run in &paragraph.runs {
-                let Run::Field(field) = run else {
-                    continue;
-                };
-                if !matches!(field.field_type.as_str(), "PAGE" | "NUMPAGES") {
-                    continue;
-                }
+            let mut fields = Vec::new();
+            page_fields(&measured.block, &mut fields);
+            for field in fields {
                 let Some(pm_start) = integral_position(field.pm_start) else {
                     continue;
                 };
@@ -217,6 +210,28 @@ pub fn resolve_header_footer_field_widths(
     Ok(())
 }
 
+/// The PAGE and NUMPAGES fields of a block, table cells included.
+fn page_fields<'a>(block: &'a LayoutBlock, fields: &mut Vec<&'a FieldRun>) {
+    match block {
+        LayoutBlock::Paragraph(paragraph) => {
+            fields.extend(paragraph.runs.iter().filter_map(|run| match run {
+                Run::Field(field) if matches!(field.field_type.as_str(), "PAGE" | "NUMPAGES") => {
+                    Some(field)
+                }
+                _ => None,
+            }));
+        }
+        LayoutBlock::Table(table) => {
+            for cell in table.rows.iter().flat_map(|row| &row.cells) {
+                for block in &cell.blocks {
+                    page_fields(block, fields);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn integral_position(value: Option<f64>) -> Option<i64> {
     let value = value?;
     (value.is_finite()
@@ -236,13 +251,7 @@ fn measure_field_text(
         id: BlockId::Num(0.0),
         para_id: None,
         runs: vec![Run::Field(FieldRun {
-            fmt: RunFormatting {
-                bold: field.fmt.bold,
-                italic: field.fmt.italic,
-                font_family: field.fmt.font_family.clone(),
-                font_size: field.fmt.font_size,
-                ..RunFormatting::default()
-            },
+            fmt: field.fmt.clone(),
             field_type: field.field_type.clone(),
             raw_type: None,
             instruction: None,
