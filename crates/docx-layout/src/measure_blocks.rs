@@ -249,15 +249,12 @@ impl FontRequirementCollector {
             implicit,
             used,
         } = self;
-        let implicit: Vec<_> = implicit
-            .into_iter()
-            .filter(|(key, _)| !named.contains_key(key))
-            .collect();
-        for (key, requirement) in named
-            .into_iter()
-            .filter(|(key, _)| used.contains(key))
-            .chain(implicit)
-        {
+        for (key, requirement) in implicit {
+            if !named.contains_key(&key) {
+                requirements.entry(key).or_insert(requirement);
+            }
+        }
+        for (key, requirement) in named {
             match requirements.entry(key) {
                 Entry::Occupied(mut kept) => {
                     let scripts = &mut kept.get_mut().scripts;
@@ -267,9 +264,10 @@ impl FontRequirementCollector {
                         }
                     }
                 }
-                Entry::Vacant(slot) => {
+                Entry::Vacant(slot) if used.contains(slot.key()) => {
                     slot.insert(requirement);
                 }
+                Entry::Vacant(_) => {}
             }
         }
     }
@@ -468,6 +466,8 @@ fn collect_paragraph_font_requirements(
             None => run_family,
         };
         collector.reach(unnamed, bold, italic, scripts);
+        // An empty text run takes its metrics from the run's family alone.
+        collector.reach(run_family, bold, italic, scripts);
         if slot_use.east_asia {
             collector.reach(
                 slots
@@ -4131,6 +4131,53 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn collects_the_run_family_of_an_empty_text_run() {
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "p", "attrs": {"defaultFontFamily": "Arial"},
+            "runs": [
+                {
+                    "kind": "text", "text": "", "bold": true,
+                    "fontSlots": {"hAnsi": "Aptos", "cs": "Calibri"}
+                },
+                {"kind": "text", "text": "Latin", "fontFamily": "Arial"}
+            ]
+        }))
+        .unwrap();
+        let keys: Vec<_> = collect_font_requirements([&block], "Calibri")
+            .into_iter()
+            .map(|requirement| requirement.key)
+            .collect();
+
+        assert!(keys.contains(&"calibri|1|0".to_owned()), "{keys:?}");
+    }
+
+    #[test]
+    fn collecting_into_a_map_keeps_scripts_of_an_existing_requirement() {
+        let paragraph = |id: &str, text: &str, mut run: Value| -> LayoutBlock {
+            run["kind"] = json!("text");
+            run["text"] = json!(text);
+            serde_json::from_value(json!({"kind": "paragraph", "id": id, "runs": [run]})).unwrap()
+        };
+        let mut requirements = BTreeMap::new();
+        collect_font_requirements_into(
+            [&paragraph("sc", "漢字", json!({"fontFamily": "Arial"}))],
+            "Calibri",
+            &mut requirements,
+        );
+        collect_font_requirements_into(
+            [&paragraph(
+                "jp",
+                "かな",
+                json!({"fontFamily": "Aptos", "fontSlots": {"cs": "Arial"}}),
+            )],
+            "Calibri",
+            &mut requirements,
+        );
+
+        assert_eq!(requirements["arial|0|0"].scripts, ["cjk-sc", "cjk-jp"]);
     }
 
     #[test]
