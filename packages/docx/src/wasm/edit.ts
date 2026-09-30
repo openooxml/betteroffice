@@ -19,6 +19,11 @@ import wasmInit, {
   list_docx_content_controls_json,
   render_docx_markdown_json,
   render_docx_markdown_with_pages_json,
+  set_wasm_heap_limit,
+  wasm_failed_allocation_bytes,
+  wasm_heap_counted,
+  wasm_live_bytes,
+  wasm_peak_bytes,
 } from './generated/edit/docx_edit.js';
 import { createWasmModuleState, type WasmAsyncInput } from './loadWasmAsset';
 
@@ -28,11 +33,28 @@ const state = createWasmModuleState({
   assetUrl: () => new URL('./generated/edit/docx_edit_bg.wasm', import.meta.url),
   initAsync: wasmInit,
   initSync,
+  heap: () =>
+    wasm_heap_counted()
+      ? {
+          liveBytes: wasm_live_bytes(),
+          peakBytes: wasm_peak_bytes(),
+          failedAllocationBytes: wasm_failed_allocation_bytes(),
+        }
+      : undefined,
 });
 
 /** Load + instantiate the editing-core wasm (browser path). Idempotent. */
 export function preloadEditWasm(input?: WasmAsyncInput): Promise<void> {
   return state.preload(input);
+}
+
+/**
+ * Caps the bytes the editing core in this thread may allocate at once; an
+ * allocation past the cap fails as if the memory were full. Undefined removes it.
+ */
+export function setEditWasmHeapLimit(bytes: number | undefined): void {
+  state.ensure();
+  set_wasm_heap_limit(bytes ?? Infinity);
 }
 
 /**

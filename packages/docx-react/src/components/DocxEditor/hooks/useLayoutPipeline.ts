@@ -14,11 +14,12 @@ import type {
   ResidentFontRequirement,
   ResidentMeasurementConfig,
 } from '@betteroffice/docx/layout';
-import type {
-  YrsLoc,
-  YrsRenderEnv,
-  YrsSession,
-  YrsStickyPosition,
+import {
+  ResidentWorkerOutOfMemoryError,
+  type YrsLoc,
+  type YrsRenderEnv,
+  type YrsSession,
+  type YrsStickyPosition,
 } from '@betteroffice/docx/yrs';
 
 import type { LayoutSelectionGate } from '../internals/LayoutSelectionGate';
@@ -423,18 +424,23 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             }
             applyComputation(computation);
             // The first pages paint now; the full layout replaces them.
-            void computation.complete?.then((complete) => {
-              if (pass !== passRef.current || sessionRef.current !== session) return;
-              if (complete && readSessionVersion(session) === sourceVersion) {
-                // Nothing the user did changed: keep their viewport.
-                applyComputation(complete, 'remote');
-              } else {
-                layOutHere();
-              }
-            });
+            void computation.complete?.then(
+              (complete) => {
+                if (pass !== passRef.current || sessionRef.current !== session) return;
+                if (complete && readSessionVersion(session) === sourceVersion) {
+                  // Nothing the user did changed: keep their viewport.
+                  applyComputation(complete, 'remote');
+                } else {
+                  layOutHere();
+                }
+              },
+              () => {}
+            );
           },
           (error: unknown) => {
             if (pass !== passRef.current) return;
+            // The display reports a worker out of memory; nothing lays out here.
+            if (error instanceof ResidentWorkerOutOfMemoryError) return;
             console.error('[PagedEditor] Layout pipeline error:', error);
             onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
           }

@@ -497,6 +497,32 @@ scrolling do not change it. With `expectLayoutVersion` the editor never lays out
 again and a newer document is refused as `stale-document`. The promise rejects when
 the document is replaced meanwhile.
 
+## Memory
+
+Each wasm32 memory holds at most 4 GiB. `DocxEditorRef.getMemoryStats()` reports
+the editor's wasm memories on the main thread and in its resident worker: each
+module's memory size, which only grows and so is also its high-water mark, and for
+the editing core the bytes allocated now, the most allocated at once, and the size
+of an allocation that failed. `onMemoryPressure` is called when the fullest memory
+crosses a `memoryBudget` level, 75% and 90% of 4 GiB by default, and when it drops
+back; it stays silent below the warning level. The editing core counts by its
+allocated bytes and the other modules by their memory size.
+
+```tsx
+<DocxEditor
+  documentBuffer={bytes}
+  onMemoryPressure={({ level, stats }) => report(level, stats)}
+/>
+```
+
+`memoryBudget.workerLimitBytes` caps what the resident worker's editing core may
+allocate at once; an allocation past it fails as if the memory were full. A worker
+that runs out of memory is replaced by a fresh one once. If that one runs out too,
+the editor reports `ResidentWorkerOutOfMemoryError` from `@betteroffice/docx/yrs`
+through `onError`, with the worker's memories at that point, and stops rendering
+rather than moving the work to the main thread. Any other worker failure moves the
+work to the main thread.
+
 ## Framework notes
 
 Import `@betteroffice/docx-react/styles.css` once at the entry/page/layout level.
