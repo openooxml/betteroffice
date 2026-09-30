@@ -1353,6 +1353,49 @@ mod pagination_rule_tests {
     }
 
     #[test]
+    fn balanced_columns_with_an_internal_float_band_stay_on_one_page() {
+        let mut value = input(vec![paragraph(1, 16, 20.0, json!({}))]);
+        value.options.page_size = Some(crate::types::Size { w: 500.0, h: 300.0 });
+        value.options.columns = Some(
+            serde_json::from_value(json!({
+                "count": 2, "gap": 20,
+            }))
+            .unwrap(),
+        );
+        value.options.section_page_float_bands = Some(
+            serde_json::from_value(json!([{
+                "default": [{"top": 70, "bottom": 110}],
+            }]))
+            .unwrap(),
+        );
+
+        let result = layout_document(&mut value).unwrap();
+
+        assert_eq!(result.pages.len(), 1);
+        let fragments: Vec<_> = result.pages[0]
+            .fragments
+            .iter()
+            .filter_map(|fragment| match fragment {
+                Fragment::Paragraph(paragraph) => Some(paragraph),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            fragments
+                .iter()
+                .map(|p| p.to_line - p.from_line)
+                .sum::<usize>(),
+            16
+        );
+        assert!(fragments.iter().any(|p| p.x != fragments[0].x));
+        assert!(
+            fragments
+                .iter()
+                .all(|p| p.y + p.height <= 70.0 || p.y >= 110.0)
+        );
+    }
+
+    #[test]
     fn a_standalone_break_paragraph_suppresses_leading_spacing_but_a_column_break_preserves_it() {
         let mut value = input(vec![
             paragraph(1, 1, 10.0, json!({})),

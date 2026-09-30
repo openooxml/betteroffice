@@ -806,6 +806,7 @@ mod tests {
         Page {
             number,
             fragments: Vec::new(),
+            body_margins: None,
             margins: PageMargins {
                 top: 96.0,
                 right: 96.0,

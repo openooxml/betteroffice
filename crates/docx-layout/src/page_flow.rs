@@ -354,12 +354,27 @@ impl Paginator {
                     None
                 }
             });
-        let mut margins = variant.map_or_else(
+        variant.map_or_else(
             || self.margins.clone(),
             |variant| effective_margins(variant.clone()),
-        );
-        self.fold_edge_float_bands(&mut margins, opens_section, page_number);
-        margins
+        )
+    }
+
+    fn page_geometry(
+        &self,
+        opens_section: bool,
+        page_number: u32,
+    ) -> (PageMargins, Option<PageMargins>) {
+        let mut body_margins = self.page_margins(opens_section, page_number);
+        let margins = self
+            .section_page_float_bands
+            .get(self.section_index)
+            .and_then(|bands| bands.anchor_margins.clone())
+            .map(effective_margins)
+            .unwrap_or_else(|| body_margins.clone());
+        self.fold_edge_float_bands(&mut body_margins, opens_section, page_number);
+        let body_margins = (body_margins != margins).then_some(body_margins);
+        (margins, body_margins)
     }
 
     /// Moves a page's body edge past float bands that cover it, so a band at
@@ -457,12 +472,15 @@ impl Paginator {
         };
         let page_index = self.states[idx].page_index;
         let number = self.pages[page_index].number;
-        let margins = self.page_margins(self.opens_section[idx], number);
-        let content_top = margins.top;
-        let content_limit = self.page_size.h - margins.bottom - self.footnote_reservation(number);
+        let (margins, body_margins) = self.page_geometry(self.opens_section[idx], number);
+        let flow_margins = body_margins.as_ref().unwrap_or(&margins);
+        let content_top = flow_margins.top;
+        let content_limit =
+            self.page_size.h - flow_margins.bottom - self.footnote_reservation(number);
         self.float_bands[idx] = self.page_float_bands(self.opens_section[idx], number);
         self.pages[page_index].size = self.page_size.clone();
         self.pages[page_index].margins = margins;
+        self.pages[page_index].body_margins = body_margins;
         self.pages[page_index].columns = (self.columns.count > 1.0).then(|| self.columns.clone());
         self.pages[page_index].region_section_index = self.section_index;
         let state = &mut self.states[idx];
@@ -505,7 +523,8 @@ impl Paginator {
             return;
         };
         let page = &self.pages[self.states[idx].page_index];
-        if self.page_margins(self.opens_section[idx], page.number) != page.margins
+        if self.page_geometry(self.opens_section[idx], page.number)
+            != (page.margins.clone(), page.body_margins.clone())
             || self.page_float_bands(self.opens_section[idx], page.number) != self.float_bands[idx]
         {
             self.restamp_pristine_page();
@@ -521,16 +540,18 @@ impl Paginator {
         self.section_started = true;
         self.continued_parity_offset = self.displayed_parity_offset;
         self.displayed_parity_offset = self.page_parity_offset(opens_section, page_number);
-        let margins = self.page_margins(opens_section, page_number);
+        let (margins, body_margins) = self.page_geometry(opens_section, page_number);
         let float_bands = self.page_float_bands(opens_section, page_number);
-        let content_top = margins.top;
+        let flow_margins = body_margins.as_ref().unwrap_or(&margins);
+        let content_top = flow_margins.top;
         let footnote_height = self.footnote_reservation(page_number);
-        let page_content_bottom = self.page_size.h - margins.bottom - footnote_height;
+        let page_content_bottom = self.page_size.h - flow_margins.bottom - footnote_height;
 
         let page = Page {
             number: page_number,
             fragments: Vec::new(),
             margins,
+            body_margins,
             size: self.page_size.clone(),
             orientation: None,
             section_index: None,
@@ -824,8 +845,8 @@ impl Paginator {
         };
 
         let page = &self.pages[page_index];
-        let content_limit =
-            page.size.h - page.margins.bottom - self.footnote_reservation(page.number);
+        let margins = page.body_margins.as_ref().unwrap_or(&page.margins);
+        let content_limit = page.size.h - margins.bottom - self.footnote_reservation(page.number);
         self.column_region_top = self.column_region_bottom.max(self.states[idx].pen_y);
         self.column_region_bottom = self.column_region_top;
         let state = &mut self.states[idx];
@@ -1006,6 +1027,13 @@ impl crate::column_balancing::ColumnBalancePaginator for Paginator {
     fn set_content_limit(&mut self, value: f64) {
         let idx = self.get_current();
         self.states[idx].content_limit = value;
+    }
+
+    fn has_float_band_in_region(&mut self, top: f64, bottom: f64) -> bool {
+        let idx = self.get_current();
+        self.float_bands[idx]
+            .iter()
+            .any(|band| band.top < bottom && band.bottom > top)
     }
 }
 

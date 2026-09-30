@@ -751,12 +751,13 @@ pub fn attach_note_areas(
                 groups.set(content.note_kind, vec![content]);
             }
         }
-        let content_bottom = page.size.h - page.margins.bottom;
+        let margins = page.body_margins.as_ref().unwrap_or(&page.margins);
+        let content_bottom = page.size.h - margins.bottom;
         let last_body_bottom = page
             .fragments
             .iter()
             .map(fragment_bottom)
-            .fold(page.margins.top, f64::max);
+            .fold(margins.top, f64::max);
         let mut bottom_cursor = content_bottom;
         let mut beneath_text_cursor = last_body_bottom;
         let mut areas = Vec::new();
@@ -821,6 +822,7 @@ mod tests {
         Page {
             number,
             fragments,
+            body_margins: None,
             margins: PageMargins {
                 top: 96.0,
                 right: 96.0,

@@ -655,6 +655,7 @@ fn extend_input_for_header_footer(
                         .title_pg
                         .then(|| float_bands(HeaderFooterType::First)),
                     even: even_and_odd.then(|| float_bands(HeaderFooterType::Even)),
+                    anchor_margins: Some(margins.clone()),
                 },
             )
         })

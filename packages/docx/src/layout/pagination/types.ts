@@ -1465,6 +1465,7 @@ export type Page = {
   fragments: Fragment[];
   /** Page margins. */
   margins: PageMargins;
+  bodyMargins?: PageMargins;
   /** Page size (width, height). */
   size: { w: number; h: number };
   /** Page orientation. */

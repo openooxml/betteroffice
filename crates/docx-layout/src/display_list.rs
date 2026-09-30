@@ -2760,6 +2760,8 @@ pub(crate) struct PageIn {
     pub(crate) size: SizeIn,
     #[serde(default)]
     pub(crate) margins: MarginsIn,
+    #[serde(default)]
+    body_margins: Option<MarginsIn>,
     /// 1-based page number (canonical layouts carry it; falls back to index+1)
     #[serde(default)]
     pub(crate) number: Option<u64>,
@@ -4206,8 +4208,9 @@ fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
     if columns.separator != Some(true) || columns.count <= 1 {
         return;
     }
-    let content_width = (page.size.w - page.margins.left - page.margins.right).max(0.0);
-    let content_bottom = page.size.h - page.margins.bottom;
+    let margins = page.body_margins.as_ref().unwrap_or(&page.margins);
+    let content_width = (page.size.w - margins.left - margins.right).max(0.0);
+    let content_bottom = page.size.h - margins.bottom;
     if columns.equal_width == Some(false) && !columns.columns.is_empty() {
         let mut cursor = page.margins.left;
         for index in 0..columns.count.saturating_sub(1) {
@@ -4224,7 +4227,7 @@ fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
             cursor += width;
             prims.push(Primitive::Line(LinePrimitive {
                 x1: px(cursor + space / 2.0),
-                y1: px(page.margins.top),
+                y1: px(margins.top),
                 x2: px(cursor + space / 2.0),
                 y2: px(content_bottom),
                 stroke_width: px(0.5),
@@ -4250,7 +4253,7 @@ fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
             + columns.gap / 2.0;
         prims.push(Primitive::Line(LinePrimitive {
             x1: px(x),
-            y1: px(page.margins.top),
+            y1: px(margins.top),
             x2: px(x),
             y2: px(content_bottom),
             stroke_width: px(0.5),
@@ -4268,11 +4271,12 @@ fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
 
 /// Exact body content/column boxes for interaction queries.
 fn page_content_geometry(page: &PageIn) -> (DisplayBounds, Vec<DisplayBounds>) {
-    let content_width = (page.size.w - page.margins.left - page.margins.right).max(0.0);
-    let content_height = (page.size.h - page.margins.top - page.margins.bottom).max(0.0);
+    let margins = page.body_margins.as_ref().unwrap_or(&page.margins);
+    let content_width = (page.size.w - margins.left - margins.right).max(0.0);
+    let content_height = (page.size.h - margins.top - margins.bottom).max(0.0);
     let content = DisplayBounds {
         x: px(page.margins.left),
-        y: px(page.margins.top),
+        y: px(margins.top),
         width: px(content_width),
         height: px(content_height),
     };
@@ -4325,7 +4329,7 @@ fn page_content_geometry(page: &PageIn) -> (DisplayBounds, Vec<DisplayBounds>) {
         for index in 0..count {
             bounds.push(DisplayBounds {
                 x: px(x),
-                y: px(page.margins.top),
+                y: px(margins.top),
                 width: px(widths[index]),
                 height: px(content_height),
             });
@@ -4343,7 +4347,7 @@ fn page_content_geometry(page: &PageIn) -> (DisplayBounds, Vec<DisplayBounds>) {
     let bounds = (0..count)
         .map(|index| DisplayBounds {
             x: px(page.margins.left + index as f64 * (width + gap)),
-            y: px(page.margins.top),
+            y: px(margins.top),
             width: px(width),
             height: px(content_height),
         })
@@ -4549,13 +4553,14 @@ fn emit_note_item(
 }
 
 fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
+    let margins = page.body_margins.as_ref().unwrap_or(&page.margins);
     let content_width = (page.size.w - page.margins.left - page.margins.right).max(1.0);
     let mut regions = Vec::with_capacity(page.note_areas.len());
     for area in &page.note_areas {
         let kind = area.kind.as_deref().unwrap_or("footnote");
         let y = area
             .y
-            .unwrap_or(page.size.h - page.margins.bottom - area.height.unwrap_or(0.0));
+            .unwrap_or(page.size.h - margins.bottom - area.height.unwrap_or(0.0));
         let columns = area.columns.unwrap_or(1).max(1) as usize;
         let column_width =
             ((content_width - (columns - 1) as f64 * NOTE_COLUMN_GAP_PX) / columns as f64).max(1.0);

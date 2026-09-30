@@ -1975,6 +1975,9 @@ pub struct SectionPageFloatBands {
     pub default: Vec<PageFloatBand>,
     pub first: Option<Vec<PageFloatBand>>,
     pub even: Option<Vec<PageFloatBand>>,
+    /// Authored margins for float anchors.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_margins: Option<PageMargins>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -2275,6 +2278,9 @@ pub struct Page {
     pub number: u32,
     pub fragments: Vec<Fragment>,
     pub margins: PageMargins,
+    /// Body flow margins when they differ from the anchor frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_margins: Option<PageMargins>,
     pub size: Size,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub orientation: Option<String>,

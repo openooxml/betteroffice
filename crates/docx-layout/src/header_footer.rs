@@ -119,8 +119,11 @@ pub fn measure_header_footer(
     }
     let mut blocks = blocks;
     apply_contextual_spacing_blocks(&mut blocks);
-    float_detached_top_and_bottom_images(&mut blocks);
-    let measures = measure_blocks(&mut blocks, content_width, config)?;
+    let mut detached = float_detached_top_and_bottom_images(&mut blocks);
+    let mut measures = measure_blocks(&mut blocks, content_width, config)?;
+    while restore_overlapping_detached_images(&mut blocks, &measures, &mut detached, metrics) {
+        measures = measure_blocks(&mut blocks, content_width, config)?;
+    }
     let height = measures.iter().map(extent_height).sum();
     let mut flow = HeaderFooterFlow::default();
     for (block, measure) in blocks.iter().zip(&measures) {
@@ -154,16 +157,16 @@ pub fn measure_header_footer(
     }))
 }
 
-/// Floats top-and-bottom images positioned away from their paragraph (relative
-/// to the page or a margin), which measurement would otherwise stack under
-/// the paragraph's text and so count in the band's flow height. Their
-/// exclusion band keeps body text clear of them instead.
-fn float_detached_top_and_bottom_images(blocks: &mut [LayoutBlock]) {
-    for block in blocks {
+/// Floats detached images, retaining their previous modes for overlap checks.
+fn float_detached_top_and_bottom_images(
+    blocks: &mut [LayoutBlock],
+) -> Vec<(usize, usize, Option<String>)> {
+    let mut detached_images = Vec::new();
+    for (block_index, block) in blocks.iter_mut().enumerate() {
         let LayoutBlock::Paragraph(paragraph) = block else {
             continue;
         };
-        for run in &mut paragraph.runs {
+        for (run_index, run) in paragraph.runs.iter_mut().enumerate() {
             let Run::Image(image) = run else {
                 continue;
             };
@@ -173,11 +176,100 @@ fn float_detached_top_and_bottom_images(blocks: &mut [LayoutBlock]) {
                 .and_then(|position| position.vertical.as_ref())
                 .and_then(|vertical| vertical.relative_to.as_deref())
                 .is_some_and(|relative| !matches!(relative, "paragraph" | "line"));
-            if detached && image.wrap_type.as_deref() == Some("topAndBottom") {
-                image.display_mode = Some("float".to_owned());
+            if detached
+                && image.wrap_type.as_deref() == Some("topAndBottom")
+                && image.display_mode.as_deref() != Some("float")
+            {
+                let previous = image.display_mode.replace("float".to_owned());
+                detached_images.push((block_index, run_index, previous));
             }
         }
     }
+    detached_images
+}
+
+fn restore_overlapping_detached_images(
+    blocks: &mut [LayoutBlock],
+    measures: &[BlockExtent],
+    detached: &mut Vec<(usize, usize, Option<String>)>,
+    metrics: HeaderFooterMetrics<'_>,
+) -> bool {
+    if detached.is_empty() {
+        return false;
+    }
+    let mut flow = HeaderFooterFlow::default();
+    let bounds: Vec<_> = blocks
+        .iter()
+        .zip(measures)
+        .map(|(block, measure)| {
+            if !contributes_to_flow(block) {
+                return None;
+            }
+            let (before, after) = block_spacing(block);
+            let height = (extent_height(measure) - before - after).max(0.0);
+            let top = flow.place(height, before, after);
+            Some((top, top + height))
+        })
+        .collect();
+    let flow_height = flow.height();
+    let distance = match metrics.kind {
+        HeaderFooterKind::Header => metrics.margins.header,
+        HeaderFooterKind::Footer => metrics.margins.footer,
+    }
+    .unwrap_or(DEFAULT_HF_DISTANCE_PX);
+    let flow_top = match metrics.kind {
+        HeaderFooterKind::Header => distance,
+        HeaderFooterKind::Footer => metrics.page_size.h - distance - flow_height,
+    };
+    let mut margins = metrics.margins.clone();
+    margins.top = margins.top.abs();
+    margins.bottom = margins.bottom.abs();
+    let mut restored = false;
+    detached.retain(|(block_index, run_index, previous)| {
+        let LayoutBlock::Paragraph(paragraph) = &blocks[*block_index] else {
+            return false;
+        };
+        let Run::Image(image) = &paragraph.runs[*run_index] else {
+            return false;
+        };
+        let vertical = image
+            .position
+            .as_ref()
+            .and_then(|position| position.vertical.as_ref())
+            .and_then(|vertical| vertical.relative_to.as_deref());
+        let known_frame =
+            matches!(vertical, Some("page" | "margin")) && image.rotation_bounds.is_none();
+        let top = (flow_top
+            + image_visual_top(
+                image,
+                0.0,
+                flow_height,
+                HeaderFooterMetrics {
+                    margins: &margins,
+                    ..metrics
+                },
+            ))
+        .min(metrics.page_size.h - image.height)
+        .max(0.0);
+        let bottom = top + image.height + image.dist_bottom.unwrap_or(0.0).max(0.0);
+        let top = top - image.dist_top.unwrap_or(0.0).max(0.0);
+        let overlaps = bounds[*block_index + 1..]
+            .iter()
+            .flatten()
+            .any(|&(y, end)| !known_frame || (flow_top + y < bottom && flow_top + end > top));
+        if overlaps {
+            let LayoutBlock::Paragraph(paragraph) = &mut blocks[*block_index] else {
+                unreachable!();
+            };
+            let Run::Image(image) = &mut paragraph.runs[*run_index] else {
+                unreachable!();
+            };
+            image.display_mode.clone_from(previous);
+            restored = true;
+        }
+        !overlaps
+    });
+    restored
 }
 
 pub fn resolve_header_footer_field_widths(
@@ -728,9 +820,185 @@ pub fn extend_body_margins(
 
 #[cfg(test)]
 mod tests {
+    use crate::display_list::{DisplayList, Primitive, build_display_list_json};
     use serde_json::json;
 
     use super::*;
+
+    fn header_with_image(
+        relative: &str,
+        offset: f64,
+        trailing_text: bool,
+    ) -> (HeaderFooterVariant, Size, PageMargins) {
+        let font_id = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = serde_json::from_value(json!({
+            "fontChains": {"liberation sans|0|0": [font_id]},
+            "defaults": {"fontFamily": "Liberation Sans", "fontSize": 12}
+        }))
+        .unwrap();
+        let mut blocks = vec![json!({
+            "kind": "paragraph", "id": "anchor",
+            "attrs": {"spacing": {"line": 16, "lineRule": "exact"}},
+            "runs": [
+                {"kind": "text", "text": "Anchor"},
+                {"kind": "image", "src": "image", "width": 100, "height": 100,
+                 "wrapType": "topAndBottom", "distTop": 0, "distBottom": 0,
+                 "position": {"vertical": {"relativeTo": relative, "posOffset": offset * 9525.0}}}
+            ]
+        })];
+        if trailing_text {
+            blocks.push(json!({
+                "kind": "paragraph", "id": "tail",
+                "attrs": {"spacing": {"line": 16, "lineRule": "exact"}},
+                "runs": [{"kind": "text", "text": "Tail"}]
+            }));
+        }
+        let size = Size { w: 500.0, h: 500.0 };
+        let margins = PageMargins {
+            top: 96.0,
+            right: 96.0,
+            bottom: 96.0,
+            left: 96.0,
+            header: Some(48.0),
+            footer: Some(48.0),
+        };
+        let variant = measure_header_footer(
+            "hf".to_owned(),
+            HeaderFooterKind::Header,
+            HeaderFooterType::Default,
+            0,
+            serde_json::from_value(json!(blocks)).unwrap(),
+            308.0,
+            HeaderFooterMetrics {
+                kind: HeaderFooterKind::Header,
+                page_size: &size,
+                margins: &margins,
+            },
+            &config,
+        )
+        .unwrap()
+        .unwrap();
+        (variant, size, margins)
+    }
+
+    #[test]
+    fn folded_body_margins_preserve_the_header_image_anchor() {
+        let (variant, size, margins) = header_with_image("margin", 0.0, false);
+        let bands = header_footer_float_bands(
+            &variant,
+            HeaderFooterMetrics {
+                kind: HeaderFooterKind::Header,
+                page_size: &size,
+                margins: &margins,
+            },
+        );
+        for body_top in [96.0_f64, 224.0] {
+            let mut input: crate::types::Input = serde_json::from_value(json!({
+                "measured": [{
+                    "block": {"kind": "paragraph", "id": "body",
+                              "runs": [
+                                  {"kind": "text", "text": "Body"},
+                                  {"kind": "image", "src": "body-image", "width": 100, "height": 100,
+                                   "displayMode": "float", "wrapType": "topAndBottom",
+                                   "position": {"vertical": {"relativeTo": "margin", "posOffset": 0}}}
+                              ]},
+                    "measure": {"kind": "paragraph", "totalHeight": 20,
+                                "lines": [{"headRun": 0, "headChar": 0, "tailRun": 0,
+                                           "tailChar": 4, "width": 40, "ascent": 15,
+                                           "descent": 5, "lineHeight": 20}]}
+                }],
+                "options": {"pageSize": size, "margins": margins,
+                            "sectionPageFloatBands": [{"default": bands, "anchorMargins": margins}]}
+            }))
+            .unwrap();
+            input.options.margins.as_mut().unwrap().top = body_top;
+            let expected_top = body_top.max(196.0);
+            let layout = crate::place::layout_document(&mut input).unwrap();
+            let page = &layout.pages[0];
+            assert_eq!(page.margins.top, 96.0);
+            assert_eq!(page.body_margins.as_ref().unwrap().top, expected_top);
+            let crate::types::Fragment::Paragraph(body) = &page.fragments[0] else {
+                panic!("paragraph expected");
+            };
+            assert!(body.y >= expected_top);
+            let display: DisplayList = serde_json::from_str(
+                &build_display_list_json(
+                    &json!({
+                        "measured": input.measured, "options": input.options, "layout": layout,
+                        "headersFooters": {"variants": [variant]}
+                    })
+                    .to_string(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let image = display.pages[0]
+                .header
+                .as_ref()
+                .unwrap()
+                .primitives
+                .iter()
+                .find_map(|primitive| match primitive {
+                    Primitive::Image(image) => Some(image),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(image.y.as_f64(), Some(96.0));
+            assert_eq!(image.y.as_f64().unwrap() + image.h.as_f64().unwrap(), 196.0);
+            assert_eq!(
+                display.pages[0].content_bounds.as_ref().unwrap().y.as_f64(),
+                Some(expected_top)
+            );
+            let body_image = display.pages[0]
+                .primitives
+                .iter()
+                .find_map(|primitive| match primitive {
+                    Primitive::Image(image) => Some(image),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(body_image.y.as_f64(), Some(96.0));
+        }
+    }
+
+    #[test]
+    fn detached_header_image_keeps_later_text_below_it() {
+        let (variant, _, margins) = header_with_image("page", 64.0, true);
+        let LayoutBlock::Paragraph(anchor) = &variant.measured[0].block else {
+            panic!("paragraph expected");
+        };
+        let Run::Image(image) = &anchor.runs[1] else {
+            panic!("image expected");
+        };
+        assert_ne!(image.display_mode.as_deref(), Some("float"));
+        let mut flow = HeaderFooterFlow::default();
+        let mut tail_top = 0.0;
+        for measured in &variant.measured {
+            let (before, after) = block_spacing(&measured.block);
+            tail_top = flow.place(
+                (extent_height(&measured.measure) - before - after).max(0.0),
+                before,
+                after,
+            );
+        }
+        assert!(margins.header.unwrap() + tail_top >= 164.0);
+    }
+
+    #[test]
+    fn detached_header_image_stays_floating_when_later_text_is_clear() {
+        let (variant, _, _) = header_with_image("page", 200.0, true);
+        let LayoutBlock::Paragraph(anchor) = &variant.measured[0].block else {
+            panic!("paragraph expected");
+        };
+        let Run::Image(image) = &anchor.runs[1] else {
+            panic!("image expected");
+        };
+        assert_eq!(image.display_mode.as_deref(), Some("float"));
+        assert_eq!(variant.flow_height, 32.0);
+    }
 
     #[test]
     fn empty_paragraph_after_table_reserves_header_footer_space() {
