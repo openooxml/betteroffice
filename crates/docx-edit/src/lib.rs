@@ -158,7 +158,6 @@ const PPR_INS: &str = "pPrIns";
 const PPR_DEL: &str = "pPrDel";
 /// Paragraph-property revision, stored as OOXML-compatible change records on the pilcrow map.
 const PPR_CHANGE: &str = "pPrChange";
-const JOIN_DONOR: &str = "_joinDonor";
 /// `_kind` of a hard-break embed.
 const BREAK_KIND: &str = "break";
 
@@ -1314,7 +1313,7 @@ fn segment_content<T: ReadTxn>(value: Out, txn: &T) -> SegmentContent {
             let values = map
                 .iter(txn)
                 .filter_map(|(key, value)| {
-                    if is_identity_key(key) || key == JOIN_DONOR {
+                    if is_identity_key(key) {
                         return None;
                     }
                     let Out::Any(value) = value else {

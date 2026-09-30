@@ -18,8 +18,7 @@
 //! paragraph's properties and paraId. That is the OOXML rule — the surviving
 //! `w:p` owns the properties — and it deliberately differs from a plain
 //! delete, which models a user removing a paragraph mark rather than a
-//! revision being applied. Deferred plain joins retain their donor rule.
-//! A story's FINAL pilcrow is never removed, because a
+//! revision being applied. A story's FINAL pilcrow is never removed, because a
 //! document always keeps its last paragraph mark; a join that would remove it
 //! clears the markers instead. A mark before a surviving block embed stays when
 //! paragraph content would otherwise interrupt the block, inheriting any pending
@@ -40,13 +39,11 @@ use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
 
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
 use crate::ops::table::resolve_table_row_revisions;
-use crate::ops::{
-    Chunk, ChunkKind, adopt_pilcrow, capture_pilcrow, inherit_block_revisions, snapshot,
-};
+use crate::ops::{Chunk, ChunkKind, inherit_block_revisions, snapshot};
 use crate::queries::revision_parts;
 use crate::{
-    DEL, EditCtx, EditingDoc, INS, JOIN_DONOR, PPR_CHANGE, PPR_DEL, PPR_INS, RevisionId,
-    StoryRange, check_range, story_ref,
+    DEL, EditCtx, EditingDoc, INS, PPR_CHANGE, PPR_DEL, PPR_INS, RevisionId, StoryRange,
+    check_range, story_ref,
 };
 
 /// What a resolve op targets.
@@ -128,7 +125,7 @@ fn restore_paragraph_properties(txn: &mut TransactionMut<'_>, map: &MapRef, chan
         for key in current.keys() {
             if previous.is_none_or(|prior| !prior.contains_key(key))
                 && !crate::is_identity_key(key)
-                && !matches!(key.as_str(), PPR_INS | PPR_DEL | PPR_CHANGE | JOIN_DONOR)
+                && !matches!(key.as_str(), PPR_INS | PPR_DEL | PPR_CHANGE)
             {
                 map.remove(txn, key);
             }
@@ -151,7 +148,7 @@ fn restore_paragraph_properties(txn: &mut TransactionMut<'_>, map: &MapRef, chan
     if let Some(previous) = previous {
         for (key, value) in previous {
             if !crate::is_identity_key(key)
-                && !matches!(key.as_str(), PPR_INS | PPR_DEL | PPR_CHANGE | JOIN_DONOR)
+                && !matches!(key.as_str(), PPR_INS | PPR_DEL | PPR_CHANGE)
             {
                 map.insert(txn, key.clone(), value.clone());
             }
@@ -280,31 +277,9 @@ fn resolve_story(
                             record(resolved, attr_ins.as_ref());
                         }
                     }
-                    if map_stamp(map, txn, JOIN_DONOR) == Some(Any::Bool(true))
-                        && let Some((_, survivor)) =
-                            crate::next_pilcrow(story, txn, chunk.start + 1)
-                    {
-                        let (donor_id, mut donor_props) = capture_pilcrow(map, txn);
-                        donor_props.retain(|(key, _)| {
-                            !matches!(key.as_str(), PPR_INS | PPR_DEL | JOIN_DONOR)
-                        });
-                        // The survivor keeps its own pending revisions and deferred join.
-                        donor_props.extend([PPR_INS, PPR_DEL, JOIN_DONOR].into_iter().filter_map(
-                            |key| {
-                                map_stamp(&survivor, txn, key).map(|value| (key.to_owned(), value))
-                            },
-                        ));
-                        adopt_pilcrow(txn, &survivor, &donor_id, &donor_props);
-                    }
                     story.remove_range(txn, chunk.start, 1);
                     removed += 1;
                     continue;
-                }
-                let deferred = Some(chunk.start) != final_pilcrow
-                    && boundary_revisions
-                        .is_some_and(|revisions| revisions.iter().any(Option::is_some));
-                if !deferred {
-                    map.remove(txn, JOIN_DONOR);
                 }
                 for (ppr_key, attr_key, ppr_stamp, attr_stamp) in [
                     (PPR_INS, INS, ppr_ins, attr_ins),

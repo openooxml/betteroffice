@@ -32,13 +32,12 @@ use crate::identity::{self, IdAllocator, PARA_ORIGIN, SOURCE_PARA_ID};
 use crate::op::{OpError, OpResult, ParaBounds, Receipt, SplitReceipt, para_bounds};
 use crate::ops::{
     adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow, block_embed_at,
-    capture_pilcrow, inherit_block_revisions, paragraph_content_before, revision_id_in_range,
-    snapshot_range,
+    capture_pilcrow, paragraph_content_before, revision_id_in_range, snapshot_range,
 };
 use crate::{
-    DEL, EditCtx, EditingDoc, JOIN_DONOR, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS,
-    ParagraphId, ParagraphIdOrigin, Position, StoryRange, check_position, insertion_attrs,
-    next_pilcrow, revision_value, story_ref,
+    DEL, EditCtx, EditingDoc, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, ParagraphId,
+    ParagraphIdOrigin, Position, StoryRange, check_position, insertion_attrs, next_pilcrow,
+    revision_value, story_ref,
 };
 
 /// The paragraph attributes a style definition owns. Applying a style resets
@@ -403,10 +402,6 @@ impl EditingDoc {
             })?;
         let (first_para_id, props) = capture_pilcrow(&orig_map, &txn);
         let second_half_empty = orig_index == at.index;
-        let deferred_split = matches!(
-            orig_map.get(&txn, JOIN_DONOR),
-            Some(Out::Any(Any::Bool(true)))
-        );
 
         let ins = revision_id
             .as_ref()
@@ -420,9 +415,6 @@ impl EditingDoc {
         new_pilcrow.insert(&mut txn, KIND_KEY, crate::PILCROW_KIND);
         new_pilcrow.insert(&mut txn, PARA_ID, first_para_id.as_str());
         for (key, value) in &props {
-            if deferred_split && matches!(key.as_str(), PPR_INS | PPR_DEL) {
-                continue;
-            }
             new_pilcrow.insert(&mut txn, key.clone(), value.clone());
         }
         if let Some(id) = revision_id.as_ref() {
@@ -529,14 +521,11 @@ impl EditingDoc {
         let story = boundary.story.clone();
         let pilcrow_index = boundary.bounds.pilcrow;
         let needs_boundary = block_embed_at(&story, &txn, pilcrow_index + 1)
-            && paragraph_content_before(&story, &txn, pilcrow_index);
-        let block_revisions = needs_boundary
-            .then(|| {
-                snapshot_range(&story, &txn, pilcrow_index + 1, pilcrow_index + 2)
-                    .first()
-                    .and_then(|chunk| chunk.block_revisions(&txn))
-            })
-            .flatten();
+            && paragraph_content_before(&story, &txn, pilcrow_index)
+            && snapshot_range(&story, &txn, pilcrow_index + 1, pilcrow_index + 2)
+                .first()
+                .and_then(|chunk| chunk.block_revisions(&txn))
+                .is_none_or(|revisions| revisions.iter().all(Option::is_none));
         let own_insert = ctx
             .is_suggesting()
             .then(|| paragraph_revision_id(&boundary.map, &txn, PPR_INS, &ctx.author))
@@ -580,22 +569,9 @@ impl EditingDoc {
                         );
                     }
                 }
-                if let Some(revisions) = block_revisions.as_ref()
-                    && revisions.iter().any(Option::is_some)
-                {
-                    inherit_block_revisions(
-                        &mut txn,
-                        &story,
-                        pilcrow_index,
-                        &boundary.map,
-                        revisions,
-                    );
-                    boundary.map.insert(&mut txn, JOIN_DONOR, Any::Bool(true));
-                }
             } else {
                 let (donor_id, mut donor_props) = capture_pilcrow(&boundary.map, &txn);
-                donor_props
-                    .retain(|(key, _)| !matches!(key.as_str(), PPR_INS | PPR_DEL | JOIN_DONOR));
+                donor_props.retain(|(key, _)| !matches!(key.as_str(), PPR_INS | PPR_DEL));
                 story.remove_range(&mut txn, pilcrow_index, 1);
                 adopt_pilcrow(&mut txn, &survivor.map, &donor_id, &donor_props);
             }
@@ -612,23 +588,6 @@ impl EditingDoc {
             let (donor_id, donor_props) = capture_pilcrow(&boundary.map, &txn);
             story.remove_range(&mut txn, pilcrow_index, 1);
             adopt_pilcrow(&mut txn, &survivor.map, &donor_id, &donor_props);
-        } else if let Some(revisions) = block_revisions
-            && revisions.iter().any(Option::is_some)
-        {
-            for key in [PPR_INS, PPR_DEL] {
-                boundary.map.remove(&mut txn, key);
-            }
-            story.format(
-                &mut txn,
-                pilcrow_index,
-                1,
-                Attrs::from([
-                    (Arc::from(crate::INS), Any::Null),
-                    (Arc::from(DEL), Any::Null),
-                ]),
-            );
-            inherit_block_revisions(&mut txn, &story, pilcrow_index, &boundary.map, &revisions);
-            boundary.map.insert(&mut txn, JOIN_DONOR, Any::Bool(true));
         }
         let caret = crate::op::loc_range_in_txn(
             &boundary.story_id,
@@ -1254,8 +1213,7 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
 fn paragraph_formatting<T: ReadTxn>(map: &MapRef, txn: &T) -> HashMap<String, Any> {
     map.iter(txn)
         .filter_map(|(key, value)| {
-            if crate::is_identity_key(key)
-                || matches!(key.as_ref(), PPR_INS | PPR_DEL | PPR_CHANGE | JOIN_DONOR)
+            if crate::is_identity_key(key) || matches!(key.as_ref(), PPR_INS | PPR_DEL | PPR_CHANGE)
             {
                 return None;
             }

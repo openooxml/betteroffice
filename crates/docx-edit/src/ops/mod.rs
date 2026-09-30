@@ -274,13 +274,13 @@ pub(crate) fn last_pilcrow<T: ReadTxn>(story: &TextRef, txn: &T) -> Option<(u32,
     last
 }
 
-/// Captures pilcrow properties and paraId, excluding internal join state.
+/// Captures every pilcrow property except the schema discriminator, plus the paraId.
 pub(crate) fn capture_pilcrow<T: ReadTxn>(map: &MapRef, txn: &T) -> (String, Vec<(String, Any)>) {
     let para_id = map_string(map, txn, PARA_ID).unwrap_or_default();
     let props = map
         .iter(txn)
         .filter_map(|(key, value)| {
-            if matches!(key, KIND_KEY | PARA_ID | crate::JOIN_DONOR) {
+            if matches!(key, KIND_KEY | PARA_ID) {
                 return None;
             }
             let Out::Any(value) = value else {

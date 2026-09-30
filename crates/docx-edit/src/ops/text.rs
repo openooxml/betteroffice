@@ -10,8 +10,8 @@ use crate::format::{FormatPolicy, HYPERLINK, PROTECTED_ATTRS};
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
 use crate::ops::{
     Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
-    block_embed_at, capture_pilcrow, inherit_block_revisions, last_pilcrow,
-    paragraph_content_before, snapshot_range, utf16_len,
+    block_embed_at, capture_pilcrow, last_pilcrow, paragraph_content_before, snapshot_range,
+    utf16_len,
 };
 use crate::{
     BREAK_KIND, DEL, EditCtx, EditingDoc, INS, KIND_KEY, Position, StoryRange, check_position,
@@ -217,18 +217,12 @@ pub(crate) fn plain_delete(
                 .filter(|_| {
                     block_embed_at(story, txn, end)
                         && (replacement_has_content || paragraph_content_before(story, txn, start))
+                        && snapshot_range(story, txn, end, end.saturating_add(1))
+                            .first()
+                            .and_then(|chunk| chunk.block_revisions(txn))
+                            .is_none_or(|revisions| revisions.iter().all(Option::is_none))
                 })
                 .cloned()
-        });
-    let block_revisions = protected_pilcrow
-        .as_ref()
-        .filter(|(index, _)| final_pilcrow.as_ref().is_none_or(|(last, _)| index != last))
-        .and_then(|(_, map)| {
-            snapshot_range(story, txn, end, end.saturating_add(1))
-                .first()
-                .and_then(|chunk| chunk.block_revisions(txn))
-                .filter(|revisions| revisions.iter().any(Option::is_some))
-                .map(|revisions| (map.clone(), revisions))
         });
     let (removed, survivor) = if let Some((index, map)) = protected_pilcrow {
         if end > index + 1 {
@@ -253,19 +247,6 @@ pub(crate) fn plain_delete(
         if survivor_id.as_deref() != Some(donor_id.as_str()) {
             adopt_pilcrow(txn, &survivor, &donor_id, &donor_props);
         }
-    }
-    if let Some((map, revisions)) = block_revisions {
-        for key in [crate::PPR_INS, crate::PPR_DEL] {
-            map.remove(txn, key);
-        }
-        story.format(
-            txn,
-            start,
-            1,
-            Attrs::from([(Arc::from(INS), Any::Null), (Arc::from(DEL), Any::Null)]),
-        );
-        inherit_block_revisions(txn, story, start, &map, &revisions);
-        map.insert(txn, crate::JOIN_DONOR, Any::Bool(true));
     }
     DeleteOutcome { removed }
 }

@@ -2474,7 +2474,6 @@ fn flush_paragraph<T: ReadTxn>(
 fn pilcrow_values<T: ReadTxn>(pilcrow: &MapRef, txn: &T) -> BTreeMap<String, Any> {
     pilcrow
         .iter(txn)
-        .filter(|(key, _)| *key != crate::JOIN_DONOR)
         .filter_map(|(key, value)| match value {
             Out::Any(value) => Some((key.to_string(), value)),
             _ => None,

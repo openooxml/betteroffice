@@ -14,8 +14,8 @@ use docx_edit::{
     TableLocator, TableRange,
 };
 use docx_layout::types::LayoutBlock;
-use yrs::types::{Attrs, text::YChange};
-use yrs::{Any, Map, Out, ReadTxn, Text, Transact};
+use yrs::Any;
+use yrs::types::Attrs;
 
 const DATE: &str = "2026-07-14T12:00:00Z";
 const BLOCK_DATE: &str = "2026-07-15T12:00:00Z";
@@ -56,26 +56,6 @@ fn stamp(id: &str) -> Any {
         ("author".to_owned(), Any::from("Remote")),
         ("date".to_owned(), Any::from(DATE)),
     ])))
-}
-
-fn join_donor(doc: &EditingDoc) -> Option<Any> {
-    let txn = doc.yrs_doc().transact();
-    let stories = txn.get_map("stories").unwrap();
-    let Some(Out::YText(story)) = stories.get(&txn, "body") else {
-        unreachable!()
-    };
-    for diff in story.diff(&txn, YChange::identity) {
-        if let Out::YMap(map) = diff.insert
-            && matches!(map.get(&txn, "_kind"),
-                Some(Out::Any(Any::String(kind))) if kind.as_ref() == "pilcrow")
-        {
-            return match map.get(&txn, "_joinDonor") {
-                Some(Out::Any(value)) => Some(value),
-                _ => None,
-            };
-        }
-    }
-    None
 }
 
 fn plain_join(doc: &EditingDoc, para: &str, operation: &str) {
@@ -230,6 +210,24 @@ fn assert_inherited_block_revision(doc: &EditingDoc, id: &str, insertion: bool) 
     );
 }
 
+fn assert_only_pending_block_revision(doc: &EditingDoc, id: &str) {
+    let revisions = doc.list_revisions().unwrap();
+    assert_eq!(revisions.len(), 1);
+    let change = &revisions[0].change;
+    assert_eq!(change.revision_id, id);
+    assert_eq!(change.author, "Bob");
+    assert_eq!(change.date, BLOCK_DATE);
+    assert!(matches!(
+        change.kind,
+        ChangeKind::Insertion
+            | ChangeKind::Deletion
+            | ChangeKind::TableInsertion
+            | ChangeKind::TableDeletion
+            | ChangeKind::TableRowInsertion
+            | ChangeKind::TableRowDeletion
+    ));
+}
+
 fn assert_pending_blocks_resolve_in_either_order(accept: bool) {
     for kind in ["table", "blockSdt", "pageBreak", "columnBreak"] {
         for mark_first in [false, true] {
@@ -355,7 +353,7 @@ fn resolving_pending_block_ranges_and_all_changes_still_joins() {
 }
 
 #[test]
-fn plain_edits_and_split_retraction_link_retained_marks_to_pending_blocks() {
+fn plain_edits_and_split_retraction_remove_marks_before_pending_blocks() {
     for kind in ["table", "blockSdt", "pageBreak", "columnBreak"] {
         for deleted_block in [false, true] {
             for operation in ["delete", "replace", "rich", "merge", "retract"] {
@@ -364,7 +362,17 @@ fn plain_edits_and_split_retraction_link_retained_marks_to_pending_blocks() {
                 }
                 let doc = EditingDoc::new(318);
                 let ids = seed_pending_block(&doc, kind, deleted_block);
+                if operation != "retract" {
+                    let target = ChangeTarget::Revision(ids[0].clone());
+                    if deleted_block {
+                        doc.reject_change(&local(), &target).unwrap();
+                    } else {
+                        doc.accept_change(&local(), &target).unwrap();
+                    }
+                }
                 let para = doc.paragraphs("body").unwrap()[0].para_id.clone();
+                doc.set_paragraph_attr(&para, "alignment", Any::from("right"))
+                    .unwrap();
                 let receipt = match operation {
                     "delete" => doc.delete_range(&local(), StoryRange::new("body", 3, 4)),
                     "replace" => doc.replace_range(&local(), StoryRange::new("body", 0, 4), "X"),
@@ -391,26 +399,40 @@ fn plain_edits_and_split_retraction_link_retained_marks_to_pending_blocks() {
                         vec![]
                     }
                 );
-                assert_inherited_block_revision(&doc, &ids[1], !deleted_block);
+                let text = if matches!(operation, "replace" | "rich") {
+                    "Xtail"
+                } else {
+                    "oldtail"
+                };
+                assert_eq!(body_texts(&doc), [text]);
+                assert_eq!(body_len(&doc), text.len() as u32 + 2);
+                let paragraph = doc.paragraphs("body").unwrap().remove(0);
+                assert_eq!(paragraph.para_id, para);
+                assert_eq!(
+                    paragraph.properties.get("alignment"),
+                    Some(&Any::from("right"))
+                );
+                assert_only_pending_block_revision(&doc, &ids[1]);
                 let target = ChangeTarget::Revision(ids[1].clone());
                 if deleted_block {
                     doc.accept_change(&local(), &target).unwrap();
                 } else {
                     doc.reject_change(&local(), &target).unwrap();
                 }
-                let text = if matches!(operation, "replace" | "rich") {
-                    "Xtail"
-                } else {
-                    "oldtail"
-                };
                 assert_joined_body(&doc, text);
+                let paragraph = doc.paragraphs("body").unwrap().remove(0);
+                assert_eq!(paragraph.para_id, para);
+                assert_eq!(
+                    paragraph.properties.get("alignment"),
+                    Some(&Any::from("right"))
+                );
             }
         }
     }
 }
 
 #[test]
-fn deferred_plain_joins_preserve_the_first_paragraph_in_either_order() {
+fn plain_joins_preserve_the_first_paragraph_in_either_order() {
     for kind in ["table", "blockSdt", "pageBreak", "columnBreak"] {
         for deleted in [false, true] {
             for operation in ["delete", "merge", "retract"] {
@@ -442,8 +464,8 @@ fn deferred_plain_joins_preserve_the_first_paragraph_in_either_order() {
                     }
                     plain_join(&doc, &first, operation);
                     if !block_first {
-                        assert_eq!(join_donor(&doc), Some(Any::Bool(true)));
-                        assert_inherited_block_revision(&doc, &ids[1], !deleted);
+                        assert_eq!(body_texts(&doc), ["oldtail"]);
+                        assert_only_pending_block_revision(&doc, &ids[1]);
                         if deleted {
                             doc.accept_change(&local(), &target).unwrap();
                         } else {
@@ -459,7 +481,6 @@ fn deferred_plain_joins_preserve_the_first_paragraph_in_either_order() {
                     );
                     assert!(!paragraph.properties.contains_key("pPrIns"));
                     assert!(!paragraph.properties.contains_key("pPrDel"));
-                    assert_eq!(join_donor(&doc), None);
                     outcomes.push(paragraph);
                 }
                 assert_eq!(outcomes[0], outcomes[1]);
@@ -469,9 +490,96 @@ fn deferred_plain_joins_preserve_the_first_paragraph_in_either_order() {
 }
 
 #[test]
-fn mark_only_rejection_preserves_a_deferred_plain_join_donor() {
+fn plain_joins_before_pending_tables_keep_first_properties_after_further_edits() {
+    for sequence in ["erase", "merge"] {
+        let mut outcomes = Vec::new();
+        for block_first in [false, true] {
+            let doc = seed(if sequence == "erase" {
+                "oldtail"
+            } else {
+                "headoldtail"
+            });
+            if sequence == "erase" {
+                doc.split_paragraph(&local(), Position::new("body", 3), None)
+                    .unwrap();
+            } else {
+                doc.split_paragraph(&local(), Position::new("body", 4), None)
+                    .unwrap();
+                doc.split_paragraph(&local(), Position::new("body", 8), None)
+                    .unwrap();
+            }
+            let paragraphs = doc.paragraphs("body").unwrap();
+            let first = paragraphs[0].para_id.clone();
+            let old = &paragraphs[paragraphs.len() - 2].para_id;
+            doc.set_paragraph_attr(&first, "alignment", Any::from("right"))
+                .unwrap();
+            let block_at = doc.paragraph_mark_position(old).unwrap().index + 1;
+            let block = doc
+                .insert_table(
+                    &EditCtx::local("Bob", BLOCK_DATE).suggesting(),
+                    Position::new("body", block_at),
+                    1,
+                    1,
+                )
+                .unwrap();
+            let target = ChangeTarget::Revision(block.revision_ids[0].clone());
+            if sequence == "erase" {
+                plain_join(&doc, &first, "delete");
+                doc.delete_range(&local(), StoryRange::new("body", 0, 3))
+                    .unwrap();
+                assert_only_pending_block_revision(&doc, &block.revision_ids[0]);
+                let insertion = doc
+                    .insert_text(
+                        &suggesting("Carol"),
+                        doc.paragraph_mark_position(&first).unwrap(),
+                        "!",
+                        FormatPolicy::Plain,
+                    )
+                    .unwrap();
+                let insertion = ChangeTarget::Revision(insertion.revision_ids[0].clone());
+                if block_first {
+                    doc.reject_change(&local(), &target).unwrap();
+                    doc.accept_change(&local(), &insertion).unwrap();
+                } else {
+                    doc.accept_change(&local(), &insertion).unwrap();
+                    doc.reject_change(&local(), &target).unwrap();
+                }
+            } else {
+                doc.merge_paragraphs(&local(), old, MergeDirection::Forward)
+                    .unwrap();
+                if block_first {
+                    doc.reject_change(&local(), &target).unwrap();
+                }
+                doc.merge_paragraphs(&local(), &first, MergeDirection::Forward)
+                    .unwrap();
+                if !block_first {
+                    doc.reject_change(&local(), &target).unwrap();
+                }
+            }
+            assert_joined_body(
+                &doc,
+                if sequence == "erase" {
+                    "tail!"
+                } else {
+                    "headoldtail"
+                },
+            );
+            let paragraph = doc.paragraphs("body").unwrap().remove(0);
+            assert_eq!(paragraph.para_id, first);
+            assert_eq!(
+                paragraph.properties.get("alignment"),
+                Some(&Any::from("right"))
+            );
+            outcomes.push(paragraph);
+        }
+        assert_eq!(outcomes[0], outcomes[1]);
+    }
+}
+
+#[test]
+fn plain_joins_preserve_the_first_paragraph_with_range_or_id_block_rejection() {
     let mut outcomes = Vec::new();
-    for mark_first in [false, true] {
+    for by_range in [false, true] {
         let doc = EditingDoc::new(325);
         let ids = seed_pending_block(&doc, "table", false);
         doc.accept_change(&local(), &ChangeTarget::Revision(ids[0].clone()))
@@ -480,17 +588,12 @@ fn mark_only_rejection_preserves_a_deferred_plain_join_donor() {
         doc.set_paragraph_attr(&first, "alignment", Any::from("right"))
             .unwrap();
         plain_join(&doc, &first, "delete");
-        if mark_first {
-            doc.reject_change(
-                &local(),
-                &ChangeTarget::Range(StoryRange::new("body", 3, 4)),
-            )
-            .unwrap();
-            assert_eq!(join_donor(&doc), Some(Any::Bool(true)));
-            assert_inherited_block_revision(&doc, &ids[1], true);
-        }
-        doc.reject_change(&local(), &ChangeTarget::Revision(ids[1].clone()))
-            .unwrap();
+        let target = if by_range {
+            ChangeTarget::Range(StoryRange::new("body", 3, 4))
+        } else {
+            ChangeTarget::Revision(ids[1].clone())
+        };
+        doc.reject_change(&local(), &target).unwrap();
         assert_joined_body(&doc, "oldtail");
         let paragraph = doc.paragraphs("body").unwrap().remove(0);
         assert_eq!(paragraph.para_id, first);
@@ -504,9 +607,9 @@ fn mark_only_rejection_preserves_a_deferred_plain_join_donor() {
 }
 
 #[test]
-fn rejecting_a_mark_deletion_preserves_a_deferred_plain_join_donor() {
+fn rejecting_a_block_deletion_after_a_plain_join_preserves_the_first_paragraph() {
     let mut outcomes = Vec::new();
-    for reject_mark_deletion in [false, true] {
+    for reject_block_deletion in [false, true] {
         let doc = EditingDoc::new(327);
         let ids = seed_pending_block(&doc, "table", false);
         doc.accept_change(&local(), &ChangeTarget::Revision(ids[0].clone()))
@@ -515,7 +618,7 @@ fn rejecting_a_mark_deletion_preserves_a_deferred_plain_join_donor() {
         doc.set_paragraph_attr(&first, "alignment", Any::from("right"))
             .unwrap();
         plain_join(&doc, &first, "delete");
-        if reject_mark_deletion {
+        if reject_block_deletion {
             let deletion = doc
                 .delete_range(&suggesting("Carol"), StoryRange::new("body", 3, 4))
                 .unwrap();
@@ -524,8 +627,7 @@ fn rejecting_a_mark_deletion_preserves_a_deferred_plain_join_donor() {
                 &ChangeTarget::Revision(deletion.revision_ids[0].clone()),
             )
             .unwrap();
-            assert_eq!(join_donor(&doc), Some(Any::Bool(true)));
-            assert_inherited_block_revision(&doc, &ids[1], true);
+            assert_only_pending_block_revision(&doc, &ids[1]);
         }
         doc.reject_change(&local(), &ChangeTarget::Revision(ids[1].clone()))
             .unwrap();
@@ -536,14 +638,13 @@ fn rejecting_a_mark_deletion_preserves_a_deferred_plain_join_donor() {
             paragraph.properties.get("alignment"),
             Some(&Any::from("right"))
         );
-        assert_eq!(join_donor(&doc), None);
         outcomes.push(paragraph);
     }
     assert_eq!(outcomes[0], outcomes[1]);
 }
 
 #[test]
-fn deferred_plain_joins_preserve_the_first_paragraph_across_multiple_tables() {
+fn plain_joins_preserve_the_first_paragraph_across_multiple_tables() {
     let mut outcomes = Vec::new();
     for second_first in [false, true] {
         let doc = EditingDoc::new(326);
@@ -569,7 +670,7 @@ fn deferred_plain_joins_preserve_the_first_paragraph_across_multiple_tables() {
             .clone();
         assert_ne!(ids[1], second);
         plain_join(&doc, &first, "delete");
-        doc.delete_range(&local(), StoryRange::new("body", 8, 9))
+        doc.delete_range(&local(), StoryRange::new("body", 7, 8))
             .unwrap();
         let mut blocks = [ids[1].clone(), second];
         if second_first {
@@ -603,7 +704,6 @@ fn deferred_resolution_joins_keep_the_surviving_paragraph_properties() {
         doc.reject_change(&local(), &ChangeTarget::Revision(ids[0].clone()))
             .unwrap();
         assert_inherited_block_revision(&doc, &ids[1], true);
-        assert_eq!(join_donor(&doc), None);
         doc.reject_change(&local(), &ChangeTarget::Revision(ids[1].clone()))
             .unwrap();
         assert_joined_body(&doc, "oldtail");
@@ -614,100 +714,6 @@ fn deferred_resolution_joins_keep_the_surviving_paragraph_properties() {
             Some(&Any::from("left"))
         );
     }
-}
-
-#[test]
-fn keeping_pending_blocks_clears_deferred_plain_join_donors() {
-    for kind in ["table", "blockSdt", "pageBreak", "columnBreak"] {
-        for deleted in [false, true] {
-            for operation in ["delete", "merge", "retract"] {
-                if deleted && operation == "retract" {
-                    continue;
-                }
-                let doc = EditingDoc::new(322);
-                let ids = seed_pending_block(&doc, kind, deleted);
-                let first = doc.paragraphs("body").unwrap()[0].para_id.clone();
-                doc.set_paragraph_attr(&first, "alignment", Any::from("right"))
-                    .unwrap();
-                plain_join(&doc, &first, operation);
-                assert_eq!(join_donor(&doc), Some(Any::Bool(true)));
-                let target = ChangeTarget::Revision(ids[1].clone());
-                if deleted {
-                    doc.reject_change(&local(), &target).unwrap();
-                } else {
-                    doc.accept_change(&local(), &target).unwrap();
-                }
-                assert_block_boundary(&doc, kind, Some("old"));
-                assert_eq!(join_donor(&doc), None);
-                let paragraph = doc.paragraphs("body").unwrap().remove(0);
-                assert_eq!(paragraph.para_id, first);
-                assert_eq!(
-                    paragraph.properties.get("alignment"),
-                    Some(&Any::from("right"))
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn resolving_the_last_boundary_revision_clears_a_deferred_plain_join_donor() {
-    let doc = EditingDoc::new(328);
-    let ids = seed_pending_block(&doc, "table", false);
-    doc.accept_change(&local(), &ChangeTarget::Revision(ids[0].clone()))
-        .unwrap();
-    let first = doc.paragraphs("body").unwrap()[0].para_id.clone();
-    doc.set_paragraph_attr(&first, "alignment", Any::from("right"))
-        .unwrap();
-    let end = doc
-        .split_paragraph(&local(), Position::new("body", 9), None)
-        .unwrap()
-        .second_para_id;
-    doc.insert_text(
-        &local(),
-        Position::new("body", 10),
-        "end",
-        FormatPolicy::Plain,
-    )
-    .unwrap();
-    doc.set_paragraph_attr(&end, "alignment", Any::from("center"))
-        .unwrap();
-    plain_join(&doc, &first, "delete");
-    doc.accept_change(
-        &local(),
-        &ChangeTarget::Range(StoryRange::new("body", 3, 4)),
-    )
-    .unwrap();
-    assert_eq!(join_donor(&doc), Some(Any::Bool(true)));
-    doc.accept_change(
-        &local(),
-        &ChangeTarget::Range(StoryRange::new("body", 0, body_len(&doc))),
-    )
-    .unwrap();
-    assert_eq!(body_texts(&doc), ["old", "tail", "end"]);
-    assert_eq!(join_donor(&doc), None);
-    assert!(doc.list_revisions().unwrap().is_empty());
-    doc.delete_range(&local(), StoryRange::new("body", 4, 5))
-        .unwrap();
-    let deletion = doc
-        .delete_range(
-            &suggesting("Dana"),
-            StoryRange::new("body", 0, body_len(&doc)),
-        )
-        .unwrap();
-    doc.accept_change(
-        &local(),
-        &ChangeTarget::Revision(deletion.revision_ids[0].clone()),
-    )
-    .unwrap();
-    assert_joined_body(&doc, "");
-    let paragraph = doc.paragraphs("body").unwrap().remove(0);
-    assert_eq!(paragraph.para_id, end);
-    assert_eq!(
-        paragraph.properties.get("alignment"),
-        Some(&Any::from("center"))
-    );
-    assert_eq!(join_donor(&doc), None);
 }
 
 #[test]
@@ -723,7 +729,6 @@ fn rejecting_a_pending_table_preserves_an_unrelated_plain_split() {
     let split = doc
         .split_paragraph(&local(), Position::new("body", 1), None)
         .unwrap();
-    assert_eq!(join_donor(&doc), None);
     doc.reject_change(&local(), &ChangeTarget::Revision(ids[1].clone()))
         .unwrap();
     assert_eq!(body_texts(&doc), ["o", "ldtail"]);
@@ -763,109 +768,6 @@ fn accepting_a_pending_table_deletion_keeps_a_suggested_split() {
     .unwrap();
     assert_eq!(body_texts(&doc), ["oldtail"]);
     assert!(doc.list_revisions().unwrap().is_empty());
-}
-
-#[test]
-fn deferred_plain_join_donor_state_undo_and_redo_together() {
-    let doc = EditingDoc::new(323);
-    let ids = seed_pending_block(&doc, "table", false);
-    doc.accept_change(&local(), &ChangeTarget::Revision(ids[0].clone()))
-        .unwrap();
-    let first = doc.paragraphs("body").unwrap()[0].para_id.clone();
-    doc.set_paragraph_attr(&first, "alignment", Any::from("right"))
-        .unwrap();
-    let mut undo = doc.undo_manager();
-    plain_join(&doc, &first, "delete");
-    undo.add_undo_barrier();
-    assert_eq!(join_donor(&doc), Some(Any::Bool(true)));
-    doc.reject_change(&local(), &ChangeTarget::Revision(ids[1].clone()))
-        .unwrap();
-    undo.add_undo_barrier();
-    assert_joined_body(&doc, "oldtail");
-    let joined = doc.paragraphs("body").unwrap();
-    assert_eq!(joined[0].para_id, first);
-    assert_eq!(
-        joined[0].properties.get("alignment"),
-        Some(&Any::from("right"))
-    );
-    assert!(undo.undo());
-    assert_eq!(body_texts(&doc), ["old", "tail"]);
-    assert_eq!(join_donor(&doc), Some(Any::Bool(true)));
-    assert!(undo.undo());
-    assert_eq!(join_donor(&doc), None);
-    assert!(undo.redo());
-    assert_eq!(join_donor(&doc), Some(Any::Bool(true)));
-    assert!(undo.redo());
-    assert_joined_body(&doc, "oldtail");
-    assert_eq!(doc.paragraphs("body").unwrap(), joined);
-    assert_eq!(join_donor(&doc), None);
-}
-
-#[test]
-fn deferred_plain_join_donors_are_private_to_the_editing_map() {
-    let doc = EditingDoc::new(324);
-    let ids = seed_pending_block(&doc, "table", false);
-    doc.accept_change(&local(), &ChangeTarget::Revision(ids[0].clone()))
-        .unwrap();
-    let first = doc.paragraphs("body").unwrap()[0].para_id.clone();
-    plain_join(&doc, &first, "delete");
-    assert_eq!(join_donor(&doc), Some(Any::Bool(true)));
-    doc.set_paragraph_attrs(
-        &suggesting("Eve"),
-        &ParaSelector::One(first.clone()),
-        &ParaAttrDelta {
-            alignment: Patch::Set("right".to_owned()),
-            ..ParaAttrDelta::default()
-        },
-    )
-    .unwrap();
-    let paragraphs = doc.paragraphs("body").unwrap();
-    assert!(!paragraphs[0].properties.contains_key("_joinDonor"));
-    assert!(
-        !serde_json::to_string(&paragraphs[0].properties)
-            .unwrap()
-            .contains("_joinDonor")
-    );
-    let context = doc
-        .selection_context(&StoryRange::new("body", 0, 3))
-        .unwrap();
-    assert!(!context.paragraph_properties.contains_key("_joinDonor"));
-    let revisions = doc.list_revisions().unwrap();
-    let checksum = docx_edit::story_checksum(&doc, "body").unwrap();
-    let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
-    let options =
-        docx_edit::structured::ExportOptions::new(docx_edit::structured::RevisionView::Markup);
-    let exported = doc.export_structured(&options).unwrap().content;
-    let fingerprint = docx_edit::structured::export_fingerprint(&exported);
-    assert!(
-        !serde_json::to_string(&exported)
-            .unwrap()
-            .contains("_joinDonor")
-    );
-    doc.set_paragraph_attr(&first, "_joinDonor", Any::Bool(false))
-        .unwrap();
-    assert_eq!(doc.paragraphs("body").unwrap(), paragraphs);
-    assert_eq!(
-        doc.selection_context(&StoryRange::new("body", 0, 3))
-            .unwrap()
-            .paragraph_properties,
-        context.paragraph_properties
-    );
-    assert_eq!(doc.list_revisions().unwrap(), revisions);
-    assert_eq!(docx_edit::story_checksum(&doc, "body").unwrap(), checksum);
-    assert_eq!(
-        docx_edit::structured::export_fingerprint(
-            &doc.export_structured(&options).unwrap().content
-        ),
-        fingerprint
-    );
-    assert_eq!(
-        serde_json::to_value(
-            yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap()
-        )
-        .unwrap(),
-        serde_json::to_value(blocks).unwrap()
-    );
 }
 
 #[test]
