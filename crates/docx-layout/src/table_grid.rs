@@ -455,7 +455,7 @@ fn resolve_autofit_column_widths(
     col_count: usize,
     explicit_width_px: Option<f64>,
     content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
-) -> Vec<f64> {
+) -> Option<Vec<f64>> {
     let (minimums, maximums) = autofit_content_widths(
         table_block,
         content_width,
@@ -473,11 +473,14 @@ fn resolve_autofit_column_widths(
         },
     )));
     if target < min_total {
+        if target <= 0.0 || table_block.indent.is_some_and(|indent| indent > 0.0) {
+            return None;
+        }
         let scale = target / min_total;
-        return minimums.into_iter().map(|width| width * scale).collect();
+        return Some(minimums.into_iter().map(|width| width * scale).collect());
     }
     if target >= max_total {
-        return distribute_to_target(maximums, target);
+        return Some(distribute_to_target(maximums, target));
     }
     let flex: Vec<f64> = maximums
         .iter()
@@ -487,13 +490,15 @@ fn resolve_autofit_column_widths(
     let flex_total: f64 = flex.iter().sum();
     let extra = (target - min_total).max(0.0);
     if flex_total <= 0.0 {
-        return distribute_to_target(minimums, target);
+        return Some(distribute_to_target(minimums, target));
     }
-    minimums
-        .into_iter()
-        .enumerate()
-        .map(|(index, min)| min + extra * flex[index] / flex_total)
-        .collect()
+    Some(
+        minimums
+            .into_iter()
+            .enumerate()
+            .map(|(index, min)| min + extra * flex[index] / flex_total)
+            .collect(),
+    )
 }
 
 pub(crate) fn resolve_table_intrinsic_widths(
@@ -670,13 +675,18 @@ pub(crate) fn resolve_table_column_widths_with_content(
         );
     }
     if !table_block.rows.is_empty() && algorithm == "autofit" {
-        return resolve_autofit_column_widths(
+        if let Some(widths) = resolve_autofit_column_widths(
             table_block,
             table_width_budget(table_block, content_width),
             col_count,
             explicit_width_px,
             content_widths,
-        );
+        ) {
+            return widths;
+        }
+        if column_widths.is_empty() {
+            column_widths = table_block.grid_widths.clone().unwrap_or_default();
+        }
     }
 
     if !table_block.rows.is_empty() {
@@ -984,6 +994,32 @@ mod tests {
             resolve_table_column_widths(&block, 600.0),
             vec![150.0, 200.0]
         );
+    }
+
+    #[test]
+    fn autofit_whose_indent_leaves_too_little_room_keeps_its_grid() {
+        for (indent, grid) in [
+            (600.0, json!({"columnWidths": [100, 100]})),
+            (599.0, json!({"columnWidths": [100, 100]})),
+            (600.0, json!({"gridWidths": [100, 100]})),
+        ] {
+            let mut table = json!({
+                "id": 0,
+                "rows": [{ "id": 0, "cells": [
+                    { "id": 0, "blocks": [], "minContentWidth": 40, "maxContentWidth": 40 },
+                    { "id": 1, "blocks": [], "minContentWidth": 40, "maxContentWidth": 40 }
+                ] }],
+                "indent": indent,
+                "layoutMode": "autofit",
+            });
+            table.as_object_mut().unwrap().extend(grid.as_object().unwrap().clone());
+            let block: TableBlock = serde_json::from_value(table).unwrap();
+            assert_eq!(
+                resolve_table_column_widths(&block, 600.0),
+                vec![100.0, 100.0],
+                "{indent}"
+            );
+        }
     }
 
     #[test]
