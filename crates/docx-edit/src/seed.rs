@@ -5799,7 +5799,13 @@ mod tests {
         let mut provenance = Provenance::default();
         {
             let txn = doc.yrs_doc().transact();
-            for story in ["nonempty", "nonmonotonic", "formatted", "deleted", "missing"] {
+            for story in [
+                "nonempty",
+                "nonmonotonic",
+                "formatted",
+                "deleted",
+                "missing",
+            ] {
                 let len = crate::story_ref(&txn, story).map_or(0, |text| text.len(&txn));
                 for unit in 0..=len + 1 {
                     provenance.relocated.push(Relocated {

@@ -272,7 +272,10 @@ impl InsertRun {
             };
             story.apply_delta(txn, std::mem::take(&mut self.deltas));
             self.seed_range = range.filter(|range| {
-                ReadTxn::store(txn).get_local_state().checked_sub(range.clock) == Some(range.len)
+                ReadTxn::store(txn)
+                    .get_local_state()
+                    .checked_sub(range.clock)
+                    == Some(range.len)
                     && story.len(txn) == range.len
             });
             self.seed_candidate = false;
