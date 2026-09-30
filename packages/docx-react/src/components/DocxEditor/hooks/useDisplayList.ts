@@ -336,9 +336,10 @@ export function useRustDisplayList(
     openLinesRef.current.add(line);
     return line;
   }, []);
-  const endOpenLines = useCallback((): void => {
+  // `forget: false` keeps the lines listed, so a line revived after a fallback still ends with its session.
+  const endOpenLines = useCallback((forget = true): void => {
     for (const line of openLinesRef.current) endDisplayListQueriesLine(line);
-    openLinesRef.current.clear();
+    if (forget) openLinesRef.current.clear();
   }, []);
   const markSettled = useCallback(
     (epoch: number | null, failure: Error | null = null, authoritative = false): void => {
@@ -553,7 +554,7 @@ export function useRustDisplayList(
       const fallbackSnapshot = { ...snapshotRef.current, frame: null, queries: null, caret: null };
       snapshotRef.current = fallbackSnapshot;
       setSnapshot(fallbackSnapshot);
-      endOpenLines();
+      endOpenLines(false);
       workerFallbackEngineRef.current = hostEngine;
     },
     [endOpenLines, queryEpochGate]
@@ -592,9 +593,10 @@ export function useRustDisplayList(
       workerRef.current?.client.destroy();
       workerRef.current = null;
       queryEpochGate.clear();
+      endOpenLines();
       markSettled(null, new Error('The editor was unmounted'), true);
     };
-  }, [markSettled, queryEpochGate]);
+  }, [endOpenLines, markSettled, queryEpochGate]);
 
   const publishQuerySnapshot = useCallback(
     (nextSnapshot: RustDisplayListSnapshot, contentEpoch: number): void => {
@@ -1012,6 +1014,7 @@ export function useRustDisplayList(
       layout: null,
       line: replacedLayoutRef.current?.line ?? documentLineRef.current,
     };
+    documentLineRef.current = {};
     cancelPageBuilds(pageBuildTimerRef);
     endOpenLines();
     workerRef.current?.client.destroy();
@@ -1382,6 +1385,7 @@ export function useRustDisplayList(
       queryEpochGate.clear();
       snapshotRef.current = EMPTY_DISPLAY_LIST_SNAPSHOT;
       endOpenLines();
+      documentLineRef.current = {};
       frameEngineRef.current = null;
       recoveryFrameEpochRef.current = 0;
       setSnapshot(EMPTY_DISPLAY_LIST_SNAPSHOT);

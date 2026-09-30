@@ -148,7 +148,9 @@ test('a session handed over keeps its worker and shows the old pages until the n
     const stale = result.current.queries!;
     await stale.whenReady();
     stale.prime();
-    expect(stale.rangeRects(1, 2).length).toBeGreaterThan(0);
+    const previewRects = stale.rangeRects(1, 2);
+    const previewHits = stale.hitTestRegions(0, 100, 100);
+    expect(previewRects.length).toBeGreaterThan(0);
 
     handoffFrom.current = preview.engine;
     await layOut(full, 1);
@@ -161,10 +163,10 @@ test('a session handed over keeps its worker and shows the old pages until the n
     expect(text(live.displayList)).toContain('Full');
     expect(live.rangeRects(1, 2).length).toBeGreaterThan(0);
 
-    // The preview and the full session are one document, so the preview's queries answer from the full layout.
+    // A line is one session's: the preview's facade keeps its handle and answers from its own pages.
     warnings.mockClear();
-    expect(stale.rangeRects(1, 2)).toEqual(live.rangeRects(1, 2));
-    expect(stale.hitTestRegions(0, 100, 100)).toEqual(live.hitTestRegions(0, 100, 100));
+    expect(stale.rangeRects(1, 2)).toEqual(previewRects);
+    expect(stale.hitTestRegions(0, 100, 100)).toEqual(previewHits);
     expect(warnings).not.toHaveBeenCalled();
 
     expect(FakeWorker.created).toHaveLength(1);
