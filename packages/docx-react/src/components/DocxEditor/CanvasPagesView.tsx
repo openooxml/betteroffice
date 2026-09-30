@@ -591,8 +591,14 @@ export function CanvasPagesView({
     let cancelled = false;
     glyphCacheRef.current = null;
     setGlyphCacheReady(false);
-    const provider = glyphOutlineProvider
-      ? Promise.resolve(glyphOutlineProvider)
+    // A replay still rasterizing once its engine is replaced or unmounted reads no outline from
+    // it (the engine may be freed) and falls back to text.
+    const outlines = glyphOutlineProvider;
+    const provider = outlines
+      ? Promise.resolve<GlyphOutlineProvider>((fontId, glyphId) => {
+          if (cancelled) throw new Error('The glyph outlines belong to a released engine');
+          return outlines(fontId, glyphId);
+        })
       : loadGlyphOutlineProvider();
     void provider
       .then((provider) => {

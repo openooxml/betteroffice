@@ -741,6 +741,151 @@ test('a load that fails while the worker builds drops the worker, never the rele
   }
 });
 
+test('a replaced worker preserves the current document when its delayed provisional layout fails', async () => {
+  const request = JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Calibri' } },
+    renderEnv: {},
+  });
+  const documents = ['Document A', 'Document B'].map((text, index) => {
+    const native = createEditSession(9302 + index);
+    native.create_story('body', text, 'Normal', 'left');
+    const [paragraph] = JSON.parse(native.paragraphs('body')) as Array<{ paraId: string }>;
+    native.set_selection('body', paragraph!.paraId, 0, paragraph!.paraId, 0);
+    const selection = JSON.parse(native.selection()) as YrsSelection;
+    const layoutJson = native.layout_document_with_regions_retained_json(request);
+    const frame = native.build_display_list_frame(JSON.stringify({}), 0);
+    const frameEpoch = 100 + index;
+    new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
+      .setBigUint64(32, BigInt(frameEpoch), true);
+    const caret = { ...JSON.parse(native.resident_caret_snapshot_json()), frameEpoch };
+    const adopted: string[] = [];
+    const resets: string[] = [];
+    const engine = {
+      adoptResidentWorkerLayout: (input: string) => {
+        adopted.push(input);
+        return adopted.length;
+      },
+      residentLayoutInWorker: () => true,
+      resetFrameBase: () => {
+        resets.push('resetFrameBase');
+        native.reset_frame_base();
+      },
+      residentWorkerProbe: () => ({ layoutRevision: adopted.length }),
+      residentWorkerSnapshot: () => ({
+        state: new Uint8Array(), fonts: [], fontsRevision: 0, layoutRevision: adopted.length,
+      }),
+      encodeStateVector: () => new Uint8Array(),
+      onUpdate: () => () => {},
+      selection: () => selection,
+      applyUpdate: () => null,
+    } as unknown as YrsSession;
+    return { native, layoutJson, frame, frameEpoch, caret, selection, engine, adopted, resets };
+  });
+  const documentA = documents[0]!;
+  const documentB = documents[1]!;
+  const workers: FakeWorker[] = [];
+  class FakeWorker extends InputFakeWorker {
+    constructor() {
+      super(new Uint8Array());
+      workers.push(this);
+    }
+    reply(response: ResidentEngineWorkerResponse): void {
+      this.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+    }
+  }
+  globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) => useRustDisplayList(layout, undefined, undefined, undefined, source),
+      { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+    );
+    const pendingA = result.current.layoutInWorker(documentA.engine, request);
+    expect(pendingA).not.toBeNull();
+    const workerA = workers[0]!;
+    expect(workerA.posted[0]).toMatchObject({ type: 'bootstrap', provisionalPages: 3 });
+    workerA.reply({
+      id: workerA.posted[0]!.id,
+      ok: true,
+      frame: documentA.frame.slice().buffer,
+      caret: documentA.caret,
+      selection: documentA.selection,
+      layoutRevision: 1,
+      layoutJson: documentA.layoutJson,
+      layoutProvisional: true,
+    });
+    const provisional = await pendingA!;
+    expect(provisional?.complete).toBeDefined();
+    let completed = false;
+    const completeA = provisional!.complete!.then((outcome) => {
+      completed = true;
+      return outcome;
+    });
+
+    const pendingB = result.current.layoutInWorker(documentB.engine, request);
+    expect(pendingB).not.toBeNull();
+    expect(workers).toHaveLength(2);
+    expect(workerA.terminated).toBe(true);
+    expect(workerA.posted.map((message) => message.type)).toEqual(['bootstrap', 'destroy']);
+    const workerB = workers[1]!;
+    workerB.reply({
+      id: workerB.posted[0]!.id,
+      ok: true,
+      frame: documentB.frame.slice().buffer,
+      caret: documentB.caret,
+      selection: documentB.selection,
+      layoutRevision: 1,
+      layoutJson: documentB.layoutJson,
+    });
+    const computationB = await pendingB!;
+    await act(async () => {
+      rerender({ layout: computationB!.layout, source: documentB.engine });
+    });
+    await waitFor(() => {
+      if (result.current.error) throw result.current.error;
+      expect(result.current.frame?.frameEpoch).toBe(documentB.frameEpoch);
+    });
+    act(() => result.current.setWorkerPresentationActive(true));
+    const { frame, queries, caret, displayList } = result.current;
+    expect(queries).not.toBeNull();
+    expect(caret).not.toBeNull();
+    expect(result.current.workerSurfacesActive).toBe(true);
+    expect(result.current.workerPresentationActive).toBe(true);
+    expect(completed).toBe(false);
+
+    await act(async () => {
+      expect(await completeA).toBeNull();
+    });
+
+    expect(completed).toBe(true);
+    expect(result.current.frame).toBe(frame);
+    expect(result.current.frame?.frameEpoch).toBe(documentB.frameEpoch);
+    expect(result.current.queries).toBe(queries);
+    expect(result.current.caret).toBe(caret);
+    expect(result.current.displayList).toBe(displayList);
+    expect(result.current.error).toBeNull();
+    expect(result.current.loading).toBe(false);
+    expect(result.current.workerSurfacesActive).toBe(true);
+    expect(result.current.workerPresentationActive).toBe(true);
+    expect(workerA.posted.map((message) => message.type)).toEqual(['bootstrap', 'destroy']);
+    expect(workerB.posted.map((message) => message.type)).toEqual(['bootstrap']);
+    expect(workerB.terminated).toBe(false);
+    expect(documentA.adopted).toEqual([request]);
+    expect(documentB.adopted).toEqual([request]);
+    expect(documentA.resets).toEqual([]);
+    expect(documentB.resets).toEqual([]);
+    expect(
+      errors.mock.calls.some(([message]) => String(message).includes('Resident engine worker unavailable'))
+    ).toBe(false);
+    unmount();
+  } finally {
+    errors.mockRestore();
+    for (const { native } of documents) native.free();
+  }
+});
+
 test('unmounting while the worker applies input never replays it on the host engine', async () => {
   const native = createEditSession(9204);
   native.create_story('body', 'Unmounted input', 'Normal', 'left');
