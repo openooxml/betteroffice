@@ -95,6 +95,7 @@ struct ConvergenceInput<'a> {
     skippable_dirty: Option<&'a [usize]>,
     keep_with_next: &'a crate::keep_together::KeepWithNextScan,
     measured: &'a [MeasuredBlock],
+    previous_pages: &'a [crate::types::Page],
 }
 
 /// Where a placement walk met the retained layout.
@@ -139,11 +140,9 @@ impl ConvergenceInput<'_> {
         let next_dirty =
             *dirty.get(dirty.partition_point(|&index| index < checkpoint.block_index))?;
         let restart = restart_index(self.keep_with_next, next_dirty);
-        let resume = self
-            .previous_checkpoints
-            .iter()
-            .rev()
-            .find(|resume| resume.block_index < restart && resumable(resume, self.measured))?;
+        let resume = self.previous_checkpoints.iter().rev().find(|resume| {
+            resume.block_index < restart && resumable(resume, self.measured, self.previous_pages)
+        })?;
         (resume.page_index > previous.page_index).then(|| Convergence::Skip {
             previous: previous.clone(),
             resume: resume.clone(),
@@ -154,11 +153,28 @@ impl ConvergenceInput<'_> {
 
 /// Whether placement restarted at `checkpoint` lays out what follows as the walk
 /// that recorded it did. A queued section geometry belongs to the page after the
-/// checkpoint's, and a floating or anchored object that opened its page would be
-/// placed again from its anchor's offset.
-fn resumable(checkpoint: &LayoutCheckpoint, measured: &[MeasuredBlock]) -> bool {
+/// checkpoint's; a block that opened a page whose geometry differs from the page
+/// before was fitted under the earlier geometry; and a floating or anchored object
+/// that opened its page would be placed again from its anchor's offset. The first
+/// page restarts from the document's origin instead.
+fn resumable(
+    checkpoint: &LayoutCheckpoint,
+    measured: &[MeasuredBlock],
+    pages: &[crate::types::Page],
+) -> bool {
     let flow = &checkpoint.flow;
-    flow.pending_page_size.is_none()
+    let same_geometry = checkpoint.page_index.checked_sub(1).is_some_and(|before| {
+        pages
+            .get(before)
+            .zip(pages.get(checkpoint.page_index))
+            .is_some_and(|(before, page)| {
+                before.size == page.size
+                    && before.margins == page.margins
+                    && before.columns == page.columns
+            })
+    });
+    same_geometry
+        && flow.pending_page_size.is_none()
         && flow.pending_margins.is_none()
         && flow.pending_columns.is_none()
         && measured
@@ -292,6 +308,27 @@ fn is_floating_text_box_block(block: &TextBoxBlock) -> bool {
         || block.wrap_type.as_deref() == Some("topAndBottom")
 }
 
+/// The paginator a pass from the document's first block starts with.
+fn origin_paginator(
+    initial_config: &SectionLayoutConfig,
+    plan: &LayoutPlan,
+    options: &crate::types::LayoutOptions,
+) -> Result<Paginator, LayoutError> {
+    let mut paginator = Paginator::new(
+        initial_config.page_size.clone(),
+        initial_config.margins.clone(),
+        initial_config
+            .columns
+            .clone()
+            .unwrap_or_else(default_columns),
+        options.footnote_reserved_heights.clone(),
+    )?;
+    if let Some(Some(restart)) = plan.section_page_restarts.first() {
+        paginator.restart_page_numbering(restart.start);
+    }
+    Ok(paginator)
+}
+
 /// Converts measured blocks into positioned pages, discarding checkpoints.
 pub fn layout_document(input: &mut Input) -> Result<Layout, LayoutError> {
     Ok(layout_document_checkpointed(input)?.layout)
@@ -345,18 +382,7 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
 
     let initial_config = plan.section_configs.first().cloned().unwrap_or(body_config);
 
-    let mut paginator = Paginator::new(
-        initial_config.page_size.clone(),
-        initial_config.margins.clone(),
-        initial_config
-            .columns
-            .clone()
-            .unwrap_or_else(default_columns),
-        options.footnote_reserved_heights.clone(),
-    )?;
-    if let Some(Some(restart)) = plan.section_page_restarts.first() {
-        paginator.restart_page_numbering(restart.start);
-    }
+    let mut paginator = origin_paginator(&initial_config, &plan, options)?;
 
     let placement = place(
         measured,
@@ -460,16 +486,31 @@ pub fn layout_document_incremental_ranges(
     )?;
     plan.section_page_restarts = options.section_page_restarts.clone().unwrap_or_default();
     let initial_config = plan.section_configs.first().cloned().unwrap_or(body_config);
-    // Only the document's first page cannot move back.
-    let restart = restart_index(&plan.keep_with_next, dirty_index);
-    let resume = previous_checkpoints
+    // A section's columns are balanced from its first block, which a resume
+    // inside it does not see.
+    if plan
+        .section_configs
         .iter()
-        .rev()
-        .find(|checkpoint| {
-            (checkpoint.block_index < restart && resumable(checkpoint, &input.measured))
-                || checkpoint.block_index == 0
+        .chain([&initial_config])
+        .any(|config| {
+            config
+                .columns
+                .as_ref()
+                .is_some_and(|columns| columns.count > 1.0)
         })
-        .ok_or_else(|| LayoutError::Unsupported("no clean pagination checkpoint".into()))?;
+    {
+        return Err(LayoutError::Unsupported(
+            "incremental placement inside multi-column sections".into(),
+        ));
+    }
+    let restart = restart_index(&plan.keep_with_next, dirty_index);
+    // Without a resumable checkpoint ahead of the change, placement starts
+    // afresh at the document's origin, still converging with the retained layout.
+    let resume = previous_checkpoints.iter().rev().find(|checkpoint| {
+        checkpoint.block_index < restart
+            && resumable(checkpoint, &input.measured, &previous_layout.pages)
+    });
+    let resume_page = resume.map_or(0, |resume| resume.page_index);
     let dirty: Vec<usize> = (previous_fingerprints.len() == next_fingerprints.len())
         .then(|| {
             previous_fingerprints
@@ -482,23 +523,13 @@ pub fn layout_document_incremental_ranges(
         })
         .unwrap_or_default();
     // Clean stretches between dirty blocks are skipped only where a page start
-    // alone decides what follows: one column throughout, no reserved note
-    // space, and no later section break that changed.
+    // alone decides what follows: no reserved note space, and no later section
+    // break that changed.
     let skippable = !dirty.is_empty()
         && options
             .footnote_reserved_heights
             .as_ref()
             .is_none_or(|heights| heights.is_empty())
-        && plan
-            .section_configs
-            .iter()
-            .chain([&initial_config])
-            .all(|config| {
-                config
-                    .columns
-                    .as_ref()
-                    .is_none_or(|columns| columns.count <= 1.0)
-            })
         && !dirty
             .iter()
             .skip(1)
@@ -506,26 +537,35 @@ pub fn layout_document_incremental_ranges(
 
     // Place each dirty stretch in turn without touching the retained pages, so
     // a failure leaves the caller's layout as it was.
-    let mut segments: Vec<(
-        LayoutCheckpoint,
-        Vec<crate::types::Page>,
-        Option<Convergence>,
-    )> = Vec::new();
-    let mut checkpoints: Vec<_> = previous_checkpoints
-        .iter()
-        .filter(|checkpoint| checkpoint_order(checkpoint) < checkpoint_order(resume))
-        .cloned()
-        .collect();
+    let mut segments: Vec<(usize, Vec<crate::types::Page>, Option<Convergence>)> = Vec::new();
+    let mut checkpoints: Vec<_> = resume.map_or_else(Vec::new, |resume| {
+        previous_checkpoints
+            .iter()
+            .filter(|checkpoint| checkpoint_order(checkpoint) < checkpoint_order(resume))
+            .cloned()
+            .collect()
+    });
     let mut placed_blocks = 0;
-    let mut start = resume.clone();
+    let mut start = resume.cloned();
     let mut segment_dirty = dirty_index;
     loop {
-        let mut paginator = Paginator::resume(
-            &start.flow,
-            start.page_number,
-            options.footnote_reserved_heights.clone(),
-        )?;
-        paginator.set_section_index(start.section_index);
+        let (block_index, section_index, page_index, mut paginator) = match &start {
+            Some(start) => {
+                let mut paginator = Paginator::resume(
+                    &start.flow,
+                    start.page_number,
+                    options.footnote_reserved_heights.clone(),
+                )?;
+                paginator.set_section_index(start.section_index);
+                (
+                    start.block_index,
+                    start.section_index,
+                    start.page_index,
+                    paginator,
+                )
+            }
+            None => (0, 0, 0, origin_paginator(&initial_config, &plan, options)?),
+        };
         let convergence = ConvergenceInput {
             previous_checkpoints,
             previous_fingerprints,
@@ -534,15 +574,16 @@ pub fn layout_document_incremental_ranges(
             skippable_dirty: skippable.then_some(dirty.as_slice()),
             keep_with_next: &plan.keep_with_next,
             measured: &input.measured,
+            previous_pages: &previous_layout.pages,
         };
         let placement = place(
             &input.measured,
             &plan,
             &mut paginator,
             &initial_config,
-            start.block_index,
-            start.section_index,
-            start.page_index,
+            block_index,
+            section_index,
+            page_index,
             Some(&convergence),
         )?;
         placed_blocks += placement.placed_blocks;
@@ -567,9 +608,9 @@ pub fn layout_document_incremental_ranges(
             }
             _ => None,
         };
-        segments.push((start, paginator.pages, placement.converged));
+        segments.push((page_index, paginator.pages, placement.converged));
         match next {
-            Some(resume) => start = resume,
+            Some(resume) => start = Some(resume),
             None => break,
         }
     }
@@ -590,11 +631,11 @@ pub fn layout_document_incremental_ranges(
         }
     };
     let mut pages = Vec::new();
-    take_retained(0, resume.page_index, &mut pages);
+    take_retained(0, resume_page, &mut pages);
     let mut rebuilt_page_ranges = Vec::with_capacity(segments.len());
     let mut reused_ranges = Vec::new();
-    for (start, mut placed, converged) in segments {
-        debug_assert_eq!(pages.len(), start.page_index);
+    for (start_page, mut placed, converged) in segments {
+        debug_assert_eq!(pages.len(), start_page);
         let rebuilt_start = pages.len();
         pages.append(&mut placed);
         rebuilt_page_ranges.push(rebuilt_start..pages.len());
@@ -640,10 +681,10 @@ pub fn layout_document_incremental_ranges(
             },
             checkpoints,
             placed_blocks,
-            rebuilt_page_start: resume.page_index,
+            rebuilt_page_start: resume_page,
             rebuilt_page_end: rebuilt_page_ranges
                 .last()
-                .map_or(resume.page_index, |range| range.end),
+                .map_or(resume_page, |range| range.end),
         },
         rebuilt_page_ranges,
     })
@@ -1907,6 +1948,25 @@ mod pagination_rule_tests {
         next: Vec<serde_json::Value>,
         dirty: &[usize],
     ) -> CheckpointedLayout {
+        assert_incremental_matches_full_with(json!({}), previous, next, dirty)
+    }
+
+    /// [`assert_incremental_matches_full`] with `options` over the test page's.
+    fn assert_incremental_matches_full_with(
+        options: serde_json::Value,
+        previous: Vec<serde_json::Value>,
+        next: Vec<serde_json::Value>,
+        dirty: &[usize],
+    ) -> CheckpointedLayout {
+        let input = |measured: Vec<serde_json::Value>| {
+            let mut value = input(measured);
+            let mut merged = serde_json::to_value(&value.options).unwrap();
+            for (key, option) in options.as_object().unwrap() {
+                merged[key] = option.clone();
+            }
+            value.options = serde_json::from_value(merged).unwrap();
+            value
+        };
         let retained = layout_document_checkpointed(&mut input(previous)).unwrap();
         let previous_fingerprints = vec![1_u64; next.len()];
         let mut next_fingerprints = previous_fingerprints.clone();
@@ -1957,6 +2017,108 @@ mod pagination_rule_tests {
                 .iter()
                 .any(|checkpoint| checkpoint.flow.pending_margins.is_some())
         );
+    }
+
+    #[test]
+    fn placement_restarts_from_the_origin_without_a_resumable_checkpoint() {
+        let blocks = || vec![text_anchored_table(), paragraph(0, 1, 10.0, json!({}))];
+        let retained = assert_incremental_matches_full(blocks(), blocks(), &[1]);
+        assert_eq!(retained.layout.pages.len(), 2);
+    }
+
+    #[test]
+    fn placement_does_not_resume_where_a_page_takes_new_section_geometry() {
+        let blocks = || {
+            vec![
+                paragraph(0, 1, 10.0, json!({})),
+                paragraph(1, 1, 10.0, json!({ "pageBreakBefore": true })),
+                json!({
+                    "block": {
+                        "kind": "sectionBreak", "id": "section", "type": "continuous",
+                        "margins": { "top": 10, "right": 10, "bottom": 10, "left": 10 },
+                    },
+                    "measure": { "kind": "sectionBreak" },
+                }),
+                paragraph(2, 9, 10.0, json!({})),
+                paragraph(3, 1, 10.0, json!({ "alignment": "center" })),
+                paragraph(4, 1, 10.0, json!({})),
+            ]
+        };
+        let final_margins =
+            json!({ "finalMargins": { "top": 10, "right": 20, "bottom": 10, "left": 20 } });
+        let retained =
+            assert_incremental_matches_full_with(final_margins, blocks(), blocks(), &[0, 5]);
+        assert!(
+            retained
+                .layout
+                .pages
+                .windows(2)
+                .any(|pair| pair[0].margins != pair[1].margins)
+        );
+    }
+
+    #[test]
+    fn a_changed_first_section_lays_out_from_the_origin() {
+        let blocks = |top: f64| {
+            vec![
+                paragraph(0, 1, 10.0, json!({})),
+                json!({
+                    "block": {
+                        "kind": "sectionBreak", "id": "section", "type": "nextPage",
+                        "margins": { "top": top, "right": 10, "bottom": 10, "left": 10 },
+                    },
+                    "measure": { "kind": "sectionBreak" },
+                }),
+                paragraph(1, 1, 10.0, json!({})),
+            ]
+        };
+        assert_incremental_matches_full(blocks(10.0), blocks(20.0), &[0, 1]);
+    }
+
+    #[test]
+    fn incremental_placement_refuses_multi_column_sections() {
+        let section = |columns: u32| {
+            json!({
+                "block": {
+                    "kind": "sectionBreak", "id": format!("section{columns}"), "type": "nextPage",
+                    "columns": { "count": columns, "gap": 20 },
+                },
+                "measure": { "kind": "sectionBreak" },
+            })
+        };
+        for blocks in [
+            vec![
+                paragraph(0, 1, 10.0, json!({})),
+                section(1),
+                paragraph(1, 1, 10.0, json!({})),
+                paragraph(2, 1, 10.0, json!({})),
+                section(2),
+                paragraph(3, 1, 10.0, json!({})),
+            ],
+            vec![
+                paragraph(0, 1, 10.0, json!({})),
+                section(2),
+                paragraph(1, 1, 10.0, json!({})),
+                paragraph(2, 1, 10.0, json!({})),
+            ],
+        ] {
+            let retained = layout_document_checkpointed(&mut input(blocks.clone())).unwrap();
+            let previous_fingerprints = vec![1_u64; blocks.len()];
+            let mut next_fingerprints = previous_fingerprints.clone();
+            next_fingerprints[3] = 2;
+            let mut previous_layout = retained.layout.clone();
+            assert!(matches!(
+                layout_document_incremental(
+                    &mut input(blocks),
+                    &mut previous_layout,
+                    &retained.checkpoints,
+                    &previous_fingerprints,
+                    &next_fingerprints,
+                    3,
+                ),
+                Err(LayoutError::Unsupported(_))
+            ));
+        }
     }
 
     fn text_anchored_table() -> serde_json::Value {
