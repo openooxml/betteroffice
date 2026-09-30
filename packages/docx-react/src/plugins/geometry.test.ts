@@ -142,6 +142,34 @@ describe('plugin overlay geometry', () => {
     expect(geometry.getPositionAtPoint(1, 1)).toBeNull();
   });
 
+  test('the mirror fallback answers in container pixels under an ancestor CSS zoom', () => {
+    for (const ancestor of [0.713, 1.25]) {
+      const parent = document.createElement('div');
+      const pages = document.createElement('div');
+      const page = document.createElement('div');
+      page.className = 'layout-page';
+      page.dataset.pageIndex = '0';
+      pages.appendChild(page);
+      parent.appendChild(pages);
+      for (const element of [parent, pages, page]) {
+        Object.defineProperty(element, 'currentCSSZoom', { value: ancestor });
+      }
+      place(parent, rectAt(20, 10, 900 * ancestor, 2100 * ancestor));
+      place(pages, rectAt(20 + 40 * ancestor, 10 + 16 * ancestor, 800 * ancestor, 2000 * ancestor));
+      const pageLeft = 20 + (40 + 30) * ancestor;
+      place(page, rectAt(pageLeft, 10 + (16 + 24) * ancestor, 100 * ancestor, 200 * ancestor));
+      const dom = createRenderedDomContext(pages);
+      const bounds = dom.getPageBounds(0)!;
+      expect(bounds.x).toBeCloseTo(30, 9);
+      expect(bounds.y).toBeCloseTo(24, 9);
+      expect(bounds.width).toBeCloseTo(100, 9);
+      expect(bounds.height).toBeCloseTo(200, 9);
+      const offset = dom.getContainerOffset();
+      expect(offset.x).toBeCloseTo(40, 9);
+      expect(offset.y).toBeCloseTo(16, 9);
+    }
+  });
+
   test('measures origins when called, so moved pages move the overlay', () => {
     const pages = document.createElement('div');
     const layer = document.createElement('div');
@@ -183,7 +211,11 @@ const TEXT_RANGE: DocxTextRange = {
 };
 const PARAGRAPH_TARGET: DocxGeometryTarget = { kind: 'paragraph', paragraph: PARAGRAPH };
 
-function semanticGeometry(zoom = 1, { stableSession = false } = {}) {
+/**
+ * Pages under a layer at client (20, 10). An `ancestor` CSS zoom scales every client distance
+ * from the layer; the elements' own pixels, borders and scroll offsets stay as they are.
+ */
+function semanticGeometry(zoom = 1, ancestor = 1, { stableSession = false } = {}) {
   const pages = document.createElement('div');
   const layer = document.createElement('div');
   const canvases = [0, 1].map((index) => {
@@ -192,17 +224,32 @@ function semanticGeometry(zoom = 1, { stableSession = false } = {}) {
     pages.appendChild(canvas);
     return canvas;
   });
+  if (ancestor !== 1) {
+    for (const element of [pages, layer, ...canvases]) {
+      Object.defineProperty(element, 'currentCSSZoom', { value: ancestor });
+    }
+  }
+  const client = (x: number, y: number) => ({
+    x: 20 + (x - 20) * ancestor,
+    y: 10 + (y - 10) * ancestor,
+  });
   const movePages = (x: number, y: number) => {
-    place(pages, rectAt(x, y, 500 * zoom, 1000 * zoom));
+    const at = client(x, y);
+    place(pages, rectAt(at.x, at.y, 500 * zoom * ancestor, 1000 * zoom * ancestor));
     canvases.forEach((canvas, index) => {
       place(
         canvas,
-        rectAt(x + 30, y + 40 + index * 240 * zoom, PAGE.width * zoom, PAGE.height * zoom)
+        rectAt(
+          at.x + 30 * ancestor,
+          at.y + (40 + index * 240 * zoom) * ancestor,
+          PAGE.width * zoom * ancestor,
+          PAGE.height * zoom * ancestor
+        )
       );
     });
   };
   movePages(130, 60);
-  place(layer, rectAt(20, 10, 900, 2100), {
+  place(layer, rectAt(20, 10, 900 * ancestor, 2100 * ancestor), {
     clientLeft: 2,
     clientTop: 3,
     scrollLeft: 5,
@@ -300,11 +347,13 @@ function semanticGeometry(zoom = 1, { stableSession = false } = {}) {
   );
   return {
     geometry,
+    dom,
     source,
     session,
     editor,
     calls,
     layer,
+    canvases,
     movePages,
     setCurrent: (value: boolean) => {
       current = value;
@@ -418,6 +467,60 @@ describe('semantic anchor geometry', () => {
     }
   });
 
+  test('answers in layer pixels under an ancestor CSS zoom', () => {
+    for (const ancestor of [0.713, 1.25]) {
+      for (const zoom of [1, 1.5]) {
+        const { geometry, dom } = semanticGeometry(zoom, ancestor);
+        const result = anchored(geometry.getAnchorGeometry(PARAGRAPH_TARGET));
+        const expected = {
+          pageIndex: 0,
+          x: 143 + 10 * zoom,
+          y: 94 + 20 * zoom,
+          width: 4 * zoom,
+          height: 40 * zoom,
+        };
+        for (const key of ['x', 'y', 'width', 'height'] as const) {
+          expect(result.rects[0]![key]).toBeCloseTo(expected[key], 9);
+        }
+        expect(result.pageRect.x).toBeCloseTo(143, 9);
+        expect(result.pageRect.y).toBeCloseTo(94, 9);
+        expect(result.pageRect.width).toBeCloseTo(PAGE.width * zoom, 9);
+        expect(result.pageRect.height).toBeCloseTo(PAGE.height * zoom, 9);
+
+        const [contextRect] = dom.getRectsForRange(0, 4);
+        expect(contextRect!.x).toBeCloseTo(30 / zoom + 10, 9);
+        expect(contextRect!.width).toBeCloseTo(4, 9);
+        const overlay = geometry.toOverlayRect(contextRect!)!;
+        expect(overlay.x).toBeCloseTo(expected.x, 9);
+        expect(overlay.y).toBeCloseTo(expected.y, 9);
+        expect(overlay.width).toBeCloseTo(expected.width, 9);
+      }
+    }
+  });
+
+  test('resolves a client point to page pixels under an ancestor CSS zoom', () => {
+    for (const ancestor of [0.713, 1.25]) {
+      for (const zoom of [1, 1.5]) {
+        const { dom, source, canvases } = semanticGeometry(zoom, ancestor);
+        const hits: [number, number, number][] = [];
+        source.hitTestRegions = (pageIndex, x, y) => {
+          hits.push([pageIndex, x, y]);
+          return { region: 'body', pos: 3, target: 'text' } as ReturnType<
+            DisplayListQueries['hitTestRegions']
+          >;
+        };
+        const page = canvases[1]!.getBoundingClientRect();
+        const scale = zoom * ancestor;
+        expect(
+          dom.getPositionAtPoint!(page.left + 10 * scale, page.top + 20 * scale)
+        ).toMatchObject({ position: 3, pageIndex: 1 });
+        expect(hits[0]![0]).toBe(1);
+        expect(hits[0]![1]).toBeCloseTo(10, 9);
+        expect(hits[0]![2]).toBeCloseTo(20, 9);
+      }
+    }
+  });
+
   test('anchors a hidden target at its boundary, then falls back to its paragraph', () => {
     const { geometry, source } = semanticGeometry();
     const target: DocxGeometryTarget = { kind: 'revision', revisionId: 'r2' };
@@ -465,9 +568,10 @@ describe('semantic anchor geometry', () => {
     });
     textLine(source, [1, 2, 3]);
     for (const revisionId of ['cd', 'ef']) {
-      expect(
-        anchored(geometry.getAnchorGeometry({ kind: 'revision', revisionId }))
-      ).toMatchObject({ rects: [], anchor: { x: 154, width: 0 } });
+      expect(anchored(geometry.getAnchorGeometry({ kind: 'revision', revisionId }))).toMatchObject({
+        rects: [],
+        anchor: { x: 154, width: 0 },
+      });
     }
     textLine(source, [0, 1, 2, 3]);
     expect(
@@ -560,9 +664,17 @@ describe('semantic anchor geometry', () => {
       projector: createCanvasHostProjector(pages, source, 1),
     });
     const layout = { id: 'layout', version: 'v1', previewVersion: 0, zoom: 1.5, pageCount: 1 };
-    const geometry = createPluginGeometry(layout, dom, layer, () => true, () => null, source, () => {
-      throw new Error('a stale context must not reach the editor');
-    });
+    const geometry = createPluginGeometry(
+      layout,
+      dom,
+      layer,
+      () => true,
+      () => null,
+      source,
+      () => {
+        throw new Error('a stale context must not reach the editor');
+      }
+    );
     refused(geometry.getAnchorGeometry(PARAGRAPH_TARGET), 'layout-unavailable');
     expect(geometry.toOverlayRect({ x: 0, y: 0, width: 1, height: 1 })).toBeNull();
     expect(geometry.getPositionAtPoint(0, 0)).toBeNull();
@@ -707,7 +819,7 @@ describe('semantic anchor geometry', () => {
   });
 
   test('one session reads the document once across preview decisions at a version', () => {
-    const { geometry, setSnapshot, source, session } = semanticGeometry(1, { stableSession: true });
+    const { geometry, setSnapshot, source, session } = semanticGeometry(1, 1, { stableSession: true });
     const reads = { listRevisions: 0, paragraphSpans: 0 };
     for (const name of ['listRevisions', 'paragraphSpans'] as const) {
       const read = session[name].bind(session) as () => unknown;
@@ -769,7 +881,12 @@ describe('semantic anchor geometry', () => {
     textLine(source, [2, 3]);
     expect(
       anchored(
-        geometry.getAnchorGeometry({ kind: 'search', paragraph: PARAGRAPH, text: 'aa', occurrence: 2 })
+        geometry.getAnchorGeometry({
+          kind: 'search',
+          paragraph: PARAGRAPH,
+          text: 'aa',
+          occurrence: 2,
+        })
       )
     ).toMatchObject({ rects: [], anchor: { x: 155 } });
     expect(

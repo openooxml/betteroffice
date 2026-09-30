@@ -258,6 +258,7 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
             .unwrap_or_else(default_columns),
         options.footnote_reserved_heights.clone(),
     )?;
+    paginator.set_section_page_margins(options.section_page_margins.clone().unwrap_or_default());
     if let Some(Some(restart)) = plan.section_page_restarts.first() {
         paginator.restart_page_numbering(restart.start);
     }
@@ -370,12 +371,13 @@ pub fn layout_document_incremental(
         .filter(|checkpoint| checkpoint.page_index < resume.page_index)
         .cloned()
         .collect();
-    let mut paginator = Paginator::resume(
+    let mut paginator = Paginator::resume_in_section(
         &resume.flow,
         resume.page_number,
+        resume.section_index,
         options.footnote_reserved_heights.clone(),
     )?;
-    paginator.set_section_index(resume.section_index);
+    paginator.set_section_page_margins(options.section_page_margins.clone().unwrap_or_default());
     // move retained pages out; restored on failure so the caller's stays valid
     let mut previous_pages = std::mem::take(&mut previous_layout.pages);
     let convergence = ConvergenceInput {

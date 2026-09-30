@@ -6,6 +6,7 @@ import {
   captureInlinePositionEmuFromDisplayList,
   DISPLAY_LIST_TABLE_INSERT_HIDE_DELAY_MS as TABLE_INSERT_HIDE_DELAY,
   detectDisplayListTableInsertHover,
+  effectiveZoom,
   findDisplayListHyperlinkAtPoint,
   resolveCanvasPoint,
   resolveDisplayPageClientRect,
@@ -567,6 +568,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         scheduleHide();
         return;
       }
+      const targetZoom = effectiveZoom(overlayTarget);
       const hit = detectDisplayListTableInsertHover({
         list: queries.displayList,
         pageIndex: point.pageIndex,
@@ -577,6 +579,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         tableKeyOf: createTableKeyResolver(projection),
         cellPmPosOf: createCellPmPosResolver(projection),
         region,
+        buttonZoom: targetZoom,
       });
       if (!hit) {
         scheduleHide();
@@ -585,8 +588,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       const targetRect = overlayTarget.getBoundingClientRect();
       setTableInsertButton({
         type: hit.type,
-        x: hit.clientX - targetRect.left,
-        y: hit.clientY - targetRect.top,
+        x: (hit.clientX - targetRect.left) / targetZoom,
+        y: (hit.clientY - targetRect.top) / targetZoom,
         cellPmPos: hit.cellPmPos,
       });
       clearTableInsertTimer();
@@ -681,9 +684,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
           if (onHyperlinkClick && selection?.anchor === selection?.head) {
             const pageSize = queries.pageSize(point.pageIndex);
             const pageRect = resolveDisplayPageClientRect(host, queries, point.pageIndex);
-            const targetRect =
-              (canvasOverlayTarget ?? host.closest('.oox-root.paged-editor'))?.getBoundingClientRect() ??
-              null;
+            const target = canvasOverlayTarget ?? host.closest('.oox-root.paged-editor');
+            const targetRect = target?.getBoundingClientRect() ?? null;
             let linkLeft = e.clientX;
             let linkBottom = e.clientY;
             if (displayHit && pageRect && pageSize) {
@@ -691,14 +693,15 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
               linkLeft = linkRect.left;
               linkBottom = linkRect.bottom;
             }
-            if (targetRect) {
+            if (target && targetRect) {
+              const targetZoom = effectiveZoom(target);
               onHyperlinkClick({
                 href,
                 displayText: displayHit?.displayText ?? href,
                 tooltip: displayHit?.tooltip,
                 position: {
-                  top: linkBottom - targetRect.top + 4,
-                  left: linkLeft - targetRect.left,
+                  top: (linkBottom - targetRect.top) / targetZoom + 4,
+                  left: (linkLeft - targetRect.left) / targetZoom,
                 },
               });
             }

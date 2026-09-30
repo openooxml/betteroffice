@@ -26,7 +26,7 @@ use docx_layout::regions::{
 };
 use docx_layout::types::{
     BlockExtent, BlockId, ColumnLayout, Input as LayoutInput, Layout, LayoutBlock, MeasuredBlock,
-    NoteAreaContract, ParagraphExtent, Run,
+    NoteAreaContract, ParagraphExtent, Run, SectionPageMargins,
 };
 use serde::Serialize;
 use yrs::Subscription;
@@ -605,25 +605,41 @@ fn extend_input_for_header_footer(
                 }
                 None => fallback_margins.clone(),
             };
-            let header_height = variants
-                .iter()
-                .filter(|variant| {
-                    variant.section_index == section_index
-                        && variant.kind == HeaderFooterKind::Header
-                })
-                .map(|variant| variant.flow_height)
-                .fold(0.0_f64, f64::max);
-            let footer_height = variants
-                .iter()
-                .filter(|variant| {
-                    variant.section_index == section_index
-                        && variant.kind == HeaderFooterKind::Footer
-                })
-                .map(|variant| variant.flow_height)
-                .fold(0.0_f64, f64::max);
-            extend_body_margins(&page_size, &margins, header_height, footer_height)
+            let height = |kind: HeaderFooterKind, hf_type: HeaderFooterType| {
+                variants
+                    .iter()
+                    .rfind(|variant| {
+                        variant.section_index == section_index
+                            && variant.kind == kind
+                            && variant.hf_type == hf_type
+                    })
+                    .map(|variant| variant.flow_height)
+            };
+            let extend = |hf_type: HeaderFooterType| {
+                let header = height(HeaderFooterKind::Header, hf_type).unwrap_or(0.0);
+                let footer = height(HeaderFooterKind::Footer, hf_type).unwrap_or(0.0);
+                extend_body_margins(&page_size, &margins, header, footer)
+            };
+            let even_and_odd =
+                regions.even_and_odd_headers || section.even_and_odd_headers == Some(true);
+            (
+                extend(HeaderFooterType::Default),
+                SectionPageMargins {
+                    first: section.title_pg.then(|| extend(HeaderFooterType::First)),
+                    even: even_and_odd.then(|| extend(HeaderFooterType::Even)),
+                    restart: section
+                        .page_numbering
+                        .as_ref()
+                        .and_then(|numbering| numbering.start),
+                },
+            )
         })
         .collect();
+    let (extended, page_margins): (Vec<_>, Vec<_>) = extended.into_iter().unzip();
+    input.options.section_page_margins = page_margins
+        .iter()
+        .any(|margins| *margins != SectionPageMargins::default())
+        .then_some(page_margins);
     input.options.margins = extended.first().cloned();
     input.options.final_margins = extended.last().cloned();
     let mut section_index = 0;
