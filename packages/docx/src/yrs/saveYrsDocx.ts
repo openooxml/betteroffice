@@ -148,6 +148,65 @@ function savedParagraphs(
   return saved;
 }
 
+/** `blocks` without the empty editor-only paragraphs in `synthetic`; the same array when none is. */
+function withoutSynthetic(blocks: BlockContent[], synthetic: ReadonlySet<string>): BlockContent[] {
+  const kept: BlockContent[] = [];
+  let changed = false;
+  for (const block of blocks) {
+    let next: BlockContent | null = block;
+    if (block.type === 'paragraph') {
+      const key = projectedSessionKey(block);
+      if (block.content.length === 0 && key !== undefined && synthetic.has(key)) next = null;
+    } else if (block.type === 'table') {
+      const rows = block.rows.map((row) => {
+        const cells = row.cells.map((cell) => {
+          const content = withoutSynthetic(cell.content, synthetic);
+          return content === cell.content ? cell : { ...cell, content };
+        });
+        return cells.every((cell, index) => cell === row.cells[index]) ? row : { ...row, cells };
+      });
+      if (rows.some((row, index) => row !== block.rows[index])) next = { ...block, rows };
+    } else if (block.type === 'blockSdt') {
+      const content = withoutSynthetic(block.content, synthetic);
+      if (content !== block.content) next = { ...block, content };
+    }
+    changed ||= next !== block;
+    if (next) kept.push(next);
+  }
+  return changed ? kept : blocks;
+}
+
+/** `document` without the editor-only paragraphs the session has not authored into. */
+function withoutSyntheticParagraphs(
+  document: Document,
+  identities: DocxParagraphIdentitySnapshot
+): Document {
+  const synthetic = new Set(
+    identities.paragraphs.flatMap(({ origin, session }) =>
+      origin === 'synthetic' && session ? [session.paraId] : []
+    )
+  );
+  if (synthetic.size === 0) return document;
+  const withContent = <T extends { content: BlockContent[] }>(owner: T): T => {
+    const content = withoutSynthetic(owner.content, synthetic);
+    return content === owner.content ? owner : { ...owner, content };
+  };
+  const pkg = document.package;
+  const parts = (map: typeof pkg.headers) =>
+    map && new Map([...map].map(([id, part]) => [id, withContent(part)] as const));
+  return {
+    ...document,
+    package: {
+      ...pkg,
+      document: withContent(pkg.document),
+      headers: parts(pkg.headers),
+      footers: parts(pkg.footers),
+      footnotes: pkg.footnotes?.map(withContent),
+      endnotes: pkg.endnotes?.map(withContent),
+    },
+  };
+}
+
 /** The identities and paragraph ID plan a session save applies. @internal */
 export interface DocxSessionSave {
   identities: DocxParagraphIdentitySnapshot;
@@ -178,9 +237,10 @@ export async function writeSessionSave(
     ...capture.plan,
     patchedParts: capture.plan.patchedParts.filter(({ part }) => patches(part)),
   };
-  const paragraphs = savedParagraphs(document, capture.identities);
+  const output = withoutSyntheticParagraphs(document, capture.identities);
+  const paragraphs = savedParagraphs(output, capture.identities);
   const { buffer } = await writeDocumentWithRust(
-    document,
+    output,
     originalBuffer,
     options,
     undefined,
