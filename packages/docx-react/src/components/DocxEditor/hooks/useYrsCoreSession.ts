@@ -83,6 +83,8 @@ interface YrsCoreSessionCallbacks {
 interface WorkerOpenOptions {
   openInWorker: OpenInWorker;
   renderedFrame: object | null;
+  /** The engine whose provisional layout is shown with the rest not yet asked of the worker. */
+  pendingCompletion?: unknown;
 }
 
 export interface YrsCoreSessionOptions {
@@ -393,6 +395,9 @@ export function useYrsCoreSession(
     let abandoned = false;
     let shown: { session: YrsSession; host: YrsDocxHost } | null = null;
     let fullOpenTimer: ReturnType<typeof setTimeout> | null = null;
+    // Disposes a full open started alongside the preview that the load never took.
+    let dropEarly = (): void => {};
+    let earlyTaken = false;
     const stale = () =>
       cancelled ||
       abandoned ||
@@ -498,7 +503,9 @@ export function useYrsCoreSession(
             ? openFull()
             : null;
         early?.catch(() => {});
-        const dropEarly = (): void => {
+        dropEarly = (): void => {
+          if (earlyTaken) return;
+          earlyTaken = true;
           void early?.then((full) => {
             if (!full) return;
             openedWorker?.destroy();
@@ -560,6 +567,7 @@ export function useYrsCoreSession(
           }, fullOpenTimeoutRef.current);
         }
         const full = await (early ?? openFull());
+        earlyTaken = true;
         if (!full) return;
         if (stale()) {
           openedWorker?.destroy();
@@ -574,13 +582,10 @@ export function useYrsCoreSession(
             inheritedFrameRef.current = renderedFrameRef.current;
             const worker = openedWorker;
             const source = bytes;
-            // Encoded before the worker lays out, so the replica can load while it completes the layout.
-            const state = worker.encodeState();
-            state.catch(() => {});
             const pending = deferWorkerOpenReplica(
               next,
               async () => {
-                const update = await state;
+                const update = await worker.encodeState();
                 return () => {
                   next.openDocx(source, false);
                   next.loadState(update);
@@ -659,6 +664,7 @@ export function useYrsCoreSession(
         if (host) callbacksRef.current?.onHostDocument?.(host, seedGeneration, next);
       })
       .catch((error) => {
+        dropEarly();
         console.error('[yrs] failed to start the editing session', error);
         if (abandoned) return;
         fail(error);
@@ -712,6 +718,8 @@ export function useYrsCoreSession(
       !start
     ) return;
     if (previewing || (handoffFrom && options?.shownEngine !== session)) return;
+    // The replica blocks this thread: it loads once the worker is laying out the rest.
+    if (workerOpen?.pendingCompletion === session) return;
     if (replicaWaitTimerRef.current !== null) {
       clearTimeout(replicaWaitTimerRef.current);
     }
@@ -724,7 +732,15 @@ export function useYrsCoreSession(
       frameId = requestAnimationFrame(start);
     });
     return () => cancelAnimationFrame(frameId);
-  }, [openInWorker, session, workerOpen?.renderedFrame, previewing, handoffFrom, options?.shownEngine]);
+  }, [
+    openInWorker,
+    session,
+    workerOpen?.renderedFrame,
+    workerOpen?.pendingCompletion,
+    previewing,
+    handoffFrom,
+    options?.shownEngine,
+  ]);
 
   const notifyFramePresented = useCallback((engine: unknown): void => {
     const waiting = paintWaitRef.current;

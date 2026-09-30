@@ -164,8 +164,8 @@ export interface UseRustDisplayListResult {
    * pixels instead of remounting; drops only on genuine fallback or reset.
    */
   workerSurfacesActive: boolean;
-  /** A provisional layout is shown and the rest of it is not yet asked of the worker. */
-  completionPending: boolean;
+  /** The engine whose provisional layout is shown with the rest not yet asked of the worker. */
+  pendingCompletion: YrsSession | null;
   workerPresentationActive: boolean;
   setWorkerPresentationActive(active: boolean): void;
   attachOffscreenCanvases(
@@ -522,7 +522,7 @@ export function useRustDisplayList(
   const workerInputQueueRef = useRef<Promise<void>>(Promise.resolve());
   const suppressWorkerInvalidationRef = useRef(0);
   const [workerSurfacesActive, setWorkerSurfacesActive] = useState(false);
-  const [completionPending, setCompletionPending] = useState(false);
+  const [pendingCompletion, setPendingCompletion] = useState<YrsSession | null>(null);
   const workerPresentationActiveRef = useRef(false);
   const [workerPresentationActive, setWorkerPresentationActiveState] = useState(false);
 
@@ -1648,7 +1648,7 @@ export function useRustDisplayList(
           // surfaces are attached: the worker answers in order, so asking
           // sooner would hold back the first paint until it is done.
           const provisionalEpoch = result.caret.frameEpoch;
-          if (workerOpenEnabledRef.current) setCompletionPending(true);
+          if (workerOpenEnabledRef.current) setPendingCompletion(hostEngine);
           const surfaced = new Promise<void>((resolve) => {
             completionGateRef.current = resolve;
             setTimeout(resolve, PROVISIONAL_SURFACE_WAIT_MS);
@@ -1656,7 +1656,7 @@ export function useRustDisplayList(
           const complete = surfaced
             // A worker handed to another session lays out that session now.
             .then(() => {
-              setCompletionPending(false);
+              setPendingCompletion((current) => (current === hostEngine ? null : current));
               return workerRef.current?.engine === hostEngine
                 ? worker.completeLayout(provisionalEpoch, false, COMPLETION_SLICE_BLOCKS)
                 : null;
@@ -2321,7 +2321,7 @@ export function useRustDisplayList(
     setRetainBuiltPages,
     workerMemory,
     workerSurfacesActive,
-    completionPending,
+    pendingCompletion,
     workerPresentationActive,
     setWorkerPresentationActive,
     attachOffscreenCanvases,
@@ -2453,8 +2453,8 @@ export interface UseCanvasRendererResult {
   frame: RetainedFrame | null;
   /** True while the worker owns the visible page surfaces. */
   workerSurfacesActive: boolean;
-  /** See {@link UseRustDisplayListResult.completionPending}. */
-  completionPending: boolean;
+  /** See {@link UseRustDisplayListResult.pendingCompletion}. */
+  pendingCompletion: YrsSession | null;
   /** sole visible renderer lifecycle */
   status: 'loading' | 'ready' | 'error';
   /** fatal display-list error; non-null exactly while status is `error` */
@@ -2610,7 +2610,7 @@ export function useCanvasRenderer(
     setRetainBuiltPages,
     workerMemory,
     workerSurfacesActive,
-    completionPending,
+    pendingCompletion,
     workerPresentationActive,
     setWorkerPresentationActive,
     attachOffscreenCanvases,
@@ -2746,7 +2746,7 @@ export function useCanvasRenderer(
     workerMemory,
     setWorkerPresentationActive,
     workerSurfacesActive,
-    completionPending,
+    pendingCompletion,
     offscreenReplay,
     paintedCaretActive,
     notifyCaretInput,

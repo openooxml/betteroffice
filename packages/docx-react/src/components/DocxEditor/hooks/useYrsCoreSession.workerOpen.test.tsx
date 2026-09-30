@@ -132,6 +132,7 @@ interface HarnessProps {
   collaboration?: DocxEditorCollaborationOptions;
   readOnly?: boolean;
   resolvedCommentIds?: ReadonlySet<number>;
+  gateReplica?: boolean;
 }
 
 function useHarness(props: HarnessProps) {
@@ -178,6 +179,7 @@ function useHarness(props: HarnessProps) {
       workerOpen: props.experimentalWorkerOpen ? {
         openInWorker,
         renderedFrame: renderer.status === 'ready' ? renderer.displayList : null,
+        ...(props.gateReplica ? { pendingCompletion: renderer.pendingCompletion } : {}),
       } : undefined,
     }
   );
@@ -332,16 +334,15 @@ test('a painted main preview hands off to the worker before hydrating the full r
     act(() => result.current.pipeline.runLayoutPipeline());
     await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(preview));
     expect(result.current.renderer.status).toBe('ready');
-    expect(workers).toHaveLength(0);
-    expect(posted).toEqual([]);
+    // The worker opens the full document while the preview opens and paints.
+    await waitFor(() => expect(posted.map((request) => request.type)).toEqual(['open']));
+    expect(workers).toHaveLength(1);
     expect(result.current.mainOpens).toEqual([]);
 
     act(() => result.current.presentFrame());
-    expect(posted).toEqual([]);
     act(() => frames.run());
-    expect(posted).toEqual([]);
     act(() => frames.run());
-    await waitFor(() => expect(posted.map((request) => request.type)).toEqual(['open']));
+    expect(posted.map((request) => request.type)).toEqual(['open']);
     expect(result.current.core.session).toBe(preview);
     expect(destroyed).not.toHaveBeenCalled();
     const firstPreviewFrame = result.current.renderer.displayList;
@@ -434,7 +435,8 @@ test.each(['null', 'throw'] as const)(
       const destroyed = spyOn(preview, 'destroy');
       act(() => result.current.pipeline.runLayoutPipeline());
       await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(preview));
-      expect(calls).toBe(0);
+      await waitFor(() => expect(calls).toBe(1));
+      expect(result.current.core.session).toBe(preview);
       act(() => result.current.presentFrame());
       act(() => frames.run());
       act(() => frames.run());
@@ -530,6 +532,38 @@ test('failure of the accepted full session before its frame cancels deferred hyd
     expect(result.current.errors).toEqual([failure]);
     expect(result.current.core.failOpening(new Error('later'), full)).toBe(false);
     expect(result.current.errors).toHaveLength(1);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
+
+test('the replica loads once the rest of a provisional layout is asked of the worker', async () => {
+  const { posted } = installWorker();
+  const frames = holdFrames();
+  try {
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, source: longBytes, gateReplica: true },
+    });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const full = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(full));
+    expect(result.current.renderer.pendingCompletion).toBe(full);
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    await waitFor(() => expect(result.current.renderer.pendingCompletion).toBeNull());
+    expect(posted.some((request) => request.type === 'completeLayout')).toBe(true);
+    act(() => frames.run());
+    act(() => frames.run());
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    const types = posted.map((request) => request.type);
+    expect(types.indexOf('completeLayout')).toBeLessThan(types.indexOf('encodeState'));
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
     unmount();
   } finally {
     cleanup();
