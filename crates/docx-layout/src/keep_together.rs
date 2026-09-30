@@ -312,10 +312,12 @@ fn table_leading_slice(block: &TableBlock, measure: &TableExtent, capacity: f64)
 
 /// Whether placement can put a floating table in the text flow (moving it
 /// whole or, when it spans the column, splitting it into rows), as it does
-/// for a text-anchored one; a page- or margin-anchored one only overlays.
+/// for a text-anchored one; a page- or margin-anchored one, or one lifted
+/// above its paragraph, only overlays.
 fn floats_in_text_flow(floating: &crate::types::FloatingTablePosition) -> bool {
     floating.vert_anchor.as_deref().unwrap_or("text") == "text"
         && !matches!(floating.tblp_x_spec.as_deref(), Some("inside" | "outside"))
+        && !floating.tblp_y.is_some_and(|y| y.is_finite() && y < 0.0)
 }
 
 /// Whether a paragraph forbids splitting its own lines across a page (keepLines).

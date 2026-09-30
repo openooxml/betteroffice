@@ -364,6 +364,17 @@ fn a_keep_next_heading_stays_beside_a_fitting_floating_table() {
 }
 
 #[test]
+fn a_keep_next_heading_stays_beside_a_text_floating_table_lifted_above_it() {
+    let mut table = table_rows(&[
+        (1, json!({}), json!({"isHeader": true})),
+        (2, json!({"widowControl": true}), json!({})),
+    ]);
+    table["block"]["floating"] =
+        json!({"horzAnchor": "page", "tblpX": 90, "vertAnchor": "text", "tblpY": -20});
+    assert_eq!(heading_and_table_pages_after(2, table), (Some(0), Some(0)));
+}
+
+#[test]
 fn a_keep_next_heading_moves_with_a_full_width_text_floating_table() {
     let mut table = table_rows(&[
         (1, json!({}), json!({"isHeader": true})),
