@@ -880,16 +880,17 @@ fn place(
             )?;
             // only paragraph runs and followers, and a page break on any of
             // them wins over the keep
-            let paragraph_run = group
-                .members
-                .iter()
-                .skip(1)
-                .chain(group.follower.as_ref())
-                .all(|&index| {
-                    let block = &measured[index].block;
-                    matches!(block, LayoutBlock::Paragraph(_))
-                        && paragraph_breaks_before_run(block) == (false, false)
-                });
+            let paragraph_run = group.follower.is_some()
+                && group
+                    .members
+                    .iter()
+                    .skip(1)
+                    .chain(group.follower.as_ref())
+                    .all(|&index| {
+                        let block = &measured[index].block;
+                        matches!(block, LayoutBlock::Paragraph(_))
+                            && paragraph_breaks_before_run(block) == (false, false)
+                    });
             let oversized = fresh_page_height > page_content_height
                 && paragraph_run
                 && !paginator.balanced_limit_in_force(state_idx);
@@ -3121,6 +3122,19 @@ mod pagination_rule_tests {
         ]))
         .unwrap();
         assert_eq!(paragraph_slices(&result, 2.0), vec![(0, 0, 1)]);
+    }
+
+    #[test]
+    fn oversized_keep_next_run_without_a_follower_keeps_mains_placement() {
+        let mut measured = vec![paragraph(
+            1,
+            20,
+            KEEP_LINE_HEIGHT,
+            json!({"widowControl": false}),
+        )];
+        measured.extend(oversized_run(true).into_iter().take(59));
+        let result = layout_document(&mut oversized_input(measured)).unwrap();
+        assert_eq!(result.pages.len(), 2);
     }
 
     #[test]
