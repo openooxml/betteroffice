@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1935,9 +1935,11 @@ fn cell_content_widths(
     for block in &cell.blocks {
         let widths = match block {
             LayoutBlock::Paragraph(paragraph) => {
-                if paragraph.runs.iter().any(
-                    |run| matches!(run, crate::types::Run::Image(image) if floating_image_run(image)),
-                ) {
+                if !painted_indent_matches(paragraph)
+                    || paragraph.runs.iter().any(
+                        |run| matches!(run, crate::types::Run::Image(image) if floating_image_run(image)),
+                    )
+                {
                     return None;
                 }
                 crate::typed_measure::intrinsic_widths(paragraph, content_width, config)?
@@ -1956,6 +1958,43 @@ fn cell_content_widths(
     Some((minimum + padding, maximum + padding))
 }
 
+/// Whether painting places the paragraph's lines where intrinsic sizing does:
+/// painting clamps negative indents and moves a hanging paragraph's text by
+/// the hang when its leading indent (the right one when right-to-left) doesn't
+/// cover it.
+fn painted_indent_matches(paragraph: &crate::types::ParagraphBlock) -> bool {
+    let Some(attrs) = paragraph.attrs.as_ref() else {
+        return true;
+    };
+    let Some(indent) = attrs.indent.as_ref() else {
+        return true;
+    };
+    let left = indent.left.unwrap_or(0.0);
+    let right = indent.right.unwrap_or(0.0);
+    let hanging = indent.hanging.unwrap_or(0.0);
+    if [left, right, indent.first_line.unwrap_or(0.0), hanging]
+        .iter()
+        .any(|value| *value < 0.0)
+    {
+        return false;
+    }
+    if hanging == 0.0 {
+        return true;
+    }
+    let marker = attrs.list_marker_hidden != Some(true)
+        && attrs
+            .list_marker
+            .as_ref()
+            .is_some_and(|marker| !marker.is_empty());
+    let covers = |leading: f64| leading > 0.0 && !(marker && hanging > leading);
+    let may_be_rtl = attrs.bidi == Some(true)
+        || paragraph
+            .runs
+            .iter()
+            .any(|run| matches!(run, crate::types::Run::Text(text) if text.fmt.rtl == Some(true)));
+    covers(left) && (!may_be_rtl || covers(right))
+}
+
 /// Floating drawings paint at their own width, which intrinsic sizing doesn't see.
 fn floating_image_run(image: &crate::types::ImageRun) -> bool {
     image.display_mode.as_deref() == Some("float")
@@ -1965,7 +2004,8 @@ fn floating_image_run(image: &crate::types::ImageRun) -> bool {
         )
 }
 
-/// The drawn left border that painting insets a first-column cell's content by.
+/// The drawn left border that painting insets a first-column cell's content by
+/// without narrowing it, so intrinsic widths can't size that cell.
 fn left_border_inset(cell: &crate::types::TableCell) -> f64 {
     cell.borders
         .as_ref()
@@ -1990,24 +2030,18 @@ fn table_content_widths(
     {
         return None;
     }
-    let col_count = count_table_columns(table);
-    let first_column: HashSet<(usize, usize)> = resolve_cell_grid(table)
-        .into_iter()
-        .filter(|cell| {
-            if table.bidi == Some(true) {
-                cell.column_index + cell.col_span >= col_count
-            } else {
-                cell.column_index == 0
-            }
-        })
-        .map(|cell| (cell.row_index, cell.cell_index))
-        .collect();
+    // Painting places each row's cells from column zero.
+    if table.rows.iter().any(|row| {
+        row.grid_before.is_some_and(|before| before > 0)
+            || row.cells.iter().any(|cell| cell.grid_start.is_some())
+    }) {
+        return None;
+    }
     Some(
         table
             .rows
             .iter()
-            .enumerate()
-            .map(|(row_index, row)| {
+            .map(|row| {
                 row.cells
                     .iter()
                     .enumerate()
@@ -2015,13 +2049,12 @@ fn table_content_widths(
                         if cell.min_content_width.is_some() && cell.max_content_width.is_some() {
                             return None;
                         }
-                        let inset = if first_column.contains(&(row_index, cell_index)) {
-                            left_border_inset(cell)
-                        } else {
-                            0.0
-                        };
+                        if (cell_index == 0 || table.bidi == Some(true))
+                            && left_border_inset(cell) > 0.0
+                        {
+                            return None;
+                        }
                         cell_content_widths(cell, content_width, config)
-                            .map(|(minimum, maximum)| (minimum + inset, maximum + inset))
                     })
                     .collect()
             })
@@ -3048,7 +3081,7 @@ mod tests {
     }
 
     #[test]
-    fn autofit_keeps_room_for_floating_drawings_and_the_painted_left_border() {
+    fn autofit_keeps_the_grid_where_painting_places_content_differently() {
         crate::with_private_measure_fonts(|| {
             let font = crate::register_measure_font(include_bytes!(
                 "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
@@ -3092,12 +3125,38 @@ mod tests {
             let bordered = table(100.0, json!({"left": {"width": 8}}), image.clone());
             assert_eq!(
                 measure_table_column_widths(&bordered, 600.0, &config),
-                vec![88.0]
+                vec![100.0]
             );
-            let hidden = table(100.0, json!({"left": {"width": 8, "style": "nil"}}), image);
+            let hidden = table(
+                100.0,
+                json!({"left": {"width": 8, "style": "nil"}}),
+                image.clone(),
+            );
             assert_eq!(
                 measure_table_column_widths(&hidden, 600.0, &config),
                 vec![80.0]
+            );
+            let mut sparse = table(100.0, json!(null), image);
+            sparse.rows[0].cells[0].grid_start = Some(0);
+            assert_eq!(
+                measure_table_column_widths(&sparse, 600.0, &config),
+                vec![100.0]
+            );
+            let mut hanging = table(
+                100.0,
+                json!(null),
+                json!([{"kind": "text", "text": "WWWW"}]),
+            );
+            assert!(cell_content_widths(&hanging.rows[0].cells[0], 600.0, &config).is_some());
+            let LayoutBlock::Paragraph(paragraph) = &mut hanging.rows[0].cells[0].blocks[0] else {
+                panic!()
+            };
+            paragraph.attrs = Some(
+                serde_json::from_value(json!({"indent": {"left": 0, "hanging": 20}})).unwrap(),
+            );
+            assert_eq!(
+                cell_content_widths(&hanging.rows[0].cells[0], 600.0, &config),
+                None
             );
         });
     }

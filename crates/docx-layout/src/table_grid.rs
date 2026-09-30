@@ -1371,22 +1371,23 @@ mod tests {
         use crate::measure_blocks::{MeasurementConfig, measure_block};
         use crate::types::{BlockExtent, LayoutBlock};
 
+        let child = json!({"kind": "table", "id": 1, "layoutMode": "autofit", "gridWidths": [300],
+            "preferredWidth": {"value": 0, "type": "auto"},
+            "rows": [{"id": 1, "cells": [
+                {"id": 1, "preferredWidth": {"value": 1500, "type": "dxa"},
+                 "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0},
+                 "blocks": [{"kind": "paragraph", "id": 0, "runs": [
+                     {"kind": "image", "src": "", "width": 200, "height": 40},
+                     {"kind": "text", "text": "x"}
+                 ]}]}
+            ]}]
+        });
         let mut outer: LayoutBlock = serde_json::from_value(json!({
             "kind": "table", "id": 0, "layoutMode": "autofit", "gridWidths": [300],
             "preferredWidth": {"value": 0, "type": "auto"},
             "rows": [{"id": 0, "cells": [
                 {"id": 0, "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0},
-                 "blocks": [{"kind": "table", "id": 1, "layoutMode": "autofit", "gridWidths": [300],
-                     "preferredWidth": {"value": 0, "type": "auto"},
-                     "rows": [{"id": 1, "cells": [
-                         {"id": 1, "preferredWidth": {"value": 1500, "type": "dxa"},
-                          "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0},
-                          "blocks": [{"kind": "paragraph", "id": 0, "runs": [
-                              {"kind": "image", "src": "", "width": 200, "height": 40},
-                              {"kind": "text", "text": "x"}
-                          ]}]}
-                     ]}]
-                 }]}
+                 "blocks": [child]}
             ]}]
         }))
         .unwrap();
