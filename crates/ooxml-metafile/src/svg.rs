@@ -248,7 +248,7 @@ impl Writer {
                         num(gradient.end.0),
                         num(gradient.end.1)
                     );
-                    for (offset, color) in &gradient.stops {
+                    for (offset, color) in gradient.stops.iter() {
                         let _ = write!(
                             writer.out,
                             r#"<stop offset="{}" stop-color="{}""#,

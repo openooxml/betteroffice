@@ -96,11 +96,34 @@ fn paint(paint: Paint, m: Xform, scale: f64) -> Paint {
             width: width * scale,
             height: height * scale,
         },
-        Paint::Linear(gradient) => Paint::Linear(Arc::new(LinearGradient {
-            start: apply(m, gradient.start),
-            end: apply(m, gradient.end),
-            ..(*gradient).clone()
-        })),
+        Paint::Linear(gradient) => Paint::Linear(Arc::new(linear(&gradient, m))),
+    }
+}
+
+/// `gradient` mapped by `m` with every point keeping its colour: the start
+/// maps with `m`, and the gradient vector with its inverse transpose, which
+/// keeps the colour bands parallel under shear and unequal scaling.
+pub(crate) fn linear(gradient: &LinearGradient, m: Xform) -> LinearGradient {
+    let start = apply(m, gradient.start);
+    let (dx, dy) = (
+        gradient.end.0 - gradient.start.0,
+        gradient.end.1 - gradient.start.1,
+    );
+    let scale = (m[0] * m[3] - m[1] * m[2]) * (dx * dx + dy * dy);
+    let normal = (
+        (m[3] * dx - m[1] * dy) / scale,
+        (m[0] * dy - m[2] * dx) / scale,
+    );
+    let length = normal.0 * normal.0 + normal.1 * normal.1;
+    let end = if length.is_finite() && length > 0.0 {
+        (start.0 + normal.0 / length, start.1 + normal.1 / length)
+    } else {
+        apply(m, gradient.end)
+    };
+    LinearGradient {
+        start,
+        end,
+        ..gradient.clone()
     }
 }
 

@@ -124,6 +124,36 @@ fn data_a_record_addresses_past_its_bounds_refuses() {
 }
 
 #[test]
+fn pattern_brushes_that_fail_to_decode_spend_the_pixel_budget() {
+    let mut record = u32s(&[1, 0, 32, 40, 72, 4, 40, 1 << 16, 1]);
+    record.extend(u16s(&[1, 24]));
+    record.extend(u32s(&[0, 0, 0, 0, 0, 0, 0]));
+    let bytes = (0..300)
+        .fold(Emf::new(10, 10), |emf, _| emf.rec(94, &record))
+        .bytes();
+    assert!(to_svg(&bytes).is_err());
+}
+
+#[test]
+fn region_geometry_filled_away_spends_the_budget() {
+    let points: Vec<(f32, f32)> = (0..10_000).map(|x| (x as f32, 0.0)).collect();
+    let path = plus_path(1, &points).2;
+    let mut region = u32s(&[
+        0xDBC0_1002,
+        2,
+        4,
+        0x1000_0003,
+        0x1000_0001,
+        path.len() as u32,
+    ]);
+    region.extend(path);
+    let mut records = vec![plus_header(false), (0x4008, 0x0402, region)];
+    records.extend((0..500).map(|_| (0x4013, 0x8002, u32s(&[0xff00_0000]))));
+    let bytes = Emf::new(10, 10).rec(70, &plus(&records).1).bytes();
+    assert!(to_svg(&bytes).is_err());
+}
+
+#[test]
 fn a_string_drawn_many_times_spends_the_text_budget_once_per_draw() {
     let units = vec![b'a' as u16; 100_000];
     let count = 20u32;

@@ -103,7 +103,7 @@ pub struct LinearGradient {
     pub start: (f64, f64),
     pub end: (f64, f64),
     /// Offsets in `0..=1` along `start..end`, ascending.
-    pub stops: Vec<(f64, Rgba)>,
+    pub stops: Arc<[(f64, Rgba)]>,
     pub spread: Spread,
 }
 

@@ -314,7 +314,8 @@ impl<const FULL: bool> Player<FULL> {
         if !FULL {
             return None;
         }
-        *self.omissions.entry(what).or_default() += 1;
+        let count = self.omissions.entry(what).or_default();
+        *count = count.saturating_add(1);
         Some(())
     }
 

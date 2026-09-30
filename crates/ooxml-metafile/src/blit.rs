@@ -528,7 +528,7 @@ pub(crate) fn pattern_brush<const FULL: bool>(
     let usage = u32_at(bytes, body + 4)?;
     let bmi = slice(bytes, u32_at(bytes, body + 8)?, u32_at(bytes, body + 12)?)?;
     let bits = slice(bytes, u32_at(bytes, body + 16)?, u32_at(bytes, body + 20)?)?;
-    let brush = match tile(player, bmi, bits, usage) {
+    let brush = match tile(player, bmi, bits, usage)? {
         Some(brush) => brush,
         None => {
             player.omit("pattern brushes that could not be decoded")?;
@@ -547,10 +547,14 @@ pub(crate) fn wmf_pattern_brush<const FULL: bool>(
 ) -> Option<()> {
     let brush = if function == 0x0142 {
         let usage = u32::from(u16_at(bytes, body + 2)?);
-        bytes.get(body + 4..).and_then(|packed| {
+        let parts = bytes.get(body + 4..).and_then(|packed| {
             let offset = packed_bits_offset(packed)?;
-            tile(player, packed.get(..offset)?, packed.get(offset..)?, usage)
-        })
+            Some((packed.get(..offset)?, packed.get(offset..)?))
+        });
+        match parts {
+            Some((bmi, bits)) => tile(player, bmi, bits, usage)?,
+            None => None,
+        }
     } else {
         None
     };
@@ -565,27 +569,34 @@ pub(crate) fn wmf_pattern_brush<const FULL: bool>(
     Some(())
 }
 
+/// A pattern brush's tile, `Some(None)` when it cannot be decoded. Its
+/// declared pixels are charged before decoding, whether or not that succeeds.
 fn tile<const FULL: bool>(
     player: &mut Player<FULL>,
     bmi: &[u8],
     bits: &[u8],
     usage: u32,
-) -> Option<Brush> {
+) -> Option<Option<Brush>> {
     let budget = player
         .limits
         .bitmap_pixels
         .saturating_sub(player.bitmap_pixels);
-    let dib = decode(bmi, bits, usage, budget.min(1 << 16)).ok()?;
-    player.bitmap_pixels += u64::from(dib.width) * u64::from(dib.height);
-    let DibPixels::Rgba(rgba) = dib.pixels else {
-        return None;
+    let declared = declared_pixels(bmi);
+    player.charge(0, declared)?;
+    let Ok(dib) = decode(bmi, bits, usage, budget.min(1 << 16)) else {
+        return Some(None);
     };
-    Some(Brush {
+    let actual = u64::from(dib.width) * u64::from(dib.height);
+    player.charge(0, actual.saturating_sub(declared))?;
+    let DibPixels::Rgba(rgba) = dib.pixels else {
+        return Some(None);
+    };
+    Some(Some(Brush {
         pattern: Some(Arc::new(Bitmap {
             width: dib.width,
             height: dib.height,
             pixels: Pixels::Rgba(rgba),
         })),
         ..Brush::solid(0, true)
-    })
+    }))
 }

@@ -378,19 +378,22 @@ fn a_dual_metafile_prefers_emf_plus_and_falls_back_to_gdi() {
 
 #[test]
 fn emf_plus_only_files_play_gdi_records_only_inside_get_dc_spans() {
+    let cover = plus_fill_rects(0xff00_0000, &[[0.0, 0.0, 100.0, 100.0]]);
     let bytes = Emf::new(100, 100)
         .rec(70, &plus(&[plus_header(false)]).1)
         .recs(vec![rect(0, 0, 10, 10)])
         .rec(70, &plus(&[(0x4004, 0, Vec::new())]).1)
-        .recs(vec![rect(20, 20, 30, 30)])
-        .rec(70, &plus(&[plus_eof()]).1)
+        .recs(vec![rect(20, 20, 30, 30), move_to(0, 60), line_to(90, 60)])
+        .rec(70, &plus(&[cover, plus_eof()]).1)
         .recs(vec![rect(40, 40, 50, 50)])
         .bytes();
     let drawing = replay(&bytes).unwrap();
-    let [Op::Shape(shape)] = &drawing.ops[..] else {
-        panic!("only the rectangle inside the GetDC span");
+    let [Op::Shape(inside), Op::Shape(line), Op::Shape(cover)] = &drawing.ops[..] else {
+        panic!("the GetDC span's rectangle and line, then the EMF+ fill");
     };
-    assert!(at(&shape.path[0], 20.0, 20.0));
+    assert!(at(&inside.path[0], 20.0, 20.0));
+    assert!(line.stroke.is_some() && at(&line.path[0], 0.0, 60.0));
+    assert!(cover.fill.is_some() && cover.stroke.is_none());
 }
 
 #[test]
@@ -591,29 +594,51 @@ fn an_emf_plus_object_split_across_records_draws_like_a_whole_one() {
     assert_eq!(shapes(&whole.ops).len(), 1);
     assert_eq!(shapes(&whole.ops)[0].path, shapes(&split.ops)[0].path);
     let brush = u32s(&[0xDBC0_1002, 0, 0xff00_0000]);
-    let mut short = u32s(&[8]);
-    short.extend(&brush);
-    let past = replay(&plus_only(vec![(0x4008, 0x8100, short)])).unwrap();
-    assert_eq!(
-        past.omissions[0].what,
-        "EMF+ objects that could not be decoded"
-    );
+    let mut over = u32s(&[8]);
+    over.extend(&brush);
+    let mut under = u32s(&[16]);
+    under.extend(&brush[..8]);
+    for chunks in [
+        vec![(0x4008, 0x8100, over)],
+        vec![
+            (0x4008, 0x8100, under),
+            (0x4008, 0x0100, brush[8..].to_vec()),
+        ],
+    ] {
+        let drawing = replay(&plus_only(chunks)).unwrap();
+        assert_eq!(
+            drawing.omissions[0].what,
+            "EMF+ objects that could not be decoded"
+        );
+    }
 }
 
 #[test]
 fn an_emf_plus_gradient_follows_the_transform_it_is_filled_under() {
-    let drawing = replay(&plus_only(vec![
-        plus_path(1, &[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]),
-        plus_linear_brush(2, [0.0, 0.0, 10.0, 10.0], 0xff00_0000, 0xffff_ffff),
-        plus_world([1.0, 0.0, 0.0, 1.0, 50.0, 0.0]),
-        plus_fill_path(1, 2),
-    ]))
-    .unwrap();
-    let shape = shapes(&drawing.ops)[0];
-    let Some(Paint::Linear(gradient)) = &shape.fill else {
-        panic!("a gradient fill");
-    };
-    assert!(at(&shape.path[0], gradient.start.0, gradient.start.1));
+    for world in [
+        [1.0, 0.0, 0.0, 1.0, 50.0, 0.0],
+        [1.0, 0.0, 1.0, 1.0, 50.0, 0.0],
+        [2.0, 0.0, 0.0, 0.5, 0.0, 0.0],
+    ] {
+        let drawing = replay(&plus_only(vec![
+            plus_path(1, &[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]),
+            plus_linear_brush(2, [0.0, 0.0, 10.0, 10.0], 0xff00_0000, 0xffff_ffff),
+            plus_world(world),
+            plus_fill_path(1, 2),
+        ]))
+        .unwrap();
+        let shape = shapes(&drawing.ops)[0];
+        let Some(Paint::Linear(gradient)) = &shape.fill else {
+            panic!("a gradient fill");
+        };
+        let along = |command: &PathCommand| {
+            let ((x, y), (sx, sy)) = (point(command), gradient.start);
+            let (dx, dy) = (gradient.end.0 - sx, gradient.end.1 - sy);
+            ((x - sx) * dx + (y - sy) * dy) / (dx * dx + dy * dy)
+        };
+        assert!(close(along(&shape.path[0]), 0.0) && close(along(&shape.path[3]), 0.0));
+        assert!(close(along(&shape.path[1]), 1.0) && close(along(&shape.path[2]), 1.0));
+    }
 }
 
 #[test]
@@ -707,6 +732,29 @@ fn excluding_an_infinite_emf_plus_region_clips_everything() {
             PathCommand::Close => true,
             command => at(command, 0.0, 0.0),
         }));
+    }
+}
+
+#[test]
+fn emf_plus_regions_fold_empty_and_infinite_operands() {
+    let rect = || {
+        let mut node = u32s(&[0x1000_0000]);
+        node.extend(f32s(&[10.0, 10.0, 20.0, 20.0]));
+        node
+    };
+    let union_with_empty = [u32s(&[0xDBC0_1002, 2, 2]), rect(), u32s(&[0x1000_0002])].concat();
+    let infinite_xor = [u32s(&[0xDBC0_1002, 2, 3, 0x1000_0003]), rect()].concat();
+    for (region, exclude) in [(union_with_empty, false), (infinite_xor, true)] {
+        let drawing = replay(&plus_only(vec![
+            (0x4008, 0x0402, region),
+            (0x4034, 2, Vec::new()),
+            plus_fill_rects(0xff00_0000, &[[0.0, 0.0, 50.0, 50.0]]),
+        ]))
+        .unwrap();
+        assert!(drawing.omissions.is_empty());
+        let clip = shapes(&drawing.ops)[0].clip.as_deref().unwrap();
+        assert_eq!(clip.region.exclude, exclude);
+        assert!(at(&clip.region.path[0], 10.0, 10.0));
     }
 }
 

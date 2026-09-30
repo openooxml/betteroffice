@@ -197,7 +197,10 @@ pub(crate) fn comment<const FULL: bool>(player: &mut Player<FULL>, bytes: &[u8])
                 if records > player.limits.records {
                     return player.refuse("the EMF+ records exceed the replay limit");
                 }
-                player.plus_gdi = false;
+                if player.plus_gdi {
+                    player.flush_pending();
+                    player.plus_gdi = false;
+                }
                 if !record(player, kind, flags, data)? {
                     return player.refuse(format!("EMF+ record type {kind:#06x} is not supported"));
                 }
@@ -338,7 +341,7 @@ fn play<const FULL: bool>(
                 return Some(true);
             };
             let mut path = Vec::new();
-            if !region_path(state, player, &region, &mut path) {
+            if !region_path(state, player, &region, &mut path)? {
                 player.omit("EMF+ regions approximated")?;
             }
             let clip = state.graphics.clip.clone();
@@ -348,21 +351,21 @@ fn play<const FULL: bool>(
             let Some(Some(Object::Path(shape))) = state.objects.get(id).cloned() else {
                 return Some(true);
             };
+            let (paint, stroke) = if kind == 0x4014 {
+                (Some(brush(player, state, solid, u32_at(data, 0)?)?), None)
+            } else {
+                let pen = pen(state, u32_at(data, 0)? as usize)?;
+                (None, pen.map(|pen| stroke(state, player, &pen)))
+            };
+            if paint.is_none() && stroke.is_none() {
+                return Some(true);
+            }
             let mut path = Vec::new();
             for figure in &shape.figures {
                 figure_path(state, player, figure, &mut path);
             }
             let clip = state.graphics.clip.clone();
-            if kind == 0x4014 {
-                let paint = brush(player, state, solid, u32_at(data, 0)?)?;
-                push_shape(player, path, Some(paint), None, true, clip);
-            } else {
-                let pen_id = u32_at(data, 0)? as usize;
-                if let Some(pen) = pen(state, pen_id)? {
-                    let stroke = stroke(state, player, &pen);
-                    push_shape(player, path, None, Some(stroke), false, clip);
-                }
-            }
+            push_shape(player, path, paint, stroke, kind == 0x4014, clip);
         }
         0x4016..=0x4018 => {
             let (paint, at) = if kind == 0x4016 {
@@ -432,11 +435,9 @@ fn play<const FULL: bool>(
             };
             let mut path = Vec::new();
             figure_path(state, player, &figure, &mut path);
-            if let Some(pen) = pen(state, id)? {
-                let stroke = stroke(state, player, &pen);
-                let clip = state.graphics.clip.clone();
-                push_shape(player, path, None, Some(stroke), false, clip);
-            }
+            let stroke = pen(state, id)?.map(|pen| stroke(state, player, &pen));
+            let clip = state.graphics.clip.clone();
+            push_shape(player, path, None, stroke, false, clip);
         }
         0x401A | 0x401B => {
             let source = (
@@ -598,12 +599,12 @@ fn push_shape<const FULL: bool>(
     even_odd: bool,
     clip: Clip,
 ) {
-    if path.is_empty() || (fill.is_none() && stroke.is_none()) {
-        return;
-    }
     player.commands = player.commands.saturating_add(path.len());
     if player.commands > player.limits.commands {
         player.overflowed = true;
+        return;
+    }
+    if path.is_empty() || (fill.is_none() && stroke.is_none()) {
         return;
     }
     player.push_op(Op::Shape(Shape {
@@ -640,11 +641,7 @@ fn placed<const FULL: bool>(player: &Player<FULL>, state: &State, paint: Paint) 
         return paint;
     };
     let m = concat(state.to_device(), player.device_to_output());
-    Paint::Linear(Arc::new(LinearGradient {
-        start: apply(m, gradient.start),
-        end: apply(m, gradient.end),
-        ..(**gradient).clone()
-    }))
+    Paint::Linear(Arc::new(crate::transform::linear(gradient, m)))
 }
 
 /// The pen object `id`, or `Some(None)` when the slot holds none.
@@ -1055,16 +1052,17 @@ fn parse_brush<const FULL: bool>(player: &mut Player<FULL>, data: &[u8]) -> Opti
                 }
             }
             stops.sort_by(|a, b| a.0.total_cmp(&b.0));
-            Paint::Linear(Arc::new(LinearGradient {
-                start: apply(transform, (rect.0, rect.1)),
-                end: apply(transform, (rect.0 + rect.2, rect.1)),
-                stops,
+            let gradient = LinearGradient {
+                start: (rect.0, rect.1),
+                end: (rect.0 + rect.2, rect.1),
+                stops: stops.into(),
                 spread: match wrap {
                     4 => Spread::Pad,
                     1 | 3 => Spread::Reflect,
                     _ => Spread::Repeat,
                 },
-            }))
+            };
+            Paint::Linear(Arc::new(crate::transform::linear(&gradient, transform)))
         }
         _ => return None,
     })
@@ -1348,12 +1346,14 @@ fn extent(region: &Region) -> Option<bool> {
     }
 }
 
-/// A region as clip regions to intersect; `false` when it had to be approximated.
+/// A region as clip regions to intersect; `false` when it had to be
+/// approximated. `spent` counts every path command built, kept or not.
 fn region_clips<const FULL: bool>(
     state: &State,
     player: &Player<FULL>,
     region: &Region,
     out: &mut Vec<ClipRegion>,
+    spent: &mut usize,
 ) -> bool {
     let empty = || ClipRegion {
         path: rect_path([0.0; 4]),
@@ -1381,6 +1381,7 @@ fn region_clips<const FULL: bool>(
             for figure in &path.figures {
                 figure_path(state, player, figure, &mut commands);
             }
+            *spent = spent.saturating_add(commands.len());
             out.push(ClipRegion {
                 path: commands,
                 even_odd: false,
@@ -1389,14 +1390,14 @@ fn region_clips<const FULL: bool>(
             true
         }
         Region::Combine(1, left, right, _) => {
-            let a = region_clips(state, player, left, out);
-            region_clips(state, player, right, out) && a
+            let a = region_clips(state, player, left, out, spent);
+            region_clips(state, player, right, out, spent) && a
         }
         Region::Combine(2 | 3, left, right, _) if extent(left) == Some(false) => {
-            region_clips(state, player, right, out)
+            region_clips(state, player, right, out, spent)
         }
         Region::Combine(2 | 3, left, right, _) if extent(right) == Some(false) => {
-            region_clips(state, player, left, out)
+            region_clips(state, player, left, out, spent)
         }
         Region::Combine(mode @ 3..=5, left, right, _)
             if *mode != 3 || extent(left) == Some(true) || extent(right) == Some(true) =>
@@ -1407,9 +1408,9 @@ fn region_clips<const FULL: bool>(
                 _ if extent(left) == Some(true) => (left, right),
                 _ => (right, left),
             };
-            let exact = region_clips(state, player, keep, out);
+            let exact = region_clips(state, player, keep, out, spent);
             let mut cuts = Vec::new();
-            let simple = region_clips(state, player, cut, &mut cuts) && cuts.len() <= 1;
+            let simple = region_clips(state, player, cut, &mut cuts, spent) && cuts.len() <= 1;
             for mut cut in cuts {
                 cut.exclude = !cut.exclude;
                 out.push(cut);
@@ -1418,8 +1419,8 @@ fn region_clips<const FULL: bool>(
         }
         Region::Combine(mode, left, right, _) => {
             let (mut a, mut b) = (Vec::new(), Vec::new());
-            region_clips(state, player, left, &mut a);
-            region_clips(state, player, right, &mut b);
+            region_clips(state, player, left, &mut a, spent);
+            region_clips(state, player, right, &mut b, spent);
             if a.is_empty() || b.is_empty() {
                 return false;
             }
@@ -1440,24 +1441,27 @@ fn region_clips<const FULL: bool>(
 }
 
 /// The region's area as one path, for filling; `false` when approximated.
+/// Geometry built but not kept is charged here, the kept path when drawn.
 fn region_path<const FULL: bool>(
     state: &State,
-    player: &Player<FULL>,
+    player: &mut Player<FULL>,
     region: &Region,
     out: &mut Vec<PathCommand>,
-) -> bool {
-    let mut clips = Vec::new();
-    let exact = region_clips(state, player, region, &mut clips);
+) -> Option<bool> {
+    let (mut clips, mut spent) = (Vec::new(), 0);
+    let exact = region_clips(state, player, region, &mut clips, &mut spent);
     let simple = clips.len() == 1 && !clips[0].exclude;
     if clips.is_empty() {
         let (w, h) = player.unit;
         out.extend(rect_path([0.0, 0.0, w, h]));
-        return exact;
+        return Some(exact);
     }
+    let kept = out.len();
     for clip in clips.into_iter().filter(|clip| !clip.exclude) {
         out.extend(clip.path);
     }
-    exact && simple
+    player.charge(spent.saturating_sub(out.len() - kept), 0)?;
+    Some(exact && simple)
 }
 
 fn set_clip<const FULL: bool>(
@@ -1466,9 +1470,9 @@ fn set_clip<const FULL: bool>(
     region: &Region,
     mode: u32,
 ) -> Option<()> {
-    let mut clips = Vec::new();
-    let mut exact = region_clips(state, player, region, &mut clips);
-    player.charge(clips.iter().map(|clip| clip.path.len()).sum(), 0)?;
+    let (mut clips, mut spent) = (Vec::new(), 0);
+    let mut exact = region_clips(state, player, region, &mut clips, &mut spent);
+    player.charge(spent, 0)?;
     let kept = if mode == 1 || mode == 4 {
         ClipChain::depth(&state.graphics.clip)
     } else {
@@ -1862,7 +1866,8 @@ fn draw_image<const FULL: bool>(
                 player.push_op(op);
             }
             for omission in &nested.omissions {
-                *player.omissions.entry(omission.what).or_default() += omission.count;
+                let count = player.omissions.entry(omission.what).or_default();
+                *count = count.saturating_add(omission.count);
             }
         }
     }
