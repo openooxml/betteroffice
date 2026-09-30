@@ -11,7 +11,7 @@ use docx_edit::structured::{
     StorySelection, UnlocatedReason, VerticalMerge, export_docx_markdown, export_docx_structured,
     export_package_structured, render_docx_markdown,
 };
-use docx_edit::{EditCtx, EditingDoc, RawOp, seed_from_docx};
+use docx_edit::{EditCtx, EditingDoc, RawOp, StoryRange, seed_from_docx};
 use fixture::{Package, image, para, run};
 use yrs::{Map, MapRef, ReadTxn, Transact};
 
@@ -496,6 +496,35 @@ fn comment_metadata(content: &DocxStructuredContent) -> docx_edit::structured::C
         .iter()
         .find_map(|story| story.comment.clone())
         .unwrap()
+}
+
+#[test]
+fn comment_zero_is_anchored_like_any_other() {
+    let xml = para(
+        "60000011",
+        &format!(
+            r#"<w:commentRangeStart w:id="0"/>{}<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>"#,
+            run("Annotated")
+        ),
+    );
+    let comments = format!(
+        r#"<w:comments {}><w:comment w:id="0" w:author="Ann">{}</w:comment></w:comments>"#,
+        fixture::namespaces(),
+        para("60000012", &run("Remark"))
+    );
+    let doc = open(
+        &Package::new(&xml)
+            .part("comments.xml", "rIdComments", COMMENTS, COMMENTS, &comments)
+            .bytes(),
+    );
+    let span = |doc: &EditingDoc| {
+        let anchors = doc.resolve_comment("0").unwrap();
+        (anchors[0].story.clone(), anchors[0].start, anchors[0].end)
+    };
+    assert_eq!(span(&doc), ("body".to_owned(), 0, 9));
+    doc.set_comment_ranges("0", &[StoryRange::new("body", 2, 5)])
+        .unwrap();
+    assert_eq!(span(&doc), ("body".to_owned(), 2, 5));
 }
 
 #[test]
