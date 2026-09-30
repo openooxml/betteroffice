@@ -2547,8 +2547,10 @@ impl EditSession {
             .sticky_index(&txn, head_index, Assoc::After)
             .ok_or_else(|| js_err("selection head could not be made sticky"))?;
         drop(txn);
-        self.engine
-            .set_resident_caret_head((story == "body").then(|| head.clone()));
+        self.engine.set_resident_caret_head(
+            (story == "body" || story.starts_with("body:"))
+                .then(|| (story.to_owned(), head.clone())),
+        );
         *self.selection.borrow_mut() = Some(LocalSelection {
             story: story.to_owned(),
             anchor,
