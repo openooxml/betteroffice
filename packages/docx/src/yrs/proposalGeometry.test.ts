@@ -107,6 +107,8 @@ function duplicated(reader: ProposalGeometryReader): ProposalGeometryReader {
       const paragraph = paragraphs.find(({ paraId }) => paraId === '00000007');
       return paragraph ? [...paragraphs, paragraph] : paragraphs;
     },
+    paragraphIdCount: (story, paraId) =>
+      reader.paragraphIdCount(story, paraId) + (paraId === '00000007' ? 1 : 0),
     paragraphSpans: (story) => {
       const spans = reader.paragraphSpans(story);
       const span = spans.find(({ paraId }) => paraId === '00000007');
