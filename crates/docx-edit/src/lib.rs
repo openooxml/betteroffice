@@ -524,6 +524,8 @@ pub struct EditingDoc {
     metadata: Mutex<Option<Arc<seed::SourceMetadata>>>,
     segment_indexes: Mutex<EpochCache<SegmentIndex>>,
     chunk_snapshots: Mutex<EpochCache<Vec<ops::Chunk>>>,
+    /// Story projections shared by committed reads at one epoch.
+    story_views: Mutex<EpochCache<target::StoryView>>,
     source: Mutex<Option<identity::SourcePackage>>,
     seen: identity::SeenCell,
     story_revisions: Arc<Mutex<StoryRevisions>>,
@@ -572,6 +574,7 @@ impl EditingDoc {
             metadata: Mutex::new(None),
             segment_indexes: Mutex::default(),
             chunk_snapshots: Mutex::default(),
+            story_views: Mutex::default(),
             source: Mutex::new(None),
             seen,
             story_revisions,
@@ -604,6 +607,8 @@ impl EditingDoc {
     /// Retains the opened package's style and structure context and rotates the version.
     pub(crate) fn install_source(&self, source: seed::SourceMetadata, entropy: u64) {
         *self.metadata.lock().unwrap() = Some(Arc::new(source));
+        // Story projections read the source, so none built before it is served again.
+        self.epoch.fetch_add(1, Ordering::Relaxed);
         self.rotate_version(entropy);
     }
 

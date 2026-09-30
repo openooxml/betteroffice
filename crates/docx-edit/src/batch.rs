@@ -2555,7 +2555,7 @@ impl EditingDoc {
             ));
         }
         let source = self.source_metadata();
-        let mut views = Views::new(self, &txn);
+        let mut views = Views::committed(self, &txn);
         let mut planned_steps = Vec::with_capacity(steps.len());
         for (index, step) in steps.iter().enumerate() {
             let index = index as u32;
@@ -2710,7 +2710,7 @@ impl EditingDoc {
             };
         let Some(base) = base else {
             let txn = self.yrs_doc().transact();
-            let mut views = Views::new(self, &txn);
+            let mut views = Views::committed(self, &txn);
             let executed: Vec<Option<Executed>> = plan.steps.iter().map(|_| None).collect();
             return Ok(Ok(EditApplication {
                 version: plan.base_version.clone(),
