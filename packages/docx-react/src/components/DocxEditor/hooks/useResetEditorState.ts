@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { HeadingInfo } from '@betteroffice/docx/utils';
+import type { TrackedChangesResult } from '@betteroffice/docx/layout/render';
 import { EMPTY_ANCHOR_POSITIONS } from '../commentFactories';
 import type { PartEditTarget } from '../partEdit';
 
@@ -19,7 +20,9 @@ import type { PartEditTarget } from '../partEdit';
 export function useResetEditorState({
   commentsLoadedRef,
   trackedChangesLoadedRef,
+  sidebarAutoOpenedRef,
   setComments,
+  setYrsTrackedChangesResult,
   setHeadingInfos,
   setShowCommentsSidebar,
   setIsAddingComment,
@@ -33,7 +36,9 @@ export function useResetEditorState({
 }: {
   commentsLoadedRef: React.RefObject<boolean>;
   trackedChangesLoadedRef: React.RefObject<boolean>;
+  sidebarAutoOpenedRef: React.RefObject<boolean>;
   setComments: React.Dispatch<React.SetStateAction<Comment[]>>;
+  setYrsTrackedChangesResult: React.Dispatch<React.SetStateAction<TrackedChangesResult>>;
   setHeadingInfos: React.Dispatch<React.SetStateAction<HeadingInfo[]>>;
   setShowCommentsSidebar: React.Dispatch<React.SetStateAction<boolean>>;
   setIsAddingComment: React.Dispatch<React.SetStateAction<boolean>>;
@@ -50,7 +55,9 @@ export function useResetEditorState({
   const resetForNewDocument = useCallback(() => {
     commentsLoadedRef.current = false;
     trackedChangesLoadedRef.current = false;
+    sidebarAutoOpenedRef.current = false;
     setComments([]);
+    setYrsTrackedChangesResult({ entries: [], commentToRevision: new Map() });
     setHeadingInfos([]);
     setShowCommentsSidebar(false);
     setIsAddingComment(false);
@@ -67,7 +74,9 @@ export function useResetEditorState({
   }, [
     commentsLoadedRef,
     trackedChangesLoadedRef,
+    sidebarAutoOpenedRef,
     setComments,
+    setYrsTrackedChangesResult,
     setHeadingInfos,
     setShowCommentsSidebar,
     setIsAddingComment,

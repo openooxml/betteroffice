@@ -10,13 +10,11 @@
  * Focus never lands here: the hidden input remains the editing surface.
  */
 
-import { useMemo, useRef } from 'react';
+import { useRef } from 'react';
 import {
   buildMirrorPage,
-  buildMirrorPageLinks,
-  mirrorPageHasHeaderCells,
-  mirrorPageHasTabStops,
-  reduceMirrorToLinks,
+  buildMirrorPageText,
+  reduceMirrorToText,
   type DisplayPage,
 } from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
@@ -32,15 +30,12 @@ const mirrorLabels = (page: DisplayPage, t: TFunction) => ({
 });
 const makeMirror = (page: DisplayPage, t: TFunction): HTMLElement =>
   buildMirrorPage(page, mirrorLabels(page, t));
-// A page outside the window keeps its links, for Tab, link lists and targets,
-// and its header cells, which cells on other pages may name; reduced from its
-// built mirror when it has one.
-const makeMirrorLinks = (
+const makeMirrorText = (
   page: DisplayPage,
   t: TFunction,
   mirror: HTMLElement | null
 ): HTMLElement =>
-  mirror ? reduceMirrorToLinks(mirror) : buildMirrorPageLinks(page, mirrorLabels(page, t));
+  mirror ? reduceMirrorToText(mirror) : buildMirrorPageText(page, mirrorLabels(page, t));
 
 export function CanvasPageMirror({
   page,
@@ -58,7 +53,7 @@ export function CanvasPageMirror({
    */
   noteAnchorRevision?: number;
   zoom?: number;
-  /** Holds the mirror; an inactive page keeps only its empty host. */
+  /** Holds the full mirror; an inactive page keeps readable text. */
   active?: boolean;
   /** The first build may wait for idle time. */
   defer?: boolean;
@@ -69,10 +64,6 @@ export function CanvasPageMirror({
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const { t } = useTranslation();
-  const fallback = useMemo(
-    () => (mirrorPageHasTabStops(page) || mirrorPageHasHeaderCells(page) ? makeMirrorLinks : null),
-    [page]
-  );
   usePageChrome(hostRef, {
     page,
     t,
@@ -82,7 +73,7 @@ export function CanvasPageMirror({
     urgentRevision: noteAnchorRevision,
     register,
     make: makeMirror,
-    fallback,
+    fallback: makeMirrorText,
   });
 
   return (

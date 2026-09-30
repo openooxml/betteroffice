@@ -35,10 +35,12 @@ export { loadGlyphOutlineProvider } from './glyphOutlineWasm';
 export {
   buildMirrorPage,
   buildMirrorPageLinks,
+  buildMirrorPageText,
   displayPageHoldsMirrorId,
   mirrorPageHasHeaderCells,
   mirrorPageHasTabStops,
   reduceMirrorToLinks,
+  reduceMirrorToText,
   MIRROR_CLASS_NAMES,
   type BuildMirrorPageOptions,
   type MirrorLabels,
