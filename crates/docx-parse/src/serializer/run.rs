@@ -601,7 +601,14 @@ pub fn serialize_shape_content(
         write_wrap(&mut writer, wrap);
     } else {
         writer.start_element("wp:inline");
-        write_distances(&mut writer, wrap);
+        match wrap {
+            Some(wrap) => write_distances(&mut writer, Some(wrap)),
+            None => {
+                for name in ["distT", "distB", "distL", "distR"] {
+                    writer.attribute(name, "0");
+                }
+            }
+        }
         write_extent(&mut writer, shape.size.width, shape.size.height);
         write_effect_extent(&mut writer, shape.effect_extent.as_ref());
     }
@@ -1290,7 +1297,7 @@ mod tests {
     }
 
     #[test]
-    fn shapes_keep_their_effect_extent_and_absent_wrap_distances() {
+    fn inline_shapes_keep_their_effect_extent_and_zero_wrap_distances() {
         let graphic = r#"<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom></wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic>"#;
         for (effect, expected) in [
             ("", None),
@@ -1305,7 +1312,10 @@ mod tests {
             let shape =
                 crate::shape::parse_shape_from_drawing(&drawing_root(&source)).unwrap();
             let xml = serialize_shape_content(&shape, &mut context()).unwrap();
-            assert_eq!(start_tag(&xml, "wp:inline"), "<wp:inline>");
+            assert_eq!(
+                start_tag(&xml, "wp:inline"),
+                r#"<wp:inline distT="0" distB="0" distL="0" distR="0">"#
+            );
             match expected {
                 Some(expected) => assert_eq!(start_tag(&xml, "wp:effectExtent"), expected),
                 None => assert!(!xml.contains("wp:effectExtent"), "{xml}"),
