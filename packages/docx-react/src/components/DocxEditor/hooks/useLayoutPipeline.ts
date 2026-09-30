@@ -603,9 +603,11 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     });
   }, [scrollRestoreController]);
 
-  // Clean up pending rAF on unmount
+  // Clean up pending rAF on unmount. A worker pass answering later must not
+  // touch the session, which its owner frees on unmount.
   useEffect(() => {
     return () => {
+      passRef.current += 1;
       if (schedulerRef.current != null) cancelAnimationFrame(schedulerRef.current);
     };
   }, []);
