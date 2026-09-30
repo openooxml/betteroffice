@@ -287,6 +287,13 @@ test('replacing the document while a ref waits rejects the pending call', async 
   });
 });
 
+test('a layout deadline covers the wait for the main replica', async () => {
+  const { api, opens } = await pendingReplica();
+  const error = await api.whenLayoutComplete({ timeoutMs: 20 }).then(() => null, (failure: unknown) => failure);
+  expect(error).toMatchObject({ message: 'The document did not finish rendering' });
+  expect(opens).toEqual([]);
+});
+
 test('independent APIs do not start a replica open', async () => {
   const { api, opens, replica } = await pendingReplica();
   api.setZoom(2);
