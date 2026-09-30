@@ -1140,6 +1140,52 @@ fn text_box_distance_squared(prims: &[Primitive], x: f64, y: f64) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
+fn painted_body_hit_at(prims: &[Primitive], x: f64, y: f64) -> bool {
+    prims.iter().any(|primitive| {
+        let Some(attrs) = doc_attrs(primitive) else {
+            return false;
+        };
+        if attrs.doc_start.is_none() {
+            return false;
+        }
+        if let Some(clip) = attrs
+            .clip_group
+            .as_ref()
+            .and_then(|group| group.clip.as_ref())
+        {
+            let px = |value: &Option<Number>| value.as_ref().and_then(Number::as_f64).unwrap_or(0.0);
+            let (left, top) = (px(&clip.x), px(&clip.y));
+            let (width, height) = (px(&clip.w).max(0.0), px(&clip.h).max(0.0));
+            if width <= 0.0
+                || height <= 0.0
+                || x < left
+                || x > left + width
+                || y < top
+                || y > top + height
+            {
+                return false;
+            }
+        }
+        if let Some(hit) = text_hit(primitive) {
+            return hit.width > 0.0
+                && x >= hit.x
+                && x <= hit.x + hit.width
+                && y >= hit.top - BAND_SLACK
+                && y <= hit.bottom + BAND_SLACK;
+        }
+        let (left, top, width, height) = match primitive {
+            Primitive::Image(img) => (&img.x, &img.y, &img.w, &img.h),
+            Primitive::Shape(shape) if attrs.inline_shape_atom == Some(true) => {
+                (&shape.x, &shape.y, &shape.w, &shape.h)
+            }
+            _ => return false,
+        };
+        let (left, top) = (left.as_f64().unwrap_or(0.0), top.as_f64().unwrap_or(0.0));
+        let (width, height) = (width.as_f64().unwrap_or(0.0), height.as_f64().unwrap_or(0.0));
+        x >= left && x <= left + width && y >= top && y <= top + height
+    })
+}
+
 /// Direct body hits override header/footer bands; empty band spots activate
 /// that part. Note areas resolve against the nearest note story.
 pub fn hit_test_regions(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> Option<RegionHit> {
@@ -1159,7 +1205,7 @@ pub fn hit_test_regions(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> 
             && in_band(band)
         {
             let body = resolve_point(&page.primitives, false, x, y);
-            if body.direct {
+            if body.direct && painted_body_hit_at(&page.primitives, x, y) {
                 return Some(RegionHit {
                     region: HitRegion::Body,
                     r_id: None,
@@ -1880,6 +1926,93 @@ mod tests {
             assert_eq!(empty.pos, None);
             assert_eq!(empty.target, HoverTarget::None);
         }
+    }
+
+    fn band_page(kind: &str, top: f64, primitives: Vec<serde_json::Value>) -> DisplayList {
+        let mut dl = page(
+            serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340}),
+            primitives,
+        );
+        let band = serde_json::from_value(serde_json::json!({
+            "rId": "rIdBand", "kind": kind, "y": top, "height": 80,
+            "primitives": [run(100.0, top + 40.0, 50.0, 50)]
+        }))
+        .unwrap();
+        if kind == "header" {
+            dl.pages[0].header = Some(band);
+        } else {
+            dl.pages[0].footer = Some(band);
+        }
+        dl
+    }
+
+    #[test]
+    fn clipped_body_text_does_not_override_header() {
+        for clip in [
+            serde_json::json!({"x": 100, "y": 50, "w": 50, "h": 30}),
+            serde_json::json!({"x": 130, "y": 0, "w": 20, "h": 80}),
+            serde_json::json!({"x": 120, "y": 0, "w": 0, "h": 80}),
+            serde_json::json!({"x": 100, "y": 35, "w": 50, "h": 0}),
+            serde_json::json!({"x": 100, "y": 0, "w": -50, "h": 80}),
+            serde_json::json!({"x": 100, "y": 35, "w": 50, "h": -10}),
+            serde_json::json!({"x": 100, "y": 0, "h": 80}),
+            serde_json::json!({"x": 100, "w": 50}),
+        ] {
+            let mut text = run(100.0, 40.0, 50.0, 1);
+            text["clipGroup"] = serde_json::json!({"clip": clip});
+            let dl = band_page("header", 0.0, vec![text]);
+
+            let hit = hit_test_regions(&dl, 0, 120.0, 35.0).unwrap();
+            assert_eq!(hit.region, HitRegion::Header);
+            assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
+            assert_eq!(hit.pos, Some(52));
+            assert_eq!(hit.target, HoverTarget::Text);
+            assert_eq!(hit_test(&dl, 0, 120.0, 35.0), Some(3));
+
+            let outside = hit_test_regions(&dl, 0, 120.0, 100.0).unwrap();
+            assert_eq!(outside.region, HitRegion::Body);
+            assert_eq!(outside.pos, Some(3));
+        }
+    }
+
+    #[test]
+    fn body_text_overrides_header_only_inside_clip() {
+        let mut text = run(100.0, 40.0, 50.0, 1);
+        text["clipGroup"] = serde_json::json!({
+            "clip": {"x": 125, "y": 25, "w": 25, "h": 25}
+        });
+        let dl = band_page("header", 0.0, vec![text]);
+
+        let excluded = hit_test_regions(&dl, 0, 110.0, 35.0).unwrap();
+        assert_eq!(excluded.region, HitRegion::Header);
+        assert_eq!(excluded.pos, Some(51));
+
+        let inside = hit_test_regions(&dl, 0, 140.0, 35.0).unwrap();
+        assert_eq!(inside.region, HitRegion::Body);
+        assert_eq!(inside.r_id, None);
+        assert_eq!(inside.pos, Some(5));
+        assert_eq!(inside.target, HoverTarget::Text);
+    }
+
+    #[test]
+    fn body_image_overrides_footer_only_inside_clip() {
+        let mut image = image(100.0, 440.0, Some(10));
+        image["clipGroup"] = serde_json::json!({
+            "clip": {"x": 100, "y": 460, "w": 60, "h": 20}
+        });
+        let dl = band_page("footer", 420.0, vec![image]);
+
+        let excluded = hit_test_regions(&dl, 0, 120.0, 455.0).unwrap();
+        assert_eq!(excluded.region, HitRegion::Footer);
+        assert_eq!(excluded.r_id.as_deref(), Some("rIdBand"));
+        assert_eq!(excluded.pos, Some(52));
+        assert_eq!(excluded.target, HoverTarget::Text);
+
+        let inside = hit_test_regions(&dl, 0, 120.0, 465.0).unwrap();
+        assert_eq!(inside.region, HitRegion::Body);
+        assert_eq!(inside.r_id, None);
+        assert_eq!(inside.pos, Some(10));
+        assert_eq!(inside.target, HoverTarget::Image);
     }
 
     fn note_run(baseline: f64, doc_start: i64, group_id: &str) -> serde_json::Value {
