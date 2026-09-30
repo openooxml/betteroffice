@@ -241,6 +241,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   const queuedBehindWorkerRef = useRef(false);
   // A warm-up waits for the pass in flight too, but holds no settle and supersedes nothing.
   const queuedWarmBehindWorkerRef = useRef(false);
+  // The pass whose full layout is still to replace its first pages.
+  const completingPassRef = useRef<number | null>(null);
   const schedulerRef = useRef<number | null>(null);
   const runRef = useRef<() => void>(() => {});
   const unmountedRef = useRef(false);
@@ -393,9 +395,15 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       // flight lays out the document as opened.
       const waits =
         inWorker || (!onHost && pendingInWorkerRef.current === null && !inFlight?.opening);
-      if (waits && session && inFlight?.session === session) {
+      const warmPending = pendingWarmOnlyRef.current === true;
+      if (
+        waits &&
+        session &&
+        (inFlight?.session === session ||
+          (warmPending && completingPassRef.current === passRef.current))
+      ) {
         pendingLayoutOriginRef.current ??= 'local';
-        if (pendingWarmOnlyRef.current === true) {
+        if (warmPending) {
           queuedWarmBehindWorkerRef.current = true;
           return;
         }
@@ -659,25 +667,36 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
               if (stale || queued) markSupersededLayout(computation.layout);
               applyComputation(computation);
               // The first pages paint now; the full layout replaces them.
-              void computation.complete?.then(
-                (complete) => {
-                  if (pass !== passRef.current || sessionRef.current !== session) return;
-                  if (
-                    complete &&
-                    readSessionVersion(session) ===
-                      (workerOpenEnabledRef.current
-                        ? workerOpenSourceVersion(session, sourceVersion)
-                        : sourceVersion)
-                  ) {
-                    if (queuedBehindWorkerRef.current) markSupersededLayout(complete.layout);
-                    // Nothing the user did changed: keep their viewport.
-                    applyComputation(complete, 'remote');
-                  } else if (!queuedBehindWorkerRef.current && !warmOnly) {
-                    layOutHere();
+              const completion = computation.complete;
+              if (!completion) return;
+              completingPassRef.current = pass;
+              void completion
+                .then(
+                  (complete) => {
+                    if (pass !== passRef.current || sessionRef.current !== session) return;
+                    if (
+                      complete &&
+                      readSessionVersion(session) ===
+                        (workerOpenEnabledRef.current
+                          ? workerOpenSourceVersion(session, sourceVersion)
+                          : sourceVersion)
+                    ) {
+                      if (queuedBehindWorkerRef.current) markSupersededLayout(complete.layout);
+                      // Nothing the user did changed: keep their viewport.
+                      applyComputation(complete, 'remote');
+                    } else if (!queuedBehindWorkerRef.current && !warmOnly) {
+                      layOutHere();
+                    }
+                  },
+                  () => {}
+                )
+                .finally(() => {
+                  if (completingPassRef.current !== pass) return;
+                  completingPassRef.current = null;
+                  if (queuedWarmBehindWorkerRef.current && sessionRef.current === session) {
+                    requestPass();
                   }
-                },
-                () => {}
-              );
+                });
             },
             (error: unknown) => {
               if (pass !== passRef.current) return;

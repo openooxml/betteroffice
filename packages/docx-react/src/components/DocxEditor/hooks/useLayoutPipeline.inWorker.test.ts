@@ -593,3 +593,63 @@ test('a warm-up behind a worker pass holds no settle and supersedes nothing', as
   expect(doc.laidOutHere).toEqual([]);
   expect(errors).toEqual([]);
 });
+
+test("a warm-up waits for the full layout that replaces a pass's first pages", async () => {
+  const { doc, session } = fakeDocument();
+  const asked: number[] = [];
+  const pages = (count: number) =>
+    ({ pages: Array.from({ length: count }, () => ({})) }) as unknown as Layout;
+  let finish!: (complete: LayoutComputation | null) => void;
+  const hook = renderHook(() =>
+    useLayoutPipeline({
+      document: null,
+      session,
+      renderEnv: {} as YrsRenderEnv,
+      pageGap: 24,
+      zoom: 1,
+      residentMeasurementConfig: () => ({}) as ResidentMeasurementConfig,
+      deferLayoutPass: () => false,
+      pagesContainerRef: { current: null },
+      viewportLayoutRef: { current: null },
+      syncCoordinator: new LayoutSelectionGate(),
+      getScrollContainer: () => null,
+      layoutInWorker: (owner) => {
+        asked.push(Number(owner.version()));
+        return Promise.resolve(
+          asked.length === 1
+            ? {
+                layout: pages(1),
+                notesConverged: true,
+                complete: new Promise<LayoutComputation | null>((resolve) => {
+                  finish = resolve;
+                }),
+              }
+            : { layout: pages(3), notesConverged: true }
+        );
+      },
+    })
+  );
+  const settle = (ms: number) =>
+    act(async () => {
+      await new Promise((done) => setTimeout(done, ms));
+    });
+  try {
+    act(() => hook.result.current.runLayoutPipeline());
+    await settle(0);
+    expect(hook.result.current.layout?.pages).toHaveLength(1);
+
+    act(() => hook.result.current.scheduleWarmLayout());
+    await settle(40);
+    expect(asked).toEqual([1]);
+
+    finish({ layout: pages(3), notesConverged: true });
+    await settle(0);
+    expect(hook.result.current.layout?.pages).toHaveLength(3);
+    expect(isSupersededLayout(hook.result.current.layout)).toBe(false);
+    await settle(40);
+    expect(asked).toEqual([1, 1]);
+    expect(doc.laidOutHere).toEqual([]);
+  } finally {
+    hook.unmount();
+  }
+});
