@@ -1713,7 +1713,7 @@ struct ImageRunIn {
     /// anchor position for a floating image run (`wp:positionH`/`wp:positionV`),
     /// resolved to a page rect by [`resolve_anchored_position`]
     #[serde(default)]
-    position: Option<AnchorPosIn>,
+    position: Option<crate::types::ImageRunPosition>,
     #[serde(default)]
     crop_top: Option<f64>,
     #[serde(default)]
@@ -1771,33 +1771,6 @@ pub(crate) struct RotationBoundsIn {
     offset_x: Option<f64>,
     #[serde(default)]
     offset_y: Option<f64>,
-}
-
-/// anchor of a floating image/text-box run (`ImageRunPosition`): one axis each,
-/// resolved against the page geometry in [`resolve_anchored_position`].
-#[derive(Deserialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-struct AnchorPosIn {
-    #[serde(default)]
-    horizontal: Option<AnchorAxisIn>,
-    #[serde(default)]
-    vertical: Option<AnchorAxisIn>,
-    #[serde(default)]
-    relative_height: Option<u64>,
-}
-
-/// one axis of an anchor: an OOXML `relativeFrom` band plus either an `align`
-/// keyword or a `posOffset` (EMU). Mirrors `ImageRunPosition.{horizontal,vertical}`.
-#[derive(Deserialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-struct AnchorAxisIn {
-    #[serde(default)]
-    relative_to: Option<String>,
-    /// offset from the band base, in EMU (converted with [`emu_to_px`])
-    #[serde(default)]
-    pos_offset: Option<f64>,
-    #[serde(default)]
-    align: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -2535,7 +2508,7 @@ pub(crate) struct TextBoxBlockIn {
     #[serde(default)]
     wrap_type: Option<String>,
     #[serde(default)]
-    position: Option<AnchorPosIn>,
+    position: Option<crate::types::ImageRunPosition>,
     #[serde(default)]
     pm_start: Option<i64>,
     #[serde(default)]
@@ -4643,8 +4616,8 @@ fn measured_block_height(measured: &MeasuredBlockIn) -> f64 {
     }
 }
 
-fn resolve_hf_box_position(
-    position: Option<&AnchorPosIn>,
+pub(crate) fn resolve_hf_box_position(
+    position: Option<&crate::types::ImageRunPosition>,
     css_float: Option<&str>,
     width: f64,
     height: f64,
@@ -7661,13 +7634,13 @@ fn emit_paragraph_borders(
 // ---------------------------------------------------------------------------
 
 /// Page coordinate frame for anchored floats, in pixels.
-struct PageFloatGeom {
-    page_width: f64,
-    page_height: f64,
-    margin_left: f64,
-    margin_top: f64,
-    content_width: f64,
-    content_height: f64,
+pub(crate) struct PageFloatGeom {
+    pub(crate) page_width: f64,
+    pub(crate) page_height: f64,
+    pub(crate) margin_left: f64,
+    pub(crate) margin_top: f64,
+    pub(crate) content_width: f64,
+    pub(crate) content_height: f64,
 }
 
 /// an anchor band: `base` is the band's origin (content-relative px) and `size`
@@ -7747,15 +7720,18 @@ fn vertical_anchor_band(
 /// paragraph fragment's content-relative top, which is the base for the
 /// `paragraph` and `line` bands. Anchors are resolved here rather than read off
 /// the fragment, because the layout does not store them.
-fn resolve_anchored_position(
-    imr: &ImageRunIn,
+pub(crate) fn resolve_anchored_position(
+    position: Option<&crate::types::ImageRunPosition>,
+    css_float: Option<&str>,
+    width: f64,
+    height: f64,
     fragment_y: f64,
     geom: &PageFloatGeom,
 ) -> (f64, f64) {
-    let x = match imr.position.as_ref().and_then(|p| p.horizontal.as_ref()) {
+    let x = match position.and_then(|p| p.horizontal.as_ref()) {
         None => {
-            if imr.css_float.as_deref() == Some("right") {
-                geom.content_width - image_layout_width(imr)
+            if css_float == Some("right") {
+                geom.content_width - width
             } else {
                 0.0
             }
@@ -7765,7 +7741,7 @@ fn resolve_anchored_position(
             match h.align.as_deref() {
                 Some("right") => {
                     if band.size != 0.0 {
-                        band.base + band.size - image_layout_width(imr)
+                        band.base + band.size - width
                     } else {
                         0.0
                     }
@@ -7773,7 +7749,7 @@ fn resolve_anchored_position(
                 Some("left") => band.base,
                 Some("center") => {
                     if band.size != 0.0 {
-                        band.base + (band.size - image_layout_width(imr)) / 2.0
+                        band.base + (band.size - width) / 2.0
                     } else {
                         0.0
                     }
@@ -7786,7 +7762,7 @@ fn resolve_anchored_position(
         }
     };
 
-    let y = match imr.position.as_ref().and_then(|p| p.vertical.as_ref()) {
+    let y = match position.and_then(|p| p.vertical.as_ref()) {
         None => fragment_y,
         Some(v) => {
             let band = vertical_anchor_band(v.relative_to.as_deref(), fragment_y, geom);
@@ -7794,14 +7770,14 @@ fn resolve_anchored_position(
                 Some("top") => band.base,
                 Some("center") => {
                     if band.size != 0.0 {
-                        band.base + (band.size - image_layout_height(imr)) / 2.0
+                        band.base + (band.size - height) / 2.0
                     } else {
                         fragment_y
                     }
                 }
                 Some("bottom") => {
                     if band.size != 0.0 {
-                        band.base + band.size - image_layout_height(imr)
+                        band.base + band.size - height
                     } else {
                         fragment_y
                     }
@@ -7878,7 +7854,12 @@ fn emit_paragraph_floating_images(
 }
 
 /// Word clamps a text-wrapping float into its page and leaves `wrapNone` free.
-fn clamp_wrapped_float_y(y: f64, height: f64, wrap: Option<&str>, page_height: f64) -> f64 {
+pub(crate) fn clamp_wrapped_float_y(
+    y: f64,
+    height: f64,
+    wrap: Option<&str>,
+    page_height: f64,
+) -> f64 {
     if !matches!(wrap, Some("square" | "tight" | "through" | "topAndBottom")) {
         return y;
     }
@@ -7893,7 +7874,14 @@ fn emit_floating_image(
     geom: &PageFloatGeom,
 ) {
     let block_ref = BlockRef::of(&block.id);
-    let (x, y) = resolve_anchored_position(imr, frag_y - geom.margin_top, geom);
+    let (x, y) = resolve_anchored_position(
+        imr.position.as_ref(),
+        imr.css_float.as_deref(),
+        image_layout_width(imr),
+        image_layout_height(imr),
+        frag_y - geom.margin_top,
+        geom,
+    );
     let page_x = geom.margin_left + x;
     let rot = imr
         .rotation_deg

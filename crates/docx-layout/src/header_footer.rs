@@ -197,6 +197,11 @@ fn restore_overlapping_detached_images(
     if detached.is_empty() {
         return false;
     }
+    let unmeasured_text = blocks.iter().any(|block| {
+        matches!(block, LayoutBlock::TextBox(_))
+            || (!contributes_to_flow(block)
+                && matches!(block, LayoutBlock::Table(_) | LayoutBlock::Shape(_)))
+    });
     let mut flow = HeaderFooterFlow::default();
     let bounds: Vec<_> = blocks
         .iter()
@@ -221,9 +226,7 @@ fn restore_overlapping_detached_images(
         HeaderFooterKind::Header => distance,
         HeaderFooterKind::Footer => metrics.page_size.h - distance - flow_height,
     };
-    let mut margins = metrics.margins.clone();
-    margins.top = margins.top.abs();
-    margins.bottom = margins.bottom.abs();
+    let geom = float_geometry(metrics);
     let mut restored = false;
     detached.retain(|(block_index, run_index, previous)| {
         let LayoutBlock::Paragraph(paragraph) = &blocks[*block_index] else {
@@ -232,31 +235,35 @@ fn restore_overlapping_detached_images(
         let Run::Image(image) = &paragraph.runs[*run_index] else {
             return false;
         };
-        let vertical = image
-            .position
-            .as_ref()
-            .and_then(|position| position.vertical.as_ref())
-            .and_then(|vertical| vertical.relative_to.as_deref());
-        let known_frame =
-            matches!(vertical, Some("page" | "margin")) && image.rotation_bounds.is_none();
-        let top = (flow_top
-            + image_visual_top(
-                image,
-                0.0,
-                flow_height,
-                HeaderFooterMetrics {
-                    margins: &margins,
-                    ..metrics
-                },
-            ))
-        .min(metrics.page_size.h - image.height)
-        .max(0.0);
+        let (x, y) = crate::display_list::resolve_anchored_position(
+            image.position.as_ref(),
+            image.css_float.as_deref(),
+            image.width,
+            image.height,
+            flow_top - geom.margin_top,
+            &geom,
+        );
+        let top = crate::display_list::clamp_wrapped_float_y(
+            geom.margin_top + y,
+            image.height,
+            image.wrap_type.as_deref(),
+            geom.page_height,
+        );
         let bottom = top + image.height + image.dist_bottom.unwrap_or(0.0).max(0.0);
         let top = top - image.dist_top.unwrap_or(0.0).max(0.0);
-        let overlaps = bounds[*block_index + 1..]
-            .iter()
-            .flatten()
-            .any(|&(y, end)| !known_frame || (flow_top + y < bottom && flow_top + end > top));
+        let overlaps = unmeasured_text
+            || image.rotation_bounds.is_some()
+            || image.inline_shape.is_some()
+            || !image.width.is_finite()
+            || image.width <= 0.0
+            || image.height <= 0.0
+            || !x.is_finite()
+            || !top.is_finite()
+            || !bottom.is_finite()
+            || bounds
+                .iter()
+                .flatten()
+                .any(|&(y, end)| flow_top + y < bottom && flow_top + end > top);
         if overlaps {
             let LayoutBlock::Paragraph(paragraph) = &mut blocks[*block_index] else {
                 unreachable!();
@@ -539,7 +546,20 @@ fn image_visual_top(
 }
 
 fn emu_to_pixels(value: f64) -> f64 {
-    value / 914_400.0 * 96.0
+    (value * 96.0 / 914_400.0).round()
+}
+
+fn float_geometry(metrics: HeaderFooterMetrics<'_>) -> crate::display_list::PageFloatGeom {
+    crate::display_list::PageFloatGeom {
+        page_width: metrics.page_size.w,
+        page_height: metrics.page_size.h,
+        margin_left: metrics.margins.left,
+        margin_top: metrics.margins.top.abs(),
+        content_width: metrics.page_size.w - metrics.margins.left - metrics.margins.right,
+        content_height: metrics.page_size.h
+            - metrics.margins.top.abs()
+            - metrics.margins.bottom.abs(),
+    }
 }
 
 pub fn header_footer_float_bands(
@@ -555,6 +575,7 @@ pub fn header_footer_float_bands(
         HeaderFooterKind::Header => distance,
         HeaderFooterKind::Footer => metrics.page_size.h - distance - variant.flow_height,
     };
+    let geom = float_geometry(metrics);
     let mut bands = Vec::new();
     let mut add = |position: Option<&ImageRunPosition>,
                    size: Size,
@@ -563,7 +584,8 @@ pub fn header_footer_float_bands(
                    distances: BoxEdges,
                    anchor_y: f64,
                    emu: bool,
-                   image: bool| {
+                   image: bool,
+                   css_float: Option<&str>| {
         let Some(position) = position else {
             return;
         };
@@ -576,22 +598,6 @@ pub fn header_footer_float_bands(
             || size.h <= 0.0
         {
             return;
-        }
-        let mut position = position.clone();
-        if emu {
-            for axis in [&mut position.horizontal, &mut position.vertical]
-                .into_iter()
-                .flatten()
-            {
-                axis.pos_offset = axis.pos_offset.map(emu_to_pixels);
-            }
-            if let Some(simple) = position.simple_pos.as_mut() {
-                for axis in ["x", "y"] {
-                    if let Some(value) = simple.get(axis).and_then(serde_json::Value::as_f64) {
-                        simple[axis] = serde_json::json!(emu_to_pixels(value));
-                    }
-                }
-            }
         }
         let left = metrics.margins.left;
         let right = metrics.page_size.w - metrics.margins.right;
@@ -617,9 +623,30 @@ pub fn header_footer_float_bands(
         };
         for odd_page in [true, false] {
             frame.odd_page = odd_page;
-            let (x, y) = crate::anchor::resolve_position(Some(&position), size.w, size.h, &frame);
+            let (x, y) = if emu && image {
+                let (x, y) = crate::display_list::resolve_anchored_position(
+                    Some(position),
+                    css_float,
+                    size.w,
+                    size.h,
+                    flow_top + anchor_y - geom.margin_top,
+                    &geom,
+                );
+                (geom.margin_left + x, geom.margin_top + y)
+            } else if emu {
+                crate::display_list::resolve_hf_box_position(
+                    Some(position),
+                    css_float,
+                    size.w,
+                    size.h,
+                    flow_top + anchor_y - geom.margin_top,
+                    &geom,
+                )
+            } else {
+                crate::anchor::resolve_position(Some(position), size.w, size.h, &frame)
+            };
             let y = if image {
-                y.min(metrics.page_size.h - size.h).max(0.0)
+                crate::display_list::clamp_wrapped_float_y(y, size.h, wrap, geom.page_height)
             } else {
                 y
             };
@@ -679,6 +706,7 @@ pub fn header_footer_float_bands(
                             anchor_y,
                             true,
                             true,
+                            image.css_float.as_deref(),
                         );
                     }
                 }
@@ -695,6 +723,7 @@ pub fn header_footer_float_bands(
                 anchor_y,
                 false,
                 false,
+                None,
             ),
             LayoutBlock::TextBox(text_box) => add(
                 text_box.position.as_ref(),
@@ -713,6 +742,7 @@ pub fn header_footer_float_bands(
                 anchor_y,
                 true,
                 false,
+                text_box.css_float.as_deref(),
             ),
             LayoutBlock::Image(image) => {
                 if let Some(anchor) = &image.anchor {
@@ -728,6 +758,7 @@ pub fn header_footer_float_bands(
                         anchor_y,
                         false,
                         true,
+                        None,
                     );
                 }
             }
@@ -776,6 +807,7 @@ pub fn header_footer_float_bands(
                             anchor_y,
                             false,
                             false,
+                            None,
                         );
                     }
                 }
@@ -830,15 +862,6 @@ mod tests {
         offset: f64,
         trailing_text: bool,
     ) -> (HeaderFooterVariant, Size, PageMargins) {
-        let font_id = crate::register_measure_font(include_bytes!(
-            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
-        ))
-        .unwrap();
-        let config = serde_json::from_value(json!({
-            "fontChains": {"liberation sans|0|0": [font_id]},
-            "defaults": {"fontFamily": "Liberation Sans", "fontSize": 12}
-        }))
-        .unwrap();
         let mut blocks = vec![json!({
             "kind": "paragraph", "id": "anchor",
             "attrs": {"spacing": {"line": 16, "lineRule": "exact"}},
@@ -856,6 +879,22 @@ mod tests {
                 "runs": [{"kind": "text", "text": "Tail"}]
             }));
         }
+        header_footer_with_blocks(HeaderFooterKind::Header, blocks)
+    }
+
+    fn header_footer_with_blocks(
+        kind: HeaderFooterKind,
+        blocks: Vec<serde_json::Value>,
+    ) -> (HeaderFooterVariant, Size, PageMargins) {
+        let font_id = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = serde_json::from_value(json!({
+            "fontChains": {"liberation sans|0|0": [font_id]},
+            "defaults": {"fontFamily": "Liberation Sans", "fontSize": 12}
+        }))
+        .unwrap();
         let size = Size { w: 500.0, h: 500.0 };
         let margins = PageMargins {
             top: 96.0,
@@ -867,13 +906,13 @@ mod tests {
         };
         let variant = measure_header_footer(
             "hf".to_owned(),
-            HeaderFooterKind::Header,
+            kind,
             HeaderFooterType::Default,
             0,
             serde_json::from_value(json!(blocks)).unwrap(),
             308.0,
             HeaderFooterMetrics {
-                kind: HeaderFooterKind::Header,
+                kind,
                 page_size: &size,
                 margins: &margins,
             },
@@ -1003,6 +1042,144 @@ mod tests {
         };
         assert_eq!(image.display_mode.as_deref(), Some("float"));
         assert_eq!(variant.flow_height, 32.0);
+    }
+
+    #[test]
+    fn detached_header_image_keeps_same_paragraph_tail_below_it() {
+        let (variant, _, margins) = header_footer_with_blocks(
+            HeaderFooterKind::Header,
+            vec![json!({
+                "kind": "paragraph", "id": "anchor",
+                "attrs": {"spacing": {"line": 16, "lineRule": "exact"}},
+                "runs": [
+                    {"kind": "image", "src": "image", "width": 100, "height": 100,
+                     "wrapType": "topAndBottom", "distTop": 0, "distBottom": 0,
+                     "position": {"vertical": {"relativeTo": "page", "posOffset": 48 * 9525}}},
+                    {"kind": "text", "text": "Tail"}
+                ]
+            })],
+        );
+        let LayoutBlock::Paragraph(paragraph) = &variant.measured[0].block else {
+            panic!("paragraph expected");
+        };
+        let Run::Image(image) = &paragraph.runs[0] else {
+            panic!("image expected");
+        };
+        assert_ne!(image.display_mode.as_deref(), Some("float"));
+        let BlockExtent::Paragraph(measure) = &variant.measured[0].measure else {
+            panic!("paragraph expected");
+        };
+        let tail_line = measure
+            .lines
+            .iter()
+            .position(|line| line.head_run == 1)
+            .unwrap();
+        let tail_top = margins.header.unwrap()
+            + measure.lines[..tail_line]
+                .iter()
+                .map(|line| line.float_skip_before.unwrap_or(0.0) + line.line_height)
+                .sum::<f64>();
+        assert!(tail_top >= 148.0);
+    }
+
+    #[test]
+    fn detached_footer_image_keeps_preceding_text_clear() {
+        let (variant, size, margins) = header_footer_with_blocks(
+            HeaderFooterKind::Footer,
+            vec![
+                json!({
+                    "kind": "paragraph", "id": "text",
+                    "attrs": {"spacing": {"line": 16, "lineRule": "exact"}},
+                    "runs": [{"kind": "text", "text": "Tail"}]
+                }),
+                json!({
+                    "kind": "paragraph", "id": "anchor",
+                    "attrs": {"spacing": {"line": 16, "lineRule": "exact"}},
+                    "runs": [
+                        {"kind": "image", "src": "image", "width": 100, "height": 100,
+                         "wrapType": "topAndBottom", "distTop": 0, "distBottom": 0,
+                         "position": {"vertical": {"relativeTo": "page", "posOffset": 400 * 9525}}}
+                    ]
+                }),
+            ],
+        );
+        let LayoutBlock::Paragraph(paragraph) = &variant.measured[1].block else {
+            panic!("paragraph expected");
+        };
+        let Run::Image(image) = &paragraph.runs[0] else {
+            panic!("image expected");
+        };
+        assert_ne!(image.display_mode.as_deref(), Some("float"));
+        let text_top = size.h - margins.footer.unwrap() - variant.flow_height;
+        assert!(text_top + extent_height(&variant.measured[0].measure) <= 400.0);
+    }
+
+    #[test]
+    fn inside_and_outside_margin_bands_match_the_painted_header_image() {
+        for relative in ["insideMargin", "outsideMargin"] {
+            let (variant, size, margins) = header_with_image(relative, 0.0, false);
+            let bands = header_footer_float_bands(
+                &variant,
+                HeaderFooterMetrics {
+                    kind: HeaderFooterKind::Header,
+                    page_size: &size,
+                    margins: &margins,
+                },
+            );
+            assert_eq!(bands.len(), 2);
+            assert!(
+                bands
+                    .iter()
+                    .all(|band| band.top == 96.0 && band.bottom == 196.0)
+            );
+            let mut input: crate::types::Input = serde_json::from_value(json!({
+                "measured": [{
+                    "block": {"kind": "paragraph", "id": "body",
+                              "runs": [{"kind": "text", "text": "Body"}]},
+                    "measure": {"kind": "paragraph", "totalHeight": 20,
+                                "lines": [{"headRun": 0, "headChar": 0, "tailRun": 0,
+                                           "tailChar": 4, "width": 40, "ascent": 15,
+                                           "descent": 5, "lineHeight": 20}]}
+                }],
+                "options": {"pageSize": size, "margins": margins,
+                            "sectionPageFloatBands": [{"default": bands, "anchorMargins": margins}]}
+            }))
+            .unwrap();
+            let mut layout = crate::place::layout_document(&mut input).unwrap();
+            let regions = serde_json::from_value(json!({
+                "sections": [{"headerFooterRefs": {"headerDefault": variant.r_id}}]
+            }))
+            .unwrap();
+            crate::regions::apply_document_regions(&mut layout, &regions);
+            let crate::types::Fragment::Paragraph(body) = &layout.pages[0].fragments[0] else {
+                panic!("paragraph expected");
+            };
+            assert!(body.y >= 196.0);
+            let display: DisplayList = serde_json::from_str(
+                &build_display_list_json(
+                    &json!({
+                        "measured": input.measured, "options": input.options, "layout": layout,
+                        "headersFooters": {"variants": [variant]}
+                    })
+                    .to_string(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let image = display.pages[0]
+                .header
+                .as_ref()
+                .unwrap()
+                .primitives
+                .iter()
+                .find_map(|primitive| match primitive {
+                    Primitive::Image(image) => Some(image),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(image.y.as_f64(), Some(96.0));
+            assert_eq!(image.y.as_f64().unwrap() + image.h.as_f64().unwrap(), 196.0);
+        }
     }
 
     #[test]

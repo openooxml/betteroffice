@@ -28,11 +28,28 @@
 //! its new column band below content already on the page. Geometry that cannot
 //! change mid-sheet is deferred until the next page.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
 use crate::LayoutError;
 use crate::types::{
     ColumnLayout, Fragment, Page, PageFloatBand, PageMargins, SectionPageFloatBands,
     SectionPageMargins, Size,
 };
+
+#[derive(Debug, Clone, Default)]
+pub struct SharedPageFloatBands {
+    sections: Arc<[SectionPageFloatBands]>,
+    fingerprint: u64,
+}
+
+impl PartialEq for SharedPageFloatBands {
+    fn eq(&self, other: &Self) -> bool {
+        self.fingerprint == other.fingerprint
+            && (Arc::ptr_eq(&self.sections, &other.sections) || self.sections == other.sections)
+    }
+}
 
 /// Complete page-to-page geometry needed to restart placement at a clean
 /// page boundary. Cursor/spacing state is intentionally absent: checkpoints
@@ -53,7 +70,7 @@ pub struct PageFlowGeometry {
     /// Whether the displayed number this page would continue from the page
     /// before it differs in parity from its physical one.
     pub continued_parity_offset: bool,
-    pub section_page_float_bands: Vec<SectionPageFloatBands>,
+    pub section_page_float_bands: SharedPageFloatBands,
     /// Whether this page opened a column region that placement balances.
     pub balanced_region: bool,
 }
@@ -121,7 +138,7 @@ pub struct Paginator {
     start_page_number: u32,
     section_index: usize,
     section_page_margins: Vec<SectionPageMargins>,
-    section_page_float_bands: Vec<SectionPageFloatBands>,
+    section_page_float_bands: SharedPageFloatBands,
     float_bands: Vec<Vec<PageFloatBand>>,
     /// Whether the section in force has opened a page yet.
     section_started: bool,
@@ -179,7 +196,7 @@ impl Paginator {
             start_page_number: 1,
             section_index: 0,
             section_page_margins: Vec::new(),
-            section_page_float_bands: Vec::new(),
+            section_page_float_bands: SharedPageFloatBands::default(),
             float_bands: Vec::new(),
             section_started: false,
             opens_section: Vec::new(),
@@ -208,7 +225,19 @@ impl Paginator {
                 variant.sort_by(|a, b| a.top.total_cmp(&b.top));
             }
         }
-        self.section_page_float_bands = bands;
+        let fingerprint = if bands.is_empty() {
+            0
+        } else {
+            let mut hasher = DefaultHasher::new();
+            serde_json::to_vec(&bands)
+                .expect("float bands serialize")
+                .hash(&mut hasher);
+            hasher.finish()
+        };
+        self.section_page_float_bands = SharedPageFloatBands {
+            sections: bands.into(),
+            fingerprint,
+        };
     }
 
     /// Restore a paginator at a clean page start. The first lazily-created
@@ -403,6 +432,7 @@ impl Paginator {
         let mut body_margins = self.page_margins(opens_section, page_number);
         let margins = self
             .section_page_float_bands
+            .sections
             .get(self.section_index)
             .and_then(|bands| bands.anchor_margins.clone())
             .map(effective_margins)
@@ -445,6 +475,7 @@ impl Paginator {
 
     fn page_float_bands(&self, opens_section: bool, page_number: u32) -> Vec<PageFloatBand> {
         self.section_page_float_bands
+            .sections
             .get(self.section_index)
             .map(|variants| {
                 if let Some(first) = variants.first.as_ref().filter(|_| opens_section) {
@@ -1104,6 +1135,86 @@ mod tests {
             equal_width: None,
             separator: None,
             columns: None,
+        }
+    }
+
+    #[test]
+    fn checkpoints_share_float_bands_across_one_page_sections() {
+        for section_count in [1, 32, 128] {
+            let size = Size { w: 500.0, h: 500.0 };
+            let mut bands = vec![SectionPageFloatBands::default(); section_count];
+            for section in &mut bands {
+                section.anchor_margins = Some(margins(96.0, 96.0));
+            }
+            bands[0].default.push(PageFloatBand {
+                top: 96.0,
+                bottom: 196.0,
+                odd_page: None,
+            });
+            let mut paginator =
+                Paginator::new(size, margins(96.0, 96.0), columns(), None).unwrap();
+            paginator.set_section_page_float_bands(bands.clone());
+            let mut checkpoints = Vec::new();
+            for section_index in 0..section_count {
+                if section_index > 0 {
+                    paginator.force_authored_page_break(false);
+                }
+                paginator.set_section_index(section_index);
+                let (page_index, page_number, flow) = paginator.clean_page_start().unwrap();
+                checkpoints.push(crate::place::LayoutCheckpoint {
+                    block_index: section_index,
+                    section_index,
+                    page_index,
+                    page_number,
+                    flow,
+                });
+                let idx = paginator.get_current();
+                paginator.set_pen_y(idx, paginator.state(idx).content_top + 16.0);
+            }
+            assert_eq!(paginator.pages.len(), section_count);
+            let shared = &paginator.section_page_float_bands.sections;
+            assert_eq!(shared.len(), section_count);
+            assert_eq!(Arc::strong_count(shared), section_count + 1);
+            assert!(checkpoints.iter().all(|checkpoint| Arc::ptr_eq(
+                shared,
+                &checkpoint.flow.section_page_float_bands.sections,
+            )));
+            for checkpoint in [&checkpoints[0], &checkpoints[section_count - 1]] {
+                let mut resumed = Paginator::resume_in_section(
+                    &checkpoint.flow,
+                    checkpoint.page_number,
+                    checkpoint.section_index,
+                    None,
+                )
+                .unwrap();
+                assert!(Arc::ptr_eq(
+                    shared,
+                    &resumed.section_page_float_bands.sections,
+                ));
+                let idx = resumed.get_current();
+                assert_eq!(resumed.pages[idx].margins, margins(96.0, 96.0));
+                assert_eq!(
+                    resumed.state(idx).content_top,
+                    if checkpoint.section_index == 0 {
+                        196.0
+                    } else {
+                        96.0
+                    },
+                );
+                resumed.set_section_page_float_bands(bands.clone());
+                assert_eq!(
+                    resumed.section_page_float_bands,
+                    checkpoint.flow.section_page_float_bands,
+                );
+                bands[0].anchor_margins.as_mut().unwrap().top = 80.0;
+                resumed.set_section_page_float_bands(bands.clone());
+                assert_ne!(
+                    resumed.section_page_float_bands.fingerprint,
+                    checkpoint.flow.section_page_float_bands.fingerprint,
+                );
+                bands[0].anchor_margins.as_mut().unwrap().top = 96.0;
+                assert_eq!(shared[0].anchor_margins.as_ref().unwrap().top, 96.0);
+            }
         }
     }
 
