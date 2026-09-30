@@ -653,3 +653,33 @@ test("a warm-up waits for the full layout that replaces a pass's first pages", a
     hook.unmount();
   }
 });
+
+test('a real pass that fails in the worker with only a warm-up queued behind it still lays out here', async () => {
+  const { doc, worker, errors, hook, frame, shown } = await opened();
+  doc.version = 2;
+  act(() => hook.result.current.scheduleLayout('local', true));
+  await frame();
+  expect(worker.map((pass) => pass.at)).toEqual([1, 2]);
+  act(() => hook.result.current.scheduleWarmLayout());
+  await frame();
+  doc.workerAvailable = false;
+  act(() => worker[1]!.fail());
+  await frame();
+  await frame();
+  expect(errors).toEqual([]);
+  expect(doc.laidOutHere).toEqual([2]);
+  expect(shown()).toBe('2');
+});
+
+test('without the warm-up the failed real pass lays out here', async () => {
+  const { doc, worker, errors, hook, frame, shown } = await opened();
+  doc.version = 2;
+  act(() => hook.result.current.scheduleLayout('local', true));
+  await frame();
+  doc.workerAvailable = false;
+  act(() => worker[1]!.fail());
+  await frame();
+  expect(errors).toEqual([]);
+  expect(doc.laidOutHere).toEqual([2]);
+  expect(shown()).toBe('2');
+});
