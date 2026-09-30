@@ -67,7 +67,7 @@ interface RefApiInputs {
   runLayoutPipeline: (options?: { onHost?: boolean }) => void;
   getLayoutRequest: () => string | null;
   scrollToPositionImpl: (pmPos: number, forParaIdScroll?: boolean) => void;
-  revealPositionImpl: (position: number) => RevealPositionOutcome;
+  revealPositionImpl: (position: number, signal?: AbortSignal) => RevealPositionOutcome;
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
   scrollToPageImpl: (pageNumber: number) => void;
   setIsFocused: React.Dispatch<React.SetStateAction<boolean>>;
@@ -261,7 +261,7 @@ export interface UsePagedEditorRefApiOptions {
   runLayoutPipeline: () => void;
   getLayoutRequest: () => string | null;
   scrollToPositionImpl: (pmPos: number, forParaIdScroll?: boolean) => void;
-  revealPositionImpl: (position: number) => RevealPositionOutcome;
+  revealPositionImpl: (position: number, signal?: AbortSignal) => RevealPositionOutcome;
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
   scrollToPageImpl: (pageNumber: number) => void;
   setIsFocused: React.Dispatch<React.SetStateAction<boolean>>;

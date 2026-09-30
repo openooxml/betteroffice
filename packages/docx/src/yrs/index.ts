@@ -16,6 +16,8 @@
 
 import type { EditSession } from './wasm/index';
 import type { Document } from '../types/document';
+import type { CompatibilityFlags } from '../docx/settingsParser';
+import { resolveCommentMedia } from './hostMedia';
 import { registerSessionInternals } from './sessionInternals';
 import { noteYrsStoriesDirty } from './yrsToDocument';
 import type {
@@ -50,6 +52,7 @@ import {
   type DocxProposalResult,
   type DocxProposalSnapshot,
   type DocxProposalStateRequest,
+  type DocxProposalWithdrawRequest,
 } from './proposals';
 import type {
   DocxContentControlQuery,
@@ -79,16 +82,26 @@ export * from './inputPositionMap';
 export {
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
+  ResidentWorkerOutOfMemoryError,
   canUseResidentEngineWorker,
+  retainPreloadedResidentEngineWorker,
+  takePreloadedResidentEngineWorker,
   type ResidentEngineWorkerApplyResult,
   type ResidentEngineWorkerFrame,
   type ResidentEngineOffscreenPage,
 } from './residentEngineWorkerClient';
+export { preloadDocxEngine } from './preloadDocxEngine';
 export {
   residentCaretSnapshotForFrame,
   residentCaretDeviceRect,
   type ResidentCaretPaintStyle,
 } from './residentCaret';
+export {
+  WASM32_MEMORY_LIMIT_BYTES,
+  wasmModuleMemories,
+  type WasmHeapStats,
+  type WasmModuleMemory,
+} from '../wasm/loadWasmAsset';
 export { documentToYrs } from './documentToYrs';
 export { yrsToDocument } from './yrsToDocument';
 export * from './paragraphIdentity';
@@ -103,6 +116,7 @@ export {
   type DocxProposalSnapshot,
   type DocxProposalState,
   type DocxProposalStateRequest,
+  type DocxProposalWithdrawRequest,
 } from './proposals';
 export {
   captureSessionSave,
@@ -116,6 +130,13 @@ export {
 export interface YrsDocxHost {
   document: Document;
   referencedFonts: string[];
+  /**
+   * The `referencedFonts` a document seeded from its package names only for
+   * East Asian or complex-script text it does not contain, so no text is
+   * measured or drawn with them. Empty when its stories were not seeded; a
+   * preview's cover only its own first pages.
+   */
+  unusedScriptFonts?: string[];
   embeddedFonts: Map<string, ArrayBuffer>;
   fontTableRelationshipsXml?: string;
 }
@@ -222,6 +243,13 @@ export interface YrsOpeningOptions {
    * as one session. Each opening mints a fresh one by default.
    */
   generation?: string;
+  /**
+   * Seeds images as `media:{n}` tokens naming their part of the package,
+   * instead of `data:` URLs, keeping them out of the document state. Only a
+   * replica opened from the same package on a version that reads tokens
+   * shows them, so every client of a shared room must be one. Off by default.
+   */
+  mediaTokens?: boolean;
 }
 
 /** SHA-256 digests of the byte copies {@link prepareDocxBytes} made, by copy. */
@@ -247,6 +275,11 @@ export async function prepareDocxBytes(bytes: Uint8Array): Promise<Uint8Array> {
     // Opening hashes the copy itself.
   }
   return copy;
+}
+
+/** The SHA-256 {@link prepareDocxBytes} took of `bytes`, if it took one. @internal */
+export function preparedDocxDigest(bytes: Uint8Array): string | undefined {
+  return preparedDigests.get(bytes);
 }
 
 /** Snapshot of one paragraph from {@link YrsSession.paragraphs}. */
@@ -439,6 +472,11 @@ export interface YrsRevisionReceipt {
   revisionId: string | null;
 }
 
+/** Where the replacement text landed; after the struck-out text when suggesting. */
+export interface YrsReplaceReceipt extends YrsRevisionReceipt {
+  range?: YrsStoryRange;
+}
+
 /**
  * Receipt of {@link YrsSession.splitParagraph}. The first half keeps the
  * original paraId and the second half is re-minted; suggesting
@@ -484,6 +522,7 @@ export type YrsRawOp =
 
 /** Host context for {@link YrsSession.yrsBlocksForStory} (theme + list numbering). */
 export interface YrsRenderEnv {
+  compatibilityFlags?: Partial<CompatibilityFlags>;
   tocStyleIds?: string[];
   paragraphSpacingLinePx?: number;
   /** Section document-grid snap pitch in px (w:docGrid). The engine derives this from sections; hosts may omit it. */
@@ -501,6 +540,11 @@ export interface YrsRenderEnv {
   showHiddenText?: boolean;
   /** Revision id → decision shown in layout; unlisted revisions render as tracked changes. */
   revisionPreview?: Readonly<Record<string, 'accepted' | 'rejected'>>;
+  /**
+   * Lay the opened package's images out as `media:{n}` tokens, which a
+   * resolver given the session's `mediaSource` reads. @internal
+   */
+  mediaTokens?: boolean;
 }
 
 /** Receipt of {@link YrsSession.addComment}. */
@@ -566,6 +610,14 @@ export function sameYrsSelection(left: YrsSelection | null, right: YrsSelection 
   );
 }
 
+/** How far a region layout begun with {@link YrsSession.beginRegionLayout} has come. */
+export interface YrsRegionLayoutProgress {
+  measuredBlocks: number;
+  bodyBlocks: number;
+  /** The retained region layout reply, once the pass is complete. */
+  layoutJson?: string;
+}
+
 /** Opt-in internal stage timings for one resident engine input. @internal */
 export interface YrsEngineApplyProfile {
   selectionMs: number;
@@ -617,6 +669,8 @@ export interface YrsResidentWorkerSnapshot {
   layoutRevision: number;
   /** The document is a preview's cut of a package: its layouts render NUMPAGES empty. */
   partialDocument?: boolean;
+  /** Which seeded `data:` image sources lay out as `media:{n}` tokens. @internal */
+  mediaSources?: string;
 }
 
 /**
@@ -809,6 +863,12 @@ export interface YrsSelectionText {
  * One live replica of the yrs editing model. Thin typed wrapper over the
  * wasm `EditSession` — no editing logic on this side of the boundary.
  */
+/** An embedded image's bytes, as its `media:{n}` source displays them. */
+export interface YrsMediaSource {
+  bytes: Uint8Array;
+  mimeType: string;
+}
+
 export interface YrsSession extends CollaborationReplica {
   /** The yrs client id this replica writes with. */
   readonly clientId: number;
@@ -836,6 +896,16 @@ export interface YrsSession extends CollaborationReplica {
   /** Same pass, but the reply omits the measured arena (fetch it on demand
    * through {@link YrsSession.retainedKernelInputsJson}). */
   layoutDocumentWithRegionsRetainedJson(input: string): string;
+  /**
+   * {@link YrsSession.layoutDocumentWithRegionsRetainedJson} a step at a time:
+   * this lowers the body, and each {@link YrsSession.resumeRegionLayout}
+   * measures up to `blocks` more body blocks. `layoutJson` arrives with the
+   * step that completes the pass, equal to the one-call reply. A document
+   * change, a font registration or another layout in between abandons the
+   * pass, and resuming it then throws.
+   */
+  beginRegionLayout(input: string): YrsRegionLayoutProgress;
+  resumeRegionLayout(blocks: number): YrsRegionLayoutProgress;
   /** Retained `{ measured, options }` for the main-thread display fallback. */
   retainedKernelInputsJson(expectedLayoutRevision: number): string;
   /**
@@ -928,6 +998,8 @@ export interface YrsSession extends CollaborationReplica {
    * with {@link openDocx}. @internal
    */
   openDocxPreview(bytes: Uint8Array, blocks: number): YrsDocxHost | null;
+  /** Opened by {@link openDocxPreview}: its document refuses every change. @internal */
+  isDisplayOnly(): boolean;
   /**
    * Marks whether the document is a preview's, as a replica of one is: its
    * layouts render NUMPAGES empty. @internal
@@ -946,6 +1018,20 @@ export interface YrsSession extends CollaborationReplica {
   beginOpening(generation?: string): void;
   /** Materializes the retained canonical package for compatibility APIs. */
   materializeDocx(): Document | null;
+  /**
+   * The displayed bytes and media type of the package part a `media:{n}`
+   * image source names, or `null` for any other source or a destroyed session.
+   */
+  mediaSource(token: string): YrsMediaSource | null;
+  /** Changes on package opening and session destruction. */
+  mediaScope(): number;
+  /** The `data:` URL a token stands for, or `null` when unavailable or destroyed. */
+  mediaDataUrl(token: string): string | null;
+  /**
+   * Lays this replica's `data:` image sources out as the `media:{n}` tokens a
+   * snapshot's `mediaSources` names. @internal
+   */
+  loadMediaSources(json: string): void;
   /**
    * Seeds stories and returns paragraph IDs in document order. Seeding a
    * document that has no opening yet starts one; see {@link beginOpening}.
@@ -1055,7 +1141,7 @@ export interface YrsSession extends CollaborationReplica {
    */
   deleteRange(range: YrsStoryRange, suggesting?: YrsAuthor): YrsRevisionReceipt;
   /** Replaces a range with text in one transaction (one shared revision when suggesting). */
-  replaceRange(range: YrsStoryRange, text: string, suggesting?: YrsAuthor): YrsRevisionReceipt;
+  replaceRange(range: YrsStoryRange, text: string, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /**
    * Splits a paragraph by inserting one pilcrow. The FIRST half keeps the
    * original paraId; the SECOND half is re-minted (`secondParaId`).
@@ -1267,6 +1353,12 @@ export interface YrsSession extends CollaborationReplica {
    * history; each call that changes one increments `previewVersion`.
    */
   setProposalStates(request: DocxProposalStateRequest): DocxProposalResult;
+  /**
+   * Withdraws proposals, settling each as its decision previews it: accepted ones apply for good,
+   * rejected and undecided ones are removed. The settlement is one change against `expectVersion`
+   * outside undo history, so a later round resolves against the text the preview showed.
+   */
+  withdrawProposals(request: DocxProposalWithdrawRequest): DocxProposalResult;
   /** The proposals in the order they were made. */
   getProposals(): DocxProposalSnapshot;
   /** Listens for new proposals, decisions and a forgotten registry. Returns the unsubscribe. */
@@ -1395,7 +1487,15 @@ function docxSourceBuffer(bytes: Uint8Array): ArrayBuffer {
   ) {
     return bytes.buffer;
   }
-  return bytes.slice().buffer as ArrayBuffer;
+  return new Uint8Array(bytes).buffer as ArrayBuffer;
+}
+
+/**
+ * Decodes the host metadata a resident worker's `open` replied with, for the
+ * package `source` it opened. @internal
+ */
+export function decodeDocxHostJson(json: string, source: Uint8Array): YrsDocxHost {
+  return decodeDocxHost(json, source);
 }
 
 function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
@@ -1410,10 +1510,18 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
   ) {
     throw new TypeError('DOCX host referencedFonts must be a string array');
   }
+  const unusedScriptFonts = wire.unusedScriptFonts ?? [];
+  if (
+    !Array.isArray(unusedScriptFonts) ||
+    !unusedScriptFonts.every((name) => typeof name === 'string')
+  ) {
+    throw new TypeError('DOCX host unusedScriptFonts must be a string array');
+  }
   const result = decodeS9EnvelopeValue(wire.envelope, docxSourceBuffer(source));
   return {
     document: result.document,
     referencedFonts: wire.referencedFonts,
+    unusedScriptFonts,
     embeddedFonts: result.embeddedFonts,
     ...(result.fontTableRelationshipsXml === undefined
       ? {}
@@ -1449,6 +1557,18 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   let residentLayoutRevision = 0;
   // The current resident layout ran only in a resident worker replica.
   let layoutRanInWorker = false;
+  // The request of a region layout begun a step at a time.
+  let steppedLayoutInput: string | null = null;
+  const completedRegionLayout = (progress: YrsRegionLayoutProgress): YrsRegionLayoutProgress => {
+    if (progress.layoutJson !== undefined && steppedLayoutInput !== null) {
+      residentLayoutInput = steppedLayoutInput;
+      residentLayoutWithRegions = true;
+      residentLayoutRevision += 1;
+      layoutRanInWorker = false;
+      steppedLayoutInput = null;
+    }
+    return progress;
+  };
   let residentFontsRevision = 0;
   let docxSource: Uint8Array | null = null;
 
@@ -1478,9 +1598,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     }
   };
 
+  // A preview session refuses every change to its document.
+  let displayOnly = false;
   // A preview's cut of a package, whose layouts count only its own pages.
   let partialDocument = false;
   const mutate = <T>(operation: () => T): T => {
+    if (displayOnly) throw new Error('A document preview is display-only');
     invalidateReadCaches();
     wasmCallDepth += 1;
     try {
@@ -1548,6 +1671,14 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     observing = false;
   };
 
+  // `data:` URLs of the opened package's `media:{n}` sources.
+  const mediaDataUrls = new Map<string, string | null>();
+  let mediaScope = 0;
+  const resetMedia = (): void => {
+    mediaDataUrls.clear();
+    mediaScope += 1;
+  };
+
   const openDocx = (
     bytes: Uint8Array,
     seedStories: boolean,
@@ -1555,7 +1686,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   ): YrsDocxHost => {
     const source = bytes.slice();
     markDirty('all');
+    resetMedia();
     const json = mutate(() => {
+      session.set_media_tokens(options.mediaTokens === true);
       const opened = session.open_docx(
         source,
         seedStories,
@@ -1565,9 +1698,24 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       proposals.reset();
       return opened;
     });
-    const host = decodeDocxHost(json, source);
+    const host = withHostMedia(decodeDocxHost(json, source));
     docxSource = source;
     partialDocument = false;
+    return host;
+  };
+
+  const mediaDataUrl = (token: string): string | null => {
+    if (destroyed || !token.startsWith('media:')) return null;
+    let url = mediaDataUrls.get(token);
+    if (url === undefined) {
+      url = session.media_data_url(token) ?? null;
+      mediaDataUrls.set(token, url);
+    }
+    return url;
+  };
+
+  const withHostMedia = (host: YrsDocxHost): YrsDocxHost => {
+    resolveCommentMedia(host.document.package.document.comments, mediaDataUrl);
     return host;
   };
 
@@ -1575,18 +1723,28 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     version: () => facade.version(),
     resolveParagraphAnchor: (anchor) => facade.resolveParagraphAnchor(anchor),
     findText: (request) => facade.findText(request),
+    readParagraphs: (request) => facade.readParagraphs(request),
     applyEdits: (request) => facade.applyEdits(request),
+    listRevisions: () => facade.listRevisions(),
+    settleRevisions: (accept, reject) => {
+      const since = facade.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+      session.settle_revisions_json(JSON.stringify({ accept, reject }));
+      markDirty(facade.storiesChangedSince(since).stories);
+    },
   });
 
   const facade: YrsSession = {
     clientId,
     openDocxPreview: (bytes, blocks) => {
       markDirty('all');
+      resetMedia();
       const json = mutate(() => session.open_docx_preview(bytes, blocks));
       if (json === undefined) return null;
+      displayOnly = true;
       partialDocument = true;
-      return decodeDocxHost(json, bytes);
+      return withHostMedia(decodeDocxHost(json, bytes));
     },
+    isDisplayOnly: () => displayOnly,
     setPartialDocument: (partial) => {
       partialDocument = partial;
       session.set_partial_document(partial);
@@ -1649,6 +1807,16 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       layoutRanInWorker = false;
       return output;
     },
+    beginRegionLayout: (input) => {
+      steppedLayoutInput = input;
+      return completedRegionLayout(
+        JSON.parse(session.begin_region_layout(input)) as YrsRegionLayoutProgress
+      );
+    },
+    resumeRegionLayout: (blocks) =>
+      completedRegionLayout(
+        JSON.parse(session.resume_region_layout(blocks)) as YrsRegionLayoutProgress
+      ),
     adoptResidentWorkerLayout: (input) => {
       residentLayoutInput = input;
       residentLayoutWithRegions = true;
@@ -1710,6 +1878,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       if (!residentLayoutInput) return null;
       if (!residentLayoutWithRegions && residentRenderInputs.size === 0) return null;
       const selectionJson = session.selection();
+      const mediaSources = session.media_sources_json();
       const fontsCurrent = options?.knownFontsRevision === residentFontsRevision;
       let state: Uint8Array | null = null;
       if (options?.knownStateVector) {
@@ -1738,6 +1907,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         layoutWithRegions: residentLayoutWithRegions,
         layoutRevision: residentLayoutRevision,
         ...(partialDocument ? { partialDocument: true } : {}),
+        ...(mediaSources ? { mediaSources } : {}),
       };
     },
     residentWorkerProbe: () => {
@@ -1769,6 +1939,15 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         proposals.reset();
       });
     },
+    mediaSource: (token) => {
+      if (destroyed || !token.startsWith('media:')) return null;
+      const bytes = session.media_bytes(token);
+      const mimeType = bytes && session.media_type(token);
+      return bytes && mimeType ? { bytes, mimeType } : null;
+    },
+    loadMediaSources: (json) => session.load_media_sources(json),
+    mediaDataUrl,
+    mediaScope: () => mediaScope,
     materializeDocx: () => {
       const source = docxSource;
       const json = session.materialize_docx();
@@ -2078,7 +2257,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
               suggesting?.name,
               suggesting?.date
             )
-          ) as YrsRevisionReceipt
+          ) as YrsReplaceReceipt
       );
     },
     splitParagraph: (at, suggesting) => {
@@ -2438,6 +2617,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       }),
     proposeChanges: (request) => mutate(() => proposals.propose(request)),
     setProposalStates: (request) => proposals.setStates(request),
+    withdrawProposals: (request) => mutate(() => proposals.withdraw(request)),
     getProposals: () => proposals.snapshot(),
     onProposalChange: (listener) => {
       if (destroyed) throw new Error('yrs session is destroyed');
@@ -2478,6 +2658,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     destroy: () => {
       if (destroyed) return;
       destroyed = true;
+      resetMedia();
       listeners.clear();
       proposals.destroy();
       pendingUpdates.length = 0;

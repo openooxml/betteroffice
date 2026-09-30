@@ -199,7 +199,7 @@ export function DocxEditorPagedArea({
   setShowCommentsSidebar: React.Dispatch<React.SetStateAction<boolean>>;
   onTotalPagesChange: (totalPages: number) => void;
   /** Receives each computed layout. */
-  onError?: (error: Error) => void;
+  onError?: (error: Error, session?: unknown) => void;
   onLayoutComputed?: (layout: Layout | null) => void;
   /** Hands layout passes to the resident worker. */
   layoutInWorker?: LayoutInWorker;
@@ -377,7 +377,7 @@ export function DocxEditorPagedArea({
               setCommentSelectionRange(selection);
               pagedEditorRef.current?.setSelection(selection.to);
             }
-            setAddCommentYPosition(floatingCommentBtn.top);
+            setAddCommentYPosition(floatingCommentBtn.top / zoom);
             setShowCommentsSidebar(true);
             setIsAddingComment(true);
             setFloatingCommentBtn(null);

@@ -14,7 +14,8 @@
 //! A page's `primitives` are emitted back to front: watermark, behind-document
 //! floating images, the layout's fragments in order, in-front floating images,
 //! then column separators. Inside a fragment the order is shading, borders,
-//! then line content.
+//! then line content. The `watermark_primitive_count` prefix paints below the
+//! header and footer; the remaining body primitives paint above them.
 //!
 //! `background`, `page_borders`, `header`, `footer` and `note_areas` are
 //! separate fields rather than entries in that stream, so the consumer places
@@ -87,6 +88,7 @@ use ooxml_drawingml::chart::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 /// A compiled document: one entry per laid-out page, in document order.
@@ -124,6 +126,9 @@ pub struct DisplayPage {
     pub page_label: Option<String>,
     /// paint order
     pub primitives: Vec<Primitive>,
+    /// Leading primitives painted beneath the header and footer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark_primitive_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -281,20 +286,20 @@ pub struct DocAttrs {
     pub line_index: Option<u64>,
     /// table cell the primitive paints inside (0-based grid coordinates)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cell: Option<TableCellRef>,
+    pub cell: Option<Box<TableCellRef>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment_ids: Option<Vec<String>>,
     /// inert field identity when this primitive paints a field result — the
     /// a11y mirror announces it; the instruction is NEVER parsed/executed.
     /// Additive + serde-optional: field-free fixtures stay byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub field: Option<FieldMetadata>,
+    pub field: Option<Box<FieldMetadata>>,
     /// footnote/endnote reference identity when this primitive is the body
     /// reference mark (note backlinks). Additive + serde-optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note_ref: Option<NoteRefMetadata>,
+    pub note_ref: Option<Box<NoteRefMetadata>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub revision: Option<Revision>,
+    pub revision: Option<Box<Revision>>,
     /// Synthetic numbering glyph emitted before the first line of a list
     /// paragraph. The mirror uses this to expose the stable list-marker class.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -307,7 +312,7 @@ pub struct DocAttrs {
     /// display-list snapshots that carry only run-level revisions stay
     /// byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub structural_revision: Option<StructuralRevision>,
+    pub structural_revision: Option<Box<StructuralRevision>>,
     /// sanitized hyperlink target for clickable text/image primitives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub href: Option<String>,
@@ -323,13 +328,13 @@ pub struct DocAttrs {
     pub link_doc_location: Option<String>,
     /// innermost block-level content-control identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sdt: Option<SdtAttrs>,
+    pub sdt: Option<Box<SdtAttrs>>,
     /// Full outer-to-inner content-control ancestry.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sdt_path: Vec<SdtAttrs>,
     /// inline content-control widget metadata when this text primitive is its glyph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inline_sdt_widget: Option<InlineSdtWidgetAttrs>,
+    pub inline_sdt_widget: Option<Box<InlineSdtWidgetAttrs>>,
     /// accessibility summary for primitives that compose one chart block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chart: Option<ChartA11yAttrs>,
@@ -350,15 +355,15 @@ pub struct DocAttrs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment: Option<CommentMetadata>,
+    pub comment: Option<Box<CommentMetadata>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub clip_group: Option<ClipGroupMetadata>,
+    pub clip_group: Option<Box<ClipGroupMetadata>>,
     /// Leader glyph metadata shared by text and glyph primitives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub leader_glyphs: Option<LeaderGlyphMetadata>,
+    pub leader_glyphs: Option<Box<LeaderGlyphMetadata>>,
     /// Optional decoration metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub highlight_slice: Option<HighlightSliceMetadata>,
+    pub highlight_slice: Option<Box<HighlightSliceMetadata>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style: Option<DisplayBorderStyle>,
     /// Fields belonging to one primitive class are flattened through the shared
@@ -372,23 +377,23 @@ pub struct DocAttrs {
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "shapeType")]
     pub image_shape_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_frame: Option<ContentFrame>,
+    pub content_frame: Option<Box<ContentFrame>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub border: Option<Value>,
+    pub border: Option<Box<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fill_paint: Option<Value>,
+    pub fill_paint: Option<Box<Value>>,
     /// Lossless DrawingML stroke details beyond the plain colour/width/dash
     /// triple: compound, alignment, caps, joins, arrows and custom dashes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stroke_paint: Option<Value>,
+    pub stroke_paint: Option<Box<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effect_extent: Option<Value>,
+    pub effect_extent: Option<Box<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub drawing_scene: Option<Value>,
+    pub drawing_scene: Option<Box<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text_body_properties: Option<Value>,
+    pub text_body_properties: Option<Box<Value>>,
     /// GlyphRun-only member flattened through the shared attrs (same pattern
     /// as the image/shape members above): the resolved CSS font shorthand the
     /// canvas fillText safety net uses when glyph outlines are unavailable,
@@ -399,9 +404,9 @@ pub struct DocAttrs {
     /// (glow/shadow/reflection/textFill/textOutline), passed through losslessly
     /// from `RunFormatting.modernEffects`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub modern_effects: Option<Value>,
+    pub modern_effects: Option<Box<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub table: Option<TableMetadata>,
+    pub table: Option<Box<TableMetadata>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_shape_atom: Option<bool>,
 }
@@ -2450,8 +2455,9 @@ struct ShapeFillIn {
     background_color: Option<String>,
     #[serde(default)]
     picture_rel_id: Option<String>,
-    /// resolved SAFE embedded picture source (`data:`/`blob:` minted by the
-    /// parser from embedded parts; never an external target)
+    /// resolved SAFE embedded picture source (`data:`/`blob:` or a `media:{n}`
+    /// part token, minted by the parser from embedded parts; never an external
+    /// target)
     #[serde(default)]
     picture_src: Option<String>,
     #[serde(default)]
@@ -2772,7 +2778,7 @@ pub(crate) struct PageIn {
     #[serde(default)]
     pub(crate) section_page_index: Option<u64>,
     #[serde(default)]
-    section_page_number: Option<u64>,
+    pub(crate) section_page_number: Option<u64>,
     #[serde(default)]
     pub(crate) header_footer_refs: Option<PageHeaderFooterRefsIn>,
     #[serde(default)]
@@ -3303,7 +3309,7 @@ fn stamp_sdt_range(prims: &mut [Primitive], groups: &[SdtGroupIn], overwrite: bo
         if let Some(attrs) = doc_attrs_mut(p)
             && (overwrite || attrs.sdt.is_none())
         {
-            attrs.sdt = Some(sdt.clone());
+            attrs.sdt = Some(Box::new(sdt.clone()));
             attrs.sdt_path = path.clone();
         }
     }
@@ -3733,12 +3739,13 @@ fn stamp_image_run_attrs(attrs: &mut DocAttrs, run: &ImageRunIn, x: f64, y: f64)
     attrs.image_flip_v = (run.flip_v == Some(true)
         || transform_has_flip(run.transform.as_deref(), 'y'))
     .then_some(true);
-    attrs.content_frame = content_frame(x, y, run.width, run.height, run.rotation_bounds.as_ref());
+    attrs.content_frame =
+        content_frame(x, y, run.width, run.height, run.rotation_bounds.as_ref()).map(Box::new);
     attrs.image_shape_type = run.shape_type.clone();
     attrs.effects = run.effects.clone();
-    attrs.border = run.outline.clone();
+    attrs.border = run.outline.clone().map(Box::new);
     if run.is_insertion == Some(true) || run.is_deletion == Some(true) {
-        attrs.revision = Some(Revision {
+        attrs.revision = Some(Box::new(Revision {
             author: run.change_author.clone().unwrap_or_default(),
             date: run.change_date.clone().unwrap_or_default(),
             revision_id: run
@@ -3750,7 +3757,7 @@ fn stamp_image_run_attrs(attrs: &mut DocAttrs, run: &ImageRunIn, x: f64, y: f64)
             } else {
                 RevisionKind::Del
             },
-        });
+        }));
     }
 }
 
@@ -3770,10 +3777,11 @@ fn stamp_image_block_attrs(attrs: &mut DocAttrs, block: &ImageBlockIn, x: f64, y
         block.width,
         block.height,
         block.rotation_bounds.as_ref(),
-    );
+    )
+    .map(Box::new);
     attrs.image_shape_type = block.shape_type.clone();
     attrs.effects = block.effects.clone();
-    attrs.border = block.outline.clone();
+    attrs.border = block.outline.clone().map(Box::new);
 }
 
 fn image_layout_width(run: &ImageRunIn) -> f64 {
@@ -4860,7 +4868,7 @@ fn recompose_hf_region(
                 let mut attrs = BlockRef::of(&block.id).attrs();
                 attrs.doc_start = block.pm_start;
                 attrs.doc_end = block.pm_end;
-                attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups);
+                attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups).map(Box::new);
                 attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
                 stamp_image_block_attrs(&mut attrs, block, x, y);
                 let rotation = block
@@ -4995,6 +5003,7 @@ fn build_display_list_selected(
         {
             emit_watermark(&mut prims, watermark, page);
         }
+        let watermark_primitive_count = (!prims.is_empty()).then_some(prims.len());
         if let Some(border) = page_border_primitive(
             &render_options,
             page,
@@ -5132,7 +5141,9 @@ fn build_display_list_selected(
                     let mut attrs = BlockRef::of(&imf.block_id).attrs();
                     attrs.doc_start = imf.pm_start.or(block.and_then(|b| b.pm_start));
                     attrs.doc_end = imf.pm_end.or(block.and_then(|b| b.pm_end));
-                    attrs.sdt = block.and_then(|b| sdt_attrs_from_groups(&b.sdt_groups));
+                    attrs.sdt = block
+                        .and_then(|b| sdt_attrs_from_groups(&b.sdt_groups))
+                        .map(Box::new);
                     if let Some(block) = block {
                         attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
                         stamp_image_block_attrs(&mut attrs, block, imf.x, imf.y);
@@ -5256,6 +5267,7 @@ fn build_display_list_selected(
             section_page_number: page.section_page_number,
             page_label: page.page_label.clone(),
             primitives: prims,
+            watermark_primitive_count,
             background: page.background.clone(),
             page_borders,
             header,
@@ -5276,6 +5288,13 @@ fn build_display_list_selected(
         &input.comment_authors,
         &input.comment_threads,
     );
+    // A resident list keeps every page, so no page holds spare capacity.
+    for page in &mut display_list.pages {
+        page.primitives.shrink_to_fit();
+        for region in [&mut page.header, &mut page.footer].into_iter().flatten() {
+            region.primitives.shrink_to_fit();
+        }
+    }
     display_list
 }
 
@@ -5413,7 +5432,7 @@ fn apply_review_primitive_metadata(
                 if let Some(thread) = thread {
                     apply_comment_thread_metadata(&mut metadata, thread);
                 }
-                attrs.comment = Some(metadata);
+                attrs.comment = Some(Box::new(metadata));
             }
             if is_comment_wash {
                 if all_resolved {
@@ -5550,7 +5569,7 @@ pub(crate) fn emit_paragraph_fragment(
     if emit_block_chrome {
         if let Some(rev) = pmark_revision.clone() {
             let mut bar_attrs = block_ref.attrs();
-            bar_attrs.structural_revision = Some(rev.clone());
+            bar_attrs.structural_revision = Some(Box::new(rev.clone()));
             prims.push(Primitive::Rect(RectPrimitive {
                 x: px(origin_x + STRUCTURAL_CHANGE_BAR_OFFSET_X),
                 y: px(origin_y),
@@ -5650,7 +5669,7 @@ pub(crate) fn emit_paragraph_fragment(
         && frag.carried_to_next != Some(true)
     {
         let mut glyph_attrs = block_ref.attrs();
-        glyph_attrs.structural_revision = Some(rev.clone());
+        glyph_attrs.structural_revision = Some(Box::new(rev.clone()));
         let glyph_x = line.end_x + PARAGRAPH_MARK_GLYPH_GAP;
         prims.push(Primitive::Text(TextRunPrimitive {
             text: "¶".to_string(),
@@ -5720,7 +5739,7 @@ pub(crate) fn emit_paragraph_fragment(
                     a.to_line = Some(to);
                 }
                 if let Some(sdt) = &sdt {
-                    a.sdt = Some(sdt.clone());
+                    a.sdt = Some(Box::new(sdt.clone()));
                     a.sdt_path = sdt_path.clone();
                 }
             }
@@ -6435,7 +6454,7 @@ fn emit_line(
                             attrs.bidi_level =
                                 attrs.bidi_level.or_else(|| logical_order.map(|_| *level));
                             if imr.is_insertion == Some(true) || imr.is_deletion == Some(true) {
-                                attrs.revision = Some(Revision {
+                                attrs.revision = Some(Box::new(Revision {
                                     author: imr.change_author.clone().unwrap_or_default(),
                                     date: imr.change_date.clone().unwrap_or_default(),
                                     revision_id: imr
@@ -6447,7 +6466,7 @@ fn emit_line(
                                     } else {
                                         RevisionKind::Del
                                     },
-                                });
+                                }));
                             }
                         }
                     }
@@ -6597,7 +6616,7 @@ fn emit_tab_leader(
         attrs.doc_end = tab.pm_end;
         attrs.logical_order = logical_order.or(tab.fmt.logical_order);
         attrs.bidi_level = tab.fmt.bidi_level;
-        attrs.leader_glyphs = Some(LeaderGlyphMetadata {
+        attrs.leader_glyphs = Some(Box::new(LeaderGlyphMetadata {
             glyph: Some(glyph.to_string()),
             count: Some(count),
             x: Some(px(x)),
@@ -6609,7 +6628,7 @@ fn emit_tab_leader(
             size: measured.font_size.map(|size| px(size * 96.0 / 72.0)),
             color: Some(run_color(&fmt)),
             rtl: tab.fmt.rtl.filter(|rtl| *rtl),
-        });
+        }));
         prims.push(Primitive::Text(TextRunPrimitive {
             text: glyph.repeat(count as usize),
             x: px(x),
@@ -6766,9 +6785,9 @@ fn emit_text_segment(
     attrs.doc_start = pm_start;
     attrs.doc_end = pm_end;
     attrs.comment_ids = comment_ids.clone();
-    attrs.revision = revision;
+    attrs.revision = revision.map(Box::new);
     attrs.href = hyperlink_href(fmt);
-    attrs.inline_sdt_widget = fmt.inline_sdt_widget.clone();
+    attrs.inline_sdt_widget = fmt.inline_sdt_widget.clone().map(Box::new);
     attrs.logical_order = logical_order.or(fmt.logical_order);
     attrs.bidi_level = exact_advance.then_some(bidi_level).or(fmt.bidi_level);
     attrs.lang = fmt.language.as_ref().and_then(|language| {
@@ -6792,20 +6811,20 @@ fn emit_text_segment(
     // the a11y mirror can announce what the field is. Announce-only — nothing
     // downstream parses or executes the instruction.
     if let Some(field_run) = field {
-        attrs.field = Some(field_metadata(field_run));
+        attrs.field = Some(Box::new(field_metadata(field_run)));
     }
     // footnote/endnote body reference mark → note_ref, the backlink hook
     // (the mirror renders it as a doc-noteref link to `oox-<kind>-<id>`)
     if let Some(id) = fmt.footnote_ref_id {
-        attrs.note_ref = Some(NoteRefMetadata {
+        attrs.note_ref = Some(Box::new(NoteRefMetadata {
             kind: Some("footnote".to_string()),
             id: Some(id),
-        });
+        }));
     } else if let Some(id) = fmt.endnote_ref_id {
-        attrs.note_ref = Some(NoteRefMetadata {
+        attrs.note_ref = Some(Box::new(NoteRefMetadata {
             kind: Some("endnote".to_string()),
             id: Some(id),
-        });
+        }));
     }
 
     // Highlight is the run font box, never the containing line band. Exact
@@ -6814,7 +6833,7 @@ fn emit_text_segment(
         let ascent = font_px * 0.8;
         let descent = font_px * 0.2;
         let mut highlight_attrs = attrs.clone();
-        highlight_attrs.highlight_slice = Some(HighlightSliceMetadata {
+        highlight_attrs.highlight_slice = Some(Box::new(HighlightSliceMetadata {
             source_start: exact_advance.then_some(source_start as u64),
             source_end: exact_advance.then_some(source_end as u64),
             ascent: Some(px(ascent)),
@@ -6822,7 +6841,7 @@ fn emit_text_segment(
             includes_trailing_whitespace: Some(
                 text.chars().next_back().is_some_and(char::is_whitespace),
             ),
-        });
+        }));
         prims.push(Primitive::Decoration(DecorationPrimitive {
             deco: DecoKind::Highlight,
             x: px(x),
@@ -6910,7 +6929,7 @@ fn emit_text_segment(
     };
     if !emitted_glyphs {
         let mut text_attrs = attrs.clone();
-        text_attrs.modern_effects = fmt.modern_effects.clone();
+        text_attrs.modern_effects = fmt.modern_effects.clone().map(Box::new);
         prims.push(Primitive::Text(TextRunPrimitive {
             text: text.to_string(),
             x: px(x),
@@ -7239,7 +7258,7 @@ fn try_emit_glyph_runs(
         // outlines unavailable) — same shorthand the TextRunPrimitive would
         // carry, so the fallback keeps family/weight/style
         sub_attrs.fallback_font = Some(css_font(fmt));
-        sub_attrs.modern_effects = fmt.modern_effects.clone();
+        sub_attrs.modern_effects = fmt.modern_effects.clone().map(Box::new);
 
         local.push(Primitive::GlyphRun(GlyphRunPrimitive {
             font_id: font.to_u32(),
@@ -7894,7 +7913,7 @@ fn emit_floating_image(
     attrs.doc_start = imr.pm_start;
     attrs.doc_end = imr.pm_end;
     stamp_image_run_attrs(&mut attrs, imr, page_x, page_y);
-    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups);
+    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups).map(Box::new);
     attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
     prims.push(Primitive::Image(ImagePrimitive {
         rel_id: imr.src.clone(),
@@ -7934,7 +7953,7 @@ fn emit_shape_fragment(
         .or(frag.pm_end)
         .or(block.doc_end)
         .or(block.pm_end);
-    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups);
+    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups).map(Box::new);
     attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
     attrs.aria_label = block.title.clone();
     attrs.aria_description = block.description.clone();
@@ -7950,12 +7969,12 @@ fn emit_shape_fragment(
         .and_then(|scene| scene.pointer("/root/id"))
         .and_then(Value::as_str)
         .map(str::to_string);
-    attrs.fill_paint = shape_fill_paint(block.fill.as_ref());
-    attrs.stroke_paint = shape_stroke_paint(block.stroke.as_ref());
+    attrs.fill_paint = shape_fill_paint(block.fill.as_ref()).map(Box::new);
+    attrs.stroke_paint = shape_stroke_paint(block.stroke.as_ref()).map(Box::new);
     attrs.effects = block.effects.clone();
-    attrs.effect_extent = block.effect_extent.clone();
-    attrs.drawing_scene = block.scene.clone();
-    attrs.text_body_properties = block.text_body_properties.clone();
+    attrs.effect_extent = block.effect_extent.clone().map(Box::new);
+    attrs.drawing_scene = block.scene.clone().map(Box::new);
+    attrs.text_body_properties = block.text_body_properties.clone().map(Box::new);
 
     let decorative = block.decorative.unwrap_or_else(|| {
         block.inner_text.is_empty() && block.title.is_none() && block.description.is_none()
@@ -8095,12 +8114,12 @@ fn shape_fill_paint(fill: Option<&ShapeFillIn>) -> Option<Value> {
         }
     }
     // resolved picture-fill source: pass through only parser-minted embedded
-    // schemes (data:/blob:) so a hand-crafted input cannot smuggle an external
-    // URL to the canvas image resolver
+    // schemes (data:/blob:, or a media:{n} part token) so a hand-crafted input
+    // cannot smuggle an external URL to the canvas image resolver
     if let Some(src) = fill
         .picture_src
         .as_ref()
-        .filter(|src| src.starts_with("data:") || src.starts_with("blob:"))
+        .filter(|src| src.starts_with("data:") || src.starts_with("blob:") || is_media_token(src))
     {
         paint.insert("pictureSrc".to_string(), Value::String(src.clone()));
     }
@@ -8120,6 +8139,13 @@ fn shape_fill_paint(fill: Option<&ShapeFillIn>) -> Option<Value> {
         paint.insert("themeRefIndex".to_string(), Value::Number(index.into()));
     }
     (!paint.is_empty()).then_some(Value::Object(paint))
+}
+
+/// A `media:{n}` token naming a package part the host resolves.
+fn is_media_token(src: &str) -> bool {
+    src.strip_prefix("media:").is_some_and(|digits| {
+        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 fn shape_stroke_paint(stroke: Option<&ShapeStrokeIn>) -> Option<Value> {
@@ -8465,7 +8491,7 @@ fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block
         .or(frag.pm_end)
         .or(block.doc_end)
         .or(block.pm_end);
-    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups);
+    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups).map(Box::new);
     attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
     attrs.chart = Some(ChartA11yAttrs {
         label: chart_aria_label(&chart),
@@ -8864,11 +8890,11 @@ fn apply_clip_group(attrs: &mut DocAttrs, id: String, rect: ClipRect) {
     } else {
         rect
     };
-    attrs.clip_group = Some(ClipGroupMetadata {
+    attrs.clip_group = Some(Box::new(ClipGroupMetadata {
         id: Some(id),
         clip: Some(clip),
         opacity: None,
-    });
+    }));
 }
 
 fn table_metadata(
@@ -9113,7 +9139,7 @@ pub(crate) fn emit_table_fragment(
     let table_revision = whole_table_revision(block);
     if let Some(rev) = table_revision.clone() {
         let mut attrs = block_ref.attrs();
-        attrs.structural_revision = Some(rev.clone());
+        attrs.structural_revision = Some(Box::new(rev.clone()));
         prims.push(Primitive::Rect(RectPrimitive {
             x: px(frag.x + STRUCTURAL_CHANGE_BAR_OFFSET_X),
             y: px(frag.y),
@@ -9141,7 +9167,7 @@ pub(crate) fn emit_table_fragment(
                 continue;
             }
             let mut attrs = block_ref.attrs();
-            attrs.structural_revision = Some(rev.clone());
+            attrs.structural_revision = Some(Box::new(rev.clone()));
             prims.push(Primitive::Rect(RectPrimitive {
                 x: px(frag.x + STRUCTURAL_CHANGE_BAR_OFFSET_X),
                 y: px(t),
@@ -9241,7 +9267,7 @@ pub(crate) fn emit_table_fragment(
             && let Some((t, b)) = clip(cy, cy + p.cell_h)
         {
             let mut bg_attrs = block_ref.attrs();
-            bg_attrs.cell = Some(cell_ref.clone());
+            bg_attrs.cell = Some(Box::new(cell_ref.clone()));
             prims.push(Primitive::Rect(RectPrimitive {
                 x: px(cx),
                 y: px(t),
@@ -9265,8 +9291,8 @@ pub(crate) fn emit_table_fragment(
                     Some(p.g.column_index as u64),
                 );
                 let mut attrs = block_ref.attrs();
-                attrs.cell = Some(cell_ref.clone());
-                attrs.structural_revision = Some(rev.clone());
+                attrs.cell = Some(Box::new(cell_ref.clone()));
+                attrs.structural_revision = Some(Box::new(rev.clone()));
                 prims.push(Primitive::Rect(RectPrimitive {
                     x: px(cx),
                     y: px(t),
@@ -9298,7 +9324,7 @@ pub(crate) fn emit_table_fragment(
                 // explicit ownership: the owning grid cell rides on the line so
                 // consumers associate borders exactly (no geometric fallback)
                 let line_attrs = DocAttrs {
-                    cell: Some(cell_ref.clone()),
+                    cell: Some(Box::new(cell_ref.clone())),
                     ..DocAttrs::default()
                 };
                 prims.push(Primitive::Line(LinePrimitive {
@@ -9402,7 +9428,7 @@ pub(crate) fn emit_table_fragment(
             // ownership metadata: the cut rule closes this grid cell's column
             // band at the fragment edge (borderOwner stays Fragment)
             let line_attrs = DocAttrs {
-                cell: Some(TableCellRef {
+                cell: Some(Box::new(TableCellRef {
                     row: g.row_index as u64,
                     col: g.column_index as u64,
                     row_span: g.row_span as u64,
@@ -9417,7 +9443,7 @@ pub(crate) fn emit_table_fragment(
                     owns_right_border: None,
                     owns_bottom_border: None,
                     owns_left_border: None,
-                }),
+                })),
                 ..DocAttrs::default()
             };
             prims.push(Primitive::Line(LinePrimitive {
@@ -9464,7 +9490,7 @@ pub(crate) fn emit_table_fragment(
                     inner.parent_table_id = Some(table_id.clone());
                 }
             } else {
-                attrs.table = Some(metadata.clone());
+                attrs.table = Some(Box::new(metadata.clone()));
             }
         }
     }
@@ -10151,7 +10177,7 @@ fn emit_cell_floating_images(
             let layout_width = image_layout_width(imr);
             let layout_height = image_layout_height(imr);
             let mut attrs = block_ref.attrs();
-            attrs.cell = Some(cell_ref.clone());
+            attrs.cell = Some(Box::new(cell_ref.clone()));
             // A continuation repaint carries no document positions.
             if selectable {
                 attrs.doc_start = imr.pm_start;
@@ -10483,7 +10509,7 @@ fn strip_doc_positions(p: &mut Primitive) {
 /// carry no DocAttrs and stay untouched)
 fn set_cell_ref(p: &mut Primitive, cell: &TableCellRef) {
     if let Some(attrs) = doc_attrs_mut(p) {
-        attrs.cell = Some(cell.clone());
+        attrs.cell = Some(Box::new(cell.clone()));
     }
 }
 
@@ -10583,29 +10609,32 @@ pub fn build_resident_display_list_partial_with_fonts_observed(
     build: &dyn Fn(usize) -> bool,
     observe_phase: &mut impl FnMut(),
 ) -> Result<(ResidentDisplayInput, DisplayList), String> {
-    let input = resident_build_input(pagination, layout, extras)?;
-    observe_phase();
-    let selected: HashSet<usize> = (0..input.layout.pages.len())
+    let selected: HashSet<usize> = (0..layout.pages.len())
         .filter(|&index| build(index))
         .collect();
+    let input = resident_build_input_for(pagination, layout, extras, Some(&selected))?;
+    observe_phase();
     let built = build_display_list_selected(&input, fonts, Some(&selected));
     let mut built_pages: HashMap<usize, DisplayPage> = built
         .pages
         .into_iter()
         .map(|page| (page.page_index as usize, page))
         .collect();
-    let blocks = measured_blocks_by_key(&input);
+    let blocks = source_blocks_by_key(pagination);
     let pages = input
         .layout
         .pages
         .iter()
         .enumerate()
-        .map(|(index, page)| {
-            built_pages
-                .remove(&index)
-                .unwrap_or_else(|| unbuilt_page(page, index, &blocks))
+        .map(|(index, page)| match built_pages.remove(&index) {
+            Some(built) => Ok(built),
+            None => Ok(unbuilt_page_with_span(
+                page,
+                index,
+                layout_page_position_span(&layout.pages[index], &blocks)?,
+            )),
         })
-        .collect();
+        .collect::<Result<_, String>>()?;
     observe_phase();
     Ok((
         ResidentDisplayInput { input },
@@ -10656,81 +10685,18 @@ pub fn build_resident_display_pages_with_fonts(
     Ok(wanted)
 }
 
-fn measured_blocks_by_key(input: &BuildInput) -> HashMap<String, &MeasuredBlockIn> {
+/// The pagination's rendered measured blocks by key, first occurrence winning
+/// as in [`build_display_list_selected`].
+fn source_blocks_by_key(
+    pagination: &crate::types::Input,
+) -> HashMap<String, &crate::types::MeasuredBlock> {
     let mut blocks = HashMap::new();
-    for measured in &input.measured {
-        let key = match &measured.block {
-            BlockIn::Paragraph(block) => block_key(&block.id),
-            BlockIn::Table(block) => block_key(&block.id),
-            BlockIn::Image(block) => block_key(&block.id),
-            BlockIn::TextBox(block) => block_key(&block.id),
-            BlockIn::Shape(block) => block_key(&block.id),
-            BlockIn::Chart(block) => block_key(&block.id),
-            BlockIn::Unsupported => continue,
-        };
-        blocks.entry(key).or_insert(measured);
+    for measured in &pagination.measured {
+        if let Some(key) = resident_block_key(&measured.block) {
+            blocks.entry(key.into_owned()).or_insert(measured);
+        }
     }
     blocks
-}
-
-/// The lowest and highest body position `page`'s fragments place.
-fn page_position_span(
-    page: &PageIn,
-    blocks: &HashMap<String, &MeasuredBlockIn>,
-) -> Option<[i64; 2]> {
-    let mut span: Option<[i64; 2]> = None;
-    let mut include = |start: Option<i64>, end: Option<i64>| {
-        for value in [start, end].into_iter().flatten() {
-            span = Some(span.map_or([value, value], |[low, high]| {
-                [low.min(value), high.max(value)]
-            }));
-        }
-    };
-    fn block(block: &BlockIn, include: &mut dyn FnMut(Option<i64>, Option<i64>)) {
-        match block {
-            BlockIn::Paragraph(paragraph) => include(paragraph.pm_start, paragraph.pm_end),
-            BlockIn::Image(image) => include(image.pm_start, image.pm_end),
-            BlockIn::Table(table) => rows(&table.rows, include),
-            _ => {}
-        }
-    }
-    fn rows(rows: &[TableRowIn], include: &mut dyn FnMut(Option<i64>, Option<i64>)) {
-        for row in rows {
-            for cell in &row.cells {
-                for nested in &cell.blocks {
-                    block(nested, include);
-                }
-            }
-        }
-    }
-    for fragment in &page.fragments {
-        match fragment {
-            FragmentIn::Paragraph(fragment) => include(fragment.pm_start, fragment.pm_end),
-            FragmentIn::Image(fragment) => include(fragment.pm_start, fragment.pm_end),
-            FragmentIn::TextBox(fragment) => include(fragment.pm_start, fragment.pm_end),
-            FragmentIn::Shape(fragment) => include(fragment.pm_start, fragment.pm_end),
-            FragmentIn::Chart(fragment) => include(fragment.pm_start, fragment.pm_end),
-            FragmentIn::Table(fragment) => {
-                if let Some(measured) = blocks.get(&block_key(&fragment.block_id))
-                    && let BlockIn::Table(table) = &measured.block
-                {
-                    let end = fragment.row_end.min(table.rows.len());
-                    let start = fragment.row_start.min(end);
-                    rows(&table.rows[start..end], &mut include);
-                }
-            }
-            FragmentIn::Unsupported => {}
-        }
-    }
-    span
-}
-
-fn unbuilt_page(
-    page: &PageIn,
-    page_index: usize,
-    blocks: &HashMap<String, &MeasuredBlockIn>,
-) -> DisplayPage {
-    unbuilt_page_with_span(page, page_index, page_position_span(page, blocks))
 }
 
 fn unbuilt_page_with_span(
@@ -10751,6 +10717,7 @@ fn unbuilt_page_with_span(
         section_page_number: page.section_page_number,
         page_label: page.page_label.clone(),
         primitives: Vec::new(),
+        watermark_primitive_count: None,
         background: page.background.clone(),
         page_borders: Vec::new(),
         header: None,
@@ -10761,9 +10728,10 @@ fn unbuilt_page_with_span(
     }
 }
 
-/// [`page_position_span`] read from a pagination page and its measured blocks,
-/// converting positions as the resident transcoder does: a non-finite one is
-/// absent and a fractional or out-of-range one is an error.
+/// The lowest and highest body position a pagination page's fragments place,
+/// with table fragments read from its measured blocks, converting positions as
+/// the resident transcoder does: a non-finite one is absent and a fractional or
+/// out-of-range one is an error.
 fn layout_page_position_span(
     page: &crate::types::Page,
     blocks: &HashMap<String, &crate::types::MeasuredBlock>,
@@ -10797,7 +10765,8 @@ fn layout_page_position_span(
             Fragment::Shape(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
             Fragment::Chart(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
             Fragment::Table(fragment) => {
-                if let Some(measured) = blocks.get(&crate_block_id_key(&fragment.block_id))
+                if let Some(measured) =
+                    blocks.get(resident_block_id_key(&fragment.block_id).as_ref())
                     && let LayoutBlock::Table(table) = &measured.block
                 {
                     let end = fragment.row_end.min(table.rows.len());
@@ -10830,6 +10799,18 @@ fn resident_build_input(
     layout: &crate::types::Layout,
     extras: &str,
 ) -> Result<BuildInput, String> {
+    resident_build_input_for(pagination, layout, extras, None)
+}
+
+/// [`resident_build_input`] holding only the measured blocks that `pages`
+/// place; [`refresh_resident_display_pages`] adds the others as their pages
+/// build.
+fn resident_build_input_for(
+    pagination: &crate::types::Input,
+    layout: &crate::types::Layout,
+    extras: &str,
+    pages: Option<&HashSet<usize>>,
+) -> Result<BuildInput, String> {
     let mut fields: serde_json::Map<String, Value> =
         serde_json::from_str(extras).map_err(|e| format!("parse display extras: {e}"))?;
     for key in ["measured", "options", "layout"] {
@@ -10840,17 +10821,29 @@ fn resident_build_input(
     let extras: ResidentExtrasWire =
         serde_json::from_value(wire).map_err(|e| format!("parse resident display input: {e}"))?;
     let mut transcoder = crate::transcode::Transcoder::default();
+    let layout: LayoutIn = transcoder
+        .convert(layout)
+        .map_err(|e| format!("parse resident display input: {e}"))?;
+    let placed: Option<HashSet<String>> = pages.map(|pages| {
+        pages
+            .iter()
+            .filter_map(|&index| layout.pages.get(index))
+            .flat_map(|page| page.fragments.iter().filter_map(fragment_block_key))
+            .collect()
+    });
     let measured = pagination
         .measured
         .iter()
+        .filter(|measured| {
+            placed.as_ref().is_none_or(|keys| {
+                resident_block_key(&measured.block).is_some_and(|key| keys.contains(key.as_ref()))
+            })
+        })
         .map(|measured| transcoder.convert(measured))
         .collect::<Result<Vec<MeasuredBlockIn>, _>>()
         .map_err(|e| format!("parse resident display input: {e}"))?;
     let options = transcoder
         .convert(&pagination.options)
-        .map_err(|e| format!("parse resident display input: {e}"))?;
-    let layout = transcoder
-        .convert(layout)
         .map_err(|e| format!("parse resident display input: {e}"))?;
     let headers_footers = extras
         .headers_footers
@@ -11086,11 +11079,7 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_observed(
         previous.pages[page_index] = page;
     }
     if built.len() < selected.len() {
-        let blocks: HashMap<String, &crate::types::MeasuredBlock> = pagination
-            .measured
-            .iter()
-            .map(|measured| (crate_block_key(&measured.block), measured))
-            .collect();
+        let blocks = source_blocks_by_key(pagination);
         for &page_index in selected.difference(&built) {
             previous.pages[page_index] = unbuilt_page_with_span(
                 &resident.input.layout.pages[page_index],
@@ -11150,6 +11139,9 @@ fn refresh_resident_display_pages_reading(
         input.layout.pages[page_index] = page;
     }
 
+    if selected_blocks.is_empty() {
+        return Ok(());
+    }
     let current_indices: HashMap<String, usize> = input
         .measured
         .iter()
@@ -11158,16 +11150,20 @@ fn refresh_resident_display_pages_reading(
         .collect();
     let mut pending_blocks = selected_blocks;
     for measured in &pagination.measured {
-        let key = crate_block_key(&measured.block);
-        if !pending_blocks.remove(&key) {
+        if pending_blocks.is_empty() {
+            break;
+        }
+        let Some(key) = resident_block_key(&measured.block) else {
+            continue;
+        };
+        if !pending_blocks.remove(key.as_ref()) {
             continue;
         }
-        let index = current_indices
-            .get(&key)
-            .copied()
-            .ok_or_else(|| format!("resident display measured block {key:?} is missing"))?;
-        input.measured[index] =
-            convert_resident_value(measured, "resident display measured block")?;
+        let block = convert_resident_value(measured, "resident display measured block")?;
+        match current_indices.get(key.as_ref()) {
+            Some(&index) => input.measured[index] = block,
+            None => input.measured.push(block),
+        }
     }
     if let Some(key) = pending_blocks.into_iter().next() {
         return Err(format!(
@@ -11184,25 +11180,38 @@ fn convert_resident_value<T: Serialize, U: DeserializeOwned>(
     crate::transcode::transcode(input).map_err(|error| format!("parse {label}: {error}"))
 }
 
-fn crate_block_key(block: &crate::types::LayoutBlock) -> String {
+/// [`measured_block_key`] of `block` once transcoded: none for the breaks and
+/// unsupported blocks the display input does not render.
+fn resident_block_key(block: &crate::types::LayoutBlock) -> Option<Cow<'_, str>> {
+    use crate::types::LayoutBlock;
     match block {
-        crate::types::LayoutBlock::Paragraph(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::Table(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::Image(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::TextBox(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::Shape(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::Chart(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::SectionBreak(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::PageBreak(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::ColumnBreak(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::Unsupported => "unsupported".to_owned(),
+        LayoutBlock::Paragraph(value) => Some(resident_block_id_key(&value.id)),
+        LayoutBlock::Table(value) => Some(resident_block_id_key(&value.id)),
+        LayoutBlock::Image(value) => Some(resident_block_id_key(&value.id)),
+        LayoutBlock::TextBox(value) => Some(resident_block_id_key(&value.id)),
+        LayoutBlock::Shape(value) => Some(resident_block_id_key(&value.id)),
+        LayoutBlock::Chart(value) => Some(resident_block_id_key(&value.id)),
+        LayoutBlock::SectionBreak(_)
+        | LayoutBlock::PageBreak(_)
+        | LayoutBlock::ColumnBreak(_)
+        | LayoutBlock::Unsupported => None,
     }
 }
 
-fn crate_block_id_key(id: &crate::types::BlockId) -> String {
+/// [`block_key`] of `id` once transcoded, which reads an integral number back
+/// as an integer.
+fn resident_block_id_key(id: &crate::types::BlockId) -> Cow<'_, str> {
     match id {
-        crate::types::BlockId::Str(value) => value.clone(),
-        crate::types::BlockId::Num(value) => value.to_string(),
+        crate::types::BlockId::Str(value) => Cow::Borrowed(value),
+        crate::types::BlockId::Num(value)
+            if value.fract() == 0.0 && *value >= i64::MIN as f64 && *value <= i64::MAX as f64 =>
+        {
+            Cow::Owned((*value as i64).to_string())
+        }
+        crate::types::BlockId::Num(value) => Cow::Owned(
+            serde_json::Number::from_f64(*value)
+                .map_or_else(|| "null".to_owned(), |n| n.to_string()),
+        ),
     }
 }
 
@@ -11326,6 +11335,14 @@ fn normalize_integral_json_numbers(value: &mut Value) {
 mod tests {
     use super::*;
 
+    /// Every retained primitive carries its attributes inline, so rarely set
+    /// metadata stays boxed: 270k primitives cost 1.9 KB each before it was.
+    #[test]
+    fn retained_primitives_stay_compact() {
+        assert!(std::mem::size_of::<DocAttrs>() <= 800);
+        assert!(std::mem::size_of::<Primitive>() <= 1152);
+    }
+
     /// The resident input as it was built before typed transcoding: every
     /// value through a JSON tree, integral numbers normalized.
     fn resident_build_input_via_json(
@@ -11401,6 +11418,178 @@ mod tests {
                 "{extras}"
             );
         }
+    }
+
+    #[test]
+    fn a_partial_resident_build_converts_only_built_pages_and_completes_to_a_full_build() {
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let mut names: Vec<String> = std::fs::read_dir(&fixtures)
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().into_string().ok()?;
+                name.strip_suffix(".input.json").map(str::to_owned)
+            })
+            .collect();
+        names.sort();
+        let extras = r#"{"contractVersion":2,"fontChains":{"arial|0|0":[]}}"#;
+        let fonts = ooxml_text::FontStore::default();
+        let mut fewer_blocks = 0;
+        for name in names {
+            let text =
+                std::fs::read_to_string(fixtures.join(format!("{name}.input.json"))).unwrap();
+            let Ok(mut pagination) = serde_json::from_str::<crate::types::Input>(&text) else {
+                continue;
+            };
+            let Ok(layout) = crate::compute_layout_input(&mut pagination) else {
+                continue;
+            };
+            let expected = serde_json::to_value(build_display_list(
+                &resident_build_input(&pagination, &layout, extras).unwrap(),
+                &fonts,
+            ))
+            .unwrap();
+            let (mut resident, mut list) = build_resident_display_list_partial_with_fonts_observed(
+                &pagination,
+                &layout,
+                extras,
+                &fonts,
+                &|index| index == 0,
+                &mut || {},
+            )
+            .unwrap();
+            if layout.pages.len() > 1 {
+                assert!(list.pages[1].unbuilt, "{name}");
+                if resident.input.measured.len() < pagination.measured.len() {
+                    fewer_blocks += 1;
+                }
+            }
+            let rest: Vec<usize> = (1..layout.pages.len()).collect();
+            build_resident_display_pages_with_fonts(
+                &pagination,
+                &layout,
+                &fonts,
+                &mut resident,
+                &mut list,
+                &rest,
+            )
+            .unwrap();
+            assert_eq!(serde_json::to_value(&list).unwrap(), expected, "{name}");
+        }
+        assert!(
+            fewer_blocks >= 3,
+            "only {fewer_blocks} fixtures skipped blocks"
+        );
+    }
+
+    fn table_split_fixture() -> crate::types::Input {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/table-splits-with-repeated-header.input.json");
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    /// Builds page 0 alone, then the rest, as a list to compare with a full build.
+    fn partial_then_rest(
+        pagination: &crate::types::Input,
+        layout: &crate::types::Layout,
+    ) -> (DisplayList, DisplayList) {
+        let fonts = ooxml_text::FontStore::default();
+        let (mut resident, mut list) = build_resident_display_list_partial_with_fonts_observed(
+            pagination,
+            layout,
+            "{}",
+            &fonts,
+            &|index| index == 0,
+            &mut || {},
+        )
+        .unwrap();
+        let first = list.clone();
+        let rest: Vec<usize> = (1..layout.pages.len()).collect();
+        build_resident_display_pages_with_fonts(
+            pagination,
+            layout,
+            &fonts,
+            &mut resident,
+            &mut list,
+            &rest,
+        )
+        .unwrap();
+        (first, list)
+    }
+
+    #[test]
+    fn a_partial_resident_build_keys_numeric_block_ids_as_the_transcoder_does() {
+        for id in [-0.0, 1e21] {
+            let mut pagination = table_split_fixture();
+            let crate::types::LayoutBlock::Table(table) = &mut pagination.measured[0].block else {
+                panic!("the fixture opens with a table");
+            };
+            table.id = crate::types::BlockId::Num(id);
+            let layout = crate::compute_layout_input(&mut pagination).unwrap();
+            assert!(layout.pages.len() > 1);
+            let full = build_display_list(
+                &resident_build_input(&pagination, &layout, "{}").unwrap(),
+                &ooxml_text::FontStore::default(),
+            );
+            let (first, list) = partial_then_rest(&pagination, &layout);
+            assert_eq!(first.pages[0], full.pages[0], "{id}");
+            assert_eq!(list, full, "{id}");
+        }
+    }
+
+    #[test]
+    fn a_break_sharing_a_rendered_block_id_does_not_stand_in_for_it() {
+        let mut pagination = table_split_fixture();
+        let crate::types::LayoutBlock::Table(table) = &mut pagination.measured[0].block else {
+            panic!("the fixture opens with a table");
+        };
+        let mut position = 1.0;
+        for cell in table.rows.iter_mut().flat_map(|row| row.cells.iter_mut()) {
+            for block in &mut cell.blocks {
+                if let crate::types::LayoutBlock::Paragraph(paragraph) = block {
+                    paragraph.pm_start = Some(position);
+                    paragraph.pm_end = Some(position + 8.0);
+                    position += 10.0;
+                }
+            }
+        }
+        let layout = crate::compute_layout_input(&mut pagination.clone()).unwrap();
+        let crate::types::LayoutBlock::Table(table) = &pagination.measured[0].block else {
+            panic!("the fixture opens with a table");
+        };
+        let mut shadowed = pagination.clone();
+        let page_break: crate::types::LayoutBlock = serde_json::from_value(serde_json::json!({
+            "kind": "pageBreak",
+            "id": serde_json::to_value(&table.id).unwrap(),
+        }))
+        .unwrap();
+        shadowed.measured.insert(
+            0,
+            crate::types::MeasuredBlock {
+                block: page_break,
+                ..pagination.measured[0].clone()
+            },
+        );
+        let unbuilt = |_: usize| false;
+        let fonts = ooxml_text::FontStore::default();
+        let spans = |pagination: &crate::types::Input| {
+            build_resident_display_list_partial_with_fonts_observed(
+                pagination,
+                &layout,
+                "{}",
+                &fonts,
+                &unbuilt,
+                &mut || {},
+            )
+            .unwrap()
+            .1
+        };
+        let expected = spans(&pagination);
+        assert!(expected.pages[1].position_span.is_some());
+        assert_eq!(spans(&shadowed), expected);
+        assert_eq!(
+            partial_then_rest(&shadowed, &layout),
+            partial_then_rest(&pagination, &layout)
+        );
     }
 
     #[test]

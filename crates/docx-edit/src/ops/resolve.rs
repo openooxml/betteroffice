@@ -169,6 +169,7 @@ fn resolve_paragraph_property_changes(
         Some(Out::Any(Any::Array(changes))) => changes.to_vec(),
         _ => return,
     };
+    let total = changes.len();
     let mut remaining = Vec::new();
     for change in changes {
         if active_stamp(Some(change.clone()), filter).is_some() {
@@ -182,7 +183,7 @@ fn resolve_paragraph_property_changes(
     }
     if remaining.is_empty() {
         map.remove(txn, PPR_CHANGE);
-    } else {
+    } else if remaining.len() < total {
         map.insert(txn, PPR_CHANGE, Any::Array(Arc::from(remaining)));
     }
 }

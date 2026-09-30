@@ -5,7 +5,12 @@
 
 import { afterEach, describe, expect, it } from 'bun:test';
 
-import { createWasmModuleState, readWasmSync, type WasmAsyncInput } from './loadWasmAsset';
+import {
+  createWasmModuleState,
+  readWasmSync,
+  wasmModuleMemories,
+  type WasmAsyncInput,
+} from './loadWasmAsset';
 
 const ASSET = new URL('./generated/opc/ooxml_opc_bg.wasm', import.meta.url);
 const realFetch = globalThis.fetch;
@@ -89,5 +94,49 @@ describe('readWasmSync', () => {
     // shim that supplies its own must not defeat the read.
     const foreign = { href: ASSET.href, protocol: 'file:' } as URL;
     expect(readWasmSync(foreign)?.byteLength).toBeGreaterThan(0);
+  });
+});
+
+describe('wasmModuleMemories', () => {
+  it('lists a module once it is initialized, with its allocator counters', async () => {
+    const memory = new WebAssembly.Memory({ initial: 2 });
+    const heap = { liveBytes: 10, peakBytes: 20, failedAllocationBytes: 0 };
+    const state = createWasmModuleState({
+      label: 'memory-test',
+      preloadName: 'preloadMemoryTestWasm',
+      assetUrl: () => ASSET,
+      initAsync: async () => ({ memory }),
+      initSync: () => ({ memory }),
+      heap: () => heap,
+    });
+    expect(wasmModuleMemories().find((module) => module.label === 'memory-test')).toBeUndefined();
+
+    await state.preload(new Uint8Array());
+
+    expect(wasmModuleMemories().find((module) => module.label === 'memory-test')).toEqual({
+      label: 'memory-test',
+      bufferBytes: 2 * 65536,
+      ...heap,
+    });
+    memory.grow(1);
+    expect(wasmModuleMemories().find((module) => module.label === 'memory-test')?.bufferBytes).toBe(
+      3 * 65536
+    );
+  });
+
+  it('omits allocator counters for a module without them', () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    createWasmModuleState({
+      label: 'memory-test-sync',
+      preloadName: 'preloadMemoryTestSyncWasm',
+      assetUrl: () => ASSET,
+      initAsync: async () => ({ memory }),
+      initSync: () => ({ memory }),
+    }).ensure();
+
+    expect(wasmModuleMemories().find((module) => module.label === 'memory-test-sync')).toEqual({
+      label: 'memory-test-sync',
+      bufferBytes: 65536,
+    });
   });
 });

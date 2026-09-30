@@ -38,7 +38,8 @@ import { ParseError } from '../DocxEditorHelpers';
 import { displayListNeedsHostImages } from './canvasPresentation';
 import { CanvasReplayState, presentCanvasReplay, type CanvasReplayPreparation } from './canvasReplay';
 import { resolveCaretPaintColor } from './paintedCaret';
-import { clearPresented, markPresented } from './internals/layoutProvenance';
+import { clearPresented, markPresented, markReplayFailed } from './internals/layoutProvenance';
+import { viewportColumnBand } from './internals/viewportBand';
 import { DEFAULT_CARET_WIDTH } from './overlays/SelectionOverlay';
 
 // Canvas is the sole visible renderer. The editing/input subtree stays mounted
@@ -382,14 +383,9 @@ export function CanvasPagesView({
         );
         return;
       }
-      // client rects are viewport-relative: the visible band starts at the
-      // scroller's client top for an element scroller, at 0 for the root
-      const viewportTop = scrollTarget === window ? 0 : scrollParent.getBoundingClientRect().top;
-      const viewportHeight =
-        scrollTarget === window ? window.innerHeight : scrollParent.clientHeight;
-      const columnRect = column.getBoundingClientRect();
-      const viewTop = viewportTop - columnRect.top;
-      const viewBottom = viewTop + viewportHeight;
+      const band = viewportColumnBand(scrollTarget === window ? null : scrollParent, column);
+      const viewTop = band.top - band.columnTop;
+      const viewBottom = viewTop + band.height;
       const { tops, bottoms } = pageOffsets;
       let first = tops.length - 1;
       for (let index = 0; index < tops.length; index += 1) {
@@ -595,8 +591,14 @@ export function CanvasPagesView({
     let cancelled = false;
     glyphCacheRef.current = null;
     setGlyphCacheReady(false);
-    const provider = glyphOutlineProvider
-      ? Promise.resolve(glyphOutlineProvider)
+    // A replay still rasterizing once its engine is replaced or unmounted reads no outline from
+    // it (the engine may be freed) and falls back to text.
+    const outlines = glyphOutlineProvider;
+    const provider = outlines
+      ? Promise.resolve<GlyphOutlineProvider>((fontId, glyphId) => {
+          if (cancelled) throw new Error('The glyph outlines belong to a released engine');
+          return outlines(fontId, glyphId);
+        })
       : loadGlyphOutlineProvider();
     void provider
       .then((provider) => {
@@ -769,6 +771,7 @@ export function CanvasPagesView({
       (error) => {
         if (replayGeneration === replayGenerationRef.current) {
           console.error('[CanvasRenderer] Canvas replay failed', error);
+          markReplayFailed(displayList, error);
         }
       }
     );

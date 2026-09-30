@@ -28,6 +28,8 @@ import {
   residentCaretSnapshotForFrame,
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
+  takePreloadedResidentEngineWorker,
+  ResidentWorkerOutOfMemoryError,
   sameYrsSelection,
   type ResidentCaretPaintStyle,
   type ResidentEngineOffscreenPage,
@@ -36,6 +38,7 @@ import {
   type YrsRenderEnv,
   type YrsResidentWorkerSnapshot,
   type YrsSelection,
+  type WasmModuleMemory,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
@@ -68,6 +71,8 @@ export interface UseRustDisplayListResult {
   displayList: DisplayList | null;
   /** fatal error from resolving inputs or building the display list */
   error: Error | null;
+  /** The engine whose layout, build or input failed with `error`. */
+  errorEngine: unknown;
   /** true until the first display list for the current document is ready */
   loading: boolean;
   /** Binary retained-frame state; null on the compatibility JSON path. */
@@ -77,10 +82,23 @@ export interface UseRustDisplayListResult {
   /** Resolve the newest query facade after pending document/frame changes. */
   resolveQueries: ResolveDisplayListQueries;
   /**
-   * The display list once it shows every document change so far. `relayout`
-   * runs a layout pass when none is on its way; rejects when rendering fails.
+   * The display list once it shows every document change so far, laid out in
+   * full. `relayout` runs a layout pass when none is on its way; rejects when
+   * rendering fails, or after `timeoutMs` (15 s by default, none when null).
    */
-  settledDisplayList(relayout: () => void, timeoutMs?: number): Promise<DisplayList>;
+  settledDisplayList(
+    relayout: (() => void) | null,
+    timeoutMs?: number | null
+  ): Promise<DisplayList>;
+  /**
+   * Drops the settled display list. Without `failure` a new document is on its way, so waiters
+   * wait for its display list; with one they reject.
+   */
+  resetSettled(failure?: Error | null): void;
+  /** True from a document load until the loaded document's first layout arrives. */
+  awaitingDocument(): boolean;
+  /** Ties a session, as it is created, to the document load now under way. */
+  recordSession(session: YrsSession | null): void;
   /** Worker-computed caret tagged to `frame`. */
   caret: YrsResidentCaretSnapshot | null;
   /** Apply a plain-text edit through the resident engine and publish its frame. */
@@ -92,11 +110,19 @@ export interface UseRustDisplayListResult {
   ): Promise<ResidentFrameApplyResult | null>;
   /** See {@link LayoutInWorker}. */
   layoutInWorker: LayoutInWorker;
+  /** The engine whose layout the latest published frame shows. */
+  presentedEngine: unknown;
+  /** {@link presentedEngine} as of now, before the render that shows the frame. */
+  shownFrameEngine(): unknown;
+  /** Lets go of every engine the pages showed: the resident worker and the presented engine. */
+  release(): void;
   /**
    * The pages `[start, end)` near the viewport. Only these are built; every
    * other page arrives as geometry until it comes near.
    */
   setDisplayWindow(start: number, end: number): void;
+  /** The resident worker's wasm memories as of its latest reply; null without a worker. */
+  workerMemory(): WasmModuleMemory[] | null;
   /**
    * True while the worker owns the visible page surfaces. Sticky across
    * invalidation (remote/structural updates) so the canvas keeps its last
@@ -145,6 +171,9 @@ export interface WorkerLayoutComputation extends LayoutComputation {
 const PROVISIONAL_LAYOUT_PAGES = 3;
 /** How long the rest of the layout waits for the first surfaces to attach. */
 const PROVISIONAL_SURFACE_WAIT_MS = 250;
+// Body blocks the first step of a provisional layout's completion measures;
+// later steps are sized to a time slice. 0 completes it in one step.
+const COMPLETION_SLICE_BLOCKS = 64;
 
 interface WorkerLayoutFrame {
   result: ResidentEngineWorkerFrame;
@@ -160,7 +189,10 @@ interface WorkerLayoutFrame {
 /** The display fallback needs a main-thread layout of a worker-run one. */
 class MainThreadLayoutPendingError extends Error {}
 
-/** A newer layout with another revision preview reached the session; its own pass shows it. */
+/**
+ * A newer layout reached the session, with another revision preview or from a
+ * worker pass run again; its own pass shows it.
+ */
 class SupersededPreviewError extends Error {}
 
 export interface ResidentFrameApplyResult {
@@ -212,6 +244,24 @@ const EMPTY_DISPLAY_LIST_SNAPSHOT: RustDisplayListSnapshot = {
   caret: null,
 };
 
+interface BuiltDisplay {
+  displayList: DisplayList;
+  frame: RetainedFrame | null;
+  caret: YrsResidentCaretSnapshot | null;
+  queryEngine: RustDisplayListEngine | null | undefined;
+  workerProduced: boolean;
+  caretPainted: boolean;
+  /** Shows a layout of the first pages only, so it does not settle. */
+  provisional?: boolean;
+  /** The preview a worker frame was built with; absent for a frame of `layout` itself. */
+  previewKey?: string | null;
+}
+
+// A replacement worker's frames follow the frame on screen.
+function followedFrameEpoch(frame: RetainedFrame | null): { frameEpoch?: number } {
+  return frame?.frameEpoch ? { frameEpoch: frame.frameEpoch } : {};
+}
+
 // rebuilds the display list through the rust wasm engine after every layout
 // pass. dumb replay glue: the `{ measured, options, layout }` triple (plus the
 // kernel-recorded `headersFooters` payload when the document has HF parts) is
@@ -234,10 +284,23 @@ export function useRustDisplayList(
   resolvedCommentIds?: ReadonlySet<number>,
   engine?: RustDisplayListEngine | null,
   /** Asks the host for a layout of the document as it is now. */
-  requestLayout?: () => void
+  requestLayout?: () => void,
+  /** The most a resident worker's editing core may allocate at once. */
+  workerHeapLimitBytes?: number,
+  /**
+   * The session whose pages are shown while another session replaces it
+   * page for page: its worker and page surfaces carry over to the next.
+   */
+  handoffFromRef?: React.RefObject<YrsSession | null>
 ): UseRustDisplayListResult {
   const requestLayoutRef = useRef(requestLayout);
   requestLayoutRef.current = requestLayout;
+  const workerHeapLimitRef = useRef(workerHeapLimitBytes);
+  workerHeapLimitRef.current = workerHeapLimitBytes;
+  // The engine whose layout the shown frame is of: another engine's frames
+  // never apply to it as a base.
+  const frameEngineRef = useRef<unknown>(null);
+  const [presentedEngine, setPresentedEngine] = useState<unknown>(null);
   const [snapshot, setSnapshot] = useState<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
   const snapshotRef = useRef<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
   const queryEpochGateRef = useRef<DisplayListQueryEpochGate | null>(null);
@@ -250,11 +313,33 @@ export function useRustDisplayList(
   const settleErrorRef = useRef<Error | null>(null);
   const settleWaitersRef = useRef(new Set<() => void>());
   const settleRelayoutRef = useRef<(() => void) | null>(null);
-  const markSettled = useCallback((epoch: number | null, failure: Error | null = null): void => {
-    settledEpochRef.current = epoch;
-    settleErrorRef.current = failure;
-    for (const waiter of [...settleWaitersRef.current]) waiter();
+  const layoutRef = useRef(layout);
+  layoutRef.current = layout;
+  // The layout shown when another document started loading. What becomes of
+  // it settles no wait: waits are for the document being loaded.
+  const replacedLayoutRef = useRef<{ layout: Layout | null; line: object } | null>(null);
+  const documentLoadsRef = useRef(0);
+  // Layouts without a source engine share a line only within a document load.
+  const documentLineRef = useRef<object>({});
+  const sourceLinesRef = useRef(new WeakMap<object, object>());
+  const sourceLine = useCallback((source: RustDisplayListEngine | null | undefined): object => {
+    if (!source) return replacedLayoutRef.current?.line ?? documentLineRef.current;
+    let line = sourceLinesRef.current.get(source);
+    if (!line) {
+      line = {};
+      sourceLinesRef.current.set(source, line);
+    }
+    return line;
   }, []);
+  const markSettled = useCallback(
+    (epoch: number | null, failure: Error | null = null, authoritative = false): void => {
+      if (replacedLayoutRef.current && !authoritative) return;
+      settledEpochRef.current = epoch;
+      settleErrorRef.current = failure;
+      for (const waiter of [...settleWaitersRef.current]) waiter();
+    },
+    []
+  );
   const requestSettleRelayout = useCallback((): void => {
     if (settleWaitersRef.current.size === 0) return;
     setTimeout(() => {
@@ -262,13 +347,63 @@ export function useRustDisplayList(
     }, 0);
   }, []);
   const [error, setError] = useState<Error | null>(null);
+  const [errorEngine, setErrorEngine] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
   const generationRef = useRef(0);
   const workerRef = useRef<{
     engine: YrsSession;
     client: ResidentEngineWorkerClient;
+    /** The document load its session belongs to. */
+    load: number;
   } | null>(null);
+  // The document load each session belongs to: the one under way when it was
+  // created, as the editor records it, else when it was first laid out or shown.
+  const sessionLoadsRef = useRef(new WeakMap<YrsSession, number>());
+  const sessionLoad = useCallback((session: YrsSession): number => {
+    let load = sessionLoadsRef.current.get(session);
+    if (load === undefined) {
+      load = documentLoadsRef.current;
+      sessionLoadsRef.current.set(session, load);
+    }
+    return load;
+  }, []);
+  const spawnedWorkerEnginesRef = useRef(new WeakSet<YrsSession>());
+  // Sessions whose worker and page surfaces a successor took over: they never take one back.
+  const handedOverEnginesRef = useRef(new WeakSet<YrsSession>());
+  // The worker for `hostEngine`: its own, the one of the session it
+  // takes over from, a spare, or a new one.
+  const workerFor = useCallback(
+    (hostEngine: YrsSession): NonNullable<typeof workerRef.current> => {
+      const current = workerRef.current;
+      if (current?.engine === hostEngine) return current;
+      const load = sessionLoad(hostEngine);
+      const replacement = spawnedWorkerEnginesRef.current.has(hostEngine);
+      spawnedWorkerEnginesRef.current.add(hostEngine);
+      if (current && handoffFromRef?.current === current.engine) {
+        handedOverEnginesRef.current.add(current.engine);
+        current.client.rebootstrap();
+        workerRef.current = { engine: hostEngine, client: current.client, load };
+        return workerRef.current;
+      }
+      current?.client.destroy();
+      // A successor that fails to construct leaves no destroyed client current.
+      workerRef.current = null;
+      const spare = replacement ? null : takePreloadedResidentEngineWorker();
+      workerRef.current = {
+        engine: hostEngine,
+        client: spare ?? new ResidentEngineWorkerClient(),
+        load,
+      };
+      return workerRef.current;
+    },
+    [handoffFromRef, sessionLoad]
+  );
   const workerFallbackEngineRef = useRef<YrsSession | null>(null);
+  // No worker starts once the hook is gone, whatever failure arrives late.
+  const unmountedRef = useRef(false);
+  // The engines whose worker ran out of memory, each with the failure once its
+  // replacement did too. Weak, so a replaced document's session is not kept.
+  const outOfMemoryRef = useRef(new WeakMap<YrsSession, ResidentWorkerOutOfMemoryError | null>());
   const displayWindowRef = useRef<[number, number]>(INITIAL_DISPLAY_WINDOW);
   const pageBuildInFlightRef = useRef(false);
   const pageBuildTimerRef = useRef<PageBuildTimer | null>(null);
@@ -395,6 +530,8 @@ export function useRustDisplayList(
   );
 
   const residentEngine = isWorkerHostEngine(engine) ? engine : null;
+  const residentEngineRef = useRef(residentEngine);
+  residentEngineRef.current = residentEngine;
 
   // Rendering moves to the host engine for good: its frames start from a fresh
   // base, numbered after the worker's last frame.
@@ -430,20 +567,24 @@ export function useRustDisplayList(
     });
   }, [queryEpochGate, requestSettleRelayout, residentEngine]);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
       if (paintedCaretIdleTimerRef.current !== null) {
         clearTimeout(paintedCaretIdleTimerRef.current);
       }
       if (dispatchHoldTimerRef.current !== null) {
         clearTimeout(dispatchHoldTimerRef.current);
       }
+      // A build the worker leaves unanswered must not fall back on the freed session.
+      generationRef.current += 1;
       workerRef.current?.client.destroy();
       workerRef.current = null;
       queryEpochGate.clear();
-    },
-    [queryEpochGate]
-  );
+      markSettled(null, new Error('The editor was unmounted'), true);
+    };
+  }, [markSettled, queryEpochGate]);
 
   const publishQuerySnapshot = useCallback(
     (nextSnapshot: RustDisplayListSnapshot, contentEpoch: number): void => {
@@ -503,8 +644,54 @@ export function useRustDisplayList(
     return () => clearTimeout(id);
   }, [snapshot.queries]);
 
+  // A worker that ran out of memory is replaced by a fresh one once. The main
+  // thread never takes over its work: its memory has the same limit and
+  // already holds the document. `retry` asks the caller to use the current
+  // worker, `stale` means the failed worker no longer serves this engine.
+  // A worker of a document that another load replaced fails nothing of the new one.
+  const replaceOutOfMemoryWorker = useCallback(
+    (
+      hostEngine: YrsSession,
+      worker: { client: ResidentEngineWorkerClient; load: number } | null,
+      failure: ResidentWorkerOutOfMemoryError
+    ): 'retry' | 'stale' | 'failed' => {
+      if (worker && worker.load !== documentLoadsRef.current) return 'stale';
+      const client = worker?.client ?? null;
+      const previous = outOfMemoryRef.current.has(hostEngine);
+      if (outOfMemoryRef.current.get(hostEngine)) return 'failed';
+      if (unmountedRef.current || workerFallbackEngineRef.current === hostEngine) return 'stale';
+      const current = workerRef.current;
+      if (current && current.engine !== hostEngine) return 'stale';
+      // Another request of the failed worker already replaced it.
+      if (current?.client !== client) return previous ? 'retry' : 'stale';
+      current.client.destroy();
+      workerRef.current = null;
+      setWorkerSurfacesActive(false);
+      setWorkerPresentationActive(false);
+      if (!previous) {
+        outOfMemoryRef.current.set(hostEngine, null);
+        console.warn(
+          '[CanvasRenderer] Resident engine worker ran out of memory; starting a fresh worker',
+          failure
+        );
+        return 'retry';
+      }
+      outOfMemoryRef.current.set(hostEngine, failure);
+      console.error('[CanvasRenderer] Resident engine worker ran out of memory again', failure);
+      queryEpochGate.clear();
+      setError(failure);
+      setErrorEngine(hostEngine);
+      setLoading(false);
+      // A display-only preview's failure fails no wait: the full session replaces it.
+      if (hostEngine.isDisplayOnly?.() !== true) markSettled(null, failure, true);
+      return 'failed';
+    },
+    [markSettled, queryEpochGate, setWorkerPresentationActive]
+  );
+
   const applyResidentInput = useCallback(
     (operation: ResidentInputOperation): Promise<ResidentFrameApplyResult | null> => {
+      const documentLoad = documentLoadsRef.current;
       const replayInputOnMainThread = async (
         pending: ResidentInputOperation,
         hostEngine: YrsSession,
@@ -558,7 +745,8 @@ export function useRustDisplayList(
           null,
           { ...previous, queries: null },
           readSessionVersion(hostEngine),
-          UNKNOWN_REVISION_PREVIEW_KEY
+          UNKNOWN_REVISION_PREVIEW_KEY,
+          sourceLine(hostEngine)
         );
         generationRef.current += 1;
         snapshotRef.current = nextSnapshot;
@@ -572,10 +760,23 @@ export function useRustDisplayList(
         setTimeout(() => requestLayoutRef.current?.(), 0);
         return { frameEpoch: nextFrame.frameEpoch, caretSynchronized: false, deletedUnits };
       };
+      // An input to a document another load replaced, or an unmount freed, applies to nothing.
+      const dropped = (): boolean =>
+        unmountedRef.current || documentLoadsRef.current !== documentLoad;
       const run = async (): Promise<ResidentFrameApplyResult | null> => {
+        if (dropped()) return { frameEpoch: null, caretSynchronized: false };
         const worker = workerRef.current;
         const currentFrame = snapshotRef.current.frame;
-        if (!worker || !worker.client.isReady() || !currentFrame) return null;
+        // A worker still on the session being replaced does not take the new one's input.
+        if (
+          !worker ||
+          worker.engine !== residentEngineRef.current ||
+          !worker.client.isReady() ||
+          !currentFrame
+        ) {
+          return null;
+        }
+        const line = sourceLine(worker.engine);
         const selection = worker.engine.selection();
         if (!selection) return null;
         const dispatchedEpoch = contentEpochRef.current;
@@ -613,7 +814,17 @@ export function useRustDisplayList(
             }
           }
         } catch (error) {
+          if (error instanceof ResidentWorkerOutOfMemoryError) {
+            // The edit never reached the host: it takes the structural path there,
+            // and the next frame comes from a fresh worker, or reports the failure.
+            replaceOutOfMemoryWorker(worker.engine, worker, error);
+            return null;
+          }
           if (!(error instanceof ResidentWorkerFailureError)) throw error;
+          // A worker another document's load replaced rejects the input it held for its own.
+          if (dropped() || worker.load !== documentLoadsRef.current) {
+            return { frameEpoch: null, caretSynchronized: false };
+          }
           console.error(
             '[CanvasRenderer] Resident engine worker unavailable; falling back to the main-thread engine',
             error
@@ -627,6 +838,7 @@ export function useRustDisplayList(
         } finally {
           residentPaintInflightRef.current -= 1;
         }
+        if (dropped()) return { frameEpoch: null, caretSynchronized: false };
         if (!result.applied) return null;
         const delta = workerDelta ?? decodeFrameDelta(result.frame);
         suppressWorkerInvalidationRef.current += 1;
@@ -634,6 +846,9 @@ export function useRustDisplayList(
           for (const update of result.updates) worker.engine.applyLocalUpdate(update);
         } finally {
           suppressWorkerInvalidationRef.current -= 1;
+        }
+        if (workerRef.current !== worker) {
+          return { frameEpoch: null, caretSynchronized: false, deletedUnits: result.deletedUnits };
         }
         const previous = snapshotRef.current;
         if (previous.frame && delta.frameEpoch <= previous.frame.frameEpoch) {
@@ -676,7 +891,8 @@ export function useRustDisplayList(
           null,
           previous,
           readSessionVersion(worker.engine),
-          workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision)
+          workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
+          line
         );
         // Supersede an older async compatibility build before publishing the
         // frame produced by the edit transaction.
@@ -712,9 +928,13 @@ export function useRustDisplayList(
         // stories, or a frame that has not established resident state).
         if (nextError.message.includes('resident input state is not ready')) return null;
         console.error('[CanvasRenderer] Resident input failed', nextError);
-        queryEpochGate.clear();
-        setError(nextError);
-        markSettled(null, nextError);
+        // An input to a document another load replaced fails nothing of the new one.
+        if (!dropped()) {
+          queryEpochGate.clear();
+          setError(nextError);
+          setErrorEngine(residentEngineRef.current);
+          markSettled(null, nextError);
+        }
         // Once invoked, never fall through to the legacy op: a worker failure
         // may have happened after committing the transaction.
         return { frameEpoch: null, caretSynchronized: false };
@@ -727,7 +947,9 @@ export function useRustDisplayList(
       paintedCaretMachine,
       publishQuerySnapshot,
       queryEpochGate,
+      replaceOutOfMemoryWorker,
       requestSettleRelayout,
+      sourceLine,
     ]
   );
 
@@ -773,6 +995,29 @@ export function useRustDisplayList(
     [adoptHostEngine, setWorkerPresentationActive]
   );
 
+  const shownFrameEngine = useCallback((): unknown => frameEngineRef.current, []);
+  const release = useCallback((): void => {
+    // A failed load's failure holds for later waits until the next load.
+    replacedLayoutRef.current = {
+      layout: null,
+      line: replacedLayoutRef.current?.line ?? documentLineRef.current,
+    };
+    cancelPageBuilds(pageBuildTimerRef);
+    workerRef.current?.client.destroy();
+    workerRef.current = null;
+    frameEngineRef.current = null;
+    setPresentedEngine(null);
+    setWorkerSurfacesActive(false);
+    setWorkerPresentationActive(false);
+  }, [setWorkerPresentationActive]);
+
+  /** The frame `engine`'s next frame applies to. */
+  const frameBase = useCallback(
+    (engine: unknown): RetainedFrame | null =>
+      frameEngineRef.current === engine ? snapshotRef.current.frame : null,
+    []
+  );
+
   // Build the unbuilt pages of the worker frame: those the viewport shows
   // first, then the rest while the main thread is idle, since accessibility
   // mirrors and printing read every page's content.
@@ -783,6 +1028,9 @@ export function useRustDisplayList(
       const worker = workerRef.current;
       const frame = snapshotRef.current.frame;
       if (!worker || !worker.client.isReady() || !frame) return;
+      // A worker handed to another session builds its pages once it has
+      // presented that session's frame.
+      if (frameEngineRef.current !== worker.engine) return;
       const pages = frame.displayList.pages;
       const [start, end] = displayWindowRef.current;
       const unbuilt: number[] = [];
@@ -805,11 +1053,18 @@ export function useRustDisplayList(
       }
       pageBuildInFlightRef.current = true;
       const dispatchedEpoch = contentEpochRef.current;
+      const line = sourceLine(worker.engine);
       const paintToken = paintedCaretMachine.token();
       const paintCaret =
         workerPresentationActiveRef.current && paintedCaretMachine.shouldPaint(performance.now());
       const failed = (cause: unknown): void => {
         if (workerRef.current !== worker) return;
+        if (cause instanceof ResidentWorkerOutOfMemoryError) {
+          if (replaceOutOfMemoryWorker(worker.engine, worker, cause) === 'retry') {
+            requestLayoutRef.current?.();
+          }
+          return;
+        }
         console.error(
           '[CanvasRenderer] Building display pages failed; falling back to the main-thread engine',
           cause
@@ -821,6 +1076,10 @@ export function useRustDisplayList(
         (result) => {
           pageBuildInFlightRef.current = false;
           if (workerRef.current !== worker) return;
+          if (frameEngineRef.current !== worker.engine) {
+            schedulePageBuildsWhenIdleRef.current();
+            return;
+          }
           try {
             const previous = snapshotRef.current;
             const delta = decodeFrameDelta(result.frame);
@@ -841,7 +1100,8 @@ export function useRustDisplayList(
                     null,
                     previous,
                     readSessionVersion(worker.engine),
-                    workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision)
+                    workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
+                    line
                   )
                 : { displayList: nextFrame.displayList, frame: nextFrame, queries: null, caret };
             snapshotRef.current = nextSnapshot;
@@ -860,7 +1120,14 @@ export function useRustDisplayList(
         }
       );
     },
-    [applyPaintedCaretReply, dropWorker, paintedCaretMachine, publishQuerySnapshot]
+    [
+      applyPaintedCaretReply,
+      dropWorker,
+      paintedCaretMachine,
+      publishQuerySnapshot,
+      replaceOutOfMemoryWorker,
+      sourceLine,
+    ]
   );
 
   const schedulePageBuilds = useCallback(
@@ -902,21 +1169,18 @@ export function useRustDisplayList(
         !canUseResidentEngineWorker() ||
         !isWorkerHostEngine(hostEngine) ||
         !hostEngine.adoptResidentWorkerLayout ||
-        workerFallbackEngineRef.current === hostEngine
+        workerFallbackEngineRef.current === hostEngine ||
+        handedOverEnginesRef.current.has(hostEngine)
       ) {
         return null;
       }
-      if (workerRef.current?.engine !== hostEngine) {
-        workerRef.current?.client.destroy();
-        workerRef.current = {
-          engine: hostEngine,
-          client: new ResidentEngineWorkerClient(),
-        };
-      }
-      const worker = workerRef.current.client;
+      const outOfMemory = outOfMemoryRef.current.get(hostEngine);
+      if (outOfMemory) return Promise.reject(outOfMemory);
+      const owner = workerFor(hostEngine);
+      const worker = owner.client;
       const bootstrapping = !worker.bootstrapSent();
-      const previousFrame = bootstrapping ? null : snapshotRef.current.frame;
-      hostEngine.adoptResidentWorkerLayout(request);
+      const previousFrame = bootstrapping ? null : frameBase(hostEngine);
+      const adoptedRevision = hostEngine.adoptResidentWorkerLayout(request);
       const snapshot = hostEngine.residentWorkerSnapshot(
         bootstrapping
           ? {}
@@ -938,7 +1202,13 @@ export function useRustDisplayList(
         layoutExtras: JSON.stringify(frameExtrasInputs()),
         stateVector: hostEngine.encodeStateVector(),
         displayWindow: displayWindowRef.current,
-        ...(bootstrapping ? { provisionalPages: PROVISIONAL_LAYOUT_PAGES } : {}),
+        ...(bootstrapping
+          ? {
+              provisionalPages: PROVISIONAL_LAYOUT_PAGES,
+              heapLimitBytes: workerHeapLimitRef.current,
+              ...followedFrameEpoch(snapshotRef.current.frame),
+            }
+          : {}),
       };
       const paintCaret =
         !bootstrapping &&
@@ -947,7 +1217,30 @@ export function useRustDisplayList(
       const reply = bootstrapping
         ? worker.bootstrap(snapshot, '', options)
         : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, options);
-      const unavailable = (cause: unknown): null => {
+      // A worker out of memory runs the pass again in a fresh worker; once
+      // that one runs out too, the pass rejects and nothing lays out here.
+      const unavailable = (
+        cause: unknown
+      ): Promise<WorkerLayoutComputation | null> | null => {
+        const current = workerRef.current;
+        if (owner.load !== documentLoadsRef.current || (current && current.engine !== hostEngine)) {
+          return null;
+        }
+        // A session whose replacement worker ran out of memory too lays out nowhere.
+        const outOfMemory = cause instanceof ResidentWorkerOutOfMemoryError;
+        if (outOfMemory && outOfMemoryRef.current.get(hostEngine)) return Promise.reject(cause);
+        // A pass of a session no worker serves any more starts no worker.
+        if (!current) return null;
+        if (outOfMemory) {
+          // A newer layout, here or in a worker, replaced this pass: the host
+          // drops it, and a newer worker request recovers the worker it asks.
+          if (hostEngine.residentWorkerProbe()?.layoutRevision !== adoptedRevision) return null;
+          const outcome = replaceOutOfMemoryWorker(hostEngine, owner, cause);
+          if (outcome === 'failed') return Promise.reject(cause);
+          if (outcome === 'stale') return null;
+          return layoutInWorkerRef.current?.(hostEngine, request) ?? null;
+        }
+        if (current?.client !== worker) return null;
         console.error(
           '[CanvasRenderer] Resident engine worker unavailable; laying out on the main thread',
           cause
@@ -979,7 +1272,9 @@ export function useRustDisplayList(
       return reply
         .then((result): WorkerLayoutComputation => {
           const computation = adopt(result, previousFrame);
-          if (!result.layoutProvisional) return computation;
+          // A display-only preview is replaced by the full document before
+          // anything needs the rest of its pages.
+          if (!result.layoutProvisional || hostEngine.isDisplayOnly?.()) return computation;
           // The rest is laid out against the provisional frame, once its page
           // surfaces are attached: the worker answers in order, so asking
           // sooner would hold back the first paint until it is done.
@@ -989,19 +1284,40 @@ export function useRustDisplayList(
             setTimeout(resolve, PROVISIONAL_SURFACE_WAIT_MS);
           });
           const complete = surfaced
-            .then(() => worker.completeLayout(provisionalEpoch))
+            // A worker handed to another session lays out that session now.
+            .then(() =>
+              workerRef.current?.engine === hostEngine
+                ? worker.completeLayout(provisionalEpoch, false, COMPLETION_SLICE_BLOCKS)
+                : null
+            )
             .then((completed) => {
               if (!completed) return null;
-              const base = snapshotRef.current.frame;
+              const base = frameBase(hostEngine);
               return adopt(completed, base?.frameEpoch === provisionalEpoch ? base : undefined);
             })
-            .catch(unavailable);
+            .catch(async (cause: unknown): Promise<LayoutComputation | null> => {
+              const retried = await unavailable(cause);
+              return retried?.complete ?? retried;
+            });
+          // A pass the host drops never observes this; the renderer reports the failure.
+          complete.catch(() => {});
           return { ...computation, complete };
         })
         .catch(unavailable);
     },
-    [dropWorker, frameExtrasInputs, overrides?.build, paintedCaretMachine, queryEpochGate]
+    [
+      dropWorker,
+      frameBase,
+      frameExtrasInputs,
+      overrides?.build,
+      paintedCaretMachine,
+      queryEpochGate,
+      replaceOutOfMemoryWorker,
+      workerFor,
+    ]
   );
+  const layoutInWorkerRef = useRef(layoutInWorker);
+  layoutInWorkerRef.current = layoutInWorker;
 
   const attachOffscreenCanvases = useCallback(
     async (
@@ -1011,13 +1327,13 @@ export function useRustDisplayList(
       zoom: number,
       caretStyle: ResidentCaretPaintStyle
     ): Promise<boolean> => {
-      const worker = workerRef.current?.client;
+      const current = workerRef.current;
       // Queue even while the worker is mid-invalidation: requests are handled
       // FIFO, so an attach lands after the sync that follows and the worker
       // rasters the newly attached surfaces itself. Refusing here would strand
       // already-transferred canvases (they cannot be re-transferred).
-      if (!worker) return false;
-      const attached = worker.attachCanvases(
+      if (!current) return false;
+      const attached = current.client.attachCanvases(
         pages,
         activePageIds,
         devicePixelRatio,
@@ -1026,13 +1342,27 @@ export function useRustDisplayList(
       );
       completionGateRef.current?.();
       completionGateRef.current = null;
-      await attached;
+      try {
+        await attached;
+      } catch (error) {
+        if (!(error instanceof ResidentWorkerOutOfMemoryError)) throw error;
+        if (
+          workerRef.current === current &&
+          replaceOutOfMemoryWorker(current.engine, current, error) === 'retry'
+        ) {
+          requestLayoutRef.current?.();
+        }
+        return false;
+      }
       return true;
     },
-    []
+    [replaceOutOfMemoryWorker]
   );
 
   useEffect(() => {
+    if (replacedLayoutRef.current && layout && layout !== replacedLayoutRef.current.layout) {
+      replacedLayoutRef.current = null;
+    }
     if (!layout) {
       // layout reset (document change) — drop the stale pages
       generationRef.current++;
@@ -1040,18 +1370,27 @@ export function useRustDisplayList(
       layoutPreviewKeyRef.current = null;
       queryEpochGate.clear();
       snapshotRef.current = EMPTY_DISPLAY_LIST_SNAPSHOT;
+      frameEngineRef.current = null;
       recoveryFrameEpochRef.current = 0;
       setSnapshot(EMPTY_DISPLAY_LIST_SNAPSHOT);
       setError(null);
       setLoading(true);
       settledEpochRef.current = null;
-      settleErrorRef.current = null;
+      // A failure of the document being loaded holds until its layout or the next load.
+      if (!replacedLayoutRef.current) settleErrorRef.current = null;
+      // The worker of a session the renderer let go of never builds again.
+      if (workerRef.current && workerRef.current.engine !== residentEngine) {
+        workerRef.current.client.destroy();
+        workerRef.current = null;
+      }
       setWorkerSurfacesActive(false);
       setWorkerPresentationActive(false);
       notifyCaretInterrupt();
       return;
     }
     queryEpochGate.invalidate();
+    // A new layout settles with its own display list, not with the last one.
+    settledEpochRef.current = null;
     const previewKey = revisionPreviewKeyOf(layout);
     if (
       previewKey !== null &&
@@ -1062,13 +1401,23 @@ export function useRustDisplayList(
     }
     if (previewKey !== null) layoutPreviewKeyRef.current = previewKey;
     const contentEpoch = contentEpochRef.current;
+    const line = sourceLine(engine);
     const sourceVersion = sourceVersionOf(layout);
     const inputs = (overrides?.getInputs ?? getLayoutKernelInputs)(layout);
     const generation = ++generationRef.current;
+    const documentLoad = documentLoadsRef.current;
+    // A display-only preview's failure fails no wait: the full session replaces it.
+    const settleFailure = (failure: Error): void => {
+      const preview = engine as { isDisplayOnly?: () => boolean } | null | undefined;
+      if (preview?.isDisplayOnly?.() !== true) markSettled(null, failure);
+    };
     if (!inputs) {
+      const failure = new Error('No display-list inputs were recorded for the current layout.');
       queryEpochGate.clear();
-      setError(new Error('No display-list inputs were recorded for the current layout.'));
+      setError(failure);
+      setErrorEngine(engine ?? null);
       setLoading(false);
+      settleFailure(failure);
       return;
     }
     const build = overrides?.build ?? buildRustDisplayList;
@@ -1113,11 +1462,12 @@ export function useRustDisplayList(
       }
       // A frame engine paints the pagination it retains, which a newer layout may have replaced.
       const retainedRevision = residentEngine?.residentWorkerProbe()?.layoutRevision;
+      const base = frameBase(residentEngine ?? engine ?? null);
       return buildRustDisplayFrame(
         buildInputs,
         engine ?? undefined,
-        snapshotRef.current.frame,
-        snapshotRef.current.frame?.frameEpoch ?? recoveryFrameEpochRef.current
+        base,
+        base?.frameEpoch ?? recoveryFrameEpochRef.current
       ).then((result) => ({
         ...result,
         caret: null as YrsResidentCaretSnapshot | null,
@@ -1130,30 +1480,55 @@ export function useRustDisplayList(
       }));
     };
     const paintToken = paintedCaretMachine.token();
-    let pending: Promise<{
-      displayList: DisplayList;
-      frame: RetainedFrame | null;
-      caret: YrsResidentCaretSnapshot | null;
-      queryEngine: RustDisplayListEngine | null | undefined;
-      workerProduced: boolean;
-      caretPainted: boolean;
-      /** Shows a layout of the first pages only, so it does not settle. */
-      provisional?: boolean;
-      /** The preview a worker frame was built with; absent for a frame of `layout` itself. */
-      previewKey?: string | null;
-    }>;
-    if (!overrides?.build && probe && canUseResidentEngineWorker()) {
+    let pending: Promise<BuiltDisplay>;
+    const outOfMemory = residentEngine ? outOfMemoryRef.current.get(residentEngine) : null;
+    if (residentEngine && handedOverEnginesRef.current.has(residentEngine)) {
+      // Its successor paints these surfaces now, and its first frame replaces this one.
+      pending = Promise.reject(new SupersededPreviewError());
+    } else if (outOfMemory && residentEngine) {
+      // A replaced document's failure fails nothing of the one being loaded.
+      pending = Promise.reject(
+        sessionLoad(residentEngine) === documentLoadsRef.current
+          ? outOfMemory
+          : new SupersededPreviewError()
+      );
+    } else if (!overrides?.build && probe && canUseResidentEngineWorker()) {
       const hostEngine = residentEngine;
       if (!hostEngine) throw new Error('Resident worker snapshot requires a host engine');
       // The worker this build asks; a failure of one that was since replaced
       // (a StrictMode remount's destroyed worker) must not tear down its successor.
       let requested = workerRef.current;
-      const fallback = (cause: unknown) => {
-        if (requested !== workerRef.current) {
-          return generation === generationRef.current
+      const fallback = (
+        cause: unknown,
+        owner: { client: ResidentEngineWorkerClient; load: number } | null = null
+      ): Promise<BuiltDisplay> => {
+        // A replaced build falls back on nothing and recovers no worker: its
+        // engine may be gone by now.
+        if (generation !== generationRef.current) return Promise.reject(cause);
+        if (cause instanceof ResidentWorkerOutOfMemoryError) {
+          // Another load's build recovers nothing.
+          if (documentLoad !== documentLoadsRef.current) return Promise.reject(cause);
+          if (owner && owner.load !== documentLoadsRef.current) {
+            return Promise.reject(new SupersededPreviewError());
+          }
+          // So does a layout adopted since this build began, such as a worker
+          // pass running again, whose frame this build's snapshot would erase.
+          if (hostEngine.residentWorkerProbe()?.layoutRevision !== probe.layoutRevision) {
+            return Promise.reject(new SupersededPreviewError());
+          }
+          const outcome = replaceOutOfMemoryWorker(hostEngine, owner, cause);
+          if (outcome === 'retry') {
+            try {
+              return requestWorkerFrame();
+            } catch (error) {
+              return fallback(error);
+            }
+          }
+          return outcome === 'stale' && requested !== workerRef.current
             ? buildOnMainThread()
             : Promise.reject(cause);
         }
+        if (requested !== workerRef.current) return buildOnMainThread();
         const nextError =
           cause instanceof Error
             ? cause
@@ -1165,6 +1540,85 @@ export function useRustDisplayList(
         dropWorker(hostEngine);
         return buildOnMainThread();
       };
+      const requestWorkerFrame = (): Promise<BuiltDisplay> => {
+        const owner = workerFor(hostEngine);
+        requested = owner;
+        const worker = owner.client;
+        const extras = encodeDisplayListFrameExtras(buildInputs);
+        const bootstrapping = !worker.bootstrapSent();
+        const previousFrame = bootstrapping ? null : frameBase(hostEngine);
+        // On a fresh client both hints are null, so a bootstrap snapshot is
+        // always complete; a sync snapshot ships a state diff and skips font
+        // bytes the worker already holds.
+        const buildSnapshot = () => {
+          const snapshot = hostEngine.residentWorkerSnapshot({
+            knownStateVector: worker.remoteStateVector(),
+            knownFontsRevision: worker.syncedFontsRevision(),
+          });
+          if (!snapshot) throw new Error('Resident worker snapshot was not available');
+          rememberWorkerPreview(workerPreviewKeysRef.current, snapshot);
+          return snapshot;
+        };
+        const sent = () => ({ stateVector: hostEngine.encodeStateVector() });
+        // Structural text input reaches the worker as a sync/buildFrame; keep
+        // the painted caret glued to those frames while the typing burst lasts.
+        const paintCaret =
+          !bootstrapping &&
+          workerPresentationActiveRef.current &&
+          paintedCaretMachine.shouldPaint(performance.now());
+        const snapshot =
+          bootstrapping || worker.layoutRevision() !== probe.layoutRevision
+            ? buildSnapshot()
+            : null;
+        // The extras carry this layout's headers and footers, so they only go
+        // with a worker layout of the same preview.
+        const shownKey = snapshot
+          ? layoutPreviewKey(snapshot.layoutInput)
+          : (workerPreviewKeysRef.current.get(probe.layoutRevision) ?? null);
+        const workerFrame =
+          previewKey !== null && shownKey !== null && shownKey !== previewKey
+            ? Promise.reject(new SupersededPreviewError())
+            : !snapshot
+              ? worker.buildFrame(extras, previousFrame?.frameEpoch ?? 0, paintCaret)
+              : bootstrapping
+                ? worker.bootstrap(snapshot, extras, {
+                    ...sent(),
+                    displayWindow: displayWindowRef.current,
+                    heapLimitBytes: workerHeapLimitRef.current,
+                    ...followedFrameEpoch(snapshotRef.current.frame),
+                  })
+                : worker.sync(snapshot, extras, previousFrame?.frameEpoch ?? 0, paintCaret, {
+                    ...sent(),
+                    displayWindow: displayWindowRef.current,
+                  });
+        return workerFrame
+          .then((result) => {
+            const delta = decodeFrameDelta(result.frame);
+            const nextFrame = applyFrameDelta(previousFrame, delta);
+            return {
+              displayList: nextFrame.displayList,
+              frame: nextFrame,
+              // A replaced build is dropped below; its engine may be gone by now.
+              caret:
+                generation === generationRef.current
+                  ? residentCaretForSelection(
+                      result.caret,
+                      result.selection,
+                      hostEngine.selection(),
+                      nextFrame
+                    )
+                  : null,
+              queryEngine: null,
+              workerProduced: true,
+              caretPainted: result.caretPainted,
+              previewKey: workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
+            };
+          })
+          .catch((error) => {
+            if (error instanceof SupersededPreviewError) throw error;
+            return fallback(error, owner);
+          });
+      };
       const prebuilt = workerLayoutFramesRef.current.get(layout);
       if (prebuilt) workerLayoutFramesRef.current.delete(layout);
       try {
@@ -1175,7 +1629,7 @@ export function useRustDisplayList(
           prebuilt.engine === hostEngine &&
           workerRef.current?.engine === hostEngine &&
           prebuilt.contentEpoch === contentEpoch &&
-          (snapshotRef.current.frame?.frameEpoch ?? null) ===
+          (frameBase(hostEngine)?.frameEpoch ?? null) ===
             (prebuilt.previousFrame?.frameEpoch ?? null) &&
           prebuilt.layoutExtras === JSON.stringify(frameExtrasInputs())
         ) {
@@ -1199,83 +1653,7 @@ export function useRustDisplayList(
             previewKey: workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
           });
         } else {
-          if (workerRef.current?.engine !== hostEngine) {
-            workerRef.current?.client.destroy();
-            workerRef.current = {
-              engine: hostEngine,
-              client: new ResidentEngineWorkerClient(),
-            };
-          }
-          requested = workerRef.current;
-          const worker = workerRef.current.client;
-          const extras = encodeDisplayListFrameExtras(buildInputs);
-          const bootstrapping = !worker.bootstrapSent();
-          const previousFrame = bootstrapping ? null : snapshotRef.current.frame;
-          // On a fresh client both hints are null, so a bootstrap snapshot is
-          // always complete; a sync snapshot ships a state diff and skips font
-          // bytes the worker already holds.
-          const buildSnapshot = () => {
-            const snapshot = hostEngine.residentWorkerSnapshot({
-              knownStateVector: worker.remoteStateVector(),
-              knownFontsRevision: worker.syncedFontsRevision(),
-            });
-            if (!snapshot) throw new Error('Resident worker snapshot was not available');
-            rememberWorkerPreview(workerPreviewKeysRef.current, snapshot);
-            return snapshot;
-          };
-          const sent = () => ({ stateVector: hostEngine.encodeStateVector() });
-          // Structural text input reaches the worker as a sync/buildFrame; keep
-          // the painted caret glued to those frames while the typing burst lasts.
-          const paintCaret =
-            !bootstrapping &&
-            workerPresentationActiveRef.current &&
-            paintedCaretMachine.shouldPaint(performance.now());
-          const snapshot =
-            bootstrapping || worker.layoutRevision() !== probe.layoutRevision
-              ? buildSnapshot()
-              : null;
-          // The extras carry this layout's headers and footers, so they only go
-          // with a worker layout of the same preview.
-          const shownKey = snapshot
-            ? layoutPreviewKey(snapshot.layoutInput)
-            : (workerPreviewKeysRef.current.get(probe.layoutRevision) ?? null);
-          const workerFrame =
-            previewKey !== null && shownKey !== null && shownKey !== previewKey
-              ? Promise.reject(new SupersededPreviewError())
-              : !snapshot
-                ? worker.buildFrame(extras, previousFrame?.frameEpoch ?? 0, paintCaret)
-                : bootstrapping
-                  ? worker.bootstrap(snapshot, extras, {
-                      ...sent(),
-                      displayWindow: displayWindowRef.current,
-                    })
-                  : worker.sync(snapshot, extras, previousFrame?.frameEpoch ?? 0, paintCaret, {
-                      ...sent(),
-                      displayWindow: displayWindowRef.current,
-                    });
-          pending = workerFrame
-            .then((result) => {
-              const delta = decodeFrameDelta(result.frame);
-              const nextFrame = applyFrameDelta(previousFrame, delta);
-              return {
-                displayList: nextFrame.displayList,
-                frame: nextFrame,
-                caret: residentCaretForSelection(
-                  result.caret,
-                  result.selection,
-                  hostEngine.selection(),
-                  nextFrame
-                ),
-                queryEngine: null,
-                workerProduced: true,
-                caretPainted: result.caretPainted,
-                previewKey: workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
-              };
-            })
-            .catch((error) => {
-              if (error instanceof SupersededPreviewError) throw error;
-              return fallback(error);
-            });
+          pending = requestWorkerFrame();
         }
       } catch (error) {
         pending = fallback(error);
@@ -1299,14 +1677,17 @@ export function useRustDisplayList(
           result.queryEngine,
           snapshotRef.current,
           sourceVersion,
-          result.previewKey === undefined ? previewKey : result.previewKey
+          result.previewKey === undefined ? previewKey : result.previewKey,
+          line
         );
         snapshotRef.current = nextSnapshot;
         publishQuerySnapshot(nextSnapshot, contentEpoch);
         setSnapshot(nextSnapshot);
+        frameEngineRef.current = residentEngine ?? engine ?? null;
+        setPresentedEngine(residentEngine ?? engine ?? null);
         setError(null);
         setLoading(false);
-        if (!result.provisional) markSettled(contentEpoch);
+        if (!result.provisional && layout.partial !== true) markSettled(contentEpoch);
         const workerProduced = Boolean(
           result.workerProduced && probe && workerRef.current?.client.isReady()
         );
@@ -1333,8 +1714,9 @@ export function useRustDisplayList(
         console.error('[CanvasRenderer] Rust display-list build failed', nextError);
         queryEpochGate.clear();
         setError(nextError);
+        setErrorEngine(engine ?? null);
         setLoading(false);
-        markSettled(null, nextError);
+        settleFailure(nextError);
       });
   }, [
     adoptHostEngine,
@@ -1353,11 +1735,39 @@ export function useRustDisplayList(
     publishQuerySnapshot,
     queryEpochGate,
     markSettled,
+    replaceOutOfMemoryWorker,
     requestSettleRelayout,
+    sessionLoad,
+    sourceLine,
+    workerFor,
   ]);
 
+  const resetSettled = useCallback(
+    (failure: Error | null = null): void => {
+      if (!failure) {
+        contentEpochRef.current += 1;
+        documentLoadsRef.current += 1;
+        // Until the next document's layout arrives, what is built is the shown document's.
+        replacedLayoutRef.current = {
+          layout: layoutRef.current,
+          line: replacedLayoutRef.current?.line ?? documentLineRef.current,
+        };
+        documentLineRef.current = {};
+      }
+      markSettled(null, failure, true);
+    },
+    [markSettled]
+  );
+  const awaitingDocument = useCallback((): boolean => replacedLayoutRef.current !== null, []);
+  const recordSession = useCallback(
+    (session: YrsSession | null): void => {
+      if (session) sessionLoad(session);
+    },
+    [sessionLoad]
+  );
+
   const settledDisplayList = useCallback(
-    (relayout: () => void, timeoutMs = 15_000): Promise<DisplayList> =>
+    (relayout: (() => void) | null, timeoutMs: number | null = 15_000): Promise<DisplayList> =>
       new Promise<DisplayList>((resolve, reject) => {
         let timer: ReturnType<typeof setTimeout> | undefined;
         const settle = (): boolean => {
@@ -1381,30 +1791,45 @@ export function useRustDisplayList(
           settle();
         };
         if (settle()) return;
-        settleRelayoutRef.current = relayout;
+        if (relayout) settleRelayoutRef.current = relayout;
         settleWaitersRef.current.add(waiter);
-        timer = setTimeout(() => {
-          settleWaitersRef.current.delete(waiter);
-          reject(new Error('The document did not finish rendering'));
-        }, timeoutMs);
-        relayout();
+        if (timeoutMs !== null) {
+          timer = setTimeout(() => {
+            settleWaitersRef.current.delete(waiter);
+            reject(new Error('The document did not finish rendering'));
+          }, timeoutMs);
+        }
+        relayout?.();
       }),
     [schedulePageBuilds]
+  );
+
+  const workerMemory = useCallback(
+    (): WasmModuleMemory[] | null => workerRef.current?.client.memory() ?? null,
+    []
   );
 
   return {
     displayList: snapshot.displayList,
     error,
+    errorEngine,
     loading,
     frame: snapshot.frame,
     queries: snapshot.queries,
     resolveQueries,
     settledDisplayList,
+    resetSettled,
+    awaitingDocument,
+    recordSession,
     caret: snapshot.caret,
     applyInput,
     applyDelete,
     layoutInWorker,
+    presentedEngine,
+    shownFrameEngine,
+    release,
     setDisplayWindow,
+    workerMemory,
     workerSurfacesActive,
     workerPresentationActive,
     setWorkerPresentationActive,
@@ -1449,7 +1874,7 @@ function rememberWorkerPreview(
 
 /**
  * `sourceVersion` and `previewKey`: the document version and revision preview the frame's pixels
- * and queries show.
+ * and queries show; `line`, the document load it lays out.
  */
 function createRustDisplayListSnapshot(
   displayList: DisplayList,
@@ -1458,10 +1883,11 @@ function createRustDisplayListSnapshot(
   engine: RustDisplayListEngine | null | undefined,
   previous: RustDisplayListSnapshot,
   sourceVersion: string | null,
-  previewKey: string | null
+  previewKey: string | null,
+  line: object
 ): RustDisplayListSnapshot {
   const residentQueries = residentDisplayListQueryEngine(engine);
-  const queries = createDisplayListQueries(displayList, residentQueries, previous.queries);
+  const queries = createDisplayListQueries(displayList, residentQueries, previous.queries, line);
   stampSourceVersion(queries, sourceVersion);
   if (previewKey !== null) stampRevisionPreviewKey(queries, previewKey);
   return { displayList, frame, queries, caret };
@@ -1538,19 +1964,31 @@ export interface UseCanvasRendererResult {
   status: 'loading' | 'ready' | 'error';
   /** fatal display-list error; non-null exactly while status is `error` */
   error: Error | null;
+  /** See {@link UseRustDisplayListResult.errorEngine}. */
+  errorEngine: unknown;
+  /** The engine of the layout the display list is built from; it lags a replaced session. */
+  layoutEngine: unknown;
   /** feed PagedEditor's per-pass Layout into the interaction query source */
   onLayoutComputed: (
     layout: Layout | null,
     engine?: (RustDisplayListEngine & { outlineGlyphJson?: GlyphOutlineProvider }) | null
   ) => void;
+  /** Drops the pages, their engine and the resident worker, for a load that failed. */
+  reset(): void;
   /** media resolver for CanvasPagesView */
   resolveImage: ImageResolver;
   /** Rust display-list query facade for adapter interactions. */
   queries: DisplayListQueries | null;
   /** Resolve the newest facade after pending edits and relayouts. */
   resolveQueries: ResolveDisplayListQueries;
-  /** The display list once it shows every document change so far. */
-  settledDisplayList(relayout: () => void, timeoutMs?: number): Promise<DisplayList>;
+  /** See {@link UseRustDisplayListResult.settledDisplayList}. */
+  settledDisplayList: UseRustDisplayListResult['settledDisplayList'];
+  /** See {@link UseRustDisplayListResult.resetSettled}. */
+  resetSettled: UseRustDisplayListResult['resetSettled'];
+  /** See {@link UseRustDisplayListResult.awaitingDocument}. */
+  awaitingDocument: UseRustDisplayListResult['awaitingDocument'];
+  /** See {@link UseRustDisplayListResult.recordSession}. */
+  recordSession: UseRustDisplayListResult['recordSession'];
   /** Worker caret from the same atomic renderer snapshot. */
   caret: YrsResidentCaretSnapshot | null;
   /** Whether worker-presented pixels make `caret` authoritative. */
@@ -1559,6 +1997,13 @@ export interface UseCanvasRendererResult {
   canvasHostRef: React.RefObject<HTMLDivElement | null>;
   /** Glyph outlines sourced from the same resident font store as measurement. */
   glyphOutlineProvider: GlyphOutlineProvider | null;
+  /** The engine whose layout the shown frame is of. */
+  presentedEngine: unknown;
+  /**
+   * The image resolver of the frame published last, even before the render that shows it: a
+   * display list read from `settledDisplayList` may belong to a session not shown yet.
+   */
+  imageResolverForShownFrame(): ImageResolver;
   /** One-call ordinary text insertion; false until resident state is ready. */
   applyInput(text: string): Promise<ResidentFrameApplyResult | null>;
   /** One-call ordinary deletions/merges; false until resident state is ready. */
@@ -1570,6 +2015,8 @@ export interface UseCanvasRendererResult {
   layoutInWorker: LayoutInWorker;
   /** The pages `[start, end)` near the viewport, built before the others. */
   setDisplayWindow(start: number, end: number): void;
+  /** The resident worker's wasm memories as of its latest reply; null without a worker. */
+  workerMemory(): WasmModuleMemory[] | null;
   setWorkerPresentationActive(active: boolean): void;
   /** OffscreenCanvas replay bridge; null keeps DOM-canvas replay. */
   offscreenReplay: {
@@ -1591,6 +2038,22 @@ export interface UseCanvasRendererResult {
   notifyCaretInterrupt(): void;
 }
 
+/**
+ * Decoded images of one session's document; the next session starts empty. A frame's replay
+ * reads the images of the session that built it, which the renderer holds until another
+ * session's frame replaces it.
+ */
+export function useFrameImageResolver(engine: RustDisplayListEngine | null): ImageResolver {
+  return useMemo(() => frameImageResolver(engine), [engine]);
+}
+
+function frameImageResolver(engine: RustDisplayListEngine | null): ImageResolver {
+  return createCanvasImageResolver({
+    media: (token) => engine?.mediaSource?.(token) ?? null,
+    mediaScope: () => engine?.mediaScope?.() ?? 0,
+  });
+}
+
 // bundles the canvas-renderer host wiring for DocxEditor: collects each
 // layout pass and rebuilds the display list through the rust engine. Canvas is
 // the only visible renderer: the first build has an explicit loading state and
@@ -1603,7 +2066,11 @@ export function useCanvasRenderer(
   // rebuild the display list (resolve / reopen / expand-a-resolved-card).
   resolvedCommentIds?: ReadonlySet<number>,
   /** Asks the host for a layout of the document as it is now. */
-  requestLayout?: () => void
+  requestLayout?: () => void,
+  /** The most a resident worker's editing core may allocate at once. */
+  workerHeapLimitBytes?: number,
+  /** See `useRustDisplayList`'s `handoffFromRef`. */
+  handoffFromRef?: React.RefObject<YrsSession | null>
 ): UseCanvasRendererResult {
   const [layout, setLayout] = useState<Layout | null>(null);
   const [engine, setEngine] = useState<
@@ -1622,16 +2089,24 @@ export function useCanvasRenderer(
   const {
     displayList,
     error,
+    errorEngine,
     loading,
     frame,
     queries: snapshotQueries,
     resolveQueries,
     settledDisplayList,
+    resetSettled,
+    awaitingDocument,
+    recordSession,
     caret,
     applyInput,
     applyDelete,
     layoutInWorker,
+    presentedEngine,
+    shownFrameEngine,
+    release,
     setDisplayWindow,
+    workerMemory,
     workerSurfacesActive,
     workerPresentationActive,
     setWorkerPresentationActive,
@@ -1646,10 +2121,27 @@ export function useCanvasRenderer(
     fontChainsProviderRef,
     resolvedCommentIds,
     engine,
-    requestLayout
+    requestLayout,
+    workerHeapLimitBytes,
+    handoffFromRef
   );
-  // Decoded images of one session's document; the next session starts empty.
-  const resolveImage = useMemo(() => createCanvasImageResolver(), [engine]);
+  const reset = useCallback((): void => {
+    setLayout(null);
+    setEngine(null);
+    release();
+  }, [release]);
+  const imageSession = (presentedEngine ?? engine) as RustDisplayListEngine | null;
+  const resolveImage = useFrameImageResolver(imageSession);
+  const shownImagesRef = useRef({ engine: imageSession, resolveImage });
+  shownImagesRef.current = { engine: imageSession, resolveImage };
+  const imageResolverForShownFrame = useCallback((): ImageResolver => {
+    const shown = (shownFrameEngine() ?? shownImagesRef.current.engine) as
+      | RustDisplayListEngine
+      | null;
+    return shown === shownImagesRef.current.engine
+      ? shownImagesRef.current.resolveImage
+      : frameImageResolver(shown);
+  }, [shownFrameEngine]);
   const status: UseCanvasRendererResult['status'] = error
     ? 'error'
     : loading || displayList == null
@@ -1718,19 +2210,33 @@ export function useCanvasRenderer(
     // canvas and forcing a full replay.
     status,
     error,
+    errorEngine,
+    layoutEngine: engine,
     onLayoutComputed,
+    reset,
     resolveImage,
     queries: geometryReady ? snapshotQueries : null,
     resolveQueries,
     settledDisplayList,
+    resetSettled,
+    awaitingDocument,
+    recordSession,
     caret,
     authoritativeCaretActive,
     canvasHostRef,
-    glyphOutlineProvider: engine?.outlineGlyphJson ?? null,
+    // Glyph ids are a session's own: outlines come from the engine whose
+    // frame is shown, which lags `engine` while a new session's first frame builds.
+    glyphOutlineProvider:
+      (presentedEngine as { outlineGlyphJson?: GlyphOutlineProvider } | null)?.outlineGlyphJson ??
+      engine?.outlineGlyphJson ??
+      null,
+    presentedEngine,
+    imageResolverForShownFrame,
     applyInput,
     applyDelete,
     layoutInWorker,
     setDisplayWindow,
+    workerMemory,
     setWorkerPresentationActive,
     offscreenReplay,
     paintedCaretActive,

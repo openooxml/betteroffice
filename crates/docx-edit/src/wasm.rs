@@ -980,6 +980,10 @@ fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue>
         .get("showHiddenText")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    env.media_tokens = value
+        .get("mediaTokens")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if let Some(Value::Object(ids)) = value.get("numericIds") {
         for (key, entry) in ids {
             if let Some(id) = entry.as_f64() {
@@ -1191,6 +1195,8 @@ pub struct EditSession {
     resident_deleted_units: Cell<u32>,
     /// The comparison applied here, awaiting its saved bytes.
     compared: RefCell<Option<(Box<CompareApplied>, CompareLimits)>>,
+    /// Seed images as `media:{n}` tokens rather than `data:` URLs.
+    media_tokens: Cell<bool>,
 }
 
 struct UpdateEventObserver {
@@ -1203,6 +1209,9 @@ struct UpdateEventObserver {
 struct DocxHostWire {
     envelope: docx_parse::S9WireEnvelope,
     referenced_fonts: Vec<String>,
+    /// Empty unless the stories were seeded from the package (a preview's
+    /// from its cut).
+    unused_script_fonts: Vec<String>,
 }
 
 fn thin_header_footer(
@@ -1318,19 +1327,29 @@ impl EditSession {
             Some(digest) => crate::seed::checked_package_digest(digest)?,
             None => crate::seed::package_digest(bytes),
         };
-        let (envelope, parts) = crate::seed::parse_docx_package_with_digest(bytes, digest.clone())
-            .map_err(|error| error.to_string())?;
+        let (envelope, parts, media) =
+            crate::seed::parse_docx_package_with_media(Arc::clone(&source), digest.clone())?;
         let host_envelope = thin_docx_envelope(&envelope);
-        let referenced_fonts = if seed_stories {
+        let fonts = if seed_stories {
+            let seed_media = if self.media_tokens.get() {
+                crate::seed::SeedMedia::AsParsed
+            } else {
+                crate::seed::SeedMedia::DataUrls {
+                    table: &media,
+                    layout_tokens: true,
+                }
+            };
             let fonts = crate::seed::seed_parsed_docx(
                 self.engine.doc(),
                 envelope,
                 parts,
                 Arc::clone(&source),
                 digest.clone(),
+                seed_media,
             )
             .map_err(|error| error.to_string())?;
             self.engine.doc().begin_opening(generation);
+            self.engine.doc().install_media(media);
             fonts
         } else {
             let fonts =
@@ -1343,12 +1362,20 @@ impl EditSession {
             self.engine
                 .doc()
                 .retain_source_docx_with_digest(Arc::clone(&source), digest.clone());
+            self.engine.doc().install_media(media);
+            self.engine
+                .doc()
+                .set_media_sources(crate::media::MediaSources::default());
             drop(envelope);
-            fonts
+            crate::seed::SeededFonts {
+                referenced: fonts,
+                unused_script: Vec::new(),
+            }
         };
         let host = DocxHostWire {
             envelope: host_envelope,
-            referenced_fonts,
+            referenced_fonts: fonts.referenced,
+            unused_script_fonts: fonts.unused_script,
         };
         let json = serde_json::to_string(&host).map_err(|error| error.to_string())?;
         self.docx_source.replace(Some(source));
@@ -1364,16 +1391,18 @@ impl EditSession {
         if self.docx_source.borrow().is_some() || !self.story_ids().is_empty() {
             return Err("a preview opens only into an empty session".to_owned());
         }
-        let Some(envelope) = crate::seed::parse_docx_preview(bytes, blocks)? else {
+        let Some((envelope, media)) = crate::seed::parse_docx_preview(Arc::from(bytes), blocks)?
+        else {
             return Ok(None);
         };
         let host_envelope = thin_docx_envelope(&envelope);
-        let referenced_fonts = crate::seed::seed_preview_envelope(self.engine.doc(), envelope)?;
+        let fonts = crate::seed::seed_preview_envelope(self.engine.doc(), envelope, media)?;
         self.engine.set_partial_document(true);
         self.engine.doc().rotate_version(js_entropy());
         serde_json::to_string(&DocxHostWire {
             envelope: host_envelope,
-            referenced_fonts,
+            referenced_fonts: fonts.referenced,
+            unused_script_fonts: fonts.unused_script,
         })
         .map(Some)
         .map_err(|error| error.to_string())
@@ -1568,6 +1597,7 @@ impl EditSession {
             last_apply_profile_json: RefCell::new("{}".to_owned()),
             resident_deleted_units: Cell::new(0),
             compared: RefCell::new(None),
+            media_tokens: Cell::new(false),
         };
         session.engine.doc().rotate_version(js_entropy());
         Ok(session)
@@ -1660,6 +1690,22 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// [`Self::layout_document_with_regions_retained_json`] without the reply,
+    /// for a caller that reads only the retained state.
+    pub fn layout_document_with_regions_retained(&self, input: &str) -> Result<(), JsValue> {
+        let _fonts = self.fonts.enter();
+        self.engine
+            .layout_document_with_regions_retained(input)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// The retained region layout's `headersFooters` JSON, when it has any.
+    pub fn retained_headers_footers_json(&self) -> Result<Option<String>, JsValue> {
+        self.engine
+            .retained_headers_footers_json()
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// The retained region layout of the first `pages` pages only; see
     /// `EngineSession::layout_document_with_regions_prefix_retained_json`.
     pub fn layout_document_with_regions_prefix_retained_json(
@@ -1671,6 +1717,29 @@ impl EditSession {
         self.engine
             .layout_document_with_regions_prefix_retained_json(input, pages as usize)
             .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Begins `layout_document_with_regions_retained_json` as a pass measured a
+    /// step at a time; see `EngineSession::begin_region_layout`. Returns the
+    /// progress JSON, with `layoutJson` once the pass is complete.
+    pub fn begin_region_layout(&self, input: &str) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
+        let progress = self
+            .engine
+            .begin_region_layout(input)
+            .map_err(|error| JsValue::from_str(&error))?;
+        serde_json::to_string(&progress).map_err(|error| JsValue::from_str(&error.to_string()))
+    }
+
+    /// Measures up to `blocks` more body blocks of the begun pass; see
+    /// `EngineSession::resume_region_layout`.
+    pub fn resume_region_layout(&self, blocks: u32) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
+        let progress = self
+            .engine
+            .resume_region_layout(blocks as usize)
+            .map_err(|error| JsValue::from_str(&error))?;
+        serde_json::to_string(&progress).map_err(|error| JsValue::from_str(&error.to_string()))
     }
 
     /// Retained `{ measured, options }` for the main-thread display-list
@@ -2170,7 +2239,9 @@ impl EditSession {
     /// Seeding starts a new opening, with `generation` or a fresh one, so its
     /// session anchors are its own; see [`EditingDoc::begin_opening`].
     ///
-    /// Returns `{"envelope","referencedFonts":[string, …]}`. The envelope is
+    /// Returns `{"envelope","referencedFonts":[string, …],"unusedScriptFonts":[string, …]}`:
+    /// `unusedScriptFonts` are the referenced fonts a seeded package names only
+    /// for East Asian or complex-script text it does not contain. The envelope is
     /// the parsed package with the parts the host does not need stripped —
     /// body content, header/footer and note content, numbering, media and
     /// charts are emptied, section entries keep only their properties — so
@@ -2196,12 +2267,45 @@ impl EditSession {
 
     /// Opens `bytes` for display only, seeded from the body's first `blocks`
     /// blocks (see `seed::seed_docx_preview`): the reply is the host metadata
-    /// of that parse. The session keeps no source package, so it cannot save.
+    /// of that parse, as [`EditSession::open_docx`] replies, with the
+    /// `unusedScriptFonts` of its cut. The session keeps no source package, so
+    /// it cannot save.
     /// Opens nothing and replies with nothing for a document the preview
     /// refuses, which opens with [`EditSession::open_docx`] instead.
     pub fn open_docx_preview(&self, bytes: &[u8], blocks: u32) -> Result<Option<String>, JsValue> {
         self.open_preview(bytes, blocks as usize)
             .map_err(|error| js_err(&error))
+    }
+
+    /// Whether [`EditSession::open_docx`] seeds images as `media:{n}` tokens,
+    /// which only a replica opened from the same package resolves, instead of
+    /// `data:` URLs. Off by default.
+    pub fn set_media_tokens(&self, enabled: bool) {
+        self.media_tokens.set(enabled);
+    }
+
+    /// The digests mapping the `data:` URLs this replica seeded to
+    /// `media:{n}` tokens, for [`EditSession::load_media_sources`]; empty
+    /// when it seeded none.
+    pub fn media_sources_json(&self) -> String {
+        let sources = self.engine.doc().media_sources();
+        if sources.is_empty() {
+            String::new()
+        } else {
+            sources.to_json()
+        }
+    }
+
+    /// Lays this replica's `data:` image sources out as the `media:{n}` tokens
+    /// another replica seeded them from.
+    pub fn load_media_sources(&self, json: &str) -> Result<(), JsValue> {
+        let sources = if json.is_empty() {
+            crate::media::MediaSources::default()
+        } else {
+            crate::media::MediaSources::from_json(json).map_err(|error| js_err(&error))?
+        };
+        self.engine.doc().set_media_sources(sources);
+        Ok(())
     }
 
     /// Marks whether the session's document is part of a package, as a
@@ -2228,6 +2332,28 @@ impl EditSession {
             crate::seed::parse_docx_package_with_digest(source, digest).map_err(js_err)?;
         let json = serde_json::to_string(&envelope).map_err(js_err)?;
         Ok(Some(json))
+    }
+
+    /// The bytes a `media:{n}` image source displays, as the part's
+    /// [`EditSession::media_type`]; `undefined` for any other source or a
+    /// part that cannot be read.
+    pub fn media_bytes(&self, token: &str) -> Option<Vec<u8>> {
+        let media = self.engine.doc().media_table()?;
+        let index = docx_parse::media::media_token_index(token)?;
+        media.bytes(index).ok().map(std::borrow::Cow::into_owned)
+    }
+
+    /// The media type of [`EditSession::media_bytes`].
+    pub fn media_type(&self, token: &str) -> Option<String> {
+        let media = self.engine.doc().media_table()?;
+        media
+            .mime_type(docx_parse::media::media_token_index(token)?)
+            .map(str::to_owned)
+    }
+
+    /// The `data:` URL a `media:{n}` image source stands for.
+    pub fn media_data_url(&self, token: &str) -> Option<String> {
+        self.engine.doc().media_table()?.resolve(token)
     }
 
     /// Seeds stories from JSON:
@@ -3045,7 +3171,7 @@ impl EditSession {
     /// Replaces `[start, end)` with `text` in one transaction. The inserted
     /// text adopts the first replaced unit's formatting; in suggesting mode
     /// the deletion and the insertion share one revision id. Receipt:
-    /// `{"revisionId": string|null}`.
+    /// `{"revisionId": string|null, "range": {"story", "start": {"paraId", "offset"}, "end": {"paraId", "offset"}}}`.
     #[allow(clippy::too_many_arguments)]
     pub fn replace_range(
         &self,
@@ -3066,7 +3192,18 @@ impl EditSession {
             .doc()
             .replace_range(&ctx, StoryRange::new(story, start, end), text)
             .map_err(js_err)?;
-        Ok(json!({ "revisionId": receipt.revision_ids.into_iter().next() }).to_string())
+        let range = receipt.range.map(|range| {
+            json!({
+                "story": range.start.story,
+                "start": { "paraId": range.start.para, "offset": range.start.offset },
+                "end": { "paraId": range.end.para, "offset": range.end.offset },
+            })
+        });
+        Ok(json!({
+            "revisionId": receipt.revision_ids.into_iter().next(),
+            "range": range,
+        })
+        .to_string())
     }
 
     /// Splits a paragraph at `(story, para_id, offset)` by inserting one
@@ -3652,6 +3789,26 @@ impl EditSession {
             .reject_change(&ctx, &target)
             .map_err(js_err)?;
         Ok(json!({ "revisionIds": receipt.revision_ids }).to_string())
+    }
+
+    /// Resolves tracked changes by revision id outside undo history:
+    /// `{"accept":[string, …],"reject":[string, …]}` -> `{"revisionIds":[string, …]}`, the ids
+    /// resolved. An id that matches nothing is skipped. See [`EditingDoc::settle_revisions`].
+    pub fn settle_revisions_json(&self, request: &str) -> Result<String, JsValue> {
+        #[derive(serde::Deserialize)]
+        struct Settle {
+            #[serde(default)]
+            accept: Vec<String>,
+            #[serde(default)]
+            reject: Vec<String>,
+        }
+        let request: Settle = serde_json::from_str(request).map_err(js_err)?;
+        let resolved = self
+            .engine
+            .doc()
+            .settle_revisions(&request.accept, &request.reject, &self.undo)
+            .map_err(js_err)?;
+        Ok(json!({ "revisionIds": resolved }).to_string())
     }
 
     /// Applies a batch of raw story mutations in ONE transaction. Unlike every
@@ -4643,11 +4800,48 @@ mod tests {
             session.docx_source.borrow().as_deref(),
             Some(source.as_slice())
         );
-        let blocks = session
-            .engine
-            .lower_story_json("body", &crate::bridge::RenderEnv::default())
-            .unwrap();
-        assert!(blocks.contains("data:image/png;base64,AQIDBA=="));
+        let blocks =
+            |env: &crate::bridge::RenderEnv| session.engine.lower_story_json("body", env).unwrap();
+        let tokens_env = crate::bridge::RenderEnv {
+            media_tokens: true,
+            ..Default::default()
+        };
+        assert!(blocks(&tokens_env).contains(r#""media:0""#));
+        assert!(!blocks(&tokens_env).contains("data:"));
+        assert!(
+            blocks(&crate::bridge::RenderEnv::default()).contains("data:image/png;base64,AQIDBA==")
+        );
+        assert_eq!(session.media_bytes("media:0"), Some(image_bytes.clone()));
+        assert_eq!(session.media_type("media:0").as_deref(), Some("image/png"));
+        assert_eq!(
+            session.media_data_url("media:0").as_deref(),
+            Some("data:image/png;base64,AQIDBA==")
+        );
+        assert_eq!(session.media_bytes("media:1"), None);
+        assert_eq!(
+            session.media_data_url("data:image/png;base64,AQIDBA=="),
+            None
+        );
+        let data_url = b"data:image/png;base64,AQIDBA==";
+        let holds = |state: &[u8]| {
+            state
+                .windows(data_url.len())
+                .any(|window| window == data_url)
+        };
+        assert!(holds(&session.engine.doc().encode_state_as_update_v1()));
+        let tokens = EditSession::new(8.0).unwrap();
+        tokens.set_media_tokens(true);
+        tokens.open_docx(&source, true, None, None).unwrap();
+        assert!(!holds(&tokens.engine.doc().encode_state_as_update_v1()));
+        assert!(
+            tokens
+                .engine
+                .lower_story_json("body", &crate::bridge::RenderEnv::default())
+                .unwrap()
+                .contains(r#""media:0""#)
+        );
+        assert_eq!(tokens.media_sources_json(), "");
+        assert_ne!(session.media_sources_json(), "");
         let materialized: docx_parse::S9WireEnvelope =
             serde_json::from_str(&session.materialize_docx().unwrap().unwrap()).unwrap();
         assert_eq!(materialized, expected);
@@ -5020,6 +5214,12 @@ mod tests {
                     .layout_document_with_regions_prefix_retained_json(&request, 1)
                     .unwrap(),
             ));
+            let mut progress = parse(session.begin_region_layout(&request).unwrap());
+            while progress.get("layoutJson").is_none() {
+                between();
+                progress = parse(session.resume_region_layout(1).unwrap());
+            }
+            record(progress);
             let layout = parse(
                 session
                     .layout_document_with_regions_retained_json(&request)
@@ -5158,6 +5358,88 @@ mod tests {
             ("word/document.xml".to_owned(), document.into_bytes()),
         ])
         .unwrap()
+    }
+
+    fn script_fonts_docx(body: &str, defaults: &str) -> Vec<u8> {
+        const MAIN: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape""#;
+        let document = format!(r#"<w:document {MAIN}><w:body>{body}</w:body></w:document>"#);
+        let styles = format!(
+            r#"<w:styles {MAIN}><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="SimSun" w:cs="Times New Roman"/>{defaults}</w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#
+        );
+        let fonts = format!(
+            r#"<w:fonts {MAIN}><w:font w:name="Calibri"><w:charset w:val="00"/></w:font><w:font w:name="SimSun"><w:altName w:val="宋体"/><w:charset w:val="86"/></w:font><w:font w:name="Batang"><w:charset w:val="81"/></w:font></w:fonts>"#
+        );
+        ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/_rels/document.xml.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/></Relationships>"#.to_vec()),
+            ("word/document.xml".to_owned(), document.into_bytes()),
+            ("word/styles.xml".to_owned(), styles.into_bytes()),
+            ("word/fontTable.xml".to_owned(), fonts.into_bytes()),
+        ])
+        .unwrap()
+    }
+
+    fn unused_script_fonts(body: &str, defaults: &str, seed_stories: bool) -> Value {
+        let session = EditSession::new(78.0).unwrap();
+        let bytes = script_fonts_docx(body, defaults);
+        let host: Value =
+            serde_json::from_str(&session.open_docx(&bytes, seed_stories, None, None).unwrap())
+                .unwrap();
+        host["unusedScriptFonts"].clone()
+    }
+
+    #[test]
+    fn an_opened_document_names_the_script_fonts_its_text_does_not_use() {
+        let run = |text: &str| format!("<w:r><w:t>{text}</w:t></w:r>");
+        let latin = |text: &str| format!("<w:p>{}</w:p><w:p>{text}</w:p>", run("Latin"));
+        let all = json!(["Batang", "SimSun", "Times New Roman", "宋体"]);
+        assert_eq!(unused_script_fonts(&latin(&run("More")), "", true), all);
+        assert_eq!(
+            unused_script_fonts(&latin(&run("漢字")), "", true),
+            json!(["Times New Roman"])
+        );
+        assert_eq!(
+            unused_script_fonts(&latin(&run("مرحبا")), "", true),
+            json!(["Batang", "SimSun", "宋体"])
+        );
+        assert_eq!(
+            unused_script_fonts(&latin(&run("More")), "", false),
+            json!([])
+        );
+        let control = format!(
+            "<w:p><w:sdt><w:sdtPr/><w:sdtContent>{}</w:sdtContent></w:sdt></w:p>",
+            run("abc")
+        );
+        assert_eq!(unused_script_fonts(&control, "", true), all);
+        assert_eq!(
+            unused_script_fonts(&control, "<w:cs/>", true),
+            json!(["Batang", "SimSun", "宋体"])
+        );
+        let text_box = r#"<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="Text box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:spPr><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:rPr><w:rFonts w:ascii="SimSun" w:hAnsi="SimSun"/></w:rPr><w:t>Hello</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#;
+        assert_eq!(
+            unused_script_fonts(&latin(text_box), "", true),
+            json!(["Batang", "Times New Roman", "宋体"])
+        );
+    }
+
+    #[test]
+    fn a_preview_names_the_script_fonts_its_cut_does_not_use() {
+        let paragraph = |text: &str| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+        let unused = |body: String| -> Value {
+            let session = EditSession::new(79.0).unwrap();
+            let host = session
+                .open_preview(&script_fonts_docx(&body, ""), 1)
+                .unwrap()
+                .unwrap();
+            serde_json::from_str::<Value>(&host).unwrap()["unusedScriptFonts"].clone()
+        };
+        let body = |first: &str, second: &str| format!("{}{}", paragraph(first), paragraph(second));
+        let all = json!(["Batang", "SimSun", "Times New Roman", "宋体"]);
+        assert_eq!(unused(body("Latin", "More")), all);
+        assert_eq!(unused(body("漢字", "Latin")), json!(["Times New Roman"]));
+        // The CJK text lies past the preview's cut.
+        assert_eq!(unused(body("Latin", "漢字")), all);
     }
 
     #[test]

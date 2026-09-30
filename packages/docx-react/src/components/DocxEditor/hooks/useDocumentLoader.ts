@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { Comment } from '@betteroffice/docx/types/content';
-import type { YrsDocxHost } from '@betteroffice/docx/yrs';
+import type { YrsDocxHost, YrsSession } from '@betteroffice/docx/yrs';
 import {
   extractEmbeddedFontFaces,
+  extractFontsFromDocument,
   loadEmbeddedFontFamilies,
   registerDocumentFaces,
   getRenderableDocumentFonts,
@@ -78,9 +79,14 @@ export function useDocumentLoader({
   const [yrsSeedBytes, setYrsSeedBytes] = useState<Uint8Array | null>(null);
   const [yrsSeedGeneration, setYrsSeedGeneration] = useState(0);
   const [loadGeneration] = useState(() => new DocumentLoadGeneration());
+  const previewDocumentRef = useRef<Document | null>(null);
+  // Counts accepted host documents: a preview's font loads end once the full
+  // document of its load is accepted.
+  const hostDocumentsRef = useRef(0);
   // Embedded families registered under an alias because another live document
   // registered different faces under the same name.
   const [fontAliases, setFontAliases] = useState<ReadonlyMap<string, string>>(NO_FONT_ALIASES);
+  const skippedFontsRef = useRef<SkippedFonts | null>(null);
 
   const loadParsedDocument = useCallback(
     (doc: Document, seedBytes?: Uint8Array) => {
@@ -137,9 +143,25 @@ export function useDocumentLoader({
   );
 
   const acceptHostDocument = useCallback(
-    (host: YrsDocxHost, generation: number) => {
-      if (!loadGeneration.complete(generation)) return;
+    (
+      host: YrsDocxHost,
+      generation: number,
+      session?: Pick<YrsSession, 'onUpdate'>,
+      options?: { preview: boolean }
+    ) => {
+      // A preview shows the load's first pages; the full document completes it.
+      if (
+        options?.preview
+          ? !loadGeneration.isCurrent(generation)
+          : !loadGeneration.complete(generation)
+      ) {
+        // A session replaced within this load may hold another document.
+        if (session && loadGeneration.isCurrent(generation)) skippedFontsRef.current?.changed();
+        return;
+      }
       const doc = host.document;
+      const accepted = ++hostDocumentsRef.current;
+      previewDocumentRef.current = options?.preview ? doc : null;
       history.reset(doc);
       setLoadingState({ isLoading: false, parseError: null });
       const embeddedFamilies = getEmbeddedFontFamilies(doc.package.fontTable);
@@ -150,6 +172,26 @@ export function useDocumentLoader({
       setDocumentFonts(
         [...new Map(documentFonts.map((font) => [font.name.toLowerCase(), font])).values()]
       );
+      // A preview's font loads stop once the full document is accepted.
+      const isCurrent = () =>
+        loadGeneration.isCurrent(generation) && hostDocumentsRef.current === accepted;
+      // A preview never changes, so what its first pages skip stays skipped.
+      const skipped = new Set(
+        session || options?.preview ? host.unusedScriptFonts?.map(fontKey) : undefined
+      );
+      const isSkipped = (family: string) => skipped.has(fontKey(family));
+      const skippedFonts =
+        session && !options?.preview && skipped.size > 0
+          ? skipUntilChanged(session, () => {
+              if (!isCurrent()) return;
+              fontScope
+                .loadFontsWithMapping(
+                  [...host.referencedFonts, ...extractFontsFromDocument(doc)].filter(isSkipped)
+                )
+                .catch((error) => console.warn('Failed to load document fonts:', error));
+            })
+          : null;
+      skippedFontsRef.current = skippedFonts;
       loadDocumentFontsInOrder(
         loadEmbeddedFontFamilies(
           doc.package.fontTable,
@@ -157,27 +199,45 @@ export function useDocumentLoader({
           host.fontTableRelationshipsXml,
           fontScope
         ),
-        () => loadGeneration.isCurrent(generation),
+        isCurrent,
         setFontAliases,
-        () =>
-          Promise.all([
-            fontScope.loadFontsWithMapping(host.referencedFonts),
-            fontScope.loadDocumentFonts(doc),
-          ])
+        () => {
+          const used = (family: string) => !isSkipped(family);
+          const loaded = Promise.all([
+            fontScope.loadFontsWithMapping(host.referencedFonts.filter(used)),
+            fontScope.loadFontsWithMapping([...extractFontsFromDocument(doc)].filter(used)),
+          ]);
+          skippedFonts?.start();
+          return loaded;
+        }
       );
     },
     [loadGeneration, history, setDocumentFonts, setLoadingState, fontScope]
   );
 
   const failHostDocument = useCallback(
-    (error: Error, generation: number) => {
-      if (!loadGeneration.complete(generation)) return;
+    (error: Error, generation: number, options?: { opened: boolean }) => {
+      // A load that fails after its document was accepted has completed.
+      if (
+        options?.opened
+          ? !loadGeneration.isCurrent(generation)
+          : !loadGeneration.complete(generation)
+      ) {
+        return;
+      }
+      loadGeneration.fail(generation);
+      // A preview's first pages, or a document that failed to show, are not
+      // the document the load opened.
+      if (options?.opened || previewDocumentRef.current) {
+        previewDocumentRef.current = null;
+        history.reset(null);
+      }
       setYrsSeedDocument(null);
       setYrsSeedBytes(null);
       setLoadingState({ isLoading: false, parseError: error.message });
       onError?.(error);
     },
-    [loadGeneration, onError, setLoadingState]
+    [loadGeneration, history, onError, setLoadingState]
   );
 
   const isCurrentLoad = useCallback(
@@ -186,7 +246,11 @@ export function useDocumentLoader({
   );
 
   const reportLayoutError = useCallback(
-    (error: Error) => loadGeneration.reportError(yrsSeedGeneration, error, onError),
+    (error: Error, onCurrentError?: (error: Error) => void) =>
+      loadGeneration.reportError(yrsSeedGeneration, error, (current) => {
+        onCurrentError?.(current);
+        onError?.(current);
+      }),
     [loadGeneration, yrsSeedGeneration, onError]
   );
 
@@ -215,8 +279,14 @@ export function useDocumentLoader({
     if (commentsLoadedRef.current) return;
     const doc = history.state;
     if (!doc) return;
-    commentsLoadedRef.current = true;
     const bodyComments = doc.package?.document?.comments;
+    // A preview's parse generates other IDs than the full document's, whose
+    // comments are the ones loaded; its sidebar opens now all the same.
+    if (doc === previewDocumentRef.current) {
+      if (bodyComments && bodyComments.length > 0) setShowCommentsSidebar(true);
+      return;
+    }
+    commentsLoadedRef.current = true;
     if (bodyComments && bodyComments.length > 0) {
       setComments(bodyComments);
       setShowCommentsSidebar(true);
@@ -257,6 +327,46 @@ export function useDocumentLoader({
 }
 
 const NO_FONT_ALIASES: ReadonlyMap<string, string> = new Map();
+
+const fontKey = (family: string): string => family.trim().toLowerCase();
+
+interface SkippedFonts {
+  /** The fonts loaded at open have started loading. */
+  start(): void;
+  /** The document changed outside `session`'s updates. */
+  changed(): void;
+}
+
+/**
+ * Runs `load` once, after `start` and the first change to the document,
+ * local or remote: an edit can give a font skipped at open text to draw.
+ */
+function skipUntilChanged(
+  session: Pick<YrsSession, 'onUpdate'>,
+  load: () => void
+): SkippedFonts {
+  let started = false;
+  let changed = false;
+  let loaded = false;
+  const run = () => {
+    if (!started || !changed || loaded) return;
+    loaded = true;
+    load();
+  };
+  const onChange = () => {
+    unsubscribe();
+    changed = true;
+    run();
+  };
+  const unsubscribe = session.onUpdate(onChange);
+  return {
+    start: () => {
+      started = true;
+      run();
+    },
+    changed: onChange,
+  };
+}
 
 /**
  * Takes the aliases of a document's embedded faces once they registered, and

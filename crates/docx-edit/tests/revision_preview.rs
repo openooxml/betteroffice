@@ -154,8 +154,8 @@ fn each_decision_shows_its_outcome_at_the_source_positions() {
         runs(&native, 0),
         [
             run("Alpha ", 1.0, 7.0, ""),
-            run("BETA", 7.0, 11.0, "ins"),
-            run("beta", 11.0, 15.0, "del"),
+            run("beta", 7.0, 11.0, "del"),
+            run("BETA", 11.0, 15.0, "ins"),
             run(" gamma", 15.0, 21.0, ""),
         ]
     );
@@ -164,7 +164,7 @@ fn each_decision_shows_its_outcome_at_the_source_positions() {
         Some(Accepted) => (
             vec![
                 run("Alpha ", 1.0, 7.0, ""),
-                run("BETA", 7.0, 11.0, ""),
+                run("BETA", 11.0, 15.0, ""),
                 run(" gamma", 15.0, 21.0, ""),
             ],
             vec![],
@@ -173,7 +173,7 @@ fn each_decision_shows_its_outcome_at_the_source_positions() {
         Some(Rejected) => (
             vec![
                 run("Alpha ", 1.0, 7.0, ""),
-                run("beta", 11.0, 15.0, ""),
+                run("beta", 7.0, 11.0, ""),
                 run(" gamma", 15.0, 21.0, ""),
             ],
             vec![run("Delta", 23.0, 28.0, "")],
@@ -221,7 +221,7 @@ fn proposals_decide_independently() {
         runs(&mixed, 0),
         [
             run("Alpha ", 1.0, 7.0, ""),
-            run("BETA", 7.0, 11.0, ""),
+            run("BETA", 11.0, 15.0, ""),
             run(" gamma", 15.0, 21.0, ""),
         ]
     );
@@ -255,13 +255,13 @@ fn decided_runs_keep_their_formatting_and_lose_only_the_markup() {
     assert_eq!(accepted[0]["runs"][1]["bold"], true);
     assert_eq!(
         without_markup(&accepted[0]["runs"][1]),
-        without_markup(&native[0]["runs"][1])
+        without_markup(&native[0]["runs"][2])
     );
     let rejected = lower(&engine, &preview(&[(&replace, Rejected)]));
     assert_eq!(rejected[0]["runs"][1]["bold"], true);
     assert_eq!(
         without_markup(&rejected[0]["runs"][1]),
-        without_markup(&native[0]["runs"][2])
+        without_markup(&native[0]["runs"][1])
     );
     assert_eq!(
         without_markup(&rejected[0]["runs"][2]),
@@ -428,17 +428,17 @@ fn a_table_cell_previews_its_own_revisions() {
         cell_runs(&RenderEnv::default()),
         [
             ("cell ".to_owned(), ""),
-            ("BETA".to_owned(), "ins"),
-            ("beta".to_owned(), "del")
+            ("beta".to_owned(), "del"),
+            ("BETA".to_owned(), "ins")
         ]
     );
     assert_eq!(
         cell_runs(&preview(&[(&id, Accepted)])),
-        [("cell BETA".to_owned(), "")]
+        [("cell ".to_owned(), ""), ("BETA".to_owned(), "")]
     );
     assert_eq!(
         cell_runs(&preview(&[(&id, Rejected)])),
-        [("cell ".to_owned(), ""), ("beta".to_owned(), "")]
+        [("cell beta".to_owned(), "")]
     );
 }
 
@@ -547,8 +547,8 @@ fn a_changed_preview_rebuilds_the_retained_frame() {
         tracked,
         [
             segment("Alpha ", None),
-            segment("BETA", Some(RevisionKind::Ins)),
             segment("beta", Some(RevisionKind::Del)),
+            segment("BETA", Some(RevisionKind::Ins)),
             segment(" gamma", None),
             segment("Delta", Some(RevisionKind::Del)),
             segment("Title", None),
@@ -718,14 +718,14 @@ fn hidden_ranges_collapse_to_the_neighbouring_edges() {
     engine.build_display_list_frame("{}", 0).unwrap();
     engine
         .with_display_list(|list| {
-            assert!(docx_layout::hit::range_rects(list, 11, 15).is_empty());
-            let before = docx_layout::hit::caret_rect(list, 11).unwrap();
-            let after = docx_layout::hit::caret_rect(list, 15).unwrap();
+            assert!(docx_layout::hit::range_rects(list, 7, 11).is_empty());
+            let before = docx_layout::hit::caret_rect(list, 7).unwrap();
+            let after = docx_layout::hit::caret_rect(list, 11).unwrap();
             assert_eq!((before.page_index, before.y), (after.page_index, after.y));
             assert!((before.x - after.x).abs() < 0.01, "{before:?} {after:?}");
-            let inserted = docx_layout::hit::range_rects(list, 7, 11);
+            let inserted = docx_layout::hit::range_rects(list, 11, 15);
             assert_eq!(inserted.len(), 1);
-            assert!((inserted[0].x + inserted[0].width - before.x).abs() < 0.01);
+            assert!((inserted[0].x - after.x).abs() < 0.01);
 
             let empty_line = docx_layout::hit::caret_rect(list, 23).unwrap();
             let marks = docx_layout::hit::range_rects(list, 23, 28);
@@ -760,4 +760,63 @@ fn a_paged_export_refuses_a_previewed_layout() {
         Err(ExportFailureCode::UnsupportedRevisionLayout)
     );
     assert_eq!(export(RenderEnv::default()), Ok(()));
+}
+
+#[test]
+fn a_suggested_replacement_that_ends_before_a_block_embed_stays_in_its_paragraph() {
+    let table = r#"<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:p w14:paraId="00000002"><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;
+    let suggest = |author: &str| EditCtx::local(author, "2026-09-29T12:00:00Z").suggesting();
+    let first_runs = |engine: &EngineSession| -> Vec<(String, &'static str)> {
+        runs(&lower(engine, &RenderEnv::default()), 0)
+            .into_iter()
+            .map(|run| (run.0, run.3))
+            .collect()
+    };
+
+    // "old" and its paragraph mark, up to a table; Ann's own pending "Z" inside
+    // the range is retracted without moving the insertion ahead of "ab".
+    let engine = EngineSession::new(75112);
+    let body = format!(
+        r#"<w:p w14:paraId="00000001"><w:r><w:t>abold</w:t></w:r></w:p>{table}<w:p w14:paraId="00000003"><w:r><w:t>tail</w:t></w:r></w:p>"#
+    );
+    seed_from_docx(engine.doc(), &document(&body)).unwrap();
+    engine
+        .doc()
+        .insert_text(
+            &suggest("Ann"),
+            Position::new("body", 2),
+            "Z",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+    engine
+        .doc()
+        .replace_range(&suggest("Ann"), StoryRange::new("body", 2, 7), "X")
+        .unwrap();
+    assert_eq!(
+        first_runs(&engine),
+        [
+            ("ab".to_owned(), ""),
+            ("X".to_owned(), "ins"),
+            ("old".to_owned(), "del")
+        ]
+    );
+    assert_eq!(lower(&engine, &RenderEnv::default())[1]["kind"], "table");
+
+    // A story that ends with a page break after its last paragraph mark.
+    let engine = EngineSession::new(75114);
+    seed_from_docx(
+        engine.doc(),
+        &document(r#"<w:p w14:paraId="00000001"><w:r><w:t>old</w:t></w:r><w:r><w:br w:type="page"/></w:r></w:p>"#),
+    )
+    .unwrap();
+    let len = engine.doc().story_len("body").unwrap();
+    engine
+        .doc()
+        .replace_range(&suggest("Ann"), StoryRange::new("body", 0, len), "X")
+        .unwrap();
+    assert_eq!(
+        first_runs(&engine),
+        [("X".to_owned(), "ins"), ("old".to_owned(), "del")]
+    );
 }
