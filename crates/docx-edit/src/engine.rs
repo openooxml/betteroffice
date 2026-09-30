@@ -2317,8 +2317,13 @@ impl EngineSession {
                     .zip(&retained.measured)
                 {
                     if *fingerprint == *retained_fingerprint
-                        && crate::fingerprint::relative_positions_fingerprint(&next.block)?
-                            != crate::fingerprint::relative_positions_fingerprint(&retained.block)?
+                        && crate::fingerprint::positions_fingerprint(
+                            &next.block,
+                            next.block.pm_start(),
+                        )? != crate::fingerprint::positions_fingerprint(
+                            &retained.block,
+                            retained.block.pm_start(),
+                        )?
                     {
                         *fingerprint ^= 1;
                     }

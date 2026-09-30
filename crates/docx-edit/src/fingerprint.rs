@@ -38,19 +38,15 @@ pub(crate) fn fingerprint_without_positions<T: Serialize + ?Sized>(
     Ok(hasher.finish())
 }
 
-/// Fingerprint of positions relative to the first pm and doc position, and of the
-/// distance between those two. Without a pm position the doc positions stay
-/// absolute: only a pm shift is carried to a retained display.
-pub(crate) fn relative_positions_fingerprint<T: Serialize + ?Sized>(
+/// Fingerprint of `value`'s positions relative to `origin`, the enclosing block's
+/// pm position a retained display shifts by; absolute without one.
+pub(crate) fn positions_fingerprint<T: Serialize + ?Sized>(
     value: &T,
+    origin: Option<f64>,
 ) -> Result<u64, String> {
     let mut hasher = Hasher::<true>::new();
+    hasher.origin = origin;
     value.serialize(&mut hasher).map_err(|error| error.0)?;
-    match hasher.first_positions {
-        [Some(pm), Some(doc)] => hasher.inner.write_u64((doc - pm).to_bits()),
-        [None, Some(doc)] => hasher.inner.write_u64(doc.to_bits()),
-        _ => {}
-    }
     Ok(hasher.finish())
 }
 
@@ -63,7 +59,7 @@ fn position_key(key: &str) -> Option<usize> {
 struct Hasher<const RELATIVE_POSITIONS: bool = false> {
     inner: DefaultHasher,
     position_family: Option<usize>,
-    first_positions: [Option<f64>; 2],
+    origin: Option<f64>,
 }
 
 impl<const RELATIVE_POSITIONS: bool> Hasher<RELATIVE_POSITIONS> {
@@ -71,7 +67,7 @@ impl<const RELATIVE_POSITIONS: bool> Hasher<RELATIVE_POSITIONS> {
         Self {
             inner: DefaultHasher::new(),
             position_family: None,
-            first_positions: [None; 2],
+            origin: None,
         }
     }
 
@@ -89,9 +85,8 @@ impl<const RELATIVE_POSITIONS: bool> Hasher<RELATIVE_POSITIONS> {
     }
 
     fn relative_position(&mut self, value: f64) {
-        if let Some(family) = self.position_family {
-            let first = *self.first_positions[family].get_or_insert(value);
-            let relative = value - first;
+        if self.position_family.is_some() {
+            let relative = self.origin.map_or(value, |origin| value - origin);
             self.inner.write_u64(TAG_F64);
             self.inner.write_u64(if relative == 0.0 {
                 0
@@ -614,7 +609,7 @@ mod tests {
     use serde::Serialize;
     use serde_json::json;
 
-    use super::{fingerprint_without_positions as fingerprint, relative_positions_fingerprint};
+    use super::{fingerprint_without_positions as fingerprint, positions_fingerprint};
 
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -661,38 +656,39 @@ mod tests {
     }
 
     #[test]
-    fn relative_positions_ignore_uniform_shifts() {
-        let base = relative_positions_fingerprint(&run("text", 1.0)).unwrap();
+    fn positions_ignore_a_shift_of_the_whole_block() {
+        let base = positions_fingerprint(&run("text", 1.0), Some(1.0)).unwrap();
         assert_eq!(
             base,
-            relative_positions_fingerprint(&run("other text", 90.0)).unwrap()
+            positions_fingerprint(&run("other text", 90.0), Some(90.0)).unwrap()
         );
         let mut doc_moved = run("text", 1.0);
         doc_moved.fmt.doc_start = Some(101.0);
         doc_moved.extra["nested"][0]["docEnd"] = json!(101.0);
-        assert_ne!(base, relative_positions_fingerprint(&doc_moved).unwrap());
+        assert_ne!(base, positions_fingerprint(&doc_moved, Some(1.0)).unwrap());
 
-        let doc_only = |position: f64| json!({ "docStart": position, "docEnd": position + 1.0 });
+        // Without an enclosing origin positions stay absolute, nested pm ones too.
+        let nested = |position: f64| json!({ "docStart": position, "inner": [{ "pmStart": position, "pmEnd": position + 1.0 }] });
         assert_ne!(
-            relative_positions_fingerprint(&doc_only(100.0)).unwrap(),
-            relative_positions_fingerprint(&doc_only(200.0)).unwrap()
+            positions_fingerprint(&nested(100.0), None).unwrap(),
+            positions_fingerprint(&nested(200.0), None).unwrap()
         );
     }
 
     #[test]
-    fn relative_positions_detect_non_uniform_shifts() {
-        let base = relative_positions_fingerprint(&run("text", 1.0)).unwrap();
+    fn positions_detect_moves_within_the_block() {
+        let base = positions_fingerprint(&run("text", 1.0), Some(1.0)).unwrap();
         let mut moved = run("text", 1.0);
         moved.extra["pmEnd"] = json!(6.0);
-        assert_ne!(base, relative_positions_fingerprint(&moved).unwrap());
+        assert_ne!(base, positions_fingerprint(&moved, Some(1.0)).unwrap());
 
         let mut moved = run("text", 1.0);
         moved.extra["nested"][0]["docEnd"] = json!(2.0);
-        assert_ne!(base, relative_positions_fingerprint(&moved).unwrap());
+        assert_ne!(base, positions_fingerprint(&moved, Some(1.0)).unwrap());
 
         let mut missing = run("text", 1.0);
         missing.fmt.doc_start = None;
-        assert_ne!(base, relative_positions_fingerprint(&missing).unwrap());
+        assert_ne!(base, positions_fingerprint(&missing, Some(1.0)).unwrap());
     }
 
     #[test]
