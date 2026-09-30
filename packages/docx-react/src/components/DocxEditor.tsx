@@ -194,6 +194,8 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   /**
    * Open DOCX files in the resident worker. Off by default. A read-only editor without
    * collaboration then loads its main-thread copy of the document only when something needs it.
+   * While a read-only document's host proposals are held in the worker, synchronous ref members
+   * that need the main-thread document throw `DocxReplicaNotReadyError`; await `flushPendingInput()` first.
    * @experimental
    */
   experimentalWorkerOpen?: boolean;

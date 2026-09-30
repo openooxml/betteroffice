@@ -26,6 +26,7 @@ export {
   type DocxEditorCollaborationOptions,
   type EditorMode,
 } from './components/DocxEditor';
+export { DocxReplicaNotReadyError } from './components/DocxEditor/hooks/useDocxEditorRefApi';
 
 // Commands: one authority for built-in and host chrome
 export { DocxCommandProvider, type DocxCommandProviderProps } from './commands/DocxCommandProvider';
