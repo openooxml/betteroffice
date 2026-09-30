@@ -1193,11 +1193,15 @@ fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
         }
     }
     if let Some(hit) = text_hit(primitive) {
-        let paint_clip = match primitive {
-            Primitive::Text(text) => text.paint_clip.as_ref(),
-            Primitive::GlyphRun(run) => run.paint_clip.as_ref(),
-            _ => None,
+        let (paint_clip, rotation) = match primitive {
+            Primitive::Text(text) => (text.paint_clip.as_ref(), text.rotation_deg.as_ref()),
+            Primitive::GlyphRun(run) => (run.paint_clip.as_ref(), run.rotation_deg.as_ref()),
+            _ => (None, None),
         };
+        // A turned run paints outside its unturned box.
+        if rotation.and_then(Number::as_f64).unwrap_or(0.0) % 360.0 != 0.0 {
+            return false;
+        }
         if let Some(clip) = paint_clip {
             let left = clip.x.as_ref().and_then(Number::as_f64).unwrap_or(0.0);
             let width = clip.w.as_ref().and_then(Number::as_f64).unwrap_or(0.0);
@@ -1211,7 +1215,6 @@ fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
             && y >= hit.top - BAND_SLACK
             && y <= hit.bottom + BAND_SLACK;
     }
-    let px = |value: &Number| value.as_f64().unwrap_or(0.0);
     let (left, top, width, height) = match primitive {
         Primitive::Image(img) => {
             let Some(rect) = image_paint_rect(img) else {
@@ -2379,6 +2382,23 @@ mod tests {
         let dl = band_page("footer", 420.0, vec![unclipped]);
         assert_eq!(
             hit_test_regions(&dl, 0, 120.0, 455.0).unwrap().region,
+            HitRegion::Body
+        );
+    }
+
+    #[test]
+    fn turned_body_text_leaves_header_clicks_to_the_header() {
+        let mut turned = run(100.0, 40.0, 50.0, 1);
+        turned["rotationDeg"] = 90.into();
+        let dl = band_page("header", 0.0, vec![turned]);
+        let hit = hit_test_regions(&dl, 0, 120.0, 35.0).unwrap();
+        assert_eq!(hit.region, HitRegion::Header);
+        assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
+        let mut full_turn = run(100.0, 40.0, 50.0, 1);
+        full_turn["rotationDeg"] = 360.into();
+        let dl = band_page("header", 0.0, vec![full_turn]);
+        assert_eq!(
+            hit_test_regions(&dl, 0, 120.0, 35.0).unwrap().region,
             HitRegion::Body
         );
     }

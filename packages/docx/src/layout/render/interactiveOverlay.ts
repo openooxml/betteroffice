@@ -199,12 +199,11 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
     if (primitive.clipGroup?.clip && (primitive.clipGroup.opacity ?? 1) <= 0) return false;
     switch (primitive.kind) {
       case 'text':
-        if (!primitive.text.trim() || textPaintsNothing(primitive)) return false;
-        break;
       case 'glyphRun':
-        if (!primitive.glyphs.length || !primitive.text.trim() || textPaintsNothing(primitive)) {
-          return false;
-        }
+        // A turned run paints outside its unturned box.
+        if (!primitive.text.trim() || textPaintsNothing(primitive)) return false;
+        if ((primitive.rotationDeg ?? 0) % 360 !== 0) return false;
+        if (primitive.kind === 'glyphRun' && !primitive.glyphs.length) return false;
         break;
       case 'rect':
         if (!primitive.fill || primitive.fill === 'transparent' || primitive.fill === 'none') {

@@ -351,6 +351,20 @@ test('body text with no fill does not hide header controls', () => {
   }
 });
 
+test('turned body text does not hide header controls', () => {
+  const runs: DisplayPrimitive[] = [{
+    kind: 'text', text: 'covered', x: 100, baselineY: 35, width: 60,
+    font: '16px sans-serif', color: '#000',
+  }, {
+    kind: 'glyphRun', fontId: 1, size: 16, color: '#000', text: 'covered',
+    glyphs: [{ id: 1, x: 100, y: 35, cluster: 0, advance: 60 }],
+  }];
+  for (const run of runs) {
+    expectActive(headerWidget([{ ...run, rotationDeg: 90 } as DisplayPrimitive]));
+    expectHidden(headerWidget([{ ...run, rotationDeg: 360 } as DisplayPrimitive]));
+  }
+});
+
 test('a page whose only inline control is covered has no tab stop', () => {
   const page = pageWith([image()]);
   expectHidden(buildInteractiveOverlayPage(page)
