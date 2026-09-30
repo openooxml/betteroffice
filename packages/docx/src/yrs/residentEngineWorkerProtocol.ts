@@ -7,6 +7,7 @@ import type {
 import type { ResidentCaretPaintStyle } from './residentCaret';
 
 export type ResidentEngineWorkerRequest =
+  | { id: number; type: 'warm' }
   | {
       id: number;
       type: 'bootstrap';

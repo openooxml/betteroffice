@@ -15,7 +15,12 @@ beforeAll(async () => {
   const frameDelta = resolve(import.meta.dir, '../layout/render/frameDelta.ts');
   const modules: Record<string, string> = {
     './residentEngineSession':
-      'export const createResidentEngineSession = async () => testHarness.session;',
+      `export const createResidentEngineSession = async () => {
+        await testHarness.preload();
+        testHarness.sessionsCreated += 1;
+        return testHarness.session;
+      };`,
+    './wasm/index': 'export const preloadEditWasm = () => testHarness.preload();',
     '../layout/render/glyphCache': 'export class GlyphCache {}',
     '../layout/render/frameDelta': `
       export { applyFrameDeltaOwned } from ${JSON.stringify(frameDelta)};
@@ -77,6 +82,23 @@ function worker() {
     },
   };
   const harness = {
+    initializations: 0,
+    sessionsCreated: 0,
+    wasmReady: false,
+    failWarm: null as Error | null,
+    preloadBlock: null as Promise<void> | null,
+    async preload(): Promise<void> {
+      await harness.preloadBlock;
+      if (harness.failWarm) {
+        const error = harness.failWarm;
+        harness.failWarm = null;
+        throw error;
+      }
+      if (!harness.wasmReady) {
+        harness.initializations += 1;
+        harness.wasmReady = true;
+      }
+    },
     delta: null as DecodedFrameDelta | null,
     caret: null as YrsResidentCaretRect | null,
     rasterized: [] as number[],
@@ -249,6 +271,52 @@ function deferred() {
   return { promise, resolve };
 }
 
+describe('resident worker warmup', () => {
+  test('initializes wasm without creating a session, then bootstraps a frame', async () => {
+    const w = worker();
+    expect(await w.send({ type: 'warm' })).toMatchObject({ ok: true });
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect(await w.build([])).toMatchObject({
+      ok: false,
+      error: 'Resident engine worker is not initialized',
+    });
+    expect(await w.bootstrap()).toMatchObject({ ok: true, layoutRevision: 1 });
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(1);
+    expect((await w.attach([1])).ok).toBe(true);
+    expect(w.harness.rasterized).toEqual([1]);
+  });
+
+  test('retries initialization after a failed warm, including a wasm runtime error', async () => {
+    const w = worker();
+    w.harness.failWarm = new WebAssembly.RuntimeError('init failed');
+    const failed = await w.send({ type: 'warm' });
+    expect(failed).toMatchObject({ ok: false, error: 'init failed' });
+    expect(failed).not.toHaveProperty('terminal');
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect((await w.bootstrap()).ok).toBe(true);
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(1);
+  });
+
+  test('queues bootstrap behind an in-flight warm', async () => {
+    const w = worker();
+    const loading = deferred();
+    w.harness.preloadBlock = loading.promise;
+    const warm = w.send({ type: 'warm' });
+    const bootstrap = w.bootstrap();
+    await Promise.resolve();
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect(w.answered).toEqual([]);
+    loading.resolve();
+    expect((await warm).ok).toBe(true);
+    expect((await bootstrap).ok).toBe(true);
+    expect(w.answered).toEqual([1, 2]);
+    expect(w.harness.initializations).toBe(1);
+  });
+});
+
 describe('resident worker page damage', () => {
   test('paints each page once while a three-page window crosses twelve pages', async () => {
     const w = worker();
@@ -394,6 +462,8 @@ describe('resident worker page damage', () => {
 describe('resident worker layout ownership', () => {
   test('returns the layout it ran and completes the frame extras from it', async () => {
     const w = worker();
+    expect((await w.send({ type: 'warm' })).ok).toBe(true);
+    expect(w.harness.sessionsCreated).toBe(0);
     const extras: string[] = [];
     const layoutJson = JSON.stringify({
       layout: { pages: [] },
@@ -441,6 +511,8 @@ describe('resident worker layout ownership', () => {
       layoutExtras: JSON.stringify({ resolvedCommentIds: [4], fontChains: { 'a|0|0': [1] } }),
     });
     expect(reply.ok && reply.layoutJson).toBe(layoutJson);
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(1);
     expect(extras).toEqual([
       '{"headersFooters":{"parts":[]},"fontChains":{"a|0|0":[1]},"resolvedCommentIds":[4]}',
     ]);

@@ -5,6 +5,7 @@ import {
   createResidentEngineSession,
   type ResidentEngineSession,
 } from './residentEngineSession';
+import { preloadEditWasm } from './wasm/index';
 import {
   presentOffscreenPageBackBuffer,
   presentOffscreenPageBackBufferWithCaret,
@@ -122,6 +123,19 @@ function replyFailure(id: number, error: unknown): void {
 }
 
 async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
+  if (request.type === 'warm') {
+    try {
+      await preloadEditWasm();
+      reply({ id: request.id, ok: true });
+    } catch (error) {
+      reply({
+        id: request.id,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
   if (request.type === 'destroy') {
     destroySession();
     return;

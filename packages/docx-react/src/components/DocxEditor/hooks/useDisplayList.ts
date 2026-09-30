@@ -28,6 +28,7 @@ import {
   residentCaretSnapshotForFrame,
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
+  takePreloadedResidentEngineWorker,
   sameYrsSelection,
   type ResidentCaretPaintStyle,
   type ResidentEngineOffscreenPage,
@@ -292,6 +293,20 @@ export function useRustDisplayList(
     engine: YrsSession;
     client: ResidentEngineWorkerClient;
   } | null>(null);
+  const spawnedWorkerEnginesRef = useRef(new WeakSet<YrsSession>());
+  const workerFor = useCallback((hostEngine: YrsSession): ResidentEngineWorkerClient => {
+    if (workerRef.current?.engine !== hostEngine) {
+      workerRef.current?.client.destroy();
+      const replacement = spawnedWorkerEnginesRef.current.has(hostEngine);
+      spawnedWorkerEnginesRef.current.add(hostEngine);
+      const spare = replacement ? null : takePreloadedResidentEngineWorker();
+      workerRef.current = {
+        engine: hostEngine,
+        client: spare ?? new ResidentEngineWorkerClient(),
+      };
+    }
+    return workerRef.current.client;
+  }, []);
   const workerFallbackEngineRef = useRef<YrsSession | null>(null);
   const displayWindowRef = useRef<[number, number]>(INITIAL_DISPLAY_WINDOW);
   const pageBuildInFlightRef = useRef(false);
@@ -935,14 +950,7 @@ export function useRustDisplayList(
       ) {
         return null;
       }
-      if (workerRef.current?.engine !== hostEngine) {
-        workerRef.current?.client.destroy();
-        workerRef.current = {
-          engine: hostEngine,
-          client: new ResidentEngineWorkerClient(),
-        };
-      }
-      const worker = workerRef.current.client;
+      const worker = workerFor(hostEngine);
       const bootstrapping = !worker.bootstrapSent();
       const previousFrame = bootstrapping ? null : snapshotRef.current.frame;
       hostEngine.adoptResidentWorkerLayout(request);
@@ -1031,7 +1039,7 @@ export function useRustDisplayList(
         })
         .catch(unavailable);
     },
-    [dropWorker, frameExtrasInputs, overrides?.build, paintedCaretMachine, queryEpochGate]
+    [dropWorker, frameExtrasInputs, overrides?.build, paintedCaretMachine, queryEpochGate, workerFor]
   );
 
   const attachOffscreenCanvases = useCallback(
@@ -1238,15 +1246,8 @@ export function useRustDisplayList(
             previewKey: workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
           });
         } else {
-          if (workerRef.current?.engine !== hostEngine) {
-            workerRef.current?.client.destroy();
-            workerRef.current = {
-              engine: hostEngine,
-              client: new ResidentEngineWorkerClient(),
-            };
-          }
+          const worker = workerFor(hostEngine);
           requested = workerRef.current;
-          const worker = workerRef.current.client;
           const extras = encodeDisplayListFrameExtras(buildInputs);
           const bootstrapping = !worker.bootstrapSent();
           const previousFrame = bootstrapping ? null : snapshotRef.current.frame;
@@ -1393,6 +1394,7 @@ export function useRustDisplayList(
     queryEpochGate,
     markSettled,
     requestSettleRelayout,
+    workerFor,
   ]);
 
   const resetSettled = useCallback(
