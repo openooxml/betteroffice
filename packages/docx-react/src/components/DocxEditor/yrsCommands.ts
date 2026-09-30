@@ -7,6 +7,7 @@ import type {
   YrsParagraphAttrs,
   YrsSession,
   YrsStoryRange,
+  YrsStorySegment,
   YrsTableLoc,
   YrsTableRange,
 } from '@betteroffice/docx/yrs';
@@ -225,6 +226,101 @@ export function yrsSelectedText(session: YrsSession): string {
       return from < to ? segment.text.slice(from - segment.start, to - segment.start) : '';
     })
     .join('');
+}
+
+function embedPlainText(
+  session: YrsSession,
+  segment: Extract<YrsStorySegment, { kind: 'embed' }>
+): string {
+  switch (segment.embedKind) {
+    case 'tab':
+      return '\t';
+    case 'break':
+      return '\n';
+    case 'field':
+      return typeof segment.payload.displayText === 'string' ? segment.payload.displayText : '';
+    case 'blockSdt':
+      return typeof segment.payload.story === 'string'
+        ? `${storyPlainText(session, segment.payload.story).replace(/\n$/, '')}\n`
+        : '';
+    case 'table':
+      return Array.isArray(segment.payload.rows)
+        ? tablePlainText(session, { rows: segment.payload.rows as TablePayloadRow[] })
+            .map((row) => `${row}\n`)
+            .join('')
+        : '';
+    default:
+      return '';
+  }
+}
+
+function cellPlainText(session: YrsSession, story: string): string {
+  return storyPlainText(session, story).replace(/\n$/, '').replace(/\n/g, ' ');
+}
+
+/** One tab-separated line per grid row; merged-over slots stay empty. */
+function tablePlainText(
+  session: YrsSession,
+  payload: TablePayload,
+  range?: { top: number; bottom: number; left: number; right: number }
+): string[] {
+  const { anchors, columns } = tableAnchors(payload);
+  const byGrid = new Map(anchors.map((cell) => [`${cell.row}:${cell.column}`, cell.story]));
+  const lines: string[] = [];
+  for (let row = range?.top ?? 0; row <= (range?.bottom ?? payload.rows.length - 1); row += 1) {
+    const texts: string[] = [];
+    for (let column = range?.left ?? 0; column <= (range?.right ?? columns - 1); column += 1) {
+      const story = byGrid.get(`${row}:${column}`);
+      texts.push(story ? cellPlainText(session, story) : '');
+    }
+    lines.push(texts.join('\t'));
+  }
+  return lines;
+}
+
+/** Plain text of story units `[from, to)`: paragraphs end in newlines, tables become tab-separated rows. */
+function storyPlainText(session: YrsSession, story: string, from = 0, to = Infinity): string {
+  let text = '';
+  let offset = 0;
+  for (const segment of session.storySegments(story)) {
+    const start = offset;
+    offset += segment.kind === 'text' ? segment.text.length : 1;
+    if (offset <= from) continue;
+    if (start >= to) break;
+    if (segment.kind === 'text') {
+      text += segment.text.slice(Math.max(from, start) - start, Math.min(to, offset) - start);
+    } else if (segment.kind === 'pilcrow') {
+      text += '\n';
+    } else {
+      text += embedPlainText(session, segment);
+    }
+  }
+  return text;
+}
+
+/**
+ * The current selection as plain text for the clipboard: tabs and line breaks
+ * as characters, tables and a multi-cell selection as tab-separated rows.
+ */
+export function yrsSelectionPlainText(session: YrsSession): string {
+  const table = currentYrsTableTarget(session);
+  if (table && !sameCell(table.range.anchor, table.range.head)) {
+    const payload = tablePayload(session, table.range.anchor);
+    const { anchor, head } = table.range;
+    return payload
+      ? tablePlainText(session, payload, {
+          top: Math.min(anchor.row, head.row),
+          bottom: Math.max(anchor.row, head.row),
+          left: Math.min(anchor.column, head.column),
+          right: Math.max(anchor.column, head.column),
+        }).join('\n')
+      : '';
+  }
+  const range = currentYrsSelectionRange(session);
+  if (!range) return '';
+  const start = yrsStoryOffsetForLoc(session, { story: range.story, ...range.start });
+  const end = yrsStoryOffsetForLoc(session, { story: range.story, ...range.end });
+  return start === end ? '' : storyPlainText(session, range.story, start, end);
 }
 
 interface TablePayloadCell {

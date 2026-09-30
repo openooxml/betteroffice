@@ -1430,6 +1430,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     interactionPageHostRef: canvasRenderer.canvasHostRef,
     i18n,
     partEditOpen: partEditTarget !== null,
+    readOnly,
     onAddComment: useCallback(
       ({ from, to, yPos }: { from: number; to: number; yPos: number | null }) => {
         setCommentSelectionRange({ from, to });

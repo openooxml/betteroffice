@@ -255,7 +255,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
   const resolveHoverCursor = useCallback(
     (clientX: number, clientY: number) => {
       hoverPointRef.current = { x: clientX, y: clientY };
-      const hit = readOnly ? null : (resolveCanvasHit(clientX, clientY, false)?.hit ?? null);
+      const hit = resolveCanvasHit(clientX, clientY, false)?.hit ?? null;
       paintHoverCursor(canvasHoverCursor({ readOnly, partEdit }, hit));
     },
     [paintHoverCursor, partEdit, readOnly, resolveCanvasHit]
@@ -317,6 +317,19 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   const focusInput = useCallback(() => yrsInputRef.current?.focus(), [yrsInputRef]);
 
+  const beginTextDrag = useCallback(
+    (position: number): void => {
+      yrsCellDragAnchorRef.current = resolveTarget(position)?.cell ?? null;
+      yrsCellDraggingRef.current = false;
+      isDraggingRef.current = true;
+      dragAnchorRef.current = position;
+      setTextSelection(position);
+      focusInput();
+      if (!partEdit) setIsFocused(true);
+    },
+    [focusInput, partEdit, resolveTarget, setIsFocused, setTextSelection]
+  );
+
   const extendCellSelection = useCallback(
     (pmPos: number): boolean => {
       const anchor = yrsCellDragAnchorRef.current;
@@ -347,7 +360,11 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       setTableInsertButton(null);
       clearTableInsertTimer();
       e.preventDefault();
-      if (readOnly) return;
+      if (readOnly) {
+        const position = getPositionFromMouse(e.clientX, e.clientY);
+        if (position != null) beginTextDrag(position);
+        return;
+      }
 
       const point = resolveCanvasHit(e.clientX, e.clientY, false);
       const hit = point?.hit ?? null;
@@ -413,16 +430,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       }
 
       const pmPos = getPositionFromMouse(e.clientX, e.clientY);
-      const targetPos = pmPos ?? Math.max(0, projection.size - 1);
-      yrsCellDragAnchorRef.current = resolveTarget(targetPos)?.cell ?? null;
-      yrsCellDraggingRef.current = false;
-      isDraggingRef.current = true;
-      dragAnchorRef.current = targetPos;
-      setTextSelection(targetPos);
-      focusInput();
-      if (!partEdit) setIsFocused(true);
+      beginTextDrag(pmPos ?? Math.max(0, projection.size - 1));
     },
     [
+      beginTextDrag,
       clearTableInsertTimer,
       displayListQueries,
       focusInput,
@@ -531,7 +542,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       // what re-reads the point under it
       if (isDraggingRef.current || yrsCellDraggingRef.current) return;
       hoverPointRef.current = { x: e.clientX, y: e.clientY };
-      const point = readOnly ? null : resolveCanvasHit(e.clientX, e.clientY, false);
+      const point = resolveCanvasHit(e.clientX, e.clientY, false);
       paintHoverCursor(canvasHoverCursor({ readOnly, partEdit }, point?.hit ?? null));
       if (readOnly) return;
       const scheduleHide = () => {

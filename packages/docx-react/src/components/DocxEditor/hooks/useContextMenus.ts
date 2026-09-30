@@ -13,7 +13,7 @@ import {
 import { isWithinPageArea } from '../internals/pageAreaRouting';
 import { formatKeys } from '../../dialogs/KeyboardShortcutsDialog/ShortcutItem';
 import type { PagedEditorRef } from '../PagedEditor';
-import { currentYrsTableTarget, yrsSelectedText } from '../yrsCommands';
+import { currentYrsTableTarget, yrsSelectedText, yrsSelectionPlainText } from '../yrsCommands';
 import type { DocxTableAction } from '../../../commands/types';
 
 interface TableContextInfo {
@@ -55,6 +55,7 @@ export function useContextMenus({
   interactionPageHostRef,
   i18n,
   partEditOpen,
+  readOnly = false,
   onAddComment,
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
@@ -65,6 +66,8 @@ export function useContextMenus({
   interactionPageHostRef: React.RefObject<HTMLDivElement | null>;
   i18n: Translations | undefined;
   partEditOpen: boolean;
+  /** Offers only Copy and Select all, and no image menu. */
+  readOnly?: boolean;
   onAddComment: (range: { from: number; to: number; yPos: number | null }) => void;
 }) {
   const { t } = useTranslation();
@@ -133,7 +136,7 @@ export function useContextMenus({
       } | null;
     }) => {
       // An image right-click takes priority over the text context menu.
-      if (data.image) {
+      if (data.image && !readOnly) {
         imageContextMenu.openForImage({
           x: data.x,
           y: data.y,
@@ -153,7 +156,7 @@ export function useContextMenus({
         tableContext: currentTable,
       });
     },
-    [imageContextMenu, tableContext]
+    [imageContextMenu, readOnly, tableContext]
   );
 
   const handleImageWrapApply = useCallback(
@@ -224,6 +227,21 @@ export function useContextMenus({
     // `formatKeys` handles all modifier swaps on Mac (Ctrl+ → ⌘, Shift+ → ⇧,
     // Alt+ → ⌥) so multi-modifier strings like `Ctrl+Shift+V` render as
     // `⌘⇧V` rather than the wrong `⌘+Shift+V`.
+    if (readOnly) {
+      return [
+        {
+          action: 'copy',
+          label: t('contextMenu.copy'),
+          shortcut: formatKeys(t('contextMenu.copyShortcut')),
+          dividerAfter: true,
+        },
+        {
+          action: 'selectAll',
+          label: t('contextMenu.selectAll'),
+          shortcut: formatKeys(t('contextMenu.selectAllShortcut')),
+        },
+      ];
+    }
     const items: TextContextMenuItem[] = [
       {
         action: 'cut',
@@ -302,6 +320,7 @@ export function useContextMenus({
     contextMenu.tableContext,
     i18n,
     partEditOpen,
+    readOnly,
     t,
   ]);
 
@@ -321,7 +340,7 @@ export function useContextMenus({
         }
         case 'copy': {
           const session = paged.getYrsSession();
-          const text = session ? yrsSelectedText(session) : '';
+          const text = session ? yrsSelectionPlainText(session) : '';
           if (text) await navigator.clipboard.writeText(text).catch(() => undefined);
           break;
         }
