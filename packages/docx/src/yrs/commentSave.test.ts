@@ -476,3 +476,32 @@ it('keeps every range of a comment anchored in the body and a table cell across 
     bytes = (await saveYrsDocx(reopened)).bytes;
   }
 });
+
+it('keeps overlapping and cross-paragraph comment ranges after an unrelated edit', async () => {
+  const body =
+    `<w:p w14:paraId="0F000001"><w:commentRangeStart w:id="3"/>${t('A')}` +
+    `<w:commentRangeStart w:id="4"/>${t('B')}<w:commentRangeEnd w:id="3"/>${t('C')}` +
+    '<w:commentRangeEnd w:id="4"/><w:r><w:commentReference w:id="3"/></w:r>' +
+    '<w:r><w:commentReference w:id="4"/></w:r></w:p>' +
+    `<w:p w14:paraId="0F000002">${t('Before ')}<w:commentRangeStart w:id="5"/>${t('first')}</w:p>` +
+    `<w:p w14:paraId="0F000003">${t('second')}<w:commentRangeEnd w:id="5"/>` +
+    `<w:r><w:commentReference w:id="5"/></w:r>${t(' after')}</w:p>` +
+    `<w:p w14:paraId="0F000004">${t('Later')}</w:p>`;
+  const session = await open(docx(body, [3, 4, 5]), 91090);
+  const { start } = range(session, 3, 0, 0);
+  session.insertText({ story: 'body', ...start }, 'QA ');
+  for (const [path, bytes] of await saves(session)) {
+    for (const [id, text] of [[3, 'AB'], [4, 'BC'], [5, 'firstsecond']] as const) {
+      expect([path, id, markers(bytes, id)]).toEqual([path, id, ['RangeStart', 'RangeEnd', 'Reference']]);
+      for (const reopened of [await open(bytes, 91091), await seeded(bytes, 91092)]) {
+        expect(anchored(reopened, String(id))).toBe(text);
+      }
+    }
+    const first = paragraphXml(bytes, '0F000002');
+    const second = paragraphXml(bytes, '0F000003');
+    expect(first).toContain('<w:commentRangeStart w:id="5"/>');
+    expect(first).not.toContain('<w:commentRangeEnd w:id="5"/>');
+    expect(second).toContain('<w:commentRangeEnd w:id="5"/>');
+    expect(second).not.toContain('<w:commentRangeStart w:id="5"/>');
+  }
+});
