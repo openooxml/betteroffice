@@ -326,13 +326,14 @@ fn draw<const FULL: bool>(player: &mut Player<FULL>, job: Blit<'_>) -> Option<()
     if declared > budget {
         return player.refuse("the metafile's bitmaps exceed the pixel budget");
     }
-    player.bitmap_pixels += declared;
-    let dib = match decode(job.bmi, job.bits, job.usage, budget) {
+    player.charge(0, declared)?;
+    let dib = match decode(job.bmi, job.bits, job.usage, budget, |pixels| {
+        player.charge(0, pixels.saturating_sub(declared)).is_some()
+    }) {
         Ok(dib) => dib,
+        Err(_) if player.overflowed => return None,
         Err(_) => return player.omit("bitmaps that could not be decoded"),
     };
-    let actual = u64::from(dib.width) * u64::from(dib.height);
-    player.charge(0, actual.saturating_sub(declared))?;
     let Some((bitmap, offset, whole)) = crop(
         dib,
         job.source,
@@ -583,11 +584,14 @@ fn tile<const FULL: bool>(
         .saturating_sub(player.bitmap_pixels);
     let declared = declared_pixels(bmi);
     player.charge(0, declared)?;
-    let Ok(dib) = decode(bmi, bits, usage, budget.min(1 << 16)) else {
+    let Ok(dib) = decode(bmi, bits, usage, budget.min(1 << 16), |pixels| {
+        player.charge(0, pixels.saturating_sub(declared)).is_some()
+    }) else {
+        if player.overflowed {
+            return None;
+        }
         return Some(None);
     };
-    let actual = u64::from(dib.width) * u64::from(dib.height);
-    player.charge(0, actual.saturating_sub(declared))?;
     let DibPixels::Rgba(rgba) = dib.pixels else {
         return Some(None);
     };

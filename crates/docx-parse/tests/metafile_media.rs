@@ -10,6 +10,9 @@ use docx_parse::serializer::{
 };
 use sha2::{Digest, Sha256};
 
+#[path = "../../ooxml-metafile/tests/common/mod.rs"]
+mod metafile;
+
 const EMF: &[u8] = include_bytes!("../../ooxml-metafile/tests/fixtures/shapes.emf");
 const WMF: &[u8] = include_bytes!("../../ooxml-metafile/tests/fixtures/shapes.wmf");
 
@@ -141,6 +144,43 @@ fn a_metafile_that_cannot_be_replayed_shows_a_placeholder_and_warns() {
         svg.contains(r##"fill="#f1f3f4""##),
         "a neutral placeholder stands in: {svg}"
     );
+}
+
+#[test]
+fn compressed_metafile_parts_exhaust_the_document_pixel_budget() {
+    let metafile = metafile::cropped_rle_emf(1024);
+    assert!(metafile.len() < 256);
+    let mut parts =
+        ooxml_opc::unzip_parts(&package("word/media/image0.emf", &metafile, DRAWING)).unwrap();
+    for index in 1..66 {
+        parts.push((format!("word/media/image{index}.emf"), metafile.clone()));
+    }
+    let wire = parse_docx_s9_wire(
+        &ooxml_opc::rezip_parts(&parts).unwrap(),
+        S9ParseOptions::default(),
+    )
+    .unwrap();
+    let warnings = wire.document.warnings.clone().unwrap_or_default();
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    for index in 64..66 {
+        assert!(warnings.iter().any(|warning| {
+            warning.contains(&format!("image{index}.emf")) && warning.contains("replay limits")
+        }));
+    }
+    let json = serde_json::to_value(&wire).unwrap();
+    let entries = json["document"]["package"]["mediaEntries"]
+        .as_array()
+        .unwrap();
+    for index in 0..66 {
+        let path = format!("word/media/image{index}.emf");
+        let entry = entries.iter().find(|entry| entry[0] == path).unwrap();
+        let svg = svg_of(entry[1]["dataUrl"].as_str().unwrap());
+        if index < 64 {
+            assert!(svg.contains("<image"), "{path}: {svg}");
+        } else {
+            assert!(svg.contains(r##"fill="#f1f3f4""##), "{path}: {svg}");
+        }
+    }
 }
 
 fn save_request(original: &[u8]) -> S13SaveRequest {

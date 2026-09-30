@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::drawing::PathCommand;
 use crate::emf::{brush_from_style, full_brush, full_pen, logfont, pen_from_style, read_points};
-use crate::player::{Combine, GdiObject, MAX_HANDLES, Player, axis_aligned_rect};
+use crate::player::{Combine, GdiObject, MAX_HANDLES, Player, SharedBudget, axis_aligned_rect};
 use crate::read::{i16_at, u16_at, u32_at};
 
 pub(crate) const WMF_PLACEABLE_KEY: u32 = 0x9AC6_CDD7;
@@ -36,7 +36,11 @@ pub(crate) struct WmfRecords {
     pub handles: usize,
 }
 
-pub(crate) fn wmf_records(bytes: &[u8], max_records: usize) -> Option<WmfRecords> {
+pub(crate) fn wmf_records(
+    bytes: &[u8],
+    max_records: usize,
+    budget: Option<&SharedBudget>,
+) -> Option<WmfRecords> {
     let placeable = u32_at(bytes, 0)? == WMF_PLACEABLE_KEY;
     let header = if placeable { 22 } else { 0 };
     let kind = u16_at(bytes, header)?;
@@ -70,6 +74,9 @@ pub(crate) fn wmf_records(bytes: &[u8], max_records: usize) -> Option<WmfRecords
     let mut count = 0usize;
     let mut records: Vec<(usize, usize, usize)> = Vec::new();
     while offset + 6 <= bytes.len() {
+        if budget.is_some_and(|budget| !budget.spend(1, 0)) {
+            return None;
+        }
         let size = (u32_at(bytes, offset)? as usize).checked_mul(2)?;
         let function = u16_at(bytes, offset + 4)?;
         let end = offset.checked_add(size)?;

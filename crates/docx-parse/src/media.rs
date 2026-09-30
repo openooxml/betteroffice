@@ -133,13 +133,14 @@ fn display_form<'a>(
     (Cow::Borrowed(data), mime_type, None)
 }
 
-/// The metafile bytes one document's transcodes may replay, and the SVG
-/// bytes they may produce, together.
+/// One document's cumulative metafile display allowances.
 #[derive(Debug)]
 #[cfg_attr(not(feature = "metafile"), allow(dead_code))]
 struct DisplayBudget {
     metafile_bytes: usize,
     svg_bytes: usize,
+    #[cfg(feature = "metafile")]
+    replay: ooxml_metafile::ReplayBudget,
 }
 
 impl Default for DisplayBudget {
@@ -147,6 +148,14 @@ impl Default for DisplayBudget {
         Self {
             metafile_bytes: 64 * 1024 * 1024,
             svg_bytes: 64 * 1024 * 1024,
+            #[cfg(feature = "metafile")]
+            replay: {
+                let picture = ooxml_metafile::ReplayBudget::default();
+                ooxml_metafile::ReplayBudget {
+                    work: 4 * picture.work,
+                    pixels: 4 * picture.pixels,
+                }
+            },
         }
     }
 }
@@ -208,8 +217,11 @@ fn metafile_display_form<'a>(
     if data.len() > budget.metafile_bytes {
         return placeholder("the document's pictures exceed the display size limit".to_owned());
     }
+    if budget.replay.work == 0 || budget.replay.pixels == 0 {
+        return placeholder("the document's pictures exceed the replay limits".to_owned());
+    }
     budget.metafile_bytes -= data.len();
-    match ooxml_metafile::to_svg(data) {
+    match ooxml_metafile::to_svg_with_budget(data, &mut budget.replay) {
         Ok(svg) if svg.markup.len() <= budget.svg_bytes => {
             budget.svg_bytes -= svg.markup.len();
             let warning = (!svg.omissions.is_empty()).then(|| {
@@ -327,6 +339,34 @@ mod tests {
             &media["word/media/a.png"],
             &media["media/a.png"]
         ));
+    }
+
+    #[cfg(feature = "metafile")]
+    #[test]
+    fn metafile_parts_share_the_document_work_budget() {
+        let data = include_bytes!("../../ooxml-metafile/tests/fixtures/shapes.emf");
+        let mut replay = ooxml_metafile::ReplayBudget::default();
+        let before = replay.work;
+        ooxml_metafile::to_svg_with_budget(data, &mut replay).unwrap();
+        let mut budget = DisplayBudget::default();
+        budget.replay.work = 2 * (before - replay.work);
+        for index in 0..3 {
+            let (display, mime, warning) = display_form(
+                data,
+                "image/x-emf",
+                &format!("word/media/image{index}.emf"),
+                &mut budget,
+            );
+            assert_eq!(mime, "image/svg+xml");
+            let svg = std::str::from_utf8(&display).unwrap();
+            if index < 2 {
+                assert!(warning.is_none());
+                assert!(!svg.contains(r##"fill="#f1f3f4""##));
+            } else {
+                assert!(warning.unwrap().contains("replay limits"));
+                assert!(svg.contains(r##"fill="#f1f3f4""##));
+            }
+        }
     }
 
     #[test]

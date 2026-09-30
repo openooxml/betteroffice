@@ -5,7 +5,9 @@
 //! adds text, bitmaps, general clipping and styled pens, and records ink it
 //! cannot reproduce as an omission instead of refusing.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::drawing::{
@@ -50,6 +52,27 @@ pub(crate) const FULL_LIMITS: Limits = Limits {
     text_chars: 1_000_000,
     bitmap_pixels: 16_777_216,
 };
+
+pub(crate) struct SharedBudget {
+    pub remaining: Cell<crate::ReplayBudget>,
+    pub exceeded: Cell<bool>,
+}
+
+impl SharedBudget {
+    pub(crate) fn spend(&self, work: u64, pixels: u64) -> bool {
+        if self.exceeded.get() {
+            return false;
+        }
+        let remaining = self.remaining.get();
+        let exceeded = work > remaining.work || pixels > remaining.pixels;
+        self.remaining.set(crate::ReplayBudget {
+            work: remaining.work.saturating_sub(work),
+            pixels: remaining.pixels.saturating_sub(pixels),
+        });
+        self.exceeded.set(exceeded);
+        !exceeded
+    }
+}
 
 pub(crate) type Xform = [f64; 6];
 
@@ -243,6 +266,7 @@ pub(crate) struct Player<const FULL: bool> {
     pub omissions: BTreeMap<&'static str, usize>,
     pub text_chars: usize,
     pub bitmap_pixels: u64,
+    pub budget: Option<Rc<SharedBudget>>,
     pub refusal: Option<String>,
     /// How many metafiles enclose this one.
     pub depth: usize,
@@ -280,6 +304,7 @@ impl<const FULL: bool> Player<FULL> {
             omissions: BTreeMap::new(),
             text_chars: 0,
             bitmap_pixels: 0,
+            budget: None,
             refusal: None,
             depth: 0,
             plus_only: false,
@@ -298,9 +323,23 @@ impl<const FULL: bool> Player<FULL> {
         None
     }
 
-    /// Spends path commands and bitmap pixels built outside `push`, such as
-    /// clip regions and nested drawings, refusing past the limits.
+    /// Spends cumulative work and pixels in the full profile.
+    pub(crate) fn spend(&mut self, work: u64, pixels: u64) -> Option<()> {
+        if FULL
+            && self
+                .budget
+                .as_ref()
+                .is_some_and(|budget| !budget.spend(work, pixels))
+        {
+            self.overflowed = true;
+            return self.refuse("the metafile draws more than the replay limits");
+        }
+        Some(())
+    }
+
+    /// Spends commands and pixels built outside `push`.
     pub(crate) fn charge(&mut self, commands: usize, pixels: u64) -> Option<()> {
+        self.spend(commands as u64, pixels)?;
         self.commands = self.commands.saturating_add(commands);
         self.bitmap_pixels = self.bitmap_pixels.saturating_add(pixels);
         if self.commands > self.limits.commands || self.bitmap_pixels > self.limits.bitmap_pixels {
@@ -419,6 +458,9 @@ impl<const FULL: bool> Player<FULL> {
     }
 
     pub(crate) fn push(&mut self, command: PathCommand) {
+        if self.spend(1, 0).is_none() {
+            return;
+        }
         self.commands += 1;
         if self.commands > self.limits.commands {
             self.overflowed = true;
@@ -619,6 +661,9 @@ impl<const FULL: bool> Player<FULL> {
     }
 
     pub(crate) fn push_op(&mut self, op: Op) {
+        if self.spend(1, 0).is_none() {
+            return;
+        }
         if self.ops.len() >= self.limits.ops {
             self.overflowed = true;
             return;

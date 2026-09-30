@@ -27,7 +27,12 @@ pub struct Svg {
 
 /// Replays `bytes` and writes the drawing as SVG.
 pub fn to_svg(bytes: &[u8]) -> Result<Svg, Refusal> {
-    let drawing = crate::replay(bytes)?;
+    to_svg_with_budget(bytes, &mut crate::ReplayBudget::default())
+}
+
+/// Writes SVG while spending cumulative replay allowances.
+pub fn to_svg_with_budget(bytes: &[u8], budget: &mut crate::ReplayBudget) -> Result<Svg, Refusal> {
+    let drawing = crate::replay_with_budget(bytes, budget)?;
     let markup = write(&drawing)?;
     Ok(Svg {
         markup,

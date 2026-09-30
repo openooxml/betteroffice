@@ -4,7 +4,9 @@
 mod common;
 
 use common::*;
-use ooxml_metafile::{MAX_SVG_BYTES, decode, to_svg};
+use ooxml_metafile::{
+    MAX_SVG_BYTES, ReplayBudget, decode, replay, replay_with_budget, to_svg, to_svg_with_budget,
+};
 
 fn check(bytes: &[u8]) {
     if let Ok(svg) = to_svg(bytes) {
@@ -342,6 +344,119 @@ fn nested_image(inner: &[u8]) -> (u16, u16, Vec<u8>) {
     let mut image = u32s(&[0xDBC0_1002, 2, 3, inner.len() as u32]);
     image.extend(inner);
     (0x4008, 0x0500, image)
+}
+
+fn repeated_nested_images(inner: &[u8], count: usize) -> Vec<u8> {
+    let mut records = vec![plus_header(true)];
+    records.extend((0..count).map(|_| nested_image(inner)));
+    records.push(plus_draw_image(
+        0,
+        [0.0, 0.0, 10.0, 10.0],
+        [0.0, 0.0, 10.0, 10.0],
+    ));
+    records.push(plus_eof());
+    Emf::new(10, 10)
+        .rec(70, &plus(&records).1)
+        .recs(vec![rect(0, 0, 5, 5)])
+        .bytes()
+}
+
+#[test]
+fn repeated_cropped_nested_images_spend_decoded_pixels() {
+    let inner = cropped_rle_emf(1024);
+    let drawing = replay(&inner).unwrap();
+    let ooxml_metafile::drawing::Op::Image(image) = &drawing.ops[0] else {
+        panic!("the child must retain its cropped bitmap");
+    };
+    assert_eq!((image.bitmap.width, image.bitmap.height), (1, 1));
+    assert!(to_svg(&repeated_nested_images(&inner, 1)).is_ok());
+    assert_eq!(
+        to_svg(&repeated_nested_images(&inner, 17)).unwrap_err().0,
+        "the metafile draws more than the replay limits"
+    );
+}
+
+#[test]
+fn failed_nested_images_spend_work_and_decoded_pixels() {
+    let mut inner = cropped_rle_emf(1024);
+    let last_record = inner.len() - 20;
+    inner[last_record..last_record + 4].copy_from_slice(&250u32.to_le_bytes());
+    assert!(replay(&inner).is_err());
+    let mut budget = ReplayBudget::default();
+    let before = budget;
+    let svg = to_svg_with_budget(&repeated_nested_images(&inner, 1), &mut budget).unwrap();
+    assert!(svg.markup.contains("<path"));
+    assert_eq!(before.pixels - budget.pixels, 1024 * 1024);
+    assert!(budget.work < before.work);
+    assert_eq!(
+        to_svg(&repeated_nested_images(&inner, 17)).unwrap_err().0,
+        "the metafile draws more than the replay limits"
+    );
+}
+
+#[test]
+fn refused_replays_keep_their_cumulative_spending() {
+    let mut broken = cropped_rle_emf(256);
+    broken.truncate(broken.len() - 20);
+    let mut budget = ReplayBudget {
+        work: ReplayBudget::default().work,
+        pixels: 2 * 256 * 256,
+    };
+    let before = budget.work;
+    assert!(replay_with_budget(&broken, &mut budget).is_err());
+    assert_eq!(budget.pixels, 256 * 256);
+    assert!(budget.work < before);
+    assert!(replay_with_budget(&broken, &mut budget).is_err());
+    assert_eq!(budget.pixels, 0);
+    assert_eq!(
+        replay_with_budget(&cropped_rle_emf(256), &mut budget)
+            .unwrap_err()
+            .0,
+        "the metafile draws more than the replay limits"
+    );
+}
+
+#[test]
+fn failed_nested_images_spend_cumulative_record_work() {
+    let inner = Emf::new(10, 10).rec(250, &[]).bytes();
+    let mut budget = ReplayBudget {
+        work: 100,
+        ..ReplayBudget::default()
+    };
+    assert_eq!(
+        replay_with_budget(&repeated_nested_images(&inner, 30), &mut budget)
+            .unwrap_err()
+            .0,
+        "the metafile draws more than the replay limits"
+    );
+    assert_eq!(budget.work, 0);
+    assert_eq!(budget.pixels, ReplayBudget::default().pixels);
+}
+
+#[test]
+fn a_failed_emf_in_a_wmf_keeps_its_spending() {
+    let mut inner = cropped_rle_emf(256);
+    inner.truncate(inner.len() - 20);
+    let mut escape = u16s(&[0x000F, (34 + inner.len()) as u16]);
+    escape.extend(u32s(&[0x4346_4D57, 1, 0x0001_0000]));
+    escape.extend(u16s(&[0]));
+    escape.extend(u32s(&[0, 1, inner.len() as u32, 0, inner.len() as u32]));
+    escape.extend(&inner);
+    let bytes = Wmf::new(1440, 1440, 1440)
+        .recs(vec![(0x0626, escape), (0x041B, i16s(&[10, 10, 0, 0]))])
+        .bytes();
+    let mut budget = ReplayBudget::default();
+    let before = budget;
+    assert!(replay_with_budget(&bytes, &mut budget).is_ok());
+    assert_eq!(before.pixels - budget.pixels, 256 * 256);
+    let mut budget = ReplayBudget {
+        pixels: 256 * 256 - 1,
+        ..ReplayBudget::default()
+    };
+    assert_eq!(
+        replay_with_budget(&bytes, &mut budget).unwrap_err().0,
+        "the metafile draws more than the replay limits"
+    );
 }
 
 #[test]

@@ -329,6 +329,15 @@ pub fn stretch_dibits(dest: [i32; 4], dib: &(Vec<u8>, Vec<u8>), rop: u32) -> (u3
     (81, body)
 }
 
+pub fn cropped_rle_emf(side: u32) -> Vec<u8> {
+    let mut bmi = u32s(&[40, side, side]);
+    bmi.extend(u16s(&[1, 8]));
+    bmi.extend(u32s(&[1, 4, 0, 0, 2, 0, 0, 0x00ff_ffff]));
+    let (kind, mut body) = stretch_dibits([0, 0, 10, 10], &(bmi, vec![1, 1, 0, 1]), 0x00CC_0020);
+    body[32..40].copy_from_slice(&i32s(&[1, 1]));
+    Emf::new(10, 10).rec(kind, &body).bytes()
+}
+
 /// `ALPHABLEND` (114) or `TRANSPARENTBLT` (116) of a whole DIB into `dest`.
 pub fn blend(
     kind: u32,

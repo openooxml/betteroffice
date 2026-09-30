@@ -23,9 +23,12 @@ mod wmf;
 pub use drawing::{Drawing, Omission, Refusal};
 pub use shapes::{MetafileDrawing, MetafileOp, MetafileStroke, decode};
 #[cfg(feature = "svg")]
-pub use svg::{MAX_SVG_BYTES, Svg, placeholder_svg, to_svg};
+pub use svg::{MAX_SVG_BYTES, Svg, placeholder_svg, to_svg, to_svg_with_budget};
 
-use player::Player;
+use std::cell::Cell;
+use std::rc::Rc;
+
+use player::{Player, SharedBudget};
 use read::{i32_at, u16_at, u32_at};
 
 /// Whether `bytes` start like an EMF or a WMF.
@@ -52,16 +55,61 @@ pub fn picture_size(bytes: &[u8]) -> Option<(f64, f64)> {
     (width != 0.0 && height != 0.0).then(|| fit(width / inch * 96.0, height / inch * 96.0))
 }
 
-/// Replays every record of an EMF, EMF+ or WMF metafile it can reproduce.
-pub fn replay(bytes: &[u8]) -> Result<Drawing, Refusal> {
-    play_nested(bytes, 0).map_err(Refusal)
+/// Remaining cumulative replay work and bitmap pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplayBudget {
+    pub work: u64,
+    pub pixels: u64,
 }
 
-pub(crate) fn play_nested(bytes: &[u8], depth: usize) -> Result<Drawing, String> {
+impl Default for ReplayBudget {
+    fn default() -> Self {
+        Self {
+            work: (player::FULL_LIMITS.records
+                + player::FULL_LIMITS.ops
+                + player::FULL_LIMITS.commands) as u64,
+            pixels: player::FULL_LIMITS.bitmap_pixels,
+        }
+    }
+}
+
+/// Replays every record of an EMF, EMF+ or WMF metafile it can reproduce.
+pub fn replay(bytes: &[u8]) -> Result<Drawing, Refusal> {
+    replay_with_budget(bytes, &mut ReplayBudget::default())
+}
+
+/// Replays with cumulative allowances, spending them even on refusal.
+pub fn replay_with_budget(bytes: &[u8], budget: &mut ReplayBudget) -> Result<Drawing, Refusal> {
+    let limits = ReplayBudget::default();
+    let allowance = ReplayBudget {
+        work: budget.work.min(limits.work),
+        pixels: budget.pixels.min(limits.pixels),
+    };
+    let shared = Rc::new(SharedBudget {
+        remaining: Cell::new(allowance),
+        exceeded: Cell::new(false),
+    });
+    let result = play_nested(bytes, 0, Rc::clone(&shared));
+    let remaining = shared.remaining.get();
+    budget.work -= allowance.work - remaining.work;
+    budget.pixels -= allowance.pixels - remaining.pixels;
+    if shared.exceeded.get() {
+        return Err(Refusal(
+            "the metafile draws more than the replay limits".to_owned(),
+        ));
+    }
+    result.map_err(Refusal)
+}
+
+pub(crate) fn play_nested(
+    bytes: &[u8],
+    depth: usize,
+    budget: Rc<SharedBudget>,
+) -> Result<Drawing, String> {
     let player = if emf::is_emf(bytes) {
-        play_full_emf(bytes, depth)
+        play_full_emf(bytes, depth, budget)
     } else if wmf::is_wmf(bytes) {
-        play_wmf::<true>(bytes, depth)
+        play_wmf::<true>(bytes, depth, Some(budget))
     } else {
         Err("the bytes are not an EMF or WMF metafile".to_owned())
     }?;
@@ -82,27 +130,41 @@ pub(crate) fn play_nested(bytes: &[u8], depth: usize) -> Result<Drawing, String>
 
 /// An EMF with EMF+ records plays them, as Office does, when they draw
 /// without omissions; otherwise, and for plain EMF, its GDI records play.
-fn play_full_emf(bytes: &[u8], depth: usize) -> Result<Player<true>, String> {
-    if !has_plus_header(bytes) {
-        return play_emf::<true>(bytes, depth, false);
+fn play_full_emf(
+    bytes: &[u8],
+    depth: usize,
+    budget: Rc<SharedBudget>,
+) -> Result<Player<true>, String> {
+    if !has_plus_header(bytes, &budget) {
+        return play_emf::<true>(bytes, depth, false, Some(budget));
     }
-    let plus = play_emf::<true>(bytes, depth, true);
+    let plus = play_emf::<true>(bytes, depth, true, Some(Rc::clone(&budget)));
+    if budget.exceeded.get() {
+        return Err("the metafile draws more than the replay limits".to_owned());
+    }
     if let Ok(player) = &plus
         && player.omissions.is_empty()
         && !player.ops.is_empty()
     {
         return plus;
     }
-    match play_emf::<true>(bytes, depth, false) {
+    let gdi = play_emf::<true>(bytes, depth, false, Some(Rc::clone(&budget)));
+    if budget.exceeded.get() {
+        return Err("the metafile draws more than the replay limits".to_owned());
+    }
+    match gdi {
         Ok(gdi) if !gdi.ops.is_empty() => Ok(gdi),
         gdi => plus.or(gdi),
     }
 }
 
 /// Whether an EMF+ header comment comes before the EMF's first drawing record.
-fn has_plus_header(bytes: &[u8]) -> bool {
+fn has_plus_header(bytes: &[u8], budget: &SharedBudget) -> bool {
     let mut offset = 0usize;
     for index in 0..player::FULL_LIMITS.records {
+        if !budget.spend(1, 0) {
+            return false;
+        }
         let (Some(kind), Some(size)) = (
             u32_at(bytes, offset),
             u32_at(bytes, offset.saturating_add(4)),
@@ -155,6 +217,7 @@ pub(crate) fn play_emf<const FULL: bool>(
     bytes: &[u8],
     depth: usize,
     prefer_plus: bool,
+    budget: Option<Rc<SharedBudget>>,
 ) -> Result<Player<FULL>, String> {
     let malformed = || "the EMF header is malformed".to_owned();
     if u32_at(bytes, 0) != Some(1)
@@ -171,14 +234,19 @@ pub(crate) fn play_emf<const FULL: bool>(
         (1.0, 1.0)
     };
     let mut player = Player::<FULL>::new(frame, handles + 1, unit);
+    player.budget = budget;
     player.depth = depth;
     player.prefer_plus = prefer_plus;
     if FULL {
         player.device_per_mm = emf::device_per_mm(bytes);
-        player.gdi_records = has_gdi_records(bytes, player.limits.records);
+        player.gdi_records =
+            has_gdi_records(bytes, player.limits.records, player.budget.as_deref());
     }
     let mut offset = 0usize;
     for index in 0..player.limits.records {
+        player
+            .spend(1, 0)
+            .ok_or_else(|| "the metafile draws more than the replay limits".to_owned())?;
         let (Some(kind), Some(size)) = (
             u32_at(bytes, offset),
             u32_at(bytes, offset.saturating_add(4)),
@@ -227,9 +295,12 @@ pub(crate) fn play_emf<const FULL: bool>(
 
 /// Whether an EMF holds records besides its header, comments and EOF: a
 /// dual EMF+ metafile's GDI rendition, or plain GDI content.
-fn has_gdi_records(bytes: &[u8], limit: usize) -> bool {
+fn has_gdi_records(bytes: &[u8], limit: usize, budget: Option<&SharedBudget>) -> bool {
     let mut offset = 0usize;
     for _ in 0..limit {
+        if budget.is_some_and(|budget| !budget.spend(1, 0)) {
+            return false;
+        }
         let (Some(kind), Some(size)) = (
             u32_at(bytes, offset),
             u32_at(bytes, offset.saturating_add(4)),
@@ -252,18 +323,29 @@ fn has_gdi_records(bytes: &[u8], limit: usize) -> bool {
 pub(crate) fn play_wmf<const FULL: bool>(
     bytes: &[u8],
     depth: usize,
+    budget: Option<Rc<SharedBudget>>,
 ) -> Result<Player<FULL>, String> {
     let limits = if FULL {
         player::FULL_LIMITS
     } else {
         player::SHAPES_LIMITS
     };
-    let records = wmf::wmf_records(bytes, limits.records).ok_or("the WMF is malformed")?;
+    let records = wmf::wmf_records(bytes, limits.records, budget.as_deref()).ok_or_else(|| {
+        if budget.as_ref().is_some_and(|budget| budget.exceeded.get()) {
+            "the metafile draws more than the replay limits"
+        } else {
+            "the WMF is malformed"
+        }
+        .to_owned()
+    })?;
     if FULL {
         if let Some(emf) = wmf::embedded_emf(bytes, &records.records)
-            && let Ok(player) = play_emf::<FULL>(&emf, depth, false)
+            && let Ok(player) = play_emf::<FULL>(&emf, depth, false, budget.clone())
         {
             return Ok(player);
+        }
+        if budget.as_ref().is_some_and(|budget| budget.exceeded.get()) {
+            return Err("the metafile draws more than the replay limits".to_owned());
         }
         if !records.framed {
             return Err("the WMF has neither a placeable header nor a window extent".to_owned());
@@ -280,6 +362,7 @@ pub(crate) fn play_wmf<const FULL: bool>(
         (1.0, 1.0)
     };
     let mut player = Player::<FULL>::new(records.frame, records.handles, unit);
+    player.budget = budget;
     player.depth = depth;
     player.pixel = FULL.then_some(1.0);
     match wmf::play_wmf(&mut player, bytes, &records.records) {

@@ -6,6 +6,7 @@
 //! metafile plays its EMF+ records here, and its GDI records only inside the
 //! spans an `EmfPlusGetDC` record opens.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::drawing::{
@@ -174,6 +175,7 @@ pub(crate) fn comment<const FULL: bool>(player: &mut Player<FULL>, bytes: &[u8])
             return player.refuse("an EMF+ record has an invalid size");
         }
         let data = &bytes[at + 12..at + 12 + data_size];
+        player.spend(1, 0)?;
         match player.plus.as_deref() {
             None if kind == HEADER => {
                 let dpi = (
@@ -599,6 +601,9 @@ fn push_shape<const FULL: bool>(
     even_odd: bool,
     clip: Clip,
 ) {
+    if player.spend(path.len() as u64, 0).is_none() {
+        return;
+    }
     player.commands = player.commands.saturating_add(path.len());
     if player.commands > player.limits.commands {
         player.overflowed = true;
@@ -1615,7 +1620,7 @@ fn parse_image<const FULL: bool>(player: &mut Player<FULL>, data: &[u8]) -> Opti
                 player.refuse::<()>("the metafile's bitmaps exceed the pixel budget");
                 return None;
             }
-            player.bitmap_pixels += pixels;
+            player.charge(0, pixels)?;
             let pixels = match mime {
                 Some(mime) => Pixels::Encoded {
                     mime,
@@ -1639,46 +1644,32 @@ fn parse_image<const FULL: bool>(player: &mut Player<FULL>, data: &[u8]) -> Opti
     }
 }
 
-/// Replays a metafile image, charging what it holds to the enclosing
-/// picture's budgets.
+/// Replays an embedded image with the enclosing picture's allowances.
 fn nested<const FULL: bool>(player: &mut Player<FULL>, bytes: &[u8]) -> Option<Nested> {
     if player.depth + 1 >= crate::MAX_NESTING {
         return Some(Nested::TooDeep);
     }
-    let Ok(drawing) = crate::play_nested(bytes, player.depth + 1) else {
+    let budget = Rc::clone(player.budget.as_ref()?);
+    let drawing = crate::play_nested(bytes, player.depth + 1, Rc::clone(&budget));
+    if budget.exceeded.get() {
+        return player.refuse("the metafile draws more than the replay limits");
+    }
+    let Ok(drawing) = drawing else {
         return Some(Nested::Failed);
     };
     let mut commands = 0;
-    let mut pixels = 0;
     let mut clips = std::collections::HashSet::new();
-    let mut bitmaps = std::collections::HashSet::new();
-    let mut bitmap = |bitmap: &Arc<Bitmap>| {
-        if bitmaps.insert(Arc::as_ptr(bitmap)) {
-            pixels += u64::from(bitmap.width) * u64::from(bitmap.height);
-        }
-    };
     for op in &drawing.ops {
-        let mut paint = |paint: &Paint| {
-            if let Paint::Pattern { tile, .. } = paint {
-                bitmap(tile);
-            }
-        };
         let clip = match op {
             Op::Shape(shape) => {
                 commands += shape.path.len();
-                shape.fill.iter().for_each(&mut paint);
-                shape.stroke.iter().for_each(|stroke| paint(&stroke.paint));
                 &shape.clip
             }
             Op::Text(text) => {
                 commands += text.text.len();
-                paint(&text.fill);
                 &text.clip
             }
-            Op::Image(image) => {
-                bitmap(&image.bitmap);
-                &image.clip
-            }
+            Op::Image(image) => &image.clip,
         };
         let mut at = clip.as_deref();
         while let Some(link) = at
@@ -1688,7 +1679,6 @@ fn nested<const FULL: bool>(player: &mut Player<FULL>, bytes: &[u8]) -> Option<N
             at = link.parent.as_deref();
         }
     }
-    player.charge(commands, pixels)?;
     Some(Nested::Drawn(drawing, commands))
 }
 

@@ -119,6 +119,7 @@ pub(crate) fn decode(
     bits: &[u8],
     usage: u32,
     budget: u64,
+    charge: impl FnOnce(u64) -> bool,
 ) -> Result<Dib, &'static str> {
     let header = header(bmi)?;
     let pixels = u64::from(header.width) * u64::from(header.height);
@@ -132,7 +133,11 @@ pub(crate) fn decode(
             "image/jpeg"
         };
         let (width, height) = encoded_size(bits, mime).ok_or("an embedded image is malformed")?;
-        if u64::from(width) * u64::from(height) > budget.min(MAX_BITMAP_PIXELS) {
+        let pixels = u64::from(width) * u64::from(height);
+        if pixels > budget.min(MAX_BITMAP_PIXELS) {
+            return Err("a bitmap exceeds the pixel budget");
+        }
+        if !charge(pixels) {
             return Err("a bitmap exceeds the pixel budget");
         }
         return Ok(Dib {
@@ -144,6 +149,9 @@ pub(crate) fn decode(
                 bytes: bits.to_vec(),
             },
         });
+    }
+    if !charge(pixels) {
+        return Err("a bitmap exceeds the pixel budget");
     }
     if usage != 0 && header.bits <= 8 {
         return Err("a bitmap indexes a palette the metafile does not carry");

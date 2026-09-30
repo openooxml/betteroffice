@@ -27,8 +27,8 @@ pub struct MetafileDrawing {
 /// Solid fills and strokes in fractions of the metafile's frame, or `None`
 /// when the metafile holds anything else.
 pub fn decode(bytes: &[u8]) -> Option<MetafileDrawing> {
-    let player = crate::play_emf::<false>(bytes, 0, false)
-        .or_else(|_| crate::play_wmf::<false>(bytes, 0))
+    let player = crate::play_emf::<false>(bytes, 0, false, None)
+        .or_else(|_| crate::play_wmf::<false>(bytes, 0, None))
         .ok()?;
     let drawing = finish(player)?;
     (!drawing.ops.is_empty()).then_some(drawing)
