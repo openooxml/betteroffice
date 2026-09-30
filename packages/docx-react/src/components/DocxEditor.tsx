@@ -1436,15 +1436,16 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     interactionPageHostRef: canvasRenderer.canvasHostRef,
     i18n,
     partEditOpen: partEditTarget !== null,
+    readOnly,
     onAddComment: useCallback(
       ({ from, to, yPos }: { from: number; to: number; yPos: number | null }) => {
         setCommentSelectionRange({ from, to });
-        setAddCommentYPosition(yPos);
+        setAddCommentYPosition(yPos === null ? null : yPos / state.zoom);
         setShowCommentsSidebar(true);
         setIsAddingComment(true);
         setFloatingCommentBtn(null);
       },
-      []
+      [state.zoom]
     ),
   });
 
@@ -1483,7 +1484,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const dialogApply = useRef({ pageSetup: handlePageSetupApply, watermark: handleWatermarkApply });
   dialogApply.current = { pageSetup: handlePageSetupApply, watermark: handleWatermarkApply };
 
-  const { scrollPageInfo, setScrollPageInfo } = useScrollPageInfo({
+  const { scrollPageInfo, setScrollPageInfo, readCurrentPage } = useScrollPageInfo({
     scrollContainerRef,
     pagedEditorRef,
   });
@@ -1615,6 +1616,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     zoom: state.zoom,
     setZoom: (zoom: number) => setState((prev) => ({ ...prev, zoom })),
     scrollPageInfo,
+    readCurrentPage,
     loadParsedDocument,
     loadBuffer,
     comments,
