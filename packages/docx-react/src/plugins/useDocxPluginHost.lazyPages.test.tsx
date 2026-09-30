@@ -5,7 +5,10 @@ import { resolve } from 'node:path';
 import { useEffect } from 'react';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { createDisplayListQueries, type DisplayList } from '@betteroffice/docx/layout/render';
-import { createRenderedDomContext } from '@betteroffice/docx/plugin-api/RenderedDomContext';
+import {
+  createCanvasHostProjector,
+  createRenderedDomContext,
+} from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import type { YrsLoc } from '@betteroffice/docx/yrs';
 import { createDocxCommandController } from '../commands/createDocxCommandStore';
@@ -168,7 +171,10 @@ test('a visible proposal waits for its page build and paint, then notifies plugi
           if (autoPresent) paint();
           else present = paint;
           binding.onRenderedDomContext(
-            createRenderedDomContext(pages, 1, { displayListQueries: queries }),
+            createRenderedDomContext(pages, 1, {
+              displayListQueries: queries,
+              projector: createCanvasHostProjector(pages, queries, 1),
+            }),
             queries
           );
         });
@@ -236,7 +242,10 @@ test('a visible proposal waits for its page build and paint, then notifies plugi
     stampRevisionPreviewKey(fullQueries, renderedPreviewKey(result.current.display.queries!));
     const reference = createPluginGeometry(
       geometry()!.layout,
-      createRenderedDomContext(pages, 1, { displayListQueries: fullQueries }),
+      createRenderedDomContext(pages, 1, {
+        displayListQueries: fullQueries,
+        projector: createCanvasHostProjector(pages, fullQueries, 1),
+      }),
       layer,
       () => true,
       () => null,
