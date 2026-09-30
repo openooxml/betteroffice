@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { Comment } from '@betteroffice/docx/types/content';
-import type { YrsDocxHost } from '@betteroffice/docx/yrs';
+import type { YrsDocxHost, YrsSession } from '@betteroffice/docx/yrs';
 import {
   extractEmbeddedFontFaces,
+  extractFontsFromDocument,
   loadEmbeddedFontFamilies,
   registerDocumentFaces,
   getRenderableDocumentFonts,
@@ -81,6 +82,7 @@ export function useDocumentLoader({
   // Embedded families registered under an alias because another live document
   // registered different faces under the same name.
   const [fontAliases, setFontAliases] = useState<ReadonlyMap<string, string>>(NO_FONT_ALIASES);
+  const skippedFontsRef = useRef<SkippedFonts | null>(null);
 
   const loadParsedDocument = useCallback(
     (doc: Document, seedBytes?: Uint8Array) => {
@@ -137,8 +139,12 @@ export function useDocumentLoader({
   );
 
   const acceptHostDocument = useCallback(
-    (host: YrsDocxHost, generation: number) => {
-      if (!loadGeneration.complete(generation)) return;
+    (host: YrsDocxHost, generation: number, session?: Pick<YrsSession, 'onUpdate'>) => {
+      if (!loadGeneration.complete(generation)) {
+        // A session replaced within this load may hold another document.
+        if (session && loadGeneration.isCurrent(generation)) skippedFontsRef.current?.changed();
+        return;
+      }
       const doc = host.document;
       history.reset(doc);
       setLoadingState({ isLoading: false, parseError: null });
@@ -150,6 +156,21 @@ export function useDocumentLoader({
       setDocumentFonts(
         [...new Map(documentFonts.map((font) => [font.name.toLowerCase(), font])).values()]
       );
+      const isCurrent = () => loadGeneration.isCurrent(generation);
+      const skipped = new Set(session ? host.unusedScriptFonts?.map(fontKey) : undefined);
+      const isSkipped = (family: string) => skipped.has(fontKey(family));
+      const skippedFonts =
+        session && skipped.size > 0
+          ? skipUntilChanged(session, () => {
+              if (!isCurrent()) return;
+              fontScope
+                .loadFontsWithMapping(
+                  [...host.referencedFonts, ...extractFontsFromDocument(doc)].filter(isSkipped)
+                )
+                .catch((error) => console.warn('Failed to load document fonts:', error));
+            })
+          : null;
+      skippedFontsRef.current = skippedFonts;
       loadDocumentFontsInOrder(
         loadEmbeddedFontFamilies(
           doc.package.fontTable,
@@ -157,13 +178,17 @@ export function useDocumentLoader({
           host.fontTableRelationshipsXml,
           fontScope
         ),
-        () => loadGeneration.isCurrent(generation),
+        isCurrent,
         setFontAliases,
-        () =>
-          Promise.all([
-            fontScope.loadFontsWithMapping(host.referencedFonts),
-            fontScope.loadDocumentFonts(doc),
-          ])
+        () => {
+          const used = (family: string) => !isSkipped(family);
+          const loaded = Promise.all([
+            fontScope.loadFontsWithMapping(host.referencedFonts.filter(used)),
+            fontScope.loadFontsWithMapping([...extractFontsFromDocument(doc)].filter(used)),
+          ]);
+          skippedFonts?.start();
+          return loaded;
+        }
       );
     },
     [loadGeneration, history, setDocumentFonts, setLoadingState, fontScope]
@@ -261,6 +286,46 @@ export function useDocumentLoader({
 }
 
 const NO_FONT_ALIASES: ReadonlyMap<string, string> = new Map();
+
+const fontKey = (family: string): string => family.trim().toLowerCase();
+
+interface SkippedFonts {
+  /** The fonts loaded at open have started loading. */
+  start(): void;
+  /** The document changed outside `session`'s updates. */
+  changed(): void;
+}
+
+/**
+ * Runs `load` once, after `start` and the first change to the document,
+ * local or remote: an edit can give a font skipped at open text to draw.
+ */
+function skipUntilChanged(
+  session: Pick<YrsSession, 'onUpdate'>,
+  load: () => void
+): SkippedFonts {
+  let started = false;
+  let changed = false;
+  let loaded = false;
+  const run = () => {
+    if (!started || !changed || loaded) return;
+    loaded = true;
+    load();
+  };
+  const onChange = () => {
+    unsubscribe();
+    changed = true;
+    run();
+  };
+  const unsubscribe = session.onUpdate(onChange);
+  return {
+    start: () => {
+      started = true;
+      run();
+    },
+    changed: onChange,
+  };
+}
 
 /**
  * Takes the aliases of a document's embedded faces once they registered, and

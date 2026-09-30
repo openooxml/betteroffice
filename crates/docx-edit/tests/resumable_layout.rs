@@ -142,11 +142,10 @@ fn section(columns: u64, last: bool) -> String {
     }
 }
 
-/// A generated document, and whether it has a section with columns.
-fn generated(seed: u64) -> (Vec<u8>, bool) {
+/// A generated document.
+fn generated(seed: u64) -> Vec<u8> {
     let mut rng = Rng(seed * 2_654_435_761 + 1);
     let mut body = String::new();
-    let mut columns = false;
     let text = |rng: &mut Rng, words: u64| {
         (0..words)
             .map(|index| format!("w{}{}", index, rng.next(1000)))
@@ -162,9 +161,7 @@ fn generated(seed: u64) -> (Vec<u8>, bool) {
             )),
             1 => body.push_str(&p(&id, r#"<w:r><w:br w:type="page"/></w:r>"#)),
             2 => {
-                let count = 1 + rng.next(3);
-                columns |= count > 1;
-                body.push_str(&section(count, false));
+                body.push_str(&section(1 + rng.next(3), false));
             }
             3 => body.push_str(&p(
                 &id,
@@ -210,17 +207,14 @@ fn generated(seed: u64) -> (Vec<u8>, bool) {
         "",
         &r("A note long enough to take a line or two of its own."),
     );
-    (with_body_and_note(&body, &note), columns)
+    with_body_and_note(&body, &note)
 }
 
 #[test]
 fn generated_documents_lay_out_alike_in_steps() {
     for seed in 1..=24 {
-        let (bytes, columns) = generated(seed);
-        // Relayout after an edit resumes placement inside a section; with columns
-        // that can panic in terminal column balancing on main, independently of
-        // stepping, so those documents check the stepped pass alone.
-        assert_stepped_equals_whole(&format!("generated document {seed}"), &bytes, !columns);
+        let bytes = generated(seed);
+        assert_stepped_equals_whole(&format!("generated document {seed}"), &bytes, true);
     }
 }
 
@@ -228,7 +222,7 @@ fn generated_documents_lay_out_alike_in_steps() {
 fn a_change_between_steps_abandons_the_pass() {
     docx_layout::clear_measure_fonts();
     let font = docx_layout::register_measure_font(FONT).unwrap();
-    let (bytes, _) = generated(3);
+    let bytes = generated(3);
 
     let (engine, request) = seeded(&bytes, font);
     assert!(
