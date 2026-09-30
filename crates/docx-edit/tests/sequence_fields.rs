@@ -594,6 +594,26 @@ fn a_text_box_with_a_projected_nested_sequence_keeps_cached_results() {
 }
 
 #[test]
+fn a_text_box_sequence_too_deep_to_lower_keeps_its_sequence_cached() {
+    let deep = (0..8).fold(
+        field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>2</w:t>", 1),
+        |content, _| format!("<w:sdt><w:sdtPr/><w:sdtContent>{content}</w:sdtContent></w:sdt>"),
+    );
+    let body = [
+        paragraph(&field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>1</w:t>", 1)),
+        format!("<w:p>{}</w:p>", text_box(&deep)),
+        paragraph(&field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>3</w:t>", 1)),
+    ]
+    .concat();
+    for hydrated in [false, true] {
+        assert_eq!(
+            boxed_sequence_results_in(&lowered_body(&body, false, hydrated)),
+            [(false, "1"), (false, "3")].map(|(boxed, result)| (boxed, result.to_owned()))
+        );
+    }
+}
+
+#[test]
 fn a_text_box_with_a_projected_sequence_keeps_cached_results() {
     let boxed = format!(
         r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> SEQ Figure </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:hyperlink w:anchor="top">{}</w:hyperlink><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,

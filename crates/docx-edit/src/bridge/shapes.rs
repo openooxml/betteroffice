@@ -412,6 +412,7 @@ fn push_shape_body_block(
     env: &RenderEnv,
 ) {
     if depth > MAX_SHAPE_BODY_DEPTH {
+        skip_deep_content(block, nested_sequences);
         return;
     }
     match string(block, "type").as_deref() {
@@ -511,6 +512,7 @@ fn shape_content_runs(
     env: &RenderEnv,
 ) -> Vec<Run> {
     if depth >= MAX_SHAPE_BODY_DEPTH {
+        skip_deep_content(content, nested_sequences);
         return Vec::new();
     }
     match string(content, "type").as_deref() {
@@ -567,6 +569,23 @@ fn shape_content_runs(
         Some("simpleField") => vec![shape_field_run(content, env)],
         _ => Vec::new(),
     }
+}
+
+/// Content too deep to lower still names its SEQ fields, so their sequences
+/// keep cached results rather than numbering without them.
+fn skip_deep_content(content: &Value, nested_sequences: &mut Vec<String>) {
+    match string(content, "type").as_deref() {
+        Some("complexField" | "simpleField") => nested_sequences.extend(
+            string(content, "instruction")
+                .as_deref()
+                .and_then(docx_layout::sequence_fields::sequence_name),
+        ),
+        Some("hyperlink") => {
+            nested_sequences.extend(crate::seed::hyperlink_sequence_names(content));
+        }
+        _ => {}
+    }
+    nested_sequences.extend(crate::seed::nested_sequence_names(content));
 }
 
 /// The result of a complex field that holds a hyperlink or a simple field,
