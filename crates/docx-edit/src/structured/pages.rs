@@ -2228,7 +2228,11 @@ mod tests {
                 normalized_region_settings(Some(&full), true),
                 "{flag}"
             );
-            assert_ne!(normalized_region_settings(Some(&partial), true), defaults, "{flag}");
+            assert_ne!(
+                normalized_region_settings(Some(&partial), true),
+                defaults,
+                "{flag}"
+            );
         }
         for settings in [
             json!({"compatibilityFlags": {"suppressSpBfAfterPgBrk": "true"}}),
