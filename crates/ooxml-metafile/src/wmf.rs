@@ -68,6 +68,7 @@ pub(crate) fn wmf_records(
     bytes: &[u8],
     max_records: usize,
     budget: Option<&SharedBudget>,
+    default_origin: bool,
 ) -> Option<WmfRecords> {
     let placeable = u32_at(bytes, 0)? == WMF_PLACEABLE_KEY;
     let header = if placeable { 22 } else { 0 };
@@ -136,6 +137,11 @@ pub(crate) fn wmf_records(
             _ => {}
         }
     }
+    let org = if placeable || !default_origin {
+        org
+    } else {
+        org.or(Some((0, 0)))
+    };
     let mut frame = placeable_frame.unwrap_or((0.0, 0.0, 1.0, 1.0));
     let windowed = if let (Some(org), Some((width, height))) = (org, ext)
         && width != 0

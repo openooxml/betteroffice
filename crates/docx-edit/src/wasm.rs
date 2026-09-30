@@ -1352,21 +1352,17 @@ impl EditSession {
             self.engine.doc().install_media(media);
             fonts
         } else {
-            let fonts =
-                crate::seed::referenced_fonts(&envelope).map_err(|error| error.to_string())?;
-            let parts = crate::structured::source::SourceParts::new(parts);
-            let mut metadata = crate::seed::source_metadata(&envelope, Some(&parts))
-                .map_err(|error| error.to_string())?;
+            let (mut metadata, index, fonts) =
+                crate::seed::replica_source(envelope, parts, Arc::clone(&source), digest.clone())?;
             metadata.watch_comments(self.engine.doc());
             self.engine.doc().install_source(metadata, js_entropy());
             self.engine
                 .doc()
-                .retain_source_docx_with_digest(Arc::clone(&source), digest.clone());
+                .retain_source(crate::identity::SourcePackage::Ready(Arc::new(index)));
             self.engine.doc().install_media(media);
             self.engine
                 .doc()
                 .set_media_sources(crate::media::MediaSources::default());
-            drop(envelope);
             crate::seed::SeededFonts {
                 referenced: fonts,
                 unused_script: Vec::new(),
@@ -5694,6 +5690,27 @@ mod tests {
         let preview = EditSession::new(79.0).unwrap();
         preview.open_preview(&bytes, 1).unwrap().unwrap();
         assert!(preview.materialize_docx().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_replica_indexes_its_package_as_it_opens() {
+        let bytes = batch_docx();
+        let origin = EditSession::new(83.0).unwrap();
+        origin.open_docx(&bytes, true, None, None).unwrap();
+        let replica = EditSession::new(84.0).unwrap();
+        replica.open_docx(&bytes, false, None, None).unwrap();
+        assert!(replica.engine.doc().source_indexed());
+        replica.load(&origin.encode_state()).unwrap();
+        let paragraphs = |session: &EditSession| {
+            envelope(
+                &session
+                    .read_paragraphs_json(r#"{"story":"body","view":"accepted"}"#)
+                    .unwrap(),
+            )["paragraphs"]
+                .clone()
+        };
+        assert_eq!(paragraphs(&replica), paragraphs(&origin));
+        assert!(replica.materialize_docx().unwrap().is_some());
     }
 
     #[test]

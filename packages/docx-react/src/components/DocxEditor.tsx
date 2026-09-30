@@ -95,6 +95,7 @@ import { useHeaderFooterEditing } from './DocxEditor/hooks/useHeaderFooterEditin
 import type { PartEditTarget } from './DocxEditor/partEdit';
 import { useDocumentLoader } from './DocxEditor/hooks/useDocumentLoader';
 import { useCompatibilityWarm, useYrsCoreSession } from './DocxEditor/hooks/useYrsCoreSession';
+import { useHostProposalRevisions } from './DocxEditor/hooks/useHostProposalRevisions';
 import {
   useDocxEnginePrewarm,
   useDocxEnginePrewarmOnBytes,
@@ -265,6 +266,8 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
    * `applyEdits`, commands and plugin writes stay blocked. Default: false.
    */
   allowHostProposals?: boolean;
+  /** Lists host proposals as sidebar cards while `allowHostProposals` is set; otherwise they stay out of the sidebar. Default: false. */
+  showHostProposalsInSidebar?: boolean;
   /**
    * When true, the editor does not intercept Cmd/Ctrl+F or Cmd/Ctrl+H.
    * This lets the browser or host app handle native find/history shortcuts.
@@ -843,6 +846,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     readOnly: readOnlyProp = false,
     previewFirstPage = false,
     allowHostProposals = false,
+    showHostProposalsInSidebar = false,
     disableFindReplaceShortcuts = false,
     toolbarExtra,
     toolbar,
@@ -1117,7 +1121,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const { resetForNewDocument: resetEditorState } = useResetEditorState({
     commentsLoadedRef,
     trackedChangesLoadedRef,
+    sidebarAutoOpenedRef,
     setComments,
+    setYrsTrackedChangesResult,
     setHeadingInfos,
     setShowCommentsSidebar,
     setIsAddingComment,
@@ -1235,6 +1241,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const opening = yrsCore.opening;
   failOpeningRef.current = yrsCore.failOpening;
   coreSessionRef.current = yrsCore.session;
+  const hostProposalRevisions = useHostProposalRevisions(yrsCore.session);
+  const hostProposalRevisionsRef = useRef(hostProposalRevisions);
+  hostProposalRevisionsRef.current = hostProposalRevisions;
   const reportPagedError = useCallback(
     (error: Error, session?: unknown) => {
       if (untakenWorkerSession(session)) return;
@@ -1403,12 +1412,18 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     []
   );
 
+  const getProposalAnchorKeys = useCallback(
+    () => proposalAnchorKeys(pagedEditorRef.current?.getYrsSession() ?? null),
+    []
+  );
+
   // Auto-open the sidebar once if the loaded document already has tracked changes.
   useCommentLifecycle({
     commentToRevision,
     setComments,
     isLoading: state.isLoading || opening,
-    trackedChangesCount: trackedChanges.length,
+    trackedChanges,
+    getProposalAnchorKeys,
     setShowCommentsSidebar,
     trackedChangesLoadedRef,
   });
@@ -2075,9 +2090,22 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     []
   );
 
+  const sidebarTrackedChanges = useMemo(
+    () =>
+      allowHostProposals && !showHostProposalsInSidebar
+        ? trackedChanges.filter(
+            (change) =>
+              !hostProposalRevisions.has(`revision-${change.revisionId}`) &&
+              (change.insertionRevisionId == null ||
+                !hostProposalRevisions.has(`revision-${change.insertionRevisionId}`))
+          )
+        : trackedChanges,
+    [trackedChanges, allowHostProposals, showHostProposalsInSidebar, hostProposalRevisions]
+  );
+
   const commentSidebarItems = useCommentSidebarItems({
     comments,
-    trackedChanges,
+    trackedChanges: sidebarTrackedChanges,
     callbacks: stableCallbacks,
     showResolved: showCommentsSidebar,
     isAddingComment: showCommentsSidebar ? isAddingComment : false,
@@ -2103,13 +2131,13 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     }
   }, [allSidebarItems, expandedSidebarItem]);
 
-  // Build a map from insertion revisionIds to sidebar item IDs for replacement tracked changes.
-  // This allows clicking the insertion part of a replacement to activate the same sidebar card.
+  // Map insertion revisionIds to the sidebar card id prefix of replacement tracked changes,
+  // so clicking the insertion part of a replacement activates the same card.
   const revisionIdAliases = useMemo(() => {
     const map = new Map<string, string>();
-    trackedChanges.forEach((change, idx) => {
+    trackedChanges.forEach((change) => {
       if (change.type === 'replacement' && change.insertionRevisionId != null) {
-        map.set(String(change.insertionRevisionId), `tc-${change.revisionId}-${idx}`);
+        map.set(String(change.insertionRevisionId), `tc-${change.revisionId}-`);
       }
     });
     return map;
@@ -2185,15 +2213,23 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     if (!cursorSidebarItem) {
       for (const revision of session.listRevisions()) {
         if (revision.range.story !== head.story) continue;
+        const revId = String(yrsIdToNumericId(revision.revisionId));
+        if (
+          allowHostProposalsRef.current &&
+          hostProposalRevisionsRef.current.has(`revision-${revId}`)
+        ) {
+          continue;
+        }
         const start = session.locateParagraph(head.story, revision.range.start.paraId).start + revision.range.start.offset;
         const end = session.locateParagraph(head.story, revision.range.end.paraId).start + revision.range.end.offset;
         if (start <= offset && offset <= end) {
-          const revId = String(yrsIdToNumericId(revision.revisionId));
           const prefix = `tc-${revId}-`;
           let match = commentSidebarItems.find((item) => item.id.startsWith(prefix));
           if (!match) {
-            const aliasedId = revisionIdAliases.get(revId);
-            if (aliasedId) match = commentSidebarItems.find((item) => item.id === aliasedId);
+            const aliasedPrefix = revisionIdAliases.get(revId);
+            if (aliasedPrefix) {
+              match = commentSidebarItems.find((item) => item.id.startsWith(aliasedPrefix));
+            }
           }
           if (match) cursorSidebarItem = match.id;
           break;
@@ -2227,11 +2263,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // manual close stays closed.
   useEffect(() => {
     if (sidebarAutoOpenedRef.current || commentSidebarItems.length === 0) return;
-    const proposed = proposalAnchorKeys(pagedEditorRef.current?.getYrsSession() ?? null);
+    const proposed = getProposalAnchorKeys();
     if (commentSidebarItems.every((item) => proposed.has(item.anchorKey ?? ''))) return;
     sidebarAutoOpenedRef.current = true;
     setShowCommentsSidebar(true);
-  }, [commentSidebarItems]);
+  }, [commentSidebarItems, getProposalAnchorKeys, setShowCommentsSidebar]);
 
   const editorContainerStyle: CSSProperties = {
     flex: 1,

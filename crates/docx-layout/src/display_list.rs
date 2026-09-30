@@ -1480,6 +1480,9 @@ pub(crate) struct ParagraphBlockIn {
     pub(crate) pm_start: Option<i64>,
     #[serde(default)]
     pub(crate) pm_end: Option<i64>,
+    /// [`paragraph_base_is_rtl`], computed once for all of the paragraph's fragments
+    #[serde(skip)]
+    base_rtl: std::sync::OnceLock<bool>,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -1717,8 +1720,8 @@ struct ImageRunIn {
     css_float: Option<String>,
     /// anchor position for a floating image run (`wp:positionH`/`wp:positionV`),
     /// resolved to a page rect by [`resolve_anchored_position`]
-    #[serde(default)]
-    position: Option<AnchorPosIn>,
+    #[serde(default, deserialize_with = "deserialize_anchor_position")]
+    position: Option<crate::types::ImageRunPosition>,
     #[serde(default)]
     crop_top: Option<f64>,
     #[serde(default)]
@@ -1778,31 +1781,35 @@ pub(crate) struct RotationBoundsIn {
     offset_y: Option<f64>,
 }
 
-/// anchor of a floating image/text-box run (`ImageRunPosition`): one axis each,
-/// resolved against the page geometry in [`resolve_anchored_position`].
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AnchorPosIn {
     #[serde(default)]
-    horizontal: Option<AnchorAxisIn>,
+    horizontal: Option<crate::types::AxisPosition>,
     #[serde(default)]
-    vertical: Option<AnchorAxisIn>,
+    vertical: Option<crate::types::AxisPosition>,
     #[serde(default)]
     relative_height: Option<u64>,
 }
 
-/// one axis of an anchor: an OOXML `relativeFrom` band plus either an `align`
-/// keyword or a `posOffset` (EMU). Mirrors `ImageRunPosition.{horizontal,vertical}`.
-#[derive(Deserialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-struct AnchorAxisIn {
-    #[serde(default)]
-    relative_to: Option<String>,
-    /// offset from the band base, in EMU (converted with [`emu_to_px`])
-    #[serde(default)]
-    pos_offset: Option<f64>,
-    #[serde(default)]
-    align: Option<String>,
+fn deserialize_anchor_position<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::types::ImageRunPosition>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(
+        Option::<AnchorPosIn>::deserialize(deserializer)?.map(|position| {
+            crate::types::ImageRunPosition {
+                horizontal: position.horizontal,
+                vertical: position.vertical,
+                relative_height: position.relative_height,
+                use_simple_pos: None,
+                simple_pos: None,
+                behind_doc: None,
+            }
+        }),
+    )
 }
 
 #[derive(Deserialize, Clone)]
@@ -2540,8 +2547,8 @@ pub(crate) struct TextBoxBlockIn {
     css_float: Option<String>,
     #[serde(default)]
     wrap_type: Option<String>,
-    #[serde(default)]
-    position: Option<AnchorPosIn>,
+    #[serde(default, deserialize_with = "deserialize_anchor_position")]
+    position: Option<crate::types::ImageRunPosition>,
     #[serde(default)]
     pm_start: Option<i64>,
     #[serde(default)]
@@ -2766,6 +2773,10 @@ pub(crate) struct PageIn {
     pub(crate) size: SizeIn,
     #[serde(default)]
     pub(crate) margins: MarginsIn,
+    #[serde(default)]
+    body_margins: Option<MarginsIn>,
+    #[serde(default)]
+    body_anchor_margins: Option<MarginsIn>,
     /// 1-based page number (canonical layouts carry it; falls back to index+1)
     #[serde(default)]
     pub(crate) number: Option<u64>,
@@ -3472,8 +3483,12 @@ fn is_ltr_strong(c: char) -> bool {
 /// paragraphs carrying at least one w:rtl run are candidates; the base then
 /// follows the first strong directional character (dir="auto" rule). (#719)
 fn paragraph_base_is_rtl(block: &ParagraphBlockIn) -> bool {
+    *block.base_rtl.get_or_init(|| runs_base_is_rtl(&block.runs))
+}
+
+fn runs_base_is_rtl(runs: &[RunIn]) -> bool {
     let mut has_rtl_run = false;
-    for run in &block.runs {
+    for run in runs {
         if let RunIn::Text(t) = run
             && t.fmt.rtl == Some(true)
         {
@@ -3484,7 +3499,7 @@ fn paragraph_base_is_rtl(block: &ParagraphBlockIn) -> bool {
     if !has_rtl_run {
         return false;
     }
-    for run in &block.runs {
+    for run in runs {
         if let RunIn::Text(t) = run {
             for c in t.text.chars() {
                 if is_rtl_strong(c) {
@@ -4212,8 +4227,9 @@ fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
     if columns.separator != Some(true) || columns.count <= 1 {
         return;
     }
-    let content_width = (page.size.w - page.margins.left - page.margins.right).max(0.0);
-    let content_bottom = page.size.h - page.margins.bottom;
+    let margins = page.body_margins.as_ref().unwrap_or(&page.margins);
+    let content_width = (page.size.w - margins.left - margins.right).max(0.0);
+    let content_bottom = page.size.h - margins.bottom;
     if columns.equal_width == Some(false) && !columns.columns.is_empty() {
         let mut cursor = page.margins.left;
         for index in 0..columns.count.saturating_sub(1) {
@@ -4230,7 +4246,7 @@ fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
             cursor += width;
             prims.push(Primitive::Line(LinePrimitive {
                 x1: px(cursor + space / 2.0),
-                y1: px(page.margins.top),
+                y1: px(margins.top),
                 x2: px(cursor + space / 2.0),
                 y2: px(content_bottom),
                 stroke_width: px(0.5),
@@ -4256,7 +4272,7 @@ fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
             + columns.gap / 2.0;
         prims.push(Primitive::Line(LinePrimitive {
             x1: px(x),
-            y1: px(page.margins.top),
+            y1: px(margins.top),
             x2: px(x),
             y2: px(content_bottom),
             stroke_width: px(0.5),
@@ -4274,11 +4290,12 @@ fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
 
 /// Exact body content/column boxes for interaction queries.
 fn page_content_geometry(page: &PageIn) -> (DisplayBounds, Vec<DisplayBounds>) {
-    let content_width = (page.size.w - page.margins.left - page.margins.right).max(0.0);
-    let content_height = (page.size.h - page.margins.top - page.margins.bottom).max(0.0);
+    let margins = page.body_margins.as_ref().unwrap_or(&page.margins);
+    let content_width = (page.size.w - margins.left - margins.right).max(0.0);
+    let content_height = (page.size.h - margins.top - margins.bottom).max(0.0);
     let content = DisplayBounds {
         x: px(page.margins.left),
-        y: px(page.margins.top),
+        y: px(margins.top),
         width: px(content_width),
         height: px(content_height),
     };
@@ -4331,7 +4348,7 @@ fn page_content_geometry(page: &PageIn) -> (DisplayBounds, Vec<DisplayBounds>) {
         for index in 0..count {
             bounds.push(DisplayBounds {
                 x: px(x),
-                y: px(page.margins.top),
+                y: px(margins.top),
                 width: px(widths[index]),
                 height: px(content_height),
             });
@@ -4349,7 +4366,7 @@ fn page_content_geometry(page: &PageIn) -> (DisplayBounds, Vec<DisplayBounds>) {
     let bounds = (0..count)
         .map(|index| DisplayBounds {
             x: px(page.margins.left + index as f64 * (width + gap)),
-            y: px(page.margins.top),
+            y: px(margins.top),
             width: px(width),
             height: px(content_height),
         })
@@ -4555,13 +4572,14 @@ fn emit_note_item(
 }
 
 fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
+    let margins = page.body_margins.as_ref().unwrap_or(&page.margins);
     let content_width = (page.size.w - page.margins.left - page.margins.right).max(1.0);
     let mut regions = Vec::with_capacity(page.note_areas.len());
     for area in &page.note_areas {
         let kind = area.kind.as_deref().unwrap_or("footnote");
         let y = area
             .y
-            .unwrap_or(page.size.h - page.margins.bottom - area.height.unwrap_or(0.0));
+            .unwrap_or(page.size.h - margins.bottom - area.height.unwrap_or(0.0));
         let columns = area.columns.unwrap_or(1).max(1) as usize;
         let column_width =
             ((content_width - (columns - 1) as f64 * NOTE_COLUMN_GAP_PX) / columns as f64).max(1.0);
@@ -4644,8 +4662,8 @@ fn measured_block_height(measured: &MeasuredBlockIn) -> f64 {
     }
 }
 
-fn resolve_hf_box_position(
-    position: Option<&AnchorPosIn>,
+pub(crate) fn resolve_hf_box_position(
+    position: Option<&crate::types::ImageRunPosition>,
     css_float: Option<&str>,
     width: f64,
     height: f64,
@@ -5013,19 +5031,26 @@ fn build_display_list_selected(
         }
 
         // Page coordinate frame for anchored-float resolution.
+        let margins = page.body_anchor_margins.as_ref().unwrap_or(&page.margins);
         let float_geom = PageFloatGeom {
             page_width: page.size.w,
             page_height: page.size.h,
-            margin_left: page.margins.left,
-            margin_top: page.margins.top,
-            content_width: page.size.w - page.margins.left - page.margins.right,
-            content_height: page.size.h - page.margins.top - page.margins.bottom,
+            margin_left: margins.left,
+            margin_top: margins.top,
+            content_width: page.size.w - margins.left - margins.right,
+            content_height: page.size.h - margins.top - margins.bottom,
         };
 
+        let mut float_paragraphs = HashSet::new();
         let mut behind_objects = Vec::new();
         for fragment in &page.fragments {
             match fragment {
                 FragmentIn::Paragraph(fragment) => {
+                    if !float_paragraphs
+                        .insert((block_key(&fragment.block_id), fragment.x.to_bits()))
+                    {
+                        continue;
+                    }
                     let Some(measured) = by_id.get(&block_key(&fragment.block_id)) else {
                         continue;
                     };
@@ -5207,8 +5232,10 @@ fn build_display_list_selected(
         }
 
         // Front floating images paint after body content.
+        float_paragraphs.clear();
         for frag in &page.fragments {
             if let FragmentIn::Paragraph(pf) = frag
+                && float_paragraphs.insert((block_key(&pf.block_id), pf.x.to_bits()))
                 && let Some(mb) = by_id.get(&block_key(&pf.block_id))
                 && let BlockIn::Paragraph(block) = &mb.block
             {
@@ -7664,13 +7691,13 @@ fn emit_paragraph_borders(
 // ---------------------------------------------------------------------------
 
 /// Page coordinate frame for anchored floats, in pixels.
-struct PageFloatGeom {
-    page_width: f64,
-    page_height: f64,
-    margin_left: f64,
-    margin_top: f64,
-    content_width: f64,
-    content_height: f64,
+pub(crate) struct PageFloatGeom {
+    pub(crate) page_width: f64,
+    pub(crate) page_height: f64,
+    pub(crate) margin_left: f64,
+    pub(crate) margin_top: f64,
+    pub(crate) content_width: f64,
+    pub(crate) content_height: f64,
 }
 
 /// an anchor band: `base` is the band's origin (content-relative px) and `size`
@@ -7750,15 +7777,18 @@ fn vertical_anchor_band(
 /// paragraph fragment's content-relative top, which is the base for the
 /// `paragraph` and `line` bands. Anchors are resolved here rather than read off
 /// the fragment, because the layout does not store them.
-fn resolve_anchored_position(
-    imr: &ImageRunIn,
+pub(crate) fn resolve_anchored_position(
+    position: Option<&crate::types::ImageRunPosition>,
+    css_float: Option<&str>,
+    width: f64,
+    height: f64,
     fragment_y: f64,
     geom: &PageFloatGeom,
 ) -> (f64, f64) {
-    let x = match imr.position.as_ref().and_then(|p| p.horizontal.as_ref()) {
+    let x = match position.and_then(|p| p.horizontal.as_ref()) {
         None => {
-            if imr.css_float.as_deref() == Some("right") {
-                geom.content_width - image_layout_width(imr)
+            if css_float == Some("right") {
+                geom.content_width - width
             } else {
                 0.0
             }
@@ -7768,7 +7798,7 @@ fn resolve_anchored_position(
             match h.align.as_deref() {
                 Some("right") => {
                     if band.size != 0.0 {
-                        band.base + band.size - image_layout_width(imr)
+                        band.base + band.size - width
                     } else {
                         0.0
                     }
@@ -7776,7 +7806,7 @@ fn resolve_anchored_position(
                 Some("left") => band.base,
                 Some("center") => {
                     if band.size != 0.0 {
-                        band.base + (band.size - image_layout_width(imr)) / 2.0
+                        band.base + (band.size - width) / 2.0
                     } else {
                         0.0
                     }
@@ -7789,7 +7819,7 @@ fn resolve_anchored_position(
         }
     };
 
-    let y = match imr.position.as_ref().and_then(|p| p.vertical.as_ref()) {
+    let y = match position.and_then(|p| p.vertical.as_ref()) {
         None => fragment_y,
         Some(v) => {
             let band = vertical_anchor_band(v.relative_to.as_deref(), fragment_y, geom);
@@ -7797,14 +7827,14 @@ fn resolve_anchored_position(
                 Some("top") => band.base,
                 Some("center") => {
                     if band.size != 0.0 {
-                        band.base + (band.size - image_layout_height(imr)) / 2.0
+                        band.base + (band.size - height) / 2.0
                     } else {
                         fragment_y
                     }
                 }
                 Some("bottom") => {
                     if band.size != 0.0 {
-                        band.base + band.size - image_layout_height(imr)
+                        band.base + band.size - height
                     } else {
                         fragment_y
                     }
@@ -7881,7 +7911,12 @@ fn emit_paragraph_floating_images(
 }
 
 /// Word clamps a text-wrapping float into its page and leaves `wrapNone` free.
-fn clamp_wrapped_float_y(y: f64, height: f64, wrap: Option<&str>, page_height: f64) -> f64 {
+pub(crate) fn clamp_wrapped_float_y(
+    y: f64,
+    height: f64,
+    wrap: Option<&str>,
+    page_height: f64,
+) -> f64 {
     if !matches!(wrap, Some("square" | "tight" | "through" | "topAndBottom")) {
         return y;
     }
@@ -7896,7 +7931,14 @@ fn emit_floating_image(
     geom: &PageFloatGeom,
 ) {
     let block_ref = BlockRef::of(&block.id);
-    let (x, y) = resolve_anchored_position(imr, frag_y - geom.margin_top, geom);
+    let (x, y) = resolve_anchored_position(
+        imr.position.as_ref(),
+        imr.css_float.as_deref(),
+        image_layout_width(imr),
+        image_layout_height(imr),
+        frag_y - geom.margin_top,
+        geom,
+    );
     let page_x = geom.margin_left + x;
     let rot = imr
         .rotation_deg
@@ -11334,6 +11376,79 @@ fn normalize_integral_json_numbers(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_and_text_box_positions_ignore_legacy_metadata() {
+        let position = serde_json::json!({
+            "horizontal": {"relativeTo": "page", "posOffset": 914400},
+            "vertical": {"relativeTo": "margin", "posOffset": 0},
+            "relativeHeight": 7,
+        });
+        let measured = serde_json::json!([
+            {
+                "block": {"kind": "paragraph", "id": "image-anchor", "runs": [{
+                    "kind": "image", "src": "image", "width": 20, "height": 20,
+                    "displayMode": "float", "position": position,
+                }]},
+                "measure": {"kind": "paragraph", "totalHeight": 20, "lines": [{
+                    "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 1,
+                    "width": 0, "ascent": 15, "descent": 5, "lineHeight": 20,
+                }]},
+            },
+            {
+                "block": {"kind": "textBox", "id": "box", "width": 20, "height": 20,
+                          "displayMode": "float", "fillColor": "#eeeeee",
+                          "position": position, "content": []},
+                "measure": {"kind": "textBox", "width": 20, "height": 20,
+                            "innerMeasures": []},
+            },
+        ]);
+        let input = serde_json::json!({
+            "measured": measured,
+            "options": {},
+            "headersFooters": {"variants": [{
+                "rId": "header", "kind": "header", "type": "default",
+                "height": 20, "flowHeight": 20, "measured": measured,
+            }]},
+            "layout": {"pages": [{
+                "size": {"w": 500, "h": 500},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "fragments": [
+                    {"kind": "paragraph", "blockId": "image-anchor", "x": 96, "y": 96,
+                     "width": 308, "height": 20, "fromLine": 0, "toLine": 1},
+                    {"kind": "textBox", "blockId": "box", "x": 96, "y": 96,
+                     "width": 20, "height": 20},
+                ],
+            }]},
+        });
+        let expected = build_display_list_json(&input.to_string()).unwrap();
+        for metadata in [
+            serde_json::json!({"useSimplePos": 0}),
+            serde_json::json!({"behindDoc": "0"}),
+            serde_json::json!({"useSimplePos": [], "behindDoc": {}, "simplePos": false,
+                               "unknown": [1, 2]}),
+        ] {
+            let mut input = input.clone();
+            for path in ["/measured", "/headersFooters/variants/0/measured"] {
+                for measured in input.pointer_mut(path).unwrap().as_array_mut().unwrap() {
+                    let block = &mut measured["block"];
+                    let position = if block["kind"] == "paragraph" {
+                        &mut block["runs"][0]["position"]
+                    } else {
+                        &mut block["position"]
+                    };
+                    position
+                        .as_object_mut()
+                        .unwrap()
+                        .extend(metadata.as_object().unwrap().clone());
+                }
+            }
+            assert_eq!(
+                build_display_list_json(&input.to_string()).unwrap(),
+                expected
+            );
+        }
+    }
 
     /// Every retained primitive carries its attributes inline, so rarely set
     /// metadata stays boxed: 270k primitives cost 1.9 KB each before it was.
