@@ -49,10 +49,10 @@
 
 use crate::display_list::{
     DisplayBounds, DisplayList, DisplayPage, DocAttrs, HfRegion, NoteRegion, Primitive,
-    TableCellRef, doc_attrs, note_group_id,
+    ShapePrimitive, TableCellRef, doc_attrs, note_group_id,
 };
 use serde::Serialize;
-use serde_json::Number;
+use serde_json::{Number, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
@@ -1149,7 +1149,8 @@ fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
     if attrs.doc_start.is_none() {
         return false;
     }
-    // The canvas multiplies group and primitive opacity: either at zero paints nothing.
+    // The canvas multiplies the primitive's opacity with its group's, which it applies only
+    // inside a clip: either at zero paints nothing.
     let transparent =
         |opacity: Option<&Number>| opacity.and_then(Number::as_f64).is_some_and(|o| o <= 0.0);
     let own_opacity = match primitive {
@@ -1158,17 +1159,26 @@ fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
         Primitive::GlyphRun(run) => run.opacity.as_ref(),
         _ => None,
     };
-    if transparent(attrs.clip_group.as_ref().and_then(|group| group.opacity.as_ref()))
+    let group = attrs.clip_group.as_ref();
+    let group_clip = group.and_then(|group| group.clip.as_ref());
+    if (group_clip.is_some() && transparent(group.and_then(|group| group.opacity.as_ref())))
         || transparent(own_opacity)
         || transparent(attrs.primitive_opacity.as_ref())
     {
         return false;
     }
-    if let Some(clip) = attrs
-        .clip_group
-        .as_ref()
-        .and_then(|group| group.clip.as_ref())
-    {
+    let paints = match primitive {
+        Primitive::Text(text) => !text.text.trim().is_empty() && !text_fill_none(attrs),
+        Primitive::GlyphRun(run) => {
+            !run.glyphs.is_empty() && !run.text.trim().is_empty() && !text_fill_none(attrs)
+        }
+        Primitive::Shape(shape) => shape_fill_paints(shape),
+        _ => true,
+    };
+    if !paints {
+        return false;
+    }
+    if let Some(clip) = group_clip {
         let px = |value: &Option<Number>| value.as_ref().and_then(Number::as_f64).unwrap_or(0.0);
         let (left, top) = (px(&clip.x), px(&clip.y));
         let (width, height) = (px(&clip.w).max(0.0), px(&clip.h).max(0.0));
@@ -1213,7 +1223,44 @@ fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
         width.as_f64().unwrap_or(0.0),
         height.as_f64().unwrap_or(0.0),
     );
-    x >= left && x <= left + width && y >= top && y <= top + height
+    width > 0.0 && height > 0.0 && x >= left && x <= left + width && y >= top && y <= top + height
+}
+
+/// A run with no glyph fill: whether its outline paints differs by canvas path, so it covers nothing.
+fn text_fill_none(attrs: &DocAttrs) -> bool {
+    attrs
+        .modern_effects
+        .as_deref()
+        .and_then(|effects| effects.pointer("/textFill/kind"))
+        .and_then(Value::as_str)
+        == Some("none")
+}
+
+/// Whether a shape's fill paints its interior, as the overlay's occlusion check decides it.
+fn shape_fill_paints(shape: &ShapePrimitive) -> bool {
+    if shape.geometry_path.is_empty() {
+        return false;
+    }
+    let paint = shape.attrs.fill_paint.as_deref();
+    let field = |key: &str| {
+        paint
+            .and_then(|paint| paint.get(key))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+    };
+    match field("kind") {
+        Some("none") => false,
+        Some("gradient" | "pattern") => true,
+        Some("picture") if field("pictureSrc").is_some() || field("pictureRelId").is_some() => {
+            paint
+                .and_then(|paint| paint.get("pictureOpacity"))
+                .and_then(Value::as_f64)
+                .is_none_or(|opacity| opacity > 0.0)
+        }
+        _ => field("color")
+            .or(shape.fill.as_deref())
+            .is_some_and(|fill| !matches!(fill, "" | "transparent" | "none")),
+    }
 }
 
 /// Direct body hits override header/footer bands; empty band spots activate
@@ -2118,17 +2165,136 @@ mod tests {
     #[test]
     fn transparent_body_image_leaves_footer_clicks_to_the_footer() {
         let visible = band_page("footer", 420.0, vec![image(100.0, 440.0, Some(10))]);
-        assert_eq!(hit_test_regions(&visible, 0, 120.0, 455.0).unwrap().region, HitRegion::Body);
+        assert_eq!(
+            hit_test_regions(&visible, 0, 120.0, 455.0).unwrap().region,
+            HitRegion::Body
+        );
 
         let mut own = image(100.0, 440.0, Some(10));
         own["opacity"] = 0.into();
         let mut group = image(100.0, 440.0, Some(10));
-        group["clipGroup"] = serde_json::json!({"opacity": 0});
+        group["clipGroup"] = serde_json::json!({
+            "clip": {"x": 0, "y": 0, "w": 500, "h": 500}, "opacity": 0
+        });
         for image in [own, group] {
             let dl = band_page("footer", 420.0, vec![image]);
             let hit = hit_test_regions(&dl, 0, 120.0, 455.0).unwrap();
             assert_eq!(hit.region, HitRegion::Footer);
             assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
+        }
+
+        // The canvas applies group opacity only inside a clip.
+        let mut unclipped = image(100.0, 440.0, Some(10));
+        unclipped["clipGroup"] = serde_json::json!({"opacity": 0});
+        let dl = band_page("footer", 420.0, vec![unclipped]);
+        assert_eq!(
+            hit_test_regions(&dl, 0, 120.0, 455.0).unwrap().region,
+            HitRegion::Body
+        );
+    }
+
+    #[test]
+    fn body_text_that_paints_no_glyphs_leaves_header_clicks_to_the_header() {
+        let glyph_run = |text: &str| {
+            serde_json::json!({
+                "kind": "glyphRun", "fontId": 1, "size": 16, "color": "#000000",
+                "text": text, "docStart": 1, "docEnd": 6,
+                "glyphs": [{"id": 1, "x": 100, "y": 40, "cluster": 0, "advance": 50}]
+            })
+        };
+        let no_fill = serde_json::json!({"textFill": {"kind": "none"}});
+        let mut unfilled_run = run(100.0, 40.0, 50.0, 1);
+        unfilled_run["modernEffects"] = no_fill.clone();
+        let mut unfilled_glyphs = glyph_run("hello");
+        unfilled_glyphs["modernEffects"] = no_fill;
+        let mut blank_run = run(100.0, 40.0, 50.0, 1);
+        blank_run["text"] = "  \t".into();
+        let mut no_glyphs = glyph_run("hello");
+        no_glyphs["glyphs"] = serde_json::json!([]);
+        for text in [
+            unfilled_run,
+            unfilled_glyphs,
+            blank_run,
+            glyph_run(" "),
+            no_glyphs,
+        ] {
+            let dl = band_page("header", 0.0, vec![text]);
+            let hit = hit_test_regions(&dl, 0, 120.0, 35.0).unwrap();
+            assert_eq!(hit.region, HitRegion::Header);
+            assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
+        }
+        for text in [run(100.0, 40.0, 50.0, 1), glyph_run("hello")] {
+            let dl = band_page("header", 0.0, vec![text]);
+            assert_eq!(
+                hit_test_regions(&dl, 0, 120.0, 35.0).unwrap().region,
+                HitRegion::Body
+            );
+        }
+    }
+
+    #[test]
+    fn body_images_and_shapes_that_paint_nothing_leave_footer_clicks_to_the_footer() {
+        let mut no_width = image(100.0, 440.0, Some(10));
+        no_width["w"] = 0.into();
+        let mut no_height = image(100.0, 455.0, Some(10));
+        no_height["h"] = 0.into();
+        let shape = |paint: Option<serde_json::Value>, fill: Option<&str>| {
+            let mut shape = inline_shape_primitive(100.0, 440.0, 60.0, 40.0, 10, "shape:band");
+            if let Some(paint) = paint {
+                shape["fillPaint"] = paint;
+            }
+            if let Some(fill) = fill {
+                shape["fill"] = fill.into();
+            }
+            shape
+        };
+        let mut no_path = shape(None, Some("#ff0000"));
+        no_path["geometryPath"] = serde_json::json!([]);
+        for (x, primitive) in [
+            (100.0, no_width),
+            (120.0, no_height),
+            (
+                120.0,
+                shape(Some(serde_json::json!({"kind": "none"})), Some("#ff0000")),
+            ),
+            (120.0, shape(None, None)),
+            (120.0, shape(None, Some("transparent"))),
+            (
+                120.0,
+                shape(Some(serde_json::json!({"kind": "picture"})), None),
+            ),
+            (
+                120.0,
+                shape(
+                    Some(
+                        serde_json::json!({"kind": "picture", "pictureRelId": "rId9", "pictureOpacity": 0}),
+                    ),
+                    None,
+                ),
+            ),
+            (120.0, no_path),
+        ] {
+            let dl = band_page("footer", 420.0, vec![primitive]);
+            let hit = hit_test_regions(&dl, 0, x, 455.0).unwrap();
+            assert_eq!(hit.region, HitRegion::Footer);
+            assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
+        }
+        for primitive in [
+            shape(None, Some("#ff0000")),
+            shape(
+                Some(serde_json::json!({"kind": "solid", "color": "#00ff00"})),
+                None,
+            ),
+            shape(Some(serde_json::json!({"kind": "gradient"})), None),
+            shape(
+                Some(serde_json::json!({"kind": "picture", "pictureRelId": "rId9"})),
+                None,
+            ),
+        ] {
+            let dl = band_page("footer", 420.0, vec![primitive]);
+            let hit = hit_test_regions(&dl, 0, 120.0, 455.0).unwrap();
+            assert_eq!(hit.region, HitRegion::Body);
+            assert_eq!(hit.pos, Some(10));
         }
     }
 
