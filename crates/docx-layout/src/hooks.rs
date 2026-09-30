@@ -163,6 +163,20 @@ pub(crate) fn row_keep_heights(block: &TableBlock, measure: &TableExtent) -> Vec
     heights
 }
 
+/// Fits `height` at the cursor and reports whether that moved it. A retry that
+/// leaves the cursor in place (rounding can make a height that failed the
+/// caller's check pass `ensure_fits`) places there instead of looping.
+fn fit_moved_cursor(paginator: &mut Paginator, height: f64) -> bool {
+    let before = paginator.get_current();
+    let (column, pen_y) = {
+        let state = paginator.state(before);
+        (state.column_index, state.pen_y)
+    };
+    let after = paginator.ensure_fits(height);
+    let state = paginator.state(after);
+    after != before || state.column_index != column || state.pen_y > pen_y
+}
+
 /// Places an in-flow table, emitting one fragment per page or column it spans.
 ///
 /// The cursor is `(row_index, consumed)`, where `consumed` is how many pixels
@@ -239,8 +253,8 @@ fn layout_table_with_position(
             && consumed == 0.0
             && row_remaining_at_start > paginator.get_available_height()
             && paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
+            && fit_moved_cursor(paginator, row_remaining_at_start)
         {
-            paginator.ensure_fits(row_remaining_at_start);
             continue;
         }
 
@@ -272,8 +286,8 @@ fn layout_table_with_position(
             && (header_start_height <= column_capacity || first_body_kept_oversized)
             && header_start_height + pending_spacing > paginator.get_available_height()
             && paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
+            && fit_moved_cursor(paginator, header_start_height + pending_spacing)
         {
-            paginator.ensure_fits(header_start_height + pending_spacing);
             continue;
         }
         let minimum_body_slice = breaks.fresh_slice(row_index, consumed, body_capacity);
@@ -309,8 +323,9 @@ fn layout_table_with_position(
                 if cur > start_row {
                     break;
                 }
-                if paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top {
-                    paginator.ensure_fits(keep_height + header_overhead + pending_spacing);
+                if paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
+                    && fit_moved_cursor(paginator, keep_height + header_overhead + pending_spacing)
+                {
                     continue 'rows;
                 }
             }

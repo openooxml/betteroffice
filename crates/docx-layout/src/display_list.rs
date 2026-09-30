@@ -1480,6 +1480,9 @@ pub(crate) struct ParagraphBlockIn {
     pub(crate) pm_start: Option<i64>,
     #[serde(default)]
     pub(crate) pm_end: Option<i64>,
+    /// [`paragraph_base_is_rtl`], computed once for all of the paragraph's fragments
+    #[serde(skip)]
+    base_rtl: std::sync::OnceLock<bool>,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -3480,8 +3483,12 @@ fn is_ltr_strong(c: char) -> bool {
 /// paragraphs carrying at least one w:rtl run are candidates; the base then
 /// follows the first strong directional character (dir="auto" rule). (#719)
 fn paragraph_base_is_rtl(block: &ParagraphBlockIn) -> bool {
+    *block.base_rtl.get_or_init(|| runs_base_is_rtl(&block.runs))
+}
+
+fn runs_base_is_rtl(runs: &[RunIn]) -> bool {
     let mut has_rtl_run = false;
-    for run in &block.runs {
+    for run in runs {
         if let RunIn::Text(t) = run
             && t.fmt.rtl == Some(true)
         {
@@ -3492,7 +3499,7 @@ fn paragraph_base_is_rtl(block: &ParagraphBlockIn) -> bool {
     if !has_rtl_run {
         return false;
     }
-    for run in &block.runs {
+    for run in runs {
         if let RunIn::Text(t) = run {
             for c in t.text.chars() {
                 if is_rtl_strong(c) {

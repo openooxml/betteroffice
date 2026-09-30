@@ -1789,6 +1789,55 @@ mod pagination_rule_tests {
     }
 
     #[test]
+    fn a_kept_row_pair_terminates_when_rounding_fits_it_at_the_cursor() {
+        let heights = [20.0, 20.000000000000007];
+        let cell = |row: usize| {
+            json!({ "id": 30 + row, "blocks": [{
+                "kind": "paragraph", "id": 40 + row,
+                "runs": [{ "kind": "text", "text": "x", "fmt": {} }],
+                "attrs": { "keepNext": row == 0 },
+            }] })
+        };
+        let extent = |row: usize| {
+            json!({ "height": heights[row], "cells": [{ "width": 100, "height": heights[row],
+                "blocks": [{ "kind": "paragraph", "lines": [line(heights[row])],
+                             "totalHeight": heights[row] }] }] })
+        };
+        let table = json!({
+            "block": {
+                "kind": "table", "id": 2,
+                "rows": [{ "id": 20, "cells": [cell(0)] }, { "id": 21, "cells": [cell(1)] }],
+                "columnWidths": [100],
+            },
+            "measure": {
+                "kind": "table", "columnWidths": [100],
+                "totalWidth": 100, "totalHeight": heights[0] + heights[1],
+                "rows": [extent(0), extent(1)],
+            },
+        });
+        let mut value: Input = serde_json::from_value(json!({
+            "measured": [paragraph(1, 1, 20.0, json!({"spacing": {"after": 64}})), table],
+            "options": {
+                "pageSize": {"w": 500, "h": 500},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "sectionPageFloatBands": [{"default": [{"top": 220, "bottom": 240}]}],
+            },
+        }))
+        .unwrap();
+        let result = layout_document(&mut value).unwrap();
+        let last_row_end = result
+            .pages
+            .iter()
+            .flat_map(|page| &page.fragments)
+            .filter_map(|fragment| match fragment {
+                Fragment::Table(table) => Some(table.row_end),
+                _ => None,
+            })
+            .next_back();
+        assert_eq!(last_row_end, Some(2));
+    }
+
+    #[test]
     fn a_paragraph_crosses_two_thousand_disjoint_float_bands_on_one_page() {
         let count = 2_000;
         let bands: Vec<_> = (0..count)

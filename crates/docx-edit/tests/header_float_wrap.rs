@@ -179,7 +179,8 @@ fn body_text_flows_above_and_below_a_top_and_bottom_footer_float() {
         assert!((page.last().unwrap().0 - 750.25).abs() < 0.1);
         assert!(
             page.iter()
-                .all(|&(top, bottom)| bottom <= 650.25 || top >= 750.25)
+                .all(|&(top, bottom)| bottom <= 650.25 + 0.1 || top >= 750.25 - 0.1),
+            "{page:?}"
         );
     }
 }
