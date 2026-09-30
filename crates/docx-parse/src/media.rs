@@ -5,11 +5,316 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use indexmap::IndexMap;
+use ooxml_opc::{MAX_TOTAL_UNCOMPRESSED_BYTES, RetainedPackage};
 use serde::{Deserialize, Serialize};
 
 use crate::relationships::RelationshipMap;
 
 pub type MediaMap = IndexMap<String, Arc<MediaFile>>;
+
+/// How a [`MediaTable`] token starts: `media:{n}` names its `n`th part.
+pub const MEDIA_TOKEN_PREFIX: &str = "media:";
+
+/// The token naming a [`MediaTable`]'s `index`th part.
+pub fn media_token(index: usize) -> String {
+    format!("{MEDIA_TOKEN_PREFIX}{index}")
+}
+
+/// The part index `token` names, when it is a `media:{n}` token in its one
+/// spelling.
+pub fn media_token_index(token: &str) -> Option<usize> {
+    let digits = token.strip_prefix(MEDIA_TOKEN_PREFIX)?;
+    let canonical = !digits.is_empty()
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+        && (digits == "0" || !digits.starts_with('0'));
+    canonical.then(|| digits.parse().ok()).flatten()
+}
+
+/// Bytes read to tell whether [`display_form`] replaces a part.
+const SNIFFED_BYTES: usize = 64;
+
+/// The `word/media/` parts of a retained package in archive order, the
+/// `n`th of which a `media:{n}` token names. An image part stays compressed
+/// in the package until read, and its `data:` URL is built only when asked
+/// for. Parts browsers cannot decode are transcoded when the table is built,
+/// with the warnings [`build_media_map_with_warnings`] reports.
+#[derive(Clone, Debug)]
+pub struct MediaTable {
+    package: RetainedPackage,
+    parts: Arc<[MediaPart]>,
+    warnings: Arc<[String]>,
+}
+
+#[derive(Debug)]
+struct MediaPart {
+    path: String,
+    position: usize,
+    size: u64,
+    /// An image, which no parser reads as markup and so need not inflate
+    /// with the package.
+    image: bool,
+    mime_type: &'static str,
+    display: Option<Vec<u8>>,
+}
+
+impl MediaTable {
+    /// The media of `package`. The images it leaves compressed must fit the
+    /// container budget by their declared sizes.
+    pub fn new(package: RetainedPackage) -> Result<Self, String> {
+        let scan = MediaScan::new(package, MAX_TOTAL_UNCOMPRESSED_BYTES)?;
+        let total = scan
+            .parts
+            .iter()
+            .filter(|part| part.transcode)
+            .fold(scan.images, |total, part| total.saturating_add(part.size));
+        if total > MAX_TOTAL_UNCOMPRESSED_BYTES {
+            return Err(budget_exceeded());
+        }
+        let mut parts = scan
+            .parts
+            .iter()
+            .filter(|part| part.transcode)
+            .map(|part| {
+                scan.package
+                    .read(part.position)
+                    .map(|bytes| (part.path.clone(), bytes))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        scan.finish(&mut parts)
+    }
+
+    /// Whether the package's part at `path` is an image the table reads
+    /// itself, which inflating the package may skip.
+    pub fn keeps_compressed(&self, path: &str) -> bool {
+        self.parts
+            .iter()
+            .any(|part| part.image && part.path == path)
+    }
+
+    /// Whether the images left compressed, by their declared sizes, and the
+    /// `inflated` bytes of the package's other parts fit the container budget.
+    pub fn check_budget(&self, inflated: u64) -> Result<(), String> {
+        let total = self
+            .parts
+            .iter()
+            .filter(|part| part.image)
+            .fold(inflated, |total, part| total.saturating_add(part.size));
+        if total > MAX_TOTAL_UNCOMPRESSED_BYTES {
+            return Err(budget_exceeded());
+        }
+        Ok(())
+    }
+
+    pub fn len(&self) -> usize {
+        self.parts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.parts.is_empty()
+    }
+
+    /// The package path of the `index`th part.
+    pub fn path(&self, index: usize) -> Option<&str> {
+        self.parts.get(index).map(|part| part.path.as_str())
+    }
+
+    /// The media type of the bytes [`MediaTable::bytes`] returns.
+    pub fn mime_type(&self, index: usize) -> Option<&'static str> {
+        self.parts.get(index).map(|part| part.mime_type)
+    }
+
+    /// The `index`th part as displayed: its transcode, or its inflated bytes.
+    pub fn bytes(&self, index: usize) -> Result<Cow<'_, [u8]>, String> {
+        let part = self
+            .parts
+            .get(index)
+            .ok_or_else(|| format!("no media part {index}"))?;
+        match &part.display {
+            Some(display) => Ok(Cow::Borrowed(display)),
+            None => self.package.read(part.position).map(Cow::Owned),
+        }
+    }
+
+    /// The `data:` URL [`build_media_map`] gives the `index`th part.
+    pub fn data_url(&self, index: usize) -> Result<String, String> {
+        let bytes = self.bytes(index)?;
+        let mime_type = self.parts[index].mime_type;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok(format!("data:{mime_type};base64,{encoded}"))
+    }
+
+    /// The `data:` URL a `media:{n}` token stands for, or `None` for any other
+    /// string or a part that cannot be read.
+    pub fn resolve(&self, token: &str) -> Option<String> {
+        media_token_index(token)
+            .filter(|index| *index < self.len())
+            .and_then(|index| self.data_url(index).ok())
+    }
+
+    /// One warning per part that could not be transcoded for display.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// The media map image resolution reads, each part's token standing
+    /// where [`build_media_map`] puts its `data:` URL.
+    pub fn media_map(&self) -> MediaMap {
+        let mut media = MediaMap::new();
+        for (index, part) in self.parts.iter().enumerate() {
+            let file = Arc::new(MediaFile {
+                path: part.path.clone(),
+                filename: Some(
+                    part.path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&part.path)
+                        .to_owned(),
+                ),
+                mime_type: part.mime_type.to_owned(),
+                base64: String::new(),
+                data_url: media_token(index),
+            });
+            media.insert(part.path.clone(), Arc::clone(&file));
+            if let Some(normalized) = part.path.strip_prefix("word/") {
+                media.insert(normalized.to_owned(), file);
+            }
+        }
+        media
+    }
+}
+
+/// Media metadata and the budget reserved for images kept compressed.
+pub(crate) struct MediaScan {
+    package: RetainedPackage,
+    parts: Vec<ScannedPart>,
+    budget: u64,
+    images: u64,
+}
+
+struct ScannedPart {
+    path: String,
+    position: usize,
+    size: u64,
+    image: bool,
+    transcode: bool,
+}
+
+impl MediaScan {
+    /// Fails when compressed images' declared sizes exceed `budget`.
+    pub(crate) fn new(package: RetainedPackage, budget: u64) -> Result<Self, String> {
+        let budget = budget.min(MAX_TOTAL_UNCOMPRESSED_BYTES);
+        let mut parts = Vec::new();
+        let mut images = 0_u64;
+        for (position, (path, size)) in package.parts().enumerate() {
+            if !is_media_path(path) {
+                continue;
+            }
+            let prefix = package.read_prefix(position, SNIFFED_BYTES)?;
+            let image = is_image(&prefix);
+            let transcode = transcodes(&prefix, media_mime_type(path));
+            if image && !transcode {
+                images = images.saturating_add(size);
+                if images > budget {
+                    return Err(format!("inflated size exceeds {budget} bytes"));
+                }
+            }
+            parts.push(ScannedPart {
+                path: path.to_owned(),
+                position,
+                size,
+                image,
+                transcode,
+            });
+        }
+        Ok(Self {
+            package,
+            parts,
+            budget,
+            images,
+        })
+    }
+
+    /// Whether the image at `path` stays compressed during extraction.
+    pub(crate) fn keeps_compressed(&self, path: &str) -> bool {
+        self.parts
+            .iter()
+            .any(|part| part.image && !part.transcode && part.path == path)
+    }
+
+    /// What the images left compressed leave of the budget.
+    pub(crate) fn remaining_budget(&self) -> u64 {
+        self.budget - self.images
+    }
+
+    /// Moves transcode inputs from the bounded extraction into the table.
+    pub(crate) fn finish(
+        self,
+        inflated: &mut Vec<(String, Vec<u8>)>,
+    ) -> Result<MediaTable, String> {
+        let package = self.package;
+        let mut warnings = Vec::new();
+        let parts = self
+            .parts
+            .into_iter()
+            .map(|part| {
+                let mime_type = media_mime_type(&part.path);
+                let (mime_type, display) = if part.transcode {
+                    let index = inflated
+                        .iter()
+                        .position(|(path, _)| path == &part.path)
+                        .ok_or_else(|| format!("missing inflated media part {}", part.path))?;
+                    let data = inflated.remove(index).1;
+                    let (display, mime_type, warning) = display_form(&data, mime_type, &part.path);
+                    warnings.extend(warning);
+                    let display = match display {
+                        Cow::Owned(display) => display,
+                        Cow::Borrowed(_) => data,
+                    };
+                    (mime_type, Some(display))
+                } else {
+                    (mime_type, None)
+                };
+                Ok(MediaPart {
+                    path: part.path,
+                    position: part.position,
+                    size: part.size,
+                    image: part.image,
+                    mime_type,
+                    display,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(MediaTable {
+            package,
+            parts: parts.into(),
+            warnings: warnings.into(),
+        })
+    }
+}
+
+fn budget_exceeded() -> String {
+    format!("inflated size exceeds {MAX_TOTAL_UNCOMPRESSED_BYTES} bytes")
+}
+
+/// Whether `prefix` starts an image format a media part may hold.
+fn is_image(prefix: &[u8]) -> bool {
+    prefix.starts_with(b"\x89PNG\r\n\x1a\n")
+        || prefix.starts_with(&[0xff, 0xd8, 0xff])
+        || prefix.starts_with(b"GIF8")
+        || prefix.starts_with(b"BM")
+        || (prefix.starts_with(b"RIFF") && prefix.get(8..12) == Some(b"WEBP"))
+        || matches!(
+            prefix.first_chunk::<4>(),
+            Some(b"II\x2a\x00" | b"MM\x00\x2a")
+        )
+        || prefix.starts_with(b"II\xbc")
+        || (prefix.starts_with(&[1, 0, 0, 0]) && prefix.get(40..44) == Some(b" EMF"))
+        || prefix.starts_with(&[0xd7, 0xcd, 0xc6, 0x9a])
+}
+
+fn is_media_path(path: &str) -> bool {
+    path.to_ascii_lowercase().starts_with("word/media/")
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,7 +347,7 @@ pub fn build_media_map_with_warnings(parts: &[(String, Vec<u8>)]) -> (MediaMap, 
     let mut media = MediaMap::new();
     let mut warnings = Vec::new();
     for (path, data) in parts {
-        if !path.to_ascii_lowercase().starts_with("word/media/") {
+        if !is_media_path(path) {
             continue;
         }
         let filename = path.rsplit('/').next().unwrap_or(path).to_owned();
@@ -106,6 +411,16 @@ pub fn resolve_image_data(
         mime_type: Some(media_mime_type(target).to_owned()),
         filename,
     }
+}
+
+/// Whether [`display_form`] replaces a part whose bytes start with `prefix`.
+fn transcodes(prefix: &[u8], _mime_type: &str) -> bool {
+    #[cfg(feature = "tiff")]
+    if is_tiff(prefix) {
+        return true;
+    }
+    let _ = prefix;
+    false
 }
 
 /// Browsers have no TIFF decoder, so the display copy carries a PNG transcode.

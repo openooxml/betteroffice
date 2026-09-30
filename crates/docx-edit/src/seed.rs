@@ -13,6 +13,7 @@ use crate::identity::{
     PARA_ORIGIN, SOURCE_PARA_ID, SYNTHETIC, SeededParagraph, SourceIndex, SourcePackage,
     SourcePartInput, SourceStoryKind,
 };
+use crate::script_fonts::ScriptFontUse;
 use crate::structured::source::{
     CellLayout, CommentWrites, InlineRecord, InlineSource, Pin, Provenance, RawSource, ReadSource,
     Relocated, Represented, RowLayout, SourceMerge, SourceParts, Step, TableLayout, Witness,
@@ -4394,6 +4395,7 @@ fn collect_font_table_fonts(envelope: &docx_parse::S9WireEnvelope, fonts: &mut B
 fn units_to_raw_ops(
     units: Vec<InlineUnit>,
     referenced_fonts: &mut BTreeSet<String>,
+    mut script_fonts: Option<&mut ScriptFontUse>,
 ) -> Result<Vec<RawOp>, String> {
     let mut ops = vec![RawOp::Delete { index: 0, len: 1 }];
     let mut index = 0u32;
@@ -4418,6 +4420,12 @@ fn units_to_raw_ops(
         Ok(())
     };
     for unit in units {
+        if let Some(script_fonts) = script_fonts.as_deref_mut() {
+            match &unit.content {
+                UnitContent::Text(value) => script_fonts.text(value, &unit.attrs),
+                UnitContent::Embed { payload, .. } => script_fonts.embed(payload, &unit.attrs),
+            }
+        }
         for (key, value) in &unit.attrs {
             collect_font_entry(key, value, referenced_fonts);
             collect_fonts_from_value(value, referenced_fonts);
@@ -4457,7 +4465,10 @@ fn units_to_raw_ops(
     Ok(ops)
 }
 
-fn seed_plan(plan: StoryPlan) -> Result<(String, Vec<RawOp>, BTreeSet<String>), String> {
+fn seed_plan(
+    plan: StoryPlan,
+    script_fonts: Option<&mut ScriptFontUse>,
+) -> Result<(String, Vec<RawOp>, BTreeSet<String>), String> {
     let StoryPlan {
         story_id,
         units,
@@ -4465,7 +4476,7 @@ fn seed_plan(plan: StoryPlan) -> Result<(String, Vec<RawOp>, BTreeSet<String>), 
         ..
     } = plan;
     let mut referenced_fonts = BTreeSet::new();
-    let mut ops = units_to_raw_ops(units, &mut referenced_fonts)?;
+    let mut ops = units_to_raw_ops(units, &mut referenced_fonts, script_fonts)?;
     if !comment_coverage.is_empty() {
         ops.extend(
             comment_coverage
@@ -4564,6 +4575,8 @@ type SourceRoot = (String, SourceStoryKind, Option<String>);
 struct LoweredDocx {
     context: LoweringContext,
     referenced_fonts: BTreeSet<String>,
+    /// `None` for a seed whose caller does not report unused script fonts.
+    script_fonts: Option<ScriptFontUse>,
     roots: Vec<SourceRoot>,
     relationships: Vec<(String, docx_parse::Relationship)>,
     read: ReadSource,
@@ -4579,6 +4592,8 @@ fn lower_docx(
     let relationships = envelope.document.package.relationship_entries.clone();
     let mut referenced_fonts = BTreeSet::new();
     collect_font_table_fonts(&envelope, &mut referenced_fonts);
+    let mut script_fonts = ScriptFontUse::default();
+    script_fonts.font_table(&envelope.document.package.font_table.fonts);
     let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
     collect_fonts_from_value(&parsed, &mut referenced_fonts);
     let source_json = if needs_source_json(&parsed) {
@@ -4608,6 +4623,7 @@ fn lower_docx(
     Ok(LoweredDocx {
         context,
         referenced_fonts,
+        script_fonts: Some(script_fonts),
         roots,
         relationships,
         read,
@@ -4621,7 +4637,17 @@ pub(crate) fn seed_parsed_docx_with(
     envelope: docx_parse::S9WireEnvelope,
     parts: Option<&SourceParts>,
 ) -> Result<Vec<String>, String> {
-    seed_lowered(document, lower_docx(envelope, parts)?, None)
+    let mut lowered = lower_docx(envelope, parts)?;
+    lowered.script_fonts = None;
+    seed_lowered(document, lowered, None).map(|fonts| fonts.referenced)
+}
+
+/// The fonts a seeded document references, and those of them it names only
+/// for East Asian or complex-script text it does not contain.
+pub(crate) struct SeededFonts {
+    pub(crate) referenced: Vec<String>,
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+    pub(crate) unused_script: Vec<String>,
 }
 
 /// Seeds every lowered story into `document` and retains the package context, with the identity
@@ -4630,10 +4656,11 @@ fn seed_lowered(
     document: &EditingDoc,
     lowered: LoweredDocx,
     index: Option<SourceIndex>,
-) -> Result<Vec<String>, String> {
+) -> Result<SeededFonts, String> {
     let LoweredDocx {
         context,
         mut referenced_fonts,
+        mut script_fonts,
         mut read,
         ..
     } = lowered;
@@ -4648,7 +4675,7 @@ fn seed_lowered(
         .map_err(|error| error.to_string())?;
     let mut batches = Vec::with_capacity(context.plans.len());
     for plan in context.plans {
-        let (story_id, ops, fonts) = seed_plan(plan)?;
+        let (story_id, ops, fonts) = seed_plan(plan, script_fonts.as_mut())?;
         batches.push((story_id, ops));
         referenced_fonts.extend(fonts);
     }
@@ -4679,7 +4706,12 @@ fn seed_lowered(
                 .set(inventory.occurrence_safety(source.read()));
         }
     }
-    Ok(referenced_fonts.into_iter().collect())
+    Ok(SeededFonts {
+        unused_script: script_fonts
+            .map(|scan| scan.unused(&referenced_fonts))
+            .unwrap_or_default(),
+        referenced: referenced_fonts.into_iter().collect(),
+    })
 }
 
 /// Where the raw XML blocks of every source comment body sit in the comments part, as lowering
@@ -4810,7 +4842,7 @@ pub(crate) fn seed_blocks(
     let mut provenance = std::mem::take(&mut context.provenance);
     let mut batches = Vec::with_capacity(context.plans.len());
     for plan in context.plans {
-        let (story_id, ops, _) = seed_plan(plan)?;
+        let (story_id, ops, _) = seed_plan(plan, None)?;
         batches.push((story_id, ops));
     }
     doc.apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
@@ -5058,7 +5090,7 @@ pub(crate) fn seed_parsed_docx(
     parts: Vec<(String, Vec<u8>)>,
     bytes: Arc<[u8]>,
     digest: String,
-) -> Result<Vec<String>, String> {
+) -> Result<SeededFonts, String> {
     let ids = PackageIds::scan(&parts);
     let parts = SourceParts::new(parts);
     let mut lowered = lower_docx(envelope, Some(&parts))?;
@@ -5153,11 +5185,12 @@ pub(crate) fn parse_docx_preview(
     parse(&parts)
 }
 
-/// Seeds a preview parse; returns the fonts it references.
+/// Seeds a preview parse; returns the fonts it references, and those of them
+/// it names only for East Asian or complex-script text its cut does not contain.
 pub(crate) fn seed_preview_envelope(
     document: &EditingDoc,
     envelope: docx_parse::S9WireEnvelope,
-) -> Result<Vec<String>, String> {
+) -> Result<SeededFonts, String> {
     let mut lowered = lower_docx(envelope, None)?;
     retain_referenced_body_stories(&mut lowered.context.plans);
     seed_lowered(document, lowered, None)
@@ -5410,7 +5443,7 @@ mod tests {
             .plans
             .into_iter()
             .map(|plan| {
-                let (story_id, ops, _) = seed_plan(plan).unwrap();
+                let (story_id, ops, _) = seed_plan(plan, None).unwrap();
                 (story_id, ops)
             })
             .collect();

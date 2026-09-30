@@ -16,6 +16,7 @@
 
 import type { EditSession } from './wasm/index';
 import type { Document } from '../types/document';
+import type { CompatibilityFlags } from '../docx/settingsParser';
 import { registerSessionInternals } from './sessionInternals';
 import { noteYrsStoriesDirty } from './yrsToDocument';
 import type {
@@ -81,10 +82,13 @@ export {
   ResidentWorkerFailureError,
   ResidentWorkerOutOfMemoryError,
   canUseResidentEngineWorker,
+  retainPreloadedResidentEngineWorker,
+  takePreloadedResidentEngineWorker,
   type ResidentEngineWorkerApplyResult,
   type ResidentEngineWorkerFrame,
   type ResidentEngineOffscreenPage,
 } from './residentEngineWorkerClient';
+export { preloadDocxEngine } from './preloadDocxEngine';
 export {
   residentCaretSnapshotForFrame,
   residentCaretDeviceRect,
@@ -123,6 +127,13 @@ export {
 export interface YrsDocxHost {
   document: Document;
   referencedFonts: string[];
+  /**
+   * The `referencedFonts` a document seeded from its package names only for
+   * East Asian or complex-script text it does not contain, so no text is
+   * measured or drawn with them. Empty when its stories were not seeded; a
+   * preview's cover only its own first pages.
+   */
+  unusedScriptFonts?: string[];
   embeddedFonts: Map<string, ArrayBuffer>;
   fontTableRelationshipsXml?: string;
 }
@@ -496,6 +507,7 @@ export type YrsRawOp =
 
 /** Host context for {@link YrsSession.yrsBlocksForStory} (theme + list numbering). */
 export interface YrsRenderEnv {
+  compatibilityFlags?: Partial<CompatibilityFlags>;
   tocStyleIds?: string[];
   paragraphSpacingLinePx?: number;
   /** Section document-grid snap pitch in px (w:docGrid). The engine derives this from sections; hosts may omit it. */
@@ -1440,10 +1452,18 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
   ) {
     throw new TypeError('DOCX host referencedFonts must be a string array');
   }
+  const unusedScriptFonts = wire.unusedScriptFonts ?? [];
+  if (
+    !Array.isArray(unusedScriptFonts) ||
+    !unusedScriptFonts.every((name) => typeof name === 'string')
+  ) {
+    throw new TypeError('DOCX host unusedScriptFonts must be a string array');
+  }
   const result = decodeS9EnvelopeValue(wire.envelope, docxSourceBuffer(source));
   return {
     document: result.document,
     referencedFonts: wire.referencedFonts,
+    unusedScriptFonts,
     embeddedFonts: result.embeddedFonts,
     ...(result.fontTableRelationshipsXml === undefined
       ? {}
