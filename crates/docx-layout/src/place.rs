@@ -91,8 +91,10 @@ struct ConvergenceInput<'a> {
     previous_fingerprints: &'a [u64],
     next_fingerprints: &'a [u64],
     dirty_index: usize,
-    /// Every dirty block, ascending, when placement may skip the clean pages between them.
-    skippable_dirty: Option<&'a [usize]>,
+    /// Every dirty block, ascending, when the block count is unchanged.
+    dirty: Option<&'a [usize]>,
+    /// Whether placement may skip the clean pages between dirty blocks.
+    skippable: bool,
     keep_with_next: &'a crate::keep_together::KeepWithNextScan,
     measured: &'a [MeasuredBlock],
     previous_pages: &'a [crate::types::Page],
@@ -119,31 +121,52 @@ impl ConvergenceInput<'_> {
         if checkpoint.block_index <= self.dirty_index {
             return None;
         }
-        let previous = self.previous_checkpoints.iter().find(|previous| {
-            previous.block_index == checkpoint.block_index
-                && previous.section_index == checkpoint.section_index
-                && previous.page_number == checkpoint.page_number
-                && previous.flow == checkpoint.flow
-        })?;
-        if self.previous_fingerprints.get(checkpoint.block_index..)
-            == self.next_fingerprints.get(checkpoint.block_index..)
-        {
+        let suffix_matches = match self.dirty {
+            Some(dirty) => dirty
+                .last()
+                .is_none_or(|&last| last < checkpoint.block_index),
+            None => {
+                self.previous_fingerprints.get(checkpoint.block_index..)
+                    == self.next_fingerprints.get(checkpoint.block_index..)
+            }
+        };
+        if !suffix_matches && !self.skippable {
+            return None;
+        }
+        // Checkpoints are in placement order, so those of one block are adjacent.
+        let first = self
+            .previous_checkpoints
+            .partition_point(|previous| previous.block_index < checkpoint.block_index);
+        let previous = self.previous_checkpoints[first..]
+            .iter()
+            .take_while(|previous| previous.block_index == checkpoint.block_index)
+            .find(|previous| {
+                previous.section_index == checkpoint.section_index
+                    && previous.page_number == checkpoint.page_number
+                    && previous.flow == checkpoint.flow
+            })?;
+        if suffix_matches {
             return Some(Convergence::Suffix {
                 next: checkpoint.clone(),
                 previous: previous.clone(),
             });
         }
-        let dirty = self.skippable_dirty?;
         if previous.page_index != checkpoint.page_index {
             return None;
         }
+        let dirty = self.dirty?;
         let next_dirty =
             *dirty.get(dirty.partition_point(|&index| index < checkpoint.block_index))?;
         let restart = restart_index(self.keep_with_next, next_dirty);
-        let resume = self.previous_checkpoints.iter().rev().find(|resume| {
-            resume.block_index < restart && resumable(resume, self.measured, self.previous_pages)
-        })?;
-        (resume.page_index > previous.page_index).then(|| Convergence::Skip {
+        let end = self
+            .previous_checkpoints
+            .partition_point(|resume| resume.block_index < restart);
+        let resume = self.previous_checkpoints[..end]
+            .iter()
+            .rev()
+            .take_while(|resume| resume.page_index > previous.page_index)
+            .find(|resume| resumable(resume, self.measured, self.previous_pages))?;
+        Some(Convergence::Skip {
             previous: previous.clone(),
             resume: resume.clone(),
             dirty_index: next_dirty,
@@ -505,8 +528,8 @@ pub fn layout_document_incremental_ranges(
             && resumable(checkpoint, &input.measured, &previous_layout.pages)
     });
     let resume_page = resume.map_or(0, |resume| resume.page_index);
-    let dirty: Vec<usize> = (previous_fingerprints.len() == next_fingerprints.len())
-        .then(|| {
+    let dirty: Option<Vec<usize>> =
+        (previous_fingerprints.len() == next_fingerprints.len()).then(|| {
             previous_fingerprints
                 .iter()
                 .zip(next_fingerprints)
@@ -514,12 +537,11 @@ pub fn layout_document_incremental_ranges(
                 .filter(|(_, (previous, next))| previous != next)
                 .map(|(index, _)| index)
                 .collect()
-        })
-        .unwrap_or_default();
+        });
     // Clean stretches between dirty blocks are skipped only where a page start
     // alone decides what follows: one column throughout, no reserved note space,
     // and no later section break that changed.
-    let skippable = !dirty.is_empty()
+    let skippable = dirty.as_ref().is_some_and(|dirty| !dirty.is_empty())
         && plan
             .section_configs
             .iter()
@@ -536,6 +558,7 @@ pub fn layout_document_incremental_ranges(
             .is_none_or(|heights| heights.is_empty())
         && !dirty
             .iter()
+            .flatten()
             .skip(1)
             .any(|&index| matches!(input.measured[index].block, LayoutBlock::SectionBreak(_)));
 
@@ -578,7 +601,8 @@ pub fn layout_document_incremental_ranges(
             previous_fingerprints,
             next_fingerprints,
             dirty_index: segment_dirty,
-            skippable_dirty: skippable.then_some(dirty.as_slice()),
+            dirty: dirty.as_deref(),
+            skippable,
             keep_with_next: &plan.keep_with_next,
             measured: &input.measured,
             previous_pages: &previous_layout.pages,
