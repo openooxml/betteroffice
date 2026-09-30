@@ -1168,6 +1168,18 @@ fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
         }
     }
     if let Some(hit) = text_hit(primitive) {
+        let paint_clip = match primitive {
+            Primitive::Text(text) => text.paint_clip.as_ref(),
+            Primitive::GlyphRun(run) => run.paint_clip.as_ref(),
+            _ => None,
+        };
+        if let Some(clip) = paint_clip {
+            let left = clip.x.as_ref().and_then(Number::as_f64).unwrap_or(0.0);
+            let width = clip.w.as_ref().and_then(Number::as_f64).unwrap_or(0.0);
+            if width <= 0.0 || x < left || x > left + width {
+                return false;
+            }
+        }
         return hit.width > 0.0
             && x >= hit.x
             && x <= hit.x + hit.width
@@ -2016,6 +2028,55 @@ mod tests {
         assert_eq!(inside.r_id, None);
         assert_eq!(inside.pos, Some(5));
         assert_eq!(inside.target, HoverTarget::Text);
+    }
+
+    #[test]
+    fn synthetic_fallback_paint_clip_limits_body_hits_in_header() {
+        let glyph_run = serde_json::json!({
+            "kind": "glyphRun", "fontId": 1, "size": 16, "color": "#000000",
+            "text": "hello", "docStart": 1, "docEnd": 6,
+            "glyphs": [{"id": 1, "x": 100, "y": 40, "cluster": 0, "advance": 50}]
+        });
+        for mut text in [run(100.0, 40.0, 50.0, 1), glyph_run] {
+            text["paintClip"] = serde_json::json!({"x": 100, "w": 25});
+            let dl = band_page("header", 0.0, vec![text.clone()]);
+
+            let excluded = hit_test_regions(&dl, 0, 140.0, 35.0).unwrap();
+            assert_eq!(excluded.region, HitRegion::Header);
+            assert_eq!(excluded.r_id.as_deref(), Some("rIdBand"));
+            assert_eq!(excluded.pos, Some(54));
+            assert_eq!(excluded.target, HoverTarget::Text);
+
+            let inside = hit_test_regions(&dl, 0, 110.0, 35.0).unwrap();
+            assert_eq!(inside.region, HitRegion::Body);
+            assert_eq!(inside.r_id, None);
+            assert!(inside.pos.is_some_and(|pos| (1..=6).contains(&pos)));
+            assert_eq!(inside.target, HoverTarget::Text);
+
+            text["paintClip"] = serde_json::json!({"w": 125});
+            let dl = band_page("header", 0.0, vec![text.clone()]);
+            assert_eq!(
+                hit_test_regions(&dl, 0, 110.0, 35.0).unwrap().region,
+                HitRegion::Body
+            );
+            assert_eq!(
+                hit_test_regions(&dl, 0, 140.0, 35.0).unwrap().region,
+                HitRegion::Header
+            );
+
+            for clip in [
+                serde_json::json!({"x": 100}),
+                serde_json::json!({"x": 100, "w": 0}),
+                serde_json::json!({"x": 100, "w": -25}),
+            ] {
+                text["paintClip"] = clip;
+                let dl = band_page("header", 0.0, vec![text.clone()]);
+                assert_eq!(
+                    hit_test_regions(&dl, 0, 110.0, 35.0).unwrap().region,
+                    HitRegion::Header
+                );
+            }
+        }
     }
 
     #[test]

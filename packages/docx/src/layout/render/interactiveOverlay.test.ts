@@ -1,0 +1,171 @@
+import { GlobalRegistrator } from '@happy-dom/global-registrator';
+import { afterAll, expect, test } from 'bun:test';
+import type { DisplayPage, DisplayPrimitive, ImagePrimitive, TextRunPrimitive } from './displayList';
+import { buildInteractiveOverlayPage } from './interactiveOverlay';
+
+const ownsDom = !GlobalRegistrator.isRegistered;
+if (ownsDom) GlobalRegistrator.register();
+afterAll(async () => {
+  if (ownsDom) await GlobalRegistrator.unregister();
+});
+
+function checkbox(groupId = 'header'): DisplayPrimitive {
+  return {
+    kind: 'rect', x: 100, y: 20, w: 20, h: 20, fill: '#fff',
+    inlineSdtWidget: { kind: 'checkbox', groupId, pos: 1 },
+  };
+}
+
+function image(extra: Partial<ImagePrimitive> = {}): ImagePrimitive {
+  return { kind: 'image', relId: 'rIdImage', x: 100, y: 20, w: 60, h: 40, ...extra };
+}
+
+function pageWith(body: DisplayPrimitive[]): DisplayPage {
+  return {
+    pageIndex: 0, width: 400, height: 400, primitives: body,
+    header: {
+      rId: 'rIdHeader', kind: 'header', y: 0, height: 80, primitives: [checkbox()],
+    },
+  };
+}
+
+function headerWidget(body: DisplayPrimitive[]): HTMLButtonElement {
+  return buildInteractiveOverlayPage(pageWith(body))
+    .querySelector<HTMLButtonElement>('.layout-inline-sdt-widget')!;
+}
+
+function expectHidden(button: HTMLButtonElement): void {
+  expect(button.style.visibility).toBe('hidden');
+  expect(button.style.pointerEvents).toBe('none');
+  expect(button.tabIndex).toBe(-1);
+  expect(button.disabled).toBe(true);
+}
+
+function expectActive(button: HTMLButtonElement): void {
+  expect(button.style.visibility).not.toBe('hidden');
+  expect(button.style.pointerEvents).toBe('auto');
+  expect(button.tabIndex).toBe(0);
+  expect(button.disabled).toBe(false);
+}
+
+test('body images hide covered header checkboxes', () => {
+  expectHidden(headerWidget([image()]));
+});
+
+test('body image occlusion honors primitive bounds and clips', () => {
+  expectHidden(headerWidget([image({ clipGroup: { clip: { x: 100, y: 20, w: 60, h: 40 } } })]));
+  for (const clip of [
+    { x: 100, y: 40, w: 60, h: 20 },
+    { x: 120, y: 20, w: 40, h: 40 },
+    { x: 100, y: 20, w: 0, h: 40 },
+    { x: 100, y: 20, w: 60, h: -1 },
+    { x: 100, y: 20, h: 40 },
+    { x: 100, y: 20, w: 60 },
+    { x: 100, y: 20, w: Infinity, h: 40 },
+  ]) {
+    expectActive(headerWidget([image({ clipGroup: { clip } })]));
+  }
+  expectHidden(headerWidget([image({
+    clipGroup: { clip: { x: NaN, y: Infinity, w: 200, h: 100 } },
+  })]));
+  expectActive(headerWidget([image({
+    x: 130, clipGroup: { clip: { x: 100, y: 20, w: 60, h: 40 } },
+  })]));
+});
+
+test('body text occlusion honors horizontal paint slots', () => {
+  const text: TextRunPrimitive = {
+    kind: 'text', text: 'hello', x: 100, baselineY: 35, width: 60,
+    font: '16px sans-serif', color: '#000',
+  };
+  const runs: DisplayPrimitive[] = [text, {
+    kind: 'glyphRun', fontId: 1, size: 16, color: '#000', text: 'hello',
+    glyphs: [{ id: 1, x: 100, y: 35, cluster: 0, advance: 60 }],
+  }];
+  for (const run of runs) {
+    expectHidden(headerWidget([run]));
+    expectHidden(headerWidget([{ ...run, paintClip: { x: 100, w: 15 } } as DisplayPrimitive]));
+    for (const paintClip of [{ x: 100, w: 5 }, { x: 120, w: 40 }, { x: 100, w: 0 }]) {
+      expectActive(headerWidget([{ ...run, paintClip } as DisplayPrimitive]));
+    }
+  }
+});
+
+test('only body paint hides lower-layer controls', () => {
+  const repeat: DisplayPrimitive = {
+    kind: 'rect', x: 100, y: 20, w: 40, h: 20, fill: '#fff',
+    sdt: { groupId: 'repeat', sdtType: 'repeatingSection', repeatingItem: true },
+  };
+  const page = pageWith([checkbox('watermark'), image(), checkbox('body')]);
+  page.watermarkPrimitiveCount = 1;
+  page.header!.primitives.push(repeat);
+  page.footer = {
+    rId: 'rIdFooter', kind: 'footer', y: 0, height: 80, primitives: [checkbox('footer')],
+  };
+  page.noteAreas = [{ y: 20, height: 40, primitives: [checkbox('note')] }];
+  const overlay = buildInteractiveOverlayPage(page);
+  for (const groupId of ['watermark', 'header', 'footer']) {
+    expectHidden(overlay.querySelector<HTMLButtonElement>(
+      `.layout-inline-sdt-widget[data-sdt-group-id="${groupId}"]`
+    )!);
+  }
+  const buttons = overlay.querySelectorAll<HTMLButtonElement>('.layout-sdt-repeat-btn');
+  expect(buttons.length).toBe(2);
+  for (const button of buttons) expectHidden(button);
+  expect(overlay.querySelector<HTMLElement>('.layout-sdt-repeat-controls')!.style.pointerEvents)
+    .toBe('none');
+  for (const groupId of ['body', 'note']) {
+    expectActive(overlay.querySelector<HTMLButtonElement>(
+      `.layout-inline-sdt-widget[data-sdt-group-id="${groupId}"]`
+    )!);
+  }
+  const watermarkOnly = pageWith([image()]);
+  watermarkOnly.watermarkPrimitiveCount = 1;
+  expectActive(buildInteractiveOverlayPage(watermarkOnly)
+    .querySelector<HTMLButtonElement>('.layout-inline-sdt-widget')!);
+});
+
+test('only primitives with paint and positive area occlude controls', () => {
+  expectHidden(headerWidget([{ kind: 'rect', x: 100, y: 20, w: 20, h: 20, fill: '#fff' }]));
+  expectHidden(headerWidget([{
+    kind: 'shape', x: 100, y: 20, w: 20, h: 20, fill: '#fff',
+    geometryPath: [
+      { type: 'move', x: 100, y: 20 }, { type: 'line', x: 120, y: 20 },
+      { type: 'line', x: 120, y: 40 }, { type: 'line', x: 100, y: 40 }, { type: 'close' },
+    ],
+  }]));
+  for (const primitive of [
+    image({ w: 0 }),
+    image({ h: 0 }),
+    image({ opacity: 0 }),
+    { kind: 'rect', x: 100, y: 20, w: 20, h: 20, fill: 'transparent' },
+    {
+      kind: 'shape', x: 100, y: 20, w: 20, h: 20, geometryPath: [],
+      stroke: { color: '#000', width: 1 },
+    },
+  ] as DisplayPrimitive[]) {
+    expectActive(headerWidget([primitive]));
+  }
+});
+
+test('boundary controls use their own centers for occlusion', () => {
+  const page = pageWith([image({ x: 140, y: 42, w: 20, h: 16 })]);
+  page.header!.primitives = [{
+    kind: 'rect', x: 100, y: 20, w: 60, h: 40, fill: '#fff',
+    sdt: { groupId: 'repeat', sdtType: 'checkbox', repeatingItem: true },
+  }];
+  const overlay = buildInteractiveOverlayPage(page);
+  expectHidden(overlay.querySelector<HTMLButtonElement>('[data-sdt-repeat="remove"]')!);
+  expectActive(overlay.querySelector<HTMLButtonElement>('[data-sdt-repeat="add"]')!);
+  expectActive(overlay.querySelector<HTMLButtonElement>('.layout-sdt-widget')!);
+
+  page.primitives = [image({ x: 124, y: 36, w: 12, h: 8 })];
+  const centerCovered = buildInteractiveOverlayPage(page);
+  for (const button of centerCovered.querySelectorAll<HTMLButtonElement>('button')) {
+    expectActive(button);
+  }
+
+  page.primitives = [image({ x: 140, y: 22, w: 18, h: 18 })];
+  expectHidden(buildInteractiveOverlayPage(page)
+    .querySelector<HTMLButtonElement>('.layout-sdt-widget')!);
+});

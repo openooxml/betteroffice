@@ -11,7 +11,14 @@
  */
 
 import type { DisplayPage, DisplayPrimitive, InlineSdtWidgetAttrs, SdtAttrs } from './displayList';
-import { glyphRunRect, lineRect, textRunRect, type GeoRect } from './displayListGeometry';
+import {
+  clipPaintsPoint,
+  displayPrimitiveRect,
+  glyphRunRect,
+  lineRect,
+  textRunRect,
+  type GeoRect,
+} from './displayListGeometry';
 
 export interface InteractiveOverlayLabels {
   /** Accessible name for a repeating-section add button. */
@@ -44,6 +51,10 @@ export function applyInteractiveSdtFocus(
 /** The only pointer-active elements the overlay renders. */
 const INTERACTIVE_SELECTOR =
   '.layout-sdt-widget, .layout-inline-sdt-widget, .layout-sdt-repeat-btn';
+const BOUNDARY_CONTROL_INSET = 2;
+const BOUNDARY_WIDGET_SIZE = 18;
+const REPEAT_BUTTON_SIZE = 16;
+const REPEAT_BUTTON_GAP = 2;
 
 interface SdtExtent {
   attrs: SdtAttrs;
@@ -88,10 +99,12 @@ export function buildInteractiveOverlayPage(
     event.stopPropagation();
   });
 
-  for (const [layer, primitives] of pagePrimitiveLayers(page).entries()) {
+  const layers = pagePrimitiveLayers(page);
+  const body = layers[3]!;
+  for (const [layer, primitives] of layers.entries()) {
     const groups = collectSdtExtents(primitives);
     for (const extent of [...groups.values()].sort(compareSdtExtents)) {
-      const boundary = renderBoundary(extent, doc, options.labels);
+      const boundary = renderBoundary(extent, doc, options.labels, layer < 3 ? body : undefined);
       boundary.style.zIndex = String(layer);
       root.appendChild(boundary);
     }
@@ -100,10 +113,70 @@ export function buildInteractiveOverlayPage(
     for (const extent of widgets.values()) {
       const widget = renderInlineWidget(extent, doc, options.labels);
       widget.style.zIndex = String(layer);
+      if (layer < 3) hideCoveredControl(widget, extent.rect, body);
       root.appendChild(widget);
     }
   }
   return root;
+}
+
+function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean {
+  const x = rect.x + Math.max(1, rect.w) / 2;
+  const y = rect.y + Math.max(1, rect.h) / 2;
+  return body.some((primitive) => {
+    if ('opacity' in primitive && primitive.opacity !== undefined && primitive.opacity <= 0) {
+      return false;
+    }
+    if (primitive.clipGroup?.clip && (primitive.clipGroup.opacity ?? 1) <= 0) return false;
+    switch (primitive.kind) {
+      case 'text':
+        if (!primitive.text) return false;
+        break;
+      case 'glyphRun':
+        if (!primitive.glyphs.length) return false;
+        break;
+      case 'rect':
+        if (!primitive.fill || primitive.fill === 'transparent' || primitive.fill === 'none') {
+          return false;
+        }
+        break;
+      case 'shape': {
+        const paint = primitive.fillPaint;
+        const fill = paint?.color ?? primitive.fill;
+        if (!primitive.geometryPath.length) return false;
+        if (paint?.kind === 'none') return false;
+        if (paint?.kind === 'gradient' || paint?.kind === 'pattern') break;
+        if (paint?.kind === 'picture' && (paint.pictureSrc || paint.pictureRelId)) break;
+        if (!fill || fill === 'transparent' || fill === 'none') return false;
+        break;
+      }
+      case 'image':
+      case 'decoration':
+        break;
+      default:
+        return false;
+    }
+    const painted = displayPrimitiveRect(primitive);
+    return (
+      Number.isFinite(painted.w) &&
+      Number.isFinite(painted.h) &&
+      painted.w > 0 &&
+      painted.h > 0 &&
+      x >= painted.x &&
+      x <= painted.x + painted.w &&
+      y >= painted.y &&
+      y <= painted.y + painted.h &&
+      clipPaintsPoint(primitive, x, y)
+    );
+  });
+}
+
+function hideCoveredControl(button: HTMLButtonElement, rect: GeoRect, body: DisplayPrimitive[]): void {
+  if (!bodyPaintsRectCenter(body, rect)) return;
+  button.style.visibility = 'hidden';
+  button.style.pointerEvents = 'none';
+  button.tabIndex = -1;
+  button.disabled = true;
 }
 
 function pagePrimitiveLayers(page: DisplayPage): DisplayPrimitive[][] {
@@ -163,9 +236,12 @@ function compareSdtExtents(a: SdtExtent, b: SdtExtent): number {
 function renderBoundary(
   extent: SdtExtent,
   doc: Document,
-  labels: InteractiveOverlayLabels | undefined
+  labels: InteractiveOverlayLabels | undefined,
+  body: DisplayPrimitive[] | undefined
 ): HTMLElement {
   const { attrs, rect } = extent;
+  const right = rect.x + Math.max(1, rect.w) - BOUNDARY_CONTROL_INSET;
+  const bottom = rect.y + Math.max(1, rect.h) - BOUNDARY_CONTROL_INSET;
   const box = doc.createElement('div');
   box.className = 'layout-block-sdt-box layout-canvas-sdt-box';
   stampSdtAttrs(box, attrs);
@@ -201,19 +277,53 @@ function renderBoundary(
     trigger.textContent =
       kind === 'dropdown' ? '▾' : kind === 'date' ? '▣' : attrs.checked ? '☒' : '☐';
     trigger.style.pointerEvents = 'auto';
+    if (body) {
+      trigger.style.width = `${BOUNDARY_WIDGET_SIZE}px`;
+      trigger.style.height = `${BOUNDARY_WIDGET_SIZE}px`;
+      trigger.style.boxSizing = 'border-box';
+      hideCoveredControl(
+        trigger,
+        {
+          x: right - BOUNDARY_WIDGET_SIZE,
+          y: rect.y + BOUNDARY_CONTROL_INSET,
+          w: BOUNDARY_WIDGET_SIZE,
+          h: BOUNDARY_WIDGET_SIZE,
+        },
+        body
+      );
+    }
     box.appendChild(trigger);
   }
 
   if (repeat) {
     const controls = doc.createElement('div');
     controls.className = 'layout-sdt-repeat-controls';
-    controls.style.pointerEvents = 'auto';
-    controls.appendChild(
-      repeatButton(doc, attrs, 'add', '＋', labels?.addRepeatingItem, authoredName)
-    );
-    controls.appendChild(
-      repeatButton(doc, attrs, 'remove', '✕', labels?.removeRepeatingItem, authoredName)
-    );
+    controls.style.pointerEvents = body ? 'none' : 'auto';
+    const buttons = [
+      repeatButton(doc, attrs, 'add', '＋', labels?.addRepeatingItem, authoredName),
+      repeatButton(doc, attrs, 'remove', '✕', labels?.removeRepeatingItem, authoredName),
+    ];
+    for (const [index, button] of buttons.entries()) {
+      if (body) {
+        button.style.width = `${REPEAT_BUTTON_SIZE}px`;
+        button.style.height = `${REPEAT_BUTTON_SIZE}px`;
+        button.style.boxSizing = 'border-box';
+        button.style.pointerEvents = 'auto';
+        hideCoveredControl(
+          button,
+          {
+            x:
+              right - REPEAT_BUTTON_SIZE -
+              (buttons.length - 1 - index) * (REPEAT_BUTTON_SIZE + REPEAT_BUTTON_GAP),
+            y: bottom - REPEAT_BUTTON_SIZE,
+            w: REPEAT_BUTTON_SIZE,
+            h: REPEAT_BUTTON_SIZE,
+          },
+          body
+        );
+      }
+      controls.appendChild(button);
+    }
     box.appendChild(controls);
   }
   return box;
