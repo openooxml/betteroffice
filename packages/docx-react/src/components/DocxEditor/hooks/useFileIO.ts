@@ -137,6 +137,7 @@ function withSavedComments(document: Document, session: YrsSession, comments: Co
 export function useFileIO({
   pagedEditorRef,
   resolveImage,
+  shownImageResolver,
   fontFamilies,
   comments,
   documentName,
@@ -152,6 +153,8 @@ export function useFileIO({
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   resolveImage: ImageResolver;
+  /** The resolver of the frame published last; print reads it once its display list settles. */
+  shownImageResolver?: () => ImageResolver;
   /** The CSS family each document font family paints browser text with, where they differ. */
   fontFamilies?: ReadonlyMap<string, string>;
   comments: Comment[];
@@ -176,6 +179,7 @@ export function useFileIO({
       try {
         if (!pagedEditorRef.current) return null;
         const { editor, session } = await flushedSession(pagedEditorRef);
+        if (session.isDisplayOnly?.()) throw new Error('The document is still opening');
         const projected = editor.getDocument();
         if (!projected) return null;
         const capture = projected.originalBuffer ? captureSessionSave(session) : null;
@@ -208,7 +212,12 @@ export function useFileIO({
     return {
       async prepare(displayList) {
         if (w && !w.closed) {
-          await renderDisplayListPages(w, displayList, resolveImage, fontFamilies);
+          await renderDisplayListPages(
+            w,
+            displayList,
+            shownImageResolver?.() ?? resolveImage,
+            fontFamilies
+          );
         }
       },
       print() {
@@ -227,7 +236,7 @@ export function useFileIO({
         if (w && !w.closed) w.close();
       },
     };
-  }, [resolveImage, fontFamilies, onPrint]);
+  }, [resolveImage, shownImageResolver, fontFamilies, onPrint]);
 
   const handleDownloadDocument = useCallback((): Promise<DocxSaveOutcome> => {
     if (saveRequestRef.current) return saveRequestRef.current;

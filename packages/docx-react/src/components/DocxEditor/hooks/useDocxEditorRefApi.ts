@@ -1,4 +1,4 @@
-import { useImperativeHandle } from 'react';
+import { useImperativeHandle, useMemo } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { Document } from '@betteroffice/docx/types/document';
 import type {
@@ -28,6 +28,136 @@ import type { EditorMode } from '../internals/editing-modes';
 import type { SelectionState } from '../types';
 import { readMemoryStats } from '../memoryStats';
 import { documentPageCount } from './documentPageCount';
+import type { DocxHostSearch } from './useHostSearch';
+import { awaitWorkerOpenReplica, ensureWorkerOpenReplica } from '../internals/workerOpenReplica';
+
+export const DOCX_REF_REPLICA_ACCESS = {
+  commands: 'commands',
+  getDocument: 'sync',
+  getEditorRef: 'sync',
+  flushPendingInput: 'await',
+  save: 'await',
+  setZoom: 'independent',
+  getZoom: 'independent',
+  focus: 'sync',
+  getCurrentPage: 'independent',
+  getTotalPages: 'independent',
+  getMemoryStats: 'independent',
+  whenLayoutComplete: 'await',
+  scrollToPage: 'independent',
+  scrollToPosition: 'sync',
+  openPrintPreview: 'sync',
+  print: 'sync',
+  loadDocument: 'independent',
+  loadDocumentBuffer: 'independent',
+  readParagraphs: 'await',
+  listContentControls: 'await',
+  findContentControls: 'await',
+  findText: 'await',
+  validateEdits: 'await',
+  applyEdits: 'await',
+  proposeChanges: 'await',
+  setProposalStates: 'await',
+  withdrawProposals: 'await',
+  getProposals: 'await',
+  exportStructuredWithPages: 'await',
+  getPositionAtPoint: 'sync',
+  addComment: 'sync',
+  replyToComment: 'independent',
+  resolveComment: 'independent',
+  proposeChange: 'sync',
+  applyFormatting: 'sync',
+  setParagraphStyle: 'sync',
+  insertBreak: 'sync',
+  getPageContent: 'sync',
+  scrollToParaId: 'sync',
+  scrollToCommentId: 'sync',
+  scrollToChangeId: 'sync',
+  highlightRange: 'sync',
+  findInDocument: 'sync',
+  getSelectionInfo: 'sync',
+  getComments: 'independent',
+  search: 'await',
+  searchNext: 'independent',
+  searchPrevious: 'independent',
+  searchGoTo: 'independent',
+  clearSearch: 'independent',
+  getSearchState: 'independent',
+  onSearchChange: 'independent',
+  onContentChange: 'independent',
+  onSelectionChange: 'independent',
+} as const satisfies Record<keyof DocxEditorRef, 'await' | 'sync' | 'independent' | 'commands'>;
+
+function withDeadline(ready: Promise<void>, timeoutMs: number | undefined): Promise<void> {
+  if (timeoutMs === undefined) return ready;
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error('The document did not finish rendering')),
+      timeoutMs
+    );
+    ready.then(
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
+function gateReplicaAccess(
+  api: DocxEditorRef,
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  enabled: boolean
+): DocxEditorRef {
+  if (!enabled) return api;
+  const gated = { ...api };
+  for (const key of Object.keys(DOCX_REF_REPLICA_ACCESS) as Array<keyof DocxEditorRef>) {
+    const access = DOCX_REF_REPLICA_ACCESS[key];
+    const call = api[key];
+    if ((access !== 'await' && access !== 'sync') || typeof call !== 'function') continue;
+    Object.defineProperty(gated, key, {
+      value: (...args: unknown[]) => {
+        const session = pagedEditorRef.current?.getYrsSession();
+        if (session) {
+          if (access === 'sync') ensureWorkerOpenReplica(session);
+          else {
+            const ready = awaitWorkerOpenReplica(session);
+            if (ready) {
+              const timeoutMs =
+                key === 'whenLayoutComplete'
+                  ? (args[0] as { timeoutMs?: number } | undefined)?.timeoutMs
+                  : undefined;
+              const started = Date.now();
+              return withDeadline(ready, timeoutMs).then(() => {
+                if (pagedEditorRef.current?.getYrsSession() !== session) {
+                  throw new Error('The document changed while opening the replica');
+                }
+                // The layout deadline covers the replica wait.
+                const rest =
+                  timeoutMs === undefined
+                    ? args
+                    : [
+                        {
+                          ...(args[0] as object),
+                          timeoutMs: Math.max(0, timeoutMs - (Date.now() - started)),
+                        },
+                      ];
+                return Reflect.apply(call, api, rest);
+              });
+            }
+          }
+        }
+        return Reflect.apply(call, api, args);
+      },
+      enumerable: true,
+    });
+  }
+  return gated;
+}
 
 const noWorkerMemory = (): null => null;
 
@@ -78,9 +208,10 @@ const LAYOUT_REFUSALS: ReadonlySet<string> = new Set([
  */
 async function exportWithPages(
   pagedEditorRef: React.RefObject<PagedEditorRef | null>,
-  options: DocxPageExportOptions
+  options: DocxPageExportOptions,
+  experimentalWorkerOpen = false
 ): Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>> {
-  const { session } = await flushedSession(pagedEditorRef);
+  const { session } = await flushedSession(pagedEditorRef, experimentalWorkerOpen);
   const editor = (): PagedEditorRef => {
     const current = pagedEditorRef.current;
     if (!current || current.getYrsSession() !== session) {
@@ -167,7 +298,7 @@ export function useDocxEditorRefApi({
   document,
   documentFromYrs,
   historyStateRef,
-  pagedEditorRef,
+  pagedEditorRef: hostEditorRef,
   handleSave,
   zoom,
   setZoom,
@@ -185,10 +316,13 @@ export function useDocxEditorRefApi({
   commentIdAllocator,
   commands,
   modeRef,
+  openingRef,
   allowHostProposalsRef,
   workerMemory = noWorkerMemory,
   settledDisplayList,
   awaitingDocument,
+  experimentalWorkerOpen = false,
+  hostSearch,
 }: {
   ref: React.ForwardedRef<DocxEditorRef>;
   document: Document | null;
@@ -216,6 +350,8 @@ export function useDocxEditorRefApi({
   commands: DocxCommandStore;
   /** The editor's current write mode; `viewing` also stands for a read-only editor. */
   modeRef: React.RefObject<EditorMode>;
+  /** While the document opens, the API has no editor and no document, as during a load. */
+  openingRef?: React.RefObject<boolean>;
   /** Whether proposal methods run while the editor is read-only. */
   allowHostProposalsRef: React.RefObject<boolean>;
   /** The resident worker's wasm memories as of its latest reply. */
@@ -224,25 +360,39 @@ export function useDocxEditorRefApi({
   settledDisplayList?: (relayout: null, timeoutMs: number | null) => Promise<DisplayList>;
   /** Whether a document load has not yet produced its first layout. */
   awaitingDocument?: () => boolean;
+  experimentalWorkerOpen?: boolean;
+  hostSearch: DocxHostSearch;
 }) {
+  const opening = (): boolean => openingRef?.current === true;
+  const pagedEditorRef = useMemo<React.RefObject<PagedEditorRef | null>>(
+    () => ({
+      get current() {
+        return openingRef?.current === true ? null : hostEditorRef.current;
+      },
+    }),
+    [hostEditorRef, openingRef]
+  );
   const hostProposalsAllowed = () =>
     modeRef.current !== 'viewing' || allowHostProposalsRef.current === true;
   useImperativeHandle(
     ref,
-    () => ({
+    () => gateReplicaAccess({
       commands,
-      getDocument: () => pagedEditorRef.current?.getDocument() ?? documentFromYrs() ?? document,
+      getDocument: () =>
+        opening() ? null : (pagedEditorRef.current?.getDocument() ?? documentFromYrs() ?? document),
       getEditorRef: () => pagedEditorRef.current,
       flushPendingInput: async () => {
-        await flushedSession(pagedEditorRef);
+        await flushedSession(pagedEditorRef, experimentalWorkerOpen);
       },
-      save: handleSave,
+      save: async () => (opening() ? null : handleSave()),
       setZoom,
       getZoom: () => zoom,
       focus: () => pagedEditorRef.current?.focus(),
       getCurrentPage: () => readCurrentPage?.() ?? scrollPageInfo.currentPage,
+      // A preview's layouts are partial, so the count is the full document's even
+      // before its pages replace the preview's, as `whenLayoutComplete` reports it.
       getTotalPages: () =>
-        awaitingDocument?.() ? 0 : documentPageCount(pagedEditorRef.current?.getLayout()),
+        awaitingDocument?.() ? 0 : documentPageCount(hostEditorRef.current?.getLayout()),
       whenLayoutComplete: async (options) => {
         if (!settledDisplayList) throw new Error('This editor paints no display list');
         return (await settledDisplayList(null, options?.timeoutMs ?? null)).pages.length;
@@ -256,33 +406,42 @@ export function useDocxEditorRefApi({
       loadDocument: loadParsedDocument,
       loadDocumentBuffer: loadBuffer,
 
-      readParagraphs: async (request) => (await flushedSession(pagedEditorRef)).session.readParagraphs(request),
+      readParagraphs: async (request) => (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.readParagraphs(request),
       listContentControls: async (options) =>
-        (await flushedSession(pagedEditorRef)).session.listContentControls(options),
+        (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.listContentControls(options),
       findContentControls: async (query, options) =>
-        (await flushedSession(pagedEditorRef)).session.findContentControls(query, options),
-      findText: async (request) => (await flushedSession(pagedEditorRef)).session.findText(request),
+        (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.findContentControls(query, options),
+      findText: async (request) => (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.findText(request),
       validateEdits: async (request) => {
-        const { session } = await flushedSession(pagedEditorRef);
+        const { session } = await flushedSession(pagedEditorRef, experimentalWorkerOpen);
         return modeRefusal(session, modeRef.current, request) ?? session.validateEdits(request);
       },
       applyEdits: async (request) => {
-        const outcome = await applyEditBatch(pagedEditorRef, () => modeRef.current, request);
+        const outcome = await applyEditBatch(
+          pagedEditorRef, () => modeRef.current, request, undefined, undefined, experimentalWorkerOpen
+        );
         if ('flush' in outcome) throw outcome.flush.error;
         return outcome.result;
       },
 
       proposeChanges: (request) =>
-        applyProposalCall(pagedEditorRef, hostProposalsAllowed, (session) =>
-          session.proposeChanges(request)
+        applyProposalCall(
+          pagedEditorRef, hostProposalsAllowed, (session) => session.proposeChanges(request),
+          experimentalWorkerOpen
         ),
       setProposalStates: (request) =>
-        applyProposalCall(pagedEditorRef, hostProposalsAllowed, (session) =>
-          session.setProposalStates(request)
+        applyProposalCall(
+          pagedEditorRef, hostProposalsAllowed, (session) => session.setProposalStates(request),
+          experimentalWorkerOpen
         ),
-      getProposals: async () => (await flushedSession(pagedEditorRef)).session.getProposals(),
+      withdrawProposals: (request) =>
+        applyProposalCall(
+          pagedEditorRef, hostProposalsAllowed, (session) => session.withdrawProposals(request),
+          experimentalWorkerOpen
+        ),
+      getProposals: async () => (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.getProposals(),
 
-      exportStructuredWithPages: (options) => exportWithPages(pagedEditorRef, options),
+      exportStructuredWithPages: (options) => exportWithPages(pagedEditorRef, options, experimentalWorkerOpen),
       getPositionAtPoint: (clientX, clientY) =>
         pagedEditorRef.current?.getPositionAtPoint(clientX, clientY) ?? null,
 
@@ -309,13 +468,14 @@ export function useDocxEditorRefApi({
       },
 
       replyToComment: (commentId, text, authorName) => {
-        if (!comments.some((comment) => comment.id === commentId)) return null;
+        if (opening() || !comments.some((comment) => comment.id === commentId)) return null;
         const reply = createComment(commentIdAllocator, text, authorName, commentId);
         setComments((previous) => [...previous, reply]);
         return reply.id;
       },
 
       resolveComment: (commentId) => {
+        if (opening()) return;
         setComments((previous) =>
           previous.map((comment) =>
             comment.id === commentId ? { ...comment, done: true } : comment
@@ -485,7 +645,7 @@ export function useDocxEditorRefApi({
         }
       },
 
-      getComments: () => comments,
+      getComments: () => (opening() ? [] : comments),
 
       onContentChange: (listener) => {
         const subscribers = contentChangeSubscribersRef.current;
@@ -501,7 +661,8 @@ export function useDocxEditorRefApi({
         selectionChangeSubscribersRef.current.add(listener);
         return () => selectionChangeSubscribersRef.current.delete(listener);
       },
-    }),
+      ...hostSearch,
+    }, pagedEditorRef, experimentalWorkerOpen),
     [
       document,
       documentFromYrs,
@@ -516,6 +677,8 @@ export function useDocxEditorRefApi({
       workerMemory,
       settledDisplayList,
       awaitingDocument,
+      experimentalWorkerOpen,
+      hostSearch,
     ]
   );
 }

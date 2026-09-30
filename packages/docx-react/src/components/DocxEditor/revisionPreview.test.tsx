@@ -55,6 +55,7 @@ function yrsCore(session: YrsSession): YrsCoreSession {
   return {
     session,
     sessionGeneration: 0,
+    replicaReady: true,
     storyBlocks: () => null,
     bodyBlocks: () => null,
     inputPositionMap: () => null,
@@ -64,6 +65,11 @@ function yrsCore(session: YrsSession): YrsCoreSession {
     publishDirectInput: () => {},
     scheduleCompatibilityWarm: () => {},
     cancelCompatibilityWarm: () => {},
+    previewing: false,
+    handoffFrom: null,
+    opening: false,
+    notifyFramePresented: () => {},
+    failOpening: () => false,
   };
 }
 

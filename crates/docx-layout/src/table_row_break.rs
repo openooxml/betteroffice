@@ -1,8 +1,11 @@
 //! Whole-line table row-break geometry.
 
+use std::cell::OnceCell;
+
 use serde::Serialize;
 
 use crate::cell_layout::{cell_vertical_offset, layout_cell_content, nested_table_float_offset};
+use crate::keep_together::{paragraph_is_unbreakable, paragraph_widow_control};
 use crate::table_grid::resolve_cell_grid;
 use crate::types::{BlockExtent, LayoutBlock, TableBlock, TableExtent};
 
@@ -30,6 +33,7 @@ fn cell_unbreakable_ranges(
     blocks: &[LayoutBlock],
     measures: &[BlockExtent],
     start_y: f64,
+    paragraph_rules: bool,
 ) -> Vec<(f64, f64)> {
     let mut ranges = Vec::new();
     let mut y = start_y;
@@ -44,11 +48,24 @@ fn cell_unbreakable_ranges(
                 .as_ref()
                 .and_then(|attrs| attrs.spacing.as_ref());
             y += previous_after.max(spacing.and_then(|value| value.before).unwrap_or(0.0));
+            let first = ranges.len();
             for line in &extent.lines {
                 y += line.float_skip_before.unwrap_or(0.0);
                 let top = y;
                 y += line.line_height;
                 ranges.push((top, y));
+            }
+            let lines = &ranges[first..];
+            if paragraph_rules
+                && let (Some(&(top, _)), Some(&(_, bottom))) = (lines.first(), lines.last())
+            {
+                if paragraph_is_unbreakable(paragraph, extent) {
+                    ranges.push((top, bottom));
+                } else if paragraph_widow_control(paragraph, extent) {
+                    let (second_bottom, penultimate_top) = (lines[1].1, lines[lines.len() - 2].0);
+                    ranges.push((top, second_bottom));
+                    ranges.push((penultimate_top, bottom));
+                }
             }
             previous_after = spacing.and_then(|value| value.after).unwrap_or(0.0);
             continue;
@@ -88,8 +105,70 @@ fn cell_unbreakable_ranges(
 }
 
 /// Resolves the cell grid once and collects, per row, every whole-line bottom
-/// a break is allowed to snap to.
+/// a break is allowed to snap to, where widow/orphan control and `keepLines`
+/// allow one.
 pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> TableRowBreakInfo {
+    row_break_info(block, measure, true)
+}
+
+/// A table's row break geometry under the paragraph rules, with every
+/// whole-line bottom built on first use for a row those rules leave no break
+/// in a whole column, which Word then breaks at any line. A floating table
+/// keeps whole-line breaks throughout.
+pub(crate) struct RowBreaks<'a> {
+    block: &'a TableBlock,
+    measure: &'a TableExtent,
+    pub(crate) kept: TableRowBreakInfo,
+    lines: OnceCell<TableRowBreakInfo>,
+}
+
+impl<'a> RowBreaks<'a> {
+    pub(crate) fn new(block: &'a TableBlock, measure: &'a TableExtent) -> Self {
+        Self {
+            block,
+            measure,
+            kept: row_break_info(block, measure, block.floating.is_none()),
+            lines: OnceCell::new(),
+        }
+    }
+
+    pub(crate) fn lines(&self) -> &TableRowBreakInfo {
+        self.lines
+            .get_or_init(|| row_break_info(self.block, self.measure, false))
+    }
+
+    /// Whether the paragraph rules alone leave `row` no break from `consumed`
+    /// on in a column `capacity` tall.
+    pub(crate) fn kept_oversized(&self, row: usize, consumed: f64, capacity: f64) -> bool {
+        let kept = minimum_break_slice(self.measure, &self.kept, row, consumed);
+        kept > capacity && minimum_break_slice(self.measure, self.lines(), row, consumed) < kept
+    }
+
+    /// The smallest slice of `row` from `consumed` on that a fresh column
+    /// `capacity` tall places.
+    pub(crate) fn fresh_slice(&self, row: usize, consumed: f64, capacity: f64) -> f64 {
+        if self
+            .block
+            .rows
+            .get(row)
+            .is_some_and(|row| row.cant_split.unwrap_or(false))
+        {
+            return minimum_row_slice(self.block, self.measure, self.lines(), row, consumed);
+        }
+        let info = if self.kept_oversized(row, consumed, capacity) {
+            self.lines()
+        } else {
+            &self.kept
+        };
+        minimum_break_slice(self.measure, info, row, consumed)
+    }
+}
+
+fn row_break_info(
+    block: &TableBlock,
+    measure: &TableExtent,
+    paragraph_rules: bool,
+) -> TableRowBreakInfo {
     let row_count = measure.rows.len();
     // Pagination uses unrounded row offsets; border painting rounds separately.
     let mut row_tops: Vec<f64> = Vec::with_capacity(row_count + 1);
@@ -185,9 +264,12 @@ pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> 
                     add_unique(&mut offsets, off);
                 }
             }
-            for (top, bottom) in
-                cell_unbreakable_ranges(&source_cell.blocks, &measured_cell.blocks, pad_top)
-            {
+            for (top, bottom) in cell_unbreakable_ranges(
+                &source_cell.blocks,
+                &measured_cell.blocks,
+                pad_top,
+                paragraph_rules,
+            ) {
                 unbreakable_ranges.push((
                     top + content_offset - shift,
                     bottom + content_offset - shift,
@@ -229,6 +311,16 @@ pub(crate) fn minimum_row_slice(
     {
         return remaining;
     }
+    minimum_break_slice(measure, info, row, consumed)
+}
+
+fn minimum_break_slice(
+    measure: &TableExtent,
+    info: &TableRowBreakInfo,
+    row: usize,
+    consumed: f64,
+) -> f64 {
+    let remaining = measure.rows[row].height - consumed;
     info.break_offsets[row]
         .iter()
         .copied()
@@ -297,7 +389,7 @@ mod tests {
     const LINE: f64 = 20.0;
 
     fn para() -> serde_json::Value {
-        json!({ "kind": "paragraph", "id": 0, "runs": [] })
+        json!({ "kind": "paragraph", "id": 0, "runs": [], "attrs": { "widowControl": false } })
     }
 
     fn para_with_spacing(before: f64, after: f64) -> serde_json::Value {
@@ -305,7 +397,10 @@ mod tests {
             "kind": "paragraph",
             "id": 0,
             "runs": [],
-            "attrs": { "spacing": { "before": before, "after": after } },
+            "attrs": {
+                "spacing": { "before": before, "after": after },
+                "widowControl": false,
+            },
         })
     }
 

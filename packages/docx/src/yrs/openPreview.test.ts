@@ -99,11 +99,13 @@ test('a preview and a worker replica of it lay out as part of a document', async
   expect(layoutOf(replica, previewHost).layout.partial).toBe(true);
   expect(replica.residentWorkerSnapshot({})?.partialDocument).toBe(true);
 
-  // A complete open over the preview lays out the whole document again.
-  for (const story of preview.storyIds()) preview.deleteStory(story);
-  const reopened = preview.openDocx(PAGES, true);
-  expect(layoutOf(preview, reopened).layout.partial).toBeUndefined();
-  expect(preview.residentWorkerSnapshot({})?.partialDocument).toBeUndefined();
+  // A preview is display-only, so no complete open replaces its document.
+  expect(() => preview.openDocx(PAGES, true)).toThrow('display-only');
+  // A complete open over a partial replica lays out the whole document again.
+  for (const story of replica.storyIds()) replica.deleteStory(story);
+  const reopened = replica.openDocx(PAGES, true);
+  expect(layoutOf(replica, reopened).layout.partial).toBeUndefined();
+  expect(replica.residentWorkerSnapshot({})?.partialDocument).toBeUndefined();
   for (const session of [full, preview, replica]) session.destroy();
 });
 

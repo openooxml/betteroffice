@@ -24,6 +24,7 @@ import type { YrsSession } from '@betteroffice/docx/yrs';
 import type { DocxCommandController } from '../commands/createDocxCommandStore';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
 import { isPresented, sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
+import { displayWindowOf } from '../components/DocxEditor/internals/displayWindow';
 import { resolvePointPosition } from '../components/DocxEditor/internals/pointPosition';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { SelectionState } from '../components/DocxEditor/types';
@@ -45,7 +46,6 @@ import type {
 } from './types';
 
 const NO_ACTIVATIONS: readonly DocxPluginActivation[] = Object.freeze([]);
-const LAYOUT_WAIT_MS = 1000;
 
 type RenderedDom = { context: RenderedDomContext; queries: DisplayListQueries };
 
@@ -61,6 +61,7 @@ export interface UseDocxPluginHostOptions extends DocxEditorPluginProps {
   /** Changes whenever a new document load starts. */
   loadGeneration: number;
   queries: DisplayListQueries | null;
+  layoutError: Error | null;
   zoom: number;
   canvasHostRef: React.RefObject<HTMLDivElement | null>;
   overlayTarget: HTMLElement | null;
@@ -102,26 +103,59 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   const geometryRef = useRef<DocxPluginGeometry | null>(null);
   const layoutRef = useRef<DocxPluginLayout | null>(null);
   const formattingRef = useRef<SelectionState | null>(null);
+  const layoutListeners = useRef(new Set<() => void>());
 
-  const [host] = useState(() =>
+  const [host] = useState<DocxPluginHost>(() =>
     createDocxPluginHost({
       pagedEditorRef: options.pagedEditorRef,
       writeMode: () => latest.current.writeModeRef.current ?? 'viewing',
       commands: () => latest.current.commands,
       translate: (key) => translateRef.current(key),
       geometry: () => geometryRef.current,
-      async settledLayout(version) {
-        const deadline = Date.now() + LAYOUT_WAIT_MS;
-        while (sourceVersionOf(latest.current.queries) !== version) {
-          if (Date.now() >= deadline) return false;
-          await new Promise((resolve) => setTimeout(resolve, 16));
-        }
-        return true;
+      layout() {
+        const queries = latest.current.queries;
+        const layout = latest.current.pagedEditorRef.current?.getLayout();
+        return {
+          queries,
+          complete:
+            !!queries &&
+            !!layout &&
+            !layout.partial &&
+            sourceVersionOf(layout) === sourceVersionOf(queries) &&
+            queries.pageCount() === layout.pages.length,
+          failed: latest.current.layoutError !== null,
+        };
+      },
+      subscribeLayout(listener) {
+        layoutListeners.current.add(listener);
+        const unsubscribe = host.subscribe(listener);
+        return () => {
+          layoutListeners.current.delete(listener);
+          unsubscribe();
+        };
       },
     })
   );
 
   const managed = (options.plugins?.length ?? 0) > 0;
+
+  useLayoutEffect(() => {
+    for (const listener of layoutListeners.current) listener();
+  });
+
+  useEffect(() => {
+    const queries = options.queries;
+    if (!queries || queries.sourceState().status !== 'loading') return;
+    let cancelled = false;
+    const ready = () => {
+      if (cancelled) return;
+      for (const listener of layoutListeners.current) listener();
+    };
+    void queries.whenReady().then(ready, ready);
+    return () => {
+      cancelled = true;
+    };
+  }, [options.queries]);
 
   useLayoutEffect(() => {
     host.setReporter(options.onPluginError);
@@ -186,6 +220,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     (context: RenderedDomContext, queries: DisplayListQueries) => {
       domRef.current = { context, queries };
       setDom(domRef.current);
+      for (const listener of layoutListeners.current) listener();
     },
     []
   );
@@ -296,6 +331,14 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     host.layoutChanged(currentLayout);
     publishSelection();
   }, [host, currentLayout, publishSelection]);
+
+  useLayoutEffect(() => {
+    if (!managed) return;
+    return displayWindowOf(options.queries)?.subscribe(() => {
+      host.geometryChanged();
+      if (layoutRef.current) host.layoutPresented(layoutRef.current);
+    });
+  }, [host, managed, options.queries]);
 
   useEffect(() => {
     host.geometryChanged();

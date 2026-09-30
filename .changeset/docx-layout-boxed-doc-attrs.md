@@ -2,4 +2,4 @@
 "@betteroffice/rust-crates": minor
 ---
 
-The rarely set `DocAttrs` fields in `betteroffice-docx-layout` are now boxed (`Option<Box<T>>`); the JS API and the wire format are unchanged.
+**BREAKING (Rust consumers):** public `DocAttrs` fields in `betteroffice-docx-layout` are now `Option<Box<T>>`; construct them with `Some(Box::new(value))`. The JS API and the wire format are unchanged.

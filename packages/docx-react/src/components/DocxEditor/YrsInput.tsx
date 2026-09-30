@@ -94,6 +94,7 @@ export interface YrsStoredFormatting {
 export interface YrsInputProps {
   enabled: boolean;
   readOnly: boolean;
+  replicaReadyRef?: React.RefObject<boolean>;
   session: YrsSession | null;
   story?: string;
   isSuggesting?: boolean;
@@ -213,6 +214,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   {
     enabled,
     readOnly,
+    replicaReadyRef,
     session,
     story = 'body',
     isSuggesting = false,
@@ -241,6 +243,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   },
   ref
 ) {
+  const replicaReady = replicaReadyRef?.current !== false;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const composingRef = useRef(false);
   const compositionPendingRef = useRef(false);
@@ -249,6 +252,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const inputLifetimeRef = useRef({ session, enabled, mounted: true });
   inputLifetimeRef.current.session = session;
   inputLifetimeRef.current.enabled = enabled;
+  // A resident edit that answers after the input unmounted or its document was replaced
+  // finishes nothing: the session it started on may be freed.
+  const isCurrentInput = useCallback(
+    (started: YrsSession | null): boolean =>
+      inputLifetimeRef.current.mounted && inputLifetimeRef.current.session === started,
+    []
+  );
   const storedFormattingByParagraphRef = useRef(new Map<string, YrsStoredFormatting>());
   const onPendingInputChangeRef = useRef(onPendingInputChange);
   onPendingInputChangeRef.current = onPendingInputChange;
@@ -291,12 +301,16 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     pendingResidentDeleteRef.current = null;
   }, []);
 
+  // An operation still queued when the input lets go of its session starts nothing.
   const enqueueInputOperation = useCallback(
     (operation: () => void | Promise<void>): void => {
       sealInputBatches();
-      inputOperationQueueRef.current?.enqueue(operation);
+      const admitted = session;
+      inputOperationQueueRef.current?.enqueue(() =>
+        isCurrentInput(admitted) ? operation() : undefined
+      );
     },
-    [sealInputBatches]
+    [isCurrentInput, sealInputBatches, session]
   );
 
   const advanceInteractionEpoch = useCallback((): void => {
@@ -394,10 +408,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   // Body-story only: painted-caret coverage for other stories is unproven, and
   // an unhonored dispatch hold would blank the caret per keystroke there.
   const dispatchCaretInput = useCallback((): void => {
-    if (!session || readOnly) return;
+    if (!session || readOnly || replicaReadyRef?.current === false) return;
     if (session.selection()?.head.story !== 'body') return;
     onCaretInputDispatched?.();
-  }, [onCaretInputDispatched, readOnly, session]);
+  }, [onCaretInputDispatched, readOnly, session, replicaReadyRef]);
 
   const storedFormatting = useCallback((): YrsStoredFormatting | null => {
     const current = ensureSelection();
@@ -483,7 +497,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const insertText = useCallback(
     (text: string): void => {
       verticalCaretGoalRef.current.reset();
-      if (!session || readOnly || text.length === 0) return;
+      if (!session || readOnly || replicaReadyRef?.current === false || text.length === 0) return;
       dispatchCaretInput();
       const applyText = async (inputText: string) => {
         const current = ensureSelection();
@@ -560,6 +574,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           applyResidentInput
         ) {
           const applied = await applyResidentInput(inputText);
+          if (!isCurrentInput(session)) return;
           if (applied) finishResidentMutation(applied);
           else commitCompatibilityInput();
           return;
@@ -599,8 +614,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       finishMutation,
       finishResidentMutation,
       inputPositionMap,
+      isCurrentInput,
       isSuggesting,
       readOnly,
+      replicaReadyRef,
       session,
       suggestingAuthor,
     ]
@@ -608,7 +625,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const deleteUnits = useCallback(
     async (direction: 'backward' | 'forward', count: number): Promise<void> => {
-      if (!session || readOnly) return;
+      if (!session || readOnly || replicaReadyRef?.current === false) return;
       let remaining = count;
       while (remaining > 0) {
         if (deleteSelected()) {
@@ -631,6 +648,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             : caret.offset < map.paragraphs[index].length || index + 1 < paragraphs.length;
         if (hasTarget && isBodyFlowStory(activeStory) && !isSuggesting && applyResidentDelete) {
           const applied = await applyResidentDelete(direction, remaining);
+          if (!isCurrentInput(session)) return;
           if (applied) {
             finishResidentMutation(applied);
             remaining -= Math.max(1, applied.deletedUnits ?? remaining);
@@ -694,8 +712,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       finishMutation,
       finishResidentMutation,
       inputPositionMap,
+      isCurrentInput,
       isSuggesting,
       readOnly,
+      replicaReadyRef,
       session,
       suggestingAuthor,
     ]
@@ -725,7 +745,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     verticalCaretGoalRef.current.reset();
     dispatchCaretInput();
     enqueueInputOperation(() => {
-      if (!session || readOnly) return;
+      if (!session || readOnly || replicaReadyRef?.current === false) return;
       const selectedStart = deleteSelected();
       const current = selectedStart ?? ensureSelection()?.head;
       if (!current) return;
@@ -774,6 +794,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     finishMutation,
     nextParagraphStyleId,
     readOnly,
+    replicaReadyRef,
     session,
     suggestingAuthor,
   ]);
@@ -801,6 +822,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
               ? { queries: currentQueries, frameEpoch: displayListFrameEpochRef.current }
               : null
           : null;
+        if (!isCurrentInput(session)) return;
         if (
           verticalDirection &&
           interactionEpoch !== undefined &&
@@ -898,6 +920,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       enqueueInputOperation,
       ensureSelection,
       inputPositionMap,
+      isCurrentInput,
       locToDisplayPosition,
       resolveDisplayTarget,
       session,
@@ -1081,7 +1104,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       compositionCommitRef.current =
         event.currentTarget.value || event.data || compositionCommitRef.current;
       queueMicrotask(() => {
-        if (!compositionPendingRef.current || inputLifetimeRef.current.session !== session) return;
+        if (!compositionPendingRef.current || !isCurrentInput(session)) return;
         const text = textareaRef.current?.value || compositionCommitRef.current;
         // Reset the browser model before applying the document op. A trailing
         // post-composition beforeinput therefore observes an empty model and
@@ -1095,7 +1118,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         onPendingInputChangeRef.current?.(inputOperationQueueRef.current?.hasPending() ?? false);
       });
     },
-    [insertText, session]
+    [insertText, isCurrentInput, session]
   );
 
   const handleInput = useCallback(
@@ -1263,7 +1286,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       storedFormatting,
       insertText,
       deleteSelection() {
-        if (!readOnly && deleteSelected()) {
+        if (!readOnly && replicaReadyRef?.current !== false && deleteSelected()) {
           advanceInteractionEpoch();
           finishMutation();
         }
@@ -1285,6 +1308,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       insertText,
       deleteSelected,
       readOnly,
+      replicaReadyRef,
       runAfterPendingInput,
       selectAll,
       session,
@@ -1305,18 +1329,18 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, [session, story]);
 
   useEffect(() => {
-    if (!enabled || !session) return;
+    if (!enabled || !session || !replicaReady) return;
     ensureSelection();
     emitSelection(false);
-  }, [emitSelection, enabled, ensureSelection, session]);
+  }, [emitSelection, enabled, ensureSelection, session, replicaReady]);
 
   useEffect(() => {
-    if (!enabled || !session || readOnly) return;
+    if (!enabled || !session || readOnly || !replicaReady) return;
     const frame = requestAnimationFrame(() =>
       textareaRef.current?.focus({ preventScroll: true })
     );
     return () => cancelAnimationFrame(frame);
-  }, [enabled, readOnly, session, story]);
+  }, [enabled, readOnly, session, story, replicaReady]);
 
   useEffect(() => {
     if (!enabled || !displayListQueries) return;
@@ -1405,7 +1429,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       autoCapitalize="sentences"
       autoCorrect="on"
       spellCheck
-      readOnly={readOnly || !session}
+      readOnly={readOnly || replicaReadyRef?.current === false || !session}
       rows={1}
       style={{ ...BASE_STYLE, ...positionStyle }}
       onBeforeInput={handleBeforeInput}
