@@ -818,6 +818,8 @@ describe('sliced layout completion', () => {
     const { w, onResume, bootstrap } = steppedWorker(100);
     await bootstrap();
     await w.attach([1]);
+    // Presenting fails too once the trap is recorded; the trap still answers.
+    w.harness.failPresent = 1;
     w.harness.memories = [
       { label: 'docx-edit', bufferBytes: 65536, liveBytes: 65000, peakBytes: 65000, failedAllocationBytes: 112 },
     ];

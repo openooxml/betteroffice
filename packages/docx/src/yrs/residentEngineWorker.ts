@@ -110,8 +110,10 @@ function enqueue(
 }
 
 function replyFailure(id: number, error: unknown): void {
-  if (error instanceof WebAssembly.RuntimeError) {
-    trapped(id, error);
+  // Once trapped, every failure is the trap's, answered once per request.
+  const failure = trap ?? error;
+  if (failure instanceof WebAssembly.RuntimeError) {
+    trapped(id, failure);
     return;
   }
   reply({
@@ -342,6 +344,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       request.type === 'applyDelete' ? session.residentDeletedUnits() : undefined
     );
   } catch (error) {
+    if (trap) throw trap;
     if (error instanceof WebAssembly.RuntimeError) throw error;
     const message = error instanceof Error ? error.message : String(error);
     reply({
