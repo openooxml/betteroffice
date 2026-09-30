@@ -3874,6 +3874,16 @@ impl EditSession {
         outcome_json(&self.engine.doc().read_paragraphs(&request)).map_err(js_err)
     }
 
+    /// Until the matching `end_shared_reads`, committed reads share story projections of each document state.
+    pub fn begin_shared_reads(&self) {
+        self.engine.doc().begin_shared_reads();
+    }
+
+    /// Ends a shared-read scope, dropping shared story projections when the last scope ends.
+    pub fn end_shared_reads(&self) {
+        self.engine.doc().end_shared_reads();
+    }
+
     /// Exact, case-sensitive, paragraph-local search:
     /// `{"text","within","view","limit"?}` ->
     /// `{"ok":true,"version","matches":[{"text","range"}],"truncated"}`.

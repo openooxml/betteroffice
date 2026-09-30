@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { unzipContainer } from '../docx/wasm';
 import { preloadEditWasm } from '../wasm/edit';
-import { createProposalRegistry } from './proposals';
+import { createProposalRegistry, type DocxProposalSession } from './proposals';
 import {
   createYrsSession,
   proposalRevisionPreview,
@@ -166,6 +166,117 @@ beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
 
 afterEach(() => {
   for (const session of sessions.splice(0)) session.destroy();
+});
+
+describe('proposal registry', () => {
+  it('shares every proposal read and the apply in one scope when provided', () => {
+    for (const shared of [true, false]) {
+      const events: string[] = [];
+      let active = false;
+      let version = 'v1';
+      const session: DocxProposalSession = {
+        version: () => version,
+        resolveParagraphAnchor: (anchor) => {
+          expect(active).toBe(shared);
+          if (anchor.kind !== 'persisted') throw new Error('expected a persisted anchor');
+          events.push(`resolve:${anchor.paraId}`);
+          return {
+            status: 'found',
+            anchor: {
+              kind: 'session',
+              sessionId: 'test',
+              story: 'body',
+              paraId: anchor.paraId,
+            },
+          };
+        },
+        findText: (request) => {
+          expect(active).toBe(shared);
+          if (request.within.kind !== 'paragraph') throw new Error('expected a paragraph');
+          events.push(`find:${request.text}`);
+          const { story, paraId } = request.within;
+          return {
+            ok: true,
+            version,
+            matches: [
+              {
+                text: request.text,
+                range: {
+                  story,
+                  start: { paraId, offset: 0 },
+                  end: { paraId, offset: request.text.length },
+                  view: request.view,
+                },
+              },
+            ],
+            truncated: false,
+          };
+        },
+        readParagraphs: () => {
+          throw new Error('unexpected readParagraphs');
+        },
+        applyEdits: (request) => {
+          expect(active).toBe(shared);
+          events.push('apply');
+          version = 'v2';
+          return {
+            ok: true,
+            baseVersion: request.expectVersion,
+            version,
+            applied: true,
+            source: 'host',
+            changedStories: ['body'],
+            receipts: request.steps.map((_, stepIndex) => ({
+              stepIndex,
+              changed: true,
+              newParagraphs: [],
+              removedParagraphs: [],
+              revisionIds: [`revision-${stepIndex}`],
+            })),
+          };
+        },
+        listRevisions: () => [],
+        settleRevisions: () => {
+          throw new Error('unexpected settleRevisions');
+        },
+      };
+      if (shared) {
+        session.sharedReads = (read) => {
+          expect(active).toBe(false);
+          events.push('enter');
+          active = true;
+          try {
+            return read();
+          } finally {
+            active = false;
+            events.push('exit');
+          }
+        };
+      }
+      const registry = createProposalRegistry(session);
+      const snapshot = snapshotOf(
+        registry.propose({
+          expectVersion: 'v1',
+          proposals: [
+            replace('first', '00000001', 'Hello', 'Hi'),
+            replace('second', '00000006', 'Tail', 'End'),
+          ],
+        })
+      );
+      expect(snapshot.version).toBe('v2');
+      expect(snapshot.proposals.map((proposal) => proposal.id)).toEqual(['first', 'second']);
+      expect(events).toEqual([
+        ...(shared ? ['enter'] : []),
+        'resolve:00000001',
+        'find:Hello',
+        'resolve:00000006',
+        'find:Tail',
+        'apply',
+        ...(shared ? ['exit'] : []),
+      ]);
+      expect(active).toBe(false);
+    }
+  });
 });
 
 describe('YrsSession host proposals', () => {
