@@ -13,6 +13,7 @@ use crate::identity::{
     PARA_ORIGIN, SOURCE_PARA_ID, SYNTHETIC, SeededParagraph, SourceIndex, SourcePackage,
     SourcePartInput, SourceStoryKind,
 };
+use crate::raw::SeedRange;
 use crate::script_fonts::ScriptFontUse;
 use crate::structured::source::{
     CellLayout, CommentWrites, InlineRecord, InlineSource, Pin, Provenance, RawSource, ReadSource,
@@ -5046,15 +5047,70 @@ pub(crate) enum SeedMedia<'a> {
 
 /// Seeds every lowered story into `document` and retains the package context, with the identity
 /// index when there is one.
-/// The seed batches a deferred open holds back until materialization, plus the opaque
-/// sequence names, whose marker the open can only write once every story is applied.
+/// The seed ops a deferred open holds back until materialization, applied a
+/// window at a time: `next` is the unapplied cursor and `at_paragraph_end`
+/// whether the applied prefix ends on a paragraph boundary. Op indexes stay
+/// pristine because every mutation path materializes the rest first.
 pub(crate) struct PendingSeed {
-    pub batches: Vec<(String, Vec<RawOp>)>,
+    pub story: String,
+    pub ops: Vec<RawOp>,
+    pub next: usize,
+    pub at_paragraph_end: bool,
+    /// Seed ranges applied windows wrote, unioned per story for pinning at drain.
+    pub ranges: HashMap<String, SeedRange>,
     pub opaque_sequences: Vec<String>,
 }
 
+/// Extends `ranges[story]` by `range`: windows of one client's seed apply
+/// back to back, so contiguous clocks union. Anything else is ambiguous and
+/// the story falls back to sticky pinning.
+pub(crate) fn merge_seed_range(
+    ranges: &mut HashMap<String, SeedRange>,
+    story: &str,
+    range: Option<SeedRange>,
+) {
+    let merged = match (ranges.remove(story), range) {
+        (Some(existing), Some(new))
+            if existing.client == new.client && existing.clock + existing.len == new.clock =>
+        {
+            Some(SeedRange {
+                client: existing.client,
+                clock: existing.clock,
+                len: existing.len + new.len,
+            })
+        }
+        (None, Some(new)) => Some(new),
+        _ => None,
+    };
+    if let Some(range) = merged {
+        ranges.insert(story.to_owned(), range);
+    }
+}
+
+impl PendingSeed {
+    /// The end of the next window plus its boundary flag: ops covering story
+    /// `index`, extended to the paragraph mark closing it so a window never
+    /// ends mid-paragraph. Comment ops index past the tail, so only a full
+    /// materialization reaches them.
+    pub(crate) fn window_end(&self, index: u32) -> (usize, bool) {
+        let mut end = self.next;
+        let mut boundary = self.at_paragraph_end;
+        while end < self.ops.len() {
+            let op = &self.ops[end];
+            let at = op.seed_index();
+            if at <= index || (!boundary && at != u32::MAX) {
+                boundary = op.is_pilcrow();
+                end += 1;
+            } else {
+                break;
+            }
+        }
+        (end, boundary)
+    }
+}
+
 /// The body batch cut after the op that closes its `head`-th paragraph, when it has one. The
-/// tail keeps its absolute story indexes, so it applies later in one transaction unchanged.
+/// tail keeps its absolute story indexes, so it applies a window at a time unchanged.
 fn split_body_seed(batches: &mut [(String, Vec<RawOp>)], head: usize) -> Option<Vec<RawOp>> {
     let (_, ops) = batches
         .iter_mut()
@@ -5160,9 +5216,13 @@ fn seed_lowered(
         },
         0,
     );
-    if let Some(batches) = tail {
+    if let Some(ops) = tail {
         document.stash_pending_seed(PendingSeed {
-            batches: vec![("body".to_owned(), batches)],
+            story: "body".to_owned(),
+            ops,
+            next: 0,
+            at_paragraph_end: true,
+            ranges: HashMap::new(),
             opaque_sequences: context.opaque_sequences,
         });
     } else {

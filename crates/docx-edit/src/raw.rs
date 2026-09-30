@@ -65,6 +65,24 @@ pub(crate) struct SeedRange {
     pub len: u32,
 }
 
+impl RawOp {
+    /// The story index the op writes at; comment ops sit past the tail end.
+    pub(crate) fn seed_index(&self) -> u32 {
+        match self {
+            Self::Insert { index, .. }
+            | Self::Delete { index, .. }
+            | Self::Format { index, .. }
+            | Self::InsertEmbed { index, .. }
+            | Self::SetEmbedAttr { index, .. } => *index,
+            Self::SetComment { .. } | Self::RemoveComment { .. } => u32::MAX,
+        }
+    }
+
+    /// Whether the op closes a paragraph.
+    pub(crate) fn is_pilcrow(&self) -> bool {
+        matches!(self, Self::InsertEmbed { kind, .. } if kind == PILCROW_KIND)
+    }
+}
 fn valid_paragraph_id(value: &Any) -> bool {
     matches!(value, Any::String(id) if parse_paragraph_id(id).is_some())
 }
@@ -185,6 +203,24 @@ impl EditingDoc {
             .into_iter()
             .filter_map(|(story, range)| range.map(|range| (story, range)))
             .collect())
+    }
+
+    /// Applies one deferred-seed window in the same local transaction a bulk
+    /// seed would run, without the pending-seed gate so the caller's window
+    /// stays bounded. Returns the seed range the window wrote, for pinning.
+    pub(crate) fn apply_raw_seed_window(
+        &self,
+        story_id: &str,
+        ops: Vec<RawOp>,
+    ) -> OpResult<Option<SeedRange>> {
+        use yrs::Transact;
+        guard_inserted_values(&ops)?;
+        let range = {
+            let mut txn = self.yrs_doc().transact_mut_with(self.client_id());
+            apply_raw_ops_to_story(&mut txn, story_id, ops, true, &mut Vec::new())?
+        };
+        self.forget_seen();
+        Ok(range)
     }
 }
 
