@@ -2530,6 +2530,13 @@ fn measure_table(
         }
     }
 
+    let outer_width = |border: &crate::types::CellBorderSpec| {
+        if matches!(border.style.as_deref(), Some("none" | "nil")) {
+            0.0
+        } else {
+            border.width.unwrap_or(0.0)
+        }
+    };
     let mut top_border = 0.0_f64;
     let mut bottom_border = 0.0_f64;
     for cell in &grid {
@@ -2537,22 +2544,10 @@ fn measure_table(
             continue;
         };
         if cell.row_index == 0 {
-            top_border = top_border.max(
-                borders
-                    .top
-                    .as_ref()
-                    .and_then(|border| border.width)
-                    .unwrap_or(0.0),
-            );
+            top_border = top_border.max(borders.top.as_ref().map_or(0.0, outer_width));
         }
         if cell.row_index + cell.row_span >= rows.len() {
-            bottom_border = bottom_border.max(
-                borders
-                    .bottom
-                    .as_ref()
-                    .and_then(|border| border.width)
-                    .unwrap_or(0.0),
-            );
+            bottom_border = bottom_border.max(borders.bottom.as_ref().map_or(0.0, outer_width));
         }
     }
     if let Some(row) = rows.first_mut().filter(|_| !exact[0]) {
@@ -3874,6 +3869,21 @@ mod tests {
                 expected[0]
             );
         }
+    }
+
+    #[test]
+    fn invisible_outer_borders_reserve_no_band() {
+        let mut table: TableBlock = serde_json::from_value(json!({
+            "id":"table", "columnWidths":[100],
+            "rows":[{"id":"row", "height":40, "heightRule":"exact", "cells":[{
+                "id":"cell", "padding":{"top":0,"bottom":0,"left":0,"right":0},
+                "borders":{"top":{"width":6,"style":"nil"},"bottom":{"width":6,"style":"none"}},
+                "blocks":[{"kind":"image","id":"image","src":"","width":10,"height":16}]
+            }]}]
+        }))
+        .unwrap();
+        let measured = measure_table(&mut table, 100.0, &MeasurementConfig::default()).unwrap();
+        assert_eq!(measured.total_height, 40.0);
     }
 
     #[test]

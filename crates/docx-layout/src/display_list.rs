@@ -9408,8 +9408,12 @@ pub(crate) fn emit_table_fragment(
             if p.is_first_row
                 && let Some(e) = &borders.top
             {
-                let inset = if p.g.row_index == 0 && !carried && frag.clip_top.unwrap_or(0.0) == 0.0
-                {
+                let starts_table = if carried {
+                    plan.header_row_count > 0
+                } else {
+                    frag.clip_top.unwrap_or(0.0) == 0.0
+                };
+                let inset = if p.g.row_index == 0 && starts_table {
                     e.width.unwrap_or(1.0) / 2.0
                 } else {
                     0.0
