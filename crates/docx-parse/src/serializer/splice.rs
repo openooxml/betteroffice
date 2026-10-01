@@ -216,7 +216,7 @@ fn root_binds(source: &str, serialized: &str, prefixes: &BTreeSet<&str>) -> Opti
 /// Each addressed paragraph's parent element, by ordinal. `None` unless every namespace prefix
 /// in `source` keeps one binding and every namespace one prefix, `w` is bound to
 /// WordprocessingML and no default namespace is declared, so that element names identify
-/// elements, and no attribute value holds a `<`.
+/// elements.
 fn parents<'s>(
     source: &'s str,
     spans: &BTreeMap<u32, Range<usize>>,
@@ -235,7 +235,7 @@ fn parents<'s>(
             continue;
         }
         for (key, range) in &tag.attributes {
-            if *key == "xmlns" || source[range.clone()].contains('<') {
+            if *key == "xmlns" {
                 return None;
             }
             let Some(prefix) = key.strip_prefix("xmlns:") else {
@@ -341,12 +341,6 @@ pub(crate) fn splice_story_part(
             .iter()
             .any(|ordinal| !written.contains_key(ordinal))
     {
-        return None;
-    }
-    if matches!(
-        crate::xml::escape_stray_ampersands(source.as_bytes()),
-        Cow::Owned(_)
-    ) {
         return None;
     }
     let changed: BTreeSet<u32> = part.changed.iter().copied().collect();
@@ -545,24 +539,6 @@ mod tests {
         assert_eq!(splice(&source, &[(0, same)], &[]), Some(source.clone()));
         let fewer = "<w:p><w:hyperlink r:id=\"rId4\"><w:r><w:t>x</w:t></w:r></w:hyperlink></w:p>";
         assert_eq!(splice(&source, &[(0, fewer)], &[]), Some(source.clone()));
-    }
-
-    #[test]
-    fn writes_the_whole_part_when_the_source_holds_xml_the_loader_reads_leniently() {
-        let kept = "<w:p><w:hyperlink w:anchor=\"b\" w:tooltip=\"A &amp; B\"><w:r><w:t>keep</w:t></w:r></w:hyperlink></w:p>";
-        let edited = "<w:p><w:r><w:t>edited</w:t></w:r></w:p>";
-        let source = format!(
-            "{ROOT}<w:body>{kept}<w:p><w:r><w:t>edit</w:t></w:r></w:p></w:body></w:document>"
-        );
-        let paragraphs = [(0, kept), (1, edited)];
-        assert_eq!(
-            splice(&source, &paragraphs, &[1]),
-            Some(source.replace("<w:t>edit</w:t>", "<w:t>edited</w:t>"))
-        );
-        for lenient in ["A & B", "A < B"] {
-            let source = source.replace("A &amp; B", lenient);
-            assert_eq!(splice(&source, &paragraphs, &[1]), None, "{lenient}");
-        }
     }
 
     #[test]

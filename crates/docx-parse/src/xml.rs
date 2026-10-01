@@ -601,8 +601,92 @@ pub fn parse_xml(
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<XmlDocument, ParseError> {
-    let repaired = escape_stray_ampersands(xml);
-    parse_xml_strict(repaired.as_ref(), part, budget)
+    parse_xml_strict(repaired(xml).as_ref(), part, budget)
+}
+
+/// `xml` as [`parse_xml`] reads it: borrowed unless the part needed repair.
+fn repaired(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    escape_stray_ampersands(xml)
+}
+
+/// Whether [`parse_xml`] reads `xml` exactly as written, so that its bytes mean what was read
+/// from them: nothing repaired, UTF-8, one root element, every prefix bound, and none of the
+/// constructs the parser passes over that XML forbids (a declaration after the start, a
+/// malformed comment or processing instruction, `]]>` in character data).
+pub fn reads_as_written(xml: &[u8]) -> bool {
+    use quick_xml::name::ResolveResult;
+    use quick_xml::reader::NsReader;
+    if matches!(repaired(xml), std::borrow::Cow::Owned(_)) {
+        return false;
+    }
+    let mut reader = NsReader::from_reader(xml);
+    reader.config_mut().check_comments = true;
+    reader.config_mut().check_end_names = true;
+    let mut depth = 0usize;
+    let mut roots = 0usize;
+    for index in 0usize.. {
+        let Ok((resolved, event)) = reader.read_resolved_event() else {
+            return false;
+        };
+        if matches!(resolved, ResolveResult::Unknown(_)) {
+            return false;
+        }
+        match event {
+            Event::Eof => return depth == 0 && roots == 1,
+            Event::Decl(declaration) => {
+                let utf8 = match declaration.encoding() {
+                    None => true,
+                    Some(Ok(encoding)) => encoding.eq_ignore_ascii_case(b"utf-8"),
+                    Some(Err(_)) => false,
+                };
+                if index != 0 || !utf8 {
+                    return false;
+                }
+            }
+            Event::PI(instruction) => {
+                if instruction.target().eq_ignore_ascii_case(b"xml") {
+                    return false;
+                }
+            }
+            Event::DocType(_) => return false,
+            Event::Start(ref element) | Event::Empty(ref element) => {
+                if depth == 0 {
+                    roots += 1;
+                }
+                for attribute in element.attributes() {
+                    let Ok(attribute) = attribute else {
+                        return false;
+                    };
+                    if attribute.key.as_namespace_binding().is_none()
+                        && matches!(
+                            reader.resolver().resolve_attribute(attribute.key).0,
+                            ResolveResult::Unknown(_)
+                        )
+                    {
+                        return false;
+                    }
+                }
+                if matches!(event, Event::Start(_)) {
+                    depth += 1;
+                }
+            }
+            Event::End(_) => depth = depth.saturating_sub(1),
+            Event::Text(text) => {
+                if text.windows(3).any(|window| window == b"]]>")
+                    || (depth == 0 && !text.iter().all(u8::is_ascii_whitespace))
+                {
+                    return false;
+                }
+            }
+            Event::CData(_) | Event::GeneralRef(_) => {
+                if depth == 0 {
+                    return false;
+                }
+            }
+            Event::Comment(_) => {}
+        }
+    }
+    false
 }
 
 /// Parse emitted XML without repairing malformed entity references.
@@ -997,7 +1081,7 @@ fn malformed(reader: &Reader<&[u8]>, part: &str, error: impl ToString) -> ParseE
     }
 }
 
-pub(crate) fn escape_stray_ampersands(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+fn escape_stray_ampersands(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     // Stray ampersands are repaired only in UTF-8 or ASCII input.
     let mut output: Option<Vec<u8>> = None;
     let mut index = 0;
@@ -1199,6 +1283,48 @@ mod tests {
             "word/test.xml",
             &mut ParseBudget::new(&limits),
         )
+    }
+
+    #[test]
+    fn reads_as_written_only_xml_it_reads_without_repair_or_tolerance() {
+        let w = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"";
+        let part = |body: &str| {
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<w:document {w}><w:body>{body}</w:body></w:document>"
+            )
+        };
+        let paragraph = "<w:p><w:r><w:t xml:space=\"preserve\">A &amp; B</w:t></w:r></w:p><!-- note --><?pi x?>";
+        assert!(reads_as_written(part(paragraph).as_bytes()));
+        assert!(reads_as_written(
+            format!("\u{feff}{}", part(paragraph)).as_bytes()
+        ));
+        for (case, xml) in [
+            (
+                "stray ampersand",
+                part("<w:p><w:r><w:t>A & B</w:t></w:r></w:p>"),
+            ),
+            (
+                "declared encoding",
+                part(paragraph).replace("UTF-8", "windows-1252"),
+            ),
+            ("late declaration", part("<?xml version=\"1.0\"?>")),
+            ("reserved instruction", part("<?XML x?>")),
+            ("malformed comment", part("<!-- a--b -->")),
+            (
+                "character data",
+                part("<w:p><w:r><w:t>A ]]> B</w:t></w:r></w:p>"),
+            ),
+            ("unbound element", part("<x:p/>")),
+            ("unbound attribute", part("<w:p x:a=\"1\"/>")),
+            ("second root", format!("{}<w:document {w}/>", part(""))),
+            ("text after the root", format!("{}text", part(""))),
+            (
+                "document type",
+                part("").replacen("<w:document", "<!DOCTYPE w:document><w:document", 1),
+            ),
+        ] {
+            assert!(!reads_as_written(xml.as_bytes()), "{case}");
+        }
     }
 
     #[test]

@@ -1977,6 +1977,17 @@ fn story_parts_that_keep_their_paragraphs_splice_with_only_the_edited_ones_chang
 }
 
 #[test]
+fn a_part_the_parser_reads_leniently_does_not_splice() {
+    let paragraph = |text: &str| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+    let body = [paragraph("A"), paragraph("B")].concat();
+    assert!(spliced(&seeded(&paragraphs_package(&body)), "word/document.xml").is_some());
+    for lenient in [paragraph("A & B"), "<!-- a--b -->".to_owned()] {
+        let doc = seeded(&paragraphs_package(&format!("{body}{lenient}")));
+        assert_eq!(spliced(&doc, "word/document.xml"), None, "{lenient}");
+    }
+}
+
+#[test]
 fn a_moved_comment_anchor_changes_only_its_paragraph() {
     let doc = seeded(&fixture());
     let valid = key_of(&doc, "body", "Valid");
