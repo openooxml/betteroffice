@@ -650,6 +650,7 @@ impl EditingDoc {
     }
 
     /// Cached segment geometry for `story_id`, rebuilt when the doc changes.
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
     pub(crate) fn segment_index(&self, story_id: &str) -> EditResult<Arc<SegmentIndex>> {
         // Sampling before the read txn lets a racing commit tag the fresh index
         // stale rather than serve a pre-commit snapshot as current.
