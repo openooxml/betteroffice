@@ -167,7 +167,8 @@ const RICH_COMMENT = '<w:comment w:author="Rich reviewer" w:id="0" w:initials="R
   '<w:highlight w:val="yellow"/></w:rPr><w:t> colorful</w:t></w:r></w:p>\n' +
   '<w:p w14:paraId="10000011"><w:pPr><w:jc w:val="center"/></w:pPr>' + run('Second') + '</w:p>\n' +
   '<w:tbl><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc>' +
-  paragraph('10000012', run('Cell')) + '</w:tc></w:tr></w:tbl>\n</w:comment>';
+  paragraph('10000012', run('Cell')) + '</w:tc></w:tr></w:tbl>\n' +
+  paragraph('10000013', run('After')) + '\n</w:comment>';
 
 function richCommentsFixture(): Fixture {
   const source = fixture((p) =>

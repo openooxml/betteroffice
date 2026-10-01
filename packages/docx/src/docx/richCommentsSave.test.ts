@@ -18,7 +18,8 @@ const RICH = '<w:comment w:author="Rich reviewer" w:id="0" w:initials="R">\n' +
   '<w:highlight w:val="yellow"/></w:rPr><w:t> colorful</w:t></w:r></w:p>\n' +
   '<w:p w14:paraId="10000002"><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>Second</w:t></w:r></w:p>\n' +
   '<w:tbl><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc>' +
-  '<w:p w14:paraId="10000003"><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>\n</w:comment>';
+  '<w:p w14:paraId="10000003"><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>\n' +
+  '<w:p w14:paraId="10000005"><w:r><w:t>After</w:t></w:r></w:p>\n</w:comment>';
 const COMMENT_RELS = `<Relationships xmlns="${RELS}">\n` +
   `  <Relationship TargetMode='External' Target='https://example.com/synthetic' Id='link' Type='${R}/hyperlink'/>\n` +
   '</Relationships>';
