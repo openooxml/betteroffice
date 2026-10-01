@@ -490,7 +490,14 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         // A queued pass deferred above still holds settles until it gets this far.
         if (!workerProposalAuthority(session)?.initialized) markLayoutQueued(session, false);
 
-        const computeInputs = { document, pageGap, session, renderEnv: passRenderEnv, measurement };
+        const computeInputs = {
+          document,
+          pageGap,
+          session,
+          renderEnv: passRenderEnv,
+          measurement,
+          ...(workerOpenEnabledRef.current ? { cachedPageTotals: true } : {}),
+        };
         const sourceVersion = readSessionVersion(session);
         const previewKey = revisionPreviewKey(passRenderEnv.revisionPreview);
         const request = {
