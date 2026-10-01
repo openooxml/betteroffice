@@ -2438,15 +2438,15 @@ fn spliced_part(
             .iter()
             .map(|unit| unit.key.as_deref())
             .collect::<Option<_>>()?;
-        let kept = |units: &[UnitState], keys: &dyn Fn(&str) -> bool| {
+        fn kept<'u>(units: &'u [UnitState], keep: impl Fn(&str) -> bool) -> Vec<&'u str> {
             units
                 .iter()
                 .filter_map(|unit| unit.key.as_deref())
-                .filter(|key| keys(key))
-                .collect::<Vec<_>>()
-        };
-        if kept(was_units, &|key| is_keys.contains(key))
-            != kept(is_units, &|key| was_keys.contains_key(key))
+                .filter(|key| keep(key))
+                .collect()
+        }
+        if kept(was_units, |key| is_keys.contains(key))
+            != kept(is_units, |key| was_keys.contains_key(key))
         {
             return None;
         }
