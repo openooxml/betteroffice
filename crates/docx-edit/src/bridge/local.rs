@@ -77,8 +77,6 @@ impl LocalLowering {
         diff: &yrs::types::text::Diff<YChange>,
         txn: &T,
         story: &str,
-        (start, pm_start, slot, source): (u32, u64, usize, u32),
-        last: bool,
     ) {
         if self.blocked {
             return;
@@ -89,7 +87,7 @@ impl LocalLowering {
             .flatten()
             .any(|(key, value)| unsafe_value(key, value));
         match &diff.insert {
-            Out::Any(Any::String(_)) if paragraph.mixed => {}
+            Out::Any(Any::String(_)) if story != "body" || paragraph.mixed => {}
             Out::Any(Any::String(text)) => {
                 if paragraph.text.is_empty() {
                     paragraph.attrs = attributes(attrs);
@@ -100,31 +98,46 @@ impl LocalLowering {
                 }
                 paragraph.text.push_str(text);
             }
+            Out::YMap(mark) if is_pilcrow(mark, txn) => {}
             Out::YMap(mark) => {
                 let values = pilcrow_values(mark, txn);
-                self.blocked |= values.iter().any(|(key, value)| unsafe_value(key, value));
-                if is_pilcrow(mark, txn) {
-                    let sectioned =
-                        values.contains_key("sectPr") || values.contains_key("sectionBreakType");
-                    self.blocked |= sectioned && (story != "body" || !last);
-                    if story == "body" && !paragraph.mixed && !sectioned {
-                        paragraph.raw_start = start;
-                        paragraph.pm_start = pm_start;
-                        paragraph.slot = slot;
-                        paragraph.source = source;
-                        paragraph.pilcrow = Some(mark.clone());
-                        paragraph.mark_attrs = attrs.cloned();
-                        let seed = std::mem::take(paragraph);
-                        self.seeds
-                            .insert(value_string(values.get("paraId")).unwrap_or_default(), seed);
-                    }
-                } else if value_string(values.get("_kind")).as_deref() != Some("table") {
-                    self.blocked = true;
-                }
+                self.blocked |= values.iter().any(|(key, value)| unsafe_value(key, value))
+                    || value_string(values.get("_kind")).as_deref() != Some("table");
                 *paragraph = ParagraphSeed::default();
             }
             _ => self.blocked = true,
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn observe_pilcrow(
+        &mut self,
+        paragraph: &mut ParagraphSeed,
+        mark: &MapRef,
+        values: &BTreeMap<String, Any>,
+        attrs: Option<&Attrs>,
+        story: &str,
+        (start, pm_start, slot, source): (u32, u64, usize, u32),
+        last: bool,
+    ) {
+        if self.blocked {
+            return;
+        }
+        self.blocked |= values.iter().any(|(key, value)| unsafe_value(key, value));
+        let sectioned = values.contains_key("sectPr") || values.contains_key("sectionBreakType");
+        self.blocked |= sectioned && (story != "body" || !last);
+        if story == "body" && !paragraph.mixed && !sectioned && !self.blocked {
+            paragraph.raw_start = start;
+            paragraph.pm_start = pm_start;
+            paragraph.slot = slot;
+            paragraph.source = source;
+            paragraph.pilcrow = Some(mark.clone());
+            paragraph.mark_attrs = attrs.cloned();
+            let seed = std::mem::take(paragraph);
+            self.seeds
+                .insert(value_string(values.get("paraId")).unwrap_or_default(), seed);
+        }
+        *paragraph = ParagraphSeed::default();
     }
 
     pub(super) fn finish(&mut self, blocks: &[LayoutBlock], map: &LoweringMap) {

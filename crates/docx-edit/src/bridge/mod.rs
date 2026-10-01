@@ -473,19 +473,7 @@ fn lower_story<T: ReadTxn>(
         let mut plain = local::ParagraphSeed::default();
         for diff in story.diff(txn, YChange::identity) {
             let attributes = diff.attributes.as_deref();
-            local.observe(
-                &mut plain,
-                &diff,
-                txn,
-                story_id,
-                (
-                    paragraph_start,
-                    paragraph_pm_start,
-                    blocks.len(),
-                    map.paragraphs.len() as u32,
-                ),
-                story_index + 1 == story.len(txn),
-            );
+            local.observe(&mut plain, &diff, txn, story_id);
             match diff.insert {
                 Out::Any(Any::String(text)) => {
                     let text = text.as_ref();
@@ -505,6 +493,20 @@ fn lower_story<T: ReadTxn>(
                 }
                 Out::YMap(pilcrow) if is_pilcrow(&pilcrow, txn) => {
                     let values = pilcrow_values(&pilcrow, txn);
+                    local.observe_pilcrow(
+                        &mut plain,
+                        &pilcrow,
+                        &values,
+                        attributes,
+                        story_id,
+                        (
+                            paragraph_start,
+                            paragraph_pm_start,
+                            blocks.len(),
+                            map.paragraphs.len() as u32,
+                        ),
+                        story_index + 1 == story.len(txn),
+                    );
                     let para_id = value_string(values.get("paraId")).unwrap_or_default();
                     let code_join = pending_code_join.take();
                     let sectioned =
