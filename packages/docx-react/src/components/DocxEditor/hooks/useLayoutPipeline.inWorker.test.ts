@@ -7,7 +7,8 @@ import { proposalSetIdentity, type ResidentProposalReply, type YrsRenderEnv, typ
 import { isLayoutQueued, isSupersededLayout, sourceVersionOf } from '../internals/layoutProvenance';
 import { deferWorkerOpenReplica } from '../internals/workerOpenReplica';
 import { registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
-import type { WorkerLayoutComputation } from './useDisplayList';
+import type { FontRequirementsInWorker, WorkerLayoutComputation } from './useDisplayList';
+import { SupersededPreviewError } from '../internals/supersededPreview';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -64,7 +65,11 @@ function fakeDocument() {
 }
 
 /** A document whose version each test moves on; worker passes answer when the test says. */
-async function opened({ experimentalWorkerOpen = false, pendingReplica = false } = {}) {
+async function opened({
+  experimentalWorkerOpen = false,
+  pendingReplica = false,
+  fontRequirementsInWorker = undefined as FontRequirementsInWorker | undefined,
+} = {}) {
   let nextFrame = 0;
   const frames = new Map<number, FrameRequestCallback>();
   const requestFrame = spyOn(globalThis, 'requestAnimationFrame').mockImplementation((callback) => {
@@ -99,6 +104,7 @@ async function opened({ experimentalWorkerOpen = false, pendingReplica = false }
       syncCoordinator,
       getScrollContainer: () => null,
       onError: (error) => errors.push(error),
+      fontRequirementsInWorker,
       layoutInWorker: (asked) =>
         doc.workerAvailable
           ? new Promise<WorkerLayoutComputation | null>((resolve) => {
@@ -537,6 +543,34 @@ test('a worker pass that fails with a pass queued behind it leaves the layout to
   expect(shown()).toBe('2');
   expect(isSupersededLayout(hook.result.current.layout)).toBe(false);
   expect(errors).toEqual([]);
+});
+
+test('a superseded font preflight drops its pass without an error', async () => {
+  let superseded = false;
+  const h = await opened({
+    experimentalWorkerOpen: true,
+    pendingReplica: true,
+    fontRequirementsInWorker: () => (superseded ? Promise.reject(new SupersededPreviewError()) : null),
+  });
+  superseded = true;
+  h.doc.version = 2;
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  expect(h.errors).toEqual([]);
+  expect(h.worker).toHaveLength(1);
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(h.shown()).toBe('1');
+  expect(isLayoutQueued(h.session)).toBe(false);
+
+  superseded = false;
+  h.doc.version = 3;
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  await h.answer(1);
+  expect(h.worker.map((pass) => pass.at)).toEqual([1, 3]);
+  expect(h.shown()).toBe('3');
+  expect(h.errors).toEqual([]);
+  h.hook.unmount();
 });
 
 test('a pass queued behind the worker never runs after unmount', async () => {

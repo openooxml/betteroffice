@@ -41,7 +41,7 @@
 use crate::font_store::FontId;
 
 use super::floats;
-use super::input::{CompatIn, FloatSegmentIn, FloatZoneIn, SpacingIn, TabStopIn};
+use super::input::{CompatIn, FloatSegmentIn, FloatZoneIn, RunIn, SpacingIn, TabStopIn};
 use super::prepare::{
     CharAdv, PreparedField, PreparedImage, PreparedRun, PreparedTab, PreparedText,
 };
@@ -1118,6 +1118,87 @@ fn advance_metadata(
 }
 
 /// UTF-16 offset of char index `i` (or the run's total length past the end).
+/// The widest span no line may break inside, and the paragraph's first span,
+/// which always opens the first line. Text splits into words at the same
+/// opportunities the filler wraps at, except that a word carries on into the
+/// next text run when the two runs meet with no opportunity between them.
+/// Fields and images are spans of their own; tabs and line breaks end a span.
+pub(super) fn unbreakable_spans(prepared: &[PreparedRun], runs: &[RunIn]) -> (f32, f32) {
+    let mut widest = 0.0_f32;
+    let mut first: Option<f32> = None;
+    let mut close = |width: f32| {
+        if width > 0.0 {
+            widest = widest.max(width);
+            first.get_or_insert(width);
+        }
+    };
+    let mut open: Option<(f32, usize)> = None;
+    for (index, run) in prepared.iter().enumerate() {
+        let atomic = match run {
+            PreparedRun::Text(t) if !t.chars.is_empty() => {
+                let carried = match open.take() {
+                    Some((width, from)) if runs_join(runs, from, index) => width,
+                    Some((width, _)) => {
+                        close(width);
+                        0.0
+                    }
+                    None => 0.0,
+                };
+                let mut start = 0usize;
+                for end in t
+                    .breaks
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(t.chars.len()))
+                {
+                    if end <= start {
+                        continue;
+                    }
+                    let word = &t.chars[start..end];
+                    let width = visible_span_width(word, t.letter_spacing)
+                        + if start == 0 { carried } else { 0.0 };
+                    if end == t.chars.len() && !word.last().is_some_and(|c| c.is_space) {
+                        open = Some((width, index));
+                    } else {
+                        close(width);
+                    }
+                    start = end;
+                }
+                continue;
+            }
+            PreparedRun::Text(_)
+            | PreparedRun::Hidden { .. }
+            | PreparedRun::SkippedImage { .. } => {
+                continue;
+            }
+            PreparedRun::Field(field) => field.width,
+            PreparedRun::InlineImage(image) | PreparedRun::OwnLineImage(image) => image.width,
+            PreparedRun::Tab(_) | PreparedRun::LineBreak => 0.0,
+        };
+        if let Some((width, _)) = open.take() {
+            close(width);
+        }
+        close(atomic);
+    }
+    if let Some((width, _)) = open {
+        close(width);
+    }
+    (widest, first.unwrap_or(0.0))
+}
+
+/// Whether text run `after` continues the word text run `before` ends in.
+fn runs_join(runs: &[RunIn], before: usize, after: usize) -> bool {
+    let last = runs
+        .get(before)
+        .and_then(|run| run.text.as_deref())
+        .and_then(|text| text.chars().next_back());
+    let next = runs
+        .get(after)
+        .and_then(|run| run.text.as_deref())
+        .and_then(|text| text.chars().next());
+    matches!((last, next), (Some(last), Some(next)) if !crate::line_break::break_allowed_between(last, next))
+}
+
 fn utf16_at(t: &PreparedText, i: usize) -> u32 {
     t.chars.get(i).map_or(t.utf16_len, |c| c.utf16_offset)
 }
