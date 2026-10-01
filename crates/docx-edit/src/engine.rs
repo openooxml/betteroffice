@@ -6112,30 +6112,49 @@ mod tests {
         let font = docx_layout::register_measure_font(lowering_pages::FONT).unwrap();
         let mut request: serde_json::Value =
             serde_json::from_str(&small_page_request(font)).unwrap();
+        request["regions"]["sections"][0]["properties"]["pageHeight"] = 5760.into();
         repeat_final_section(&mut request);
         let request = request.to_string();
-        let engine = paragraphs_engine(9605, 3);
-        engine.set_local_lowering(true);
-        for paragraph in engine.doc().paragraphs("body").unwrap().iter().take(2) {
-            let doc = engine.doc();
-            doc.set_paragraph_attr(
-                &paragraph.para_id,
-                "contextualSpacing",
-                yrs::Any::Bool(true),
-            )
-            .unwrap();
-            doc.set_paragraph_attr(&paragraph.para_id, "spaceAfter", yrs::Any::Number(300.0))
-                .unwrap();
-        }
-        engine.layout_document_with_regions_json(&request).unwrap();
-        engine.build_display_list_frame("{}", 0).unwrap();
-        let leading = engine.pagination.borrow().input.as_ref().unwrap().measured[0]
-            .block
-            .clone();
-        let LayoutBlock::Paragraph(leading) = leading else {
-            panic!("a paragraph leads the body");
+        let tops = |engine: &EngineSession| -> Vec<f64> {
+            engine.pagination.borrow().layout.as_ref().unwrap().pages[0]
+                .fragments
+                .iter()
+                .filter_map(|fragment| match fragment {
+                    Fragment::Paragraph(fragment) if fragment.from_line == 0 => Some(fragment.y),
+                    _ => None,
+                })
+                .collect()
         };
-        assert!(contextual_spacing_enabled(&leading));
+        let laid_out = |client_id, contextual: bool| {
+            let engine = paragraphs_engine(client_id, 3);
+            engine.set_local_lowering(true);
+            for paragraph in engine.doc().paragraphs("body").unwrap().iter().take(2) {
+                let doc = engine.doc();
+                if contextual {
+                    doc.set_paragraph_attr(
+                        &paragraph.para_id,
+                        "contextualSpacing",
+                        yrs::Any::Bool(true),
+                    )
+                    .unwrap();
+                }
+                doc.set_paragraph_attr(&paragraph.para_id, "spaceAfter", yrs::Any::Number(300.0))
+                    .unwrap();
+            }
+            engine.layout_document_with_regions_json(&request).unwrap();
+            engine.build_display_list_frame("{}", 0).unwrap();
+            engine
+        };
+        let apart = tops(&laid_out(9606, false));
+        let engine = laid_out(9605, true);
+        let collapsed = tops(&engine);
+        assert_eq!((apart.len(), collapsed.len()), (3, 3));
+        for (index, dropped) in [0.0, 20.0, 40.0].into_iter().enumerate() {
+            assert!(
+                (apart[index] - collapsed[index] - dropped).abs() < 1e-6,
+                "same-style paragraphs drop their contextual spacing: {apart:?} vs {collapsed:?}"
+            );
+        }
         let snapshot = |engine: &EngineSession| {
             let pagination = engine.pagination.borrow();
             (
@@ -6144,8 +6163,37 @@ mod tests {
                 serde_json::to_string(&pagination.layout.as_ref().unwrap().pages).unwrap(),
             )
         };
-        for (at, text) in [(0, Some("x")), (3, Some("y")), (0, None)] {
-            let ctx = crate::EditCtx::local("", "");
+        let matches_cold = |label: &str| {
+            assert!(
+                engine
+                    .apply_and_layout_regions_resident("body", &mut |_| {})
+                    .unwrap(),
+                "{label}: the region fast path absorbs the edit"
+            );
+            let resident = snapshot(&engine);
+            let (render, measurement, pagination, regions, display, capture, resumable) = (
+                engine.render.replace(Default::default()),
+                engine.measurement.replace(Default::default()),
+                engine.pagination.replace(Default::default()),
+                engine.regions.replace(Default::default()),
+                engine.display.replace(Default::default()),
+                engine.capture.replace(Default::default()),
+                engine.resumable.replace(Default::default()),
+            );
+            engine.layout_document_with_regions_json(&request).unwrap();
+            assert_eq!(resident, snapshot(&engine), "{label}");
+            engine.render.replace(render);
+            engine.measurement.replace(measurement);
+            engine.pagination.replace(pagination);
+            engine.regions.replace(regions);
+            engine.display.replace(display);
+            engine.capture.replace(capture);
+            engine.resumable.replace(resumable);
+        };
+        let ctx = crate::EditCtx::local("", "");
+        let longer = " and then the lazy dog wakes up, stretches and chases the fox";
+        for (at, text) in [(0, Some("x")), (3, Some("y")), (3, Some(longer)), (0, None)] {
+            let before = tops(&engine);
             match text {
                 Some(text) => engine
                     .doc()
@@ -6162,31 +6210,25 @@ mod tests {
                     .map(|_| ()),
             }
             .unwrap();
-            assert!(
-                engine
-                    .apply_and_layout_regions_resident("body", &mut |_| {})
-                    .unwrap()
-            );
-            let resident = snapshot(&engine);
-            let (render, measurement, pagination, regions, display, capture, resumable) = (
-                engine.render.replace(Default::default()),
-                engine.measurement.replace(Default::default()),
-                engine.pagination.replace(Default::default()),
-                engine.regions.replace(Default::default()),
-                engine.display.replace(Default::default()),
-                engine.capture.replace(Default::default()),
-                engine.resumable.replace(Default::default()),
-            );
-            engine.layout_document_with_regions_json(&request).unwrap();
-            assert_eq!(resident, snapshot(&engine), "[{at}] {text:?}");
-            engine.render.replace(render);
-            engine.measurement.replace(measurement);
-            engine.pagination.replace(pagination);
-            engine.regions.replace(regions);
-            engine.display.replace(display);
-            engine.capture.replace(capture);
-            engine.resumable.replace(resumable);
+            matches_cold(&format!("[{at}] {text:?}"));
+            if text == Some(longer) {
+                let after = tops(&engine);
+                assert!(
+                    after[0] == before[0] && after[1] > before[1] && after[2] > before[2],
+                    "the paragraphs after a taller edited paragraph move down: {before:?} -> {after:?}"
+                );
+            }
         }
+        let first = engine.doc().paragraphs("body").unwrap()[0]
+            .text
+            .chars()
+            .count() as u32;
+        engine
+            .doc()
+            .delete_range(&ctx, crate::StoryRange::new("body", first, first + 1))
+            .unwrap();
+        matches_cold("merge");
+        assert_eq!(tops(&engine).len(), 2);
     }
 
     fn paragraphs_engine(client_id: u64, paragraphs: usize) -> EngineSession {
