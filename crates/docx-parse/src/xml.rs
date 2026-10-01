@@ -637,9 +637,77 @@ fn repaired(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 /// element has the `xmlns` prefix, attributes are unique by expanded name, a prefixed declaration
 /// is non-empty, `xmlns` is never declared, `xml` only to its own namespace, and no other prefix or
 /// default to the `xml` or `xmlns` namespace; declaration values hold no reference or whitespace.
+///
+/// The loader names elements and attributes by their written prefix and local name, so a part
+/// is also refused where that reading and a namespace-aware one could differ: a standard prefix
+/// bound to another namespace or a standard namespace under another prefix, an element of another
+/// namespace inside a `w` element, and an unprefixed attribute on a WordprocessingML element. And
+/// where the loader keeps text Word reads differently: a `w:t`, `w:delText`, `w:instrText`,
+/// `w:delInstrText` or `m:t` holding an element, a tab, carriage return or line feed (written or
+/// referenced), or, without `xml:space="preserve"` in scope, a leading or trailing space; and a
+/// carriage return in other text that is not only whitespace between tags. Other whitespace (inner
+/// runs of spaces, attribute-value normalization) is left as written: kept bytes read in Word as
+/// they did before the save.
 pub fn reads_as_written(xml: &[u8]) -> bool {
     matches!(repaired(xml), std::borrow::Cow::Borrowed(_)) && PlainXml::new(xml).accepts()
 }
+
+/// Prefixes the loader reads by name, with the namespaces they stand for.
+const STANDARD_NAMESPACES: [(&str, &str); 22] = [
+    ("w", namespaces::W),
+    ("v", namespaces::V),
+    ("o", namespaces::O),
+    ("a", namespaces::A),
+    ("r", namespaces::R),
+    ("wp", namespaces::WP),
+    ("wp14", namespaces::WP14),
+    ("wps", namespaces::WPS),
+    ("wpc", namespaces::WPC),
+    ("wpg", namespaces::WPG),
+    ("pic", namespaces::PIC),
+    ("m", namespaces::M),
+    ("mc", namespaces::MC),
+    ("w14", namespaces::W14),
+    ("w15", namespaces::W15),
+    ("w10", "urn:schemas-microsoft-com:office:word"),
+    (
+        "w16se",
+        "http://schemas.microsoft.com/office/word/2015/wordml/symex",
+    ),
+    (
+        "w16cid",
+        "http://schemas.microsoft.com/office/word/2016/wordml/cid",
+    ),
+    (
+        "w16",
+        "http://schemas.microsoft.com/office/word/2018/wordml",
+    ),
+    (
+        "w16cex",
+        "http://schemas.microsoft.com/office/word/2018/wordml/cex",
+    ),
+    (
+        "w16sdtdh",
+        "http://schemas.microsoft.com/office/word/2020/wordml/sdtdatahash",
+    ),
+    (
+        "wne",
+        "http://schemas.microsoft.com/office/word/2006/wordml",
+    ),
+];
+
+/// WordprocessingML prefixes, whose attributes are always prefixed.
+const WORD_PREFIXES: [&[u8]; 9] = [
+    b"w",
+    b"w14",
+    b"w15",
+    b"w16se",
+    b"w16cid",
+    b"w16",
+    b"w16cex",
+    b"w16sdtdh",
+    b"wne",
+];
 
 const XML_NAMESPACE: &[u8] = b"http://www.w3.org/XML/1998/namespace";
 const XMLNS_NAMESPACE: &[u8] = b"http://www.w3.org/2000/xmlns/";
@@ -648,12 +716,23 @@ const UNPREFIXED: &[u8] = b"";
 /// A part's attribute: its prefix (empty when unprefixed), local name and raw value.
 type PlainAttribute<'a> = (&'a [u8], &'a [u8], &'a [u8]);
 
+/// An element [`PlainXml`] has read the start tag of.
+struct OpenElement<'a> {
+    name: &'a [u8],
+    prefix: &'a [u8],
+    /// The length of `bindings` before its start tag.
+    mark: usize,
+    /// Whether `xml:space="preserve"` is in scope.
+    preserve: bool,
+    /// For a text element, where its content starts.
+    text: Option<usize>,
+}
+
 /// The scanner behind [`reads_as_written`].
 struct PlainXml<'a> {
     xml: &'a [u8],
     at: usize,
-    /// Open elements' names, each with the length of `bindings` before its start tag.
-    open: Vec<(&'a [u8], usize)>,
+    open: Vec<OpenElement<'a>>,
     /// In-scope prefix bindings, innermost last; the default namespace has the empty prefix.
     bindings: Vec<(&'a [u8], &'a [u8])>,
     attributes: Vec<PlainAttribute<'a>>,
@@ -699,7 +778,12 @@ impl<'a> PlainXml<'a> {
                 if !run.iter().all(is_xml_space) {
                     return false;
                 }
-            } else if run.windows(3).any(|window| window == b"]]>") {
+            } else if run.windows(3).any(|window| window == b"]]>")
+                || (run.contains(&b'\r')
+                    && !(run.iter().all(is_xml_space)
+                        && xml.get(self.at) == Some(&b'<')
+                        && xml[..start].last() == Some(&b'>')))
+            {
                 return false;
             }
             match xml.get(self.at) {
@@ -753,7 +837,7 @@ impl<'a> PlainXml<'a> {
     }
 
     fn start_tag(&mut self) -> bool {
-        let Some((name, prefix, _)) = self.qname() else {
+        let Some((name, prefix, local)) = self.qname() else {
             return false;
         };
         let mark = self.bindings.len();
@@ -778,7 +862,12 @@ impl<'a> PlainXml<'a> {
             };
             attributes.push((key_prefix, key_local, value));
         };
+        let parent = self.open.last();
+        let mut preserve = parent.is_some_and(|parent| parent.preserve);
         for &(key_prefix, key_local, value) in &attributes {
+            if (key_prefix, key_local) == (b"xml", b"space") {
+                preserve = value == b"preserve";
+            }
             let declared = match (key_prefix, key_local) {
                 (b"xmlns", b"xmlns") => return false,
                 (b"xmlns", local) => {
@@ -799,12 +888,28 @@ impl<'a> PlainXml<'a> {
                 || value
                     .iter()
                     .any(|&byte| byte == b'&' || is_xml_space(&byte))
+                || STANDARD_NAMESPACES.iter().any(|(standard, namespace)| {
+                    (standard.as_bytes() == declared) != (namespace.as_bytes() == value)
+                })
             {
                 return false;
             }
             self.bindings.push((declared, value));
         }
-        if prefix == b"xmlns" || (!prefix.is_empty() && self.resolve(prefix).is_none()) {
+        if prefix == b"xmlns"
+            || (!prefix.is_empty() && self.resolve(prefix).is_none())
+            || parent.is_some_and(|parent| {
+                parent.text.is_some()
+                    || (parent.prefix == b"w"
+                        && !STANDARD_NAMESPACES
+                            .iter()
+                            .any(|(standard, _)| standard.as_bytes() == prefix))
+            })
+            || (WORD_PREFIXES.contains(&prefix)
+                && attributes.iter().any(|&(key_prefix, key_local, _)| {
+                    key_prefix.is_empty() && key_local != b"xmlns"
+                }))
+        {
             return false;
         }
         let mut names = std::mem::take(&mut self.names);
@@ -835,21 +940,71 @@ impl<'a> PlainXml<'a> {
         if empty {
             self.bindings.truncate(mark);
         } else {
-            self.open.push((name, mark));
+            let text = ((prefix == b"w"
+                && matches!(local, b"t" | b"delText" | b"instrText" | b"delInstrText"))
+                || (prefix == b"m" && local == b"t"))
+                .then_some(self.at);
+            self.open.push(OpenElement {
+                name,
+                prefix,
+                mark,
+                preserve,
+                text,
+            });
         }
         true
     }
 
     fn end_tag(&mut self) -> bool {
+        let close = self.at - 2;
         let Some((name, _, _)) = self.qname() else {
             return false;
         };
         self.space();
-        let Some((open, mark)) = self.open.pop() else {
+        let Some(open) = self.open.pop() else {
             return false;
         };
-        self.bindings.truncate(mark);
-        open == name && self.eat(b">")
+        self.bindings.truncate(open.mark);
+        open.name == name
+            && self.eat(b">")
+            && open
+                .text
+                .is_none_or(|start| self.text_reads_as_written(start, close, open.preserve))
+    }
+
+    /// Whether the text content `xml[start..end]` holds no tab, carriage return or line feed and,
+    /// unless `preserve`, starts and ends with something other than a space.
+    fn text_reads_as_written(&self, start: usize, end: usize, preserve: bool) -> bool {
+        let content = &self.xml[start..end];
+        let mut characters = Vec::new();
+        let mut at = 0;
+        while at < content.len() {
+            if content[at] == b'&' {
+                let Some(length) = content[at..].iter().position(|&byte| byte == b';') else {
+                    return false;
+                };
+                let reference = &content[at + 1..at + length];
+                characters.push(match reference {
+                    [b'#', b'x', digits @ ..] => std::str::from_utf8(digits)
+                        .ok()
+                        .and_then(|digits| u32::from_str_radix(digits, 16).ok()),
+                    [b'#', digits @ ..] => std::str::from_utf8(digits)
+                        .ok()
+                        .and_then(|digits| digits.parse().ok()),
+                    _ => Some(u32::from(b'x')),
+                });
+                at += length + 1;
+            } else {
+                characters.push(Some(u32::from(content[at])));
+                at += 1;
+            }
+        }
+        let space = u32::from(b' ');
+        characters.iter().all(|character| {
+            character.is_some_and(|character| !matches!(character, 0x09 | 0x0A | 0x0D))
+        }) && (preserve
+            || (characters.first() != Some(&Some(space))
+                && characters.last() != Some(&Some(space))))
     }
 
     fn resolve(&self, prefix: &[u8]) -> Option<&'a [u8]> {
@@ -1134,31 +1289,10 @@ fn canonical_namespace(prefix: &str) -> Option<&'static str> {
     if !crate::serializer::parts::is_story_root_prefix(prefix) {
         return None;
     }
-    match prefix {
-        "w" => Some(namespaces::W),
-        "v" => Some(namespaces::V),
-        "o" => Some(namespaces::O),
-        "a" => Some(namespaces::A),
-        "r" => Some(namespaces::R),
-        "wp" => Some(namespaces::WP),
-        "wp14" => Some(namespaces::WP14),
-        "wps" => Some(namespaces::WPS),
-        "wpc" => Some(namespaces::WPC),
-        "wpg" => Some(namespaces::WPG),
-        "pic" => Some(namespaces::PIC),
-        "m" => Some(namespaces::M),
-        "mc" => Some(namespaces::MC),
-        "w14" => Some(namespaces::W14),
-        "w15" => Some(namespaces::W15),
-        "w10" => Some("urn:schemas-microsoft-com:office:word"),
-        "w16se" => Some("http://schemas.microsoft.com/office/word/2015/wordml/symex"),
-        "w16cid" => Some("http://schemas.microsoft.com/office/word/2016/wordml/cid"),
-        "w16" => Some("http://schemas.microsoft.com/office/word/2018/wordml"),
-        "w16cex" => Some("http://schemas.microsoft.com/office/word/2018/wordml/cex"),
-        "w16sdtdh" => Some("http://schemas.microsoft.com/office/word/2020/wordml/sdtdatahash"),
-        "wne" => Some("http://schemas.microsoft.com/office/word/2006/wordml"),
-        _ => None,
-    }
+    STANDARD_NAMESPACES
+        .iter()
+        .find(|(standard, _)| *standard == prefix)
+        .map(|(_, namespace)| *namespace)
 }
 
 fn retain_drawing_namespace_aliases(
@@ -1586,7 +1720,7 @@ mod tests {
                 "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n<w:document {w}><w:body>{body}</w:body></w:document>"
             )
         };
-        let paragraph = "<w:p w:rsidR='00A1'><w:r><w:t xml:space=\"preserve\">A &amp; B &#x41;&#66; ]] &gt; \u{e9}\t</w:t></w:r></w:p>";
+        let paragraph = "<w:p w:rsidR='00A1'><w:r><w:t xml:space=\"preserve\">A &amp; B &#x41;&#66; ]] &gt; \u{e9} </w:t></w:r></w:p>";
         for xml in [
             part(paragraph),
             format!("\u{feff}{}", part(paragraph)),
@@ -1596,8 +1730,13 @@ mod tests {
                 1,
             ),
             format!(
-                "<w:document {w} xmlns=\"urn:x\"><w:body><p xmlns=\"\"/><x:p xmlns:x=\"urn:y\" x:a=\"1\" a=\"1\"/></w:body></w:document>\n"
+                "<w:document {w} xmlns=\"urn:x\" xmlns:mc=\"{}\"><w:body><mc:AlternateContent><mc:Choice Requires=\"x\"><p xmlns=\"\"/><x:p xmlns:x=\"urn:y\" x:a=\"1\" a=\"1\"/></mc:Choice></mc:AlternateContent></w:body></w:document>\n",
+                namespaces::MC
             ),
+            part("<w:p><w:r xml:space=\"preserve\"><w:t> a </w:t></w:r></w:p>"),
+            part("<w:p><w:r><w:t>a  b</w:t></w:r></w:p>"),
+            part("<w:p w:val=\"a\tb\r\nc\"/>"),
+            part("<w:p>\r\n<w:r/>\r\n</w:p>"),
         ] {
             assert!(reads_as_written(xml.as_bytes()), "{xml}");
         }
@@ -1676,10 +1815,65 @@ mod tests {
             ("duplicate attribute", part("<w:p w:a=\"1\" w:a=\"2\"/>")),
             (
                 "duplicate expanded name",
+                part("<w:p><w:r xmlns:y=\"urn:d\" xmlns:z=\"urn:d\" y:a=\"1\" z:a=\"2\"/></w:p>"),
+            ),
+            (
+                "standard prefix bound to another namespace",
+                part("<w:p xmlns:r=\"urn:unrelated\"/>"),
+            ),
+            (
+                "standard namespace under another prefix",
+                part(&format!("<w:p xmlns:x=\"{}\"/>", namespaces::R)),
+            ),
+            (
+                "standard namespace as the default",
+                part(&format!("<w:p xmlns=\"{}\"/>", namespaces::W)),
+            ),
+            (
+                "element of another namespace in a w element",
+                part("<w:p><x:r xmlns:x=\"urn:x\"/></w:p>"),
+            ),
+            ("unprefixed element in a w element", part("<w:p><r/></w:p>")),
+            (
+                "unprefixed attribute on a WordprocessingML element",
+                part("<w:bookmarkStart id=\"1\" w:name=\"b\"/>"),
+            ),
+            (
+                "element in text",
+                part("<w:p><w:r><w:t>a<w:b/></w:t></w:r></w:p>"),
+            ),
+            (
+                "tab in text",
+                part("<w:p><w:r><w:t xml:space=\"preserve\">a\tb</w:t></w:r></w:p>"),
+            ),
+            (
+                "referenced line feed in text",
                 part(
-                    "<w:p xmlns:v=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" w:a=\"1\" v:a=\"2\"/>",
+                    "<w:p><w:r><w:instrText xml:space=\"preserve\">a&#10;b</w:instrText></w:r></w:p>",
                 ),
             ),
+            (
+                "carriage return in math text",
+                part(&format!(
+                    "<w:p><m:oMath xmlns:m=\"{}\"><m:r><m:t>a\rb</m:t></m:r></m:oMath></w:p>",
+                    namespaces::M
+                )),
+            ),
+            (
+                "leading space without preserve",
+                part("<w:p><w:r><w:t> a</w:t></w:r></w:p>"),
+            ),
+            (
+                "trailing referenced space without preserve",
+                part("<w:p><w:r><w:delText>a&#32;</w:delText></w:r></w:p>"),
+            ),
+            (
+                "preserve overridden by default",
+                part(
+                    "<w:p xml:space=\"preserve\"><w:r><w:t xml:space=\"default\">a </w:t></w:r></w:p>",
+                ),
+            ),
+            ("carriage return in other text", part("<w:p>a\r</w:p>")),
             ("unbound element", part("<x:p/>")),
             ("unbound attribute", part("<w:p x:a=\"1\"/>")),
             ("element with the xmlns prefix", part("<xmlns:p/>")),
