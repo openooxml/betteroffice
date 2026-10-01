@@ -201,6 +201,40 @@ test('background posting waits for idle budget and yields to a pending visible r
   }
 });
 
+test('worker-open idle builds stop after the viewport margin', async () => {
+  const { engine, inputs, host } = lazyFixture();
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(
+        inputs.layout as Layout, overrides, undefined, undefined, host,
+        undefined, undefined, undefined, true
+      )
+    );
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    const pages = () => result.current.frame!.displayList.pages;
+    expect(pages().length).toBeGreaterThan(7);
+    expect(pages().slice(0, 5).every((page) => !page.unbuilt)).toBe(true);
+    for (let round = 0; round < 10 && pages().slice(0, 7).some((page) => page.unbuilt); round += 1) {
+      await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+      await act(async () => runIdleCallbacks());
+    }
+    expect(pages().slice(0, 7).every((page) => !page.unbuilt)).toBe(true);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      runIdleCallbacks();
+    });
+    expect(idleCallbacks.size).toBe(0);
+    expect(pages().slice(7).every((page) => page.unbuilt)).toBe(true);
+    expect(
+      EngineWorker.last!.posted.filter((request) => request.type === 'buildPages')
+    ).toEqual([expect.objectContaining({ pages: [5, 6] })]);
+    unmount();
+  } finally {
+    engine.free();
+  }
+});
+
 test('a visible request supersedes a background reply awaiting idle attachment', async () => {
   const { engine, inputs, host } = lazyFixture(100);
   const overrides = { getInputs: () => inputs };
@@ -228,6 +262,68 @@ test('a visible request supersedes a background reply awaiting idle attachment',
     expect(hook.result.current.frame!.frameEpoch).toBeGreaterThan(before.frameEpoch);
   } finally {
     hook.unmount();
+    engine.free();
+  }
+});
+
+test('a settle wait promotes a background reply awaiting idle attachment', async () => {
+  const { engine, inputs, host } = lazyFixture(100);
+  const overrides = { getInputs: () => inputs };
+  const hook = renderHook(() => useRustDisplayList(
+    inputs.layout as Layout, overrides, undefined, undefined, host
+  ));
+  try {
+    await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    const builds = () => worker.posted.filter((entry) => entry.type === 'buildPages');
+    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    const before = hook.result.current.frame!;
+    await act(async () => runIdleCallbacks());
+    expect(builds()).toHaveLength(1);
+    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    expect(hook.result.current.frame).toBe(before);
+    let built = false;
+    await act(async () => {
+      const settled = await hook.result.current.settledDisplayList(null, null);
+      built = settled.pages.every((page) => !page.unbuilt);
+    });
+    expect(built).toBe(true);
+    expect(hook.result.current.error).toBeNull();
+  } finally {
+    hook.unmount();
+    engine.free();
+  }
+});
+
+test('worker-open window settling leaves far pages unbuilt while document settling builds them', async () => {
+  const { engine, inputs, host } = lazyFixture();
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(
+        inputs.layout as Layout, overrides, undefined, undefined, host,
+        undefined, undefined, undefined, true
+      )
+    );
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    const pageCount = result.current.frame!.displayList.pages.length;
+    expect(pageCount).toBeGreaterThan(7);
+    await act(async () => {
+      const settled = await result.current.settledDisplayList(null, null, 'window');
+      expect(settled.pages).toHaveLength(pageCount);
+      expect(settled.pages.slice(0, 7).every((page) => !page.unbuilt)).toBe(true);
+      expect(settled.pages.slice(7).every((page) => page.unbuilt)).toBe(true);
+    });
+    expect(
+      EngineWorker.last!.posted.filter((request) => request.type === 'buildPages')
+    ).toEqual([expect.objectContaining({ pages: [5, 6] })]);
+    await act(async () => {
+      const settled = await result.current.settledDisplayList(null, null);
+      expect(settled.pages).toHaveLength(pageCount);
+      expect(settled.pages.every((page) => !page.unbuilt)).toBe(true);
+    });
+    unmount();
+  } finally {
     engine.free();
   }
 });
@@ -263,6 +359,42 @@ test('sliced background frames publish atomically from idle without replacing vi
     expect(hook.result.current.error).toBeNull();
   } finally {
     hook.unmount();
+    engine.free();
+  }
+});
+
+test('a worker-open window wait settles when the viewport returns to built pages before a build starts', async () => {
+  const { engine, inputs, host } = lazyFixture();
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(
+        inputs.layout as Layout, overrides, undefined, undefined, host,
+        undefined, undefined, undefined, true
+      )
+    );
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    const pageCount = result.current.frame!.displayList.pages.length;
+    expect(pageCount).toBeGreaterThan(10);
+    await act(async () => {
+      await result.current.settledDisplayList(null, null, 'window');
+    });
+    const builds = () =>
+      EngineWorker.last!.posted.filter((request) => request.type === 'buildPages').length;
+    const before = builds();
+    let settled = false;
+    await act(async () => {
+      result.current.setDisplayWindow(pageCount - 2, pageCount);
+      void result.current.settledDisplayList(null, null, 'window').then(() => {
+        settled = true;
+      });
+      result.current.setDisplayWindow(0, 5);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(settled).toBe(true);
+    expect(builds()).toBe(before);
+    unmount();
+  } finally {
     engine.free();
   }
 });
