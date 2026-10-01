@@ -147,6 +147,8 @@ export interface YrsDocxHost {
    * preview's cover only its own first pages.
    */
   unusedScriptFonts?: string[];
+  /** A preview whose cut holds the whole body. */
+  wholeBody?: true;
   embeddedFonts: Map<string, ArrayBuffer>;
   fontTableRelationshipsXml?: string;
 }
@@ -1562,6 +1564,7 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
     document: result.document,
     referencedFonts: wire.referencedFonts,
     unusedScriptFonts,
+    ...(wire.wholeBody === true ? { wholeBody: true as const } : {}),
     embeddedFonts: result.embeddedFonts,
     ...(result.fontTableRelationshipsXml === undefined
       ? {}
