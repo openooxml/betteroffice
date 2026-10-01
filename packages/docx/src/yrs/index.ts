@@ -947,6 +947,8 @@ export interface YrsSession extends CollaborationReplica {
   setDisplayWindow(start: number, end: number): void;
   /** Keep every previously built page while windowed builds are on. @internal */
   setDisplayRetainBuiltPages(retain: boolean): void;
+  /** @internal */
+  setWindowedIncrementalBuilds(enabled: boolean): void;
   /** Build the listed unbuilt pages into a FrameDelta v1. @internal */
   buildDisplayPagesFrame(pages: readonly number[], expectedFrameEpoch: number): Uint8Array;
   /** Release built pages; null means the request was superseded. @internal */
@@ -1911,6 +1913,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       session.build_display_list_frame(input, expectedFrameEpoch),
     setDisplayWindow: (start, end) => session.set_display_window(start, end),
     setDisplayRetainBuiltPages: (retain) => session.set_display_retain_built_pages(retain),
+    setWindowedIncrementalBuilds: (enabled) => session.set_windowed_incremental_builds(enabled),
     buildDisplayPagesFrame: (pages, expectedFrameEpoch) =>
       session.build_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch),
     releaseDisplayPagesFrame: (pages, expectedFrameEpoch) => {
