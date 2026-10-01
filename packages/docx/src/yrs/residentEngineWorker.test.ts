@@ -932,6 +932,84 @@ describe('resident worker layout ownership', () => {
     expect(calls).toEqual(['load', 'partial:false', 'layout']);
   });
 
+  test('builds only the pages a cut preview lays out like the whole document', async () => {
+    const w = worker();
+    let epoch = 0;
+    const built: number[][] = [];
+    const frame = (full: boolean) => {
+      epoch += 1;
+      w.harness.delta = {
+        protocolVersion: 1,
+        full,
+        frameEpoch: epoch,
+        baseFrameEpoch: full ? 0 : epoch - 1,
+        docEpoch: epoch,
+        layoutEpoch: epoch,
+        pageCount: 0,
+        operations: [],
+        bytes: new Uint8Array(),
+      };
+      return new Uint8Array([0]);
+    };
+    Object.assign(w.harness.session, {
+      layoutDocumentWithRegionsPrefixRetainedJson: () =>
+        '{"layout":{"pages":[1,2,3]},"notesConverged":true}',
+      residentCaretSnapshot: () => ({ frameEpoch: epoch, caretRect: null }),
+      buildDisplayListFrame: () => frame(true),
+      buildDisplayPagesFrame: (pages: number[]) => {
+        built.push(pages);
+        return frame(false);
+      },
+    });
+    const snapshot = {
+      clientId: 1,
+      state: new Uint8Array(),
+      fontsRevision: 0,
+      fonts: [],
+      renderInputs: [],
+      measureInputs: [],
+      layoutInput: '{}',
+      layoutWithRegions: true,
+      layoutRevision: 1,
+      selection: null,
+      partialDocument: true,
+    };
+    // The seed ran out on its third page, so only its first is final.
+    await w.send({
+      type: 'bootstrap',
+      expectedFrameEpoch: 0,
+      extras: '',
+      snapshot,
+      layoutExtras: '{}',
+      provisionalPages: 3,
+      displayWindow: [0, 2],
+    });
+    expect(w.harness.displayWindows.at(-1)).toEqual([0, 1]);
+    await w.send({
+      type: 'buildFrame',
+      extras: '',
+      expectedFrameEpoch: epoch,
+      paintCaret: false,
+      displayWindow: [0, 3],
+    });
+    expect(w.harness.displayWindows.at(-1)).toEqual([0, 1]);
+    await w.send({ type: 'buildPages', pages: [0, 1, 2], expectedFrameEpoch: epoch, paintCaret: false });
+    expect(built).toEqual([[0]]);
+    await w.send({
+      type: 'sync',
+      expectedFrameEpoch: epoch,
+      extras: '',
+      paintCaret: false,
+      snapshot: { ...snapshot, partialDocument: false },
+      layoutExtras: '{}',
+      provisionalPages: 3,
+      displayWindow: [0, 3],
+    });
+    expect(w.harness.displayWindows.at(-1)).toEqual([0, 3]);
+    await w.send({ type: 'buildPages', pages: [0, 1, 2], expectedFrameEpoch: epoch, paintCaret: false });
+    expect(built).toEqual([[0], [0, 1, 2]]);
+  });
+
   test('lays out the media sources a snapshot carries, and clears them when it carries none', async () => {
     const w = worker();
     const loaded: string[] = [];
@@ -1907,6 +1985,102 @@ describe('worker proposals during sliced completion', () => {
       expect(projectionReads).toBe(1);
     } finally {
       engine.destroy();
+    }
+  });
+
+  const requirementsInput = (preview?: ReturnType<typeof proposalRevisionPreview>) => JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    renderEnv: { revisionPreview: preview },
+  });
+
+  async function decided(
+    w: Awaited<ReturnType<typeof proposalWorker>>['w'],
+    engine: Awaited<ReturnType<typeof proposalWorker>>['engine'],
+    proposal: Awaited<ReturnType<typeof proposalWorker>>['proposal']
+  ) {
+    const applied = await w.send({
+      type: 'proposal', operation: {
+        kind: 'propose', request: { expectVersion: engine.proposalEngine.version(), proposals: [proposal()] },
+      },
+    });
+    if (!applied.ok || !applied.proposal?.result?.ok) throw new Error('expected a proposal');
+    let previewVersion = applied.proposal.mirror.proposals.previewVersion;
+    return async (state: 'proposed' | 'accepted' | 'rejected') => {
+      const reply = await w.send({
+        type: 'proposal', operation: {
+          kind: 'setStates', request: {
+            expectVersion: applied.proposal!.mirror.version,
+            expectPreviewVersion: previewVersion,
+            changes: [{ id: 'p1', state }],
+          },
+        },
+      });
+      const result = reply.ok ? reply.proposal?.result : undefined;
+      if (!reply.ok || !reply.proposal || !result?.ok) throw new Error('expected a decision');
+      previewVersion = reply.proposal.mirror.proposals.previewVersion;
+      return { fontRequirements: reply.proposal.fontRequirements, preview: proposalRevisionPreview(result.snapshot) };
+    };
+  }
+
+  test('a decision answers with the font requirements of the layout input the host builds next, and an undo reads cached ones', async () => {
+    const { w, engine, proposal } = await proposalWorker();
+    try {
+      const decide = await decided(w, engine, proposal);
+      const asked = await w.send({ type: 'fontRequirements', layoutInput: requirementsInput() });
+      if (!asked.ok) throw new Error('expected font requirements');
+      let reads = 0;
+      Object.assign(w.harness.session, {
+        layoutFontRequirementsJson: (input: string) => {
+          reads += 1;
+          return engine.layoutFontRequirementsJson(input);
+        },
+      });
+
+      const accepted = await decide('accepted');
+      expect(accepted.preview).toBeDefined();
+      expect(accepted.fontRequirements).toEqual({
+        layoutInput: requirementsInput(accepted.preview),
+        requirementsJson: engine.layoutFontRequirementsJson(requirementsInput(accepted.preview)),
+      });
+      await w.send({ type: 'fontRequirements', layoutInput: requirementsInput(accepted.preview) });
+
+      const undone = await decide('proposed');
+      expect(undone.fontRequirements).toEqual({
+        layoutInput: requirementsInput(),
+        requirementsJson: asked.requirementsJson!,
+      });
+      const base = await w.send({ type: 'fontRequirements', layoutInput: requirementsInput() });
+      expect(base.ok && base.requirementsJson).toBe(asked.requirementsJson);
+      const rejected = await decide('rejected');
+      expect(rejected.fontRequirements?.layoutInput).toBe(requirementsInput(rejected.preview));
+      const again = await w.send({ type: 'fontRequirements', layoutInput: requirementsInput(rejected.preview) });
+      expect(again.ok && again.requirementsJson).toBe(rejected.fontRequirements!.requirementsJson);
+      expect(reads).toBe(2);
+    } finally {
+      void w.send({ type: 'destroy' });
+    }
+  });
+
+  test('a decision whose font requirements cannot be read leaves them to the host', async () => {
+    const { w, engine, proposal } = await proposalWorker();
+    try {
+      const decide = await decided(w, engine, proposal);
+      await w.send({ type: 'fontRequirements', layoutInput: requirementsInput() });
+      Object.assign(w.harness.session, {
+        layoutFontRequirementsJson: () => {
+          throw new Error('unreadable');
+        },
+      });
+      const accepted = await decide('accepted');
+      expect(accepted.fontRequirements).toBeUndefined();
+      const asked = await w.send({
+        type: 'fontRequirements',
+        layoutInput: requirementsInput(accepted.preview),
+      });
+      expect(asked.ok).toBe(false);
+    } finally {
+      void w.send({ type: 'destroy' });
     }
   });
 
