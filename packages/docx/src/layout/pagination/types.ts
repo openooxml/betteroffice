@@ -1076,6 +1076,8 @@ export type TypesetRow = {
    * as marginTop on the line element; measurement adds it to totalHeight.
    */
   floatSkipBefore?: number;
+  /** Extra first-line indent after a list number overruns its hanging indent. */
+  markerTabOffset?: number;
   /** Exact per-run advances in visual paint order. Undefined = legacy estimation. */
   runAdvances?: TypesetRunAdvance[];
   /** Exact shaped cluster advances. Undefined = legacy estimation. */

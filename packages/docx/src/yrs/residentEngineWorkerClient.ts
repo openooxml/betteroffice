@@ -93,6 +93,7 @@ const FRAME_REQUESTS = new Set<AwaitedRequest['type']>([
   'bootstrap',
   'sync',
   'buildFrame',
+  'releasePages',
   'applyInput',
   'applyDelete',
   'proposal',
@@ -554,6 +555,20 @@ export class ResidentEngineWorkerClient {
       ...(background ? { background: true } : {}),
     });
     return background && response.pageBuildSuperseded ? null : frameResult(response);
+  }
+
+  async releasePages(
+    pages: Array<{ index: number; pageId: string }>,
+    expectedFrameEpoch: number,
+    paintCaret = false
+  ): Promise<ResidentEngineWorkerFrame | { superseded: true }> {
+    const response = await this.request({
+      type: 'releasePages',
+      pages,
+      expectedFrameEpoch,
+      paintCaret,
+    });
+    return response.superseded ? { superseded: true } : frameResult(response);
   }
 
   async applyInput(

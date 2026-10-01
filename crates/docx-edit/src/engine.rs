@@ -34,7 +34,8 @@ use yrs::{StickyIndex, Subscription, Transact};
 
 use crate::EditingDoc;
 use crate::bridge::{
-    BridgeError, LoweringMap, RenderEnv, yrs_doc_to_mapped_layout_blocks_with_revealable,
+    BridgeError, LoweringMap, RenderEnv, RevisionPreview,
+    yrs_doc_to_mapped_layout_blocks_with_revealable,
 };
 use crate::frame_delta::{
     FrameEpochs, FramePageSnapshot, encode_frame_delta, encode_frame_delta_incremental,
@@ -95,7 +96,7 @@ struct MeasurementState {
 #[derive(Debug)]
 struct ResidentRegionState {
     request_json: String,
-    /// [`layout_options_fingerprint`] of `request_json`.
+    /// [`pagination_request_fingerprint`] of `request_json`.
     request_fingerprint: String,
     headers_footers: Option<serde_json::Value>,
     /// Inputs retained from the last full region pass so a plain body-text
@@ -168,9 +169,12 @@ struct PreparedRegionLayout {
     notes: docx_layout::footnotes::NoteLayoutInput,
     measurement: docx_layout::measure_blocks::MeasurementConfig,
     parsed_render_env: Option<RenderEnv>,
+    revision_preview_key: u64,
     measurement_fingerprint: u64,
     fonts: (u64, usize),
     resident_body: bool,
+    /// Whether the pass lowers the `body` story, the one preview changes are traced in.
+    main_body: bool,
     block_fingerprints: Option<Vec<u64>>,
     lowered_from: Option<Rc<Vec<LayoutBlock>>>,
     input_lowering: Option<(u64, Rc<LoweringMap>)>,
@@ -943,6 +947,11 @@ struct PaginationState {
     checkpoints: Vec<LayoutCheckpoint>,
     block_fingerprints: Vec<u64>,
     options_fingerprint: u64,
+    revision_preview_key: u64,
+    /// The decisions [`Self::revision_preview_key`] identifies.
+    revision_preview: BTreeMap<String, RevisionPreview>,
+    /// The document epoch the retained input was lowered at.
+    doc_epoch: u64,
     rebuilt_page_start: usize,
     rebuilt_page_end: usize,
     /// The pages the last pass placed afresh, within the range above.
@@ -962,6 +971,8 @@ struct DisplayState {
     frame_epoch: u64,
     display_builds: u64,
     binary_frame_epoch: u64,
+    encoded_doc_epoch: u64,
+    encoded_layout_epoch: u64,
     pages: Vec<FramePageSnapshot>,
     next_page_id: u64,
     extras_fingerprint: u64,
@@ -1122,6 +1133,27 @@ fn layout_options_fingerprint(mut request: serde_json::Value) -> String {
         }
     }
     pages::sha256_hex(canonical_json(&request).as_bytes())
+}
+
+/// Identifies the revision preview a pass lays out under; 0 is none.
+fn revision_preview_key(env: &RenderEnv) -> Result<u64, String> {
+    if env.revision_preview.is_empty() {
+        return Ok(0);
+    }
+    serde_json::to_vec(&env.revision_preview)
+        .map(|bytes| hash_bytes(&bytes))
+        .map_err(|error| format!("fingerprint revision preview: {error}"))
+}
+
+/// [`layout_options_fingerprint`] without the revision preview.
+fn pagination_request_fingerprint(mut request: serde_json::Value) -> String {
+    if let Some(env) = request
+        .get_mut("renderEnv")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        env.remove("revisionPreview");
+    }
+    layout_options_fingerprint(request)
 }
 
 fn font_requirements_fingerprint(mut request: serde_json::Value) -> Result<u64, String> {
@@ -1739,6 +1771,16 @@ fn suppress_contextual_spacing(blocks: &[LayoutBlock], index: usize, owned: &mut
     {
         spacing.after = Some(0.0);
     }
+}
+
+/// Whether `block` is, or nests, one of `paragraphs`.
+fn block_holds_paragraph(block: &LayoutBlock, paragraphs: &HashSet<String>) -> bool {
+    if let LayoutBlock::Paragraph(paragraph) = block {
+        return paragraphs.contains(block_key(&paragraph.id).as_ref());
+    }
+    let mut keys = Vec::new();
+    nested_block_keys(block, &mut keys);
+    keys.iter().any(|key| paragraphs.contains(key))
 }
 
 fn nested_block_keys(block: &LayoutBlock, out: &mut Vec<String>) {
@@ -2538,11 +2580,13 @@ impl EngineSession {
         input_json: &str,
         prefix_pages: Option<usize>,
     ) -> Result<PreparedRegionLayout, String> {
-        let request_fingerprint = layout_options_fingerprint(
+        let request_fingerprint = pagination_request_fingerprint(
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?,
         );
         // Reused pages keep the section stamps and page labels of the regions
-        // they were laid out under, so a regions change paginates afresh.
+        // they were laid out under, so a regions change paginates afresh. A
+        // revision preview changes only the blocks it decides, which the block
+        // fingerprints catch.
         if self
             .regions
             .borrow()
@@ -2563,6 +2607,9 @@ impl EngineSession {
                     .map_err(|error| format!("parse render environment: {error}"))?,
             )
         };
+        let revision_preview_key = parsed_render_env
+            .as_ref()
+            .map_or(Ok(0), revision_preview_key)?;
         if regions.sections.len() <= 1
             && let Some(env) = &mut parsed_render_env
         {
@@ -2575,6 +2622,7 @@ impl EngineSession {
             .map(|bytes| hash_bytes(&bytes))
             .map_err(|error| format!("fingerprint measurement config: {error}"))?;
         let resident_body = body_story.is_some();
+        let main_body = body_story.as_deref() == Some("body");
         let mut block_fingerprints: Option<Vec<u64>> = None;
         let mut lowered_from = None;
         let mut input_lowering = None;
@@ -2755,9 +2803,11 @@ impl EngineSession {
             notes,
             measurement,
             parsed_render_env,
+            revision_preview_key,
             measurement_fingerprint,
             fonts,
             resident_body,
+            main_body,
             block_fingerprints,
             lowered_from,
             input_lowering,
@@ -2791,9 +2841,11 @@ impl EngineSession {
             mut notes,
             measurement,
             parsed_render_env,
+            revision_preview_key,
             measurement_fingerprint,
             fonts,
             resident_body,
+            main_body,
             mut block_fingerprints,
             lowered_from,
             input_lowering,
@@ -2808,11 +2860,21 @@ impl EngineSession {
             body.is_none(),
             "the body is measured before a pass finishes"
         );
+        let revision_preview = parsed_render_env
+            .as_ref()
+            .map(|env| env.revision_preview.clone())
+            .unwrap_or_default();
         let paginate = |input, fingerprints| {
+            let preview = Some((revision_preview_key, &revision_preview, main_body));
             if snapshot {
-                self.publish_layout_document_value_with_fingerprints(input, fingerprints, false)
+                self.publish_layout_document_value_with_fingerprints(
+                    input,
+                    fingerprints,
+                    preview,
+                    false,
+                )
             } else {
-                self.layout_document_value_with_fingerprints(input, fingerprints)
+                self.layout_document_value_with_fingerprints(input, fingerprints, preview)
             }
         };
         let mut measured_headers_footers = if let Some(render_env) = parsed_render_env.as_ref() {
@@ -3258,28 +3320,109 @@ impl EngineSession {
     /// and `apply_input`.
     fn layout_document_value(&self, input: LayoutInput) -> Result<(), String> {
         let block_fingerprints = measured_fingerprints(&input)?;
-        self.layout_document_value_with_fingerprints(input, block_fingerprints)
+        self.layout_document_value_with_fingerprints(input, block_fingerprints, None)
     }
 
     /// Paginate a resident measured arena whose clean block fingerprints were
     /// retained while rebuilding the dirty paragraph. Compatibility callers
     /// still enter through `layout_document_value` and fingerprint every block.
+    /// The paragraphs of every story that hold a revision whose previewed
+    /// decision differs between `previous` and `next`. Story ids are opaque, so
+    /// a body table's cells may live under any id.
+    fn preview_changed_paragraphs(
+        &self,
+        previous: &BTreeMap<String, RevisionPreview>,
+        next: &BTreeMap<String, RevisionPreview>,
+    ) -> Result<HashSet<String>, String> {
+        let changed: HashSet<&str> = previous
+            .keys()
+            .chain(next.keys())
+            .filter(|id| previous.get(*id) != next.get(*id))
+            .map(String::as_str)
+            .collect();
+        let mut paragraphs = HashSet::new();
+        if changed.is_empty() {
+            return Ok(paragraphs);
+        }
+        use yrs::{Map, ReadTxn, Transact};
+        let stories: Vec<String> = {
+            let txn = self.doc.yrs_doc().transact();
+            txn.get_map(crate::STORIES)
+                .map_or_else(Vec::new, |stories| {
+                    stories
+                        .iter(&txn)
+                        .filter(|(_, value)| value.clone().cast::<yrs::TextRef>().is_ok())
+                        .map(|(story, _)| story.to_owned())
+                        .collect()
+                })
+        };
+        for story in stories {
+            let txn = self.doc.yrs_doc().transact();
+            let text = crate::story_ref(&txn, &story).map_err(|error| error.to_string())?;
+            let mut ranges: Vec<(u32, u32)> = self
+                .doc
+                .story_raw_changes(&story, &text, &txn)
+                .into_iter()
+                .filter(|change| changed.contains(change.id.as_str()))
+                .map(|change| (change.start, change.end))
+                .collect();
+            // An inline content control keeps its content's revisions in its payload.
+            ranges.extend(
+                self.doc
+                    .chunk_snapshot(&story, &text, &txn)
+                    .iter()
+                    .filter(|chunk| {
+                        matches!(&chunk.kind, crate::ops::ChunkKind::Embed(Some(map))
+                            if crate::map_string(map, &txn, crate::KIND_KEY).as_deref() == Some("sdt"))
+                    })
+                    .map(|chunk| (chunk.start, chunk.end())),
+            );
+            if ranges.is_empty() {
+                continue;
+            }
+            // Paragraphs come in story order: one overlaps a range when the
+            // furthest end among the ranges starting by its pilcrow reaches it.
+            ranges.sort_unstable();
+            let mut next_range = 0;
+            let mut furthest_end = None;
+            for bounds in crate::op::para_bounds(&text, &txn) {
+                while let Some(&(from, to)) = ranges.get(next_range)
+                    && from <= bounds.pilcrow
+                {
+                    furthest_end = furthest_end.max(Some(to));
+                    next_range += 1;
+                }
+                if furthest_end.is_some_and(|end| bounds.start <= end) {
+                    paragraphs.insert(bounds.para_id);
+                }
+            }
+        }
+        Ok(paragraphs)
+    }
+
     fn layout_document_value_with_fingerprints(
         &self,
         input: LayoutInput,
         block_fingerprints: Vec<u64>,
+        revision_preview: Option<(u64, &BTreeMap<String, RevisionPreview>, bool)>,
     ) -> Result<(), String> {
         if block_fingerprints.len() != input.measured.len() {
             return Err("resident pagination fingerprints do not match measured blocks".to_owned());
         }
         self.resumable.replace(None);
-        self.publish_layout_document_value_with_fingerprints(input, block_fingerprints, true)
+        self.publish_layout_document_value_with_fingerprints(
+            input,
+            block_fingerprints,
+            revision_preview,
+            true,
+        )
     }
 
     fn publish_layout_document_value_with_fingerprints(
         &self,
         mut input: LayoutInput,
         mut block_fingerprints: Vec<u64>,
+        revision_preview: Option<(u64, &BTreeMap<String, RevisionPreview>, bool)>,
         allow_incremental: bool,
     ) -> Result<(), String> {
         if block_fingerprints.len() != input.measured.len() {
@@ -3302,6 +3445,37 @@ impl EngineSession {
                         != relative_run_position_fingerprint(&next.block)
                     {
                         *fingerprint = measured_fingerprint(next)?;
+                    }
+                }
+            }
+            // A preview shows the document at its source positions, so a block whose
+            // content is unchanged but whose positions moved shows other source: it is
+            // placed afresh rather than shifted.
+            // Over an unchanged document lowered from the body story, only a block
+            // holding a revision whose decision changed can show other source.
+            if let Some((key, preview, resident)) = revision_preview
+                && key != previous.revision_preview_key
+                && incremental_eligible(&previous, &input, input_options_fingerprint)
+                && let moved = (resident && previous.doc_epoch == self.doc_epoch())
+                    .then(|| self.preview_changed_paragraphs(&previous.revision_preview, preview))
+                    .transpose()?
+                && moved.as_ref().is_none_or(|moved| !moved.is_empty())
+            {
+                let retained = previous.input.as_ref().expect("eligibility checked input");
+                for (((fingerprint, retained_fingerprint), next), retained) in block_fingerprints
+                    .iter_mut()
+                    .zip(&previous.block_fingerprints)
+                    .zip(&input.measured)
+                    .zip(&retained.measured)
+                {
+                    if *fingerprint == *retained_fingerprint
+                        && moved
+                            .as_ref()
+                            .is_none_or(|moved| block_holds_paragraph(&next.block, moved))
+                        && crate::fingerprint::fingerprint_with_positions(&next.block)?
+                            != crate::fingerprint::fingerprint_with_positions(&retained.block)?
+                    {
+                        *fingerprint ^= 1;
                     }
                 }
             }
@@ -3367,6 +3541,11 @@ impl EngineSession {
         pagination.checkpoints = run.checkpoints;
         pagination.block_fingerprints = block_fingerprints;
         pagination.options_fingerprint = input_options_fingerprint;
+        pagination.doc_epoch = self.doc_epoch();
+        if let Some((key, preview, _)) = revision_preview {
+            pagination.revision_preview_key = key;
+            pagination.revision_preview = preview.clone();
+        }
         pagination.rebuilt_page_start = run.rebuilt_page_start;
         pagination.rebuilt_page_end = run.rebuilt_page_end;
         pagination.rebuilt_page_ranges = rebuilt_page_ranges;
@@ -3899,7 +4078,11 @@ impl EngineSession {
             return self.build_display_list_frame(&extras, expected_frame_epoch);
         }
         let resident = self.resident_layout_input(story)?;
-        self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
+        self.layout_document_value_with_fingerprints(
+            resident.input,
+            resident.block_fingerprints,
+            None,
+        )?;
         self.pagination.borrow_mut().input_lowering = resident.lowering;
         let extras = self
             .display
@@ -3969,7 +4152,9 @@ impl EngineSession {
         if env != pass_env {
             return Ok(false);
         }
-        if self.regional_fingerprint(&regions, &env) != regional {
+        if self.regional_fingerprint(&regions, &env) != regional
+            || revision_preview_key(&env)? != self.pagination.borrow().revision_preview_key
+        {
             return Ok(false);
         }
         let outcome = self
@@ -4042,7 +4227,11 @@ impl EngineSession {
         };
         phase(RegionResidentPhase::Measured);
         let previous_capture = self.capture.borrow_mut().take();
-        self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
+        self.layout_document_value_with_fingerprints(
+            resident.input,
+            resident.block_fingerprints,
+            None,
+        )?;
         let mut pagination = self.pagination.borrow_mut();
         pagination.input_lowering = resident.lowering;
         // The fast path measures through the region config too, so its
@@ -4154,6 +4343,7 @@ impl EngineSession {
             self.layout_document_value_with_fingerprints(
                 resident.input,
                 resident.block_fingerprints,
+                None,
             )?;
             self.pagination.borrow_mut().input_lowering = resident.lowering;
             let finished = now();
@@ -4401,6 +4591,8 @@ impl EngineSession {
         display.pages = pages;
         display.next_page_id = next_page_id;
         display.binary_frame_epoch = frame_epoch;
+        display.encoded_doc_epoch = epochs.doc_epoch;
+        display.encoded_layout_epoch = epochs.layout_epoch;
         display.fresh_base = false;
         Ok(bytes)
     }
@@ -4455,7 +4647,57 @@ impl EngineSession {
             };
             docx_layout::build_resident_display_pages(input, layout, resident_input, list, pages)?
         };
-        let rebuilt: HashSet<usize> = built.into_iter().collect();
+        self.encode_display_pages_frame(&built, expected_frame_epoch)
+    }
+
+    /// Release display pages; an empty result means the request was superseded.
+    pub fn release_display_pages_frame(
+        &self,
+        pages: &[usize],
+        expected_frame_epoch: u64,
+    ) -> Result<Vec<u8>, String> {
+        let released = {
+            let pagination = self.pagination.borrow();
+            let mut display = self.display.borrow_mut();
+            if expected_frame_epoch != display.binary_frame_epoch
+                || display.binary_frame_epoch == 0
+                || display.frame_epoch != display.binary_frame_epoch
+                || display.fresh_base
+                || display.encoded_doc_epoch != self.doc_epoch()
+                || display.encoded_layout_epoch != pagination.layout_epoch
+            {
+                return Ok(Vec::new());
+            }
+            let input = pagination
+                .input
+                .as_ref()
+                .ok_or_else(|| "resident pagination input is not built".to_owned())?;
+            let layout = pagination
+                .layout
+                .as_ref()
+                .ok_or_else(|| "resident layout is not built".to_owned())?;
+            if display.pages.len() != layout.pages.len() {
+                return Err("resident frame does not match the layout".to_owned());
+            }
+            let DisplayState {
+                list: Some(list),
+                resident_input: Some(resident_input),
+                ..
+            } = &mut *display
+            else {
+                return Err("resident display list is not built".to_owned());
+            };
+            docx_layout::release_resident_display_pages(input, layout, resident_input, list, pages)?
+        };
+        self.encode_display_pages_frame(&released, expected_frame_epoch)
+    }
+
+    fn encode_display_pages_frame(
+        &self,
+        changed_pages: &[usize],
+        expected_frame_epoch: u64,
+    ) -> Result<Vec<u8>, String> {
+        let rebuilt: HashSet<usize> = changed_pages.iter().copied().collect();
         let mut display = self.display.borrow_mut();
         display.frame_epoch = display
             .frame_epoch
@@ -4488,6 +4730,8 @@ impl EngineSession {
         display.pages = snapshots;
         display.next_page_id = next_page_id;
         display.binary_frame_epoch = frame_epoch;
+        display.encoded_doc_epoch = epochs.doc_epoch;
+        display.encoded_layout_epoch = epochs.layout_epoch;
         display.fresh_base = false;
         Ok(bytes)
     }
@@ -4746,6 +4990,17 @@ impl EngineSession {
                     &format!("The editor's layout request cannot be read: {error}"),
                 )
             })?;
+        if current
+            .as_ref()
+            .and_then(|request| request.get("renderEnv"))
+            .and_then(|env| env.get("revisionPreview"))
+            .is_some_and(|preview| !RenderEnv::parse_revision_preview(preview).is_empty())
+        {
+            return Err(refuse(
+                ExportFailureCode::UnsupportedRevisionLayout,
+                "The retained layout previews revision decisions instead of their markup.",
+            ));
+        }
         if let Some(message) = pages::metadata_mismatch(&self.doc, &request, current.is_some()) {
             return Err(refuse(ExportFailureCode::StaleLayout, &message));
         }
@@ -9147,6 +9402,191 @@ mod tests {
             engine.with_display_list(Clone::clone).unwrap().pages[last],
             full_build(&engine).pages[last]
         );
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn released_display_pages_keep_ids_and_rebuild_after_an_incremental_edit() {
+        let (engine, extras) = paged_filler_engine(214, 48);
+        engine.set_display_window(Some(0..1));
+        engine.set_windowed_incremental_builds(true);
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let last = engine
+            .with_display_list(|list| list.pages.len() - 1)
+            .unwrap();
+        assert!(last >= 3);
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.build_display_pages_frame(&[1, last], epoch).unwrap();
+        let before = engine.stats();
+        let old_snapshots = engine.display.borrow().pages.clone();
+        let expected_placeholders = {
+            let pagination = engine.pagination.borrow();
+            docx_layout::build_resident_display_list_partial_observed(
+                pagination.input.as_ref().unwrap(),
+                pagination.layout.as_ref().unwrap(),
+                &extras,
+                &|_| false,
+                &mut || {},
+            )
+            .unwrap()
+            .1
+        };
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let delta = engine
+            .release_display_pages_frame(&[last, 1, 1, 2], epoch)
+            .unwrap();
+        let after = engine.stats();
+        assert_eq!(after.doc_epoch, before.doc_epoch);
+        assert_eq!(after.layout_epoch, before.layout_epoch);
+        assert_eq!(after.frame_epoch, before.frame_epoch + 1);
+        assert_eq!(after.display_builds, before.display_builds);
+        assert_eq!(u32::from_le_bytes(delta[12..16].try_into().unwrap()), 0);
+        assert_eq!(u32::from_le_bytes(delta[52..56].try_into().unwrap()), 2);
+        for (operation, index) in [1, last].into_iter().enumerate() {
+            let start =
+                crate::frame_delta::FRAME_HEADER_LEN + operation * crate::frame_delta::PAGE_OP_LEN;
+            assert_eq!(delta[start], crate::frame_delta::PAGE_OP_UPSERT);
+            assert_eq!(
+                u32::from_le_bytes(delta[start + 4..start + 8].try_into().unwrap()),
+                index as u32
+            );
+            assert_eq!(
+                u64::from_le_bytes(delta[start + 8..start + 16].try_into().unwrap()),
+                old_snapshots[index].page_id
+            );
+            assert_eq!(
+                u32::from_le_bytes(delta[start + 24..start + 28].try_into().unwrap()),
+                0
+            );
+        }
+        let released = engine.with_display_list(Clone::clone).unwrap();
+        for index in [1, last] {
+            assert_eq!(released.pages[index], expected_placeholders.pages[index]);
+            assert!(released.pages[index].position_span.is_some());
+        }
+        {
+            let display = engine.display.borrow();
+            for (index, snapshot) in display.pages.iter().enumerate() {
+                assert_eq!(snapshot.page_id, old_snapshots[index].page_id);
+                if [1, last].contains(&index) {
+                    assert!(snapshot.primitive_ids.is_empty());
+                    assert!(snapshot.positions.is_empty());
+                    assert!(snapshot.note_anchors.is_empty());
+                }
+            }
+        }
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.build_display_pages_frame(&[last], epoch).unwrap();
+        assert_eq!(
+            engine.with_display_list(Clone::clone).unwrap().pages[last],
+            full_display_build(&engine, &extras).pages[last]
+        );
+
+        let paragraph = engine.doc().paragraphs("body").unwrap().remove(0);
+        let offset = u32::try_from(paragraph.text.encode_utf16().count()).unwrap();
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", offset),
+                " typed",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let edited_delta = engine.apply_and_layout("body", epoch).unwrap();
+        assert_eq!(&edited_delta[0..4], b"FDV1");
+        assert_eq!(
+            u64::from_le_bytes(edited_delta[40..48].try_into().unwrap()),
+            epoch
+        );
+        let expected = full_display_build(&engine, &extras);
+        let edited = engine.with_display_list(Clone::clone).unwrap();
+        for (page, full) in edited.pages.iter().zip(&expected.pages) {
+            if !page.unbuilt {
+                assert_eq!(page, full);
+            }
+        }
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let all: Vec<usize> = (0..edited.pages.len()).collect();
+        engine.build_display_pages_frame(&all, epoch).unwrap();
+        assert_eq!(engine.with_display_list(Clone::clone).unwrap(), expected);
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn superseded_display_page_releases_do_not_mutate_retained_state() {
+        let (engine, extras) = paged_filler_engine(215, 40);
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let before = engine.with_display_list(Clone::clone).unwrap();
+        let snapshots = engine.display.borrow().pages.clone();
+        let next_page_id = engine.display.borrow().next_page_id;
+        let resident = format!("{:?}", engine.display.borrow().resident_input);
+        let assert_unchanged = || {
+            assert_eq!(engine.with_display_list(Clone::clone).unwrap(), before);
+            let display = engine.display.borrow();
+            assert_eq!(display.pages, snapshots);
+            assert_eq!(display.frame_epoch, epoch);
+            assert_eq!(display.binary_frame_epoch, epoch);
+            assert_eq!(display.next_page_id, next_page_id);
+            assert_eq!(format!("{:?}", display.resident_input), resident);
+        };
+        for stale in [epoch - 1, epoch + 1] {
+            assert!(
+                engine
+                    .release_display_pages_frame(&[1], stale)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_unchanged();
+        }
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 0),
+                "x",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        assert_ne!(
+            engine.doc_epoch(),
+            engine.display.borrow().encoded_doc_epoch
+        );
+        assert!(
+            engine
+                .release_display_pages_frame(&[1], epoch)
+                .unwrap()
+                .is_empty()
+        );
+        assert_unchanged();
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn a_layout_replacement_supersedes_display_page_release() {
+        let (engine, extras) = paged_filler_engine(216, 40);
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let before = engine.with_display_list(Clone::clone).unwrap();
+        let snapshots = engine.display.borrow().pages.clone();
+        let input =
+            serde_json::to_string(engine.pagination.borrow().input.as_ref().unwrap()).unwrap();
+        engine.layout_document_json(&input).unwrap();
+        assert_ne!(
+            engine.stats().layout_epoch,
+            engine.display.borrow().encoded_layout_epoch
+        );
+        assert!(
+            engine
+                .release_display_pages_frame(&[1], epoch)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(engine.with_display_list(Clone::clone).unwrap(), before);
+        assert_eq!(engine.display.borrow().pages, snapshots);
+        assert_eq!(engine.display.borrow().binary_frame_epoch, epoch);
         docx_layout::clear_measure_fonts();
     }
 

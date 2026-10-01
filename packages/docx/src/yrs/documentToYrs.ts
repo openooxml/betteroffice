@@ -439,6 +439,7 @@ function imagePayload(image: Image): Attrs {
       : null,
     borderWidth: borderWidth ?? null,
     borderColor: borderColor ?? null,
+    borderColorValue: image.outline?.color ?? null,
     borderStyle: borderStyle ?? null,
     wrapText: wrapText ?? null,
     hlinkHref: image.hlinkHref ?? null,

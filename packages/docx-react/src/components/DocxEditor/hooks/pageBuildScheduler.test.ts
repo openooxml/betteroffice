@@ -85,3 +85,25 @@ test('urgent work runs from a timer within the budget without waiting for idle t
   expect(remaining[0]).toBeGreaterThan(0);
   expect(remaining[0]).toBeLessThanOrEqual(8);
 });
+
+test('the frame fallback still runs, within the budget, when animation frames are held', async () => {
+  globalThis.requestIdleCallback = undefined as unknown as typeof requestIdleCallback;
+  const held = new Map<number, FrameRequestCallback>();
+  let next = 1;
+  globalThis.requestAnimationFrame = (run) => {
+    const id = next++;
+    held.set(id, run);
+    return id;
+  };
+  globalThis.cancelAnimationFrame = (id) => { held.delete(id); };
+  const remaining = await new Promise<number>((resolve) => {
+    scheduleIdlePageBuild((deadline) => resolve(deadline.timeRemaining()));
+  });
+  expect(remaining).toBeGreaterThan(0);
+  expect(remaining).toBeLessThanOrEqual(8);
+  expect(held.size).toBe(0);
+  let runs = 0;
+  scheduleIdlePageBuild(() => { runs += 1; }).cancel();
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  expect(runs).toBe(0);
+});

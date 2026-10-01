@@ -243,6 +243,7 @@ mod tests {
                 lines: (0..line_count)
                     .map(|_| TypesetRow {
                         line_height,
+                        marker_tab_offset: None,
                         ..Default::default()
                     })
                     .collect(),
@@ -342,6 +343,7 @@ mod tests {
             measure: BlockExtent::Paragraph(ParagraphExtent {
                 lines: vec![TypesetRow {
                     line_height: 16.0,
+                    marker_tab_offset: None,
                     ..Default::default()
                 }],
                 total_height: 28.0,

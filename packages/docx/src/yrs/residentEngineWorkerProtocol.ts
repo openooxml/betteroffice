@@ -124,6 +124,13 @@ export type ResidentEngineWorkerRequest =
     }
   | {
       id: number;
+      type: 'releasePages';
+      pages: Array<{ index: number; pageId: string }>;
+      expectedFrameEpoch: number;
+      paintCaret: boolean;
+    }
+  | {
+      id: number;
       type: 'completeLayout';
       expectedFrameEpoch: number;
       paintCaret: boolean;
@@ -198,6 +205,7 @@ export type ResidentEngineWorkerResponse = (
       frame?: ArrayBuffer;
       pageFrames?: ArrayBuffer[];
       pageBuildSuperseded?: boolean;
+      superseded?: true;
       updates?: ArrayBuffer[];
       engineMs?: number;
       workerTotalMs?: number;
