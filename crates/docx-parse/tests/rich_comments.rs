@@ -1,8 +1,9 @@
 use docx_parse::document::DocumentBody;
+use docx_parse::paragraph_identity::paragraph_ids_by_part;
 use docx_parse::s9::{S9ParseOptions, parse_docx_s9_wire};
 use docx_parse::serializer::{
-    S13SaveOptions, S13SaveRequest, SerializerContext, SerializerDeterminism, serialize_comments_part,
-    write_docx_s13,
+    S13SaveOptions, S13SaveRequest, SerializerContext, SerializerDeterminism,
+    serialize_comments_part, write_docx_s13,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -146,6 +147,48 @@ fn parse_serialize_preserves_rich_comment_xml_and_relationship_bytes() {
 }
 
 #[test]
+fn rich_comment_paragraph_id_collision_uses_the_identity_assignment() {
+    let mut parts = ooxml_opc::unzip_parts(&fixture()).unwrap();
+    let (_, bytes) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "word/document.xml")
+        .unwrap();
+    *bytes = std::str::from_utf8(bytes)
+        .unwrap()
+        .replace("00000001", "10000001")
+        .into_bytes();
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut request = save_request(&source);
+    request.document.comments = parse_docx_s9_wire(
+        &source,
+        S9ParseOptions {
+            source_ordinals: true,
+            ..S9ParseOptions::default()
+        },
+    )
+    .unwrap()
+    .document
+    .package
+    .document
+    .comments;
+    request.paragraph_ids = Some(
+        serde_json::from_value(json!({
+            "assignments": [{
+                "part": "word/comments.xml", "ordinal": 0, "paraId": "10000007"
+            }]
+        }))
+        .unwrap(),
+    );
+    let saved = write_docx_s13(request, &source).unwrap();
+    let ids = paragraph_ids_by_part(&saved).unwrap();
+    let body_ids = &ids["/word/document.xml"];
+    let comment_ids = &ids["/word/comments.xml"];
+    assert_eq!(body_ids, &["10000001".to_owned()]);
+    assert!(comment_ids.contains(&"10000007".to_owned()));
+    assert!(comment_ids.iter().all(|id| !body_ids.contains(id)));
+}
+
+#[test]
 fn editing_a_plain_comment_preserves_the_other_comments_xml() {
     let source = fixture();
     let mut request = save_request(&source);
@@ -184,7 +227,10 @@ fn resolving_a_rich_comment_preserves_its_xml() {
     request.document.comments.as_mut().unwrap()[0].done = Some(true);
     let saved = write_docx_s13(request, &source).unwrap();
     assert_rich_comment(&saved);
-    assert_eq!(save_request(&saved).document.comments.unwrap()[0].done, Some(true));
+    assert_eq!(
+        save_request(&saved).document.comments.unwrap()[0].done,
+        Some(true)
+    );
 }
 
 #[test]
@@ -273,7 +319,10 @@ fn resolving_a_plain_comment_without_source_ids_keeps_legacy_behavior() {
     let saved = write_docx_s13(request, &source).unwrap();
     let xml = String::from_utf8(part(&saved, "word/comments.xml")).unwrap();
     assert!(xml.contains(&without_rich_paragraph_ids(RICH_COMMENT)));
-    assert_eq!(save_request(&saved).document.comments.unwrap()[1].done, Some(true));
+    assert_eq!(
+        save_request(&saved).document.comments.unwrap()[1].done,
+        Some(true)
+    );
 }
 
 #[test]
@@ -326,7 +375,10 @@ fn duplicate_source_comment_ids_fall_back_to_the_plain_writer() {
         .unwrap();
     *bytes = std::str::from_utf8(bytes)
         .unwrap()
-        .replace(PLAIN_COMMENT, &PLAIN_COMMENT.replace("w:id=\"1\"", "w:id=\"0\""))
+        .replace(
+            PLAIN_COMMENT,
+            &PLAIN_COMMENT.replace("w:id=\"1\"", "w:id=\"0\""),
+        )
         .into_bytes();
     let source = ooxml_opc::rezip_parts(&parts).unwrap();
     let saved = write_docx_s13(request, &source).unwrap();

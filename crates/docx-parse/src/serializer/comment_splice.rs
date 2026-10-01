@@ -11,7 +11,9 @@ use crate::paragraph_identity::{attribute, tags, unescaped};
 use crate::relationships::parse_relationships;
 use crate::s8::{find_part, parse_comment_part};
 use crate::styles::StyleMap;
-use crate::xml::{ParseBudget, ParseError, ParseLimits, parse_javascript_integer_prefix, parse_xml};
+use crate::xml::{
+    ParseBudget, ParseError, ParseLimits, parse_javascript_integer_prefix, parse_xml,
+};
 
 use super::parts::CommentParaInfo;
 use super::xml_writer::js_number;
@@ -242,7 +244,11 @@ fn comment_spans(xml: &str) -> Result<(Vec<(String, Range<usize>)>, usize), Pars
         return Ok((Vec::new(), 0));
     }
     let limits = ParseLimits::default();
-    let document = parse_xml(xml.as_bytes(), "word/comments.xml", &mut ParseBudget::new(&limits))?;
+    let document = parse_xml(
+        xml.as_bytes(),
+        "word/comments.xml",
+        &mut ParseBudget::new(&limits),
+    )?;
     let root = document
         .root()
         .ok_or_else(|| error_xml("missing comments root"))?;
@@ -277,7 +283,9 @@ fn comment_spans(xml: &str) -> Result<(Vec<(String, Range<usize>)>, usize), Pars
             }
         } else {
             if depth == 1 {
-                let id = ids.next().ok_or_else(|| error_xml("comment span mismatch"))?;
+                let id = ids
+                    .next()
+                    .ok_or_else(|| error_xml("comment span mismatch"))?;
                 if let Some(id) = id {
                     if tag.empty {
                         spans.push((id, tag.range.clone()));
@@ -316,11 +324,19 @@ fn expand_empty_root(xml: &str) -> Result<String, ParseError> {
 
 fn with_writer_namespaces(mut xml: String) -> Result<String, ParseError> {
     let all_tags = tags(&xml).ok_or_else(|| error_xml("invalid comments root"))?;
-    let root = all_tags.first().ok_or_else(|| error_xml("missing comments root"))?;
+    let root = all_tags
+        .first()
+        .ok_or_else(|| error_xml("missing comments root"))?;
     let mut added = String::new();
     for (prefix, uri) in [
-        ("w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main"),
-        ("w14", "http://schemas.microsoft.com/office/word/2010/wordml"),
+        (
+            "w",
+            "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+        ),
+        (
+            "w14",
+            "http://schemas.microsoft.com/office/word/2010/wordml",
+        ),
     ] {
         let name = format!("xmlns:{prefix}");
         match attribute(root, &name).and_then(|range| unescaped(&xml, range)) {

@@ -392,6 +392,7 @@ pub fn write_docx_s13_parts(
             &mut package,
             &mut context,
             &request.determinism.seed,
+            !patched.contains_key(COMMENTS_PART) && !assignments.contains_key(COMMENTS_PART),
         );
     }
 
@@ -890,6 +891,7 @@ fn serialize_comment_parts(
     package: &mut Package,
     context: &mut SerializerContext,
     seed: &str,
+    allow_source_splice: bool,
 ) {
     let Some(comments) = document
         .comments
@@ -899,7 +901,7 @@ fn serialize_comment_parts(
         return;
     };
     let (mut comments_xml, mut infos) = serialize_comments_with_info(comments, context);
-    if let Some(source) = package.original_bytes(COMMENTS_PART) {
+    if allow_source_splice && let Some(source) = package.original_bytes(COMMENTS_PART) {
         let original_infos = infos.clone();
         match super::comment_splice::splice_comments(
             source,
