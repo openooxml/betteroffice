@@ -100,6 +100,7 @@ dependencies = [
  "betteroffice-ooxml-diff",
  "betteroffice-ooxml-text",
  "betteroffice-opc",
+ "foldhash",
  "js-sys",
  "ryu-js",
  "serde",
