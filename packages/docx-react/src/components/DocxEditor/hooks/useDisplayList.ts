@@ -507,7 +507,9 @@ export function useRustDisplayList(
     }),
     []
   );
-  const pageBuildInFlightRef = useRef<{ background: boolean; cancel(): void } | null>(null);
+  const pageBuildInFlightRef = useRef<{ background: boolean; cancel(): void; promote(): void } | null>(
+    null
+  );
   const pageBuildTimerRef = useRef<PageBuildTimer | null>(null);
   const provisionalPageFrameRef = useRef(false);
   const schedulePageBuildsWhenIdleRef = useRef<() => void>(() => {});
@@ -1492,6 +1494,7 @@ export function useRustDisplayList(
       const background = batch.length === 0;
       const supersedingBackground = !background && pageBuildInFlightRef.current?.background;
       if (pageBuildInFlightRef.current) {
+        if (settling) pageBuildInFlightRef.current.promote();
         if (background || !pageBuildInFlightRef.current.background) return;
         pageBuildInFlightRef.current.cancel();
         pageBuildInFlightRef.current = null;
@@ -1525,7 +1528,8 @@ export function useRustDisplayList(
         );
       }
       let attachment: PageBuildTask | null = null;
-      const build = { background, cancel: () => attachment?.cancel() };
+      let promote = (): void => {};
+      const build = { background, cancel: () => attachment?.cancel(), promote: () => promote() };
       pageBuildInFlightRef.current = build;
       const buildBase = frame;
       const dispatchedEpoch = contentEpochRef.current;
@@ -1644,13 +1648,23 @@ export function useRustDisplayList(
                   return;
                 }
               }
-              attachment = scheduleIdlePageBuild(decode, settleWaitersRef.current.size > 0);
+              attachDecode();
             } catch (error) {
               finish();
               failed(error);
             }
           };
-          attachment = scheduleIdlePageBuild(decode, settleWaitersRef.current.size > 0);
+          let urgent = false;
+          const attachDecode = (): void => {
+            urgent = settleWaitersRef.current.size > 0;
+            attachment = scheduleIdlePageBuild(decode, urgent);
+          };
+          promote = () => {
+            if (urgent || !attachment) return;
+            attachment.cancel();
+            attachDecode();
+          };
+          attachDecode();
         },
         (error) => {
           finish();

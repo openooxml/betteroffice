@@ -266,6 +266,35 @@ test('a visible request supersedes a background reply awaiting idle attachment',
   }
 });
 
+test('a settle wait promotes a background reply awaiting idle attachment', async () => {
+  const { engine, inputs, host } = lazyFixture(100);
+  const overrides = { getInputs: () => inputs };
+  const hook = renderHook(() => useRustDisplayList(
+    inputs.layout as Layout, overrides, undefined, undefined, host
+  ));
+  try {
+    await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    const builds = () => worker.posted.filter((entry) => entry.type === 'buildPages');
+    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    const before = hook.result.current.frame!;
+    await act(async () => runIdleCallbacks());
+    expect(builds()).toHaveLength(1);
+    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    expect(hook.result.current.frame).toBe(before);
+    let built = false;
+    await act(async () => {
+      const settled = await hook.result.current.settledDisplayList(null, null);
+      built = settled.pages.every((page) => !page.unbuilt);
+    });
+    expect(built).toBe(true);
+    expect(hook.result.current.error).toBeNull();
+  } finally {
+    hook.unmount();
+    engine.free();
+  }
+});
+
 test('worker-open window settling leaves far pages unbuilt while document settling builds them', async () => {
   const { engine, inputs, host } = lazyFixture();
   try {
