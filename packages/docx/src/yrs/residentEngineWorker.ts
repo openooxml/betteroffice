@@ -12,6 +12,7 @@ import {
   type DocxProposalResult,
 } from './proposals';
 import { computeProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
+import { hasCachedYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import {
   presentOffscreenPageBackBuffer,
   presentOffscreenPageBackBufferWithCaret,
@@ -42,8 +43,11 @@ import {
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 let session: ResidentEngineSession | null = null;
 let proposals: DocxProposalRegistry | null = null;
+let lastProposalMirrorVersion: string | null = null;
 /** Set while the session holds the document `open` seeded, with the heap limit it used. */
 let openedDocument: { heapLimitBytes?: number } | null = null;
+// The opened document is a display-only preview that an `open` of the whole package replaces.
+let previewing = false;
 let unsubscribe: (() => void) | null = null;
 let pendingUpdates: Uint8Array[] = [];
 let layoutRevision = 0;
@@ -77,7 +81,9 @@ interface LayoutRequest {
   extras: string;
   layoutExtras?: string;
 }
-let incompleteLayout: (LayoutRequest & { layoutInput: string }) | null = null;
+let incompleteLayout:
+  | (LayoutRequest & { layoutInput: string; workerAuthoritative?: boolean })
+  | null = null;
 let completedLayout:
   | (LayoutRequest & { layoutJson: string; headersFootersJson: string | undefined })
   | null = null;
@@ -174,22 +180,34 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'open') {
-    // One document per worker, so every queued request addresses the one it was sent for.
-    if (session) {
+    // One document per worker, so every queued request addresses the one it was sent for;
+    // only a preview gives way, to the whole document.
+    if (session && (!previewing || request.previewBlocks !== undefined)) {
       throw new Error('Resident engine worker already holds a document');
     }
+    // The preview's memory goes before the whole package seeds; its pages stay painted.
+    if (session) destroySession(true);
     const opening = await createResidentEngineSession(request.heapLimitBytes);
-    let hostJson: string;
+    let hostJson: string | null;
     try {
-      hostJson = opening.openDocx(new Uint8Array(request.bytes), request.digest, request.generation);
+      hostJson =
+        request.previewBlocks === undefined
+          ? opening.openDocx(new Uint8Array(request.bytes), request.digest, request.generation)
+          : opening.openDocxPreview(new Uint8Array(request.bytes), request.previewBlocks);
     } catch (error) {
       if (!(error instanceof WebAssembly.RuntimeError)) opening.destroy();
       throw error;
+    }
+    if (hostJson === null) {
+      opening.destroy();
+      reply({ id: request.id, ok: true, previewRefused: true });
+      return;
     }
     proposals?.destroy();
     proposals = null;
     session = opening;
     openedDocument = { heapLimitBytes: request.heapLimitBytes };
+    previewing = request.previewBlocks !== undefined;
     const stateVector = exactBuffer(session.encodeStateVector());
     reply({ id: request.id, ok: true, hostJson, stateVector }, [stateVector]);
     return;
@@ -222,6 +240,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     if (provisional) {
       incompleteLayout = {
         layoutInput: request.snapshot.layoutInput,
+        workerAuthoritative: request.snapshot.workerAuthoritative,
         extras: request.extras,
         layoutExtras: request.layoutExtras,
       };
@@ -272,7 +291,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'revisionCount') {
     if (!session) throw new Error('Resident engine worker is not initialized');
-    reply({ id: request.id, ok: true, revisionCount: session.revisionCount() });
+    // Host proposals' revisions are not the document's own.
+    const proposed = new Set(proposals?.snapshot().proposals.flatMap((p) => p.revisionIds));
+    reply({ id: request.id, ok: true, revisionCount: session.revisionCount(proposed) });
     return;
   }
   if (request.type === 'eraseCaret') {
@@ -284,12 +305,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (!session) throw new Error('Resident engine worker is not initialized');
   if (request.type === 'proposal') {
     if (!unsubscribe) throw new Error('Resident engine worker has not laid out its document');
-    await completeProvisionalLayout();
     pendingUpdates = [];
     let committed = false;
     try {
       const registry = proposals ??= createProposalRegistry(session.proposalEngine);
       const since = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+      const previousVersion = session.proposalEngine.version();
       let result: DocxProposalResult | undefined;
       switch (request.operation.kind) {
         case 'propose':
@@ -307,17 +328,26 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       if (changedStories.length > 0) completedLayout = null;
       const updates = pendingUpdates.map(exactBuffer);
       const stateVector = exactBuffer(session.encodeStateVector());
+      const version = session.proposalEngine.version();
+      const geometry = computeProposalGeometryMirror(
+        session.geometryReader,
+        registry.snapshot(),
+        version === previousVersion && (
+          version === lastProposalMirrorVersion || hasCachedYrsSidebarProjection(session.geometryReader)
+        )
+      );
+      lastProposalMirrorVersion = geometry.version;
       reply(
         {
           id: request.id,
           ok: true,
           proposal: {
             ...(result === undefined ? {} : { result }),
-            mirror: { version: session.proposalEngine.version(), proposals: registry.exportState() },
+            mirror: { version, proposals: registry.exportState() },
             changedStories,
             updates,
             stateVector,
-            geometry: computeProposalGeometryMirror(session.geometryReader, registry.snapshot()),
+            geometry,
           },
         },
         [...updates, stateVector]
@@ -337,7 +367,6 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'documentRead') {
-    await completeProvisionalLayout();
     const engine = session.proposalEngine;
     let value: unknown;
     switch (request.read.kind) {
@@ -367,7 +396,19 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     unsubscribe?.();
     unsubscribe = null;
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
-    const { layoutJson } = hydrate(request.snapshot, undefined, request.layoutExtras !== undefined);
+    const { layoutJson, provisional } = hydrate(
+      request.snapshot,
+      request.provisionalPages,
+      request.layoutExtras !== undefined
+    );
+    if (provisional) {
+      incompleteLayout = {
+        layoutInput: request.snapshot.layoutInput,
+        workerAuthoritative: request.snapshot.workerAuthoritative,
+        extras: request.extras,
+        layoutExtras: request.layoutExtras,
+      };
+    }
     subscribe();
     const started = performance.now();
     const frame = session.buildDisplayListFrame(
@@ -383,7 +424,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       started,
       false,
       request.paintCaret,
-      request.layoutExtras === undefined ? undefined : (layoutJson ?? undefined)
+      request.layoutExtras === undefined ? undefined : (layoutJson ?? undefined),
+      provisional
     );
     return;
   }
@@ -398,6 +440,38 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       frame,
       performance.now() - started,
       pendingUpdates,
+      undefined,
+      started,
+      false,
+      request.paintCaret
+    );
+    return;
+  }
+  if (request.type === 'releasePages') {
+    if (
+      !retainedFrame ||
+      retainedFrame.frameEpoch !== request.expectedFrameEpoch ||
+      request.pages.some(
+        ({ index, pageId }) => retainedFrame!.pages[index]?.pageId.toString() !== pageId
+      )
+    ) {
+      reply({ id: request.id, ok: true, superseded: true });
+      return;
+    }
+    const started = performance.now();
+    const frame = session.releaseDisplayPagesFrame(
+      request.pages.map(({ index }) => index),
+      request.expectedFrameEpoch
+    );
+    if (frame === null) {
+      reply({ id: request.id, ok: true, superseded: true });
+      return;
+    }
+    await replyFrame(
+      request.id,
+      frame,
+      performance.now() - started,
+      [],
       undefined,
       started,
       false,
@@ -425,7 +499,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'buildFrame') {
-    await completeProvisionalLayout();
+    if (!incompleteLayout?.workerAuthoritative) await completeProvisionalLayout();
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     pendingUpdates = [];
     const started = performance.now();
@@ -719,11 +793,21 @@ async function completionSlice(completion: SlicedCompletion): Promise<void> {
       progress = session.resumeRegionLayout(completion.blocks);
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) throw error;
-      // A change in between abandoned the pass: begin again on the new state,
-      // or finish in one step once changes keep coming.
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        message !== 'no region layout to resume' &&
+        message !== 'the document or its fonts changed since the region layout began'
+      ) throw error;
+      // A change in between abandoned the pass: begin again on the new state. Host
+      // proposals the worker holds keep yielding to user requests; other changes
+      // finish in one step once they keep coming.
       completion.begun = false;
       completion.restarts += 1;
-      if (completion.restarts > COMPLETION_RESTARTS) {
+      if (
+        completion.restarts > COMPLETION_RESTARTS &&
+        !incompleteLayout.workerAuthoritative &&
+        !proposals
+      ) {
         try {
           await completeProvisionalLayout();
         } catch {
@@ -803,8 +887,10 @@ function destroySession(keepSurfaces = false): void {
   proposals?.destroy();
   proposals = null;
   session?.destroy();
+  lastProposalMirrorVersion = null;
   session = null;
   openedDocument = null;
+  previewing = false;
   pendingUpdates = [];
   layoutRevision = 0;
   fontsRevision = -1;
@@ -858,19 +944,23 @@ async function replyFrame(
   }
   const selection = session?.selection() ?? null;
   caretPaintRect = paintCaret ? (caret.caretRect ?? null) : null;
-  // Pages no longer in the document release their surfaces entirely (their
-  // elements unmounted main-side); off-window pages are only zeroed, so this
-  // is the sole place a live document's canvas reference is dropped.
-  const livePageIds = new Set(retainedFrame.pages.map((page) => page.pageId.toString()));
+  // Pages no longer in the document drop their surfaces (their elements
+  // unmounted main-side). An unbuilt page keeps its transferred canvas, which
+  // can never be transferred again, and only loses its pixels.
+  const unbuiltByPageId = new Map(
+    retainedFrame.pages.map(({ pageId, page }) => [pageId.toString(), page.unbuilt === true])
+  );
   for (const pageId of pendingOffscreenPageIds) {
-    if (!livePageIds.has(pageId)) pendingOffscreenPageIds.delete(pageId);
+    if (unbuiltByPageId.get(pageId) !== false) pendingOffscreenPageIds.delete(pageId);
   }
-  for (const pageId of offscreenCanvases.keys()) {
-    if (!livePageIds.has(pageId)) {
-      offscreenCanvases.delete(pageId);
-      offscreenBackBuffers.delete(pageId);
-      forgetOffscreenPagePixels(pageId);
-    }
+  for (const pageId of new Set([...offscreenCanvases.keys(), ...offscreenBackBuffers.keys()])) {
+    const unbuilt = unbuiltByPageId.get(pageId);
+    if (unbuilt === false) continue;
+    const canvas = offscreenCanvases.get(pageId);
+    if (unbuilt === undefined) offscreenCanvases.delete(pageId);
+    else if (canvas) releaseOffscreenPageCanvas(canvas);
+    offscreenBackBuffers.delete(pageId);
+    forgetOffscreenPagePixels(pageId);
   }
   const replayStarted = performance.now();
   const { replayedPages, caretPainted } = await replayOffscreen(false);
@@ -907,7 +997,10 @@ async function replayOffscreen(
 ): Promise<{ replayedPages: number; caretPainted: boolean }> {
   const forcedPageIds = force === true ? activeOffscreenPageIds : force;
   if (forcedPageIds) {
-    for (const pageId of forcedPageIds) pendingOffscreenPageIds.add(pageId);
+    for (const { pageId, page } of retainedFrame?.pages ?? []) {
+      const key = pageId.toString();
+      if (!page.unbuilt && forcedPageIds.has(key)) pendingOffscreenPageIds.add(key);
+    }
   }
   if (!retainedFrame || offscreenCanvases.size === 0) {
     return { replayedPages: 0, caretPainted: false };
@@ -960,7 +1053,7 @@ async function replayOffscreen(
     if (!damaged && !gainsCaret && !losesCaret) continue;
     const canvas = offscreenCanvases.get(pageIdString);
     const page = retainedFrame.displayList.pages[index];
-    if (!canvas || !page) continue;
+    if (!canvas || !page || page.unbuilt) continue;
     const pageId = pageIdString;
     let buffer = offscreenBackBuffers.get(pageId);
     if (!buffer) {

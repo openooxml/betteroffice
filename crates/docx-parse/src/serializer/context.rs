@@ -16,6 +16,9 @@ pub struct SerializerContext {
     now: String,
     rendered_page_breaks: Vec<bool>,
     paragraph_ids: BTreeSet<u32>,
+    pub(crate) deletion: bool,
+    pub(crate) in_control: bool,
+    pub(crate) in_revision: bool,
 }
 
 impl SerializerContext {
@@ -26,6 +29,9 @@ impl SerializerContext {
             now: determinism.now.clone(),
             rendered_page_breaks: Vec::new(),
             paragraph_ids: BTreeSet::new(),
+            deletion: false,
+            in_control: false,
+            in_revision: false,
         })
     }
 

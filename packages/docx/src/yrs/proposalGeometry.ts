@@ -419,6 +419,7 @@ export interface ProposalGeometryMirror {
   previewVersion: number;
   proposals: string;
   targets: Record<string, ProposalGeometryTarget>;
+  navigationTargets?: Record<string, ReturnType<typeof resolveNavigationTarget>>;
   hidden: { from: number; to: number }[];
 }
 
@@ -439,7 +440,8 @@ export function proposalSetIdentity(snapshot: DocxProposalSnapshot): string {
 /** @internal */
 export function computeProposalGeometryMirror(
   reader: ProposalGeometryReader,
-  snapshot: DocxProposalSnapshot
+  snapshot: DocxProposalSnapshot,
+  includeNavigationTargets = true
 ): ProposalGeometryMirror {
   const version = reader.version();
   const projections = new Map<string, YrsPositionProjection | null>();
@@ -487,10 +489,33 @@ export function computeProposalGeometryMirror(
     previewVersion: snapshot.previewVersion,
     proposals: proposalSetIdentity(snapshot),
     targets,
+    navigationTargets: includeNavigationTargets ? Object.fromEntries(snapshot.proposals.map(({ id, paragraph }) => [
+      id, resolveNavigationTarget(reader, paragraph.story, paragraph.paraId),
+    ])) : undefined,
     hidden: hiddenRanges(reader, version, snapshot)
       .map(display)
       .filter((range): range is { from: number; to: number } => range !== null),
   };
+}
+
+/** @internal */
+export function resolveMirroredNavigationTarget(
+  mirror: ProposalGeometryMirror | null,
+  snapshot: DocxProposalSnapshot,
+  story: string,
+  paraId: string
+): ReturnType<typeof resolveNavigationTarget> | null {
+  if (
+    !mirror?.navigationTargets || mirror.version !== snapshot.version ||
+    mirror.previewVersion !== snapshot.previewVersion ||
+    mirror.proposals !== proposalSetIdentity(snapshot)
+  ) return null;
+  const proposal = snapshot.proposals.find(({ paragraph }) =>
+    paragraph.story === story && paragraph.paraId === paraId
+  );
+  return proposal && Object.hasOwn(mirror.navigationTargets, proposal.id)
+    ? mirror.navigationTargets[proposal.id]!
+    : null;
 }
 
 /** @internal */

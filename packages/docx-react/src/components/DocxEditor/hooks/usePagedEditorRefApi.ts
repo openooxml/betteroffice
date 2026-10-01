@@ -83,6 +83,7 @@ interface RefApiInputs {
   documentFromYrsRef: React.MutableRefObject<() => Document | null>;
   yrsSessionRef: React.MutableRefObject<YrsSession | null>;
   yrsLocToDisplayPositionRef: React.MutableRefObject<(loc: YrsLoc) => number | null>;
+  refreshWorkerLayoutRef: React.MutableRefObject<() => void>;
   syncYrsInputStateRef: React.MutableRefObject<
     (
       docChanged: boolean,
@@ -136,6 +137,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     yrsSessionRef,
     yrsLocToDisplayPositionRef,
     syncYrsInputStateRef,
+    refreshWorkerLayoutRef,
     applyYrsFormattingRef,
     applyYrsCommandRef,
     getYrsPositionProjectionRef,
@@ -228,14 +230,12 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     getYrsSession: () => yrsSessionRef.current,
     flushPendingInput: async () => {
       const session = yrsSessionRef.current;
-      const ready = workerOpenEnabledRef.current && session ? awaitWorkerOpenReplica(session) : undefined;
-      if (ready) await ready;
       const input = yrsInputRef.current;
       if (!input || !session) throw new Error('The editor input is unavailable');
-      // The input rejects its own flush when it unmounts or changes session; its handle object
-      // is rebuilt whenever a new frame changes its callbacks, so only the session is compared.
-      await input.flushPendingInput();
-      if (session !== yrsSessionRef.current) {
+      const pending = input.flushPendingInput();
+      const ready = workerOpenEnabledRef.current ? awaitWorkerOpenReplica(session) : undefined;
+      await (ready ? Promise.all([pending, ready]) : pending);
+      if (session !== yrsSessionRef.current || !yrsInputRef.current) {
         throw new Error('The document changed while flushing input');
       }
     },
@@ -249,6 +249,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     getLayout: () => layout,
     getLayoutRequest,
     relayout: runLayoutPipeline,
+    refreshWorkerLayout: () => refreshWorkerLayoutRef.current(),
     scrollToPosition: (position) => {
       bumpInputEpochRef.current?.();
       scrollToPositionImpl(position);
@@ -352,6 +353,7 @@ export interface UsePagedEditorRefApiOptions {
   documentFromYrs: () => Document | null;
   yrsSession: YrsSession | null;
   replicaReady?: boolean;
+  refreshWorkerLayout?: () => void;
   experimentalWorkerOpen?: boolean;
   yrsLocToDisplayPosition: (loc: YrsLoc) => number | null;
   syncYrsInputState: (
@@ -385,6 +387,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     documentFromYrs,
     yrsSession,
     replicaReady = true,
+    refreshWorkerLayout = runLayoutPipeline,
     experimentalWorkerOpen = false,
     yrsLocToDisplayPosition,
     syncYrsInputState,
@@ -406,6 +409,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   const yrsSessionRef = useRef(yrsSession);
   const yrsLocToDisplayPositionRef = useRef(yrsLocToDisplayPosition);
   const syncYrsInputStateRef = useRef(syncYrsInputState);
+  const refreshWorkerLayoutRef = useRef(refreshWorkerLayout);
   const applyYrsFormattingRef = useRef(applyYrsFormatting);
   const applyYrsCommandRef = useRef(applyYrsCommand);
   const getYrsPositionProjectionRef = useRef(getYrsPositionProjection);
@@ -415,6 +419,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   yrsSessionRef.current = yrsSession;
   yrsLocToDisplayPositionRef.current = yrsLocToDisplayPosition;
   syncYrsInputStateRef.current = syncYrsInputState;
+  refreshWorkerLayoutRef.current = refreshWorkerLayout;
   applyYrsFormattingRef.current = applyYrsFormatting;
   applyYrsCommandRef.current = applyYrsCommand;
   getYrsPositionProjectionRef.current = getYrsPositionProjection;
@@ -439,6 +444,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     yrsSessionRef,
     yrsLocToDisplayPositionRef,
     syncYrsInputStateRef,
+    refreshWorkerLayoutRef,
     applyYrsFormattingRef,
     applyYrsCommandRef,
     getYrsPositionProjectionRef,
@@ -464,6 +470,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
 export interface UsePagedEditorCommandBridgeOptions {
   bumpInputEpoch?: () => void;
   experimentalWorkerOpen?: boolean;
+  hydrateOnDemand?: boolean;
   bridgeRef: React.MutableRefObject<PagedEditorCommandBridge | null> | undefined;
   yrsInputRef: React.RefObject<YrsInputRef | null>;
   session: YrsSession | null;
@@ -488,20 +495,40 @@ export function usePagedEditorCommandBridge(options: UsePagedEditorCommandBridge
   if (!bridge.current) {
     bridge.current = {
       runAfterPendingInput(operation) {
-        latest.current.bumpInputEpoch?.();
         const session = latest.current.session;
-        const ready = latest.current.experimentalWorkerOpen && session ? awaitWorkerOpenReplica(session) : undefined;
-        if (ready) {
-          return ready.then(() => {
-            if (latest.current.session !== session) throw new DocxCommandAdmissionError('editor-unavailable');
-            const input = latest.current.yrsInputRef.current;
-            if (!input) throw new DocxCommandAdmissionError('editor-unavailable');
-            return input.runAfterPendingInput(operation);
-          });
+        if (!latest.current.experimentalWorkerOpen || !session || latest.current.hydrateOnDemand) {
+          latest.current.bumpInputEpoch?.();
+          const ready = latest.current.experimentalWorkerOpen && session ? awaitWorkerOpenReplica(session) : undefined;
+          if (ready) {
+            return ready.then(() => {
+              if (latest.current.session !== session) throw new DocxCommandAdmissionError('editor-unavailable');
+              const input = latest.current.yrsInputRef.current;
+              if (!input) throw new DocxCommandAdmissionError('editor-unavailable');
+              return input.runAfterPendingInput(operation);
+            });
+          }
+          const input = latest.current.yrsInputRef.current;
+          if (!input) return Promise.reject(new DocxCommandAdmissionError('editor-unavailable'));
+          return input.runAfterPendingInput(operation);
         }
         const input = latest.current.yrsInputRef.current;
         if (!input) return Promise.reject(new DocxCommandAdmissionError('editor-unavailable'));
-        return input.runAfterPendingInput(operation);
+        const deferEpoch = input.hasPendingInput();
+        if (!deferEpoch) latest.current.bumpInputEpoch?.();
+        const ready = awaitWorkerOpenReplica(session) ?? Promise.resolve();
+        const queued = input.runAfterPendingInput(async () => {
+          const assertCurrent = () => {
+            if (latest.current.session !== session || !latest.current.yrsInputRef.current) {
+              throw new DocxCommandAdmissionError('editor-unavailable');
+            }
+          };
+          assertCurrent();
+          await ready;
+          assertCurrent();
+          if (deferEpoch) latest.current.bumpInputEpoch?.();
+          return operation();
+        });
+        return Promise.all([queued, ready]).then(([result]) => result);
       },
       hasPendingInput: () =>
         (latest.current.experimentalWorkerOpen && latest.current.session !== null && workerOpenReplicaPending(latest.current.session)) ||

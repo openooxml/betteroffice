@@ -13,6 +13,17 @@ use crate::{
     map_string, story_ref,
 };
 
+/// A tracked change with its story-global `[start, end)`, before its paragraph
+/// locations are resolved.
+pub(crate) struct RawChange {
+    pub(crate) id: String,
+    kind: ChangeKind,
+    author: String,
+    date: String,
+    pub(crate) start: u32,
+    pub(crate) end: u32,
+}
+
 /// Which projection of the story text a read query uses.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TextView {
@@ -323,6 +334,35 @@ fn visit_chunk_revisions<T: ReadTxn>(
             if let Some(stamp) = chunk.attrs.get(key).and_then(revision_parts) {
                 visit(kind, stamp);
             }
+        }
+        if let ChunkKind::Embed(Some(map)) = &chunk.kind
+            && map_string(map, txn, KIND_KEY).as_deref() == Some("sdt")
+            && let Some(Out::Any(content)) = map.get(txn, "content")
+        {
+            let mut seen: Vec<_> = [(INS, ChangeKind::Insertion), (DEL, ChangeKind::Deletion)]
+                .into_iter()
+                .filter_map(|(key, kind)| {
+                    chunk
+                        .attrs
+                        .get(key)
+                        .and_then(revision_parts)
+                        .map(|stamp| (kind, stamp))
+                })
+                .collect();
+            crate::inline_content::visit(&content, &mut |child| {
+                let Some(Any::Map(attrs)) = child.get("attrs") else {
+                    return;
+                };
+                for (key, kind) in [(INS, ChangeKind::Insertion), (DEL, ChangeKind::Deletion)] {
+                    if let Some(stamp) = attrs.get(key).and_then(revision_parts) {
+                        let entry = (kind, stamp);
+                        if !seen.contains(&entry) {
+                            seen.push(entry.clone());
+                            visit(entry.0, entry.1);
+                        }
+                    }
+                }
+            });
         }
     }
 }
@@ -659,18 +699,43 @@ impl EditingDoc {
     pub(crate) fn story_changes(&self, story_id: &str) -> OpResult<Vec<(ChangeInfo, (u32, u32))>> {
         let txn = self.yrs_doc().transact();
         let story = story_ref(&txn, story_id)?;
-        let chunks = self.chunk_snapshot(story_id, &story, &txn);
-        struct RawChange {
-            id: String,
-            kind: ChangeKind,
-            author: String,
-            date: String,
-            start: u32,
-            end: u32,
+        let raw = self.story_raw_changes(story_id, &story, &txn);
+        if raw.is_empty() {
+            return Ok(Vec::new());
         }
+        let bounds = crate::op::para_bounds(&story, &txn);
+        raw.into_iter()
+            .map(|change| {
+                let range = LocRange {
+                    start: crate::op::loc_in_bounds(story_id, &bounds, change.start)?,
+                    end: crate::op::loc_in_bounds(story_id, &bounds, change.end)?,
+                };
+                Ok((
+                    ChangeInfo {
+                        revision_id: change.id,
+                        kind: change.kind,
+                        author: change.author,
+                        date: change.date,
+                        range,
+                    },
+                    (change.start, change.end),
+                ))
+            })
+            .collect()
+    }
+
+    /// A story's tracked changes as [`Self::story_changes`] finds them, ordered by
+    /// position, without resolving paragraph locations (a story may hold none).
+    pub(crate) fn story_raw_changes<T: ReadTxn>(
+        &self,
+        story_id: &str,
+        story: &yrs::TextRef,
+        txn: &T,
+    ) -> Vec<RawChange> {
+        let chunks = self.chunk_snapshot(story_id, story, txn);
         let mut raw: Vec<RawChange> = Vec::new();
         for chunk in chunks.iter() {
-            visit_chunk_revisions(chunk, &txn, |kind, (id, author, date)| {
+            visit_chunk_revisions(chunk, txn, |kind, (id, author, date)| {
                 let pilcrow = matches!(&chunk.kind, ChunkKind::Pilcrow(_));
                 if !pilcrow
                     && let Some(last) = raw
@@ -697,7 +762,7 @@ impl EditingDoc {
             });
         }
         raw.extend(
-            table_row_changes(&story, &txn)
+            table_row_changes(story, txn)
                 .into_iter()
                 .map(|change| RawChange {
                     id: change.revision_id,
@@ -714,28 +779,7 @@ impl EditingDoc {
                 }),
         );
         raw.sort_by_key(|change| change.start);
-        if raw.is_empty() {
-            return Ok(Vec::new());
-        }
-        let bounds = crate::op::para_bounds(&story, &txn);
-        raw.into_iter()
-            .map(|change| {
-                let range = LocRange {
-                    start: crate::op::loc_in_bounds(story_id, &bounds, change.start)?,
-                    end: crate::op::loc_in_bounds(story_id, &bounds, change.end)?,
-                };
-                Ok((
-                    ChangeInfo {
-                        revision_id: change.id,
-                        kind: change.kind,
-                        author: change.author,
-                        date: change.date,
-                        range,
-                    },
-                    (change.start, change.end),
-                ))
-            })
-            .collect()
+        raw
     }
 
     /// The Loc range covering every unit stamped with the revision ID (any story).
@@ -766,6 +810,13 @@ impl EditingDoc {
                         .map(|(id, ..)| id)
                         == Some(revision_id.to_owned())
                 });
+                if let ChunkKind::Embed(Some(map)) = &chunk.kind
+                    && map_string(map, &txn, KIND_KEY).as_deref() == Some("sdt")
+                {
+                    visit_chunk_revisions(chunk, &txn, |_, (id, ..)| {
+                        matched |= id == revision_id;
+                    });
+                }
                 if let ChunkKind::Pilcrow(map) = &chunk.kind {
                     matched = matched
                         || [crate::PPR_INS, crate::PPR_DEL].iter().any(|key| {

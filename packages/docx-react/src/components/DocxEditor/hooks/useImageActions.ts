@@ -68,6 +68,7 @@ export function useImageActions({
         alt: data.alt ?? null,
         borderWidth: data.borderWidth ?? null,
         borderColor: data.borderColor ?? null,
+        borderColorValue: null,
         borderStyle: data.borderStyle ?? null,
         width: data.width ?? null,
         height: data.height ?? null,

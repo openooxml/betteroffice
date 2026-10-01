@@ -2145,7 +2145,17 @@ fn carried_table_borders_preserve_cell_content_across_slices() {
         assert_eq!(input["layout"]["pages"][1]["fragments"][0]["rowStart"], 1);
         assert!(dl.pages[1].primitives.iter().any(|primitive| {
             matches!(primitive, Primitive::Line(line)
-                if line.attrs.cell.as_ref().is_some_and(|cell| cell.owns_top_border == Some(true)))
+                if line.attrs.cell.as_ref().is_some_and(|cell| cell.owns_top_border == Some(true))
+                    && line.y1 == line.y2 && line.y1.as_f64() == Some(0.0))
+        }));
+        let last_fragment =
+            input["layout"]["pages"].as_array().unwrap().last().unwrap()["fragments"][0].clone();
+        let bottom_y =
+            last_fragment["y"].as_f64().unwrap() + last_fragment["height"].as_f64().unwrap() - 2.0;
+        assert!(dl.pages.last().unwrap().primitives.iter().any(|primitive| {
+            matches!(primitive, Primitive::Line(line)
+                if line.role == Some(docx_layout::display_list::LineRole::TableBorder)
+                    && line.y1 == line.y2 && line.y1.as_f64() == Some(bottom_y))
         }));
         let mut seen = Vec::new();
         for (page_index, page) in dl.pages.iter().enumerate().skip(1) {
@@ -2944,6 +2954,13 @@ fn table_border_lines_carry_cell_and_table_ownership() {
         .collect();
     assert_eq!(borders.len(), 4, "four bordered edges expected: {json}");
     for line in &borders {
+        if line.color == "#111111" {
+            assert_eq!(line.y1.as_f64(), Some(50.5));
+            assert_eq!(line.y2.as_f64(), Some(50.5));
+        } else if line.color == "#333333" {
+            assert_eq!(line.y1.as_f64(), Some(73.5));
+            assert_eq!(line.y2.as_f64(), Some(73.5));
+        }
         let cell = line.attrs.cell.as_ref().expect("border line carries cell");
         assert_eq!(
             (cell.row, cell.col, cell.row_span, cell.col_span),
@@ -3168,5 +3185,46 @@ fn unbuilt_page_spans_read_positions_as_a_fresh_build_does() {
             }
             Err(_) => assert!(updated.is_err(), "{value}"),
         }
+    }
+}
+
+/// Word draws a boxed paragraph's left edge where its hanging first line
+/// begins, so the outdented label sits inside the box.
+#[test]
+fn paragraph_borders_enclose_a_hanging_first_line() {
+    let edge = serde_json::json!({ "style": "single", "width": 1.0, "space": 0.0 });
+    for (hanging, left_edge) in [(60.0, 50.0), (20.0, 90.0), (0.0, 110.0)] {
+        let mut input = serde_json::json!({
+            "measured": [{
+                "block": { "kind": "paragraph", "id": 1, "pmStart": 0, "pmEnd": 6,
+                    "attrs": { "indent": { "left": 60.0, "right": 0.0, "hanging": hanging },
+                        "borders": { "top": edge, "bottom": edge, "left": edge, "right": edge } },
+                    "runs": [{ "kind": "text", "text": "Remark", "pmStart": 1 }] },
+                "measure": { "kind": "paragraph", "totalHeight": 20.0,
+                    "lines": [{ "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 6,
+                        "width": 40.0, "ascent": 12.0, "descent": 4.0, "lineHeight": 20.0 }] }
+            }],
+            "options": { "pageSize": { "w": 400.0, "h": 200.0 },
+                "margins": { "top": 20.0, "right": 20.0, "bottom": 20.0, "left": 50.0 } }
+        });
+        input["layout"] = serde_json::from_str(
+            &docx_layout::layout_to_canonical_json(&input.to_string()).unwrap(),
+        )
+        .unwrap();
+        let dl = build_dl(&input.to_string());
+        let verticals: Vec<f64> = dl.pages[0]
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                Primitive::Line(line)
+                    if line.role == Some(docx_layout::display_list::LineRole::Border)
+                        && line.x1 == line.x2 =>
+                {
+                    line.x1.as_f64()
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(verticals, vec![left_edge, 380.0], "hanging {hanging}");
     }
 }

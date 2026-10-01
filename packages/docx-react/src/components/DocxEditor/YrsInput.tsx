@@ -282,11 +282,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const inputLifetimeRef = useRef({ session, enabled, mounted: true });
   inputLifetimeRef.current.session = session;
   inputLifetimeRef.current.enabled = enabled;
-  // A resident edit that answers after the input unmounted or its document was replaced
-  // finishes nothing: the session it started on may be freed.
   const isCurrentInput = useCallback(
-    (started: YrsSession | null): boolean =>
-      inputLifetimeRef.current.mounted && inputLifetimeRef.current.session === started,
+    (started: YrsSession | null, queue = inputOperationQueueRef.current): boolean =>
+      inputLifetimeRef.current.mounted && inputLifetimeRef.current.enabled &&
+      inputLifetimeRef.current.session === started && inputOperationQueueRef.current === queue,
     []
   );
   const storedFormattingByParagraphRef = useRef(new Map<string, YrsStoredFormatting>());
@@ -296,12 +295,17 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const queuedSessionRef = useRef(session);
   if (!inputOperationQueueRef.current || queuedSessionRef.current !== session) {
     queuedSessionRef.current = session;
-    inputOperationQueueRef.current = new InputOperationQueue(
+    const queue = new InputOperationQueue(
       (error) => {
         console.error('[YrsInput] queued input operation failed', error);
       },
-      (pending) => onPendingInputChangeRef.current?.(pending)
+      (pending) => {
+        if (!replicaReadyRef || isCurrentInput(session, queue)) {
+          onPendingInputChangeRef.current?.(pending);
+        }
+      }
     );
+    inputOperationQueueRef.current = queue;
   }
   const pendingResidentTextRef = useRef<{ text: string } | null>(null);
   const pendingResidentDeleteRef = useRef<{
@@ -367,21 +371,22 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     };
   }, [canvasHostRef]);
 
-  // An operation still queued when the input lets go of its session starts nothing. Input that
-  // reaches an on-demand replica before it has loaded waits for it, after the recorded gesture;
-  // newer input drops it, and the reader's scrolling since keeps its selection where it is.
   const enqueueInputOperation = useCallback(
-    (operation: (waited: boolean) => void | Promise<void>, onDropped?: () => void): void => {
+    (
+      operation: (waited: boolean) => void | Promise<void>,
+      kind: 'mutation' | 'selection' = 'selection',
+      onDropped?: () => void
+    ): void => {
       sealInputBatches();
       const admitted = session;
       const queue = inputOperationQueueRef.current;
       const replica =
-        admitted && requestReplica && replicaReadyRef?.current === false
+        admitted && replicaReadyRef?.current === false
           ? awaitWorkerOpenReplica(admitted)
           : undefined;
       if (!replica) {
         queue?.enqueue(() => {
-          if (!isCurrentInput(admitted)) return onDropped?.();
+          if (!isCurrentInput(admitted, queue)) return onDropped?.();
           if (replicaReadyRef?.current !== false) replicaInputRef.current.applyPendingSelection?.();
           return operation(false);
         });
@@ -390,22 +395,32 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       const epoch = replicaInputRef.current.inputEpoch?.();
       const readerScrolled = watchReaderScroll();
       queue?.enqueue(async () => {
-        const loaded = await replica.then(
-          () => true,
-          () => false
-        );
+        if (!isCurrentInput(admitted, queue)) {
+          readerScrolled();
+          return onDropped?.();
+        }
+        try {
+          await replica;
+        } catch (error) {
+          readerScrolled();
+          onDropped?.();
+          if (kind === 'mutation' && isCurrentInput(admitted, queue)) throw error;
+          return;
+        }
         const scrolled = readerScrolled();
         const superseded = replicaInputRef.current.inputEpoch?.() !== epoch;
-        if (!loaded || !isCurrentInput(admitted) || superseded) {
+        if (!isCurrentInput(admitted, queue) || (kind === 'selection' && superseded)) {
           onDropped?.();
           return;
         }
         replicaInputRef.current.applyPendingSelection?.();
         await operation(true);
-        if (scrolled) quietSelectionRef.current = admitted?.selection() ?? null;
+        if (scrolled && isCurrentInput(admitted, queue)) {
+          quietSelectionRef.current = admitted?.selection() ?? null;
+        }
       });
     },
-    [isCurrentInput, replicaReadyRef, requestReplica, sealInputBatches, session, watchReaderScroll]
+    [isCurrentInput, replicaReadyRef, sealInputBatches, session, watchReaderScroll]
   );
 
   const advanceInteractionEpoch = useCallback((): void => {
@@ -599,7 +614,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const insertText = useCallback(
     (text: string): void => {
       verticalCaretGoalRef.current.reset();
-      if (!session || readOnly || replicaReadyRef?.current === false || text.length === 0) return;
+      if (!session || readOnly || text.length === 0) return;
       dispatchCaretInput();
       const applyText = async (inputText: string) => {
         const current = ensureSelection();
@@ -691,7 +706,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         !text.includes('\r') &&
         !text.includes('\n');
       if (!canBatchResidentText) {
-        enqueueInputOperation(() => applyText(text));
+        enqueueInputOperation(() => applyText(text), 'mutation');
         return;
       }
 
@@ -705,7 +720,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       enqueueInputOperation(async () => {
         if (pendingResidentTextRef.current === batch) pendingResidentTextRef.current = null;
         await applyText(batch.text);
-      });
+      }, 'mutation');
       pendingResidentTextRef.current = batch;
     },
     [
@@ -719,7 +734,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       isCurrentInput,
       isSuggesting,
       readOnly,
-      replicaReadyRef,
       session,
       suggestingAuthor,
     ]
@@ -837,7 +851,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       enqueueInputOperation(async () => {
         if (pendingResidentDeleteRef.current === batch) pendingResidentDeleteRef.current = null;
         await deleteUnits(batch.direction, batch.count);
-      });
+      }, 'mutation');
       pendingResidentDeleteRef.current = batch;
     },
     [deleteUnits, dispatchCaretInput, enqueueInputOperation]
@@ -887,7 +901,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         offset: 0,
       });
       finishMutation();
-    });
+    }, 'mutation');
   }, [
     deleteSelected,
     dispatchCaretInput,
@@ -1157,6 +1171,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           if (selected) resolve(new Blob([selected], { type: 'text/plain' }));
           else reject(new Error('Nothing is selected to copy'));
         },
+        'selection',
         () => reject(new Error('Newer input replaced the copy'))
       );
     });
@@ -1303,8 +1318,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const queue = inputOperationQueueRef.current;
     const since = queue?.failureCheckpoint();
     const assertCurrent = () => {
-      const current = inputLifetimeRef.current;
-      if (!session || !current.mounted || !current.enabled || current.session !== session) {
+      if (!session || !isCurrentInput(session, queue)) {
         throw new Error('The editor input changed or is unavailable while flushing');
       }
     };
@@ -1316,7 +1330,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     sealInputBatches();
     await queue?.flush(since);
     assertCurrent();
-  }, [sealInputBatches, session]);
+  }, [isCurrentInput, sealInputBatches, session]);
 
   const runAfterPendingInput = useCallback(
     <T,>(operation: () => T | Promise<T>): Promise<T> => {
@@ -1327,13 +1341,20 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       const admit = (): Promise<T> => {
         if (!queue) return Promise.reject(new DocxCommandAdmissionError('editor-unavailable'));
         sealInputBatches();
-        return queue.run((inputLost) => {
+        const assertCurrent = () => {
           if (!lifetime.mounted || !lifetime.enabled || !admitted) {
             throw new DocxCommandAdmissionError('editor-unavailable');
           }
-          if (lifetime.session !== admitted) throw new DocxCommandAdmissionError('document-replaced');
+          if (lifetime.session !== admitted || inputOperationQueueRef.current !== queue) {
+            throw new DocxCommandAdmissionError('document-replaced');
+          }
+        };
+        return queue.run(async (inputLost) => {
+          assertCurrent();
           if (inputLost) throw new DocxCommandAdmissionError('input-failed');
-          return operation();
+          const result = await operation();
+          assertCurrent();
+          return result;
         }, since);
       };
       if (!composingRef.current && !compositionPendingRef.current) return admit();
@@ -1485,12 +1506,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, [emitSelection, enabled, ensureSelection, seedSelection, session, replicaReady]);
 
   useEffect(() => {
-    if (!enabled || !session || readOnly || !replicaReady) return;
+    if (!enabled || !session || readOnly) return;
     const frame = requestAnimationFrame(() =>
       textareaRef.current?.focus({ preventScroll: true })
     );
     return () => cancelAnimationFrame(frame);
-  }, [enabled, readOnly, session, story, replicaReady]);
+  }, [enabled, readOnly, session, story]);
 
   useEffect(() => {
     if (!enabled || !displayListQueries) return;
@@ -1582,7 +1603,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       autoCapitalize="sentences"
       autoCorrect="on"
       spellCheck
-      readOnly={readOnly || replicaReadyRef?.current === false || !session}
+      readOnly={readOnly || !session}
       rows={1}
       style={{ ...BASE_STYLE, ...positionStyle }}
       onBeforeInput={handleBeforeInput}

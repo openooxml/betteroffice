@@ -998,6 +998,9 @@ keep none until the host calls `session.persistParagraphIds()`, which covers eve
 part, comments and note separators included, and refuses rather than guess at an
 ambiguous comment reference. Results are `found`, `missing`, `ambiguous`, or
 `unsupported`; table, cell, and content-control identities are not persisted.
+The React editor's ref offers `getParagraphIdentities()` and
+`resolveParagraphAnchors(anchors)`, which returns the results in input order with
+the version they were resolved at.
 
 ## Package reference
 

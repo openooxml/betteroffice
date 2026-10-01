@@ -34,6 +34,10 @@ export async function flushEditorInput(
     };
   }
   try {
+    await editor.flushPendingInput();
+    if (pagedEditorRef.current?.getYrsSession() !== session) {
+      throw new Error('The document changed while flushing input');
+    }
     const ready = experimentalWorkerOpen ? awaitWorkerOpenReplica(session) : undefined;
     if (ready) {
       await ready;
@@ -41,7 +45,6 @@ export async function flushEditorInput(
         throw new Error('The document changed while opening the replica');
       }
     }
-    await editor.flushPendingInput();
   } catch (error) {
     return {
       ok: false,

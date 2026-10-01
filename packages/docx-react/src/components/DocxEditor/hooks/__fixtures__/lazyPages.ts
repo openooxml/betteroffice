@@ -1,6 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createEditSession } from '@betteroffice/docx/wasm/edit';
+import {
+  applyFrameDeltaOwned,
+  decodeFrameDelta,
+  type RetainedFrame,
+} from '@betteroffice/docx/layout/render';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import type {
   ResidentEngineWorkerRequest,
@@ -15,6 +20,12 @@ export class EngineWorker {
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror = null;
   posted: ResidentEngineWorkerRequest[] = [];
+  releaseRequests = 0;
+  releasedIndices: number[] = [];
+  supersedeNextRelease = false;
+  private frame: RetainedFrame | null = null;
+  private engineFrame: RetainedFrame | null = null;
+  private releasedEpochs = 0;
   holdPageBuilds = false;
   heldPageBuilds: (() => void)[] = [];
   holdInputReplies = false;
@@ -30,6 +41,37 @@ export class EngineWorker {
   postMessage(request: ResidentEngineWorkerRequest): void {
     this.posted.push(request);
     const engine = EngineWorker.engine!;
+    if (request.type === 'releasePages') {
+      this.releaseRequests += 1;
+      if (
+        this.supersedeNextRelease ||
+        !this.frame ||
+        request.expectedFrameEpoch !== this.frame.frameEpoch ||
+        request.pages.some(
+          ({ index, pageId }) => this.frame!.pages[index]?.pageId.toString() !== pageId
+        )
+      ) {
+        this.supersedeNextRelease = false;
+        queueMicrotask(() =>
+          this.onmessage?.({
+            data: { id: request.id, ok: true, superseded: true },
+          } as MessageEvent<ResidentEngineWorkerResponse>)
+        );
+        return;
+      }
+      const indices = request.pages.map(({ index }) => index);
+      this.releasedIndices.push(...indices);
+      const pages = indices.map((index) => ({
+        ...this.frame!.pages[index]!,
+        primitiveIds: new BigUint64Array(),
+        page: { ...this.frame!.displayList.pages[index]!, primitives: [], unbuilt: true },
+      }));
+      const frame = pageFrame(this.frame, pages);
+      this.frame = applyFrameDeltaOwned(this.frame, decodeFrameDelta(frame));
+      this.releasedEpochs += 1;
+      queueMicrotask(this.response(request.id, frame));
+      return;
+    }
     if (request.type === 'buildPages' && EngineWorker.outOfMemoryPageBuilds) {
       queueMicrotask(() =>
         this.onmessage?.({
@@ -61,6 +103,7 @@ export class EngineWorker {
       return;
     }
     let frame: Uint8Array;
+    const expectedEpoch = request.expectedFrameEpoch - this.releasedEpochs;
     engine.set_windowed_incremental_builds(
       'displayWindow' in request && request.displayWindow !== undefined
     );
@@ -70,23 +113,41 @@ export class EngineWorker {
     }
     if (request.type === 'bootstrap') engine.reset_frame_base();
     if (request.type === 'bootstrap' || request.type === 'buildFrame') {
-      frame = engine.build_display_list_frame(request.extras, request.expectedFrameEpoch);
+      frame = engine.build_display_list_frame(request.extras, expectedEpoch);
     } else if (request.type === 'buildPages') {
-      frame = engine.build_display_pages_frame(
-        Uint32Array.from(request.pages),
-        request.expectedFrameEpoch
-      );
+      frame = engine.build_display_pages_frame(Uint32Array.from(request.pages), expectedEpoch);
     } else {
       const { anchor, head } = request.selection;
       engine.set_selection(anchor.story, anchor.paraId, anchor.offset, head.paraId, head.offset);
-      frame = engine.apply_input(request.text, request.expectedFrameEpoch);
+      frame = engine.apply_input(request.text, expectedEpoch);
     }
+    this.engineFrame = applyFrameDeltaOwned(this.engineFrame, decodeFrameDelta(frame));
+    if (this.releasedEpochs > 0) {
+      if (request.type === 'buildPages') {
+        frame = pageFrame(this.frame!, request.pages.map((index) => this.engineFrame!.pages[index]!));
+      } else {
+        const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+        view.setBigUint64(32, BigInt(this.engineFrame.frameEpoch + this.releasedEpochs), true);
+        const base = view.getBigUint64(40, true);
+        if (base > 0n) view.setBigUint64(40, base + BigInt(this.releasedEpochs), true);
+      }
+    }
+    this.frame = applyFrameDeltaOwned(this.frame, decodeFrameDelta(frame));
+    const respond = this.response(request.id, frame);
+    if (request.type === 'buildPages' && this.holdPageBuilds) this.heldPageBuilds.push(respond);
+    else if (request.type === 'applyInput' && this.holdInputReplies)
+      this.heldInputReplies.push(respond);
+    else queueMicrotask(respond);
+  }
+  private response(id: number, frame: Uint8Array): () => void {
+    const engine = EngineWorker.engine!;
     const caret = JSON.parse(engine.resident_caret_snapshot_json());
+    caret.frameEpoch = this.frame!.frameEpoch;
     const selection = JSON.parse(engine.selection());
-    const respond = () =>
+    return () =>
       this.onmessage?.({
         data: {
-          id: request.id,
+          id,
           ok: true,
           frame: frame.slice().buffer,
           caret,
@@ -94,10 +155,6 @@ export class EngineWorker {
           layoutRevision: 1,
         },
       } as MessageEvent<ResidentEngineWorkerResponse>);
-    if (request.type === 'buildPages' && this.holdPageBuilds) this.heldPageBuilds.push(respond);
-    else if (request.type === 'applyInput' && this.holdInputReplies)
-      this.heldInputReplies.push(respond);
-    else queueMicrotask(respond);
   }
   releasePageBuilds(): void {
     for (const respond of this.heldPageBuilds.splice(0)) queueMicrotask(respond);
@@ -108,6 +165,104 @@ export class EngineWorker {
   terminate(): void {
     this.terminated = true;
   }
+}
+
+function pageFrame(base: RetainedFrame, pages: RetainedFrame['pages']): Uint8Array {
+  const strings: string[] = [];
+  const u32 = (out: number[], value: number): void => {
+    for (let shift = 0; shift < 32; shift += 8) out.push((value >>> shift) & 0xff);
+  };
+  const stringId = (value: string): number => {
+    let index = strings.indexOf(value);
+    if (index < 0) index = strings.push(value) - 1;
+    return index;
+  };
+  const encode = (out: number[], value: unknown): void => {
+    if (value === null) out.push(0);
+    else if (typeof value === 'boolean') out.push(value ? 2 : 1);
+    else if (typeof value === 'number') {
+      out.push(5);
+      const bytes = new Uint8Array(8);
+      new DataView(bytes.buffer).setFloat64(0, value, true);
+      out.push(...bytes);
+    } else if (typeof value === 'string') {
+      out.push(6);
+      u32(out, stringId(value));
+    } else {
+      const body: number[] = [];
+      const array = Array.isArray(value);
+      const items = array
+        ? value
+        : Object.entries(value as object).filter(([, entry]) => entry !== undefined);
+      for (const item of items) {
+        if (array) encode(body, item);
+        else {
+          const [key, entry] = item;
+          u32(body, stringId(key));
+          encode(body, entry);
+        }
+      }
+      out.push(array ? 7 : 8);
+      u32(out, body.length);
+      u32(out, items.length);
+      out.push(...body);
+    }
+  };
+  const payloads = pages.map(({ page }) => {
+    const payload: number[] = [];
+    encode(payload, page);
+    return Uint8Array.from(payload);
+  });
+  const table: number[] = [];
+  u32(table, strings.length);
+  for (const value of strings) {
+    const bytes = new TextEncoder().encode(value);
+    u32(table, bytes.length);
+    table.push(...bytes);
+  }
+  const align = (value: number): number => Math.ceil(value / 8) * 8;
+  const stringsOffset = 80 + pages.length * 48;
+  const dataOffset = align(stringsOffset + table.length);
+  let total = dataOffset;
+  const offsets = pages.map(({ primitiveIds }, index) => {
+    const ids = align(total);
+    const payload = ids + primitiveIds.length * 8;
+    total = payload + payloads[index]!.length;
+    return { ids, payload };
+  });
+  const bytes = new Uint8Array(total);
+  const view = new DataView(bytes.buffer);
+  bytes.set([0x46, 0x44, 0x56, 0x31]);
+  view.setUint16(4, 1, true);
+  view.setUint16(6, 80, true);
+  view.setUint32(8, total, true);
+  view.setBigUint64(16, BigInt(base.docEpoch), true);
+  view.setBigUint64(24, BigInt(base.layoutEpoch), true);
+  view.setBigUint64(32, BigInt(base.frameEpoch + 1), true);
+  view.setBigUint64(40, BigInt(base.frameEpoch), true);
+  view.setUint32(48, base.pages.length, true);
+  view.setUint32(52, pages.length, true);
+  view.setUint32(56, 80, true);
+  view.setUint32(60, stringsOffset, true);
+  view.setUint32(64, table.length, true);
+  view.setUint32(68, dataOffset, true);
+  view.setUint32(72, base.contractVersion ?? 0, true);
+  bytes.set(table, stringsOffset);
+  pages.forEach(({ pageIndex, pageId, fingerprint, primitiveIds }, index) => {
+    const offset = 80 + index * 48;
+    const { ids, payload } = offsets[index]!;
+    bytes[offset] = 1;
+    view.setUint32(offset + 4, pageIndex, true);
+    view.setBigUint64(offset + 8, pageId, true);
+    view.setBigUint64(offset + 16, fingerprint, true);
+    view.setUint32(offset + 24, primitiveIds.length, true);
+    view.setUint32(offset + 28, ids, true);
+    view.setUint32(offset + 32, payload, true);
+    view.setUint32(offset + 36, payloads[index]!.length, true);
+    primitiveIds.forEach((id, position) => view.setBigUint64(ids + position * 8, id, true));
+    bytes.set(payloads[index]!, payload);
+  });
+  return bytes;
 }
 
 export const PREVIEW = { r1: 'accepted' } as const;
