@@ -1666,6 +1666,7 @@ test('a provisional input frame paints without settling the waiting full layout'
     version: () => `v${version}`,
     applyLocalUpdate: mock(() => {
       version += 1;
+      return `v${version}`;
     }),
   });
   try {
@@ -1703,7 +1704,7 @@ test('a provisional input frame paints without settling the waiting full layout'
         id: worker.posted[3].id, ok: true, frame: inputFrame.slice().buffer,
         updates: [new Uint8Array([1]).buffer],
         caret: { frameEpoch: 2, caretRect: null }, selection: engine.selection(),
-        layoutRevision: 1, layoutProvisional: true,
+        layoutRevision: 1, layoutProvisional: true, precedesCompletion: true,
       });
       expect(await input).toMatchObject({ frameEpoch: 2 });
     });
@@ -1730,6 +1731,69 @@ test('a provisional input frame paints without settling the waiting full layout'
     });
     await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(4));
     await waitFor(() => expect(settled).toBe(true));
+    unmount();
+  } finally {
+    native.free();
+  }
+});
+
+test.each([
+  { name: 'within a provisional prefix', reply: { layoutProvisional: true, precedesCompletion: true }, edits: 0, shown: 'v8' },
+  { name: 'completing the prefix', reply: { precedesCompletion: true }, edits: 0, shown: 'v8' },
+  { name: 'while an update listener edits', reply: { layoutProvisional: true, precedesCompletion: true }, edits: 1, shown: 'v7' },
+  { name: 'after the completion', reply: {}, edits: 0, shown: 'v7' },
+])('input the worker answered $name records only the version its own updates produced', async ({
+  reply, edits, shown,
+}) => {
+  const { native, paraId, layoutJson, frame, engine } = setup();
+  native.set_selection('body', paraId, 0, paraId, 0);
+  let version = 7;
+  Object.assign(engine, {
+    selection: () => JSON.parse(native.selection()) as YrsSelection,
+    version: () => `v${version}`,
+    applyLocalUpdate: mock(() => {
+      version += 1;
+      const produced = `v${version}`;
+      version += edits;
+      return produced;
+    }),
+  });
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) => useRustDisplayList(layout, undefined, undefined, undefined, source),
+      { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+    );
+    const pending = result.current.layoutInWorker(engine, REQUEST);
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null }, selection: engine.selection(),
+      layoutRevision: 1, layoutJson, layoutProvisional: true,
+    });
+    const provisional = (await pending!)!;
+    await act(async () => rerender({ layout: provisional.layout, source: engine }));
+    await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(1));
+    await act(async () => {
+      const attaching = result.current.attachOffscreenCanvases(
+        [], [], 1, 1, { color: '#000', width: 2 }
+      );
+      worker.reply({ id: worker.posted[1].id, ok: true });
+      expect(await attaching).toBe(true);
+    });
+    await waitFor(() => expect(worker.posted[2]).toMatchObject({ type: 'completeLayout' }));
+    const input = result.current.applyInput('!');
+    await waitFor(() => expect(worker.posted[3]).toMatchObject({ type: 'applyInput' }));
+    const inputFrame = native.apply_input('!', 1);
+    await act(async () => {
+      worker.reply({
+        id: worker.posted[3].id, ok: true, frame: inputFrame.slice().buffer,
+        updates: [new Uint8Array([1]).buffer],
+        caret: { frameEpoch: 2, caretRect: null }, selection: engine.selection(),
+        layoutRevision: 1, ...reply,
+      });
+      expect(await input).toMatchObject({ frameEpoch: 2 });
+    });
+    expect(provisionalInputVersion(engine, 'v7')).toBe(shown);
     unmount();
   } finally {
     native.free();

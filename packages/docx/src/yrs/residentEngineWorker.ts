@@ -664,7 +664,9 @@ async function applyProvisionalInput(
       true,
       request.paintCaret,
       undefined,
-      provisional
+      provisional,
+      undefined,
+      true
     );
   } catch (error) {
     if (waiting) replyFailure(waiting.id, error);
@@ -1021,7 +1023,8 @@ async function replyFrame(
   paintCaret = false,
   layoutJson?: string,
   layoutProvisional = false,
-  deletedUnits?: number
+  deletedUnits?: number,
+  precedesCompletion = false
 ): Promise<void> {
   retainedFrame = applyFrameDeltaOwned(retainedFrame, decodeFrameDelta(bytes));
   for (const pageId of retainedFrame.damagedPageIds) pendingOffscreenPageIds.add(pageId.toString());
@@ -1073,6 +1076,7 @@ async function replyFrame(
       ...(stateVector ? { stateVector } : {}),
       ...(layoutJson !== undefined ? { layoutJson } : {}),
       ...(layoutProvisional ? { layoutProvisional } : {}),
+      ...(precedesCompletion ? { precedesCompletion } : {}),
     },
     [frame, ...updateBuffers, ...(stateVector ? [stateVector] : [])]
   );

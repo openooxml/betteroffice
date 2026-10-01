@@ -1351,6 +1351,7 @@ describe('sliced layout completion', () => {
       expect(reply.ok && reply.frame).toBeDefined();
       expect(reply.ok && reply.layoutJson).toBeUndefined();
       expect(reply.ok && reply.layoutProvisional).toBe(true);
+      expect(reply.ok && reply.precedesCompletion).toBe(true);
     }
     expect(completed.ok && completed.layoutJson).toBe(full);
     expect(prefixPages).toEqual([5, 5, 5, 5, 5, 5]);
@@ -1453,6 +1454,7 @@ describe('sliced layout completion', () => {
     expect(typed.ok && typed.frame).toBeDefined();
     expect(typed.ok && typed.layoutJson).toBeUndefined();
     expect(typed.ok && typed.layoutProvisional).toBeUndefined();
+    expect(typed.ok && typed.precedesCompletion).toBe(true);
     expect(completed.ok && completed.layoutJson).toBe(full);
     expect(order).toEqual(['input', 'complete']);
     expect(calls).toEqual(['begin', 'resume:2', 'input']);
@@ -1538,7 +1540,9 @@ describe('sliced layout completion', () => {
       order.push('complete');
       return reply;
     });
-    expect((await input!).ok).toBe(true);
+    const typed = await input!;
+    expect(typed.ok).toBe(true);
+    expect(typed.ok && typed.precedesCompletion).toBeUndefined();
     expect(completed.ok && completed.layoutJson).toBe(full);
     expect(order).toEqual(['complete', 'input']);
     expect(calls).toEqual(['begin', 'resume:2', 'resume:100', 'input']);

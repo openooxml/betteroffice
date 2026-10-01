@@ -130,6 +130,41 @@ test('host batches drain worker input, invalidate the worker once and never adop
   expect((stale as FrameDeltaError).code).toBe('stale-frame');
 });
 
+test('a worker update reports the version it produced, before an update listener edits', async () => {
+  const main = await createYrsSession({ clientId: 5113 });
+  sessions.push(main);
+  const { paraId } = main.createStory('body', 'Seed');
+  main.registerFont(new Uint8Array(readFileSync(FONT)));
+  main.layoutDocumentWithRegionsJson(LAYOUT);
+  main.setSelection({ story: 'body', paraId, offset: 4 });
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  const booted = await client.bootstrap(main.residentWorkerSnapshot()!, '{}');
+  const epoch = decodeFrameDelta(booted.frame).frameEpoch;
+  const typed = await client.applyInput('!', main.selection()!, epoch);
+  if (!typed.applied) throw new Error('the worker refused resident input');
+  expect(typed.updates).toHaveLength(1);
+
+  let seen: string | null = null;
+  const stop = main.onUpdate(() => {
+    if (seen !== null) return;
+    seen = main.version();
+    expect(main.applyEdits({
+      expectVersion: seen,
+      steps: [{
+        op: 'replaceText',
+        target: { kind: 'search', text: 'Seed', within: { kind: 'paragraph', story: 'body', paraId }, view: 'accepted' },
+        text: 'Edited',
+      }],
+    })).toMatchObject({ ok: true, applied: true });
+  });
+  const produced = main.applyLocalUpdate(typed.updates[0]!);
+  stop();
+  expect(produced).toBe(seen!);
+  expect(main.version()).not.toBe(produced);
+  expect(accepted(main)).toEqual(['Edited!']);
+});
+
 test('one resident delete request removes several characters and stops at the story start', async () => {
   const main = await createYrsSession({ clientId: 5102 });
   sessions.push(main);

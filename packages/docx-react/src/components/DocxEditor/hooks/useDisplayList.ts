@@ -1042,15 +1042,19 @@ export function useRustDisplayList(
         if (dropped()) return { frameEpoch: null, caretSynchronized: false };
         if (!result.applied) return null;
         const delta = workerDelta ?? decodeFrameDelta(result.frame);
-        const before = result.layoutProvisional ? readSessionVersion(worker.engine) : null;
+        const before = result.precedesCompletion ? readSessionVersion(worker.engine) : null;
+        let shown = before;
         suppressWorkerInvalidationRef.current += 1;
         try {
-          for (const update of result.updates) worker.engine.applyLocalUpdate(update);
+          for (const update of result.updates) {
+            const produced = worker.engine.applyLocalUpdate(update);
+            // A change an update listener made is not in the worker's completion.
+            if (shown !== null) shown = produced === readSessionVersion(worker.engine) ? produced : null;
+          }
         } finally {
           suppressWorkerInvalidationRef.current -= 1;
         }
-        const after = before === null ? null : readSessionVersion(worker.engine);
-        if (before !== null && after !== null) noteProvisionalInputVersion(worker.engine, before, after);
+        if (before !== null && shown !== null) noteProvisionalInputVersion(worker.engine, before, shown);
         if (workerRef.current !== worker) {
           return { frameEpoch: null, caretSynchronized: false, deletedUnits: result.deletedUnits };
         }

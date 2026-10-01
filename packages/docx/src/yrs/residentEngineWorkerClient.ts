@@ -43,6 +43,8 @@ export interface ResidentEngineWorkerFrame {
   layoutJson?: string;
   /** The layout (`layoutJson`, or an input reply's frame) covers only the first pages; `completeLayout` finishes it. */
   layoutProvisional?: boolean;
+  /** Input answered ahead of the pending `completeLayout`, whose layout includes it. */
+  precedesCompletion?: boolean;
 }
 
 /** A bootstrap/sync whose snapshot layout the worker runs as the only layout. */
@@ -755,6 +757,7 @@ function frameResult(
     deletedUnits: response.deletedUnits ?? 0,
     ...(response.layoutJson !== undefined ? { layoutJson: response.layoutJson } : {}),
     ...(response.layoutProvisional ? { layoutProvisional: true } : {}),
+    ...(response.precedesCompletion ? { precedesCompletion: true } : {}),
   };
 }
 

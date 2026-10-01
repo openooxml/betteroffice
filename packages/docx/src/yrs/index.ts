@@ -1067,8 +1067,11 @@ export interface YrsSession extends CollaborationReplica {
   encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
   /** Applies a remote/incremental yrs v1 update. */
   applyUpdate(update: Uint8Array): CollaborationTextInsertion | null;
-  /** Apply a same-user worker update under the local undo origin. @internal */
-  applyLocalUpdate(update: Uint8Array): void;
+  /**
+   * Apply a same-user worker update under the local undo origin. Returns the
+   * version the update produced, read before update listeners run. @internal
+   */
+  applyLocalUpdate(update: Uint8Array): string;
   /** Adopt another replica's host batch outside undo history. @internal */
   applyHostUpdate(update: Uint8Array, stories?: readonly string[]): void;
   /**
@@ -2035,7 +2038,10 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     applyLocalUpdate: (update) => {
       ensureUndo();
       markDirty('all');
-      mutate(() => session.apply_local_update(update));
+      return mutate(() => {
+        session.apply_local_update(update);
+        return workerDocumentVersion ?? session.version();
+      });
     },
     applyHostUpdate: (update, stories) => {
       markDirty(stories ?? 'all');
