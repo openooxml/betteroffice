@@ -3,4 +3,4 @@
 "@betteroffice/docx-react": patch
 ---
 
-Saving after an edit keeps every paragraph you did not edit exactly as it was, so inherited paragraph formatting no longer turns into direct formatting and content the editor does not model survives around the edit.
+Saving after an edit now keeps every paragraph you didn't edit exactly as it was, including inherited formatting and content the editor doesn't model.

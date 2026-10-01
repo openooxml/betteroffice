@@ -2019,6 +2019,9 @@ fn a_spliced_save_rewrites_only_the_edited_paragraph() {
             "assignments": plan.assignments.iter().map(|(part, ordinal, para_id)| {
                 json!({"part": part, "ordinal": ordinal, "paraId": para_id})
             }).collect::<Vec<_>>(),
+            "patchedParts": plan.patched_parts.iter().map(|(part, para_ids)| {
+                json!({"part": part, "paraIds": para_ids})
+            }).collect::<Vec<_>>(),
             "splicedParts": plan.spliced_parts.iter().map(|part| json!({
                 "part": part.part,
                 "sha256": part.sha256,

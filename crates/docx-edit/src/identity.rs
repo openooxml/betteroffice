@@ -588,8 +588,8 @@ fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
         .collect()
 }
 
-/// SHA-256 of save segments, expanding media tokens, sorting map keys and keeping nulls, and
-/// of each paragraph's: see [`UnitState`].
+/// Each paragraph's [`UnitState`], hashing its save segments with media tokens expanded, map
+/// keys sorted and nulls kept, and the SHA-256 of those digests in order.
 /// [`EditingDoc::story_segments`] already excludes paragraph identities.
 fn story_fingerprint(doc: &EditingDoc, story: &str) -> Option<([u8; 32], Vec<UnitState>)> {
     use sha2::{Digest, Sha256};
@@ -614,7 +614,6 @@ fn story_fingerprint(doc: &EditingDoc, story: &str) -> Option<([u8; 32], Vec<Uni
     if let Some(media) = doc.media_table() {
         crate::media::write_segment_data_urls(&mut segments, &media).ok()?;
     }
-    let mut hasher = Sha256::new();
     let mut units = Vec::new();
     let mut unit = Sha256::new();
     let mut blocks = Sha256::new();
@@ -631,8 +630,6 @@ fn story_fingerprint(doc: &EditingDoc, story: &str) -> Option<([u8; 32], Vec<Uni
         };
         let entry = serde_json::json!([content, ordered_map(segment.attributes.iter())]);
         let bytes = serde_json::to_vec(&entry).ok()?;
-        hasher.update(&bytes);
-        hasher.update(b"\n");
         unit.update(&bytes);
         unit.update(b"\n");
         match &segment.content {
@@ -660,6 +657,10 @@ fn story_fingerprint(doc: &EditingDoc, story: &str) -> Option<([u8; 32], Vec<Uni
             blocks: blocks.finalize().into(),
             inline,
         });
+    }
+    let mut hasher = Sha256::new();
+    for unit in &units {
+        hasher.update(unit.digest);
     }
     Some((hasher.finalize().into(), units))
 }
