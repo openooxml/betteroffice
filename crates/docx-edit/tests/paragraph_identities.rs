@@ -1933,3 +1933,163 @@ fn repeated_word_ids_export_located_twins_that_resolve_as_ambiguous() {
     assert!(keys.contains("1A2B3C4D") && !keys.contains("body:p3"));
     edit_through_export_anchors(&doc);
 }
+
+fn key_of(doc: &EditingDoc, story: &str, text: &str) -> String {
+    doc.paragraphs(story)
+        .unwrap()
+        .into_iter()
+        .find(|paragraph| paragraph.text == text)
+        .unwrap()
+        .para_id
+}
+
+/// The fixture with `bofx:block` unwrapped: a foreign element inside `w:body` keeps the part whole.
+fn plain_parts() -> Vec<(String, Vec<u8>)> {
+    let mut parts = fixture_parts();
+    replace(&mut parts, "word/document.xml", "<bofx:block>", "");
+    replace(&mut parts, "word/document.xml", "</bofx:block>", "");
+    parts
+}
+
+fn plain_fixture() -> Vec<u8> {
+    ooxml_opc::rezip_parts(&plain_parts()).unwrap()
+}
+
+fn spliced(doc: &EditingDoc, part: &str) -> Option<SplicedPart> {
+    doc.paragraph_save_plan()
+        .spliced_parts
+        .into_iter()
+        .find(|spliced| spliced.part == part)
+}
+
+#[test]
+fn story_parts_that_keep_their_paragraphs_splice_with_only_the_edited_ones_changed() {
+    let doc = seeded(&plain_fixture());
+    let body = spliced(&doc, "word/document.xml").expect("an unchanged body splices");
+    assert!(body.changed.is_empty());
+    let lower = key_of(&doc, "body", "Lower");
+    let ordinal = body
+        .paragraphs
+        .iter()
+        .find(|(_, key)| *key == lower)
+        .expect("the paragraph is spliced")
+        .0;
+    let at = doc.paragraph_mark_position(&lower).unwrap();
+    doc.insert_text(&ctx(), at, "!", FormatPolicy::Plain)
+        .unwrap();
+    let edited = spliced(&doc, "word/document.xml").expect("an edited body splices");
+    assert_eq!(edited.paragraphs, body.paragraphs);
+    assert_eq!(edited.changed, vec![ordinal]);
+    let header = spliced(&doc, "word/header1.xml").expect("an unchanged header splices");
+    assert!(header.changed.is_empty());
+
+    doc.split_paragraph(&ctx(), Position::new("body", 0), None)
+        .unwrap();
+    assert_eq!(spliced(&doc, "word/document.xml"), None);
+}
+
+#[test]
+fn a_part_holding_more_than_plain_xml_does_not_splice() {
+    let paragraph = |text: &str| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+    let body = [paragraph("A"), paragraph("B")].concat();
+    assert!(spliced(&seeded(&paragraphs_package(&body)), "word/document.xml").is_some());
+    for lenient in [
+        paragraph("A & B"),
+        "<!-- a--b -->".to_owned(),
+        "<!-- note -->".to_owned(),
+        "<?pi x?>".to_owned(),
+    ] {
+        let doc = seeded(&paragraphs_package(&format!("{body}{lenient}")));
+        assert_eq!(spliced(&doc, "word/document.xml"), None, "{lenient}");
+    }
+}
+
+#[test]
+fn a_moved_comment_anchor_changes_only_its_paragraph() {
+    let doc = seeded(&plain_fixture());
+    let valid = key_of(&doc, "body", "Valid");
+    let body = spliced(&doc, "word/document.xml").unwrap();
+    let ordinal = body
+        .paragraphs
+        .iter()
+        .find(|(_, key)| *key == valid)
+        .unwrap()
+        .0;
+    let anchors = doc.resolve_comment("1").unwrap();
+    assert_eq!(anchors.len(), 1);
+    let (start, end) = (anchors[0].start, anchors[0].end);
+    doc.set_comment_ranges("1", &[StoryRange::new("body", start + 1, end)])
+        .unwrap();
+    assert_eq!(
+        spliced(&doc, "word/document.xml").unwrap().changed,
+        vec![ordinal]
+    );
+}
+
+#[test]
+fn a_spliced_save_rewrites_only_the_edited_paragraph() {
+    let bytes = plain_fixture();
+    let doc = seeded(&bytes);
+    let lower = key_of(&doc, "body", "Lower");
+    let at = doc.paragraph_mark_position(&lower).unwrap();
+    doc.insert_text(&ctx(), at, "!", FormatPolicy::Plain)
+        .unwrap();
+    let plan = doc.paragraph_save_plan();
+    let package = docx_parse::parse_docx_s9_wire(
+        &bytes,
+        docx_parse::S9ParseOptions {
+            source_ordinals: true,
+            ..docx_parse::S9ParseOptions::default()
+        },
+    )
+    .unwrap()
+    .document
+    .package;
+    let mut content = serde_json::to_value(&package.document.content).unwrap();
+    let lower_text = content
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|block| block.to_string().contains("\"Lower\""))
+        .and_then(|block| block.pointer_mut("/content/0/content/0/text"))
+        .unwrap();
+    *lower_text = json!("Lower!");
+    let request: S13SaveRequest = serde_json::from_value(json!({
+        "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+        "document": {
+            "content": content,
+            "comments": package.document.comments,
+        },
+        "headerEntries": package.header_entries.unwrap_or_default(),
+        "footnotes": package.footnotes.unwrap_or_default(),
+        "footnoteSeparators": package.footnote_separators.unwrap_or_default(),
+        "relationshipEntries": package.relationship_entries,
+        "options": {"updateModifiedDate": false},
+        "paragraphIds": {
+            "assignments": plan.assignments.iter().map(|(part, ordinal, para_id)| {
+                json!({"part": part, "ordinal": ordinal, "paraId": para_id})
+            }).collect::<Vec<_>>(),
+            "patchedParts": plan.patched_parts.iter().map(|(part, para_ids)| {
+                json!({"part": part, "paraIds": para_ids})
+            }).collect::<Vec<_>>(),
+            "splicedParts": plan.spliced_parts.iter().map(|part| json!({
+                "part": part.part,
+                "sha256": part.sha256,
+                "paragraphs": part.paragraphs.iter().map(|(ordinal, _)| ordinal).collect::<Vec<_>>(),
+                "changed": part.changed,
+            })).collect::<Vec<_>>(),
+        },
+    }))
+    .unwrap();
+    let saved = ooxml_opc::unzip_parts(&write_docx_s13(request, &bytes).unwrap()).unwrap();
+    let source = text(&plain_parts(), "word/document.xml");
+    let document = text(&saved, "word/document.xml");
+    let start = source.find("<w:p w14:paraId=\"0000abcd\">").unwrap();
+    let end = start + source[start..].find("</w:p>").unwrap() + "</w:p>".len();
+    assert!(document.starts_with(&source[..start]), "{document}");
+    assert!(document.ends_with(&source[end..]), "{document}");
+    assert!(document[start..].contains("Lower!"));
+    for part in ["word/header1.xml", "word/footnotes.xml"] {
+        assert_eq!(text(&saved, part), text(&plain_parts(), part), "{part}");
+    }
+}
