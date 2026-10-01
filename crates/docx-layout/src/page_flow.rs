@@ -967,6 +967,40 @@ impl Paginator {
         self.advance_column(idx).0
     }
 
+    pub(crate) fn next_column_body_height(&mut self) -> Result<f64, LayoutError> {
+        let idx = self.get_current();
+        if (self.states[idx].column_index as f64) < self.columns.count - 1.0 {
+            return Ok(self.states[idx].content_limit - self.column_region_top);
+        }
+        let page_number = self.start_page_number + self.pages.len() as u32;
+        let reserved = self.footnote_reservation(page_number);
+        let mut next = Self::new(
+            self.pending_page_size
+                .as_ref()
+                .unwrap_or(&self.page_size)
+                .clone(),
+            self.pending_margins
+                .as_ref()
+                .unwrap_or(&self.margins)
+                .clone(),
+            self.pending_columns
+                .as_ref()
+                .unwrap_or(&self.columns)
+                .clone(),
+            (reserved > 0.0)
+                .then(|| std::collections::BTreeMap::from([(page_number.to_string(), reserved)])),
+        )?;
+        next.start_page_number = page_number;
+        next.section_index = self.section_index;
+        next.section_started = self.section_started;
+        next.displayed_parity_offset = self.displayed_parity_offset;
+        next.section_page_margins = self.section_page_margins.clone();
+        next.section_page_float_bands = self.section_page_float_bands.clone();
+        let next_idx = next.get_current();
+        let state = next.state(next_idx);
+        Ok(state.content_limit - state.content_top)
+    }
+
     /// Applies a column layout below content already placed in the region.
     pub fn update_columns(&mut self, new_columns: ColumnLayout) {
         self.pending_columns = None;

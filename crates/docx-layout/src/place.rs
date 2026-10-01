@@ -2834,6 +2834,73 @@ mod pagination_rule_tests {
     }
 
     #[test]
+    fn a_moved_explicit_y_narrow_float_and_its_anchor_match_incremental_layout() {
+        let blocks = |height: f64, offset: f64, anchor_before: f64| {
+            let floating = json!({
+                "block": {
+                    "kind": "table", "id": 90, "columnWidths": [60],
+                    "rows": [
+                        {"id": 91, "cells": []},
+                        {"id": 92, "cells": []}
+                    ],
+                    "floating": {
+                        "horzAnchor": "text", "vertAnchor": "text",
+                        "tblpXSpec": "right", "tblpY": offset,
+                        "leftFromText": 10, "rightFromText": 10
+                    }
+                },
+                "measure": {
+                    "kind": "table", "columnWidths": [60], "totalWidth": 60, "totalHeight": 60,
+                    "rows": [{"height": 30, "cells": []}, {"height": 30, "cells": []}]
+                }
+            });
+            let mut anchor = paragraph(2, 3, 10.0, json!({"spacing": {"before": anchor_before}}));
+            for line in anchor["measure"]["lines"].as_array_mut().unwrap() {
+                line["rightOffset"] = json!(70);
+            }
+            vec![
+                paragraph(0, 1, 10.0, json!({})),
+                paragraph(
+                    1,
+                    1,
+                    height,
+                    json!({"pageBreakBefore": true, "spacing": {"after": 12}}),
+                ),
+                floating,
+                anchor,
+            ]
+        };
+        let moved = blocks(50.0, 10.0, 20.0);
+        let retained =
+            assert_incremental_matches_full(moved.clone(), blocks(50.0, 10.0, 30.0), &[3]);
+        assert_eq!(retained.layout.pages.len(), 3);
+        let [Fragment::Table(table), Fragment::Paragraph(anchor)] =
+            retained.layout.pages[2].fragments.as_slice()
+        else {
+            panic!("table and anchor expected");
+        };
+        assert_eq!(
+            (table.x, table.y, anchor.y, anchor.from_line),
+            (130.0, 20.0, 10.0, 0)
+        );
+        let checkpoint = retained
+            .checkpoints
+            .iter()
+            .find(|checkpoint| checkpoint.block_index == 2)
+            .unwrap();
+        assert_eq!(checkpoint.flow.leading_spacing_spent, f64::INFINITY);
+        assert!(!resumable(
+            checkpoint,
+            &input(moved.clone()).measured,
+            &retained.layout.pages
+        ));
+        let fitting = blocks(10.0, 10.0, 20.0);
+        assert_incremental_matches_full(moved.clone(), fitting.clone(), &[1]);
+        assert_incremental_matches_full(fitting, moved.clone(), &[1]);
+        assert_incremental_matches_full(moved, blocks(50.0, -15.0, 20.0), &[2]);
+    }
+
+    #[test]
     fn placement_does_not_resume_at_a_floating_table_that_opened_its_page() {
         let blocks = |page_break: bool| {
             vec![
