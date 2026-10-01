@@ -187,6 +187,83 @@ describe('shared module', () => {
     return fetch;
   }
 
+  it('does not compile a shared module after synchronous disk initialization', async () => {
+    const fetch = installFetch();
+    const streaming = spyOn(WebAssembly, 'compileStreaming');
+    const compile = spyOn(WebAssembly, 'compile');
+    const seen: WasmAsyncInput[] = [];
+    const state = stateFor(() => ASSET, seen, true);
+    try {
+      state.ensure();
+      expect(await state.sharedModule()).toBeNull();
+      expect(seen).toEqual([]);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(streaming).not.toHaveBeenCalled();
+      expect(compile).not.toHaveBeenCalled();
+    } finally {
+      streaming.mockRestore();
+      compile.mockRestore();
+    }
+  });
+
+  it('does not compile the default asset during or after an explicit bytes preload', async () => {
+    const fetch = installFetch();
+    const module = new WebAssembly.Module(WASM_BYTES);
+    let resolve!: (module: WebAssembly.Module) => void;
+    const compile = spyOn(WebAssembly, 'compile').mockReturnValue(
+      new Promise((settle) => {
+        resolve = settle;
+      })
+    );
+    const streaming = spyOn(WebAssembly, 'compileStreaming');
+    const seen: WasmAsyncInput[] = [];
+    const state = stateFor(() => remote, seen, true);
+    try {
+      const loading = state.preload(WASM_BYTES);
+      expect(await state.sharedModule()).toBeNull();
+      expect(seen).toEqual([WASM_BYTES]);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(streaming).not.toHaveBeenCalled();
+      expect(compile).toHaveBeenCalledTimes(1);
+      expect(compile).toHaveBeenCalledWith(WASM_BYTES);
+
+      resolve(module);
+      await loading;
+      expect(await state.sharedModule()).toBeNull();
+      expect(seen).toEqual([WASM_BYTES]);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(streaming).not.toHaveBeenCalled();
+      expect(compile).toHaveBeenCalledTimes(1);
+    } finally {
+      streaming.mockRestore();
+      compile.mockRestore();
+    }
+  });
+
+  it('starts a shared compile that a following preload reuses', async () => {
+    const fetch = installFetch();
+    const streaming = spyOn(WebAssembly, 'compileStreaming');
+    const seen: WasmAsyncInput[] = [];
+    const state = stateFor(() => remote, seen, true);
+    try {
+      const compiling = state.sharedModule();
+      expect(state.sharedModule()).toBe(compiling);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      const loading = state.preload();
+      expect(state.module()).toBe(compiling);
+      await loading;
+      const module = await compiling;
+      expect(module).toBeInstanceOf(WebAssembly.Module);
+      expect(seen).toEqual([module]);
+      expect(state.sharedModule()).toBe(compiling);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fetch).toHaveBeenCalledWith(remote);
+      expect(streaming).toHaveBeenCalledTimes(1);
+    } finally {
+      streaming.mockRestore();
+    }
+  });
+
   it('shares one fetch and compile between preload and module', async () => {
     const fetch = installFetch();
     const streaming = spyOn(WebAssembly, 'compileStreaming');
@@ -196,12 +273,14 @@ describe('shared module', () => {
       const loading = state.preload();
       const compiling = state.module();
       expect(state.module()).toBe(compiling);
+      expect(state.sharedModule()).toBe(compiling);
       expect(state.preload()).toBe(loading);
       await loading;
       const module = await compiling;
       expect(seen).toEqual([module]);
       expect(module).toBeInstanceOf(WebAssembly.Module);
       expect(state.module()).toBe(compiling);
+      expect(state.sharedModule()).toBe(compiling);
       expect(fetch).toHaveBeenCalledTimes(1);
       expect(fetch).toHaveBeenCalledWith(remote);
       expect(streaming).toHaveBeenCalledTimes(1);

@@ -386,6 +386,22 @@ describe('warmup', () => {
     await bootstrap;
   });
 
+  test('posts null once when the host has no shared module', async () => {
+    compileModule.mockResolvedValue(null);
+    const { worker, client } = setup();
+    const warm = client.warm();
+    await Promise.resolve();
+    expect(compileModule).toHaveBeenCalledTimes(1);
+    expect(worker.posted).toEqual([
+      { id: 1, type: 'warm', hostModule: true },
+      { type: 'editModule' as const, module: null },
+    ]);
+    expect(worker.transfers).toEqual([[], []]);
+    worker.reply({ id: 1, ok: true });
+    await warm;
+    expect(worker.posted.filter((message) => message.type === 'editModule')).toHaveLength(1);
+  });
+
   test('posts null when compilation fails', async () => {
     compileModule.mockRejectedValue(new Error('compile failed'));
     const { worker, client } = setup();

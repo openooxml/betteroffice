@@ -702,6 +702,22 @@ describe('resident worker warmup', () => {
     expect(armedBudgets()).toEqual([]);
   });
 
+  test('falls back at once when the host sends a value that is not a module', async () => {
+    const w = worker();
+    const warm = w.send({ type: 'warm', hostModule: true });
+    await Promise.resolve();
+    expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
+    expect(w.harness.preloadInputs).toEqual([]);
+    expect(w.answered).toEqual([]);
+    w.scope.onmessage({ data: { type: 'editModule', module: {} as WebAssembly.Module } });
+    expect((await warm).ok).toBe(true);
+    expect(w.harness.preloadInputs).toEqual([undefined]);
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect(w.answered).toEqual([1]);
+    expect(armedBudgets()).toEqual([]);
+  });
+
   test('falls back at once when the host module message cannot be received', async () => {
     const w = worker();
     const warm = w.send({ type: 'warm', hostModule: true });
