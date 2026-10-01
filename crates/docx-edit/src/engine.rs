@@ -1683,6 +1683,143 @@ fn first_cell_paragraph(
         })
 }
 
+type ResidentWalkOut<'a> = (
+    &'a mut Vec<MeasuredBlock>,
+    &'a mut Vec<u64>,
+    &'a mut Vec<(usize, usize)>,
+);
+
+/// The dirty-block walk of `resident_layout_input_from_blocks`. With `take`, reused extents move
+/// out of `previous` and `moved` records `(previous index, measured index)` for each one.
+fn resident_walk(
+    blocks: &[LayoutBlock],
+    any_block: bool,
+    paragraph_merge: bool,
+    (previous, previous_fingerprints, take): (&mut [MeasuredBlock], &[u64], bool),
+    measure_dirty: &mut dyn FnMut(
+        usize,
+        &str,
+        &LayoutBlock,
+        &mut LayoutBlock,
+    ) -> Result<BlockExtent, String>,
+    (measured, block_fingerprints, moved): ResidentWalkOut<'_>,
+) -> Result<(u64, u64), String> {
+    let structure = || "resident plain-text input changed the block structure".to_owned();
+    let identity = || "resident plain-text input changed stable block identity".to_owned();
+    let mut reuse = |previous: &mut [MeasuredBlock], index: usize, to: usize| {
+        if take {
+            moved.push((index, to));
+            std::mem::replace(&mut previous[index].measure, BlockExtent::Unsupported)
+        } else {
+            previous[index].measure.clone()
+        }
+    };
+    let mut cursor = 0;
+    let mut skipped_merged_paragraph = false;
+    let mut resident_measure_calls = 0_u64;
+    let mut resident_reused_blocks = 0_u64;
+    for (block_index, next_block) in blocks.iter().enumerate() {
+        let mut index = cursor;
+        if index >= previous.len() {
+            return Err(structure());
+        }
+        cursor += 1;
+        if paragraph_merge && !resident_block_slots_match(&previous[index].block, next_block) {
+            if skipped_merged_paragraph || paragraph_identity(&previous[index].block).is_none() {
+                return Err(structure());
+            }
+            skipped_merged_paragraph = true;
+            index = cursor;
+            if index >= previous.len() {
+                return Err(structure());
+            }
+            cursor += 1;
+        }
+        if paragraph_merge && !resident_block_slots_match(&previous[index].block, next_block) {
+            return Err(identity());
+        }
+        let previous_fingerprint = previous_fingerprints[index];
+        let previous_block = &previous[index].block;
+        let (Some((next_id, _)), Some((previous_id, _))) = (
+            paragraph_identity(next_block),
+            paragraph_identity(previous_block),
+        ) else {
+            if next_block != previous_block {
+                let (true, Some(next_id), Some(previous_id)) = (
+                    any_block,
+                    fragment_identity(next_block),
+                    fragment_identity(previous_block),
+                ) else {
+                    return Err(
+                        "resident plain-text input changed a non-paragraph block".to_owned()
+                    );
+                };
+                let key = block_key(next_id);
+                if key != block_key(previous_id) {
+                    return Err(identity());
+                }
+                let mut next_measured_block = next_block.clone();
+                let measure =
+                    measure_dirty(block_index, &key, previous_block, &mut next_measured_block)?;
+                let measured_block = MeasuredBlock {
+                    block: next_measured_block,
+                    measure,
+                };
+                block_fingerprints.push(measured_fingerprint(&measured_block)?);
+                measured.push(measured_block);
+                resident_measure_calls = resident_measure_calls.wrapping_add(1);
+                continue;
+            }
+            let measure = reuse(previous, index, measured.len());
+            measured.push(MeasuredBlock {
+                block: next_block.clone(),
+                measure,
+            });
+            block_fingerprints.push(previous_fingerprint);
+            resident_reused_blocks = resident_reused_blocks.wrapping_add(1);
+            continue;
+        };
+        let key = block_key(next_id);
+        if key != block_key(previous_id) {
+            return Err(identity());
+        }
+        if next_block == previous_block {
+            let measure = reuse(previous, index, measured.len());
+            measured.push(MeasuredBlock {
+                block: next_block.clone(),
+                measure,
+            });
+            block_fingerprints.push(previous_fingerprint);
+            resident_reused_blocks = resident_reused_blocks.wrapping_add(1);
+            continue;
+        }
+
+        let mut next_measured_block = next_block.clone();
+        let measure = measure_dirty(block_index, &key, previous_block, &mut next_measured_block)?;
+        let measured_block = MeasuredBlock {
+            block: next_measured_block,
+            measure,
+        };
+        block_fingerprints.push(measured_fingerprint(&measured_block)?);
+        measured.push(measured_block);
+        resident_measure_calls = resident_measure_calls.wrapping_add(1);
+    }
+    if cursor < previous.len() {
+        if !paragraph_merge
+            || skipped_merged_paragraph
+            || paragraph_identity(&previous[cursor].block).is_none()
+            || cursor + 1 < previous.len()
+        {
+            return Err(structure());
+        }
+        skipped_merged_paragraph = true;
+    }
+    if paragraph_merge && !skipped_merged_paragraph {
+        return Err(structure());
+    }
+    Ok((resident_measure_calls, resident_reused_blocks))
+}
+
 /// Put extents moved out of the retained arena back; consumed in index order.
 fn restore_moved_measures(measured: &mut [MeasuredBlock], entries: Vec<MeasuredBlock>) {
     for (consumed, entry) in entries.into_iter().enumerate() {
@@ -3553,6 +3690,7 @@ impl EngineSession {
             let mut resident = self.resident_layout_input_from_blocks(
                 blocks,
                 false,
+                false,
                 &mut |_, key, previous_block, next_block| {
                     let mut envelope = self
                         .measurement_envelope_for_block(key, previous_block)
@@ -3591,6 +3729,7 @@ impl EngineSession {
         &self,
         blocks: &[LayoutBlock],
         any_block: bool,
+        take: bool,
         measure_dirty: &mut dyn FnMut(
             usize,
             &str,
@@ -3598,10 +3737,11 @@ impl EngineSession {
             &mut LayoutBlock,
         ) -> Result<BlockExtent, String>,
     ) -> Result<ResidentLayoutInput, String> {
-        let pagination = self.pagination.borrow();
+        let mut pagination = self.pagination.borrow_mut();
+        let pagination = &mut *pagination;
         let previous = pagination
             .input
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| "resident pagination input is not built".to_owned())?;
         let previous_fingerprints = &pagination.block_fingerprints;
         let paragraph_merge = blocks.len().checked_add(1) == Some(previous.measured.len());
@@ -3612,116 +3752,27 @@ impl EngineSession {
             return Err("resident pagination fingerprints are not built".to_owned());
         }
 
-        let mut previous_blocks = previous.measured.iter().zip(previous_fingerprints);
-        let mut skipped_merged_paragraph = false;
         let mut measured = Vec::with_capacity(blocks.len());
         let mut block_fingerprints = Vec::with_capacity(blocks.len());
-        let mut resident_measure_calls = 0_u64;
-        let mut resident_reused_blocks = 0_u64;
-        for (block_index, next_block) in blocks.iter().enumerate() {
-            let mut previous_entry = previous_blocks.next().ok_or_else(|| {
-                "resident plain-text input changed the block structure".to_owned()
-            })?;
-            if paragraph_merge && !resident_block_slots_match(&previous_entry.0.block, next_block) {
-                if skipped_merged_paragraph || paragraph_identity(&previous_entry.0.block).is_none()
-                {
-                    return Err("resident plain-text input changed the block structure".to_owned());
+        let mut moved = Vec::new();
+        let walked = resident_walk(
+            blocks,
+            any_block,
+            paragraph_merge,
+            (&mut previous.measured, previous_fingerprints, take),
+            measure_dirty,
+            (&mut measured, &mut block_fingerprints, &mut moved),
+        );
+        let (resident_measure_calls, resident_reused_blocks) = match walked {
+            Ok(counts) => counts,
+            Err(error) => {
+                for (from, to) in moved {
+                    previous.measured[from].measure =
+                        std::mem::replace(&mut measured[to].measure, BlockExtent::Unsupported);
                 }
-                skipped_merged_paragraph = true;
-                previous_entry = previous_blocks.next().ok_or_else(|| {
-                    "resident plain-text input changed the block structure".to_owned()
-                })?;
+                return Err(error);
             }
-            if paragraph_merge && !resident_block_slots_match(&previous_entry.0.block, next_block) {
-                return Err("resident plain-text input changed stable block identity".to_owned());
-            }
-            let (previous_measured, previous_fingerprint) = previous_entry;
-            let (Some((next_id, _)), Some((previous_id, _))) = (
-                paragraph_identity(next_block),
-                paragraph_identity(&previous_measured.block),
-            ) else {
-                if *next_block != previous_measured.block {
-                    let (true, Some(next_id), Some(previous_id)) = (
-                        any_block,
-                        fragment_identity(next_block),
-                        fragment_identity(&previous_measured.block),
-                    ) else {
-                        return Err(
-                            "resident plain-text input changed a non-paragraph block".to_owned()
-                        );
-                    };
-                    let key = block_key(next_id);
-                    if key != block_key(previous_id) {
-                        return Err(
-                            "resident plain-text input changed stable block identity".to_owned()
-                        );
-                    }
-                    let mut next_measured_block = next_block.clone();
-                    let measure = measure_dirty(
-                        block_index,
-                        &key,
-                        &previous_measured.block,
-                        &mut next_measured_block,
-                    )?;
-                    let measured_block = MeasuredBlock {
-                        block: next_measured_block,
-                        measure,
-                    };
-                    block_fingerprints.push(measured_fingerprint(&measured_block)?);
-                    measured.push(measured_block);
-                    resident_measure_calls = resident_measure_calls.wrapping_add(1);
-                    continue;
-                }
-                measured.push(MeasuredBlock {
-                    block: next_block.clone(),
-                    measure: previous_measured.measure.clone(),
-                });
-                block_fingerprints.push(*previous_fingerprint);
-                resident_reused_blocks = resident_reused_blocks.wrapping_add(1);
-                continue;
-            };
-            let key = block_key(next_id);
-            if key != block_key(previous_id) {
-                return Err("resident plain-text input changed stable block identity".to_owned());
-            }
-            if *next_block == previous_measured.block {
-                measured.push(MeasuredBlock {
-                    block: next_block.clone(),
-                    measure: previous_measured.measure.clone(),
-                });
-                block_fingerprints.push(*previous_fingerprint);
-                resident_reused_blocks = resident_reused_blocks.wrapping_add(1);
-                continue;
-            }
-
-            let mut next_measured_block = next_block.clone();
-            let measure = measure_dirty(
-                block_index,
-                &key,
-                &previous_measured.block,
-                &mut next_measured_block,
-            )?;
-            let measured_block = MeasuredBlock {
-                block: next_measured_block,
-                measure,
-            };
-            block_fingerprints.push(measured_fingerprint(&measured_block)?);
-            measured.push(measured_block);
-            resident_measure_calls = resident_measure_calls.wrapping_add(1);
-        }
-        if let Some((removed, _)) = previous_blocks.next() {
-            if !paragraph_merge
-                || skipped_merged_paragraph
-                || paragraph_identity(&removed.block).is_none()
-                || previous_blocks.next().is_some()
-            {
-                return Err("resident plain-text input changed the block structure".to_owned());
-            }
-            skipped_merged_paragraph = true;
-        }
-        if paragraph_merge && !skipped_merged_paragraph {
-            return Err("resident plain-text input changed the block structure".to_owned());
-        }
+        };
 
         let mut measurement = self.measurement.borrow_mut();
         measurement.resident_measure_calls = measurement
@@ -4128,6 +4179,7 @@ impl EngineSession {
                     match self.resident_layout_input_from_blocks(
                         blocks,
                         true,
+                        self.local_lowering.get(),
                         &mut |index, _key, _previous_block, next_block| {
                             let width = widths.get(index).copied().unwrap_or(default_width);
                             resolve_line_unit_spacing(
@@ -4161,11 +4213,19 @@ impl EngineSession {
         };
         phase(RegionResidentPhase::Measured);
         let previous_capture = self.capture.borrow_mut().take();
-        self.layout_document_value_with_fingerprints(
+        if let Err(error) = self.layout_document_value_with_fingerprints(
             resident.input,
             resident.block_fingerprints,
             None,
-        )?;
+        ) {
+            if self.local_lowering.get() {
+                // the walk moved the retained extents out
+                let mut pagination = self.pagination.borrow_mut();
+                pagination.block_fingerprints.clear();
+                pagination.measured_with = None;
+            }
+            return Err(error);
+        }
         let mut pagination = self.pagination.borrow_mut();
         pagination.input_lowering = resident.lowering;
         // The fast path measures through the region config too, so its
@@ -6155,14 +6215,6 @@ mod tests {
                 "same-style paragraphs drop their contextual spacing: {apart:?} vs {collapsed:?}"
             );
         }
-        let snapshot = |engine: &EngineSession| {
-            let pagination = engine.pagination.borrow();
-            (
-                serde_json::to_string(&pagination.input.as_ref().unwrap().measured).unwrap(),
-                pagination.block_fingerprints.clone(),
-                serde_json::to_string(&pagination.layout.as_ref().unwrap().pages).unwrap(),
-            )
-        };
         let matches_cold = |label: &str| {
             assert!(
                 engine
@@ -6170,25 +6222,7 @@ mod tests {
                     .unwrap(),
                 "{label}: the region fast path absorbs the edit"
             );
-            let resident = snapshot(&engine);
-            let (render, measurement, pagination, regions, display, capture, resumable) = (
-                engine.render.replace(Default::default()),
-                engine.measurement.replace(Default::default()),
-                engine.pagination.replace(Default::default()),
-                engine.regions.replace(Default::default()),
-                engine.display.replace(Default::default()),
-                engine.capture.replace(Default::default()),
-                engine.resumable.replace(Default::default()),
-            );
-            engine.layout_document_with_regions_json(&request).unwrap();
-            assert_eq!(resident, snapshot(&engine), "{label}");
-            engine.render.replace(render);
-            engine.measurement.replace(measurement);
-            engine.pagination.replace(pagination);
-            engine.regions.replace(regions);
-            engine.display.replace(display);
-            engine.capture.replace(capture);
-            engine.resumable.replace(resumable);
+            assert_region_state_matches_cold(&engine, &request, label);
         };
         let ctx = crate::EditCtx::local("", "");
         let longer = " and then the lazy dog wakes up, stretches and chases the fox";
@@ -6229,6 +6263,77 @@ mod tests {
             .unwrap();
         matches_cold("merge");
         assert_eq!(tops(&engine).len(), 2);
+    }
+
+    #[test]
+    fn resident_region_fast_path_restores_moved_extents_when_it_falls_back() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(lowering_pages::FONT).unwrap();
+        let mut request: serde_json::Value =
+            serde_json::from_str(&small_page_request(font)).unwrap();
+        repeat_final_section(&mut request);
+        let request = request.to_string();
+        let engine = paragraphs_engine(9607, 4);
+        engine.set_local_lowering(true);
+        engine.layout_document_with_regions_json(&request).unwrap();
+        engine.build_display_list_frame("{}", 0).unwrap();
+        let lengths: Vec<u32> = engine
+            .doc()
+            .paragraphs("body")
+            .unwrap()
+            .iter()
+            .map(|paragraph| paragraph.text.chars().count() as u32)
+            .collect();
+        let ctx = crate::EditCtx::local("", "");
+        let mark = lengths[0] + 1 + lengths[1];
+        engine
+            .doc()
+            .delete_range(&ctx, crate::StoryRange::new("body", mark, mark + 1))
+            .unwrap();
+        let last = lengths[0] + lengths[1] + lengths[2] + 2;
+        engine
+            .doc()
+            .split_paragraph(&ctx, crate::Position::new("body", last + 5), None)
+            .unwrap();
+        assert!(
+            !engine
+                .apply_and_layout_regions_resident("body", &mut |_| {})
+                .unwrap(),
+            "a block identity change midway falls back to the full pass"
+        );
+        engine.apply_and_layout_regions_full().unwrap();
+        assert_region_state_matches_cold(&engine, &request, "full pass after the fallback");
+    }
+
+    /// The retained region state equals a cold full pass of `request` over the same document.
+    fn assert_region_state_matches_cold(engine: &EngineSession, request: &str, label: &str) {
+        let snapshot = |engine: &EngineSession| {
+            let pagination = engine.pagination.borrow();
+            (
+                serde_json::to_string(&pagination.input.as_ref().unwrap().measured).unwrap(),
+                pagination.block_fingerprints.clone(),
+                serde_json::to_string(&pagination.layout.as_ref().unwrap().pages).unwrap(),
+            )
+        };
+        let resident = snapshot(engine);
+        let (render, measurement, pagination, regions, display, capture, resumable) = (
+            engine.render.replace(Default::default()),
+            engine.measurement.replace(Default::default()),
+            engine.pagination.replace(Default::default()),
+            engine.regions.replace(Default::default()),
+            engine.display.replace(Default::default()),
+            engine.capture.replace(Default::default()),
+            engine.resumable.replace(Default::default()),
+        );
+        engine.layout_document_with_regions_json(request).unwrap();
+        assert_eq!(resident, snapshot(engine), "{label}");
+        engine.render.replace(render);
+        engine.measurement.replace(measurement);
+        engine.pagination.replace(pagination);
+        engine.regions.replace(regions);
+        engine.display.replace(display);
+        engine.capture.replace(capture);
+        engine.resumable.replace(resumable);
     }
 
     fn paragraphs_engine(client_id: u64, paragraphs: usize) -> EngineSession {
@@ -8402,7 +8507,7 @@ mod tests {
         let walk = |blocks: &[LayoutBlock]| {
             let mut dirty: Vec<(usize, String)> = Vec::new();
             engine
-                .resident_layout_input_from_blocks(blocks, false, &mut |index, key, _, _| {
+                .resident_layout_input_from_blocks(blocks, false, false, &mut |index, key, _, _| {
                     dirty.push((index, key.to_owned()));
                     Ok(BlockExtent::Paragraph(ParagraphExtent {
                         lines: Vec::new(),
