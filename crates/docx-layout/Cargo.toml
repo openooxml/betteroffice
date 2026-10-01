@@ -24,6 +24,7 @@ crate-type = ["cdylib", "rlib"]
 wasm-opt = ['-O3']
 
 [dependencies]
+foldhash = { version = "0.2", default-features = false }
 ooxml-drawingml = { workspace = true, features = ["chart"] }
 ooxml-text.workspace = true
 wasm-bindgen = "0.2"

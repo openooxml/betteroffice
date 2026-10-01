@@ -139,8 +139,8 @@ describe('a session save after an edit', () => {
     expect(paragraphsWith(xml, 'QA')).toHaveLength(2);
   });
 
-  it.todo(
-    'keeps inherited paragraph properties inherited in the edited paragraph (#1067, deferred-after-0.4.1: touched paragraphs)',
+  it(
+    'keeps inherited paragraph properties inherited in the edited paragraph (#1067)',
     async () => {
       const session = await open(inheritedSpacing());
       insertAtStart(session, 'Conclusion QA', 'Edited ');
@@ -150,8 +150,8 @@ describe('a session save after an edit', () => {
       ]);
     }
   );
-  it.todo(
-    'keeps inherited paragraph properties inherited through yrsToDocument and repackDocx (#1067, deferred-after-0.4.1: full repack)',
+  it(
+    'keeps inherited paragraph properties inherited through yrsToDocument and repackDocx (#1067)',
     async () => {
       const session = await open(inheritedSpacing());
       const xml = part(

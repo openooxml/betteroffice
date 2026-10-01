@@ -1193,7 +1193,7 @@ const MAX_EXTENT_KEY_BYTES: usize = 256 * 1024;
 
 #[derive(Default)]
 struct ExtentCacheGeneration {
-    entries: HashMap<Vec<u8>, (ParagraphExtent, usize)>,
+    entries: HashMap<Vec<u8>, (ParagraphExtent, usize), foldhash::fast::RandomState>,
     key_bytes: usize,
     value_bytes: usize,
 }
@@ -1284,7 +1284,7 @@ fn extent_cache_lookup(
     EXTENT_KEY_BUF.with(|scratch| {
         let key = &mut *scratch.borrow_mut();
         key.clear();
-        if serde_json::to_writer(&mut *key, paragraph).is_err() {
+        if crate::extent_key::encode(key, paragraph).is_err() {
             return ExtentLookup::Miss(None);
         }
         if key.len() > MAX_EXTENT_KEY_BYTES {
@@ -2977,17 +2977,21 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn cache_paragraph(fonts: &crate::MeasureFonts) {
-        let _fonts = fonts.enter();
+    fn cache_measurement_config() -> MeasurementConfig {
         let font = crate::register_measure_font_bytes(include_bytes!(
             "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
         ))
         .unwrap();
-        let config = MeasurementConfig {
+        MeasurementConfig {
             font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font])]),
             defaults: json!({"fontFamily": "Liberation Sans", "fontSize": 12}),
             ..Default::default()
-        };
+        }
+    }
+
+    fn cache_paragraph(fonts: &crate::MeasureFonts) {
+        let _fonts = fonts.enter();
+        let config = cache_measurement_config();
         let paragraph = serde_json::from_value(json!({
             "id": "cached", "runs": [{"kind": "text", "text": "Cached paragraph"}]
         }))
@@ -2995,6 +2999,60 @@ mod tests {
         let extent = measure_paragraph(&paragraph, 300.0, &config).unwrap();
         assert!(!extent.lines.is_empty());
         assert_ne!(extent.lines[0].synthetic_fallback, Some(true));
+    }
+
+    #[test]
+    fn distinct_paragraphs_reuse_cached_extents() {
+        clear_extent_cache();
+        let fonts = crate::MeasureFonts::default();
+        let _fonts = fonts.enter();
+        let config = cache_measurement_config();
+        let paragraphs: Vec<ParagraphBlock> = serde_json::from_value(json!([
+            {"id": "cached", "runs": [{"kind": "text", "text": "Cached paragraph"}]},
+            {"id": "cached", "runs": [{"kind": "text", "text": "Changed paragraph"}]},
+            {
+                "id": "cached",
+                "runs": [{"kind": "text", "text": "Cached paragraph", "fontSize": 18}]
+            },
+            {
+                "id": "cached", "runs": [{"kind": "text", "text": "Cached paragraph"}],
+                "attrs": {"pPrIns": {"n": 1, "items": ["x", null]}}
+            },
+            {
+                "id": "cached", "runs": [{"kind": "text", "text": "Cached paragraph"}],
+                "attrs": {"pPrIns": {"n": 2, "items": ["x", null]}}
+            },
+            {
+                "id": "cached", "runs": [{"kind": "text", "text": "Cached paragraph"}],
+                "pmStart": 0.0
+            },
+            {
+                "id": "cached", "runs": [{"kind": "text", "text": "Cached paragraph"}],
+                "pmStart": -0.0
+            }
+        ]))
+        .unwrap();
+        let first: Vec<_> = paragraphs
+            .iter()
+            .map(|paragraph| measure_paragraph(paragraph, 300.0, &config).unwrap())
+            .collect();
+        assert_eq!(extent_cache_stats().0, paragraphs.len());
+
+        for (paragraph, expected) in paragraphs.iter().zip(&first) {
+            assert!(!expected.lines.is_empty());
+            assert_ne!(expected.lines[0].synthetic_fallback, Some(true));
+            let ExtentLookup::Hit(cached) =
+                extent_cache_lookup(paragraph, 300.0, &config, None, 0.0)
+            else {
+                panic!("expected a cached paragraph extent");
+            };
+            assert_eq!(&cached, expected);
+            assert_eq!(
+                &measure_paragraph(paragraph, 300.0, &config).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(extent_cache_stats().0, paragraphs.len());
     }
 
     #[test]
