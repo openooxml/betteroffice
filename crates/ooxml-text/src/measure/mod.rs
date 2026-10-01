@@ -447,18 +447,23 @@ pub fn measure_paragraph_typed(
                 .is_some_and(|marker| !marker.is_empty())
     });
     let hanging = indent.and_then(|i| i.hanging).unwrap_or(0.0);
+    let body_width = (request.max_width - indent_left - indent_right).max(1.0);
     let marker_tab_overrun = match attrs {
         Some(a) if visible_marker && hanging > 0.0 => {
             list_marker::list_marker_tab_overrun(store, request, a)?
         }
         _ => 0.0,
     };
+    let marker_tab_overrun = if marker_tab_overrun < body_width {
+        marker_tab_overrun
+    } else {
+        0.0
+    };
     let first_line_offset = if visible_marker && hanging > 0.0 {
         marker_tab_overrun
     } else {
         indent.and_then(|i| i.first_line).unwrap_or(0.0) - hanging
     };
-    let body_width = (request.max_width - indent_left - indent_right).max(1.0);
     let first_line_width = (body_width - first_line_offset - marker_inline_width).max(1.0);
 
     let mut extent = line_filler::fill(line_filler::FillParams {

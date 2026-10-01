@@ -1912,6 +1912,31 @@ fn list_marker_tab_overrun_chooses_the_closest_stop() {
     }
 }
 
+/// An overrun that would push the text past the right edge keeps today's text start.
+#[test]
+fn list_marker_tab_overrun_past_the_line_end_keeps_the_text_at_the_indent() {
+    let mut attrs = overrun_marker_attrs();
+    let natural_width = marker_natural_width(&attrs["listMarker"]);
+    let grid_interval = 709.0 / 1440.0 * 96.0;
+    let overrun = ((natural_width / grid_interval).floor() + 1.0) * grid_interval - 113.4;
+    attrs["indent"]["right"] = json!(0.0);
+    let measured = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "00" }],
+            "attrs": attrs
+        }),
+        113.4 + overrun - 1.0,
+    )
+    .unwrap();
+    assert!(measured["lines"][0].get("markerTabOffset").is_none());
+    approx(
+        measured["lines"][0]["width"].as_f64().unwrap(),
+        2.0 * W0,
+        "text stays on the first line at the indent",
+    );
+}
+
 /// Without grid or custom stops, an overrunning marker receives a half-em gap.
 #[test]
 fn list_marker_tab_overrun_without_stops_uses_half_an_em() {
