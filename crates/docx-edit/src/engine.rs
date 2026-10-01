@@ -6625,6 +6625,34 @@ mod tests {
         .to_string()
     }
 
+    fn local_patch_mixed_runs() -> String {
+        use super::lowering_fixture::run;
+        format!(
+            r#"{}<w:r><w:rPr><w:b/></w:rPr><w:t>cd</w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t>ef</w:t></w:r>{}"#,
+            run("ab"),
+            run("gh")
+        )
+    }
+
+    fn local_patch_list_paragraph(
+        id: &str,
+        num: u32,
+        level: u32,
+        mark: &str,
+        content: &str,
+    ) -> String {
+        format!(
+            r#"<w:p w14:paraId="{id}"><w:pPr><w:numPr><w:ilvl w:val="{level}"/><w:numId w:val="{num}"/></w:numPr>{mark}</w:pPr>{content}</w:p>"#
+        )
+    }
+
+    fn local_patch_numbering(format: &str, marker: &str) -> String {
+        format!(
+            r#"<w:numbering {}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="{format}"/><w:lvlText w:val="{marker}"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl><w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2."/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num><w:num w:numId="2"><w:abstractNumId w:val="0"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride></w:num></w:numbering>"#,
+            lowering_fixture::NS
+        )
+    }
+
     #[test]
     fn resident_plain_text_patch_matches_cold_full() {
         for enabled in [false, true] {
@@ -6755,7 +6783,7 @@ mod tests {
         ];
         for (name, package) in packages {
             let (engine, request) = laid_out(&package.bytes(), 9602);
-            let patched = name == "table";
+            let patched = matches!(name, "table" | "list" | "mixed");
             step(&engine, &request, "body", (0, 0, Some("x")), patched);
             if name == "table" {
                 step(&engine, &request, "body", (11, 11, Some("😀")), true);
@@ -6771,6 +6799,186 @@ mod tests {
         let (engine, request) = laid_out(&bold.bytes(), 9604);
         step(&engine, &request, "body", (2, 2, Some("x")), true);
         step(&engine, &request, "body", (0, 1, None), true);
+        let between = |content: &str| {
+            Package::new(&format!(
+                "{}{}{}",
+                para("10000001", &run("Before")),
+                para("10000002", content),
+                para("10000003", &run("After"))
+            ))
+        };
+        let list = |middle: &str, mark: &str, last_num| {
+            format!(
+                "{}{}{}",
+                local_patch_list_paragraph("10000001", 1, 0, "", &run("First")),
+                local_patch_list_paragraph("10000002", 1, 0, mark, middle),
+                local_patch_list_paragraph("10000003", last_num, 0, "", &run("Last"))
+            )
+        };
+        let decimal = local_patch_numbering("decimal", "%1.");
+        let bullet = local_patch_numbering("bullet", "•");
+        let multilevel: String = [
+            "First", "Nested", "Second", "Middle", "Third", "Nested", "Last",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            local_patch_list_paragraph(
+                &format!("{:08X}", 0x10000001 + index),
+                1,
+                (index % 2) as u32,
+                "",
+                &run(text),
+            )
+        })
+        .collect();
+        let cases: Vec<(&str, Package, usize, &[u32])> = vec![
+            ("mixed", between(&local_patch_mixed_runs()), 1, &[]),
+            (
+                "rsid",
+                between(
+                    r#"<w:r w:rsidR="00000001"><w:t>ab</w:t></w:r><w:r w:rsidR="00000002"><w:t>cd</w:t></w:r>"#,
+                ),
+                1,
+                &[],
+            ),
+            (
+                "language",
+                between(
+                    r#"<w:r><w:rPr><w:lang w:val="en-US"/></w:rPr><w:t>ab</w:t></w:r><w:r><w:rPr><w:lang w:val="fr-FR"/></w:rPr><w:t>cd</w:t></w:r>"#,
+                ),
+                1,
+                &[],
+            ),
+            (
+                "proofing",
+                between(&format!(
+                    r#"{}<w:proofErr w:type="spellStart"/>{}<w:proofErr w:type="spellEnd"/>"#,
+                    run("ab"),
+                    run("cd")
+                )),
+                1,
+                &[],
+            ),
+            (
+                "one-character segment",
+                between(&format!(
+                    r#"{}<w:r><w:rPr><w:b/></w:rPr><w:t>x</w:t></w:r>{}"#,
+                    run("ab"),
+                    run("cd")
+                )),
+                1,
+                &[2],
+            ),
+            (
+                "bullet",
+                Package::new(&list(&run("Middle"), "", 1)).numbering(&bullet),
+                1,
+                &[],
+            ),
+            (
+                "restart",
+                Package::new(&list(&run("Middle"), "", 2)).numbering(&decimal),
+                1,
+                &[],
+            ),
+            (
+                "multilevel",
+                Package::new(&multilevel).numbering(&decimal),
+                3,
+                &[],
+            ),
+            (
+                "marker formatting",
+                Package::new(&list(
+                    &run("Middle"),
+                    r#"<w:rPr><w:b/><w:color w:val="FF0000"/></w:rPr>"#,
+                    1,
+                ))
+                .numbering(&decimal),
+                1,
+                &[],
+            ),
+            (
+                "tracked insertion",
+                between(&format!(
+                    r#"{}<w:ins w:id="1" w:author="A">{}</w:ins>{}"#,
+                    run("ab"),
+                    run("cd"),
+                    run("ef")
+                )),
+                1,
+                &[],
+            ),
+            (
+                "tracked deletion",
+                between(&format!(
+                    r#"{}<w:del w:id="1" w:author="A"><w:r><w:delText>cd</w:delText></w:r></w:del>{}"#,
+                    run("ab"),
+                    run("ef")
+                )),
+                1,
+                &[],
+            ),
+            (
+                "empty list",
+                Package::new(&list("", "", 1)).numbering(&decimal),
+                1,
+                &[],
+            ),
+        ];
+        for (name, package, paragraph, fallback_deletes) in cases {
+            let bytes = package.bytes();
+            let (initial, _) = laid_out(&bytes, 9607);
+            let paragraphs = initial.doc().paragraphs("body").unwrap();
+            let start: u32 = paragraphs[..paragraph]
+                .iter()
+                .map(|paragraph| paragraph.text.encode_utf16().count() as u32 + 1)
+                .sum();
+            let text = &paragraphs[paragraph].text;
+            let width = text.encode_utf16().count() as u32;
+            assert!(
+                text.is_ascii(),
+                "{name}: every UTF-16 offset is a scalar boundary"
+            );
+            if name == "marker formatting" {
+                let render = initial.render.borrow();
+                let LayoutBlock::Paragraph(block) = &render.stories["body"].blocks[paragraph]
+                else {
+                    panic!("list paragraph expected");
+                };
+                let attrs = block.attrs.as_ref().unwrap();
+                assert_eq!(attrs.list_marker.as_deref(), Some("2."));
+                assert_eq!(attrs.list_marker_bold, Some(true));
+                assert_eq!(attrs.list_marker_color.as_deref(), Some("#FF0000"));
+            }
+            let patched = !name.starts_with("tracked");
+            for offset in 0..=width {
+                for inserted in ["x", "😀"] {
+                    let (engine, request) = laid_out(&bytes, 9608);
+                    let at = start + offset;
+                    step(&engine, &request, "body", (at, at, Some(inserted)), patched);
+                    step(
+                        &engine,
+                        &request,
+                        "body",
+                        (at, at + inserted.encode_utf16().count() as u32, None),
+                        patched,
+                    );
+                }
+            }
+            for offset in 0..width {
+                let (engine, request) = laid_out(&bytes, 9609);
+                let at = start + offset;
+                step(
+                    &engine,
+                    &request,
+                    "body",
+                    (at, at + 1, None),
+                    patched && !fallback_deletes.contains(&offset),
+                );
+            }
+        }
         for (bytes, patched) in [
             (
                 include_bytes!(
@@ -6794,6 +7002,99 @@ mod tests {
         ] {
             let (engine, request) = laid_out(bytes, 9603);
             step(&engine, &request, "body", (0, 0, Some("x")), patched);
+        }
+    }
+
+    #[test]
+    fn resident_mixed_and_list_text_patch_frames_match_full_lowering() {
+        use super::lowering_fixture::{Package, para, run};
+        use crate::StoryRange;
+
+        let body = format!(
+            "{}{}{}{}",
+            para("10000001", &local_patch_mixed_runs()),
+            local_patch_list_paragraph("10000002", 1, 0, "", &run("First")),
+            local_patch_list_paragraph(
+                "10000003",
+                1,
+                0,
+                r#"<w:rPr><w:b/><w:color w:val="FF0000"/></w:rPr>"#,
+                &run("Middle"),
+            ),
+            local_patch_list_paragraph("10000004", 2, 0, "", &run("Last"))
+        );
+        let bytes = Package::new(&body)
+            .numbering(&local_patch_numbering("decimal", "%1."))
+            .bytes();
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(lowering_pages::FONT).unwrap();
+        let request = small_page_request(font);
+        let engines = [EngineSession::new(9610), EngineSession::new(9610)];
+        for (index, engine) in engines.iter().enumerate() {
+            crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
+            engine.set_local_lowering(index == 1);
+            engine.layout_document_with_regions_json(&request).unwrap();
+        }
+        let frames = || {
+            engines
+                .iter()
+                .map(|engine| engine.build_display_list_frame("{}", 0).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let initial = frames();
+        assert_eq!(initial[0], initial[1]);
+        for paragraph in [0, 2] {
+            let width = engines[0].doc().paragraphs("body").unwrap()[paragraph]
+                .text
+                .encode_utf16()
+                .count() as u32;
+            for offset in 0..=width {
+                for inserted in ["x", "😀"] {
+                    let paragraphs = engines[0].doc().paragraphs("body").unwrap();
+                    let start: u32 = paragraphs[..paragraph]
+                        .iter()
+                        .map(|paragraph| paragraph.text.encode_utf16().count() as u32 + 1)
+                        .sum();
+                    let at = start + offset;
+                    for (end, text) in [
+                        (at, Some(inserted)),
+                        (at + inserted.encode_utf16().count() as u32, None),
+                    ] {
+                        for engine in &engines {
+                            engine
+                                .edit_resident_text(StoryRange::new("body", at, end), text, true)
+                                .unwrap();
+                            let epoch = engine.display.borrow().binary_frame_epoch;
+                            engine.apply_and_layout("body", epoch).unwrap();
+                        }
+                        let frames = frames();
+                        assert_eq!(
+                            frames[0], frames[1],
+                            "paragraph {paragraph} offset {offset} {text:?}"
+                        );
+                    }
+                }
+            }
+            for offset in (0..width).rev() {
+                let paragraphs = engines[0].doc().paragraphs("body").unwrap();
+                let start: u32 = paragraphs[..paragraph]
+                    .iter()
+                    .map(|paragraph| paragraph.text.encode_utf16().count() as u32 + 1)
+                    .sum();
+                let at = start + offset;
+                for engine in &engines {
+                    engine
+                        .edit_resident_text(StoryRange::new("body", at, at + 1), None, true)
+                        .unwrap();
+                    let epoch = engine.display.borrow().binary_frame_epoch;
+                    engine.apply_and_layout("body", epoch).unwrap();
+                }
+                let frames = frames();
+                assert_eq!(
+                    frames[0], frames[1],
+                    "paragraph {paragraph} delete {offset}"
+                );
+            }
         }
     }
 
