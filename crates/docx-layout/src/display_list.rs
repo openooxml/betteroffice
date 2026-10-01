@@ -11212,7 +11212,9 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_observed(
             position_deltas,
         );
     }
-    prune_resident_display_measured(resident, previous);
+    if built.len() < selected.len() {
+        prune_resident_display_measured(resident, previous);
+    }
     Ok(true)
 }
 

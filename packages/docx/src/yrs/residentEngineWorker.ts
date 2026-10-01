@@ -518,19 +518,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     for (const pageId of request.activePageIds) {
       if (!activeOffscreenPageIds.has(pageId)) forcedPageIds.add(pageId);
     }
-    const unbuiltPageIds = new Set(
-      retainedFrame?.pages.filter(({ page }) => page.unbuilt).map(({ pageId }) => pageId.toString())
-    );
-    for (const { pageId, canvas } of request.pages) {
-      if (unbuiltPageIds.has(pageId)) {
-        releaseOffscreenPageCanvas(canvas);
-        canvas.width = 0;
-        canvas.height = 0;
-        forcedPageIds.delete(pageId);
-        continue;
-      }
-      offscreenCanvases.set(pageId, canvas);
-    }
+    for (const { pageId, canvas } of request.pages) offscreenCanvases.set(pageId, canvas);
     activeOffscreenPageIds = new Set(request.activePageIds);
     offscreenDpr = request.devicePixelRatio;
     offscreenZoom = request.zoom;
@@ -941,30 +929,21 @@ async function replyFrame(
   }
   const selection = session?.selection() ?? null;
   caretPaintRect = paintCaret ? (caret.caretRect ?? null) : null;
-  const builtPageIds = new Set(
-    retainedFrame.pages
-      .filter(({ page }) => !page.unbuilt)
-      .map(({ pageId }) => pageId.toString())
+  // Pages no longer in the document drop their surfaces (their elements
+  // unmounted main-side). An unbuilt page keeps its transferred canvas, which
+  // can never be transferred again, and only loses its pixels.
+  const unbuiltByPageId = new Map(
+    retainedFrame.pages.map(({ pageId, page }) => [pageId.toString(), page.unbuilt === true])
   );
   for (const pageId of pendingOffscreenPageIds) {
-    if (!builtPageIds.has(pageId)) pendingOffscreenPageIds.delete(pageId);
+    if (unbuiltByPageId.get(pageId) !== false) pendingOffscreenPageIds.delete(pageId);
   }
-  const surfacePageIds = new Set([...offscreenCanvases.keys(), ...offscreenBackBuffers.keys()]);
-  for (const pageId of surfacePageIds) {
-    if (builtPageIds.has(pageId)) continue;
+  for (const pageId of new Set([...offscreenCanvases.keys(), ...offscreenBackBuffers.keys()])) {
+    const unbuilt = unbuiltByPageId.get(pageId);
+    if (unbuilt === false) continue;
     const canvas = offscreenCanvases.get(pageId);
-    const buffer = offscreenBackBuffers.get(pageId);
-    if (canvas) {
-      releaseOffscreenPageCanvas(canvas);
-      canvas.width = 0;
-      canvas.height = 0;
-    }
-    if (buffer) {
-      releaseOffscreenPageCanvas(buffer);
-      buffer.width = 0;
-      buffer.height = 0;
-    }
-    offscreenCanvases.delete(pageId);
+    if (unbuilt === undefined) offscreenCanvases.delete(pageId);
+    else if (canvas) releaseOffscreenPageCanvas(canvas);
     offscreenBackBuffers.delete(pageId);
     forgetOffscreenPagePixels(pageId);
   }

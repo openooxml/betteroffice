@@ -467,12 +467,13 @@ describe('resident display page release', () => {
     expect(w.surfaces.get('3')?.pixels).toBe('3:100');
   });
 
-  test('drops released canvases and buffers, ignores late attachments, and paints fresh reattachments', async () => {
+  test('a released page keeps its transferred canvas without pixels and paints into it once rebuilt', async () => {
     const w = worker();
     await w.bootstrap();
     await w.build([], 100, caret(3));
     await w.attach([3]);
-    const oldCanvas = w.surfaces.get('3')!;
+    const canvas = w.surfaces.get('3')!;
+    expect(canvas.pixels).toStartWith('3:100');
     const oldBuffer = w.harness.buffers.at(-1)!;
     w.resetCalls();
     const reply = await w.send({
@@ -483,22 +484,34 @@ describe('resident display page release', () => {
     });
     expect(reply).toMatchObject({ ok: true, replayedPages: 0, caretPainted: false });
     expect(w.harness.rasterized).toEqual([]);
-    expect(oldCanvas.pixels).toBeNull();
-    expect(oldBuffer.pixels).toBeNull();
-    expect([oldCanvas.width, oldCanvas.height, oldBuffer.width, oldBuffer.height]).toEqual([0, 0, 0, 0]);
-    w.surfaces.delete('3');
+    expect([canvas.pixels, canvas.width, canvas.height]).toEqual([null, 1, 1]);
     await w.attach([3]);
-    const lateCanvas = w.surfaces.get('3')!;
-    expect(lateCanvas.pixels).toBeNull();
-    await w.send({ type: 'buildPages', pages: [2], expectedFrameEpoch: 3, paintCaret: false });
     expect(w.harness.rasterized).toEqual([]);
-    expect(oldCanvas.pixels).toBeNull();
-    expect(lateCanvas.pixels).toBeNull();
-    w.surfaces.delete('3');
-    await w.attach([3]);
+    expect(canvas.pixels).toBeNull();
+    await w.send({ type: 'buildPages', pages: [2], expectedFrameEpoch: 3, paintCaret: false });
     expect(w.harness.rasterized).toEqual([3]);
-    expect(w.surfaces.get('3')?.pixels).toBe('3:100');
+    expect(w.surfaces.get('3')).toBe(canvas);
+    expect(canvas.pixels).toBe('3:100');
     expect(w.harness.buffers.at(-1)).not.toBe(oldBuffer);
+  });
+
+  test('a canvas attached while its page is unbuilt is painted once the page builds', async () => {
+    const w = worker();
+    await w.bootstrap();
+    await w.send({
+      type: 'releasePages',
+      pages: [{ index: 2, pageId: '3' }],
+      expectedFrameEpoch: 1,
+      paintCaret: false,
+    });
+    w.resetCalls();
+    await w.attach([3]);
+    const canvas = w.surfaces.get('3')!;
+    expect(w.harness.rasterized).toEqual([]);
+    expect(canvas.pixels).toBeNull();
+    await w.send({ type: 'buildPages', pages: [2], expectedFrameEpoch: 2, paintCaret: false });
+    expect(w.harness.rasterized).toEqual([3]);
+    expect(canvas.pixels).toBe('3:100');
   });
 });
 
