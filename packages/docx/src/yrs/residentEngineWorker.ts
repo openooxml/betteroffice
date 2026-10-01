@@ -8,6 +8,7 @@ import {
 import { preloadEditWasm } from './wasm/index';
 import {
   createProposalRegistry,
+  proposalRevisionPreview,
   type DocxProposalRegistry,
   type DocxProposalResult,
 } from './proposals';
@@ -50,7 +51,16 @@ let layoutRevision = 0;
 // -1 = no fonts applied yet (fresh session); hydrate skips re-registration
 // when the snapshot's revision matches what this session already holds.
 let fontsRevision = -1;
-let operations = Promise.resolve();
+interface WorkerOperation {
+  run: () => Promise<void> | void;
+  id: number;
+  current: () => boolean;
+}
+const operations: WorkerOperation[] = [];
+const backgroundOperations: WorkerOperation[] = [];
+let drainingOperations = false;
+let workerAuthoritative = false;
+let prefixPages = 3;
 let retainedFrame: RetainedFrame | null = null;
 let glyphCache: GlyphCache | null = null;
 const offscreenCanvases = new Map<string, OffscreenCanvas>();
@@ -77,7 +87,7 @@ interface LayoutRequest {
   extras: string;
   layoutExtras?: string;
 }
-let incompleteLayout: (LayoutRequest & { layoutInput: string }) | null = null;
+let incompleteLayout: (LayoutRequest & { layoutInput: string; pages: number }) | null = null;
 let completedLayout:
   | (LayoutRequest & { layoutJson: string; headersFootersJson: string | undefined })
   | null = null;
@@ -96,6 +106,7 @@ interface SlicedCompletion {
 let slicedCompletion: SlicedCompletion | null = null;
 const COMPLETION_SLICE_MS = 24;
 const COMPLETION_RESTARTS = 3;
+const FOREGROUND_BURST = 16;
 const ALL_BLOCKS = 2 ** 32 - 1;
 
 // The request being handled, and the requests answered with a trap.
@@ -110,16 +121,40 @@ scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
 function enqueue(
   operation: () => Promise<void> | void,
   id: number,
-  current: () => boolean = () => true
+  current: () => boolean = () => true,
+  priority: 'foreground' | 'background' = 'foreground'
 ): void {
-  operations = operations
-    .then(() => {
-      if (!current()) return;
+  (priority === 'foreground' ? operations : backgroundOperations).push({
+    run: operation,
+    id,
+    current,
+  });
+  if (drainingOperations) return;
+  drainingOperations = true;
+  void Promise.resolve().then(drainOperations);
+}
+
+async function drainOperations(): Promise<void> {
+  let foreground = 0;
+  while (operations.length > 0 || backgroundOperations.length > 0) {
+    const background =
+      backgroundOperations.length > 0 &&
+      (operations.length === 0 || (!workerAuthoritative && foreground >= FOREGROUND_BURST));
+    const operation = (background ? backgroundOperations : operations).shift()!;
+    if (!operation.current()) continue;
+    foreground = background ? 0 : foreground + 1;
+    try {
       if (trap) throw trap;
-      handlingId = id;
-      return operation();
-    })
-    .catch((error) => replyFailure(id, error));
+      handlingId = operation.id;
+      await operation.run();
+    } catch (error) {
+      replyFailure(operation.id, error);
+    }
+    if (foreground > 0 && foreground % FOREGROUND_BURST === 0 && slicedCompletion) {
+      await new Promise<void>((resolve) => nextTurn(resolve));
+    }
+  }
+  drainingOperations = false;
 }
 
 function replyFailure(id: number, error: unknown): void {
@@ -213,6 +248,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     unsubscribe?.();
     unsubscribe = null;
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
+    if (request.provisionalPages !== undefined) prefixPages = request.provisionalPages;
     const { layoutJson, provisional } = hydrate(
       request.snapshot,
       request.provisionalPages,
@@ -224,6 +260,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         layoutInput: request.snapshot.layoutInput,
         extras: request.extras,
         layoutExtras: request.layoutExtras,
+        pages: request.provisionalPages!,
       };
     }
     subscribe();
@@ -286,11 +323,11 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (!session) throw new Error('Resident engine worker is not initialized');
   if (request.type === 'proposal') {
     if (!unsubscribe) throw new Error('Resident engine worker has not laid out its document');
-    await completeProvisionalLayout();
     pendingUpdates = [];
     let committed = false;
     try {
       const registry = proposals ??= createProposalRegistry(session.proposalEngine);
+      const previewVersion = registry.snapshot().previewVersion;
       const since = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
       let result: DocxProposalResult | undefined;
       switch (request.operation.kind) {
@@ -306,7 +343,20 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       }
       committed = request.operation.kind !== 'snapshot';
       const changedStories = session.storiesChangedSince(since).stories;
-      if (changedStories.length > 0) completedLayout = null;
+      if (changedStories.length > 0 || registry.snapshot().previewVersion !== previewVersion) {
+        completedLayout = null;
+        if (incompleteLayout) {
+          const input = JSON.parse(incompleteLayout.layoutInput);
+          incompleteLayout.layoutInput = JSON.stringify({
+            ...input,
+            renderEnv: {
+              ...input.renderEnv,
+              revisionPreview: proposalRevisionPreview(registry.snapshot()),
+            },
+          });
+          refreshProvisionalLayout(incompleteLayout.pages);
+        }
+      }
       const updates = pendingUpdates.map(exactBuffer);
       const stateVector = exactBuffer(session.encodeStateVector());
       reply(
@@ -339,7 +389,6 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'documentRead') {
-    await completeProvisionalLayout();
     const engine = session.proposalEngine;
     let value: unknown;
     switch (request.read.kind) {
@@ -369,7 +418,22 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     unsubscribe?.();
     unsubscribe = null;
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
-    const { layoutJson } = hydrate(request.snapshot, undefined, request.layoutExtras !== undefined);
+    const pages = request.snapshot.workerAuthoritative
+      ? Math.max(prefixPages, request.displayWindow?.[1] ?? 0)
+      : undefined;
+    const { layoutJson, provisional } = hydrate(
+      request.snapshot,
+      pages,
+      request.layoutExtras !== undefined
+    );
+    if (provisional) {
+      incompleteLayout = {
+        layoutInput: request.snapshot.layoutInput,
+        extras: request.extras,
+        layoutExtras: request.layoutExtras,
+        pages: pages!,
+      };
+    }
     subscribe();
     const started = performance.now();
     const frame = session.buildDisplayListFrame(
@@ -385,11 +449,16 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       started,
       false,
       request.paintCaret,
-      request.layoutExtras === undefined ? undefined : (layoutJson ?? undefined)
+      request.layoutExtras === undefined ? undefined : (layoutJson ?? undefined),
+      provisional
     );
     return;
   }
   if (request.type === 'buildPages') {
+    if (workerAuthoritative && incompleteLayout) {
+      const pages = Math.max(incompleteLayout.pages, ...request.pages.map((page) => page + 1));
+      if (pages > incompleteLayout.pages) refreshProvisionalLayout(pages);
+    }
     setFrameDisplayWindow(session);
     // Pages of the provisional frame build between steps, as before a completion.
     pendingUpdates = [];
@@ -409,13 +478,14 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'completeLayout') {
     setFrameDisplayWindow(session);
-    if (incompleteLayout && request.sliceBlocks) {
+    const blocks = request.sliceBlocks ?? (workerAuthoritative ? 32 : undefined);
+    if (incompleteLayout && blocks) {
       supersedeSlicedCompletion();
       slicedCompletion = {
         id: request.id,
         expectedFrameEpoch: request.expectedFrameEpoch,
         paintCaret: request.paintCaret,
-        blocks: request.sliceBlocks,
+        blocks,
         begun: false,
         restarts: 0,
       };
@@ -427,7 +497,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'buildFrame') {
-    await completeProvisionalLayout();
+    if (!workerAuthoritative) await completeProvisionalLayout();
+    else if (incompleteLayout && (request.displayWindow?.[1] ?? 0) > incompleteLayout.pages) {
+      refreshProvisionalLayout(request.displayWindow![1]);
+    }
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     pendingUpdates = [];
     const started = performance.now();
@@ -446,6 +519,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'applyUpdate') {
     session.applyUpdate(request.update);
+    if (workerAuthoritative && incompleteLayout) refreshProvisionalLayout(incompleteLayout.pages);
     if (request.selection) session.setSelection(request.selection.anchor, request.selection.head);
     return;
   }
@@ -555,6 +629,7 @@ function hydrate(
 ): { layoutJson: string | null; provisional: boolean } {
   if (!session) throw new Error('Resident engine worker is not initialized');
   supersedeSlicedCompletion();
+  workerAuthoritative = snapshot.workerAuthoritative === true;
   incompleteLayout = null;
   completedLayout = null;
   if (loadState && !snapshot.workerAuthoritative) session.loadState(snapshot.state);
@@ -608,10 +683,25 @@ function setFrameDisplayWindow(
   engine.setWindowedIncrementalBuilds(window !== undefined);
 }
 
-/**
- * Replaces a provisional layout with the full one before anything reads it,
- * finishing a sliced completion at once and answering its request first.
- */
+function refreshProvisionalLayout(pages: number): void {
+  if (!session || !incompleteLayout) return;
+  const layout = incompleteLayout;
+  const layoutJson = session.layoutDocumentWithRegionsPrefixRetainedJson(layout.layoutInput, pages);
+  layout.pages = pages;
+  if (slicedCompletion) {
+    slicedCompletion.begun = false;
+    slicedCompletion.restarts += 1;
+  }
+  if ((JSON.parse(layoutJson) as { provisional?: boolean }).provisional === true) return;
+  incompleteLayout = null;
+  completedLayout = {
+    ...layout,
+    layoutJson,
+    headersFootersJson: session.retainedHeadersFootersJson(),
+  };
+}
+
+/** Finishes a required full-layout barrier and answers its waiting completion first. */
 async function completeProvisionalLayout(): Promise<void> {
   if (!session || !incompleteLayout) return;
   const waiting = slicedCompletion;
@@ -703,14 +793,24 @@ function scheduleCompletionSlice(completion: SlicedCompletion): void {
         }
       },
       completion.id,
-      () => slicedCompletion === completion
+      () => slicedCompletion === completion,
+      'background'
     );
   });
 }
 
 /** One bounded step of a sliced completion, which then queues the next. */
 async function completionSlice(completion: SlicedCompletion): Promise<void> {
-  if (!session || slicedCompletion !== completion || !incompleteLayout) return;
+  if (!session || slicedCompletion !== completion) return;
+  if (!incompleteLayout) {
+    slicedCompletion = null;
+    await replyCompletedLayout(completion.id, completion.expectedFrameEpoch, completion.paintCaret);
+    return;
+  }
+  if (!workerAuthoritative && completion.restarts > COMPLETION_RESTARTS) {
+    await completeProvisionalLayout();
+    return;
+  }
   let progress;
   if (!completion.begun) {
     progress = session.beginRegionLayout(incompleteLayout.layoutInput);
@@ -725,7 +825,7 @@ async function completionSlice(completion: SlicedCompletion): Promise<void> {
       // or finish in one step once changes keep coming.
       completion.begun = false;
       completion.restarts += 1;
-      if (completion.restarts > COMPLETION_RESTARTS) {
+      if (!workerAuthoritative && completion.restarts > COMPLETION_RESTARTS) {
         try {
           await completeProvisionalLayout();
         } catch {
@@ -810,6 +910,8 @@ function destroySession(keepSurfaces = false): void {
   pendingUpdates = [];
   layoutRevision = 0;
   fontsRevision = -1;
+  workerAuthoritative = false;
+  prefixPages = 3;
   supersedeSlicedCompletion();
   incompleteLayout = null;
   completedLayout = null;

@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { createResidentEngineSession } from '../residentEngineSession';
+import { createResidentEngineSession, type ResidentEngineSession } from '../residentEngineSession';
 import { preloadEditWasm } from '../wasm/index';
 import type { ResidentEngineWorkerPort } from '../residentEngineWorkerClient';
 import type {
@@ -33,7 +33,9 @@ const STUBS: Record<string, string> = {
  * Bundles the worker module, with canvas output stubbed, and returns a factory that starts one
  * in-process worker per call. Messages cross with structured-clone semantics, asynchronously.
  */
-export async function residentWorkerFactory(): Promise<() => InProcessResidentWorker> {
+export async function residentWorkerFactory(): Promise<
+  (onSession?: (session: ResidentEngineSession) => void) => InProcessResidentWorker
+> {
   const result = await Bun.build({
     entrypoints: [resolve(import.meta.dir, '../residentEngineWorker.ts')],
     target: 'bun',
@@ -62,7 +64,7 @@ export async function residentWorkerFactory(): Promise<() => InProcessResidentWo
     'testHarness',
     await result.outputs[0].text()
   ) as (scope: unknown, canvas: unknown, harness: unknown) => void;
-  return () => {
+  return (onSession) => {
     let held: ResidentEngineWorkerResponse[] | null = null;
     const scope = {
       onmessage: null as ((event: { data: ResidentEngineWorkerRequest }) => void) | null,
@@ -98,7 +100,11 @@ export async function residentWorkerFactory(): Promise<() => InProcessResidentWo
       },
     };
     start(scope, class {}, {
-      createSession: createResidentEngineSession,
+      createSession: async () => {
+        const session = await createResidentEngineSession();
+        onSession?.(session);
+        return session;
+      },
       preload: preloadEditWasm,
     });
     return worker;

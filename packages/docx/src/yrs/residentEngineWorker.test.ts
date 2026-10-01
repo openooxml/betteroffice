@@ -15,7 +15,7 @@ import type {
   ResidentProposalOperation,
 } from './residentEngineWorkerProtocol';
 
-let startWorker: (scope: unknown, canvas: unknown, harness: unknown) => void;
+let startWorker: (scope: unknown, canvas: unknown, harness: unknown, turns: unknown) => void;
 
 beforeAll(async () => {
   const frameDelta = resolve(import.meta.dir, '../layout/render/frameDelta.ts');
@@ -68,6 +68,7 @@ beforeAll(async () => {
     'self',
     'OffscreenCanvas',
     'testHarness',
+    'MessageChannel',
     await result.outputs[0].text()
   ) as typeof startWorker;
 });
@@ -77,7 +78,7 @@ class Surface {
   constructor(public width = 1, public height = 1) {}
 }
 
-function worker() {
+function worker(synchronousTurns = false) {
   let nextId = 0;
   let frameEpoch = 0;
   const replies = new Map<number, (reply: ResidentEngineWorkerResponse) => void>();
@@ -213,7 +214,11 @@ function worker() {
       canvas.height = buffer.height;
     },
   };
-  startWorker(scope, Surface, harness);
+  class ImmediateTurns {
+    port1 = { onmessage: null as (() => void) | null };
+    port2 = { postMessage: () => this.port1.onmessage?.() };
+  }
+  startWorker(scope, Surface, harness, synchronousTurns ? ImmediateTurns : MessageChannel);
   function send(request: ResidentEngineWorkerRequestWithoutId) {
     const id = ++nextId;
     return new Promise<ResidentEngineWorkerResponse>((resolve) => {
@@ -1174,8 +1179,8 @@ describe('sliced layout completion', () => {
     selection: null,
   };
 
-  function steppedWorker(bodyBlocks = 10) {
-    const w = worker();
+  function steppedWorker(bodyBlocks = 10, authoritative = false, synchronousTurns = false) {
+    const w = worker(synchronousTurns);
     const calls: string[] = [];
     let epoch = 0;
     let measured = 0;
@@ -1248,7 +1253,7 @@ describe('sliced layout completion', () => {
         type: 'bootstrap',
         expectedFrameEpoch: 0,
         extras: '',
-        snapshot,
+        snapshot: { ...snapshot, ...(authoritative ? { workerAuthoritative: true as const } : {}) },
         layoutExtras: '{}',
         provisionalPages: 3,
       });
@@ -1295,6 +1300,221 @@ describe('sliced layout completion', () => {
     expect(calls.filter((call) => call === 'begin')).toHaveLength(2);
     expect(calls.indexOf('update')).toBeLessThan(calls.lastIndexOf('begin'));
     expect(calls).not.toContain('whole');
+  });
+
+  test('foreground proposals, snapshots, navigation and frames overtake an already queued slice', async () => {
+    const { w, calls, onResume, bootstrap } = steppedWorker(100, true, true);
+    let version = 'proposal-1';
+    const engine = {
+      version: () => version,
+      resolveParagraphAnchor: (anchor: DocxParagraphAnchor) => ({ status: 'found', anchor }),
+      applyEdits: (request: DocxEditRequest) => {
+        calls.push('propose');
+        version = 'proposal-2';
+        return {
+          ok: true, version, source: 'host', changedStories: ['body'],
+          receipts: request.steps.map((_step, stepIndex) => ({
+            stepIndex, changed: true, revisionIds: ['revision'],
+            newParagraphs: [], removedParagraphs: [],
+          })),
+        };
+      },
+    };
+    Object.assign(w.harness.session, {
+      proposalEngine: engine,
+      geometryReader: {
+        version: engine.version,
+        hasStory: () => false,
+        listRevisions: () => [],
+        resolveParagraphAnchor: () => ({ status: 'missing' }),
+      },
+      storiesChangedSince: (since: number) => ({
+        revision: version === 'proposal-1' ? 0 : 1,
+        stories: since === 0 && version === 'proposal-2' ? ['body'] : [],
+      }),
+      buildDisplayPagesFrame: () => {
+        calls.push('pages');
+        return w.harness.session.buildDisplayListFrame();
+      },
+      layoutDocumentWithRegionsPrefixRetainedJson: (_input: string, pages: number) => {
+        calls.push(`prefix:${pages}`);
+        return provisional;
+      },
+    });
+    await bootstrap();
+    calls.length = 0;
+    const initial = await w.send({ type: 'proposal', operation: { kind: 'snapshot' } });
+    expect(initial.ok && initial.proposal?.mirror.version).toBe('proposal-1');
+    expect(calls).toEqual([]);
+    const order: string[] = [];
+    const replies: Promise<ResidentEngineWorkerResponse>[] = [];
+    onResume.push(() => queueMicrotask(() => {
+      const requests: ResidentEngineWorkerRequestWithoutId[] = [
+        {
+          type: 'proposal', operation: {
+            kind: 'propose', request: {
+              expectVersion: 'proposal-1', proposals: [{
+                id: 'host',
+                paragraph: { kind: 'session', sessionId: 'session', story: 'body', paraId: 'p1' },
+                suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+                op: 'insertText', at: 'end', text: '!',
+              }],
+            },
+          },
+        },
+        {
+          type: 'proposal', operation: {
+            kind: 'setStates', request: {
+              expectVersion: 'proposal-2', expectPreviewVersion: 0,
+              changes: [{ id: 'host', state: 'rejected' }],
+            },
+          },
+        },
+        { type: 'proposal', operation: { kind: 'snapshot' } },
+        { type: 'documentRead', read: { kind: 'navigationTarget', story: 'body', paraId: 'p1' } },
+        { type: 'buildFrame', extras: '{}', expectedFrameEpoch: 1, paintCaret: false },
+        { type: 'buildPages', pages: [0], expectedFrameEpoch: 2, paintCaret: false },
+      ];
+      for (const request of requests) {
+        replies.push(w.send(request).then((reply) => {
+          order.push(request.type === 'proposal' ? request.operation.kind : request.type);
+          return reply;
+        }));
+      }
+    }));
+    const completed = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 2,
+    }).then((reply) => { order.push('complete'); return reply; });
+    const responses = await Promise.all(replies);
+    expect(responses.filter((reply) => !reply.ok)).toEqual([]);
+    expect(responses.every((reply) => reply.ok)).toBe(true);
+    expect(responses[0]!.ok && responses[0]!.proposal?.result?.ok).toBe(true);
+    expect(responses[1]!.ok && responses[1]!.proposal?.result?.ok).toBe(true);
+    expect(responses[2]!.ok && responses[2]!.proposal?.mirror.proposals.previewVersion).toBe(1);
+    expect(responses[3]!.ok && responses[3]!.read?.value).toBe('missing-target');
+    expect(order).toEqual(['propose', 'setStates', 'snapshot', 'documentRead', 'buildFrame', 'buildPages', 'complete']);
+    expect(calls.slice(0, 6)).toEqual(['begin', 'resume:2', 'propose', 'prefix:3', 'prefix:3', 'pages']);
+    expect(calls.filter((call) => call === 'begin')).toHaveLength(2);
+    expect(calls).not.toContain('whole');
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(new Set(w.answered).size).toBe(w.answered.length);
+  });
+
+  test('editable documents grant completion a slice during a continuous foreground burst', async () => {
+    const { w, calls, onResume, bootstrap } = steppedWorker(100, false, true);
+    await bootstrap();
+    let reads = 0;
+    const drained = deferred();
+    w.harness.session.revisionCount = () => {
+      reads += 1;
+      if (reads < 100) void w.send({ type: 'revisionCount' });
+      else drained.resolve();
+      return 0;
+    };
+    let readsAtResume = 0;
+    onResume.push(
+      () => queueMicrotask(() => { void w.send({ type: 'revisionCount' }); }),
+      () => { readsAtResume = reads; }
+    );
+    const completed = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 2,
+    });
+    expect(readsAtResume).toBeGreaterThan(0);
+    expect(readsAtResume).toBeLessThanOrEqual(16);
+    expect(reads).toBeLessThan(100);
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(calls).not.toContain('whole');
+    await drained.promise;
+  });
+
+  test('an authoritative completion defaults to slices and answers once when an update finishes the prefix', async () => {
+    const { w, calls, onResume, bootstrap } = steppedWorker(100, true, true);
+    await bootstrap();
+    Object.assign(w.harness.session, {
+      layoutDocumentWithRegionsPrefixRetainedJson: (_input: string, pages: number) => {
+        calls.push(`prefix:${pages}`);
+        return full;
+      },
+    });
+    let framed: Promise<ResidentEngineWorkerResponse> | undefined;
+    onResume.push(() => queueMicrotask(() => {
+      void w.send({ type: 'applyUpdate', update: new Uint8Array([1]), selection: null });
+      framed = w.send({
+        type: 'buildFrame', extras: '{}', expectedFrameEpoch: 1, paintCaret: false,
+      });
+    }));
+    const completed = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false,
+    });
+    expect((await framed!).ok).toBe(true);
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(calls).toEqual(['begin', 'resume:32', 'update', 'prefix:3']);
+    const again = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: 3, paintCaret: false,
+    });
+    expect(again.ok && again.frame).toBeUndefined();
+    expect(new Set(w.answered).size).toBe(w.answered.length);
+  });
+
+  test('an authoritative sync preempts and supersedes completion with a visible prefix', async () => {
+    const { w, calls, onResume, bootstrap } = steppedWorker(100, true, true);
+    Object.assign(w.harness.session, {
+      layoutDocumentWithRegionsPrefixRetainedJson: (_input: string, pages: number) => {
+        calls.push(`prefix:${pages}`);
+        return provisional;
+      },
+    });
+    await bootstrap();
+    calls.length = 0;
+    let synced: Promise<ResidentEngineWorkerResponse> | undefined;
+    onResume.push(() => queueMicrotask(() => {
+      synced = w.send({
+        type: 'sync', snapshot: { ...snapshot, workerAuthoritative: true, layoutRevision: 2 },
+        extras: '', layoutExtras: '{}', displayWindow: [2, 4],
+        expectedFrameEpoch: 1, paintCaret: false,
+      });
+    }));
+    const superseded = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 2,
+    });
+    const visible = await synced!;
+    expect(superseded.ok && superseded.frame).toBeUndefined();
+    expect(visible.ok && visible.layoutJson).toBe(provisional);
+    expect(visible.ok && visible.layoutProvisional).toBe(true);
+    expect(visible.ok && visible.layoutRevision).toBe(2);
+    expect(calls).toEqual(['begin', 'resume:2', 'prefix:4']);
+    const completed = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: 2, paintCaret: false, sliceBlocks: 2,
+    });
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(completed.ok && completed.layoutRevision).toBe(2);
+    expect(calls).not.toContain('whole');
+    expect(new Set(w.answered).size).toBe(w.answered.length);
+  });
+
+  test('editable completion falls back after bounded invalidations', async () => {
+    const { w, calls, onResume, bootstrap } = steppedWorker(100);
+    await bootstrap();
+    const engine = w.harness.session as unknown as {
+      beginRegionLayout(): unknown;
+      resumeRegionLayout(blocks: number): unknown;
+    };
+    const begin = engine.beginRegionLayout;
+    const resume = engine.resumeRegionLayout;
+    engine.resumeRegionLayout = (blocks) => resume(Math.min(blocks, 2));
+    engine.beginRegionLayout = () => {
+      onResume.push(() => {
+        void w.send({ type: 'applyUpdate', update: new Uint8Array([1]), selection: null });
+      });
+      return begin();
+    };
+    const completed = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 2,
+    });
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(calls.filter((call) => call === 'whole')).toHaveLength(1);
+    expect(calls.filter((call) => call === 'begin')).toHaveLength(4);
+    expect(new Set(w.answered).size).toBe(w.answered.length);
   });
 
   test('a glyph trap while a frame request finishes the pass answers both requests once', async () => {

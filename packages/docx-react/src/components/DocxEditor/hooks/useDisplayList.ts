@@ -80,7 +80,6 @@ import { nearestPages } from './pageBuildOrder';
 
 export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
   encodeState(): Promise<Uint8Array>;
-  laidOut(): Promise<void>;
   revisionCount(): Promise<number>;
   proposal: ResidentEngineWorkerClient['proposal'];
   documentRead: ResidentEngineWorkerClient['documentRead'];
@@ -449,7 +448,6 @@ export function useRustDisplayList(
     opened?: boolean;
     stateVector?: Uint8Array;
     opening?: Promise<ResidentEngineWorkerOpened>;
-    layoutComplete?: Promise<LayoutComputation | null>;
   } | null>(null);
   const retainBuiltPagesRef = useRef(false);
   // The document load each session belongs to: the one under way when it was
@@ -1305,9 +1303,6 @@ export function useRustDisplayList(
         return {
           ...opened,
           encodeState: () => requestOpenedWorker(hostEngine, (owner) => owner.client.encodeState()),
-          laidOut: () => requestOpenedWorker(hostEngine, async (owner) => {
-            await owner.layoutComplete;
-          }),
           revisionCount: () => requestOpenedWorker(hostEngine, (owner) => owner.client.revisionCount()),
           proposal: (op) =>
             requestOpenedWorker(hostEngine, (owner) => owner.client.proposal(op)),
@@ -1798,7 +1793,6 @@ export function useRustDisplayList(
             });
           // A pass the host drops never observes this; the renderer reports the failure.
           complete.catch(() => {});
-          owner.layoutComplete = complete;
           return { ...computation, complete };
         })
         .catch(unavailable);

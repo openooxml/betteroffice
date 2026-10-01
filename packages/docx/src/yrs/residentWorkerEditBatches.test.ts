@@ -9,10 +9,10 @@ import {
 } from '../layout/render/frameDelta';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { preloadEditWasm } from '../wasm/edit';
-import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
+import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { createYrsSession, type DocxEditRequest, type YrsSession } from './index';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
-import type { DocxProposalInput, DocxProposalResult, DocxProposalSnapshot } from './proposals';
+import { proposalRevisionPreview, type DocxProposalInput, type DocxProposalResult, type DocxProposalSnapshot } from './proposals';
 import { resolveNavigationTarget } from './proposalGeometry';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
@@ -27,7 +27,7 @@ const LAYOUT = JSON.stringify({
   renderEnv: {},
 });
 
-let startWorker: () => InProcessResidentWorker;
+let startWorker: Awaited<ReturnType<typeof residentWorkerFactory>>;
 const sessions: YrsSession[] = [];
 const clients: ResidentEngineWorkerClient[] = [];
 
@@ -302,6 +302,122 @@ test('the worker lays a host batch out exactly as the main thread does', async (
   const inWorker = JSON.parse(synced.layoutJson!) as { layout: { pages: unknown[] } };
   expect(inWorker.layout.pages.length).toBeGreaterThan(3);
   expect(inWorker).toEqual(JSON.parse(main.layoutDocumentWithRegionsRetainedJson(LAYOUT)));
+});
+
+test('foreground proposal decisions and reads preempt completion and finish at the fresh final layout', async () => {
+  const source = await createYrsSession({ clientId: 5111 });
+  sessions.push(source);
+  const filler = 'lorem ipsum dolor sit amet '.repeat(8);
+  const ids = source.loadStories([{
+    storyId: 'body',
+    paragraphs: Array.from({ length: 800 }, (_, index) => ({ text: `${index} ${filler}` })),
+  }]).body!;
+  source.registerFont(new Uint8Array(readFileSync(FONT)));
+  source.adoptResidentWorkerLayout!(LAYOUT);
+  const sessionId = source.paragraphIdentities().sessionId;
+  const trace: string[] = [];
+  let inject: (() => void) | undefined;
+  const client = new ResidentEngineWorkerClient(startWorker((engine) => {
+    const resume = engine.resumeRegionLayout;
+    const prefix = engine.layoutDocumentWithRegionsPrefixRetainedJson;
+    engine.resumeRegionLayout = (blocks) => {
+      trace.push('slice');
+      const progress = resume(Math.min(blocks, 1));
+      const run = inject;
+      inject = undefined;
+      run?.();
+      return progress;
+    };
+    engine.layoutDocumentWithRegionsPrefixRetainedJson = (input, pages) => {
+      trace.push('prefix');
+      return prefix(input, pages);
+    };
+  }));
+  clients.push(client);
+  const booted = await client.bootstrap(source.residentWorkerSnapshot()!, '', {
+    layoutExtras: '{}', provisionalPages: 1, displayWindow: [0, 1],
+  });
+  expect(booted.layoutProvisional).toBe(true);
+  let retained = applyFrameDeltaOwned(null, decodeFrameDelta(booted.frame));
+  const initial = await client.proposal({ kind: 'snapshot' });
+  source.mirrorWorkerDocument(initial.mirror);
+  source.adoptResidentWorkerLayout!(LAYOUT);
+  const synced = await client.sync(source.residentWorkerSnapshot()!, '', booted.caret.frameEpoch, false, {
+    layoutExtras: '{}', displayWindow: [0, 1],
+  });
+  expect(synced.layoutProvisional).toBe(true);
+  retained = applyFrameDeltaOwned(retained, decodeFrameDelta(synced.frame));
+  let round: Promise<DocxProposalSnapshot> | undefined;
+  let navigationValue: unknown;
+  inject = () => {
+    round = (async () => {
+      const proposed = await client.proposal({
+        kind: 'propose', request: {
+          expectVersion: initial.mirror.version,
+          proposals: [0, 90].map((index) => ({
+            id: `p${index}`,
+            paragraph: { kind: 'session', sessionId, story: 'body', paraId: ids[index]! },
+            suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+            op: 'replaceText', search: 'dolor', replaceWith: 'a much longer replacement',
+            occurrence: 'all',
+          })),
+        },
+      });
+      trace.push('propose');
+      expect(proposed.result?.ok).toBe(true);
+      const decided = await client.proposal({
+        kind: 'setStates', request: {
+          expectVersion: proposed.mirror.version, expectPreviewVersion: 0,
+          changes: [{ id: 'p0', state: 'rejected' }, { id: 'p90', state: 'accepted' }],
+        },
+      });
+      trace.push('setStates');
+      expect(decided.result?.ok).toBe(true);
+      const snapshot = await client.proposal({ kind: 'snapshot' });
+      trace.push('snapshot');
+      expect(snapshot.mirror).toEqual(decided.mirror);
+      const navigation = await client.documentRead({
+        kind: 'navigationTarget', story: 'body', paraId: ids[90]!,
+      });
+      trace.push('navigation');
+      navigationValue = navigation.value;
+      expect(navigation.value).toMatchObject({
+        loc: { story: 'body', paraId: ids[90], offset: 0 }, position: expect.any(Number),
+      });
+      const paragraphs = await client.documentRead({ kind: 'readParagraphs', request: { view: 'accepted' } });
+      trace.push('paragraphs');
+      expect(paragraphs.value.ok).toBe(true);
+      const frame = await client.buildFrame('{}', synced.caret.frameEpoch, false, [0, 1]);
+      trace.push('frame');
+      retained = applyFrameDeltaOwned(retained, decodeFrameDelta(frame.frame));
+      expect(frameText(retained)).toContain('0 lorem ipsum dolor');
+      expect(frameText(retained)).not.toContain('a much longer replacement');
+      await client.buildPages([0], frame.caret.frameEpoch);
+      trace.push('pages');
+      if (!decided.result?.ok) throw new Error('expected proposal decisions');
+      return decided.result.snapshot;
+    })();
+  };
+  trace.length = 0;
+  const completed = await client.completeLayout(synced.caret.frameEpoch, false, 1);
+  trace.push('complete');
+  const final = await round!;
+  expect(trace.filter((event) => event !== 'slice' && event !== 'prefix')).toEqual([
+    'propose', 'setStates', 'snapshot', 'navigation', 'paragraphs', 'frame', 'pages', 'complete',
+  ]);
+  expect(trace.slice(0, trace.indexOf('pages') + 1).filter((event) => event === 'slice')).toHaveLength(1);
+  expect(trace.filter((event) => event === 'prefix')).toHaveLength(2);
+  expect(completed).not.toBeNull();
+  const fresh = await createYrsSession({ clientId: 5112 });
+  sessions.push(fresh);
+  fresh.loadState(await client.encodeState());
+  fresh.registerFont(new Uint8Array(readFileSync(FONT)));
+  expect(navigationValue).toEqual(resolveNavigationTarget(fresh, 'body', ids[90]!));
+  const finalInput = JSON.stringify({
+    ...JSON.parse(LAYOUT), renderEnv: { revisionPreview: proposalRevisionPreview(final) },
+  });
+  expect(JSON.parse(completed!.layoutJson!)).toEqual(JSON.parse(fresh.layoutDocumentWithRegionsRetainedJson(finalInput)));
+  expect(JSON.parse(completed!.layoutJson!).layout.pages.length).toBeGreaterThan(3);
 });
 
 function proposalDocument(): Uint8Array {
