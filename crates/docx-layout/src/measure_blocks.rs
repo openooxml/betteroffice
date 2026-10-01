@@ -2340,6 +2340,10 @@ fn measure_table(
 
     for (row_index, row) in table.rows.iter_mut().enumerate() {
         let mut cells = Vec::with_capacity(row.cells.len());
+        let rotated_length = row
+            .height
+            .filter(|_| row.is_exact_height())
+            .unwrap_or(content_width);
         for (cell_index, cell) in row.cells.iter_mut().enumerate() {
             let resolved = grid
                 .iter()
@@ -2378,10 +2382,7 @@ fn measure_table(
                     .padding
                     .as_ref()
                     .map_or(0.0, |padding| padding.top + padding.bottom);
-                row.height
-                    .filter(|_| row.is_exact_height())
-                    .unwrap_or(content_width)
-                    - padding
+                rotated_length - padding
             } else {
                 cell_width - left - right
             };
