@@ -1,6 +1,7 @@
 /** Typed TypeScript boundary for the Rust package writer. */
 
 import type { BlockContent, Document, Hyperlink, Image, Run } from '../types/document';
+import { visitTrackedControlContent } from '../utils/trackedControlContent';
 import { preloadParseWasm, writeDocxS13Wire } from './parseWasm';
 import { collectParts, headerFooterFilename, partText } from './rezip/parts';
 import { preloadOpcWasm, unzipContainer } from './wasm';
@@ -196,7 +197,16 @@ function collectNewImages(blocks: BlockContent[]): Image[] {
           content.type === 'moveFrom' ||
           content.type === 'moveTo'
         ) {
-          for (const inline of content.content) if (inline.type === 'run') visitRun(inline);
+          for (const inline of content.content) {
+            if (inline.type === 'run') visitRun(inline);
+            else visitTrackedControlContent(inline, (node) => {
+              if (node.type === 'run') visitRun(node);
+            }, false, true);
+          }
+        } else {
+          visitTrackedControlContent(content, (node) => {
+            if (node.type === 'run') visitRun(node);
+          });
         }
       }
     } else if (block.type === 'table') {
@@ -215,6 +225,13 @@ function collectExternalHyperlinks(blocks: BlockContent[]): Hyperlink[] {
       for (const content of block.content) {
         if (content.type === 'hyperlink' && (content.href || content.rId) && !content.anchor) {
           hyperlinks.push(content);
+        }
+        if (content.type !== 'run') {
+          visitTrackedControlContent(content, (node) => {
+            if (node.type === 'hyperlink' && (node.href || node.rId) && !node.anchor) {
+              hyperlinks.push(node);
+            }
+          });
         }
       }
     } else if (block.type === 'table') {

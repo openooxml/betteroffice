@@ -1,5 +1,29 @@
 # @betteroffice/rust-crates
 
+## 0.4.1
+
+### Patch Changes
+
+- 66d0d66: A comment with ID 0 can now be re-anchored with `setCommentRanges` and keeps its range when saved after an edit elsewhere. Comment ranges, bookmarks and notes without a `w:id` are now ignored instead of being read as ID 0.
+- ff24d4d: Overlapping comments and comment ranges that span several paragraphs now keep their full extent when the document is saved after an edit elsewhere.
+- 37a8ff8: A header or footer field whose code runs over paragraph marks now shows its paragraphs as one line, as Word does, so it no longer makes the header taller and shortens every page.
+- 36ab3fe: Text now wraps beside a floating table wider than half the column that is anchored to the margin or names no horizontal anchor, as in Word, instead of running full width under it.
+- 55d0103: Body text now keeps clear of floating images, shapes, text boxes and tables in headers and footers that wrap top and bottom or span the text column, as in Word.
+- 4f2fcca: An inline picture alone on its line now gets the extra room of 1.5 or double line spacing below it, as in Word, so pages with such pictures break where Word breaks them.
+- d83c2fd: A paragraph set to keep with the next one inside a table cell now stays with it when the row breaks across pages, as in Word.
+- 81f0e0a: A table row set to keep with the next row now stays on its page when the first lines of the next row fit below it, as in Word, instead of moving with the whole next row.
+- 74322c9: A keep-with-next heading above a table now stays on its page when the first lines of the table's first row fit below it, as in Word, instead of moving to the next page with the whole row.
+- dd21fb2: A table row whose minimum height is taller than its content now moves whole to the next page when it does not fit, as in Word, instead of splitting across the page break.
+- ece75fd: Jumping to a proposal or paragraph no longer freezes long documents while the target is resolved. New `YrsSession.paragraphIdCount` counts the paragraphs of a story that carry an id.
+- c3ebdd0: Comments anchored inside a table cell or a block content control now keep their ranges when the document is saved after an edit elsewhere, and can be re-anchored with `setCommentRanges`.
+- fd3f7d4: A keep-with-next paragraph followed by a paragraph that starts a new page now stays on its page, as in Word, instead of moving to a page of its own.
+- 90033fe: Saving no longer adds zero wrap distances or a zero effect extent to a picture that had none, so inline pictures keep their position in LibreOffice after a save.
+- e8fb199: Internal groundwork for applying host proposals in the background worker; nothing changes for editors yet.
+- 7ab1ed4: Opening a large document spends less time committing its initial content, so it loads sooner.
+- 28eaa43: Opening a large document spends less time preparing its source positions, so it finishes loading sooner.
+- 2988780: Opening a document no longer waits for the East Asian or complex-script fonts its text names but never uses, so the first page no longer waits on a large CJK font for Latin-only text.
+- c407a61: A paragraph under widow control whose last line would carry over alone now takes one more line to the next page, as Word does, so page breaks match Word.
+
 ## 0.4.0
 
 ### Minor Changes

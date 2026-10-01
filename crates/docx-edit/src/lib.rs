@@ -80,6 +80,7 @@ mod fingerprint;
 mod format;
 mod heading;
 mod identity;
+mod inline_content;
 mod list_marker;
 pub mod media;
 mod op;

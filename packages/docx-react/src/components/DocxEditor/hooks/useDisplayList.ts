@@ -1330,19 +1330,39 @@ export function useRustDisplayList(
           if (failure) throw failure;
           if (error instanceof ResidentWorkerOutOfMemoryError) {
             if (replaceOutOfMemoryWorker(hostEngine, owner, error) === 'retry') {
+              if (holdsWorkerProposals(hostEngine)) {
+                registeredWorkerProposalAuthority(hostEngine)?.restart();
+              }
               continue;
             }
           } else {
             if (!isCurrentWorker(hostEngine, owner)) throw new SupersededPreviewError();
-            if (owner.client.hasFailed() && holdsCommittedWorkerProposals(hostEngine)) {
-              throw failWorkerDocument(hostEngine, error);
+            if (owner.client.hasFailed()) {
+              if (holdsCommittedWorkerProposals(hostEngine)) {
+                throw failWorkerDocument(hostEngine, error);
+              }
+              if (holdsWorkerProposals(hostEngine)) {
+                owner.client.destroy();
+                workerRef.current = null;
+                setWorkerSurfacesActive(false);
+                setWorkerPresentationActive(false);
+                registeredWorkerProposalAuthority(hostEngine)?.restart();
+              }
             }
           }
           throw error;
         }
       }
     },
-    [failWorkerDocument, handedOverPreview, isCurrentWorker, replaceOutOfMemoryWorker, sessionLoad, workerFor]
+    [
+      failWorkerDocument,
+      handedOverPreview,
+      isCurrentWorker,
+      replaceOutOfMemoryWorker,
+      sessionLoad,
+      setWorkerPresentationActive,
+      workerFor,
+    ]
   );
 
   const openInWorker = useCallback<OpenInWorker>(

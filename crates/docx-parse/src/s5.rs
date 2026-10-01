@@ -237,6 +237,9 @@ fn collect_complex_field_instructions(
                 }
             }
             InlineNode::InlineSdt(sdt) => collect_complex_field_instructions(&sdt.content, output),
+            InlineNode::Tracked(change) => {
+                collect_complex_field_instructions(&change.content, output)
+            }
             _ => {}
         }
     }
