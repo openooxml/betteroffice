@@ -10274,14 +10274,19 @@ mod tests {
                     decode(edit(tail, ""));
                 }
             }
-            assert!(engine
-                .with_display_list(|list| list.pages.iter().all(|page| !page.unbuilt))
-                .unwrap());
+            assert!(
+                engine
+                    .with_display_list(|list| list.pages.iter().all(|page| !page.unbuilt))
+                    .unwrap()
+            );
             decode(edit(tail, "y"));
 
             engine.set_windowed_incremental_builds(true);
-            let mut before =
-                decode(engine.release_display_pages_frame(&distant, epoch()).unwrap());
+            let mut before = decode(
+                engine
+                    .release_display_pages_frame(&distant, epoch())
+                    .unwrap(),
+            );
             assert!(before.pages[1..].iter().all(|page| page.unbuilt));
             for (offset, text) in ["a", "b", "c"].into_iter().enumerate() {
                 let bytes = edit(3 + offset as u32, text);
