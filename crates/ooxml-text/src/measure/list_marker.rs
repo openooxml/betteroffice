@@ -78,7 +78,15 @@ pub(super) fn list_marker_tab_overrun(
     }
     let body_start =
         marker_tab_stop(attrs, marker_end_px)?.unwrap_or(marker_end_px + size_px * 0.5);
-    Ok(body_start - indent_left)
+    let overrun = body_start - indent_left;
+    let indent_right = indent.and_then(|i| i.right).unwrap_or(0.0);
+    let body_width = input.max_width - indent_left - indent_right;
+    // Keep today's text start when the stop leaves less than an em for the text.
+    Ok(if overrun <= body_width - size_px {
+        overrun
+    } else {
+        0.0
+    })
 }
 
 /// Returns nonempty marker text only when the marker is visible.

@@ -454,11 +454,6 @@ pub fn measure_paragraph_typed(
         }
         _ => 0.0,
     };
-    let marker_tab_overrun = if marker_tab_overrun < body_width {
-        marker_tab_overrun
-    } else {
-        0.0
-    };
     let first_line_offset = if visible_marker && hanging > 0.0 {
         marker_tab_overrun
     } else {
