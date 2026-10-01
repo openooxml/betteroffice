@@ -65,20 +65,26 @@ fn table_outer_borders_match_word_positions() {
 
         let display: Value =
             serde_json::from_str(&engine.build_display_list_json(&layout).unwrap()).unwrap();
+        let mut lines: Vec<(f64, String)> = Vec::new();
+        for primitive in display["pages"][0]["primitives"].as_array().unwrap() {
+            let (Some("text"), Some(text), Some(y)) = (
+                primitive["kind"].as_str(),
+                primitive["text"].as_str(),
+                primitive["baselineY"].as_f64(),
+            ) else {
+                continue;
+            };
+            match lines.iter_mut().find(|(line_y, _)| *line_y == y) {
+                Some((_, line)) => line.push_str(text),
+                None => lines.push((y, text.to_owned())),
+            }
+        }
         let baseline = |target: &str| {
-            let primitive = display["pages"][0]["primitives"]
-                .as_array()
-                .unwrap()
+            lines
                 .iter()
-                .find(|primitive| {
-                    matches!(primitive["kind"].as_str(), Some("text" | "glyphRun"))
-                        && primitive["text"] == target
-                })
-                .unwrap_or_else(|| panic!("{name}: missing {target} text"));
-            primitive["baselineY"]
-                .as_f64()
-                .or_else(|| primitive["glyphs"][0]["y"].as_f64())
-                .unwrap()
+                .find(|(_, line)| line.contains(target))
+                .unwrap_or_else(|| panic!("{name}: missing {target} text"))
+                .0
                 * 0.75
         };
         let row_text = expected["row01"][0].as_str().unwrap();
