@@ -1,9 +1,11 @@
 import type { YrsSession } from '@betteroffice/docx/yrs';
 
+export type WorkerOpenFallbackReason = 'failure' | { syncAccess: string };
+
 interface PendingReplica {
   ready: Promise<void>;
   start(): void;
-  ensure(): void;
+  ensure(reason?: WorkerOpenFallbackReason): void;
   fail(error: unknown): void;
   cancel(): void;
   pending: boolean;
@@ -29,7 +31,7 @@ const replicas = new WeakMap<YrsSession, PendingReplica>();
 export function deferWorkerOpenReplica(
   session: YrsSession,
   hydrate: () => Promise<() => void>,
-  fallback: () => void,
+  fallback: (reason: WorkerOpenFallbackReason) => void,
   onReady: () => void,
   onDemand?: WorkerOpenReplicaDemand
 ): PendingReplica {
@@ -43,16 +45,20 @@ export function deferWorkerOpenReplica(
     reject = no;
   });
   void ready.catch(() => {});
-  const finish = (load: () => void, handoff = false): void => {
+  const finish = (
+    load: (reason: WorkerOpenFallbackReason) => void,
+    handoff = false,
+    reason: WorkerOpenFallbackReason = 'failure'
+  ): void => {
     if (!replica.pending || finishing) return;
     finishing = true;
     try {
       try {
-        load();
+        load(reason);
         if (handoff) replica.readyVersion = session.version();
       } catch (error) {
         if (!handoff) throw error;
-        fallback();
+        fallback('failure');
       }
       replica.loadedVersion = session.version();
       replica.pending = false;
@@ -82,8 +88,8 @@ export function deferWorkerOpenReplica(
         () => finish(fallback)
       );
     },
-    ensure() {
-      finish(fallback);
+    ensure(reason = 'failure') {
+      finish(fallback, false, reason);
       if (failure !== undefined) throw failure;
     },
     cancel() {
@@ -140,8 +146,8 @@ export function workerOpenReplicaLoadedVersion(session: YrsSession): string | un
   return replicas.get(session)?.loadedVersion;
 }
 
-export function ensureWorkerOpenReplica(session: YrsSession): void {
-  replicas.get(session)?.ensure();
+export function ensureWorkerOpenReplica(session: YrsSession, syncAccess?: string): void {
+  replicas.get(session)?.ensure(syncAccess === undefined ? 'failure' : { syncAccess });
 }
 
 export function failWorkerOpenReplica(session: YrsSession, error: unknown): void {

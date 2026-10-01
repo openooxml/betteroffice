@@ -366,11 +366,58 @@ describe('preloaded worker', () => {
     client?.destroy();
   });
 
-  test('drops a failed spare so the next preload creates a fresh worker', async () => {
+  test('keeps a spare usable after a non-terminal warm failure', async () => {
+    installWorker();
+    const warm = preloadResidentEngineWorker();
+    const worker = FakeWorker.instances[0];
+    worker.reply({ id: worker.lastId(), ok: false, error: 'init failed' });
+    await expect(warm).rejects.toThrow('init failed');
+    expect(worker.terminated).toBe(false);
+    const client = takePreloadedResidentEngineWorker()!;
+    expect(client).not.toBeNull();
+    expect(client.hasFailed()).toBe(false);
+    const bootstrap = client.bootstrap(snapshot, '');
+    expect(worker.posted.at(-1)).toMatchObject({ type: 'bootstrap' });
+    worker.reply(frameReply(worker.lastId()));
+    await bootstrap;
+    client.destroy();
+  });
+
+  test('retries a non-terminal warm failure on the same spare', async () => {
+    installWorker();
+    const warm = preloadResidentEngineWorker();
+    const worker = FakeWorker.instances[0];
+    worker.reply({ id: worker.lastId(), ok: false, error: 'init failed' });
+    await expect(warm).rejects.toThrow('init failed');
+    const retry = preloadResidentEngineWorker();
+    const sharedRetry = preloadResidentEngineWorker();
+    expect(FakeWorker.instances).toHaveLength(1);
+    expect(retry).not.toBe(warm);
+    expect(sharedRetry).toBe(retry);
+    expect(worker.posted).toEqual([{ id: 1, type: 'warm' }, { id: 2, type: 'warm' }]);
+    worker.reply({ id: worker.lastId(), ok: true });
+    await retry;
+    expect(worker.terminated).toBe(false);
+  });
+
+  test('expires an unused spare after a non-terminal warm failure', async () => {
+    installWorker();
+    const warm = preloadResidentEngineWorker();
+    const worker = FakeWorker.instances[0];
+    worker.reply({ id: worker.lastId(), ok: false, error: 'init failed' });
+    await expect(warm).rejects.toThrow('init failed');
+    expect(worker.terminated).toBe(false);
+    expect(armedBudgets()).toEqual([RESIDENT_WORKER_SILENCE_MS]);
+    expireTimers();
+    expect(worker.terminated).toBe(true);
+    expect(takePreloadedResidentEngineWorker()).toBeNull();
+  });
+
+  test('drops a terminally failed spare so the next preload creates a fresh worker', async () => {
     installWorker();
     const warm = preloadResidentEngineWorker();
     const failed = FakeWorker.instances[0];
-    failed.reply({ id: failed.lastId(), ok: false, error: 'init failed' });
+    failed.reply({ id: failed.lastId(), ok: false, error: 'init failed', terminal: true });
     await expect(warm).rejects.toThrow('init failed');
     expect(failed.terminated).toBe(true);
     expect(takePreloadedResidentEngineWorker()).toBeNull();

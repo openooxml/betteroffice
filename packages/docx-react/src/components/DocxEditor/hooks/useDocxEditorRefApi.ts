@@ -189,7 +189,7 @@ function gateReplicaAccess(
               void requestWorkerOpenReplica(session)?.catch(() => {});
               throw new DocxReplicaNotReadyError(key);
             }
-            if (onDemand === undefined) ensureWorkerOpenReplica(session);
+            if (onDemand === undefined) ensureWorkerOpenReplica(session, key);
           } else {
             if (key === 'whenLayoutComplete' && workerOpenReplicaOnDemand(session)) {
               return Reflect.apply(call, api, args);
