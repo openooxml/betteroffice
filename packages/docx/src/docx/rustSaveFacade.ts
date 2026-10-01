@@ -41,6 +41,14 @@ export interface RustSaveResult {
 export interface RustParagraphIds {
   assignments: Array<{ part: string; ordinal: number; paraId: string }>;
   patchedParts: Array<{ part: string; paraIds: Array<[number, string]> }>;
+  /**
+   * Story parts written as their source bytes with only some paragraphs
+   * re-serialized: those whose `sourceOrdinal` is in `changed`, or whose
+   * written comments, revisions, notes or relationships differ from their
+   * source. `paragraphs` lists every `sourceOrdinal` the model holds for the
+   * part, `sha256` the source part it addresses.
+   */
+  splicedParts?: Array<{ part: string; sha256: string; paragraphs: number[]; changed: number[] }>;
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {

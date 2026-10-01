@@ -4,12 +4,13 @@
 //! and re-emit unchanged markup, so every byte outside an explicitly changed
 //! paragraph remains authored exactly as it appeared in the source package.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use base64::Engine as _;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::block::BlockContent;
 use crate::document::DocumentBody;
@@ -32,8 +33,8 @@ use super::context::SerializerContext;
 use super::numbering::serialize_numbering_xml;
 use super::paragraph::serialize_paragraph;
 use super::paragraph_ids::{
-    COMMENTS_PART, S13ParagraphIds, apply_assignments, comment_companions, model_paragraph_ids,
-    patch_comment_parts, patch_part,
+    COMMENTS_PART, S13ParagraphIds, S13SplicedPart, apply_assignments, comment_companions,
+    model_paragraph_ids, patch_comment_parts, patch_part,
 };
 use super::parts::{
     serialize_comments_extended_part, serialize_comments_extensible_part,
@@ -225,6 +226,27 @@ pub fn write_docx_s13_parts(
         })
         .collect();
 
+    let assignments: HashMap<String, BTreeMap<u32, String>> = paragraph_ids
+        .assignments_by_part()
+        .into_iter()
+        .map(|(part, ids)| (package.resolve_path(part).to_owned(), ids))
+        .collect();
+    let spliced: HashMap<String, &S13SplicedPart> = paragraph_ids
+        .spliced_parts
+        .iter()
+        .filter(|part| part.part != COMMENTS_PART && !patched.contains_key(part.part.as_str()))
+        .filter_map(|part| {
+            let path = package.resolve_path(&part.part).to_owned();
+            let original = package.original_bytes(&path)?;
+            (format!("{:x}", Sha256::digest(original)) == part.sha256.to_ascii_lowercase())
+                .then_some((path, part))
+        })
+        .collect();
+    let stories = StoryParts {
+        spliced: &spliced,
+        assignments: &assignments,
+    };
+
     let preserved = |path: &str| patched_parts.contains_key(package.resolve_path(path));
     let changed: Option<HashSet<String>> = request
         .selective
@@ -303,7 +325,10 @@ pub fn write_docx_s13_parts(
             }
         }
     } else {
-        serialize_document_part(&request.document, &mut context)?
+        let path = package.document_path.clone();
+        stories.write(&package, &path, &mut context, |context| {
+            serialize_document_part(&request.document, context)
+        })?
     };
     package.set_text("word/document.xml", document_xml);
 
@@ -313,6 +338,7 @@ pub fn write_docx_s13_parts(
         &relationships,
         &mut package,
         &mut context,
+        &stories,
     )?;
     let story_parts: Vec<String> = relationships
         .values()
@@ -370,20 +396,20 @@ pub fn write_docx_s13_parts(
         if let Some(bytes) = patched_parts.remove("word/footnotes.xml") {
             package.set("word/footnotes.xml", bytes);
         } else if !footnotes.is_empty() {
-            package.set_text(
-                "word/footnotes.xml",
-                serialize_footnotes_part(&footnotes, &mut context)?,
-            );
+            let xml = stories.write(&package, "word/footnotes.xml", &mut context, |context| {
+                serialize_footnotes_part(&footnotes, context)
+            })?;
+            package.set_text("word/footnotes.xml", xml);
         }
         let mut endnotes = request.endnote_separators;
         endnotes.extend(request.endnotes);
         if let Some(bytes) = patched_parts.remove("word/endnotes.xml") {
             package.set("word/endnotes.xml", bytes);
         } else if !endnotes.is_empty() {
-            package.set_text(
-                "word/endnotes.xml",
-                serialize_endnotes_part(&endnotes, &mut context)?,
-            );
+            let xml = stories.write(&package, "word/endnotes.xml", &mut context, |context| {
+                serialize_endnotes_part(&endnotes, context)
+            })?;
+            package.set_text("word/endnotes.xml", xml);
         }
     }
 
@@ -684,12 +710,51 @@ fn validate_selective_header_footer_parts(
     Ok(())
 }
 
+/// The story parts a save may splice into their source XML, and the paragraph IDs it assigns.
+struct StoryParts<'r> {
+    spliced: &'r HashMap<String, &'r S13SplicedPart>,
+    assignments: &'r HashMap<String, BTreeMap<u32, String>>,
+}
+
+impl StoryParts<'_> {
+    /// The story part at `path` as `serialize` writes it, or its source XML with only the
+    /// paragraphs that need it rewritten when the part is spliced.
+    fn write(
+        &self,
+        package: &Package,
+        path: &str,
+        context: &mut SerializerContext,
+        serialize: impl FnOnce(&mut SerializerContext) -> Result<String, ParseError>,
+    ) -> Result<String, ParseError> {
+        let path = package.resolve_path(path);
+        let Some(part) = self.spliced.get(path) else {
+            return serialize(context);
+        };
+        context.begin_splice(part.paragraphs.iter().copied());
+        let serialized = serialize(context);
+        let written = context.end_splice();
+        let serialized = serialized?;
+        let source = package
+            .original_bytes(path)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok());
+        let empty = BTreeMap::new();
+        let assignments = self.assignments.get(path).unwrap_or(&empty);
+        Ok(source
+            .zip(written)
+            .and_then(|(source, written)| {
+                super::splice::splice_story_part(source, &serialized, &written, part, assignments)
+            })
+            .unwrap_or(serialized))
+    }
+}
+
 fn serialize_header_footer_parts(
     headers: &[(String, HeaderFooter)],
     footers: &[(String, HeaderFooter)],
     relationships: &IndexMap<String, Relationship>,
     package: &mut Package,
     context: &mut SerializerContext,
+    stories: &StoryParts,
 ) -> Result<(), ParseError> {
     for (entries, relationship_type) in [
         (headers, relationship_types::HEADER),
@@ -705,10 +770,11 @@ fn serialize_header_footer_parts(
             {
                 continue;
             }
-            package.set_text(
-                resolve_relative_path(&package.document_path, &relationship.target)?,
-                serialize_header_footer_part(story, context)?,
-            );
+            let path = resolve_relative_path(&package.document_path, &relationship.target)?;
+            let xml = stories.write(package, &path, context, |context| {
+                serialize_header_footer_part(story, context)
+            })?;
+            package.set_text(path, xml);
         }
     }
     Ok(())
@@ -1833,7 +1899,7 @@ fn process_hyperlink_part<'a>(
                 .as_deref()
                 .and_then(|id| relationships.existing_position(id))
                 .map(|position| *relationships.entry(position));
-            let Some(href) = hyperlink.href.as_deref() else {
+            let Some(href) = hyperlink.href.as_deref().filter(|href| !href.is_empty()) else {
                 if current.is_none() {
                     hyperlink.relationship_id = None;
                 }
@@ -2418,7 +2484,6 @@ fn build_source_patched_document_xml(
     sources: &S13SourceParagraphs,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
-    use sha2::{Digest, Sha256};
     if format!("{:x}", Sha256::digest(original)) != sources.part_sha256.to_ascii_lowercase() {
         return Err(save_error(
             "the main document part is not the one the source paragraphs address",
@@ -3043,6 +3108,88 @@ mod tests {
         assert!(document.contains("<w:t>edited</w:t>"));
         assert!(!document.contains("model copy"));
         assert_eq!(parts["custom/opaque.dat"], b"opaque\0bytes");
+    }
+
+    #[test]
+    fn a_hyperlink_whose_target_the_model_hides_keeps_its_relationship() {
+        let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdFile" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="file:///C:/shared/report.docx" TargetMode="External"/></Relationships>"#;
+        let mut parts = ooxml_opc::unzip_parts(&base_package(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><w:body><w:p><w:hyperlink r:id=\"rIdFile\"><w:r><w:t>report</w:t></w:r></w:hyperlink></w:p></w:body></w:document>",
+        ))
+        .expect("unzip");
+        for (name, bytes) in &mut parts {
+            if name == "word/_rels/document.xml.rels" {
+                *bytes = rels.as_bytes().to_vec();
+            }
+        }
+        let original = ooxml_opc::rezip_parts(&parts).expect("package");
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": determinism(),
+            "document": { "content": [{
+                "type": "paragraph",
+                "content": [{
+                    "type": "hyperlink",
+                    "href": "",
+                    "rId": "rIdFile",
+                    "children": [{ "type": "run", "content": [{ "type": "text", "text": "report" }] }]
+                }]
+            }] },
+            "options": { "updateModifiedDate": false }
+        }))
+        .expect("request");
+        let saved = part_map(&write_docx_s13(request, &original).expect("save"));
+        assert_eq!(saved["word/_rels/document.xml.rels"], rels.as_bytes());
+        let document = String::from_utf8(saved["word/document.xml"].clone()).unwrap();
+        assert!(
+            document.contains("<w:hyperlink r:id=\"rIdFile\">"),
+            "{document}"
+        );
+    }
+
+    #[test]
+    fn spliced_save_keeps_the_source_bytes_of_unchanged_paragraphs() {
+        let original_document = concat!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\"><w:body>",
+            "<w:p w14:paraId=\"0000000A\" w:rsidR=\"00AB12CD\"><w:r><w:t>keep</w:t></w:r></w:p>",
+            "<!-- authored gap -->",
+            "<w:p w14:paraId=\"0000000B\"><w:r><w:t>old</w:t></w:r></w:p>",
+            "</w:body></w:document>"
+        );
+        let original = base_package(original_document);
+        let save = |sha256: String| {
+            let mut keep = text_paragraph("keep", Some("0000000A"));
+            keep["sourceOrdinal"] = json!(0);
+            let mut edited = text_paragraph("edited", Some("0000000B"));
+            edited["sourceOrdinal"] = json!(1);
+            let request: S13SaveRequest = serde_json::from_value(json!({
+                "determinism": determinism(),
+                "document": { "content": [keep, edited] },
+                "options": { "updateModifiedDate": false },
+                "paragraphIds": { "splicedParts": [{
+                    "part": "word/document.xml",
+                    "sha256": sha256,
+                    "paragraphs": [0, 1],
+                    "changed": [1]
+                }] }
+            }))
+            .expect("request");
+            let saved = write_docx_s13(request, &original).expect("spliced save");
+            String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap()
+        };
+        let spliced = save(format!(
+            "{:x}",
+            Sha256::digest(original_document.as_bytes())
+        ));
+        let edited_start = original_document
+            .find("<w:p w14:paraId=\"0000000B\">")
+            .unwrap();
+        assert!(spliced.starts_with(&original_document[..edited_start]));
+        assert!(spliced.ends_with("</w:body></w:document>"));
+        assert!(spliced.contains("<w:t>edited</w:t>"));
+        assert!(!spliced.contains("old"));
+        let stale = save("0".repeat(64));
+        assert!(!stale.contains("authored gap"));
+        assert!(stale.contains("<w:t>edited</w:t>"));
     }
 
     #[test]

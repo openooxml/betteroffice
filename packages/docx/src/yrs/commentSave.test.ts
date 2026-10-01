@@ -223,16 +223,16 @@ describe('a reanchored comment', () => {
       first.applyUpdate(second.encodeStateAsUpdate(first.encodeStateVector()));
       const expected = anchored(source, '1');
       expect(['Closing', 'After']).toContain(expected);
-      const written: string[] = [];
+      const written = new Map<string, Set<string>>();
       for (const replica of [source, peer]) {
         expect(anchored(replica, '1')).toBe(expected);
         for (const [path, bytes] of await saves(replica)) {
           expect([path, markers(bytes, 1)]).toEqual([path, ['RangeStart', 'RangeEnd', 'Reference']]);
           expect(anchored(await open(bytes, 91032), '1')).toBe(expected);
-          written.push(documentXml(bytes));
+          written.set(path, (written.get(path) ?? new Set()).add(documentXml(bytes)));
         }
       }
-      expect(new Set(written).size).toBe(1);
+      for (const [path, xml] of written) expect([path, xml.size]).toEqual([path, 1]);
     }
   });
 
@@ -253,16 +253,16 @@ describe('a reanchored comment', () => {
         first.applyUpdate(second.encodeStateAsUpdate(first.encodeStateVector()));
         const expected = anchored(source, '1');
         expect(['tro', 'Closing']).toContain(expected);
-        const written: string[] = [];
+        const written = new Map<string, Set<string>>();
         for (const replica of [source, peer]) {
           expect(anchored(replica, '1')).toBe(expected);
           for (const [path, bytes] of await saves(replica)) {
             expect([path, markers(bytes, 1)]).toEqual([path, ['RangeStart', 'RangeEnd', 'Reference']]);
             expect(anchored(await open(bytes, 91042), '1')).toBe(expected);
-            written.push(documentXml(bytes));
+            written.set(path, (written.get(path) ?? new Set()).add(documentXml(bytes)));
           }
         }
-        expect(new Set(written).size).toBe(1);
+        for (const [path, xml] of written) expect([path, xml.size]).toEqual([path, 1]);
       }
     }
   });
