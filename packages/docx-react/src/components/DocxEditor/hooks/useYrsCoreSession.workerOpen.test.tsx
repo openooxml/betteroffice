@@ -27,12 +27,12 @@ import type { DocxEditorCollaborationOptions } from '../types';
 import { awaitWorkerOpenReplica, ensureWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
 import { isLayoutQueued, revisionPreviewKey, revisionPreviewKeyOf, sourceVersionOf } from '../internals/layoutProvenance';
 import * as replicaHelpers from '../internals/workerOpenReplica';
-import { workerProposalAuthority } from '../internals/workerProposalAuthority';
+import { registeredWorkerProposalAuthority, workerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { DocxEditorRef } from '../../DocxEditor';
 import type { PagedEditorRef } from '../PagedEditor';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
 import { createCommentIdAllocator } from '../commentFactories';
-import { useDocxEditorRefApi } from './useDocxEditorRefApi';
+import { DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
 import { usePagedEditorCommandBridge, type PagedEditorCommandBridge } from './usePagedEditorRefApi';
 import { YrsInput, type YrsInputRef } from '../YrsInput';
 
@@ -91,6 +91,8 @@ afterAll(async () => {
 function installWorker(options: {
   failOpen?: boolean;
   failState?: boolean;
+  failProposal?: boolean;
+  crashProposalOnce?: boolean;
   holdState?: boolean;
   holdOpen?: boolean;
   oomStage?: 'open' | 'fontRequirements' | 'bootstrap' | 'encodeState' | 'proposal' |
@@ -109,6 +111,7 @@ function installWorker(options: {
   const replies = new Map<number, () => void>();
   const received = new Set<ResidentEngineWorkerRequest>();
   const replyWaiters = new Set<() => void>();
+  let proposalCrashed = false;
   globalThis.Worker = class {
     constructor() {
       const worker = startWorker();
@@ -142,10 +145,20 @@ function installWorker(options: {
           queueMicrotask(() => worker.onmessage?.({
             data: { id: request.id, ok: false, error: 'worker exhausted memory', terminal: true, outOfMemory: true },
           } as MessageEvent));
+        } else if (options.crashProposalOnce && !proposalCrashed &&
+            request.type === 'proposal' && request.operation.kind === 'propose') {
+          proposalCrashed = true;
+          queueMicrotask(() => worker.onmessage?.({
+            data: { id: request.id, ok: false, error: 'proposal crashed', terminal: true },
+          } as MessageEvent));
         } else if ((options.failOpen && request.type === 'open') ||
             (options.failState && request.type === 'encodeState')) {
           queueMicrotask(() => worker.onmessage?.({
             data: { id: request.id, ok: false, error: 'open failed', terminal: true },
+          } as MessageEvent));
+        } else if (options.failProposal && request.type === 'proposal' && request.operation.kind === 'propose') {
+          queueMicrotask(() => worker.onmessage?.({
+            data: { id: request.id, ok: false, error: 'proposal failed' },
           } as MessageEvent));
         } else if (request.type === 'revisionCount') {
           options.onRevisionCount?.();
@@ -1921,6 +1934,114 @@ test('a document read OOM before proposals reopens the source document once', as
   }
 }, 15_000);
 
+test('an OOM during the first proposal starts a fresh worker instead of failing the document', async () => {
+  const options: Parameters<typeof installWorker>[0] = {};
+  const { workers, posted } = installWorker(options);
+  const { result, unmount } = await openWorkerProposals();
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const api = result.current.ref.current!;
+    const session = result.current.core.session!;
+    const identities = await api.getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    const initial = await api.getProposals();
+    options.oomStage = 'proposal';
+    let outcome!: { ok: boolean } | Error;
+    await act(async () => {
+      outcome = await api.proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'first-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'First ',
+        }],
+      }).catch((error: Error) => error);
+    });
+    expect(outcome).not.toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    expect(workers).toHaveLength(2);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(2);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    expect(errorLog.mock.calls.some(([message]) =>
+      String(message).includes('holding proposals ran out of memory')
+    )).toBe(false);
+    expect(registeredWorkerProposalAuthority(session)?.holdsWorkerState() ?? false).toBe(
+      !(outcome instanceof Error) && outcome.ok
+    );
+    const after = await api.getProposals();
+    expect(after.proposals.map(({ id }) => id)).toEqual(
+      !(outcome instanceof Error) && outcome.ok ? ['first-proposal'] : []
+    );
+  } finally {
+    unmount();
+    errorLog.mockRestore();
+  }
+}, 15_000);
+
+test('a later proposal succeeds after an OOM during the first proposal', async () => {
+  const options: Parameters<typeof installWorker>[0] = {};
+  const { workers, posted } = installWorker(options);
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const api = () => result.current.ref.current!;
+    const session = result.current.core.session!;
+    const identities = await api().getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
+    const initial = await api().getProposals();
+    options.oomStage = 'proposal';
+    await act(async () => {
+      await expect(api().proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'failed-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Failed ',
+        }],
+      })).rejects.toThrow();
+    });
+    expect(registeredWorkerProposalAuthority(session)!.holdsWorkerState()).toBe(false);
+    expect(session.getProposals().proposals).toEqual([]);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    await act(async () => { await api().whenLayoutComplete({ timeoutMs: 5000 }); });
+    const recovered = await api().getProposals();
+    const recoveredParagraph = (await api().getParagraphIdentities()).paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    await act(async () => {
+      expect(await api().proposeChanges({
+        expectVersion: recovered.version,
+        proposals: [{
+          id: 'recovered-after-oom', paragraph: recoveredParagraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Recovered ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    const proposed = await api().getProposals();
+    expect(proposed.proposals.map(({ id }) => id)).toEqual(['recovered-after-oom']);
+    await act(async () => {
+      expect(await api().setProposalStates({
+        expectVersion: proposed.version,
+        expectPreviewVersion: proposed.previewVersion,
+        changes: [{ id: 'recovered-after-oom', state: 'accepted' }],
+      })).toMatchObject({ ok: true });
+    });
+    expect((await api().getProposals()).proposals).toMatchObject([
+      { id: 'recovered-after-oom', state: 'accepted' },
+    ]);
+    expect(workers).toHaveLength(2);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(2);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
 test.each([true, false])(
   'worker revisions are asked at the replica gate, before the completion finishes, with onWorkerRevisions=%s',
   async (withCallback) => {
@@ -2213,6 +2334,310 @@ test('worker proposals reach the registry before hydration and survive hand-over
     frames.restore();
   }
 });
+
+test('a sync ref call during the first in-flight proposal keeps the worker\'s proposals', async () => {
+  const { workers, posted, received, reply } = installWorker({
+    holdReply: (request) => request.type === 'proposal' && request.operation.kind === 'propose',
+  });
+  const frames = holdFrames();
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: workerProposalProps,
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const api = () => result.current.ref.current!;
+    const identities = await api().getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((identity) => identity.session?.story === 'body')!.session!;
+    const initial = await api().getProposals();
+    const snapshot = await received('proposal');
+    const authority = workerProposalAuthority(session)!;
+    expect(authority.holdsWorkerState()).toBe(false);
+    const terminate = spyOn(workers[0]!, 'terminate');
+    const ensureReplica = spyOn(replicaHelpers, 'ensureWorkerOpenReplica');
+    try {
+      const proposed = api().proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'in-flight-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Proposed ',
+        }],
+      });
+      void proposed.catch(() => {});
+      let proposal!: ResidentEngineWorkerRequest;
+      await act(async () => { proposal = await received('proposal', snapshot.id); });
+      expect(proposal).toMatchObject({ operation: { kind: 'propose' } });
+      act(() => { expect(() => api().getDocument()).toThrow(DocxReplicaNotReadyError); });
+      await act(async () => {});
+      expect(authority.holdsWorkerState()).toBe(true);
+      expect(workerProposalAuthority(session)).toBe(authority);
+      expect(ensureReplica).not.toHaveBeenCalled();
+      expect(terminate).not.toHaveBeenCalled();
+      expect(result.current.mainOpens).toEqual([]);
+      expect(session.storyIds()).toEqual([]);
+      expect(result.current.core.replicaReady).toBe(false);
+      expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+      await act(async () => {
+        reply(proposal);
+        expect(await proposed).toMatchObject({ ok: true });
+        await awaitWorkerOpenReplica(session);
+      });
+      await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+      expect(result.current.mainOpens).toEqual([false]);
+      expect(session.workerDocumentMirrored()).toBe(false);
+      const mirrored = await api().getProposals();
+      expect(mirrored.proposals.map((proposal) => proposal.id)).toEqual(['in-flight-proposal']);
+      await act(async () => {
+        expect(await api().setProposalStates({
+          expectVersion: mirrored.version,
+          expectPreviewVersion: mirrored.previewVersion,
+          changes: [{ id: 'in-flight-proposal', state: 'accepted' }],
+        })).toMatchObject({ ok: true });
+      });
+      expect((await api().getProposals()).proposals[0]!.state).toBe('accepted');
+      expect(result.current.errors).toEqual([]);
+    } finally {
+      terminate.mockRestore();
+      ensureReplica.mockRestore();
+    }
+  } finally {
+    unmount();
+    frames.restore();
+  }
+});
+
+test('a failed first proposal leaves the replica fallback available', async () => {
+  const { workers, posted, received, reply } = installWorker({
+    failProposal: true,
+    holdReply: (request) => request.type === 'proposal' && request.operation.kind === 'propose',
+  });
+  const frames = holdFrames();
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: workerProposalProps,
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const api = () => result.current.ref.current!;
+    const identities = await api().getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((identity) => identity.session?.story === 'body')!.session!;
+    const initial = await api().getProposals();
+    const snapshot = await received('proposal');
+    const authority = workerProposalAuthority(session)!;
+    expect(authority.holdsWorkerState()).toBe(false);
+    const terminate = spyOn(workers[0]!, 'terminate');
+    try {
+      const proposed = api().proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'failed-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Proposed ',
+        }],
+      });
+      void proposed.catch(() => {});
+      let proposal!: ResidentEngineWorkerRequest;
+      await act(async () => { proposal = await received('proposal', snapshot.id); });
+      expect(proposal).toMatchObject({ operation: { kind: 'propose' } });
+      expect(authority.holdsWorkerState()).toBe(true);
+      expect(result.current.mainOpens).toEqual([]);
+      expect(terminate).not.toHaveBeenCalled();
+      await act(async () => {
+        reply(proposal);
+        await expect(proposed).rejects.toThrow('proposal failed');
+      });
+      expect(authority.holdsWorkerState()).toBe(false);
+      expect(session.getProposals()).toEqual(initial);
+      expect(terminate).not.toHaveBeenCalled();
+      expect(result.current.core.replicaReady).toBe(false);
+      act(() => { expect(api().getDocument()).not.toBeNull(); });
+      expect(result.current.mainOpens).toEqual([true]);
+      expect(terminate).toHaveBeenCalledTimes(1);
+      expect(result.current.core.replicaReady).toBe(true);
+      expect(session.workerDocumentMirrored()).toBe(false);
+      expect(workerProposalAuthority(session)).toBeNull();
+      expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+      expect((await api().getProposals()).proposals).toEqual([]);
+      expect(result.current.errors).toEqual([]);
+    } finally {
+      terminate.mockRestore();
+    }
+  } finally {
+    unmount();
+    frames.restore();
+  }
+});
+
+test('a later proposal succeeds after a terminal crash during the first proposal', async () => {
+  installWorker({ crashProposalOnce: true });
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const api = () => result.current.ref.current!;
+    const session = result.current.core.session!;
+    const identities = await api().getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
+    const initial = await api().getProposals();
+    await act(async () => {
+      await expect(api().proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'failed-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Failed ',
+        }],
+      })).rejects.toThrow('proposal crashed');
+    });
+    expect(registeredWorkerProposalAuthority(session)!.holdsWorkerState()).toBe(false);
+    expect(session.getProposals().proposals).toEqual([]);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    await act(async () => { await api().whenLayoutComplete({ timeoutMs: 5000 }); });
+    const recovered = await api().getProposals();
+    const recoveredParagraph = (await api().getParagraphIdentities()).paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    await act(async () => {
+      expect(await api().proposeChanges({
+        expectVersion: recovered.version,
+        proposals: [{
+          id: 'recovered-after-crash', paragraph: recoveredParagraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Recovered ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    const proposed = await api().getProposals();
+    expect(proposed.proposals.map(({ id }) => id)).toEqual(['recovered-after-crash']);
+    await act(async () => {
+      expect(await api().setProposalStates({
+        expectVersion: proposed.version,
+        expectPreviewVersion: proposed.previewVersion,
+        changes: [{ id: 'recovered-after-crash', state: 'accepted' }],
+      })).toMatchObject({ ok: true });
+    });
+    expect((await api().getProposals()).proposals).toMatchObject([
+      { id: 'recovered-after-crash', state: 'accepted' },
+    ]);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
+test('a call queued behind a first proposal that crashes runs on the replacement worker', async () => {
+  installWorker({ crashProposalOnce: true });
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const api = () => result.current.ref.current!;
+    const bodyParagraph = async () => (await api().getParagraphIdentities()).paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    const paragraph = await bodyParagraph();
+    const initial = await api().getProposals();
+    const request = (id: string, expectVersion: string, target = paragraph) => ({
+      expectVersion,
+      proposals: [{
+        id, paragraph: target,
+        suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+        op: 'insertText' as const, at: 'start' as const, text: 'Queued ',
+      }],
+    });
+    let first!: Promise<unknown>;
+    let queued!: Promise<unknown>;
+    await act(async () => {
+      first = api().proposeChanges(request('failed-proposal', initial.version)).catch((error: Error) => error);
+      queued = api().proposeChanges(request('queued-proposal', initial.version)).catch((error: Error) => error);
+      expect(await first).toBeInstanceOf(Error);
+    });
+    let outcome: unknown;
+    await act(async () => {
+      outcome = await Promise.race([
+        queued,
+        new Promise((resolve) => setTimeout(() => resolve('hung'), 5000)),
+      ]);
+    });
+    expect(outcome).not.toBe('hung');
+    expect(outcome).toMatchObject({ ok: expect.any(Boolean) });
+    await act(async () => { await api().whenLayoutComplete({ timeoutMs: 5000 }); });
+    const current = await api().getProposals();
+    if (!current.proposals.some(({ id }) => id === 'queued-proposal')) {
+      const target = await bodyParagraph();
+      await act(async () => {
+        expect(await api().proposeChanges(request('queued-proposal', current.version, target)))
+          .toMatchObject({ ok: true });
+      });
+    }
+    expect((await api().getProposals()).proposals.map(({ id }) => id)).toEqual(['queued-proposal']);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
+test('a hand-over while a call waits for the replacement worker\'s layout settles both', async () => {
+  const options: Parameters<typeof installWorker>[0] = { crashProposalOnce: true };
+  const { workers, posted } = installWorker(options);
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const api = () => result.current.ref.current!;
+    const session = result.current.core.session!;
+    const bodyParagraph = async () => (await api().getParagraphIdentities()).paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    const initial = await api().getProposals();
+    const paragraph = await bodyParagraph();
+    options.holdBootstrap = true;
+    let first!: Promise<unknown>;
+    let queued!: Promise<unknown>;
+    await act(async () => {
+      first = api().proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'failed-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Failed ',
+        }],
+      }).catch((error: Error) => error);
+      queued = api().getProposals().catch((error: Error) => error);
+      expect(await first).toBeInstanceOf(Error);
+    });
+    await waitFor(() => expect(posted.filter((request) => request.type === 'bootstrap')).toHaveLength(2));
+    expect(workers).toHaveLength(2);
+    await act(async () => {});
+    let replica!: Promise<unknown>;
+    let outcome: unknown;
+    await act(async () => {
+      replica = requestWorkerOpenReplica(session)!;
+      workers[1]!.release();
+      outcome = await Promise.race([
+        Promise.all([queued, replica]),
+        new Promise((resolve) => setTimeout(() => resolve('hung'), 5000)),
+      ]);
+    });
+    expect(outcome).not.toBe('hung');
+    expect((outcome as [unknown])[0]).toMatchObject({ proposals: [] });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    const current = await api().getProposals();
+    const target = await bodyParagraph();
+    await act(async () => {
+      expect(await api().proposeChanges({
+        expectVersion: current.version,
+        proposals: [{
+          id: 'after-handover', paragraph: target,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Recovered ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    expect((await api().getProposals()).proposals.map(({ id }) => id)).toEqual(['after-handover']);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
 
 test('without worker proposals the ref waits for hydration before applying a proposal', async () => {
   const { posted, workers } = installWorker({ holdState: true });

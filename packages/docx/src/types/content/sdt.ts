@@ -10,6 +10,7 @@ import type { MathEquation } from './math';
 import type { BlockContent } from './section';
 import type { TextFormatting } from '../formatting';
 import type { ColorValue } from '../colors';
+import type { TrackedRunChange } from './trackedChange';
 
 /** Glyph/font pair used by checkbox states (`w14:*State`). */
 export interface SdtCheckboxGlyph {
@@ -186,7 +187,7 @@ export interface InlineSdt {
    * level; the renderer must descend into all of them so docProps-bound
    * fields and similar template content survive paged rendering.
    */
-  content: (Run | Hyperlink | SimpleField | ComplexField | InlineSdt | MathEquation)[];
+  content: (Run | Hyperlink | SimpleField | ComplexField | InlineSdt | MathEquation | TrackedRunChange)[];
 }
 
 /**

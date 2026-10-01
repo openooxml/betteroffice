@@ -324,6 +324,35 @@ fn visit_chunk_revisions<T: ReadTxn>(
                 visit(kind, stamp);
             }
         }
+        if let ChunkKind::Embed(Some(map)) = &chunk.kind
+            && map_string(map, txn, KIND_KEY).as_deref() == Some("sdt")
+            && let Some(Out::Any(content)) = map.get(txn, "content")
+        {
+            let mut seen: Vec<_> = [(INS, ChangeKind::Insertion), (DEL, ChangeKind::Deletion)]
+                .into_iter()
+                .filter_map(|(key, kind)| {
+                    chunk
+                        .attrs
+                        .get(key)
+                        .and_then(revision_parts)
+                        .map(|stamp| (kind, stamp))
+                })
+                .collect();
+            crate::inline_content::visit(&content, &mut |child| {
+                let Some(Any::Map(attrs)) = child.get("attrs") else {
+                    return;
+                };
+                for (key, kind) in [(INS, ChangeKind::Insertion), (DEL, ChangeKind::Deletion)] {
+                    if let Some(stamp) = attrs.get(key).and_then(revision_parts) {
+                        let entry = (kind, stamp);
+                        if !seen.contains(&entry) {
+                            seen.push(entry.clone());
+                            visit(entry.0, entry.1);
+                        }
+                    }
+                }
+            });
+        }
     }
 }
 
@@ -766,6 +795,13 @@ impl EditingDoc {
                         .map(|(id, ..)| id)
                         == Some(revision_id.to_owned())
                 });
+                if let ChunkKind::Embed(Some(map)) = &chunk.kind
+                    && map_string(map, &txn, KIND_KEY).as_deref() == Some("sdt")
+                {
+                    visit_chunk_revisions(chunk, &txn, |_, (id, ..)| {
+                        matched |= id == revision_id;
+                    });
+                }
                 if let ChunkKind::Pilcrow(map) = &chunk.kind {
                     matched = matched
                         || [crate::PPR_INS, crate::PPR_DEL].iter().any(|key| {

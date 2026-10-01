@@ -25,12 +25,15 @@ import {
 export interface WorkerProposalAuthority {
   /** The session mirrors the worker registry and version. */
   readonly initialized: boolean;
+  restart(): void;
   /** Initializes once; rejects when the worker cannot answer. */
   initialize(): Promise<void>;
   /** Mirrored geometry until hand-over. */
   geometry(): ProposalGeometryMirror | null;
-  /** Reseeding would lose worker changes. */
+  /** Reseeding would lose worker changes, including those of a state change still in flight. */
   holdsWorkerState(): boolean;
+  /** Reseeding would lose worker changes the main thread has already observed. */
+  holdsCommittedWorkerState(): boolean;
   propose(
     request: DocxProposalRequest,
     main: (request: DocxProposalRequest) => Promise<DocxProposalResult>
@@ -109,6 +112,7 @@ export function registerWorkerProposalAuthority(
   let mirror: ResidentProposalReply['mirror'] | null = null;
   let geometry: ProposalGeometryMirror | null = null;
   let holdsState = false;
+  let mutating = 0;
   let handingOver = false;
   let handover: Promise<Handover> | null = null;
   let versionRewrite: { worker: string; main: string } | null = null;
@@ -152,6 +156,7 @@ export function registerWorkerProposalAuthority(
       if (viaWorker) {
         await ready;
         assertCurrent();
+        if (!initialized && !handingOver) await initializeNow();
         if (initialized) return call();
       }
       await awaitWorkerOpenReplica(session);
@@ -168,11 +173,16 @@ export function registerWorkerProposalAuthority(
     const pending = op.kind === 'propose' || op.kind === 'withdraw';
     if (pending) session.mirrorWorkerDocument({ ...previous, version: previous.version + '~' });
     let reply: ResidentProposalReply;
+    mutating += 1;
     try {
       reply = await worker.proposal(op);
     } catch (error) {
-      if (hooks.current() && pending) session.mirrorWorkerDocument(previous);
+      if (hooks.current() && pending && workerOpenReplicaPending(session)) {
+        session.mirrorWorkerDocument(previous);
+      }
       throw error;
+    } finally {
+      mutating -= 1;
     }
     assertCurrent();
     if (
@@ -189,27 +199,39 @@ export function registerWorkerProposalAuthority(
     if (!reply.result) throw new Error('The resident worker did not return a proposal result');
     return reply.result;
   }, main);
+  const initializeNow = async (): Promise<void> => {
+    await Promise.race([hooks.laidOut(), stopped]);
+    assertCurrent();
+    if (handingOver || initialized) return;
+    snapshotPosted = true;
+    const reply = await worker.proposal({ kind: 'snapshot' });
+    assertCurrent();
+    const previousVersion = mirror?.version;
+    initialized = true;
+    store(reply);
+    hooks.adopted(reply.mirror.version);
+    if (previousVersion !== undefined && previousVersion !== reply.mirror.version) hooks.relayout();
+  };
   const authority: RegisteredAuthority = {
     get initialized() { return initialized; },
+    restart() {
+      if (!initialized || holdsState || failure || handingOver || !hooks.current()) return;
+      initialized = false;
+      initializing = null;
+      snapshotPosted = false;
+      hooks.relayout();
+      notify();
+    },
     initialize() {
       if (failure) return Promise.reject(failure.error);
       if (initializing) return initializing;
       if (handingOver) return Promise.resolve(awaitWorkerOpenReplica(session));
-      initializing = enqueue(async () => {
-        await Promise.race([hooks.laidOut(), stopped]);
-        assertCurrent();
-        if (handingOver) return;
-        snapshotPosted = true;
-        const reply = await worker.proposal({ kind: 'snapshot' });
-        assertCurrent();
-        initialized = true;
-        store(reply);
-        hooks.adopted(reply.mirror.version);
-      });
+      initializing = enqueue(initializeNow);
       return initializing;
     },
     geometry: () => geometry,
-    holdsWorkerState: () => holdsState,
+    holdsWorkerState: () => holdsState || mutating > 0,
+    holdsCommittedWorkerState: () => holdsState,
     failure: () => failure?.error,
     draining: () => handingOver && queued > 0,
     fail: (error) => {
@@ -272,7 +294,7 @@ export function registerWorkerProposalAuthority(
             completed = true;
             hooks.handedOver(handedOver.version);
             geometry = null;
-            if (initialized) {
+            if (mirror) {
               session.mirrorWorkerDocument({ version: handedOver.version, proposals: handedOver.proposals });
               session.mirrorWorkerDocument(null);
               versionRewrite = { worker: handedOver.version, main: session.version() };

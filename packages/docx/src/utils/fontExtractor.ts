@@ -9,6 +9,7 @@
  * - Document defaults
  */
 
+import { visitTrackedControlContent } from './trackedControlContent';
 import type {
   Document,
   DocxPackage,
@@ -262,6 +263,16 @@ function extractFontsFromParagraphContent(content: ParagraphContent, fonts: Set<
     extractFontsFromRun(content, fonts);
   } else if (content.type === 'hyperlink') {
     extractFontsFromHyperlink(content, fonts);
+    visitTrackedControlContent(content, (node) => {
+      if (node.type === 'run') extractFontsFromRun(node, fonts);
+    });
+  } else if (
+    content.type === 'inlineSdt' || content.type === 'insertion' || content.type === 'deletion' ||
+    content.type === 'moveFrom' || content.type === 'moveTo'
+  ) {
+    visitTrackedControlContent(content, (node) => {
+      if (node.type === 'run') extractFontsFromRun(node, fonts);
+    });
   } else if (content.type === 'simpleField' || content.type === 'complexField') {
     // Fields may contain runs with fonts
     if ('content' in content) {
@@ -276,6 +287,9 @@ function extractFontsFromParagraphContent(content: ParagraphContent, fonts: Set<
         extractFontsFromRun(run, fonts);
       }
     }
+    visitTrackedControlContent(content, (node) => {
+      if (node.type === 'run') extractFontsFromRun(node, fonts);
+    });
   }
 }
 

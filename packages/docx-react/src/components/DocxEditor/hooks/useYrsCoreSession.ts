@@ -671,11 +671,16 @@ export function useYrsCoreSession(
               { active: () => hydrateOnDemandRef.current, request }
             );
             if (workerOpenRef.current?.workerProposals) {
-              const laidOut = new Promise<void>((resolve) => {
+              let laidOut = new Promise<void>((resolve) => {
                 workerLaidOutRef.current = resolve;
               });
               const authority = registerWorkerProposalAuthority(next, worker, {
                 relayout: () => {
+                  if (!authority.initialized) {
+                    laidOut = new Promise<void>((resolve) => {
+                      workerLaidOutRef.current = resolve;
+                    });
+                  }
                   markLayoutQueued(next, true);
                   workerOpenRef.current?.refreshWorkerLayout?.();
                 },
