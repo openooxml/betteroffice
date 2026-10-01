@@ -518,7 +518,7 @@ pub(crate) fn widen_columns_to_minimums(widths: &mut [f64], minimums: &[f64]) ->
 
 /// Shortfall below which a column is not widened: the line filler's own
 /// rounding slack, not a word that fails to fit.
-pub(crate) const WIDEN_TOLERANCE_PX: f64 = 0.001;
+const WIDEN_TOLERANCE_PX: f64 = 0.001;
 
 /// Resolves per-column pixel widths from the table's grid metadata and width
 /// budget, per the module's three algorithms. Measures no cell content.

@@ -8,9 +8,9 @@ use serde_json::Value;
 use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offset};
 use crate::floating_objects::{MIN_WRAP_SEGMENT_WIDTH, table_wrap_gaps};
 use crate::table_grid::{
-    ResolvedGridCell, WIDEN_TOLERANCE_PX, content_sized_columns, count_table_columns,
-    fits_columns_to_words, grow_content_sized_columns, resolve_cell_grid,
-    resolve_table_column_widths, resolve_table_width_px, widen_columns_to_minimums,
+    ResolvedGridCell, content_sized_columns, count_table_columns, fits_columns_to_words,
+    grow_content_sized_columns, resolve_cell_grid, resolve_table_column_widths,
+    resolve_table_width_px, widen_columns_to_minimums,
 };
 use crate::types::{
     BlockExtent, BlockId, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition,
@@ -2407,20 +2407,25 @@ fn measure_table_cells(
 /// Whether a line of some measured cell paragraph starts inside a word.
 fn table_breaks_inside_a_word(table: &TableBlock, rows: &[TableRowExtent]) -> bool {
     table.rows.iter().zip(rows).any(|(row, measured)| {
-        row.cells.iter().zip(&measured.cells).any(|(cell, extent)| {
-            !is_rotated(cell)
-                && cell
-                    .blocks
-                    .iter()
-                    .zip(&extent.blocks)
-                    .any(|pair| match pair {
-                        (LayoutBlock::Paragraph(paragraph), BlockExtent::Paragraph(extent)) => {
-                            starts_a_line_inside_a_word(paragraph, extent)
-                        }
-                        _ => false,
-                    })
-        })
+        row.cells
+            .iter()
+            .zip(&measured.cells)
+            .any(|(cell, extent)| cell_breaks_inside_a_word(cell, extent))
     })
+}
+
+fn cell_breaks_inside_a_word(cell: &crate::types::TableCell, extent: &TableCellExtent) -> bool {
+    !is_rotated(cell)
+        && cell
+            .blocks
+            .iter()
+            .zip(&extent.blocks)
+            .any(|pair| match pair {
+                (LayoutBlock::Paragraph(paragraph), BlockExtent::Paragraph(extent)) => {
+                    starts_a_line_inside_a_word(paragraph, extent)
+                }
+                _ => false,
+            })
 }
 
 /// Whether a line of `extent` starts where the paragraph's text offers no
@@ -2526,34 +2531,40 @@ fn cell_content_minimum(
     Some(content.map(|content| content + padding))
 }
 
-/// Whether every cell spanning several columns that held its widest word at
-/// `before` still holds it at `after`.
-fn spanning_cells_keep_their_words(
+/// Whether a paragraph of a cell spanning several columns breaks a line
+/// inside a word in `after` where it did not in `before`.
+fn spanning_cell_newly_breaks_a_word(
     table: &TableBlock,
     grid: &[ResolvedGridCell],
-    rows: &[TableRowExtent],
-    before: &[f64],
-    after: &[f64],
-    content_width: f64,
-    config: &MeasurementConfig,
+    before: &[TableRowExtent],
+    after: &[TableRowExtent],
 ) -> bool {
-    let spanned = |widths: &[f64], entry: &ResolvedGridCell| -> f64 {
-        widths
-            .iter()
-            .skip(entry.column_index)
-            .take(entry.col_span)
-            .sum()
+    let measured = |rows: &[TableRowExtent], entry: &ResolvedGridCell, index: usize| {
+        rows.get(entry.row_index)
+            .and_then(|row| row.cells.get(entry.cell_index))
+            .and_then(|cell| cell.blocks.get(index))
+            .cloned()
     };
-    grid.iter()
-        .filter(|entry| entry.col_span > 1)
-        .all(|entry| {
-            let (was, now) = (spanned(before, entry), spanned(after, entry));
-            now >= was
-                || !matches!(
-                    cell_content_minimum(table, entry, rows, content_width, config),
-                    Some(Some(minimum)) if minimum <= was + WIDEN_TOLERANCE_PX && minimum > now + WIDEN_TOLERANCE_PX
-                )
+    grid.iter().filter(|entry| entry.col_span > 1).any(|entry| {
+        let Some(cell) = table
+            .rows
+            .get(entry.row_index)
+            .and_then(|row| row.cells.get(entry.cell_index))
+            .filter(|cell| !is_rotated(cell))
+        else {
+            return false;
+        };
+        cell.blocks.iter().enumerate().any(|(index, block)| {
+            let LayoutBlock::Paragraph(paragraph) = block else {
+                return false;
+            };
+            let breaks = |extent: Option<BlockExtent>| {
+                matches!(extent, Some(BlockExtent::Paragraph(extent))
+                        if starts_a_line_inside_a_word(paragraph, &extent))
+            };
+            breaks(measured(after, entry, index)) && !breaks(measured(before, entry, index))
         })
+    })
 }
 
 /// Per column, the narrowest width that holds the widest word of every cell
@@ -2623,16 +2634,8 @@ fn measure_table(
         if widen_columns_to_minimums(
             &mut column_widths,
             &column_content_minimums(table, &grid, &rows, content_width, config),
-        ) && spanning_cells_keep_their_words(
-            table,
-            &grid,
-            &rows,
-            &before,
-            &column_widths,
-            content_width,
-            config,
         ) {
-            rows = measure_table_cells(
+            let widened = measure_table_cells(
                 table,
                 &grid,
                 &column_widths,
@@ -2640,8 +2643,11 @@ fn measure_table(
                 target_width,
                 config,
             )?;
-        } else {
-            column_widths = before;
+            if spanning_cell_newly_breaks_a_word(table, &grid, &rows, &widened) {
+                column_widths = before;
+            } else {
+                rows = widened;
+            }
         }
     }
 
@@ -4946,8 +4952,15 @@ mod tests {
     }
 
     fn word_cell(text: &str, span: usize) -> serde_json::Value {
-        json!({"id":text,"colSpan":span,"padding":{"top":0,"bottom":0,"left":1,"right":1},"blocks":[
-            {"kind":"paragraph","id":text,"runs":[{"kind":"text","text":text}]}]})
+        word_cell_paragraphs(&[text], span)
+    }
+
+    fn word_cell_paragraphs(texts: &[&str], span: usize) -> serde_json::Value {
+        let blocks: Vec<_> = texts
+            .iter()
+            .map(|text| json!({"kind":"paragraph","id":text,"runs":[{"kind":"text","text":text}]}))
+            .collect();
+        json!({"id":texts.join("|"),"colSpan":span,"padding":{"top":0,"bottom":0,"left":1,"right":1},"blocks":blocks})
     }
 
     fn word_table_rows(
@@ -5043,12 +5056,18 @@ mod tests {
                     word_cell("00 00", 1),
                     word_cell("0 0", 1),
                 ],
-                vec![word_cell("0", 1), word_cell("00000000000000000000", 2)],
+                vec![
+                    word_cell("0", 1),
+                    word_cell_paragraphs(
+                        &["000000000000000000000000000000", "00000000000000000000"],
+                        2,
+                    ),
+                ],
             ],
         );
         assert_eq!(extent.column_widths, vec![60.0, 100.0, 100.0]);
         assert_eq!(paragraph.lines.len(), 2);
-        let BlockExtent::Paragraph(spanning) = &extent.rows[1].cells[1].blocks[0] else {
+        let BlockExtent::Paragraph(spanning) = &extent.rows[1].cells[1].blocks[1] else {
             panic!()
         };
         assert_eq!(spanning.lines.len(), 1);
