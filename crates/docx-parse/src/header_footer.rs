@@ -42,8 +42,7 @@ pub struct HeaderFooter {
 pub struct HeaderFooterAlias {
     pub part: String,
     pub fingerprint: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revision: Option<u64>,
+    pub source_sha256: String,
 }
 
 pub(crate) fn story_fingerprint(story: &HeaderFooter) -> Result<String, ParseError> {
@@ -145,7 +144,7 @@ pub fn parse_related_header_footers(
 > {
     let mut headers = IndexMap::new();
     let mut footers = IndexMap::new();
-    let mut aliases: HashMap<String, Vec<(String, bool)>> = HashMap::new();
+    let mut aliases: HashMap<String, Vec<(String, bool, String)>> = HashMap::new();
     let document_path = office_document_path(parts, budget)?;
     for (relationship_id, relationship) in document_relationships {
         let is_header = relationship.relationship_type == relationship_types::HEADER;
@@ -163,10 +162,11 @@ pub fn parse_related_header_footers(
             // available anywhere in this crate.
             continue;
         };
-        aliases
-            .entry(part_path.to_owned())
-            .or_default()
-            .push((relationship_id.clone(), is_header));
+        aliases.entry(expected_path).or_default().push((
+            relationship_id.clone(),
+            is_header,
+            format!("{:x}", Sha256::digest(xml)),
+        ));
         let relationships_path = relationship_part_path(part_path);
         let part_relationships = find_part_case_insensitive(parts, &relationships_path)
             .map(|(path, xml)| parse_relationships(xml, path, budget))
@@ -202,18 +202,20 @@ pub fn parse_related_header_footers(
         if entries.len() < 2 {
             continue;
         }
-        for (id, is_header) in entries {
+        for (id, is_header, source_sha256) in entries {
             let stories = if is_header {
                 &mut headers
             } else {
                 &mut footers
             };
             if let Some(story) = stories.get_mut(&id) {
-                let fingerprint = story_fingerprint(story)?;
+                let Ok(fingerprint) = story_fingerprint(story) else {
+                    continue;
+                };
                 story.source_alias = Some(HeaderFooterAlias {
                     part: part.clone(),
                     fingerprint,
-                    revision: None,
+                    source_sha256,
                 });
             }
         }

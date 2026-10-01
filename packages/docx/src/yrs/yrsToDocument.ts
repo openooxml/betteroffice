@@ -52,7 +52,6 @@ import type {
   Comment,
   Footnote,
   Endnote,
-  HeaderFooter,
 } from '../types/document';
 import type { YrsSession } from './index';
 
@@ -2654,16 +2653,6 @@ function projectStories(
   const bodyContent = context.storyIds.has('body') && shouldProject('body')
     ? context.storyToBlocks('body')
     : base.package.document.content;
-  const hasAliases = [base.package.headers, base.package.footers]
-    .some((parts) => [...(parts?.values() ?? [])].some((part) => part.sourceAlias !== undefined));
-  const revisions = hasAliases ? session.storiesChangedSince(-1).revisions ?? {} : {};
-  const storyRevision = (storyId: string): number => Object.entries(revisions)
-    .reduce((latest, [id, revision]) =>
-      id === storyId || id.startsWith(`${storyId}:`) ? Math.max(latest, revision) : latest, 0);
-  const sourceAlias = (part: HeaderFooter, storyId: string) => {
-    if (!part.sourceAlias) return {};
-    return { sourceAlias: { ...part.sourceAlias, revision: storyRevision(storyId) } };
-  };
 
   let headers = base.package.headers;
   if (
@@ -2676,7 +2665,7 @@ function projectStories(
         return [
           rId,
           context.storyIds.has(storyId) && shouldProject(storyId)
-            ? { ...part, content: context.storyToBlocks(storyId), ...sourceAlias(part, storyId) }
+            ? { ...part, content: context.storyToBlocks(storyId) }
             : part,
         ];
       })
@@ -2694,7 +2683,7 @@ function projectStories(
         return [
           rId,
           context.storyIds.has(storyId) && shouldProject(storyId)
-            ? { ...part, content: context.storyToBlocks(storyId), ...sourceAlias(part, storyId) }
+            ? { ...part, content: context.storyToBlocks(storyId) }
             : part,
         ];
       })

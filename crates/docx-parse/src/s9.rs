@@ -655,8 +655,14 @@ fn parse_s9_package_impl(
     ] {
         for (_, story) in entries.iter_mut().flatten() {
             if story.source_alias.is_some() {
-                let fingerprint = crate::header_footer::story_fingerprint(story)?;
-                story.source_alias.as_mut().unwrap().fingerprint = fingerprint;
+                match crate::header_footer::story_fingerprint(story) {
+                    Ok(fingerprint) => {
+                        if let Some(alias) = story.source_alias.as_mut() {
+                            alias.fingerprint = fingerprint;
+                        }
+                    }
+                    Err(_) => story.source_alias = None,
+                }
             }
         }
     }

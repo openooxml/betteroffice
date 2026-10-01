@@ -94,37 +94,42 @@ describe('aliased header and footer saves', () => {
     }
   });
 
-  it('repackDocx writes only the later conflicting header story and registers its image', async () => {
-    const document = await parseDocx(fixture('header'), { preloadFonts: false });
-    const original = document.package.headers!.get('rId8')!;
-    const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
-    const story = (value: string, count: number, revision: number): HeaderFooter => {
-      const part = structuredClone(original);
-      part.sourceAlias = {
-        ...(part.sourceAlias ?? { part: 'word/header1.xml', fingerprint: '' }),
-        revision,
+  it('repackDocx writes the last changed entry and leaves shared image bindings untouched', async () => {
+    for (const ids of [['rId8', 'rId9'], ['rId9', 'rId8']]) {
+      const document = await parseDocx(fixture('header'), { preloadFonts: false });
+      const original = document.package.headers!.get('rId8')!;
+      const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+      const story = (value: string, count: number): HeaderFooter => {
+        const part = structuredClone(original);
+        const run = (part.content[0] as Paragraph).content[0] as Run;
+        run.content = [{ type: 'text', text: value }, ...Array.from({ length: count }, () => ({
+          type: 'drawing' as const,
+          image: { type: 'image' as const, rId: '', src: png, size: { width: 9525, height: 9525 }, wrap: { type: 'inline' as const } },
+        }))];
+        return part;
       };
-      const run = (part.content[0] as Paragraph).content[0] as Run;
-      run.content = [{ type: 'text', text: value }, ...Array.from({ length: count }, () => ({
-        type: 'drawing' as const,
-        image: { type: 'image' as const, rId: '', src: png, size: { width: 9525, height: 9525 }, wrap: { type: 'inline' as const } },
-      }))];
-      return part;
-    };
-    document.package.headers!.set('rId9', story('Earlier story', 2, 1));
-    document.package.headers!.set('rId8', story('Later story', 1, 2));
-    const saved = await repackDocx(document);
-    const parts = unzipContainer(new Uint8Array(saved));
-    expect(Object.keys(parts).filter((path) => path.startsWith('word/media/'))).toHaveLength(1);
-    const xml = new TextDecoder().decode(parts['word/header1.xml']);
-    expect(xml).toContain('Later story');
-    expect(xml).not.toContain('Earlier story');
-    const reopened = await parseDocx(saved, { preloadFonts: false });
-    for (const part of reopened.package.headers!.values()) {
-      const drawing = (part.content[0] as Paragraph).content
-        .flatMap((item) => item.type === 'run' ? item.content : [])
-        .find((item) => item.type === 'drawing');
-      expect(drawing?.type === 'drawing' && drawing.image.src).toBe(png);
+      for (const id of ids) {
+        document.package.headers!.set(id, story(id === 'rId8' ? 'First entry' : 'Last entry', id === 'rId8' ? 2 : 1));
+      }
+      const saved = await repackDocx(document);
+      const parts = unzipContainer(new Uint8Array(saved));
+      expect(Object.keys(parts).filter((path) => path.startsWith('word/media/'))).toHaveLength(1);
+      const xml = new TextDecoder().decode(parts['word/header1.xml']);
+      expect(xml).toContain('Last entry');
+      expect(xml).not.toContain('First entry');
+      for (const part of document.package.headers!.values()) {
+        const images = (part.content[0] as Paragraph).content
+          .flatMap((item) => item.type === 'run' ? item.content : [])
+          .filter((item) => item.type === 'drawing');
+        expect(images.every((item) => item.type === 'drawing' && item.image.rId === '')).toBe(true);
+      }
+      const reopened = await parseDocx(saved, { preloadFonts: false });
+      for (const part of reopened.package.headers!.values()) {
+        const drawing = (part.content[0] as Paragraph).content
+          .flatMap((item) => item.type === 'run' ? item.content : [])
+          .find((item) => item.type === 'drawing');
+        expect(drawing?.type === 'drawing' && drawing.image.src).toBe(png);
+      }
     }
   });
 
@@ -176,18 +181,27 @@ describe('aliased header and footer saves', () => {
       }
     }
 
-    it(`saveYrsDocx saves the later ${kind} edit in either alias order`, async () => {
+    it(`saveYrsDocx deterministically saves the last ${kind} relationship in either edit order`, async () => {
       for (const ids of [['rId8', 'rId9'], ['rId9', 'rId8']]) {
+        const source = fixture(kind);
         const session = await createYrsSession({ clientId: 98002 });
+        const peer = await createYrsSession({ clientId: 98004 });
         try {
-          session.openDocx(new Uint8Array(fixture(kind)), true);
-          insert(session, ids[0]!, 'Earlier ');
-          insert(session, ids[1]!, 'Later ');
-          const saved = (await saveYrsDocx(session)).bytes.slice().buffer as ArrayBuffer;
-          await assertSaved(saved, kind, 'Later Synthetic story');
-          expect(new TextDecoder().decode(unzipContainer(new Uint8Array(saved))[`word/${kind}1.xml`])).not.toContain('Earlier');
+          session.openDocx(new Uint8Array(source), true);
+          peer.openDocx(new Uint8Array(source), false);
+          peer.loadState(session.encodeState());
+          for (const id of ids) {
+            insert(session, id!, id === 'rId8' ? 'First ' : 'Last ');
+            peer.applyUpdate(session.encodeStateAsUpdate(peer.encodeStateVector()));
+          }
+          for (const replica of [session, peer]) {
+            const saved = (await saveYrsDocx(replica)).bytes.slice().buffer as ArrayBuffer;
+            await assertSaved(saved, kind, 'Last Synthetic story');
+            expect(new TextDecoder().decode(unzipContainer(new Uint8Array(saved))[`word/${kind}1.xml`])).not.toContain('First');
+          }
         } finally {
           session.destroy();
+          peer.destroy();
         }
       }
     });

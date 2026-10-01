@@ -121,6 +121,7 @@ function applyRustSaveMutations(
   const savedParts = unzipContainer(new Uint8Array(savedBuffer));
 
   for (const part of collectParts(document)) {
+    if (part.shared) continue;
     const originalRelationships = partText(originalParts[part.relsPath]) ?? '';
     const savedRelationships = partText(savedParts[part.relsPath]) ?? '';
     const originalIds = new Set(
@@ -132,7 +133,6 @@ function applyRustSaveMutations(
       .filter((id): id is string => !!id && !originalIds.has(id));
     const images = collectNewImages(part.blocks);
     if (images.length > newImageIds.length) {
-      if (part.shared) continue;
       throw new Error(
         `Rust save image mutation mismatch in ${part.relsPath}: ` +
           `${images.length} model images, ${newImageIds.length} relationships`
@@ -165,10 +165,10 @@ function applyRustSaveMutations(
   if (!headers || !relationships) return;
   for (const [ownerId, header] of headers) {
     const watermark = header.watermark;
-    if (!watermark || watermark.kind !== 'picture') continue;
+    if (header.sourceAlias || !watermark || watermark.kind !== 'picture') continue;
     const owner = relationships.get(ownerId);
     if (!owner?.target) continue;
-    const filename = (header.sourceAlias?.part ?? headerFooterFilename(owner.target)).replace(/^word\//, '');
+    const filename = headerFooterFilename(owner.target).replace(/^word\//, '');
     const relsPath = `word/_rels/${filename}.rels`;
     const savedRelationships = partText(savedParts[relsPath]) ?? '';
     if (relationshipForId(savedRelationships, watermark.relId)) continue;

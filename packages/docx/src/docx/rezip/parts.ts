@@ -104,7 +104,7 @@ export function collectParts(doc: Document): Part[] {
     for (const [rId, hf] of map.entries()) {
       const rel = rels.get(rId);
       if (!rel || rel.type !== type || !rel.target) continue;
-      const filename = hf.sourceAlias?.part ?? headerFooterFilename(rel.target);
+      const filename = headerFooterFilename(rel.target);
       const basename = filename.replace(/^word\//, '');
       parts.push({
         relsPath: `word/_rels/${basename}.rels`,

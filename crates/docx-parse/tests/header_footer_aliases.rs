@@ -6,6 +6,7 @@ use docx_parse::paragraph::ParagraphContent;
 use docx_parse::serializer::{S13SaveRequest, write_docx_s13};
 use docx_parse::{HeaderFooter, S9ParseOptions, parse_docx_s9_wire};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -80,17 +81,6 @@ fn part(bytes: &[u8], name: &str) -> Vec<u8> {
         .1
 }
 
-fn revision(story: &mut HeaderFooter, revision: u64) {
-    let mut value = serde_json::to_value(&*story).unwrap();
-    let alias = value
-        .as_object_mut()
-        .unwrap()
-        .entry("sourceAlias")
-        .or_insert_with(|| json!({"part": "word/header1.xml", "fingerprint": ""}));
-    alias["revision"] = json!(revision);
-    *story = serde_json::from_value(value).unwrap();
-}
-
 #[test]
 fn saves_edits_through_either_header_or_footer_alias() {
     for kind in ["header", "footer"] {
@@ -141,26 +131,157 @@ fn preserves_untouched_alias_parts_and_relationships() {
 }
 
 #[test]
-fn resolves_conflicting_alias_edits_by_revision_then_entry_order() {
-    let source = fixture("header", false);
-    for latest in [0, 1] {
-        let mut save = request(&source);
-        edit(&mut save.header_entries[1 - latest].1, "Earlier edit");
-        revision(&mut save.header_entries[1 - latest].1, 1);
-        edit(&mut save.header_entries[latest].1, "Later edit");
-        revision(&mut save.header_entries[latest].1, 2);
-        let saved = write_docx_s13(save, &source).unwrap();
-        let xml = String::from_utf8(part(&saved, "word/header1.xml")).unwrap();
-        assert!(xml.contains("Later edit"));
-        assert!(!xml.contains("Earlier edit"));
+fn resolves_conflicting_alias_edits_by_last_changed_entry() {
+    for kind in ["header", "footer"] {
+        let source = fixture(kind, false);
+        for reverse_entries in [false, true] {
+            for edit_order in [[0, 1], [1, 0]] {
+                let mut save = request(&source);
+                let entries = if kind == "header" {
+                    &mut save.header_entries
+                } else {
+                    &mut save.footer_entries
+                };
+                if reverse_entries {
+                    entries.reverse();
+                }
+                for index in edit_order {
+                    edit(
+                        &mut entries[index].1,
+                        if index == 0 {
+                            "First entry"
+                        } else {
+                            "Last entry"
+                        },
+                    );
+                }
+                let saved = write_docx_s13(save.clone(), &source).unwrap();
+                assert_eq!(saved, write_docx_s13(save, &source).unwrap());
+                let xml = String::from_utf8(part(&saved, &format!("word/{kind}1.xml"))).unwrap();
+                assert!(xml.contains("Last entry"));
+                assert!(!xml.contains("First entry"));
+            }
+        }
     }
+}
+
+fn replace_part(bytes: &[u8], path: &str, replacement: Vec<u8>) -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(bytes).unwrap();
+    parts.iter_mut().find(|(name, _)| name == path).unwrap().1 = replacement;
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn header_and_footer_aliases_do_not_overwrite_a_header_edit() {
+    let source = fixture("header", false);
+    let relationships = String::from_utf8(part(&source, "word/_rels/document.xml.rels"))
+        .unwrap()
+        .replace(
+            &format!(r#"Id="rId9" Type="{R}/header""#),
+            &format!(r#"Id="rId9" Type="{R}/footer""#),
+        );
+    let source = replace_part(
+        &source,
+        "word/_rels/document.xml.rels",
+        relationships.into_bytes(),
+    );
     let mut save = request(&source);
-    edit(&mut save.header_entries[0].1, "First entry");
-    edit(&mut save.header_entries[1].1, "Second entry");
+    assert_eq!(save.header_entries.len(), 1);
+    assert_eq!(save.footer_entries.len(), 1);
+    assert!(save.header_entries[0].1.source_alias.is_some());
+    assert!(save.footer_entries[0].1.source_alias.is_some());
+    edit(
+        &mut save.header_entries[0].1,
+        "Edited header with footer alias",
+    );
     let saved = write_docx_s13(save, &source).unwrap();
     assert!(
         String::from_utf8(part(&saved, "word/header1.xml"))
             .unwrap()
-            .contains("Second entry")
+            .contains("Edited header with footer alias")
     );
+}
+
+#[test]
+fn writes_untouched_aliases_from_the_model_when_source_bytes_change() {
+    for kind in ["header", "footer"] {
+        let source = fixture(kind, false);
+        let path = format!("word/{kind}1.xml");
+        let swapped = replace_part(
+            &source,
+            &path,
+            String::from_utf8(part(&source, &path))
+                .unwrap()
+                .replace("Synthetic story", "Swapped source story")
+                .into_bytes(),
+        );
+        let saved = write_docx_s13(request(&source), &swapped).unwrap();
+        let xml = String::from_utf8(part(&saved, &path)).unwrap();
+        assert!(xml.contains("Synthetic story"));
+        assert!(!xml.contains("Swapped source story"));
+    }
+}
+
+#[test]
+fn case_variant_targets_are_not_aliases() {
+    let source = fixture("header", false);
+    let relationships = String::from_utf8(part(&source, "word/_rels/document.xml.rels"))
+        .unwrap()
+        .replace("./header1.xml", "Header1.xml");
+    let source = replace_part(
+        &source,
+        "word/_rels/document.xml.rels",
+        relationships.into_bytes(),
+    );
+    let mut save = request(&source);
+    assert!(
+        save.header_entries
+            .iter()
+            .all(|(_, story)| story.source_alias.is_none())
+    );
+    edit(&mut save.header_entries[0].1, "Lowercase target edit");
+    let saved = write_docx_s13(save, &source).unwrap();
+    assert!(
+        String::from_utf8(part(&saved, "word/header1.xml"))
+            .unwrap()
+            .contains("Lowercase target edit")
+    );
+    assert!(
+        String::from_utf8(part(&saved, "word/Header1.xml"))
+            .unwrap()
+            .contains("Synthetic story")
+    );
+}
+
+#[test]
+fn aliased_math_with_a_custom_prefix_opens_and_saves_source_bytes() {
+    let source = fixture("header", false);
+    let source = replace_part(&source, "word/header1.xml", format!(r#"<w:hdr xmlns:w="{W}" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/math"><w:p><q:oMath><q:r><q:t>x</q:t></q:r></q:oMath></w:p></w:hdr>"#).into_bytes());
+    let mut save = request(&source);
+    assert_eq!(save.header_entries.len(), 2);
+    for (_, story) in &save.header_entries {
+        assert!(story.source_alias.is_none());
+        let BlockContent::Paragraph(paragraph) = &story.content[0] else {
+            panic!("paragraph")
+        };
+        assert!(matches!(
+            &paragraph.content[0],
+            ParagraphContent::Inline(InlineNode::Math(_))
+        ));
+    }
+    save.selective = Some(
+        serde_json::from_value(json!({
+            "sourceParagraphs": {
+                "partSha256": format!("{:x}", Sha256::digest(part(&source, "word/document.xml"))),
+                "paragraphs": [],
+            },
+        }))
+        .unwrap(),
+    );
+    let saved = write_docx_s13(save, &source).unwrap();
+    assert_eq!(
+        part(&saved, "word/header1.xml"),
+        part(&source, "word/header1.xml")
+    );
+    assert_eq!(request(&saved).header_entries.len(), 2);
 }

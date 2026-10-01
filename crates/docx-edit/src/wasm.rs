@@ -4368,15 +4368,11 @@ impl EditSession {
             .is_some_and(|stories| stories.contains_key(&txn, story))
     }
 
-    /// Changes after `since`; negative `since` also includes per-story revisions.
+    /// `{"revision","stories":[…]}`: the current story revision and the sorted
+    /// ids of the stories created, edited, or deleted after revision `since`.
     pub fn stories_changed_since(&self, since: f64) -> String {
         let (revision, stories) = self.engine.doc().stories_changed_since(since as u64);
-        if since < 0.0 {
-            let revisions = self.engine.doc().story_change_revisions();
-            json!({ "revision": revision, "stories": stories, "revisions": revisions }).to_string()
-        } else {
-            json!({ "revision": revision, "stories": stories }).to_string()
-        }
+        json!({ "revision": revision, "stories": stories }).to_string()
     }
 
     /// Every story id in the document, sorted so the order is stable across

@@ -1114,17 +1114,6 @@ impl EditingDoc {
         (revisions.current, stories)
     }
 
-    #[cfg(feature = "wasm")]
-    pub(crate) fn story_change_revisions(&self) -> HashMap<String, u64> {
-        self.story_revisions
-            .lock()
-            .unwrap()
-            .stamped
-            .iter()
-            .map(|(story, revision)| (story.to_string(), *revision))
-            .collect()
-    }
-
     /// [`Self::story_segments`] split after each pilcrow into units.
     pub fn story_segment_units(&self, story_id: &str) -> EditResult<Vec<Vec<StorySegment>>> {
         Ok(split_segment_units(self.story_segments(story_id)?))
