@@ -103,24 +103,25 @@ const COMPLETION_RESTARTS = 3;
 const ALL_BLOCKS = 2 ** 32 - 1;
 
 // Foreground requests (what the user is waiting on) hold background work back:
-// a background step neither starts while one is queued nor until the user has
-// been idle for FOREGROUND_IDLE_MS since the last one arrived.
+// a background step never starts while one is queued, and after an edit it
+// waits until the user has been idle for FOREGROUND_IDLE_MS.
 const FOREGROUND_IDLE_MS = 300;
 let foregroundQueued = 0;
 let backgroundIdleUntil = 0;
 
-/** Whether a request is one the user waits on. */
-function isForegroundRequest(request: ResidentEngineWorkerRequest): boolean {
+/** Whether a request is one the user waits on: an edit, or a read that only jumps the queue. */
+function foregroundKind(request: ResidentEngineWorkerRequest): 'edit' | 'read' | null {
   switch (request.type) {
     case 'applyInput':
     case 'applyDelete':
     case 'proposal':
+      return 'edit';
     case 'documentRead':
-      return true;
+      return 'read';
     case 'sync':
-      return request.foreground === true;
+      return request.foreground === true ? 'edit' : null;
     default:
-      return false;
+      return null;
   }
 }
 
@@ -136,12 +137,13 @@ const trappedIds = new Set<number>();
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
   const request = event.data;
-  if (!isForegroundRequest(request)) {
+  const kind = foregroundKind(request);
+  if (!kind) {
     enqueue(() => handle(request), request.id);
     return;
   }
   foregroundQueued += 1;
-  backgroundIdleUntil = performance.now() + FOREGROUND_IDLE_MS;
+  if (kind === 'edit') backgroundIdleUntil = performance.now() + FOREGROUND_IDLE_MS;
   enqueue(
     () => handle(request),
     request.id,
