@@ -46,6 +46,8 @@ let proposals: DocxProposalRegistry | null = null;
 let lastProposalMirrorVersion: string | null = null;
 /** Set while the session holds the document `open` seeded, with the heap limit it used. */
 let openedDocument: { heapLimitBytes?: number } | null = null;
+// The last font requirements answered, for the same request against an unchanged document.
+let requirementsAnswered: { layoutInput: string; stateVector: string; json: string } | null = null;
 let unsubscribe: (() => void) | null = null;
 let pendingUpdates: Uint8Array[] = [];
 let layoutRevision = 0;
@@ -253,11 +255,18 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'fontRequirements') {
     if (!session) throw new Error('Resident engine worker is not initialized');
-    reply({
-      id: request.id,
-      ok: true,
-      requirementsJson: session.layoutFontRequirementsJson(request.layoutInput),
-    });
+    const stateVector = session.encodeStateVector().join(',');
+    if (
+      requirementsAnswered?.layoutInput !== request.layoutInput ||
+      requirementsAnswered.stateVector !== stateVector
+    ) {
+      requirementsAnswered = {
+        layoutInput: request.layoutInput,
+        stateVector,
+        json: session.layoutFontRequirementsJson(request.layoutInput),
+      };
+    }
+    reply({ id: request.id, ok: true, requirementsJson: requirementsAnswered.json });
     return;
   }
   if (request.type === 'encodeState') {
@@ -844,6 +853,7 @@ function destroySession(keepSurfaces = false): void {
   lastProposalMirrorVersion = null;
   session = null;
   openedDocument = null;
+  requirementsAnswered = null;
   pendingUpdates = [];
   layoutRevision = 0;
   fontsRevision = -1;

@@ -2062,6 +2062,27 @@ describe('resident worker opening', () => {
     expect(calls.slice(-3)).toEqual(['begin:{"request":1}', 'resume:2', 'frame:1']);
   });
 
+  test('answers a repeated font requirements request against an unchanged document from the last answer', async () => {
+    const { w, calls } = openingWorker();
+    let vector = new Uint8Array([1]);
+    Object.assign(w.harness.session, { encodeStateVector: () => vector });
+    expect((await w.send({ type: 'open', bytes: new Uint8Array([1]).buffer })).ok).toBe(true);
+    const ask = async (layoutInput: string) => {
+      const answer = await w.send({ type: 'fontRequirements', layoutInput });
+      expect(answer.ok && answer.requirementsJson).toBe('[{"key":"a"}]');
+    };
+    for (const input of ['{"request":1}', '{"request":1}', '{"request":2}', '{"request":2}']) {
+      await ask(input);
+    }
+    vector = new Uint8Array([2]);
+    await ask('{"request":2}');
+    expect(calls.filter((call) => call.startsWith('requirements:'))).toEqual([
+      'requirements:{"request":1}',
+      'requirements:{"request":2}',
+      'requirements:{"request":2}',
+    ]);
+  });
+
   test('proposal requests between open and bootstrap leave the worker registry empty', async () => {
     const { w } = openingWorker();
     expect((await w.send({ type: 'open', bytes: new Uint8Array([4]).buffer })).ok).toBe(true);
