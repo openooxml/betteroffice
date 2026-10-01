@@ -55,6 +55,7 @@ import type {
   TableContextInfo,
 } from './DocxEditor/types';
 import { onPresented, onReplayFailed } from './DocxEditor/internals/layoutProvenance';
+import { SupersededPreviewError } from './DocxEditor/internals/supersededPreview';
 import { useOutlineSidebar } from './DocxEditor/hooks/useOutlineSidebar';
 import { useKeyboardShortcuts } from './DocxEditor/hooks/useKeyboardShortcuts';
 import { useFileIO } from './DocxEditor/hooks/useFileIO';
@@ -1280,7 +1281,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   hostProposalRevisionsRef.current = hostProposalRevisions;
   const reportPagedError = useCallback(
     (error: Error, session?: unknown) => {
-      if (untakenWorkerSession(session)) return;
+      if (error instanceof SupersededPreviewError || untakenWorkerSession(session)) return;
       if (!failOpeningRef.current(error, session)) reportLayoutError(error, session);
     },
     [untakenWorkerSession, reportLayoutError]

@@ -75,6 +75,7 @@ import {
 } from '../internals/workerOpenReplica';
 import { bindDisplayWindow, type DisplayWindow } from '../internals/displayWindow';
 import { sameLayoutInput } from '../internals/layoutInput';
+import { SupersededPreviewError } from '../internals/supersededPreview';
 import {
   failWorkerProposalAuthority,
   registeredWorkerProposalAuthority,
@@ -282,11 +283,6 @@ const SESSION_LAYOUT_WAIT_MS = 5000;
 /** The session has not laid out yet; the display tries again shortly. */
 class SessionLayoutPendingError extends Error {}
 
-/**
- * A newer layout reached the session, with another revision preview or from a
- * worker pass run again; its own pass shows it.
- */
-class SupersededPreviewError extends Error {}
 class WorkerPreviewRefusedError extends Error {}
 
 export interface ResidentFrameApplyResult {
@@ -1516,12 +1512,18 @@ export function useRustDisplayList(
         return null;
       }
       const owner = { current: workerRef.current };
+      // The worker answers in order, so a reply that arrives after the whole document took
+      // the preview's worker over is still the preview's.
+      let answered: string | undefined;
       const pending = requestOpenedWorker(
         hostEngine,
-        (current) => current.proposalFontRequirements &&
-          sameLayoutInput(current.proposalFontRequirements.layoutInput, request)
-          ? Promise.resolve(current.proposalFontRequirements.requirementsJson)
-          : current.client.fontRequirements(request),
+        async (current) => {
+          answered = await (current.proposalFontRequirements &&
+            sameLayoutInput(current.proposalFontRequirements.layoutInput, request)
+            ? Promise.resolve(current.proposalFontRequirements.requirementsJson)
+            : current.client.fontRequirements(request));
+          return answered;
+        },
         (current) => { owner.current = current; }
       )
         .then((requirements) => {
@@ -1534,6 +1536,7 @@ export function useRustDisplayList(
           if (error instanceof ResidentWorkerOutOfMemoryError) throw error;
           if (error instanceof SupersededPreviewError) {
             if (workerFallbackEngineRef.current === hostEngine) return null;
+            if (answered !== undefined && handedOverPreview(hostEngine)) return answered;
             throw error;
           }
           if (owner.current && isCurrentWorker(hostEngine, owner.current) && !dropWorker(hostEngine, error)) {
