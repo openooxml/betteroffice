@@ -3980,37 +3980,34 @@ fn project_table(
     let borders = field(formatting, "borders")
         .or_else(|| field(field(table_style, "tblPr"), "borders"))
         .or_else(|| field(field(default_style, "tblPr"), "borders"));
-    let margins = field(formatting, "cellMargins")
-        .or_else(|| field(field(table_style, "tblPr"), "cellMargins"))
-        .or_else(|| field(field(default_style, "tblPr"), "cellMargins"));
-    let logical_left = field(
-        margins,
-        if truthy(field(formatting, "bidi")) {
-            "end"
-        } else {
-            "start"
-        },
-    );
-    let logical_right = field(
-        margins,
-        if truthy(field(formatting, "bidi")) {
-            "start"
-        } else {
-            "end"
-        },
-    );
-    let default_margins = margins.map(|margins| {
+    let margin_layers: Vec<&Value> = [
+        field(formatting, "cellMargins"),
+        field(field(table_style, "tblPr"), "cellMargins")
+            .filter(|margins| !margins.is_null())
+            .or_else(|| field(field(default_style, "tblPr"), "cellMargins")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|margins| !margins.is_null())
+    .collect();
+    let margin_side = |keys: &[&str]| {
+        margin_layers.iter().find_map(|margins| {
+            keys.iter().find_map(|key| {
+                field(field(Some(*margins), key), "value").filter(|value| !value.is_null())
+            })
+        })
+    };
+    let (logical_left, logical_right) = if truthy(field(formatting, "bidi")) {
+        ("end", "start")
+    } else {
+        ("start", "end")
+    };
+    let default_margins = (!margin_layers.is_empty()).then(|| {
         drop_nulls(json!({
-            "top": nullish(field(field(Some(margins), "top"), "value")),
-            "bottom": nullish(field(field(Some(margins), "bottom"), "value")),
-            "left": nullish(
-                field(field(Some(margins), "left"), "value")
-                    .or_else(|| field(logical_left, "value"))
-            ),
-            "right": nullish(
-                field(field(Some(margins), "right"), "value")
-                    .or_else(|| field(logical_right, "value"))
-            )
+            "top": nullish(margin_side(&["top"])),
+            "bottom": nullish(margin_side(&["bottom"])),
+            "left": nullish(margin_side(&["left", logical_left])),
+            "right": nullish(margin_side(&["right", logical_right]))
         }))
     });
     let mut based_on = Vec::new();

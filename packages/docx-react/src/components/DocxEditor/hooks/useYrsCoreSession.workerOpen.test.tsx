@@ -1307,6 +1307,7 @@ test('a preview the worker opens lays out there, and the full open queues right 
     const bootstrap = posted.findIndex((request) => request.type === 'bootstrap');
     expect(bootstrap).toBeGreaterThan(0);
     expect(posted[bootstrap].type === 'bootstrap' && posted[bootstrap].opened).toBe(true);
+    expect(posted[bootstrap].type === 'bootstrap' && posted[bootstrap].displayWindow).toEqual([0, 2]);
     expect(posted.findIndex(fullOpen)).toBeGreaterThan(bootstrap);
     expect(posted.map((request) => request.type)).not.toContain('encodeState');
     expect(preview.storyIds()).toEqual([]);
