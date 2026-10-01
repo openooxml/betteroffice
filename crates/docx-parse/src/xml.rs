@@ -641,13 +641,12 @@ fn repaired(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 /// The loader names elements and attributes by their written prefix and local name, so a part
 /// is also refused where that reading and a namespace-aware one could differ: a standard prefix
 /// bound to another namespace or a standard namespace under another prefix, an element of another
-/// namespace inside a `w` element, and an unprefixed attribute on a WordprocessingML element. And
-/// where the loader keeps text Word reads differently: a `w:t`, `w:delText`, `w:instrText`,
-/// `w:delInstrText` or `m:t` holding an element, a tab, carriage return or line feed (written or
-/// referenced), or, without `xml:space="preserve"` in scope, a leading or trailing space; and a
-/// carriage return in other text that is not only whitespace between tags. Other whitespace (inner
-/// runs of spaces, attribute-value normalization) is left as written: kept bytes read in Word as
-/// they did before the save.
+/// namespace inside a `w` element, and an unprefixed attribute on a WordprocessingML element. It is
+/// refused too where a `w:t`, `w:delText`, `w:instrText`, `w:delInstrText` or `m:t` holds an
+/// element or, without `xml:space="preserve"` in scope, a leading or trailing space, and where
+/// other text that is not only whitespace between tags holds a carriage return. Other whitespace
+/// (tabs, line breaks and inner runs of spaces in text, attribute-value normalization) is left as
+/// written: kept bytes read in Word as they did before the save.
 pub fn reads_as_written(xml: &[u8]) -> bool {
     matches!(repaired(xml), std::borrow::Cow::Borrowed(_)) && PlainXml::new(xml).accepts()
 }
@@ -780,6 +779,7 @@ impl<'a> PlainXml<'a> {
                 }
             } else if run.windows(3).any(|window| window == b"]]>")
                 || (run.contains(&b'\r')
+                    && self.open.last().is_some_and(|open| open.text.is_none())
                     && !(run.iter().all(is_xml_space)
                         && xml.get(self.at) == Some(&b'<')
                         && xml[..start].last() == Some(&b'>')))
@@ -972,39 +972,37 @@ impl<'a> PlainXml<'a> {
                 .is_none_or(|start| self.text_reads_as_written(start, close, open.preserve))
     }
 
-    /// Whether the text content `xml[start..end]` holds no tab, carriage return or line feed and,
-    /// unless `preserve`, starts and ends with something other than a space.
+    /// Whether the text content `xml[start..end]` starts and ends with something other than a
+    /// space, written or referenced, unless `preserve`.
     fn text_reads_as_written(&self, start: usize, end: usize, preserve: bool) -> bool {
         let content = &self.xml[start..end];
-        let mut characters = Vec::new();
-        let mut at = 0;
-        while at < content.len() {
-            if content[at] == b'&' {
-                let Some(length) = content[at..].iter().position(|&byte| byte == b';') else {
-                    return false;
-                };
-                let reference = &content[at + 1..at + length];
-                characters.push(match reference {
-                    [b'#', b'x', digits @ ..] => std::str::from_utf8(digits)
-                        .ok()
-                        .and_then(|digits| u32::from_str_radix(digits, 16).ok()),
-                    [b'#', digits @ ..] => std::str::from_utf8(digits)
-                        .ok()
-                        .and_then(|digits| digits.parse().ok()),
-                    _ => Some(u32::from(b'x')),
-                });
-                at += length + 1;
-            } else {
-                characters.push(Some(u32::from(content[at])));
-                at += 1;
-            }
-        }
-        let space = u32::from(b' ');
-        characters.iter().all(|character| {
-            character.is_some_and(|character| !matches!(character, 0x09 | 0x0A | 0x0D))
-        }) && (preserve
-            || (characters.first() != Some(&Some(space))
-                && characters.last() != Some(&Some(space))))
+        let space = |reference: &[u8]| {
+            let value = match reference {
+                [b'&', b'#', b'x', digits @ .., b';'] => std::str::from_utf8(digits)
+                    .ok()
+                    .and_then(|digits| u32::from_str_radix(digits, 16).ok()),
+                [b'&', b'#', digits @ .., b';'] => std::str::from_utf8(digits)
+                    .ok()
+                    .and_then(|digits| digits.parse().ok()),
+                _ => None,
+            };
+            value == Some(u32::from(b' '))
+        };
+        let first = match content.first() {
+            Some(b'&') => content
+                .iter()
+                .position(|&byte| byte == b';')
+                .is_some_and(|end| space(&content[..=end])),
+            first => first == Some(&b' '),
+        };
+        let last = match content.last() {
+            Some(b';') => content
+                .iter()
+                .rposition(|&byte| byte == b'&')
+                .is_some_and(|start| space(&content[start..])),
+            last => last == Some(&b' '),
+        };
+        preserve || !(first || last)
     }
 
     fn resolve(&self, prefix: &[u8]) -> Option<&'a [u8]> {
@@ -1737,6 +1735,7 @@ mod tests {
             part("<w:p><w:r><w:t>a  b</w:t></w:r></w:p>"),
             part("<w:p w:val=\"a\tb\r\nc\"/>"),
             part("<w:p>\r\n<w:r/>\r\n</w:p>"),
+            part("<w:p><w:r><w:t>a\tb\r\nc&#10;d&#x9;e</w:t></w:r></w:p>"),
         ] {
             assert!(reads_as_written(xml.as_bytes()), "{xml}");
         }
@@ -1843,25 +1842,12 @@ mod tests {
                 part("<w:p><w:r><w:t>a<w:b/></w:t></w:r></w:p>"),
             ),
             (
-                "tab in text",
-                part("<w:p><w:r><w:t xml:space=\"preserve\">a\tb</w:t></w:r></w:p>"),
-            ),
-            (
-                "referenced line feed in text",
-                part(
-                    "<w:p><w:r><w:instrText xml:space=\"preserve\">a&#10;b</w:instrText></w:r></w:p>",
-                ),
-            ),
-            (
-                "carriage return in math text",
-                part(&format!(
-                    "<w:p><m:oMath xmlns:m=\"{}\"><m:r><m:t>a\rb</m:t></m:r></m:oMath></w:p>",
-                    namespaces::M
-                )),
-            ),
-            (
                 "leading space without preserve",
                 part("<w:p><w:r><w:t> a</w:t></w:r></w:p>"),
+            ),
+            (
+                "leading referenced space without preserve",
+                part("<w:p><w:r><w:t>&#x020;a</w:t></w:r></w:p>"),
             ),
             (
                 "trailing referenced space without preserve",
