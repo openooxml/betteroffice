@@ -36,6 +36,7 @@ import {
   workerProposalAuthority,
   workerProposalFailure,
 } from '../internals/workerProposalAuthority';
+import { SupersededPreviewError } from '../internals/supersededPreview';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { viewportMinHeightPx } from '../internals/scrollUtils';
 import {
@@ -436,10 +437,13 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
               (error: unknown) => {
                 if (pass !== passRef.current || sessionRef.current !== session) return;
                 markLayoutQueued(session, false);
-                onErrorRef.current?.(
-                  error instanceof Error ? error : new Error(String(error)),
-                  session
-                );
+                // A superseded preflight drops its pass; the pass that superseded it lays out.
+                if (!(error instanceof SupersededPreviewError)) {
+                  onErrorRef.current?.(
+                    error instanceof Error ? error : new Error(String(error)),
+                    session
+                  );
+                }
                 syncCoordinator.onLayoutComplete(currentEpoch);
               }
             );
@@ -712,6 +716,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
               // The display reports a worker out of memory; nothing lays out here.
               if (error instanceof ResidentWorkerOutOfMemoryError) return;
               if (workerProposalFailure(session) === error) return;
+              if (error instanceof SupersededPreviewError) return;
               console.error('[PagedEditor] Layout pipeline error:', error);
               onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
             }
