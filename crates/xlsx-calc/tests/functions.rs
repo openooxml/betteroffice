@@ -468,6 +468,15 @@ fn text_functions() {
 }
 
 #[test]
+fn search_offsets_use_original_unicode_positions() {
+    check(&[
+        ("SEARCH(\"b\", \"İb\")", n(2.0)),
+        ("SEARCH(\"i\", \"İ\")", n(1.0)),
+        ("SEARCH(\"b\", \"aİb\", 2)", n(3.0)),
+    ]);
+}
+
+#[test]
 fn datetime_functions() {
     check(&[
         ("DATE(2020, 1, 1)", n(43831.0)),
