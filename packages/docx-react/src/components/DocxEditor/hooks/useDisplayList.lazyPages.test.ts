@@ -1019,6 +1019,7 @@ test('default worker mode document settling builds every page past the budget, t
     await waitFor(() => expect(result.current.frame).not.toBeNull());
     const worker = EngineWorker.last!;
     const built = () => result.current.frame!.displayList.pages.filter((page) => !page.unbuilt).length;
+    await act(async () => result.current.setDisplayWindow(0, 2));
     let settled: Awaited<ReturnType<typeof result.current.settledDisplayList>> | undefined;
     await act(async () => {
       settled = await settleWithIdle(result.current, null);

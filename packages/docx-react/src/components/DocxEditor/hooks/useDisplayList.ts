@@ -1723,11 +1723,15 @@ export function useRustDisplayList(
           schedulePageBuildsWhenIdleRef.current();
           return;
         }
-        if (
-          worker.client.frameRequestPending() ||
-          worker.client.answeredFrame() > frame.frameEpoch ||
-          paintedCaretMachine.shouldPaint(performance.now())
-        ) {
+        const framePending = worker.client.frameRequestPending();
+        const unadopted = worker.client.answeredFrame() > frame.frameEpoch;
+        if (framePending || unadopted || paintedCaretMachine.shouldPaint(performance.now())) {
+          // Over the default budget, adopting the newer frame schedules the release again.
+          if (budget > 0 && unadopted && !framePending) {
+            const now = performance.now();
+            unadoptedFrameSinceRef.current ??= now;
+            if (now - unadoptedFrameSinceRef.current >= UNADOPTED_FRAME_WAIT_MS) return;
+          }
           retryPageBuildsRef.current(true);
           return;
         }
