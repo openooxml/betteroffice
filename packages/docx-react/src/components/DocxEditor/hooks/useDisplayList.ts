@@ -72,6 +72,7 @@ import {
   failWorkerOpenReplica,
   workerOpenReplicaPending,
   workerOpenSourceVersion,
+  type WorkerOpenFallbackReason,
 } from '../internals/workerOpenReplica';
 import { bindDisplayWindow, type DisplayWindow } from '../internals/displayWindow';
 import { sameLayoutInput } from '../internals/layoutInput';
@@ -89,7 +90,7 @@ export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
   proposal: ResidentEngineWorkerClient['proposal'];
   documentRead: ResidentEngineWorkerClient['documentRead'];
   handOver: ResidentEngineWorkerClient['handOver'];
-  fallback(): void;
+  fallback(reason?: WorkerOpenFallbackReason): (() => boolean) | void;
   destroy(): void;
   replicaReady(): void;
   /** Restamps the shown layout after the session started mirroring the worker's version. */
@@ -263,6 +264,7 @@ interface WorkerLayoutFrame {
   result: ResidentEngineWorkerFrame;
   previousFrame: RetainedFrame | null;
   engine: YrsSession;
+  owner: { engine: YrsSession; client: ResidentEngineWorkerClient; load: number };
   /** Content epoch and display extras the worker built the frame for. */
   contentEpoch: number;
   layoutExtras: string;
@@ -359,6 +361,7 @@ interface BuiltDisplay {
   caret: YrsResidentCaretSnapshot | null;
   queryEngine: RustDisplayListEngine | null | undefined;
   workerProduced: boolean;
+  workerOwner?: WorkerLayoutFrame['owner'];
   caretPainted: boolean;
   /** Shows a layout of the first pages only, so it does not settle. */
   provisional?: boolean;
@@ -527,6 +530,24 @@ export function useRustDisplayList(
   // Sessions whose worker and page surfaces a successor took over: they never take one back.
   const handedOverEnginesRef = useRef(new WeakSet<YrsSession>());
   const workerFallbackEngineRef = useRef<YrsSession | null>(null);
+  const recoveredWorkerEpochsRef = useRef(new WeakMap<YrsSession, number>());
+  const recoveredEngine = useCallback(
+    (engine: YrsSession | null | undefined): boolean =>
+      engine != null && recoveredWorkerEpochsRef.current.has(engine),
+    []
+  );
+  const bootstrapFrameEpoch = useCallback(
+    (engine: YrsSession): { frameEpoch?: number } =>
+      recoveredEngine(engine)
+        ? {
+            frameEpoch: Math.max(
+              recoveredWorkerEpochsRef.current.get(engine)!,
+              snapshotRef.current.frame?.frameEpoch ?? 0
+            ),
+          }
+        : followedFrameEpoch(snapshotRef.current.frame),
+    [recoveredEngine]
+  );
   // No worker starts once the hook is gone, whatever failure arrives late.
   const unmountedRef = useRef(false);
   const isCurrentWorker = useCallback(
@@ -788,8 +809,6 @@ export function useRustDisplayList(
     [failWorkerDocument, handoffFromRef, sessionLoad]
   );
 
-  // Rendering moves to the host engine for good: its frames start from a fresh
-  // base, numbered after the worker's last frame.
   const adoptHostEngine = useCallback(
     (hostEngine: YrsSession): void => {
       if (holdsWorkerProposals(hostEngine)) {
@@ -1416,15 +1435,30 @@ export function useRustDisplayList(
             requestOpenedWorker(hostEngine, (owner) => owner.client.documentRead(read)),
           handOver: () =>
             requestOpenedWorker(hostEngine, (owner) => owner.client.handOver()),
-          fallback: () => {
+          fallback: (reason = 'failure') => {
             const outOfMemory = outOfMemoryRef.current.get(hostEngine);
             if (outOfMemory) throw outOfMemory;
             const owner = workerRef.current;
             if (!owner || !isCurrentWorker(hostEngine, owner)) {
               throw new SupersededPreviewError();
             }
+            const recover = workerOpenEnabledRef.current && reason !== 'failure' &&
+              !outOfMemoryRef.current.has(hostEngine) &&
+              !workerFailureRef.current.has(hostEngine) &&
+              !owner.client.hasFailed() && !holdsWorkerProposals(hostEngine);
             if (!dropWorker(hostEngine)) throw workerFailureRef.current.get(hostEngine);
             needsLayout = true;
+            const recoveryEpoch = recoveryFrameEpochRef.current;
+            if (recover) return () => {
+              if (unmountedRef.current || sessionLoad(hostEngine) !== documentLoadsRef.current ||
+                workerRef.current || workerFallbackEngineRef.current !== hostEngine ||
+                outOfMemoryRef.current.has(hostEngine) || workerFailureRef.current.has(hostEngine)) return false;
+              recoveredWorkerEpochsRef.current.set(hostEngine, recoveryEpoch);
+              workerOpenSourcesRef.current.delete(hostEngine);
+              workerFallbackEngineRef.current = null;
+              needsLayout = false;
+              return true;
+            };
           },
           destroy: () => {
             failWorkerProposalAuthority(hostEngine, new Error('The document changed while opening the replica'));
@@ -2070,7 +2104,7 @@ export function useRustDisplayList(
         ...(bootstrapping
           ? {
               heapLimitBytes: workerHeapLimitRef.current,
-              ...followedFrameEpoch(snapshotRef.current.frame),
+              ...bootstrapFrameEpoch(hostEngine),
             }
           : {}),
       };
@@ -2086,6 +2120,8 @@ export function useRustDisplayList(
       const unavailable = (
         cause: unknown
       ): Promise<WorkerLayoutComputation | null> | null => {
+        if (recoveredEngine(hostEngine) &&
+          !isCurrentWorker(hostEngine, owner)) return rejectedWorkerLayout(new SupersededPreviewError());
         const current = workerRef.current;
         if (
           unmountedRef.current ||
@@ -2141,6 +2177,7 @@ export function useRustDisplayList(
           result,
           previousFrame: base,
           engine: hostEngine,
+          owner,
           contentEpoch,
           layoutExtras: options.layoutExtras,
           provisional: result.layoutProvisional === true,
@@ -2149,6 +2186,9 @@ export function useRustDisplayList(
       };
       const pass = reply
         .then((result): WorkerLayoutComputation | null => {
+          if (recoveredEngine(hostEngine) && !isCurrentWorker(hostEngine, owner)) {
+            throw new SupersededPreviewError();
+          }
           if (holdsWorkerProposals(hostEngine) &&
             (!isCurrentWorker(hostEngine, owner) ||
               hostEngine.residentWorkerProbe()?.layoutRevision !== adoptedRevision)) return null;
@@ -2178,13 +2218,19 @@ export function useRustDisplayList(
                 const completed = await worker.completeLayout(
                   provisionalEpoch, false, COMPLETION_SLICE_BLOCKS
                 );
-                if (!isCurrentPass()) return null;
+                if (!isCurrentPass()) {
+                  if (recoveredEngine(hostEngine) &&
+                    !isCurrentWorker(hostEngine, owner)) throw new SupersededPreviewError();
+                  return null;
+                }
                 if (completed) {
                   const base = frameBase(hostEngine);
                   return adopt(completed, base?.docEpoch === provisionalDocEpoch ? base : undefined);
                 }
                 if (!holdsWorkerProposals(hostEngine)) return null;
               }
+              if (recoveredEngine(hostEngine) &&
+                !isCurrentWorker(hostEngine, owner)) throw new SupersededPreviewError();
               return null;
             })
             .catch(async (cause: unknown): Promise<LayoutComputation | null> => {
@@ -2202,6 +2248,7 @@ export function useRustDisplayList(
       return pass;
     },
     [
+      bootstrapFrameEpoch,
       canLayoutInWorker,
       dropWorker,
       handedOverPreview,
@@ -2212,6 +2259,7 @@ export function useRustDisplayList(
       isCurrentWorker,
       paintedCaretMachine,
       queryEpochGate,
+      recoveredEngine,
       replaceOutOfMemoryWorker,
       requestOpenedWorker,
       workerFor,
@@ -2605,7 +2653,7 @@ export function useRustDisplayList(
                       ? WORKER_PREVIEW_DISPLAY_WINDOW
                       : displayWindowRef.current,
                     heapLimitBytes: workerHeapLimitRef.current,
-                    ...followedFrameEpoch(snapshotRef.current.frame),
+                    ...bootstrapFrameEpoch(hostEngine),
                   })
                 : worker.sync(snapshot, extras, previousFrame?.frameEpoch ?? 0, paintCaret, {
                     ...sent(),
@@ -2613,6 +2661,9 @@ export function useRustDisplayList(
                   });
         return workerFrame
           .then((result) => {
+            if (recoveredEngine(hostEngine) && !isCurrentWorker(hostEngine, owner)) {
+              throw new SupersededPreviewError();
+            }
             const delta = decodeFrameDelta(result.frame);
             const nextFrame = applyFrameDelta(previousFrame, delta);
             return {
@@ -2630,6 +2681,7 @@ export function useRustDisplayList(
                   : null,
               queryEngine: null,
               workerProduced: true,
+              workerOwner: owner,
               caretPainted: result.caretPainted,
               previewKey: workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
             };
@@ -2659,6 +2711,7 @@ export function useRustDisplayList(
           delta &&
           appliesTo !== undefined &&
           prebuilt.engine === hostEngine &&
+          (!recoveredEngine(prebuilt.engine) || prebuilt.owner === workerRef.current || handedOverPreviewFrame) &&
           (workerRef.current?.engine === hostEngine || handedOverPreviewFrame) &&
           prebuilt.contentEpoch === contentEpoch &&
           prebuilt.layoutExtras === JSON.stringify(frameExtrasInputs())
@@ -2677,6 +2730,7 @@ export function useRustDisplayList(
             ),
             queryEngine: null,
             workerProduced: true,
+            workerOwner: prebuilt.owner,
             caretPainted: result.caretPainted,
             provisional: prebuilt.provisional,
             previewKey: workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
@@ -2695,6 +2749,8 @@ export function useRustDisplayList(
     pending
       .then((result) => {
         if (residentEngine && workerFailureRef.current.has(residentEngine)) return;
+        if (recoveredEngine(residentEngine) && result.workerOwner &&
+          result.workerOwner !== workerRef.current && !handedOverPreviewFrame) return;
         if (
           generation !== generationRef.current ||
           contentEpoch !== contentEpochRef.current
@@ -2763,6 +2819,7 @@ export function useRustDisplayList(
       });
   }, [
     adoptHostEngine,
+    bootstrapFrameEpoch,
     ensureRebuildableReplica,
     failWorkerDocument,
     layout,
@@ -2783,6 +2840,7 @@ export function useRustDisplayList(
     publishQuerySnapshot,
     queryEpochGate,
     markSettled,
+    recoveredEngine,
     replaceOutOfMemoryWorker,
     requestOpenedWorker,
     requestSettleRelayout,
