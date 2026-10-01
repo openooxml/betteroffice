@@ -15,7 +15,7 @@ import type {
   resolveNavigationTarget,
 } from '@betteroffice/docx/yrs';
 import type { WorkerOpenedDocument } from '../hooks/useDisplayList';
-import { proposalRevisionPreview } from '@betteroffice/docx/yrs';
+import { proposalRevisionPreview, resolveMirroredNavigationTarget } from '@betteroffice/docx/yrs';
 import {
   awaitWorkerOpenReplica,
   workerOpenReplicaPending,
@@ -242,6 +242,8 @@ export function registerWorkerProposalAuthority(
       return { version: read.version, results: read.value.results };
     }, () => main(anchors)),
     navigationTarget: (story, paraId, main) => route(async () => {
+      const local = resolveMirroredNavigationTarget(geometry, session.getProposals(), story, paraId);
+      if (local !== null) return { version: geometry!.version, target: local };
       const read = await worker.documentRead({ kind: 'navigationTarget', story, paraId });
       assertCurrent();
       return { version: read.version, target: read.value };

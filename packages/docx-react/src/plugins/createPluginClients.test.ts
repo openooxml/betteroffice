@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
+import { afterEach, beforeAll, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
@@ -6,6 +6,7 @@ import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
   createYrsSession,
+  computeProposalGeometryMirror,
   proposalSetIdentity,
   type DocxEditRequest,
   type ResidentProposalReply,
@@ -386,12 +387,12 @@ describe('plugin read and navigation clients', () => {
     stampRevisionPreviewKey(env.queries, currentPreviewKey(env.session));
     env.publishLayout();
     expect(await scroll).toEqual({ ok: true });
-    expect(worker.navigation).toHaveBeenCalledTimes(2);
+    expect(worker.navigation).toHaveBeenCalledTimes(1);
     expect(env.events).toEqual(['scroll:42']);
     expect(worker.replica).not.toHaveBeenCalled();
   });
 
-  test('worker navigation resolves twice and reveals without flushing or requesting the replica', async () => {
+  test('worker navigation resolves once and reveals without flushing or requesting the replica', async () => {
     const env = await setup();
     const worker = routeWorker(env);
     const target = { story: 'body', paraId: '00000002' };
@@ -401,13 +402,97 @@ describe('plugin read and navigation clients', () => {
         expectVersion: env.session.version(),
       })
     ).toEqual({ ok: true });
-    expect(worker.navigation).toHaveBeenCalledTimes(2);
+    expect(worker.navigation).toHaveBeenCalledTimes(1);
     expect(worker.navigation.mock.calls[0]?.slice(0, 2)).toEqual(['body', '00000002']);
     expect(worker.flush).not.toHaveBeenCalled();
     expect(worker.replica).not.toHaveBeenCalled();
     expect(env.events).toEqual(['scroll:42']);
     expect(JSON.stringify(env.session.selection())).toBe(selection);
   });
+
+  for (const toggleOnly of [true, false]) {
+    test(`worker navigation uses ${toggleOnly ? 'zero reads after a toggle' : 'one read after a version-changing proposal'} and matches repeated resolution`, async () => {
+      const env = await setup();
+      const paragraph = env.session.paragraphIdentities().paragraphs[1]!.session!;
+      const target = { story: paragraph.story, paraId: paragraph.paraId };
+      const before = env.session.version();
+      expect(env.session.proposeChanges({
+        expectVersion: env.session.version(),
+        proposals: [{
+          id: 'jump', paragraph, op: 'insertText', at: 'start', text: 'Proposed ',
+          suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+        }],
+      }).ok).toBe(true);
+      expect(env.session.version()).not.toBe(before);
+      const proposed = env.session.getProposals();
+      const proposedGeometry = computeProposalGeometryMirror(env.session, proposed, false);
+      expect(proposedGeometry.navigationTargets).toBeUndefined();
+      if (toggleOnly) {
+        expect(env.session.setProposalStates({
+          expectVersion: proposed.version,
+          expectPreviewVersion: proposed.previewVersion,
+          changes: [{ id: 'jump', state: 'rejected' }],
+        }).ok).toBe(true);
+        expect(env.session.version()).toBe(proposed.version);
+        expect(env.session.getProposals().previewVersion).toBe(proposed.previewVersion + 1);
+      }
+      const first = resolveParagraph(env.session, target);
+      const second = resolveParagraph(env.session, target);
+      expect(first).toEqual(second);
+      if (typeof second === 'string') throw new Error('expected a navigation target');
+      const version = 'worker-1';
+      const proposals = env.session.getProposals();
+      const geometry = toggleOnly ? computeProposalGeometryMirror(env.session, proposals) : proposedGeometry;
+      if (toggleOnly) expect(geometry.navigationTargets?.jump).toEqual(second);
+      const snapshot: ResidentProposalReply = {
+        mirror: {
+          version,
+          proposals: {
+            previewVersion: proposals.previewVersion,
+            entries: proposals.proposals.map((record) => ({
+              record, key: 'jump', suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+            })),
+          },
+        },
+        geometry: { ...geometry, version },
+        changedStories: toggleOnly ? [] : ['body'], updates: [], stateVector: new Uint8Array(),
+      };
+      const documentRead = mock(async () => ({ version, value: second }) as never);
+      const replica = workerOpenReplica.deferWorkerOpenReplica(env.session, async () => {
+        throw new Error('navigation must not hydrate the replica');
+      }, () => { throw new Error('unexpected fallback'); }, () => {});
+      restoreWorkers.push(() => replica.cancel());
+      const authority = workerProposals.registerWorkerProposalAuthority(env.session, {
+        proposal: async () => snapshot,
+        documentRead,
+        handOver: async () => { throw new Error('unexpected hand-over'); },
+      }, {
+        laidOut: async () => {}, current: () => true, relayout: () => {}, contentChanged: () => {},
+        adopted: () => {}, handedOver: () => {},
+      });
+      await authority.initialize();
+      stampSourceVersion(env.queries, version);
+      stampRevisionPreviewKey(env.queries, currentPreviewKey(env.session));
+      const count = spyOn(env.session, 'paragraphIdCount').mockImplementation(() => {
+        throw new Error('navigation must not read the unhydrated replica');
+      });
+      const flush = spyOn(editorBatches, 'flushEditorInput');
+      restoreWorkers.push(() => { count.mockRestore(); flush.mockRestore(); });
+      env.state.layoutReady = false;
+      const scroll = env.clients.navigation.scrollToParagraph(target, { expectVersion: version });
+      await env.waiting;
+      expect(documentRead).toHaveBeenCalledTimes(toggleOnly ? 0 : 1);
+      expect(env.events).toEqual([]);
+      env.state.layoutReady = true;
+      env.publishLayout();
+      expect(await scroll).toEqual({ ok: true });
+      expect(documentRead).toHaveBeenCalledTimes(toggleOnly ? 0 : 1);
+      expect(env.events).toEqual([`scroll:${second.position}`]);
+      expect(flush).not.toHaveBeenCalled();
+      expect(replica.started).toBe(false);
+      expect(env.layoutListeners.size).toBe(0);
+    });
+  }
 
   test('worker navigation checks the session and reply versions around each resolution', async () => {
     const env = await setup();
@@ -444,25 +529,25 @@ describe('plugin read and navigation clients', () => {
     expect(env.events).toEqual([]);
   });
 
-  test('worker navigation rechecks the version after its second resolution', async () => {
+  test('worker navigation rechecks the version after layout settles without reading again', async () => {
     const env = await setup();
     const worker = routeWorker(env);
     const target = { story: 'body', paraId: '00000002' };
     const version = env.session.version();
-    worker.navigation.mockImplementation(async () => {
-      if (worker.navigation.mock.calls.length === 2) {
-        await Promise.resolve();
+    const layout = spyOn(env.access, 'layout').mockImplementationOnce(() => {
+      queueMicrotask(() => {
         env.session.insertText({ story: 'body', paraId: '00000001', offset: 5 }, '!');
-      }
-      return { version, target: { loc: { ...target, offset: 0 }, position: 42 } };
+      });
+      return { queries: env.queries, complete: true, failed: false };
     });
+    restoreWorkers.push(() => layout.mockRestore());
     expect(
       await env.clients.navigation.scrollToParagraph(target, { expectVersion: version })
     ).toMatchObject({
       ok: false,
       failure: { code: 'stale-version' },
     });
-    expect(worker.navigation).toHaveBeenCalledTimes(2);
+    expect(worker.navigation).toHaveBeenCalledTimes(1);
     expect(env.events).toEqual([]);
   });
 

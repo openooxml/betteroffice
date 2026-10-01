@@ -893,6 +893,7 @@ describe('resident worker revision counts', () => {
         version: engine.version,
         listRevisions: () => [],
         resolveParagraphAnchor: () => ({ status: 'missing' }),
+        hasStory: () => false,
       },
       storiesChangedSince: () => ({ revision: 0, stories: [] }),
     });
@@ -1602,7 +1603,7 @@ describe('worker proposals during sliced completion', () => {
       provisionalPages: 1, displayWindow: [0, 1], expectedFrameEpoch: 0,
     });
     expect(booted.ok && booted.layoutProvisional).toBe(true);
-    const proposal = (index = 1): DocxProposalInput => ({
+    const proposal = (index = 1): Extract<DocxProposalInput, { op: 'replaceText' }> => ({
       id: `p${index}`,
       paragraph: {
         kind: 'persisted',
@@ -1629,6 +1630,138 @@ describe('worker proposals during sliced completion', () => {
     };
     return { w, engine, calls, onResume, snapshot, booted, proposal, complete, expectFullLayout };
   }
+
+  test('proposal mirrors retain the same navigation target as repeated worker reads', async () => {
+    const { w, engine, proposal } = await proposalWorker();
+    try {
+      let projectionReads = 0;
+      const storyIds = engine.geometryReader.storyIds;
+      engine.geometryReader.storyIds = () => { projectionReads += 1; return storyIds(); };
+      const snapshot = await w.send({ type: 'proposal', operation: { kind: 'snapshot' } });
+      expect(snapshot.ok).toBe(true);
+      expect(projectionReads).toBe(0);
+      const applied = await w.send({
+        type: 'proposal', operation: {
+          kind: 'propose', request: { expectVersion: engine.proposalEngine.version(), proposals: [proposal()] },
+        },
+      });
+      expect(applied.ok).toBe(true);
+      if (!applied.ok || !applied.proposal?.result?.ok) throw new Error('expected a proposal');
+      expect(applied.proposal.changedStories).toEqual(['body']);
+      expect(applied.proposal.geometry.navigationTargets).toBeUndefined();
+      expect(projectionReads).toBe(0);
+      const paragraph = applied.proposal.result.snapshot.proposals[0]!.paragraph;
+      const read = { kind: 'navigationTarget', story: paragraph.story, paraId: paragraph.paraId } as const;
+      const toggled = await w.send({
+        type: 'proposal', operation: {
+          kind: 'setStates', request: {
+            expectVersion: applied.proposal.mirror.version,
+            expectPreviewVersion: applied.proposal.mirror.proposals.previewVersion,
+            changes: [{ id: 'p1', state: 'rejected' }],
+          },
+        },
+      });
+      expect(toggled.ok).toBe(true);
+      if (!toggled.ok || !toggled.proposal?.result?.ok) throw new Error('expected a toggle');
+      expect(toggled.proposal.mirror.version).toBe(applied.proposal.mirror.version);
+      expect(toggled.proposal.geometry.previewVersion).toBe(applied.proposal.geometry.previewVersion + 1);
+      expect(toggled.proposal.changedStories).toEqual([]);
+      expect(projectionReads).toBe(1);
+      const first = await w.send({ type: 'documentRead', read });
+      const second = await w.send({ type: 'documentRead', read });
+      expect(first.ok).toBe(true);
+      expect(second.ok).toBe(true);
+      if (!first.ok || !second.ok) throw new Error('expected navigation reads');
+      expect(first.read).toEqual(second.read);
+      expect(first.read).toEqual({
+        version: applied.proposal.mirror.version,
+        value: toggled.proposal.geometry.navigationTargets?.p1,
+      });
+      expect(projectionReads).toBe(1);
+    } finally {
+      engine.destroy();
+    }
+  });
+
+  test('cached navigation targets populate the first mirror and changed versions defer rebuilding', async () => {
+    const { w, engine, proposal } = await proposalWorker();
+    try {
+      let projectionReads = 0;
+      const storyIds = engine.geometryReader.storyIds;
+      engine.geometryReader.storyIds = () => { projectionReads += 1; return storyIds(); };
+      const read = { kind: 'navigationTarget', story: 'body', paraId: '00000001' } as const;
+      const initial = await w.send({ type: 'documentRead', read });
+      expect(initial.ok).toBe(true);
+      expect(projectionReads).toBe(1);
+      const unchanged = await w.send({
+        type: 'proposal', operation: {
+          kind: 'propose', request: {
+            expectVersion: engine.proposalEngine.version(),
+            proposals: [{ ...proposal(), replaceWith: 'Paragraph 1' }],
+          },
+        },
+      });
+      expect(unchanged.ok).toBe(true);
+      if (!initial.ok || !unchanged.ok || !unchanged.proposal?.result?.ok) {
+        throw new Error('expected unchanged proposal and navigation');
+      }
+      expect(unchanged.proposal.changedStories).toEqual([]);
+      expect(initial.read).toEqual({
+        version: unchanged.proposal.mirror.version,
+        value: unchanged.proposal.geometry.navigationTargets?.p1,
+      });
+      expect(unchanged.proposal.geometry.navigationTargets?.p1).toMatchObject({
+        loc: { story: read.story, paraId: read.paraId, offset: 0 }, position: 1,
+      });
+      expect(projectionReads).toBe(1);
+
+      const changed = await w.send({
+        type: 'proposal', operation: {
+          kind: 'propose', request: { expectVersion: engine.proposalEngine.version(), proposals: [proposal(2)] },
+        },
+      });
+      expect(changed.ok).toBe(true);
+      if (!changed.ok || !changed.proposal?.result?.ok) throw new Error('expected changed proposal');
+      expect(changed.proposal.changedStories).toEqual(['body']);
+      expect(changed.proposal.mirror.version).not.toBe(unchanged.proposal.mirror.version);
+      expect(changed.proposal.geometry.navigationTargets).toBeUndefined();
+      expect(projectionReads).toBe(1);
+      const snapshot = await w.send({ type: 'proposal', operation: { kind: 'snapshot' } });
+      expect(snapshot.ok).toBe(true);
+      if (!snapshot.ok || !snapshot.proposal) throw new Error('expected snapshot');
+      expect(projectionReads).toBe(2);
+      const navigation = await w.send({ type: 'documentRead', read });
+      expect(navigation.ok).toBe(true);
+      expect(navigation.ok && navigation.read).toEqual({
+        version: snapshot.proposal.mirror.version,
+        value: snapshot.proposal.geometry.navigationTargets?.p1,
+      });
+      expect(projectionReads).toBe(2);
+      const withdrawn = await w.send({
+        type: 'proposal', operation: {
+          kind: 'withdraw', request: { expectVersion: snapshot.proposal.mirror.version, ids: ['p2'] },
+        },
+      });
+      expect(withdrawn.ok).toBe(true);
+      if (!withdrawn.ok || !withdrawn.proposal?.result?.ok) throw new Error('expected withdrawal');
+      expect(withdrawn.proposal.changedStories).toEqual(['body']);
+      expect(withdrawn.proposal.geometry.navigationTargets).toBeUndefined();
+      expect(projectionReads).toBe(2);
+      const first = await w.send({ type: 'documentRead', read });
+      expect(first.ok).toBe(true);
+      expect(projectionReads).toBe(3);
+      const warmed = await w.send({ type: 'proposal', operation: { kind: 'snapshot' } });
+      expect(warmed.ok).toBe(true);
+      if (!warmed.ok || !warmed.proposal) throw new Error('expected warmed snapshot');
+      expect(first.ok && first.read).toEqual({
+        version: warmed.proposal.mirror.version,
+        value: warmed.proposal.geometry.navigationTargets?.p1,
+      });
+      expect(projectionReads).toBe(3);
+    } finally {
+      engine.destroy();
+    }
+  });
 
   test('snapshot and document reads answer before the background layout without restarting it', async () => {
     const { w, engine, calls, onResume, proposal, complete, expectFullLayout } = await proposalWorker();

@@ -12,6 +12,7 @@ import {
   type DocxProposalResult,
 } from './proposals';
 import { computeProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
+import { hasCachedYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import {
   presentOffscreenPageBackBuffer,
   presentOffscreenPageBackBufferWithCaret,
@@ -42,6 +43,7 @@ import {
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 let session: ResidentEngineSession | null = null;
 let proposals: DocxProposalRegistry | null = null;
+let lastProposalMirrorVersion: string | null = null;
 /** Set while the session holds the document `open` seeded, with the heap limit it used. */
 let openedDocument: { heapLimitBytes?: number } | null = null;
 let unsubscribe: (() => void) | null = null;
@@ -294,6 +296,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     try {
       const registry = proposals ??= createProposalRegistry(session.proposalEngine);
       const since = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+      const previousVersion = session.proposalEngine.version();
       let result: DocxProposalResult | undefined;
       switch (request.operation.kind) {
         case 'propose':
@@ -311,17 +314,26 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       if (changedStories.length > 0) completedLayout = null;
       const updates = pendingUpdates.map(exactBuffer);
       const stateVector = exactBuffer(session.encodeStateVector());
+      const version = session.proposalEngine.version();
+      const geometry = computeProposalGeometryMirror(
+        session.geometryReader,
+        registry.snapshot(),
+        version === previousVersion && (
+          version === lastProposalMirrorVersion || hasCachedYrsSidebarProjection(session.geometryReader)
+        )
+      );
+      lastProposalMirrorVersion = geometry.version;
       reply(
         {
           id: request.id,
           ok: true,
           proposal: {
             ...(result === undefined ? {} : { result }),
-            mirror: { version: session.proposalEngine.version(), proposals: registry.exportState() },
+            mirror: { version, proposals: registry.exportState() },
             changedStories,
             updates,
             stateVector,
-            geometry: computeProposalGeometryMirror(session.geometryReader, registry.snapshot()),
+            geometry,
           },
         },
         [...updates, stateVector]
@@ -829,6 +841,7 @@ function destroySession(keepSurfaces = false): void {
   proposals?.destroy();
   proposals = null;
   session?.destroy();
+  lastProposalMirrorVersion = null;
   session = null;
   openedDocument = null;
   pendingUpdates = [];

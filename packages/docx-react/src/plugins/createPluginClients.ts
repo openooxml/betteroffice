@@ -388,7 +388,7 @@ export function createPluginClients(
         if (refused) return refused;
         const currentAuthority = workerProposalAuthority(session);
         const located = currentAuthority
-          ? await locateWorker(session, target, options.expectVersion, currentAuthority)
+          ? first.located
           : locate(session, target, options.expectVersion);
         if ('ok' in located) return located;
         if (currentAuthority) {

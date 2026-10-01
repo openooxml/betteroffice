@@ -95,6 +95,115 @@ function harness(laidOut = () => Promise.resolve()) {
 const request: DocxProposalRequest = { expectVersion: 'worker-1', proposals: [] };
 const unusedMain = async () => { throw new Error('unexpected main call'); };
 
+function navigationReply(version = 'worker-1', position = 42): ResidentProposalReply {
+  const snapshot = reply(version);
+  const paragraph = { kind: 'session' as const, sessionId: 'session', story: 'body', paraId: 'p1' };
+  snapshot.mirror.proposals.entries = [{
+    key: 'jump', suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+    record: { id: 'jump', state: 'proposed', paragraph, revisionIds: [], changed: false },
+  }];
+  snapshot.geometry.proposals = proposalSetIdentity({
+    version, previewVersion: 0, proposals: snapshot.mirror.proposals.entries.map(({ record }) => record),
+  });
+  snapshot.geometry.targets.jump = { ok: true, ranges: [], paragraph: position };
+  snapshot.geometry.navigationTargets = {
+    jump: { loc: { story: 'body', paraId: 'p1', offset: 0 }, position },
+  };
+  return snapshot;
+}
+
+test('mirrored proposal navigation uses no worker reads and unknown targets use one', async () => {
+  const h = harness();
+  const snapshot = navigationReply();
+  h.worker.proposal.mockResolvedValueOnce(snapshot);
+  await h.authority.initialize();
+  const main = mock(() => 'unsupported' as const);
+  expect(await h.authority.navigationTarget('body', 'p1', main)).toEqual({
+    version: 'worker-1', target: snapshot.geometry.navigationTargets!.jump,
+  });
+  expect(h.worker.documentRead).not.toHaveBeenCalled();
+  h.worker.documentRead.mockResolvedValueOnce({ version: 'worker-1', value: 'missing-target' } as never);
+  expect(await h.authority.navigationTarget('body', 'other', main)).toEqual({
+    version: 'worker-1', target: 'missing-target',
+  });
+  expect(h.worker.documentRead).toHaveBeenCalledTimes(1);
+  expect(h.worker.documentRead.mock.calls[0]![0]).toEqual<{
+    kind: 'navigationTarget'; story: string; paraId: string;
+  }>({
+    kind: 'navigationTarget', story: 'body', paraId: 'other',
+  });
+  expect(main).not.toHaveBeenCalled();
+});
+
+test('mirrored navigation waits for preceding mutations and reads their new geometry', async () => {
+  const h = harness();
+  h.worker.proposal.mockResolvedValueOnce(navigationReply());
+  await h.authority.initialize();
+  const pending = deferred<ResidentProposalReply>();
+  const posted = deferred<void>();
+  h.worker.proposal.mockImplementation(async () => { posted.resolve(); return pending.promise; });
+  const mutation = h.authority.propose(request, unusedMain);
+  await posted.promise;
+  expect(h.session.version()).toBe('worker-1~');
+  const main = mock(() => 'unsupported' as const);
+  const navigation = h.authority.navigationTarget('body', 'p1', main);
+  const next = navigationReply('worker-2', 99);
+  pending.resolve(next);
+  await mutation;
+  expect(await navigation).toEqual({ version: 'worker-2', target: next.geometry.navigationTargets!.jump });
+  expect(h.worker.documentRead).not.toHaveBeenCalled();
+  expect(main).not.toHaveBeenCalled();
+});
+
+test('navigation ignores stale mirrors and retains exact mirrored target failures', async () => {
+  for (const mismatch of ['version', 'previewVersion', 'proposals', 'navigationTargets'] as const) {
+    const h = harness();
+    const snapshot = navigationReply();
+    if (mismatch === 'version') snapshot.geometry.version = 'older';
+    if (mismatch === 'previewVersion') snapshot.geometry.previewVersion += 1;
+    if (mismatch === 'proposals') snapshot.geometry.proposals = 'other';
+    if (mismatch === 'navigationTargets') snapshot.geometry.navigationTargets = undefined;
+    h.worker.proposal.mockResolvedValueOnce(snapshot);
+    h.worker.documentRead.mockResolvedValueOnce({ version: 'worker-1', value: 'ambiguous-target' } as never);
+    expect(await h.authority.navigationTarget('body', 'p1', () => 'unsupported')).toEqual({
+      version: 'worker-1', target: 'ambiguous-target',
+    });
+    expect(h.worker.documentRead).toHaveBeenCalledTimes(1);
+  }
+  for (const target of ['missing-target', 'ambiguous-target', 'unsupported'] as const) {
+    const h = harness();
+    const snapshot = navigationReply();
+    snapshot.geometry.navigationTargets!.jump = target;
+    h.worker.proposal.mockResolvedValueOnce(snapshot);
+    expect(await h.authority.navigationTarget('body', 'p1', () => 'unsupported')).toEqual({
+      version: 'worker-1', target,
+    });
+    expect(h.worker.documentRead).not.toHaveBeenCalled();
+  }
+});
+
+test('navigation before hand-over uses the mirror and navigation after waits for the main replica', async () => {
+  const h = harness();
+  const snapshot = navigationReply();
+  h.worker.proposal.mockImplementationOnce(async (op) => { h.events.push(op.kind); return snapshot; });
+  await h.authority.initialize();
+  deferWorkerOpenReplica(h.session, async () => {
+    const handover = await beginWorkerProposalHandover(h.session)!;
+    return () => { h.mainVersion('main-2'); handover.complete(); };
+  }, () => { throw new Error('unexpected fallback'); }, () => {});
+  const before = h.authority.navigationTarget('body', 'p1', () => 'unsupported');
+  const ready = requestWorkerOpenReplica(h.session)!;
+  const target = { loc: { story: 'body', paraId: 'p1', offset: 0 }, position: 42 };
+  const main = mock(() => target);
+  const after = h.authority.navigationTarget('body', 'p1', main);
+  expect(await before).toEqual({ version: 'worker-1', target: snapshot.geometry.navigationTargets!.jump });
+  await ready;
+  expect(await after).toEqual({ version: 'main-2', target });
+  expect(main).toHaveBeenCalledTimes(1);
+  expect(h.worker.documentRead).not.toHaveBeenCalled();
+  expect(h.events).toEqual(['snapshot', 'handOver']);
+});
+
 test('initialization runs once and serializes reads after an in-flight proposal', async () => {
   const h = harness();
   const first = h.authority.initialize();

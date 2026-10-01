@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, expect, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, expect, mock, spyOn, test } from 'bun:test';
 import type { DisplayList, DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { LayoutSelectionGate } from '@betteroffice/docx/layout';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
@@ -229,6 +229,8 @@ test('worker proposal toggles keep the shown layout and mirrored geometry at the
   restores.push(() => { requestFrame.mockRestore(); cancelFrame.mockRestore(); });
   let pipeline: UseLayoutPipelineReturn | null = null;
   const workerPreviews: unknown[] = [];
+  const revealed: number[] = [];
+  const documentRead = mock(async () => { throw new Error('unexpected document read'); });
   const paragraph = {
     kind: 'session' as const, sessionId: 'session', story: 'body', paraId: 'first',
   };
@@ -285,6 +287,9 @@ test('worker proposal toggles keep the shown layout and mirrored geometry at the
           targets: Object.fromEntries(snapshot.proposals.map(({ id }) => [
             id, { ok: true as const, ranges: [], paragraph: 3 },
           ])),
+          navigationTargets: Object.fromEntries(snapshot.proposals.map(({ id, paragraph }) => [
+            id, { loc: { story: paragraph.story, paraId: paragraph.paraId, offset: 0 }, position: 3 },
+          ])),
           hidden: [],
         },
         changedStories: [],
@@ -292,7 +297,7 @@ test('worker proposal toggles keep the shown layout and mirrored geometry at the
         stateVector: new Uint8Array(),
       };
     },
-    documentRead: async () => { throw new Error('unexpected document read'); },
+    documentRead,
     handOver: async () => { throw new Error('unexpected hand-over'); },
   }, {
     current: () => true,
@@ -369,8 +374,10 @@ test('worker proposal toggles keep the shown layout and mirrored geometry at the
     plugins: [defineDocxPlugin({ id: 'test.worker-toggles', createState: () => null })],
     pagedEditorRef: { current: {
       getYrsSession: () => session,
+      getLayout: () => layoutHook.result.current.layout,
       getSelectionRange: () => null,
       hasPendingInput: () => false,
+      revealDisplayPosition: (position: number) => { revealed.push(position); return 'scrolled'; },
       yrsLocToDisplayPosition: () => { throw new Error('worker geometry must not read replica positions'); },
     } as unknown as PagedEditorRef },
     writeModeRef: { current: 'viewing' },
@@ -444,5 +451,11 @@ test('worker proposal toggles keep the shown layout and mirrored geometry at the
   for (const { id } of snapshot.proposals) {
     expect(geometry.getAnchorGeometry({ kind: 'proposal', id })).toMatchObject({ ok: true });
   }
+  expect(replica.started).toBe(false);
+  expect(await result.current.activations[0]!.context.navigation.scrollToParagraph(paragraph, {
+    expectVersion: snapshot.version,
+  })).toEqual({ ok: true });
+  expect(revealed).toEqual([3]);
+  expect(documentRead).not.toHaveBeenCalled();
   expect(replica.started).toBe(false);
 });
