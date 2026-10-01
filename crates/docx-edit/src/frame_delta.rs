@@ -171,17 +171,8 @@ pub fn encode_frame_delta(
     epochs: FrameEpochs,
     full: bool,
     next_page_id: &mut u64,
-    compact_placeholders: bool,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
-    encode_frame_delta_inner(
-        list,
-        previous,
-        epochs,
-        full,
-        next_page_id,
-        None,
-        compact_placeholders,
-    )
+    encode_frame_delta_inner(list, previous, epochs, full, next_page_id, None)
 }
 
 /// Incremental encoder that fully prepares only display-rebuilt pages. Clean
@@ -194,7 +185,6 @@ pub fn encode_frame_delta_incremental(
     epochs: FrameEpochs,
     next_page_id: &mut u64,
     rebuilt_pages: &HashSet<usize>,
-    compact_placeholders: bool,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
     encode_frame_delta_inner(
         list,
@@ -203,7 +193,6 @@ pub fn encode_frame_delta_incremental(
         false,
         next_page_id,
         Some(&|index| rebuilt_pages.contains(&index)),
-        compact_placeholders,
     )
 }
 
@@ -217,7 +206,6 @@ pub fn encode_frame_delta_pages(
     epochs: FrameEpochs,
     next_page_id: &mut u64,
     rebuilt: &dyn Fn(usize) -> bool,
-    compact_placeholders: bool,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
     let mut data = FrameData::default();
     let prepared = prepare_pages(
@@ -228,7 +216,6 @@ pub fn encode_frame_delta_pages(
         PrepareOptions {
             match_anchors: false,
             full: false,
-            compact_placeholders,
         },
         &mut data,
     )?;
@@ -242,7 +229,6 @@ fn encode_frame_delta_inner(
     full: bool,
     next_page_id: &mut u64,
     rebuilt_pages: Option<&dyn Fn(usize) -> bool>,
-    compact_placeholders: bool,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
     let mut data = FrameData::default();
     let prepared = prepare_pages(
@@ -253,7 +239,6 @@ fn encode_frame_delta_inner(
         PrepareOptions {
             match_anchors: true,
             full,
-            compact_placeholders,
         },
         &mut data,
     )?;
@@ -541,7 +526,6 @@ fn encode_prepared(
 struct PrepareOptions {
     match_anchors: bool,
     full: bool,
-    compact_placeholders: bool,
 }
 
 fn prepare_pages<'a>(
@@ -555,7 +539,6 @@ fn prepare_pages<'a>(
     let PrepareOptions {
         match_anchors,
         full,
-        compact_placeholders,
     } = options;
     let anchors = page_anchors(list);
     // Anchors are unique within one snapshot list (page_anchors suffixes an
@@ -625,7 +608,7 @@ fn prepare_pages<'a>(
         };
         let positions = primitive_positions(page);
         let note_anchors = note_anchors(page)?;
-        let placeholder = (compact_placeholders && page.unbuilt).then(|| {
+        let placeholder = page.unbuilt.then(|| {
             let mut normalized = page.clone();
             normalized.page_index = 0;
             normalized.position_span = None;
@@ -1901,8 +1884,7 @@ mod tests {
             base_frame_epoch: 0,
         };
         let mut next_id = 0;
-        let (_, snapshot) =
-            encode_frame_delta(&before, &[], epochs, true, &mut next_id, false).unwrap();
+        let (_, snapshot) = encode_frame_delta(&before, &[], epochs, true, &mut next_id).unwrap();
         let (bytes, _) = encode_frame_delta(
             &after,
             &snapshot,
@@ -1913,7 +1895,6 @@ mod tests {
             },
             false,
             &mut next_id,
-            false,
         )
         .unwrap();
         assert_eq!(bytes[FRAME_HEADER_LEN], PAGE_OP_UPSERT);
@@ -2077,7 +2058,7 @@ mod tests {
         };
         let mut next_id = 0;
         let (_, snapshot) =
-            encode_frame_delta(&before, &[], epochs(1), true, &mut next_id, false).unwrap();
+            encode_frame_delta(&before, &[], epochs(1), true, &mut next_id).unwrap();
         let delta = |rebuilt: &[usize]| {
             let mut next_id = next_id;
             encode_frame_delta_incremental(
@@ -2086,7 +2067,6 @@ mod tests {
                 epochs(2),
                 &mut next_id,
                 &rebuilt.iter().copied().collect(),
-                false,
             )
             .unwrap()
         };
@@ -2154,35 +2134,24 @@ mod tests {
             base_frame_epoch: frame_epoch - 1,
         };
         let mut next_id = 0;
-        let (_, snapshots) = encode_frame_delta(
-            &pages(&[0, 1, 2, 3, 4]),
-            &[],
-            epochs(1),
-            true,
-            &mut next_id,
-            false,
-        )
-        .unwrap();
+        let (_, snapshots) =
+            encode_frame_delta(&pages(&[0, 1, 2, 3, 4]), &[], epochs(1), true, &mut next_id)
+                .unwrap();
         let (_, snapshots) = encode_frame_delta_pages(
             &pages(&[0, 1, 2, 3, 4, 7, 8]),
             &snapshots,
             epochs(2),
             &mut next_id,
             &|index| index == 7 || index == 8,
-            false,
         )
         .unwrap();
         let built = pages(&[0, 1, 2, 3, 4, 5, 7, 8]);
-        let (_, snapshots) = encode_frame_delta_pages(
-            &built,
-            &snapshots,
-            epochs(3),
-            &mut next_id,
-            &|index| index == 5,
-            false,
-        )
-        .unwrap();
-        let (_, fresh) = encode_frame_delta(&built, &[], epochs(3), true, &mut 0, false).unwrap();
+        let (_, snapshots) =
+            encode_frame_delta_pages(&built, &snapshots, epochs(3), &mut next_id, &|index| {
+                index == 5
+            })
+            .unwrap();
+        let (_, fresh) = encode_frame_delta(&built, &[], epochs(3), true, &mut 0).unwrap();
         for (retained, fresh) in snapshots.iter().zip(&fresh) {
             assert_eq!(retained.page_index, fresh.page_index);
             assert_eq!(retained.fingerprint, fresh.fingerprint);
@@ -2224,22 +2193,15 @@ mod tests {
             base_frame_epoch: frame_epoch - 1,
         };
         let mut next_id = 0;
-        let (_, snapshots) = encode_frame_delta(
-            &pages(&[0, 1, 2, 3, 4]),
-            &[],
-            epochs(1),
-            true,
-            &mut next_id,
-            false,
-        )
-        .unwrap();
+        let (_, snapshots) =
+            encode_frame_delta(&pages(&[0, 1, 2, 3, 4]), &[], epochs(1), true, &mut next_id)
+                .unwrap();
         let (_, snapshots) = encode_frame_delta_pages(
             &pages(&[0, 1, 2, 3, 4, 8, 9]),
             &snapshots,
             epochs(2),
             &mut next_id,
             &|index| index == 8 || index == 9,
-            false,
         )
         .unwrap();
         let built = pages(&[0, 1, 2, 3, 4, 6, 8, 9]);
@@ -2249,10 +2211,9 @@ mod tests {
             epochs(3),
             &mut next_id,
             &HashSet::from([6]),
-            false,
         )
         .unwrap();
-        let (_, fresh) = encode_frame_delta(&built, &[], epochs(3), true, &mut 0, false).unwrap();
+        let (_, fresh) = encode_frame_delta(&built, &[], epochs(3), true, &mut 0).unwrap();
         for (retained, fresh) in snapshots.iter().zip(&fresh) {
             assert_eq!(retained.page_index, fresh.page_index);
             assert_eq!(retained.fingerprint, fresh.fingerprint);
@@ -2291,15 +2252,13 @@ mod tests {
         };
         let mut next_id = 0;
         let (_, before) =
-            encode_frame_delta(&list(false, ""), &[], epochs(1), true, &mut next_id, false)
-                .unwrap();
+            encode_frame_delta(&list(false, ""), &[], epochs(1), true, &mut next_id).unwrap();
         let (release, mut snapshots) = encode_frame_delta_pages(
             &list(true, ""),
             &before,
             epochs(2),
             &mut next_id,
             &|index| index == 0,
-            false,
         )
         .unwrap();
         assert_eq!(u32_at(&release, 52), 1);
@@ -2323,7 +2282,6 @@ mod tests {
                     epochs(epoch),
                     &mut next_id,
                     &|index| index == 0,
-                    false,
                 )
                 .unwrap()
             } else {
@@ -2333,12 +2291,11 @@ mod tests {
                     epochs(epoch),
                     &mut next_id,
                     &HashSet::from([rebuilt]),
-                    false,
                 )
                 .unwrap()
             };
             let (_, fresh) =
-                encode_frame_delta(&current, &[], epochs(epoch), true, &mut 0, false).unwrap();
+                encode_frame_delta(&current, &[], epochs(epoch), true, &mut 0).unwrap();
             for (actual, expected) in next.iter().zip(&fresh) {
                 assert_eq!(actual.page_id, expected.page_id);
                 assert_eq!(actual.fingerprint, expected.fingerprint);
@@ -2375,7 +2332,7 @@ mod tests {
         };
         let mut next_id = 0;
         let (_, snapshots) =
-            encode_frame_delta(&list([8, 30]), &[], epochs(1), true, &mut next_id, false).unwrap();
+            encode_frame_delta(&list([8, 30]), &[], epochs(1), true, &mut next_id).unwrap();
 
         let (unchanged, snapshots) = encode_frame_delta_incremental(
             &list([8, 30]),
@@ -2383,7 +2340,6 @@ mod tests {
             epochs(2),
             &mut next_id,
             &HashSet::new(),
-            false,
         )
         .unwrap();
         assert_eq!(u32_at(&unchanged, 52), 0);
@@ -2394,11 +2350,10 @@ mod tests {
             epochs(3),
             &mut next_id,
             &HashSet::new(),
-            false,
         )
         .unwrap();
         assert_eq!(u32_at(&moved, 52), 1);
-        assert_eq!(moved[FRAME_HEADER_LEN], PAGE_OP_UPSERT);
+        assert_eq!(moved[FRAME_HEADER_LEN], PAGE_OP_SHIFT_POSITIONS);
     }
 
     fn placeholder_list(span: Option<[i64; 2]>) -> DisplayList {
@@ -2424,15 +2379,8 @@ mod tests {
     fn an_unbuilt_page_whose_position_span_moves_uses_a_compact_shift() {
         let before = placeholder_list(Some([8, 30]));
         let mut next_id = 0;
-        let (full, mut snapshots) = encode_frame_delta(
-            &before,
-            &[],
-            placeholder_epochs(1),
-            true,
-            &mut next_id,
-            true,
-        )
-        .unwrap();
+        let (full, mut snapshots) =
+            encode_frame_delta(&before, &[], placeholder_epochs(1), true, &mut next_id).unwrap();
         let mut retained = HashMap::new();
         assert_eq!(apply_placeholder_test_frame(&full, &mut retained), before);
         for (epoch, span) in [(2, [14, 36]), (3, [10, 32]), (4, [10, 32])] {
@@ -2443,7 +2391,6 @@ mod tests {
                 placeholder_epochs(epoch),
                 &mut next_id,
                 &HashSet::new(),
-                true,
             )
             .unwrap();
             if epoch == 4 {
@@ -2476,15 +2423,9 @@ mod tests {
             let before = placeholder_list(Some(before_span));
             let after = placeholder_list(Some(after_span));
             let mut next_id = 0;
-            let (full, snapshots) = encode_frame_delta(
-                &before,
-                &[],
-                placeholder_epochs(1),
-                true,
-                &mut next_id,
-                true,
-            )
-            .unwrap();
+            let (full, snapshots) =
+                encode_frame_delta(&before, &[], placeholder_epochs(1), true, &mut next_id)
+                    .unwrap();
             let mut retained = HashMap::new();
             assert_eq!(apply_placeholder_test_frame(&full, &mut retained), before);
             let (bytes, _) = encode_frame_delta_incremental(
@@ -2493,7 +2434,6 @@ mod tests {
                 placeholder_epochs(2),
                 &mut next_id,
                 &HashSet::new(),
-                true,
             )
             .unwrap();
             assert_eq!(u32_at(&bytes, 52), 1);
@@ -2528,15 +2468,9 @@ mod tests {
         ];
         for (before, after) in cases {
             let mut next_id = 0;
-            let (full, snapshots) = encode_frame_delta(
-                &before,
-                &[],
-                placeholder_epochs(1),
-                true,
-                &mut next_id,
-                true,
-            )
-            .unwrap();
+            let (full, snapshots) =
+                encode_frame_delta(&before, &[], placeholder_epochs(1), true, &mut next_id)
+                    .unwrap();
             let mut retained = HashMap::new();
             assert_eq!(apply_placeholder_test_frame(&full, &mut retained), before);
             let rebuilt = if before.pages[0].unbuilt && !after.pages[0].unbuilt {
@@ -2550,7 +2484,6 @@ mod tests {
                 placeholder_epochs(2),
                 &mut next_id,
                 &rebuilt,
-                true,
             )
             .unwrap();
             assert_eq!(u32_at(&bytes, 52), 1);
@@ -2566,34 +2499,19 @@ mod tests {
             }
         }
         let mut next_id = 0;
-        let (_, snapshots) = encode_frame_delta(
-            &before,
-            &[],
-            placeholder_epochs(1),
-            true,
-            &mut next_id,
-            true,
-        )
-        .unwrap();
+        let (_, snapshots) =
+            encode_frame_delta(&before, &[], placeholder_epochs(1), true, &mut next_id).unwrap();
         let (full, _) = encode_frame_delta(
             &moved,
             &snapshots,
             placeholder_epochs(2),
             true,
             &mut next_id,
-            true,
         )
         .unwrap();
         assert_eq!(full[FRAME_HEADER_LEN], PAGE_OP_UPSERT);
-        let (new_page, _) = encode_frame_delta(
-            &moved,
-            &[],
-            placeholder_epochs(2),
-            false,
-            &mut next_id,
-            true,
-        )
-        .unwrap();
+        let (new_page, _) =
+            encode_frame_delta(&moved, &[], placeholder_epochs(2), false, &mut next_id).unwrap();
         assert_eq!(new_page[FRAME_HEADER_LEN], PAGE_OP_UPSERT);
     }
 
@@ -2607,7 +2525,7 @@ mod tests {
             base_frame_epoch: 0,
         };
         let (bytes, snapshot) =
-            encode_frame_delta(&list("hello"), &[], epochs, true, &mut next_id, false).unwrap();
+            encode_frame_delta(&list("hello"), &[], epochs, true, &mut next_id).unwrap();
         assert_eq!(&bytes[0..4], b"FDV1");
         assert_eq!(u32_at(&bytes, 8) as usize, bytes.len());
         assert_eq!(u32_at(&bytes, 12), FRAME_FLAG_FULL);
@@ -2636,7 +2554,6 @@ mod tests {
             },
             false,
             &mut next_id,
-            false,
         )
         .unwrap();
         assert_eq!(u32_at(&again, 12), 0);
@@ -2655,7 +2572,7 @@ mod tests {
             base_frame_epoch: 0,
         };
         let (first, snapshot) =
-            encode_frame_delta(&list("hello"), &[], epochs, true, &mut next_id, false).unwrap();
+            encode_frame_delta(&list("hello"), &[], epochs, true, &mut next_id).unwrap();
         let first_primitive_offset = u32_at(&first, FRAME_HEADER_LEN + 28) as usize;
         let primitive_id = u64_at(&first, first_primitive_offset);
 
@@ -2670,7 +2587,6 @@ mod tests {
             },
             false,
             &mut next_id,
-            false,
         )
         .unwrap();
         assert_eq!(u32_at(&delta, 52), 1);
@@ -2692,8 +2608,7 @@ mod tests {
             base_frame_epoch: 0,
         };
         let (_, snapshot) =
-            encode_frame_delta(&list_at_position(2), &[], epochs, true, &mut next_id, false)
-                .unwrap();
+            encode_frame_delta(&list_at_position(2), &[], epochs, true, &mut next_id).unwrap();
 
         let (delta, next) = encode_frame_delta(
             &list_at_position(12),
@@ -2706,7 +2621,6 @@ mod tests {
             },
             false,
             &mut next_id,
-            false,
         )
         .unwrap();
 
@@ -2804,9 +2718,8 @@ mod tests {
             frame_epoch,
             base_frame_epoch: frame_epoch - 1,
         };
-        let (_, snapshot) =
-            encode_frame_delta(before, &[], epochs(1), true, &mut next_id, false).unwrap();
-        encode_frame_delta(after, &snapshot, epochs(2), false, &mut next_id, false)
+        let (_, snapshot) = encode_frame_delta(before, &[], epochs(1), true, &mut next_id).unwrap();
+        encode_frame_delta(after, &snapshot, epochs(2), false, &mut next_id)
             .unwrap()
             .0
     }
@@ -2882,7 +2795,6 @@ mod tests {
             epochs,
             true,
             &mut next_id,
-            false,
         )
         .unwrap();
 
@@ -2897,7 +2809,6 @@ mod tests {
             },
             false,
             &mut next_id,
-            false,
         )
         .unwrap();
 
@@ -2924,7 +2835,6 @@ mod tests {
             },
             true,
             &mut next_id,
-            false,
         )
         .unwrap();
 
@@ -2939,7 +2849,6 @@ mod tests {
             },
             false,
             &mut next_id,
-            false,
         )
         .unwrap();
 
