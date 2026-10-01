@@ -100,7 +100,9 @@ export async function createResidentEngineSession(
 
   const geometryStory = (story: string) => {
     let cached = geometryStories.get(story);
-    const changes = JSON.parse(session.stories_changed_since(cached?.revision ?? 0)) as {
+    const changes = JSON.parse(
+      session.stories_changed_since(cached?.revision ?? Number.MAX_SAFE_INTEGER)
+    ) as {
       revision: number;
       stories: string[];
     };
