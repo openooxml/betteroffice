@@ -582,6 +582,7 @@ fn shift_paragraph(
                     shift_shape(shape, delta, cutoff, ids);
                 }
             }
+            Run::Unsupported => {}
         }
     }
 }
