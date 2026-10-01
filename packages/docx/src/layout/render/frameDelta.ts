@@ -10,6 +10,7 @@ const PAGE_OP_REMOVE = 2;
 const PAGE_OP_MOVE = 3;
 const PAGE_OP_PATCH_POSITIONS = 4;
 const PAGE_OP_SHIFT_POSITIONS = 5;
+const SHIFT_SPAN_PRESENT = 1;
 const POSITION_DOC_START = 1 << 0;
 const POSITION_DOC_END = 1 << 1;
 const POSITION_FRAGMENT_START = 1 << 2;
@@ -121,12 +122,14 @@ export interface FramePagePositionShift {
   readonly fingerprint: bigint;
   readonly runs: readonly FramePositionShiftRun[];
   readonly anchors: readonly FrameNoteAnchor[];
+  readonly spanDelta?: number;
 }
 
 /** One applied position shift: its runs, then its note anchors. */
 export interface DisplayPageShift {
   readonly runs: readonly FramePositionShiftRun[];
   readonly anchors: readonly FrameNoteAnchor[];
+  readonly spanDelta?: number;
 }
 
 export type FramePageOperation =
@@ -641,7 +644,11 @@ function recordDisplayPageShift(page: DisplayPage, shift: DisplayPageShift): voi
   const log = displayPageShiftLog(page);
   log.push({
     revision: displayPageRevision(page),
-    shift: { runs: shift.runs, anchors: shift.anchors },
+    shift: {
+      runs: shift.runs,
+      anchors: shift.anchors,
+      ...(shift.spanDelta !== undefined ? { spanDelta: shift.spanDelta } : {}),
+    },
   });
   if (log.length > SHIFT_LOG_LIMIT) log.splice(0, log.length - SHIFT_LOG_LIMIT);
   Object.defineProperty(page, DISPLAY_PAGE_SHIFT_LOG, {
@@ -681,12 +688,33 @@ function setNoteAnchor(note: NoteRegionNote, anchor: FrameNoteAnchor): void {
   else note.anchorDocEnd = anchor.end;
 }
 
+function shiftedPositionSpan(
+  page: DisplayPage,
+  delta: number | undefined
+): [number, number] | undefined {
+  if (delta === undefined) return undefined;
+  if (!Number.isSafeInteger(delta)) invalid('position span delta is unsafe');
+  const span = page.positionSpan;
+  if (!span) invalid('position span shift requires retained positionSpan');
+  const [start, end] = span;
+  if (
+    !Number.isSafeInteger(start) ||
+    !Number.isSafeInteger(end) ||
+    !Number.isSafeInteger(start + delta) ||
+    !Number.isSafeInteger(end + delta)
+  ) {
+    invalid('position span shift overflows positionSpan');
+  }
+  return [start + delta, end + delta];
+}
+
 function shiftDisplayPagePositionsOwned(
   page: DisplayPage,
   shift: DisplayPageShift,
   pageIndex: number
 ): DisplayPage {
   const { runs } = shift;
+  const positionSpan = shiftedPositionSpan(page, shift.spanDelta);
   const notes = shift.anchors.map((anchor) => noteAnchorTarget(page, anchor));
   // primitives are mutated through this object below, whether or not a new
   // page wrapper is returned
@@ -718,6 +746,7 @@ function shiftDisplayPagePositionsOwned(
     invalid('position shift range exceeds retained primitive count');
   }
   shift.anchors.forEach((anchor, index) => setNoteAnchor(notes[index]!, anchor));
+  if (positionSpan) page.positionSpan = positionSpan;
   if (shift.anchors.length > 0) {
     Object.defineProperty(page, DISPLAY_PAGE_NOTE_ANCHOR_REVISION, {
       value: displayPageNoteAnchorRevision(page) + 1,
@@ -849,16 +878,20 @@ function decodePositionShift(reader: BinaryReader, operation: RawPageOp): Displa
     return current;
   };
   const count = reader.u32(require(4, 'position shift run count'));
+  const flags = reader.u32(require(4, 'position shift flags'));
   if (
     count !== operation.primitiveCount ||
-    count + operation.anchorCount === 0 ||
+    (count + operation.anchorCount === 0 && (flags & SHIFT_SPAN_PRESENT) === 0) ||
     count > MAX_CONTAINER_ITEMS
   ) {
     invalid('position shift run count mismatch');
   }
-  if (reader.u32(require(4, 'position shift reserved word')) !== 0) {
-    invalid('position shift reserved word is nonzero');
-  }
+  if ((flags & ~SHIFT_SPAN_PRESENT) !== 0) invalid('position shift flags are invalid');
+  const spanDelta =
+    flags & SHIFT_SPAN_PRESENT
+      ? reader.safeI64(require(8, 'position span delta'), 'position span delta')
+      : undefined;
+  if (spanDelta === 0) invalid('position span delta is zero');
   const runs: FramePositionShiftRun[] = [];
   let previousEnd = 0;
   for (let index = 0; index < count; index++) {
@@ -909,7 +942,7 @@ function decodePositionShift(reader: BinaryReader, operation: RawPageOp): Displa
     }
   }
   if (offset !== end) invalid('position shift byte length/count mismatch');
-  return { runs, anchors };
+  return { runs, anchors, ...(spanDelta !== undefined ? { spanDelta } : {}) };
 }
 
 function assertZeroPadding(reader: BinaryReader, start: number, end: number): void {
@@ -1047,6 +1080,7 @@ function shiftDisplayPagePositions(
   pageIndex: number
 ): DisplayPage {
   const { runs } = shift;
+  const positionSpan = shiftedPositionSpan(page, shift.spanDelta);
   let primitiveIndex = 0;
   let runIndex = 0;
   const shiftPrimitives = (primitives: readonly DisplayPrimitive[]): DisplayPrimitive[] =>
@@ -1096,6 +1130,7 @@ function shiftDisplayPagePositions(
   return {
     ...page,
     pageIndex,
+    ...(positionSpan ? { positionSpan } : {}),
     primitives,
     ...(noteAreas ? { noteAreas } : {}),
     ...(header ? { header } : {}),

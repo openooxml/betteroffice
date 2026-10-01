@@ -10147,6 +10147,185 @@ mod tests {
     }
 
     #[test]
+    fn windowed_placeholder_span_frames_match_with_local_lowering_on_and_off() {
+        let mut engines: Vec<_> = [false, true]
+            .into_iter()
+            .map(|enabled| {
+                let (engine, extras) = paged_filler_engine(216, 48);
+                engine.set_local_lowering(enabled);
+                engine.set_display_window(Some(0..1));
+                engine.set_windowed_incremental_builds(true);
+                let full = engine.build_display_list_frame(&extras, 0).unwrap();
+                let mut retained = std::collections::HashMap::new();
+                let applied =
+                    crate::frame_delta::apply_placeholder_test_frame(&full, &mut retained);
+                assert!(applied.pages.len() >= 4);
+                assert!(applied.pages[1..].iter().all(|page| page.unbuilt));
+                (engine, retained)
+            })
+            .collect();
+        for (edit, text) in ["x", "y", "z"].into_iter().enumerate() {
+            let mut applied = Vec::new();
+            for (engine, retained) in &mut engines {
+                engine
+                    .doc()
+                    .insert_text(
+                        &crate::EditCtx::local("", ""),
+                        crate::Position::new("body", 3 + edit as u32),
+                        text,
+                        crate::FormatPolicy::Inherit,
+                    )
+                    .unwrap();
+                let before = engine.with_display_list(Clone::clone).unwrap();
+                let epoch = engine.display.borrow().binary_frame_epoch;
+                let bytes = engine.apply_and_layout("body", epoch).unwrap();
+                let next = crate::frame_delta::apply_placeholder_test_frame(&bytes, retained);
+                assert_eq!(next, engine.with_display_list(Clone::clone).unwrap());
+                let operation_count =
+                    u32::from_le_bytes(bytes[52..56].try_into().unwrap()) as usize;
+                for (index, page) in next.pages.iter().enumerate().skip(1) {
+                    assert!(page.unbuilt);
+                    let [start, end] = before.pages[index].position_span.unwrap();
+                    assert_eq!(page.position_span, Some([start + 1, end + 1]));
+                    let record = (0..operation_count)
+                        .map(|op| {
+                            crate::frame_delta::FRAME_HEADER_LEN
+                                + op * crate::frame_delta::PAGE_OP_LEN
+                        })
+                        .find(|&record| {
+                            u32::from_le_bytes(bytes[record + 4..record + 8].try_into().unwrap())
+                                as usize
+                                == index
+                        })
+                        .unwrap();
+                    assert_eq!(bytes[record], crate::frame_delta::PAGE_OP_SHIFT_POSITIONS);
+                }
+                applied.push(next);
+            }
+            assert_eq!(applied[0], applied[1]);
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    /// Resident frames decode to the display list through both host modes and lowering settings.
+    #[test]
+    fn resident_frames_decode_to_the_display_list_across_build_release_and_edits() {
+        let mut runs = Vec::new();
+        for enabled in [false, true] {
+            let (engine, extras) = paged_filler_engine(217, 48);
+            engine.set_local_lowering(enabled);
+            let mut retained = std::collections::HashMap::new();
+            let mut frames = Vec::new();
+            let mut decode = |bytes: Vec<u8>| {
+                let decoded =
+                    crate::frame_delta::apply_placeholder_test_frame(&bytes, &mut retained);
+                assert_eq!(
+                    decoded,
+                    engine.with_display_list(Clone::clone).unwrap(),
+                    "local lowering {enabled}, frame {}",
+                    frames.len()
+                );
+                frames.push(bytes);
+                decoded
+            };
+            let epoch = || engine.display.borrow().binary_frame_epoch;
+            let edit = |offset, text: &str| {
+                let ctx = crate::EditCtx::local("", "");
+                if text.is_empty() {
+                    engine
+                        .doc()
+                        .delete_range(&ctx, crate::StoryRange::new("body", offset, offset + 1))
+                        .unwrap();
+                } else {
+                    engine
+                        .doc()
+                        .insert_text(
+                            &ctx,
+                            crate::Position::new("body", offset),
+                            text,
+                            crate::FormatPolicy::Inherit,
+                        )
+                        .unwrap();
+                }
+                engine.apply_and_layout("body", epoch()).unwrap()
+            };
+            let paragraphs = engine.doc().paragraphs("body").unwrap();
+            let tail = paragraphs[..paragraphs.len() - 1]
+                .iter()
+                .map(|paragraph| u32::try_from(paragraph.text.encode_utf16().count()).unwrap() + 1)
+                .sum::<u32>()
+                + 3;
+
+            engine.set_display_window(Some(0..1));
+            engine.set_windowed_incremental_builds(true);
+            let initial = decode(engine.build_display_list_frame(&extras, 0).unwrap());
+            assert!(initial.pages.len() >= 4);
+            assert!(!initial.pages[0].unbuilt);
+            assert!(initial.pages[1..].iter().all(|page| page.unbuilt));
+            let last = initial.pages.len() - 1;
+            let distant: Vec<_> = (1..initial.pages.len()).collect();
+            for (batch, pages) in distant.chunks(2).enumerate() {
+                engine.set_windowed_incremental_builds(false);
+                let built = decode(engine.build_display_pages_frame(pages, epoch()).unwrap());
+                assert!(pages.iter().all(|&index| !built.pages[index].unbuilt));
+                if batch == 0 {
+                    assert!(built.pages[last].unbuilt);
+                    decode(edit(tail, "x"));
+                    decode(edit(tail, ""));
+                }
+            }
+            assert!(
+                engine
+                    .with_display_list(|list| list.pages.iter().all(|page| !page.unbuilt))
+                    .unwrap()
+            );
+            decode(edit(tail, "y"));
+
+            engine.set_windowed_incremental_builds(true);
+            let mut before = decode(
+                engine
+                    .release_display_pages_frame(&distant, epoch())
+                    .unwrap(),
+            );
+            assert!(before.pages[1..].iter().all(|page| page.unbuilt));
+            for (offset, text) in ["a", "b", "c"].into_iter().enumerate() {
+                let bytes = edit(3 + offset as u32, text);
+                let operation_count =
+                    u32::from_le_bytes(bytes[52..56].try_into().unwrap()) as usize;
+                assert!((0..operation_count).any(|op| {
+                    bytes[crate::frame_delta::FRAME_HEADER_LEN
+                        + op * crate::frame_delta::PAGE_OP_LEN]
+                        == crate::frame_delta::PAGE_OP_SHIFT_POSITIONS
+                }));
+                let next = decode(bytes);
+                for (page, previous) in next.pages.iter().zip(&before.pages).skip(1) {
+                    assert!(page.unbuilt);
+                    let [start, end] = previous.position_span.unwrap();
+                    assert_eq!(page.position_span, Some([start + 1, end + 1]));
+                }
+                before = next;
+            }
+            engine.set_windowed_incremental_builds(false);
+            let rebuilt = decode(engine.build_display_pages_frame(&[last], epoch()).unwrap());
+            assert!(!rebuilt.pages[last].unbuilt);
+            assert!(rebuilt.pages[1..last].iter().all(|page| page.unbuilt));
+            engine.set_display_window(Some(last..last + 1));
+            engine.set_windowed_incremental_builds(true);
+            let deleted = decode(edit(tail + 3, ""));
+            assert!(!deleted.pages[last].unbuilt);
+
+            engine.set_windowed_incremental_builds(false);
+            decode(edit(tail + 3, "z"));
+            runs.push(frames);
+            docx_layout::clear_measure_fonts();
+        }
+        assert_eq!(runs[0].len(), runs[1].len());
+        for (step, (disabled, enabled)) in runs[0].iter().zip(&runs[1]).enumerate() {
+            assert_eq!(disabled, enabled, "frame {step}");
+        }
+    }
+
+    #[test]
     fn released_display_pages_keep_ids_and_rebuild_after_an_incremental_edit() {
         let (engine, extras) = paged_filler_engine(214, 48);
         engine.set_display_window(Some(0..1));
