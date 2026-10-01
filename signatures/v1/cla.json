@@ -59,6 +59,18 @@
       "id": 87603317,
       "signed_at": "2026-09-22T17:42:51Z",
       "pull_request_no": 798
+    },
+    {
+      "name": "mirza-asjad",
+      "id": 125024331,
+      "signed_at": "2026-10-01T19:49:08Z",
+      "pull_request_no": 1121
+    },
+    {
+      "name": "Abdulsamikamran",
+      "id": 130117954,
+      "signed_at": "2026-10-01T19:49:13Z",
+      "pull_request_no": 1123
     }
   ]
 }

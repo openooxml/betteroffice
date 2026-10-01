@@ -854,7 +854,7 @@ export function canUseResidentEngineWorker(): boolean {
 interface PreloadedWorker {
   client: ResidentEngineWorkerClient;
   factory: typeof Worker;
-  ready: Promise<void>;
+  ready: Promise<void> | null;
   owners: number;
   idleTimer: ReturnType<typeof setTimeout> | null;
   releaseTimer: ReturnType<typeof setTimeout> | null;
@@ -886,21 +886,23 @@ export function preloadResidentEngineWorker(): Promise<void> {
     discardPreloadedWorker(preloadedWorker);
   }
   if (!preloadedWorker) {
-    const worker: PreloadedWorker = {
+    preloadedWorker = {
       client: new ResidentEngineWorkerClient(),
       factory: Worker,
-      ready: Promise.resolve(),
+      ready: null,
       owners: 0,
       idleTimer: null,
       releaseTimer: null,
     };
-    preloadedWorker = worker;
+  }
+  const worker = preloadedWorker;
+  if (!worker.ready) {
     worker.ready = worker.client.warm().catch((error: unknown) => {
-      discardPreloadedWorker(worker);
+      if (worker.client.hasFailed()) discardPreloadedWorker(worker);
+      else worker.ready = null;
       throw error;
     });
   }
-  const worker = preloadedWorker;
   clearPreloadedWorkerTimers(worker);
   if (worker.owners === 0) {
     worker.idleTimer = setTimeout(() => discardPreloadedWorker(worker), RESIDENT_WORKER_SILENCE_MS);
