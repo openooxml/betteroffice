@@ -5,6 +5,7 @@ import {
   createResidentEngineSession,
   type ResidentEngineSession,
 } from './residentEngineSession';
+import { setFinalPreviewDisplayWindow } from './previewDisplayWindow';
 import { preloadEditWasm } from './wasm/index';
 import {
   createProposalRegistry,
@@ -258,11 +259,18 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     unsubscribe?.();
     unsubscribe = null;
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
-    const { layoutJson, provisional } = hydrate(
+    const { layoutJson, provisional, pageCount } = hydrate(
       request.snapshot,
       request.provisionalPages,
       request.layoutExtras !== undefined,
       request.opened !== true
+    );
+    setFinalPreviewDisplayWindow(
+      session,
+      request.displayWindow,
+      request.snapshot.partialDocument,
+      provisional,
+      pageCount
     );
     if (provisional) {
       incompleteLayout = {
@@ -455,10 +463,17 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     unsubscribe?.();
     unsubscribe = null;
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
-    const { layoutJson, provisional } = hydrate(
+    const { layoutJson, provisional, pageCount } = hydrate(
       request.snapshot,
       request.provisionalPages,
       request.layoutExtras !== undefined
+    );
+    setFinalPreviewDisplayWindow(
+      session,
+      request.displayWindow,
+      request.snapshot.partialDocument,
+      provisional,
+      pageCount
     );
     if (provisional) {
       incompleteLayout = {
@@ -694,7 +709,7 @@ function hydrate(
   provisionalPages?: number,
   reply = true,
   loadState = true
-): { layoutJson: string | null; provisional: boolean } {
+): { layoutJson: string | null; provisional: boolean; pageCount: number | null } {
   if (!session) throw new Error('Resident engine worker is not initialized');
   supersedeSlicedCompletion();
   incompleteLayout = null;
@@ -719,17 +734,26 @@ function hydrate(
   for (const input of snapshot.measureInputs) session.measureParagraphJson(input);
   let layoutJson: string | null = null;
   let provisional = false;
+  let pageCount: number | null = null;
   if (snapshot.layoutWithRegions && provisionalPages !== undefined) {
     layoutJson = session.layoutDocumentWithRegionsPrefixRetainedJson(
       snapshot.layoutInput,
       provisionalPages
     );
-    provisional = (JSON.parse(layoutJson) as { provisional?: boolean }).provisional === true;
+    const layout = JSON.parse(layoutJson) as {
+      provisional?: boolean;
+      layout: { pages: unknown[] };
+    };
+    provisional = layout.provisional === true;
+    pageCount = layout.layout.pages.length;
   } else if (snapshot.layoutWithRegions && !reply) {
     session.layoutDocumentWithRegionsRetained(snapshot.layoutInput);
   } else if (snapshot.layoutWithRegions) {
     // the retained reply leaves out the tens-of-MB measured arena
     layoutJson = session.layoutDocumentWithRegionsRetainedJson(snapshot.layoutInput);
+    if (snapshot.partialDocument === true) {
+      pageCount = (JSON.parse(layoutJson) as { layout: { pages: unknown[] } }).layout.pages.length;
+    }
   } else {
     session.layoutDocumentJson(snapshot.layoutInput);
   }
@@ -738,7 +762,7 @@ function hydrate(
   }
   layoutRevision = snapshot.layoutRevision;
   pendingUpdates = [];
-  return { layoutJson, provisional };
+  return { layoutJson, provisional, pageCount };
 }
 
 function setFrameDisplayWindow(
