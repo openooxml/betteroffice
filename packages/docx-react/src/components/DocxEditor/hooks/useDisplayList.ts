@@ -1714,11 +1714,7 @@ export function useRustDisplayList(
       const finish = (): void => {
         if (pageBuildInFlightRef.current !== build) return;
         pageBuildInFlightRef.current = null;
-        if (promoted && !workerOpenEnabledRef.current && settleWaitersRef.current.size === 0) {
-          retryPageBuildsRef.current(false);
-        } else {
-          schedulePageBuildsWhenIdleRef.current();
-        }
+        schedulePageBuildsWhenIdleRef.current();
       };
       const line = sourceLine(worker.engine);
       const paintToken = paintedCaretMachine.token();
