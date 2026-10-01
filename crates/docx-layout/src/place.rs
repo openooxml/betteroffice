@@ -88,10 +88,10 @@ pub struct IncrementalLayout {
     pub rebuilt_page_ranges: Vec<std::ops::Range<usize>>,
 }
 
-struct ConvergenceInput<'a> {
+struct ConvergenceInput<'a, F: PartialEq> {
     previous_checkpoints: &'a [LayoutCheckpoint],
-    previous_fingerprints: &'a [u64],
-    next_fingerprints: &'a [u64],
+    previous_fingerprints: &'a [F],
+    next_fingerprints: &'a [F],
     dirty_index: usize,
     /// Every dirty block, ascending, when the block count is unchanged.
     dirty: Option<&'a [usize]>,
@@ -121,7 +121,7 @@ enum Convergence {
     },
 }
 
-impl ConvergenceInput<'_> {
+impl<F: PartialEq> ConvergenceInput<'_, F> {
     fn retained_match(&self, checkpoint: &LayoutCheckpoint) -> Option<Convergence> {
         if checkpoint.block_index <= self.dirty_index {
             return None;
@@ -423,7 +423,7 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
 
     let mut paginator = origin_paginator(&initial_config, &plan, options)?;
 
-    let placement = place(
+    let placement = place::<u64>(
         measured,
         &plan,
         &mut paginator,
@@ -461,12 +461,12 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
 /// then stop as soon as page-start geometry and the measured suffix converge
 /// with the retained layout. Callers must conservatively gate unsupported
 /// dependency shapes (floats, notes, structural edits) before entering here.
-pub fn layout_document_incremental(
+pub fn layout_document_incremental<F: PartialEq>(
     input: &mut Input,
     previous_layout: &mut Layout,
     previous_checkpoints: &[LayoutCheckpoint],
-    previous_fingerprints: &[u64],
-    next_fingerprints: &[u64],
+    previous_fingerprints: &[F],
+    next_fingerprints: &[F],
     dirty_index: usize,
 ) -> Result<CheckpointedLayout, LayoutError> {
     layout_document_incremental_ranges(
@@ -481,12 +481,12 @@ pub fn layout_document_incremental(
 }
 
 /// [`layout_document_incremental`], reporting the page ranges it placed afresh.
-pub fn layout_document_incremental_ranges(
+pub fn layout_document_incremental_ranges<F: PartialEq>(
     input: &mut Input,
     previous_layout: &mut Layout,
     previous_checkpoints: &[LayoutCheckpoint],
-    previous_fingerprints: &[u64],
-    next_fingerprints: &[u64],
+    previous_fingerprints: &[F],
+    next_fingerprints: &[F],
     dirty_index: usize,
 ) -> Result<IncrementalLayout, LayoutError> {
     let options = &input.options;
@@ -789,7 +789,7 @@ fn section_start(plan: &LayoutPlan, section_index: usize) -> usize {
 /// The block walk itself, per the module's ordering rules. Returns early once
 /// a checkpoint matches the retained layout, which is how incremental placement
 /// detects convergence.
-fn place(
+fn place<F: PartialEq>(
     measured: &[MeasuredBlock],
     plan: &LayoutPlan,
     paginator: &mut Paginator,
@@ -797,7 +797,7 @@ fn place(
     start_index: usize,
     mut section_idx: usize,
     page_index_offset: usize,
-    convergence: Option<&ConvergenceInput<'_>>,
+    convergence: Option<&ConvergenceInput<'_, F>>,
 ) -> Result<PlacementOutcome, LayoutError> {
     let mut checkpoints = Vec::new();
     let mut placed_blocks = 0usize;

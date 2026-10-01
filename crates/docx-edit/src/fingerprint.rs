@@ -1,18 +1,26 @@
 //! Streaming content fingerprints for typed layout values.
 //!
 //! [`fingerprint_without_positions`] walks a value through its `Serialize`
-//! impl and feeds every scalar to a 64-bit SipHash, so no intermediate JSON
-//! tree is built. Object keys named `pmStart`, `pmEnd`, `docStart` and
-//! `docEnd` are skipped at every depth: those absolute document positions
-//! shift when text is edited earlier in the story without changing what the
-//! value measures or paints. Fingerprints are only compared against others
-//! from the same session.
+//! impl and feeds every scalar to two independently seeded 64-bit foldhash
+//! lanes, a 128-bit fingerprint, so no intermediate JSON tree is built. Object
+//! keys named `pmStart`, `pmEnd`, `docStart` and `docEnd` are skipped at every
+//! depth: those absolute document positions shift when text is edited earlier
+//! in the story without changing what the value measures or paints.
+//! Fingerprints are only compared against others from the same session.
 
 use std::fmt;
-use std::hash::{DefaultHasher, Hasher as _};
+use std::hash::Hasher as _;
 
+use foldhash::quality::FoldHasher;
 use serde::Serialize;
 use serde::ser::{self, Serializer};
+
+pub(crate) type Fingerprint = u128;
+
+static SHARED_A: foldhash::SharedSeed = foldhash::SharedSeed::from_u64(0x243f_6a88_85a3_08d3);
+static SHARED_B: foldhash::SharedSeed = foldhash::SharedSeed::from_u64(0x1319_8a2e_0370_7344);
+const PER_HASHER_SEED_A: u64 = 0xa409_3822_299f_31d0;
+const PER_HASHER_SEED_B: u64 = 0x082e_fa98_ec4e_6c89;
 
 const POSITION_KEYS: [&str; 4] = ["pmStart", "pmEnd", "docStart", "docEnd"];
 
@@ -32,7 +40,7 @@ const TAG_BYTES: u64 = 12;
 /// Fingerprint of `value` with absolute document positions left out.
 pub(crate) fn fingerprint_without_positions<T: Serialize + ?Sized>(
     value: &T,
-) -> Result<u64, String> {
+) -> Result<Fingerprint, String> {
     let mut hasher = Hasher::new();
     value.serialize(&mut hasher).map_err(|error| error.0)?;
     Ok(hasher.finish())
@@ -40,7 +48,9 @@ pub(crate) fn fingerprint_without_positions<T: Serialize + ?Sized>(
 
 /// Fingerprint of `value` with its absolute document positions included, so it
 /// also tells where each part of the value sits.
-pub(crate) fn fingerprint_with_positions<T: Serialize + ?Sized>(value: &T) -> Result<u64, String> {
+pub(crate) fn fingerprint_with_positions<T: Serialize + ?Sized>(
+    value: &T,
+) -> Result<Fingerprint, String> {
     let mut hasher = Hasher::new();
     hasher.keep_positions = true;
     value.serialize(&mut hasher).map_err(|error| error.0)?;
@@ -51,32 +61,36 @@ fn is_position_key(key: &str) -> bool {
     POSITION_KEYS.contains(&key)
 }
 
-/// SipHash-1-3 with fixed keys: deterministic within a process, which is all
-/// a session-local fingerprint needs.
+/// Two independently seeded 64-bit foldhash lanes with fixed seeds: deterministic
+/// within a process, which is all a session-local fingerprint needs.
 struct Hasher {
-    inner: DefaultHasher,
+    a: FoldHasher<'static>,
+    b: FoldHasher<'static>,
     keep_positions: bool,
 }
 
 impl Hasher {
     fn new() -> Self {
         Self {
-            inner: DefaultHasher::new(),
+            a: FoldHasher::with_seed(PER_HASHER_SEED_A, &SHARED_A),
+            b: FoldHasher::with_seed(PER_HASHER_SEED_B, &SHARED_B),
             keep_positions: false,
         }
     }
 
     fn word(&mut self, word: u64) {
-        self.inner.write_u64(word);
+        self.a.write_u64(word);
+        self.b.write_u64(word);
     }
 
     fn bytes(&mut self, bytes: &[u8]) {
-        self.inner.write_u64(bytes.len() as u64);
-        self.inner.write(bytes);
+        self.word(bytes.len() as u64);
+        self.a.write(bytes);
+        self.b.write(bytes);
     }
 
-    fn finish(&self) -> u64 {
-        self.inner.finish()
+    fn finish(&self) -> Fingerprint {
+        (self.a.finish() as u128) << 64 | self.b.finish() as u128
     }
 }
 
@@ -135,7 +149,9 @@ impl<'a> Container<'a> {
         self.skip_value = skip;
         if !skip {
             self.hasher.word(TAG_KEY);
-            self.hasher.word(probe.key.finish());
+            let key = probe.key.finish();
+            self.hasher.word(key as u64);
+            self.hasher.word((key >> 64) as u64);
         }
         Ok(())
     }
