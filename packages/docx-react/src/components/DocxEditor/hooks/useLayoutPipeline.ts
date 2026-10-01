@@ -16,6 +16,7 @@ import type {
 } from '@betteroffice/docx/layout';
 import {
   ResidentWorkerOutOfMemoryError,
+  proposalRevisionPreview,
   type YrsLoc,
   type YrsRenderEnv,
   type YrsSession,
@@ -30,6 +31,7 @@ import {
   workerOpenReplicaPending,
   workerOpenSourceVersion,
 } from '../internals/workerOpenReplica';
+import { workerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { viewportMinHeightPx } from '../internals/scrollUtils';
 import {
@@ -146,6 +148,12 @@ function addsFontChainsOnly(
     const kept = next.fontChains[key];
     return kept?.length === chain.length && kept.every((id, index) => id === chain[index]);
   });
+}
+
+function workerProposalRenderEnv(session: YrsSession, renderEnv: YrsRenderEnv): YrsRenderEnv {
+  return workerProposalAuthority(session)?.initialized
+    ? { ...renderEnv, revisionPreview: proposalRevisionPreview(session.getProposals()) }
+    : renderEnv;
 }
 
 /** A pass may run in the worker only if every change it lays out asked for that. */
@@ -388,10 +396,11 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         return;
       }
 
+      const passRenderEnv = workerProposalRenderEnv(session, renderEnv);
       const run = (workerRequirements?: string | null): void => {
         let measurement: ResidentMeasurementConfig | null = null;
         try {
-          const request = buildResidentRegionLayoutRequest(document, pageGap, renderEnv);
+          const request = buildResidentRegionLayoutRequest(document, pageGap, passRenderEnv);
           const input = JSON.stringify(request);
           const pendingRequirements =
             workerOpenEnabledRef.current && workerRequirements === undefined
@@ -459,11 +468,11 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         // A queued pass deferred above still holds settles until it gets this far.
         markLayoutQueued(session, false);
 
-        const computeInputs = { document, pageGap, session, renderEnv, measurement };
+        const computeInputs = { document, pageGap, session, renderEnv: passRenderEnv, measurement };
         const sourceVersion = readSessionVersion(session);
-        const previewKey = revisionPreviewKey(renderEnv.revisionPreview);
+        const previewKey = revisionPreviewKey(passRenderEnv.revisionPreview);
         const request = {
-          ...buildResidentRegionLayoutRequest(document, pageGap, renderEnv),
+          ...buildResidentRegionLayoutRequest(document, pageGap, passRenderEnv),
           measurement,
         };
         const requestWithoutPreview = JSON.stringify(
@@ -846,7 +855,11 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
 
   const getLayoutRequest = useCallback((): string | null => {
     if (!session) return null;
-    const request = buildResidentRegionLayoutRequest(document, pageGap, renderEnv);
+    const request = buildResidentRegionLayoutRequest(
+      document,
+      pageGap,
+      workerProposalRenderEnv(session, renderEnv)
+    );
     const requirements = JSON.parse(
       session.layoutFontRequirementsJson(JSON.stringify(request))
     ) as ResidentFontRequirement[];

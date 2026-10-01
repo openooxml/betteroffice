@@ -15,6 +15,7 @@ import type {
   resolveNavigationTarget,
 } from '@betteroffice/docx/yrs';
 import type { WorkerOpenedDocument } from '../hooks/useDisplayList';
+import { proposalRevisionPreview } from '@betteroffice/docx/yrs';
 import {
   awaitWorkerOpenReplica,
   workerOpenReplicaPending,
@@ -162,6 +163,7 @@ export function registerWorkerProposalAuthority(
     main: () => Promise<DocxProposalResult>
   ): Promise<DocxProposalResult> => route(async () => {
     const previous = mirror!;
+    const previousPreview = JSON.stringify(proposalRevisionPreview(session.getProposals()));
     const pending = op.kind === 'propose' || op.kind === 'withdraw';
     if (pending) session.mirrorWorkerDocument({ ...previous, version: previous.version + '~' });
     let reply: ResidentProposalReply;
@@ -178,7 +180,10 @@ export function registerWorkerProposalAuthority(
       (op.kind === 'setStates' && reply.result?.ok)
     ) holdsState = true;
     store(reply);
-    if (pending && reply.changedStories.length > 0) hooks.relayout();
+    if (
+      reply.changedStories.length > 0 ||
+      JSON.stringify(proposalRevisionPreview(session.getProposals())) !== previousPreview
+    ) hooks.relayout();
     if (reply.changedStories.length > 0) hooks.contentChanged();
     if (!reply.result) throw new Error('The resident worker did not return a proposal result');
     return reply.result;
