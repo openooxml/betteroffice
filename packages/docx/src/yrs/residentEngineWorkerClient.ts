@@ -146,6 +146,8 @@ export class ResidentEngineWorkerClient {
   /** Set once `open` is sent, with the heap limit it opened under. */
   private openedHeapLimit: { bytes?: number } | null = null;
   private bootstraps = 0;
+  /** The font-requirements read still in flight, shared while nothing was posted after it. */
+  private fontRead: { layoutInput: string; id: number; reply: Promise<string> } | null = null;
   /** Id of the last snapshot request sent; replies to earlier requests must
    * not replace the state it recorded. */
   private lastSnapshotId = 0;
@@ -295,12 +297,24 @@ export class ResidentEngineWorkerClient {
   }
 
   /** The font requirements of a region layout request, read from the opened document. */
-  async fontRequirements(layoutInput: string): Promise<string> {
-    const response = await this.request({ type: 'fontRequirements', layoutInput });
-    if (response.requirementsJson === undefined) {
-      throw new ResidentWorkerFailureError('Resident engine worker omitted the font requirements');
+  fontRequirements(layoutInput: string): Promise<string> {
+    const shared = this.fontRead;
+    if (shared && shared.layoutInput === layoutInput && shared.id === this.nextId - 1) {
+      return shared.reply;
     }
-    return response.requirementsJson;
+    const reply = this.request({ type: 'fontRequirements', layoutInput }).then((response) => {
+      if (response.requirementsJson === undefined) {
+        throw new ResidentWorkerFailureError('Resident engine worker omitted the font requirements');
+      }
+      return response.requirementsJson;
+    });
+    const read = { layoutInput, id: this.nextId - 1, reply };
+    this.fontRead = read;
+    const settle = () => {
+      if (this.fontRead === read) this.fontRead = null;
+    };
+    reply.then(settle, settle);
+    return reply;
   }
 
   /** @internal */

@@ -162,6 +162,40 @@ test('sliced page replies preserve the ordered frames for idle adoption', async 
   client.destroy();
 });
 
+test('identical font requirement reads share one request until another request is posted', async () => {
+  const { worker, client } = setup();
+  const first = client.fontRequirements('{"a":1}');
+  const second = client.fontRequirements('{"a":1}');
+  const other = client.fontRequirements('{"b":2}');
+  const afterOther = client.fontRequirements('{"a":1}');
+  client.eraseCaret();
+  const afterPost = client.fontRequirements('{"a":1}');
+  const reads = worker.posted.flatMap((request) =>
+    request.type === 'fontRequirements' ? [request] : []
+  );
+  expect(reads.map(({ layoutInput }) => layoutInput)).toEqual(['{"a":1}', '{"b":2}', '{"a":1}', '{"a":1}']);
+  for (const [index, { id }] of reads.entries()) {
+    worker.reply({ id, ok: true, requirementsJson: `[${index}]` });
+  }
+  expect(await Promise.all([first, second, other, afterOther, afterPost])).toEqual([
+    '[0]', '[0]', '[1]', '[2]', '[3]',
+  ]);
+  const settled = client.fontRequirements('{"a":1}');
+  expect(worker.posted.at(-1)).toMatchObject({ type: 'fontRequirements', layoutInput: '{"a":1}' });
+  worker.reply({ id: worker.lastId(), ok: true, requirementsJson: '[4]' });
+  expect(await settled).toBe('[4]');
+});
+
+test('a shared font requirement read rejects every caller when the worker fails', async () => {
+  const { worker, client } = setup();
+  const first = client.fontRequirements('{}');
+  const second = client.fontRequirements('{}');
+  expect(worker.posted).toHaveLength(1);
+  worker.reply({ id: worker.lastId(), ok: false, error: 'boom' });
+  await expect(first).rejects.toThrow('boom');
+  await expect(second).rejects.toThrow('boom');
+});
+
 test('frame and edit requests carry the current display window and retention flag', async () => {
   const { worker, client } = setup();
   client.setRetainBuiltPages(true);
