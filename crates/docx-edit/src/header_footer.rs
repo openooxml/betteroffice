@@ -33,18 +33,13 @@ fn parse_groups(json: &str) -> Result<Vec<HeaderFooterAliasGroup>, String> {
 }
 
 impl EditingDoc {
-    #[cfg(any(test, feature = "wasm"))]
-    pub(crate) fn set_header_footer_aliases(&self, json: &str) -> Result<(), String> {
+    #[doc(hidden)]
+    pub fn set_header_footer_aliases(&self, json: &str) -> Result<(), String> {
         let groups = parse_groups(json)?;
-        self.seed_header_footer_aliases(&groups);
-        Ok(())
-    }
-
-    pub(crate) fn seed_header_footer_aliases(&self, groups: &[HeaderFooterAliasGroup]) {
         if groups.is_empty() {
-            return;
+            return Ok(());
         }
-        let json = serde_json::to_string(groups).expect("header/footer alias groups serialize");
+        let json = serde_json::to_string(&groups).expect("header/footer alias groups serialize");
         let mut txn = self.transact_for(&EditCtx::system(""));
         let session = txn
             .get_map(crate::identity::SESSION)
@@ -52,6 +47,7 @@ impl EditingDoc {
         if map_string(&session, &txn, HF_ALIASES).as_deref() != Some(json.as_str()) {
             session.insert(&mut txn, HF_ALIASES, json);
         }
+        Ok(())
     }
 
     /// The content story for a header/footer relationship in the current state.

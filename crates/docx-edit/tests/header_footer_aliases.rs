@@ -14,8 +14,30 @@ const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-
 
 fn seeded(bytes: &[u8]) -> EditingDoc {
     let doc = EditingDoc::new(41);
-    seed_from_docx_with_generation(&doc, bytes, "aliases").unwrap();
+    build_aliased_room(&doc, bytes);
     doc
+}
+
+fn build_aliased_room(doc: &EditingDoc, bytes: &[u8]) {
+    seed_from_docx_with_generation(doc, bytes, "aliases").unwrap();
+    let groups = docx_parse::parse_docx_s9_wire(bytes, Default::default())
+        .unwrap()
+        .document
+        .package
+        .header_footer_aliases;
+    for group in &groups {
+        for alias in group.relationship_ids.iter().skip(1) {
+            let root = format!("hf:{alias}");
+            let prefix = format!("{root}:");
+            for story in story_ids(doc) {
+                if story == root || story.starts_with(&prefix) {
+                    doc.delete_story(&story).unwrap();
+                }
+            }
+        }
+    }
+    doc.set_header_footer_aliases(&serde_json::to_string(&groups).unwrap())
+        .unwrap();
 }
 
 fn story_ids(doc: &EditingDoc) -> Vec<String> {
@@ -54,7 +76,7 @@ fn text(value: &Value) -> String {
 fn assert_shared_content(headers: &[(&str, &str)], footers: &[(&str, &str)], kind: StoryKind) {
     let bytes = fixture::package(headers, footers);
     let engine = EngineSession::new(41);
-    seed_from_docx_with_generation(engine.doc(), &bytes, "aliases").unwrap();
+    build_aliased_room(engine.doc(), &bytes);
     let entries = if kind == StoryKind::Header {
         headers
     } else {
@@ -215,6 +237,35 @@ fn assert_shared_content(headers: &[(&str, &str)], footers: &[(&str, &str)], kin
 }
 
 #[test]
+fn default_open_keeps_every_relationship_story_without_alias_metadata() {
+    for headers in [
+        vec![("rId7", "header1.xml"), ("rId9", "header1.xml")],
+        vec![
+            ("rId7", "header1.xml"),
+            ("rId9", "./header1.xml"),
+            ("rId11", "header1.xml"),
+        ],
+    ] {
+        let footers = [("rId13", "footer1.xml"), ("rId15", "./footer1.xml")];
+        let doc = EditingDoc::new(41);
+        seed_from_docx_with_generation(&doc, &fixture::package(&headers, &footers), "default")
+            .unwrap();
+        let mut expected = vec!["body".to_owned()];
+        expected.extend(headers.iter().chain(&footers).map(|(id, _)| format!("hf:{id}")));
+        expected.sort();
+        assert_eq!(story_ids(&doc), expected);
+        assert!(doc.header_footer_aliases().is_empty());
+        assert_eq!(doc.header_footer_story("rId9"), "hf:rId9");
+        let txn = doc.yrs_doc().transact();
+        assert!(
+            !txn.get_map("session")
+                .unwrap()
+                .contains_key(&txn, "hfAliases")
+        );
+    }
+}
+
+#[test]
 fn header_aliases_share_edits_and_keep_section_relationships() {
     assert_shared_content(
         &[("rId7", "header1.xml"), ("rId9", "header1.xml")],
@@ -325,7 +376,7 @@ fn header_and_footer_groups_activate_independently() {
 }
 
 #[test]
-fn nested_header_content_is_seeded_and_indexed_only_for_the_canonical_story() {
+fn nested_header_content_is_shared_and_indexed_for_the_canonical_story() {
     let mut parts = ooxml_opc::unzip_parts(&alias_package()).unwrap();
     let (_, header) = parts
         .iter_mut()

@@ -39,10 +39,18 @@ export interface DocxSavedDocument {
 
 function storyBlocks(document: Document): BlockContent[][] {
   const pkg = document.package;
+  const contents = new Set<BlockContent[]>();
+  const headerFooterBlocks = [
+    ...(pkg.headers?.values() ?? []),
+    ...(pkg.footers?.values() ?? []),
+  ].flatMap((part) => {
+    if (contents.has(part.content)) return [];
+    contents.add(part.content);
+    return [part.content];
+  });
   return [
     pkg.document.content,
-    ...[...(pkg.headers?.values() ?? [])].map((part) => part.content),
-    ...[...(pkg.footers?.values() ?? [])].map((part) => part.content),
+    ...headerFooterBlocks,
     ...(pkg.footnotes ?? []).map((note) => note.content),
     ...(pkg.endnotes ?? []).map((note) => note.content),
   ];
@@ -187,8 +195,13 @@ function mapStoryParagraphs(
   document: Document,
   map: (paragraph: Paragraph) => Paragraph | null
 ): Document {
+  const contents = new Map<BlockContent[], BlockContent[]>();
   const withContent = <T extends { content: BlockContent[] }>(owner: T): T => {
-    const content = mapParagraphs(owner.content, map);
+    let content = contents.get(owner.content);
+    if (!content) {
+      content = mapParagraphs(owner.content, map);
+      contents.set(owner.content, content);
+    }
     return content === owner.content ? owner : { ...owner, content };
   };
   const pkg = document.package;

@@ -1,3 +1,4 @@
+import { headerFooterStory } from './sessionInternals';
 import type { YrsCellLoc, YrsLoc, YrsSession, YrsStorySegment } from './index';
 import type { PointPosition } from '../plugin-api';
 import {
@@ -81,7 +82,8 @@ export function createYrsPositionProjection(
 /** @internal */
 export function projectYrsDisplayPosition(
   position: number | PointPosition,
-  getProjection: (rootStory: string) => YrsPositionProjection | null
+  getProjection: (rootStory: string) => YrsPositionProjection | null,
+  session?: object | null
 ): YrsPointerProjectionTarget | null {
   let rootStory = 'body';
   if (typeof position !== 'number') {
@@ -89,7 +91,7 @@ export function projectYrsDisplayPosition(
       case 'header':
       case 'footer':
         if (!position.rId) return null;
-        rootStory = `hf:${position.rId}`;
+        rootStory = headerFooterStory(session, position.rId);
         break;
       case 'footnote':
       case 'endnote':

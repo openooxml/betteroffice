@@ -132,7 +132,7 @@ export {
   type DocxSavedParagraph,
   type DocxSessionSave,
 } from './saveYrsDocx';
-export { sessionSourcePackage } from './sessionInternals';
+export { headerFooterStory, sessionSourcePackage } from './sessionInternals';
 export { editorSaveKeys } from './editorSaveKeys';
 export * from './yrsPositionProjection';
 export * from './proposalGeometry';
@@ -1575,7 +1575,13 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
 /** A lone UTF-16 surrogate, which crossing into Wasm would turn into U+FFFD. */
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
-function wrapSession(session: EditSession, clientId: number): YrsSession {
+type HeaderFooterAliasSession = EditSession & {
+  set_header_footer_aliases(json: string): void;
+  header_footer_aliases_json(): string;
+};
+
+function wrapSession(rawSession: EditSession, clientId: number): YrsSession {
+  const session = rawSession as HeaderFooterAliasSession;
   const listeners = new Map<
     number,
     (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
@@ -1616,7 +1622,25 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   let docxSource: Uint8Array | null = null;
   let docxSourceKeys: ReturnType<typeof editorSaveKeys> | null = null;
 
+  let readCacheRevision = 0;
+  let cachedHeaderFooterAliases: {
+    revision: number;
+    aliases: ReadonlyMap<string, string>;
+  } | null = null;
+  const headerFooterAliases = (): ReadonlyMap<string, string> => {
+    if (!cachedHeaderFooterAliases || cachedHeaderFooterAliases.revision !== readCacheRevision) {
+      cachedHeaderFooterAliases = {
+        revision: readCacheRevision,
+        aliases: new Map(
+          Object.entries(JSON.parse(session.header_footer_aliases_json()) as Record<string, string>)
+        ),
+      };
+    }
+    return cachedHeaderFooterAliases.aliases;
+  };
+
   const invalidateReadCaches = (): void => {
+    readCacheRevision += 1;
     cachedSelection = undefined;
     cachedSelectionContext = null;
   };
@@ -1702,6 +1726,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     if (observing) return;
     session.set_update_observer((update: Uint8Array, origin: number) => {
       if (origin !== 0 && origin !== 1) return;
+      readCacheRevision += 1;
       pendingUpdates.push({
         update: update.slice(),
         origin: origin === 0 ? 'local' : 'remote',
@@ -2756,6 +2781,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   };
 
   registerSessionInternals(facade, {
+    headerFooterAliases,
+    setHeaderFooterAliases: (json) => mutate(() => session.set_header_footer_aliases(json)),
     sourcePackage: () =>
       docxSource && docxSourceKeys
         ? { buffer: docxSourceBuffer(docxSource), keys: docxSourceKeys }

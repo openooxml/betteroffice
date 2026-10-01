@@ -1366,10 +1366,8 @@ impl EditSession {
             self.engine.doc().install_media(media);
             fonts
         } else {
-            let aliases = envelope.document.package.header_footer_aliases.clone();
             let (mut metadata, index, fonts) =
                 crate::seed::replica_source(envelope, parts, Arc::clone(&source), digest.clone())?;
-            self.engine.doc().seed_header_footer_aliases(&aliases);
             metadata.watch_comments(self.engine.doc());
             self.engine.doc().install_source(metadata, js_entropy());
             self.engine
@@ -4929,7 +4927,7 @@ mod tests {
     }
 
     #[test]
-    fn docx_open_preserves_aliases_when_seeding_or_retaining_source() {
+    fn docx_open_reports_aliases_without_activating_them() {
         let bytes = crate::seed::header_footer_alias_fixture::package(
             &[("rId7", "header1.xml"), ("rId9", "./header1.xml")],
             &[],
@@ -4942,14 +4940,21 @@ mod tests {
                     .unwrap(),
             )
             .unwrap();
-            assert_eq!(session.header_footer_aliases_json(), r#"{"rId9":"rId7"}"#);
+            assert_eq!(session.header_footer_aliases_json(), "{}");
+            let txn = session.engine.doc().yrs_doc().transact();
+            assert!(
+                !txn.get_map(crate::identity::SESSION)
+                    .unwrap()
+                    .contains_key(&txn, "hfAliases")
+            );
+            drop(txn);
             assert_eq!(
                 result["envelope"]["document"]["package"]["headerFooterAliases"][0]["relationshipIds"],
                 json!(["rId7", "rId9"])
             );
             if seed {
                 assert!(session.engine.doc().paragraphs("hf:rId7").is_ok());
-                assert!(session.engine.doc().paragraphs("hf:rId9").is_err());
+                assert!(session.engine.doc().paragraphs("hf:rId9").is_ok());
             }
         }
     }

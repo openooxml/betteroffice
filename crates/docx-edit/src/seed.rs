@@ -5106,7 +5106,6 @@ type SourceRoot = (String, SourceStoryKind, Option<String>);
 /// One package lowered into story plans, with what its identity index and structured reads
 /// need.
 struct LoweredDocx {
-    header_footer_aliases: Vec<docx_parse::HeaderFooterAliasGroup>,
     context: LoweringContext,
     referenced_fonts: BTreeSet<String>,
     /// `None` for a seed whose caller does not report unused script fonts.
@@ -5133,7 +5132,6 @@ fn lower_docx_with(
     payloads: bool,
 ) -> Result<LoweredDocx, String> {
     envelope.document.package.media_entries.clear();
-    let header_footer_aliases = envelope.document.package.header_footer_aliases.clone();
     let relationships = envelope.document.package.relationship_entries.clone();
     let mut referenced_fonts = BTreeSet::new();
     collect_font_table_fonts(&envelope, &mut referenced_fonts);
@@ -5156,7 +5154,7 @@ fn lower_docx_with(
     let package =
         field(Some(&parsed), "package").ok_or_else(|| "parsed DOCX has no package".to_owned())?;
     let mut read = read_source(package, &parsed, parts);
-    let (mut context, roots) = lower_package(package, source_json, &header_footer_aliases);
+    let (mut context, roots) = lower_package(package, source_json);
     drop(parsed);
     read.provenance = std::mem::take(&mut context.provenance);
     read.seeded_comments = seeded_comments(&context.plans);
@@ -5166,7 +5164,6 @@ fn lower_docx_with(
         read.resolve_sources(parts, comment_raw, &represented);
     }
     Ok(LoweredDocx {
-        header_footer_aliases,
         context,
         referenced_fonts,
         script_fonts: Some(script_fonts),
@@ -5218,7 +5215,6 @@ fn seed_lowered(
     media: SeedMedia<'_>,
 ) -> Result<SeededFonts, String> {
     let LoweredDocx {
-        header_footer_aliases,
         context,
         mut referenced_fonts,
         mut script_fonts,
@@ -5261,7 +5257,6 @@ fn seed_lowered(
         .apply_raw_seed_batches(batches, &ctx)
         .map_err(|error| error.to_string())?;
     seed_opaque_sequences(document, &context.opaque_sequences);
-    document.seed_header_footer_aliases(&header_footer_aliases);
     document.set_media_sources(sources);
     read.pin(document, &ranges);
     read.comment_writes = CommentWrites::watch(document);
@@ -5476,7 +5471,6 @@ pub(crate) fn replica_source(
 fn lower_package(
     package: &Value,
     source_json: BTreeMap<String, String>,
-    header_footer_aliases: &[docx_parse::HeaderFooterAliasGroup],
 ) -> (LoweringContext, Vec<SourceRoot>) {
     let compatibility_mode = compatibility_mode_from_package(Some(package));
     let mut context = LoweringContext {
@@ -5511,16 +5505,7 @@ fn lower_package(
             let Some((relationship_id, part)) = entry_parts(entry) else {
                 continue;
             };
-            if header_footer_aliases.iter().any(|group| {
-                group
-                    .relationship_ids
-                    .iter()
-                    .skip(1)
-                    .any(|id| id == relationship_id)
-            }) {
-                continue;
-            }
-            let story_id = crate::header_footer::story_id(relationship_id);
+            let story_id = format!("hf:{relationship_id}");
             if context.plans.iter().any(|plan| plan.story_id == story_id) {
                 continue;
             }
@@ -5902,9 +5887,8 @@ pub(crate) mod header_footer_alias_fixture;
 mod header_footer_alias_tests {
     use super::*;
 
-    fn main_seed(doc: &EditingDoc, bytes: &[u8]) {
+    fn main_seed(doc: &EditingDoc, bytes: &[u8]) -> Vec<String> {
         let envelope = parse_docx_for_edit(bytes).unwrap();
-        assert!(envelope.document.package.header_footer_aliases.is_empty());
         let mut lowered = lower_docx(envelope, None).unwrap();
         let stories = lowered
             .context
@@ -5925,12 +5909,17 @@ mod header_footer_alias_tests {
         doc.apply_raw_seed_batches(batches, &ctx).unwrap();
         seed_opaque_sequences(doc, &lowered.context.opaque_sequences);
         doc.begin_opening(Some("singleton"));
+        stories
     }
 
     #[test]
-    fn singleton_package_matches_main_state_story_order_and_paragraph_allocation() {
+    fn packages_match_main_state_story_order_and_paragraph_allocation() {
         for (headers, footers) in [
             (vec![("rId7", "header1.xml")], vec![]),
+            (
+                vec![("rId7", "header1.xml"), ("rId9", "./header1.xml")],
+                vec![("rId11", "footer1.xml"), ("rId13", "./footer1.xml")],
+            ),
             (
                 vec![("rId9", "header2.xml"), ("rId7", "header1.xml")],
                 vec![("rId11", "footer1.xml")],
@@ -5940,7 +5929,11 @@ mod header_footer_alias_tests {
             let doc = EditingDoc::new(41);
             seed_from_docx_with_generation(&doc, &bytes, "singleton").unwrap();
             let baseline = EditingDoc::new(41);
-            main_seed(&baseline, &bytes);
+            let order = main_seed(&baseline, &bytes);
+            let expected_order: Vec<_> = std::iter::once("body".to_owned())
+                .chain(headers.iter().chain(&footers).map(|(id, _)| format!("hf:{id}")))
+                .collect();
+            assert_eq!(order, expected_order);
             assert_eq!(
                 doc.encode_state_as_update_v1(),
                 baseline.encode_state_as_update_v1()

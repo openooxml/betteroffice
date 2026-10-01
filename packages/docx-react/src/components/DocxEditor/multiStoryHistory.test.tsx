@@ -11,7 +11,9 @@ import { repackDocx } from '@betteroffice/docx/docx';
 import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
 import { unzipContainer } from '@betteroffice/docx/docx/wasm';
 import type { Document } from '@betteroffice/docx/types/document';
+import { sessionInternals } from '@betteroffice/docx/yrs/sessionInternals';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
+import { partEditStory } from './partEdit';
 import { PagedEditor, type PagedEditorRef } from './PagedEditor';
 import type { PagedEditorCommandBridge } from './hooks/usePagedEditorRefApi';
 import { useYrsCoreSession, type YrsCoreSession } from './hooks/useYrsCoreSession';
@@ -46,7 +48,7 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-function fixture(): Uint8Array {
+function fixture(sharedHeader = false): Uint8Array {
   const parts = new Map<string, Uint8Array>();
   parts.set(
     '[Content_Types].xml',
@@ -63,13 +65,13 @@ function fixture(): Uint8Array {
   parts.set(
     'word/_rels/document.xml.rels',
     toBytes(
-      `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdHeader" Type="${R}/header" Target="header1.xml"/></Relationships>`
+      `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdHeader" Type="${R}/header" Target="header1.xml"/>${sharedHeader ? `<Relationship Id="rIdHeaderAlias" Type="${R}/header" Target="./header1.xml"/>` : ''}</Relationships>`
     )
   );
   parts.set(
     'word/document.xml',
     toBytes(
-      `<w:document ${NS}><w:body><w:p w14:paraId="00000001"><w:r><w:t>Body text</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/></w:sectPr></w:body></w:document>`
+      `<w:document ${NS}><w:body><w:p w14:paraId="00000001">${sharedHeader ? '<w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/></w:sectPr></w:pPr>' : ''}<w:r><w:t>Body text</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="${sharedHeader ? 'rIdHeaderAlias' : 'rIdHeader'}"/></w:sectPr></w:body></w:document>`
     )
   );
   parts.set(
@@ -162,4 +164,53 @@ test('undo and redo refresh every story a multi-story batch changed before the n
   const bridge = bridgeRef.current!;
   expect(await act(() => bridge.runAfterPendingInput(() => bridge.history(true)))).toBe(true);
   expect(await saved(editorRef)).toEqual(['Body edited', 'Header edited']);
+});
+
+test('default aliased package keeps the second section header story', async () => {
+  const editorRef = createRef<PagedEditorRef>();
+  const bridgeRef: { current: PagedEditorCommandBridge | null } = { current: null };
+  const coreRef: { current: YrsCoreSession | null } = { current: null };
+  render(<Harness bytes={fixture(true)} editorRef={editorRef} bridgeRef={bridgeRef} coreRef={coreRef} />);
+  await until(() => !!coreRef.current?.session && !!editorRef.current?.getYrsSession());
+  const session = coreRef.current!.session!;
+  expect(session.hasStory('hf:rIdHeader')).toBe(true);
+  expect(session.hasStory('hf:rIdHeaderAlias')).toBe(true);
+  expect(partEditStory({ kind: 'header', rId: 'rIdHeaderAlias' }, session))
+    .toBe('hf:rIdHeaderAlias');
+  expect([...sessionInternals(session).headerFooterAliases()]).toEqual([]);
+});
+
+test('editing the second section header projects and saves canonical content for both rIds', async () => {
+  const editorRef = createRef<PagedEditorRef>();
+  const bridgeRef: { current: PagedEditorCommandBridge | null } = { current: null };
+  const coreRef: { current: YrsCoreSession | null } = { current: null };
+  render(<Harness bytes={fixture(true)} editorRef={editorRef} bridgeRef={bridgeRef} coreRef={coreRef} />);
+  await until(() => !!coreRef.current?.session && !!editorRef.current?.getYrsSession());
+  const session = coreRef.current!.session!;
+  act(() => {
+    for (const story of session.storyIds()) {
+      if (story === 'hf:rIdHeaderAlias' || story.startsWith('hf:rIdHeaderAlias:')) {
+        session.deleteStory(story);
+      }
+    }
+    sessionInternals(session).setHeaderFooterAliases(JSON.stringify([{
+      isHeader: true, partPath: 'word/header1.xml',
+      relationshipIds: ['rIdHeader', 'rIdHeaderAlias'],
+    }]));
+    editorRef.current!.syncYrsInputState(true, ['hf:rIdHeader', 'hf:rIdHeaderAlias']);
+  });
+  const part = { kind: 'header', rId: 'rIdHeaderAlias' } as const;
+  const story = partEditStory(part, session);
+  expect(part.rId).toBe('rIdHeaderAlias');
+  expect(story).toBe('hf:rIdHeader');
+  expect(session.hasStory('hf:rIdHeaderAlias')).toBe(false);
+  const paragraph = session.paragraphs(story)[0]!;
+  act(() => {
+    session.insertText({ story, paraId: paragraph.paraId, offset: 11 }, ' edited');
+    editorRef.current!.syncYrsInputState(true, [story]);
+  });
+  const document = editorRef.current!.getDocument()!;
+  expect(document.package.headers!.get('rIdHeader')!.content)
+    .toBe(document.package.headers!.get('rIdHeaderAlias')!.content);
+  expect(await saved(editorRef)).toEqual(['Body text', 'Header text edited']);
 });

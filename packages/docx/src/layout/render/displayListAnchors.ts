@@ -10,6 +10,7 @@
  */
 
 import type { YrsRevisionInfo, YrsSession } from '../../yrs';
+import { headerFooterDisplayRIds } from '../../yrs/sessionInternals';
 import type { DisplayListQueries, DisplayListRect } from './displayListQueries';
 import { canvasPageTops } from './canvasPageMetrics';
 import {
@@ -132,13 +133,19 @@ export interface YrsHeaderFooterRegions {
 }
 
 function rectForYrsPoint(
+  session: YrsSession,
   point: YrsSidebarDisplayPoint,
   queries: DisplayListQueries,
   hfRegions?: YrsHeaderFooterRegions
 ): DisplayListRect | null {
   if (!point.hfRid) return queries.anchorRect(point.position);
-  const region = hfRegions?.get(point.hfRid);
-  return region ? (queries.hfAnchorRects(region, point.hfRid, point.position)[0] ?? null) : null;
+  for (const rId of headerFooterDisplayRIds(session, point.hfRid)) {
+    const region = hfRegions?.get(rId);
+    if (!region) continue;
+    const rect = queries.hfAnchorRects(region, rId, point.position)[0];
+    if (rect) return rect;
+  }
+  return null;
 }
 
 /**
@@ -160,7 +167,7 @@ export function computeAnchorPositionsFromYrs(
 
   const register = (key: string, point: YrsSidebarDisplayPoint | null): boolean => {
     if (!point || positions.has(key)) return positions.has(key);
-    const rect = rectForYrsPoint(point, queries, hfRegions);
+    const rect = rectForYrsPoint(session, point, queries, hfRegions);
     if (!rect) return false;
     const y = projectY ? projectY(rect) : (pageTops[rect.pageIndex] ?? 0) + rect.y;
     if (y == null) return false;

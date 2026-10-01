@@ -98,6 +98,7 @@ export function collectParts(doc: Document): Part[] {
   const rels = doc.package.relationships;
   if (!rels) return parts;
 
+  const contents = new Set<BlockContent[]>();
   const addHeaderFooterParts = (map: Map<string, HeaderFooter> | undefined, type: string) => {
     if (!map) return;
     for (const [rId, hf] of map.entries()) {
@@ -105,6 +106,8 @@ export function collectParts(doc: Document): Part[] {
       if (!rel || rel.type !== type || !rel.target) continue;
       const filename = headerFooterFilename(rel.target);
       const basename = filename.replace(/^word\//, '');
+      if (contents.has(hf.content)) continue;
+      contents.add(hf.content);
       parts.push({ relsPath: `word/_rels/${basename}.rels`, blocks: hf.content });
     }
   };
