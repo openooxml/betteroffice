@@ -439,7 +439,11 @@ export function useDocxEditorRefApi({
   /** The resident worker's wasm memories as of its latest reply. */
   workerMemory?: () => WasmModuleMemory[] | null;
   /** The renderer's display list once it shows the whole current document. */
-  settledDisplayList?: (relayout: null, timeoutMs: number | null) => Promise<DisplayList>;
+  settledDisplayList?: (
+    relayout: null,
+    timeoutMs: number | null,
+    scope?: 'document' | 'window'
+  ) => Promise<DisplayList>;
   /** Whether a document load has not yet produced its first layout. */
   awaitingDocument?: () => boolean;
   experimentalWorkerOpen?: boolean;
@@ -508,7 +512,9 @@ export function useDocxEditorRefApi({
         awaitingDocument?.() ? 0 : documentPageCount(hostEditorRef.current?.getLayout()),
       whenLayoutComplete: async (options) => {
         if (!settledDisplayList) throw new Error('This editor paints no display list');
-        return (await settledDisplayList(null, options?.timeoutMs ?? null)).pages.length;
+        return (await settledDisplayList(
+          null, options?.timeoutMs ?? null, experimentalWorkerOpen ? 'window' : 'document'
+        )).pages.length;
       },
       getMemoryStats: () => readMemoryStats(workerMemory),
       scrollToPage: (pageNumber) => pagedEditorRef.current?.scrollToPage(pageNumber),

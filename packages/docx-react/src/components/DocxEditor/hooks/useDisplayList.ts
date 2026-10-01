@@ -140,7 +140,8 @@ export interface UseRustDisplayListResult {
    */
   settledDisplayList(
     relayout: (() => void) | null,
-    timeoutMs?: number | null
+    timeoutMs?: number | null,
+    scope?: 'document' | 'window'
   ): Promise<DisplayList>;
   /**
    * Drops the settled display list. Without `failure` a new document is on its way, so waiters
@@ -277,6 +278,7 @@ const INITIAL_DISPLAY_WINDOW: [number, number] = [0, 5];
 const SETTLE_BUILD_BATCH_PAGES = 128;
 /** Unbuilt pages built per idle period away from the viewport. */
 const BACKGROUND_BUILD_BATCH_PAGES = 16;
+const WORKER_OPEN_BUILD_MARGIN_PAGES = 2;
 /** How often a page build waiting behind a newer worker frame checks again. */
 const PAGE_BUILD_RETRY_MS = 50;
 /** How long a page build waits for the display to adopt a worker frame. */
@@ -394,7 +396,7 @@ export function useRustDisplayList(
   const workerPreviewKeysRef = useRef(new Map<number, string>());
   const settledEpochRef = useRef<number | null>(null);
   const settleErrorRef = useRef<Error | null>(null);
-  const settleWaitersRef = useRef(new Set<() => void>());
+  const settleWaitersRef = useRef(new Map<() => void, 'document' | 'window'>());
   const settleRelayoutRef = useRef<(() => void) | null>(null);
   const layoutRef = useRef(layout);
   layoutRef.current = layout;
@@ -430,7 +432,7 @@ export function useRustDisplayList(
       if (!failure && !authoritative && isLayoutQueued(engineRef.current)) return;
       settledEpochRef.current = epoch;
       settleErrorRef.current = failure;
-      for (const waiter of [...settleWaitersRef.current]) waiter();
+      for (const waiter of [...settleWaitersRef.current.keys()]) waiter();
     },
     []
   );
@@ -1473,8 +1475,16 @@ export function useRustDisplayList(
       }
       const pages = frame.displayList.pages;
       const [start, end] = displayWindowRef.current;
+      const settling = settleWaitersRef.current.size > 0;
+      const windowOnly = settling
+        ? ![...settleWaitersRef.current.values()].includes('document')
+        : workerOpenEnabledRef.current;
+      const first = windowOnly ? Math.max(0, start - WORKER_OPEN_BUILD_MARGIN_PAGES) : 0;
+      const last = windowOnly
+        ? Math.min(pages.length, end + WORKER_OPEN_BUILD_MARGIN_PAGES)
+        : pages.length;
       const unbuilt: number[] = [];
-      for (let index = 0; index < pages.length; index += 1) {
+      for (let index = first; index < last; index += 1) {
         if (pages[index]?.unbuilt) unbuilt.push(index);
       }
       if (unbuilt.length === 0) return;
@@ -1503,7 +1513,6 @@ export function useRustDisplayList(
       }
       if (background) {
         if (provisionalPageFrameRef.current) return;
-        const settling = settleWaitersRef.current.size > 0;
         if (!idle && !settling) {
           schedulePageBuildsWhenIdleRef.current();
           return;
@@ -1596,7 +1605,7 @@ export function useRustDisplayList(
               return;
             }
             finish();
-            for (const waiter of [...settleWaitersRef.current]) waiter();
+            for (const waiter of [...settleWaitersRef.current.keys()]) waiter();
           };
           if (!background) {
             try {
@@ -1688,6 +1697,8 @@ export function useRustDisplayList(
       if (current[0] === start && current[1] === end) return;
       displayWindowRef.current = [start, end];
       schedulePageBuilds(0);
+      // A window wait may already be met by the pages the new window shows.
+      for (const waiter of [...settleWaitersRef.current.keys()]) waiter();
       for (const listener of [...displayWindowListenersRef.current]) listener();
     },
     [schedulePageBuilds]
@@ -2549,19 +2560,31 @@ export function useRustDisplayList(
   );
 
   const settledDisplayList = useCallback(
-    (relayout: (() => void) | null, timeoutMs: number | null = 15_000): Promise<DisplayList> =>
+    (
+      relayout: (() => void) | null,
+      timeoutMs: number | null = 15_000,
+      scope: 'document' | 'window' = 'document'
+    ): Promise<DisplayList> =>
       new Promise<DisplayList>((resolve, reject) => {
         let timer: ReturnType<typeof setTimeout> | undefined;
         const settle = (): boolean => {
           const failure = settleErrorRef.current;
           const displayList = snapshotRef.current.displayList;
+          const [start, end] = displayWindowRef.current;
+          const unbuilt = displayList?.pages.some(
+            (page, index) =>
+              page.unbuilt &&
+              (scope === 'document' ||
+                (index >= start - WORKER_OPEN_BUILD_MARGIN_PAGES &&
+                  index < end + WORKER_OPEN_BUILD_MARGIN_PAGES))
+          );
           const current =
             displayList !== null &&
             settledEpochRef.current === contentEpochRef.current &&
             !isLayoutQueued(engineRef.current) &&
-            !displayList.pages.some((page) => page.unbuilt);
+            !unbuilt;
           if (!failure && !current) {
-            if (displayList?.pages.some((page) => page.unbuilt)) schedulePageBuilds(0);
+            if (unbuilt) schedulePageBuilds(0);
             return false;
           }
           settleWaitersRef.current.delete(waiter);
@@ -2575,7 +2598,7 @@ export function useRustDisplayList(
         };
         if (settle()) return;
         if (relayout) settleRelayoutRef.current = relayout;
-        settleWaitersRef.current.add(waiter);
+        settleWaitersRef.current.set(waiter, scope);
         if (timeoutMs !== null) {
           timer = setTimeout(() => {
             settleWaitersRef.current.delete(waiter);
