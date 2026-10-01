@@ -250,9 +250,10 @@ describe('shared module', () => {
       expect(state.sharedModule()).toBe(compiling);
       expect(fetch).toHaveBeenCalledTimes(1);
       const loading = state.preload();
-      expect(state.module()).toBe(compiling);
+      expect(state.module()).toBe(compiling as Promise<WebAssembly.Module>);
       await loading;
       const module = await compiling;
+      if (!module) throw new Error('Expected a shared module');
       expect(module).toBeInstanceOf(WebAssembly.Module);
       expect(seen).toEqual([module]);
       expect(state.sharedModule()).toBe(compiling);
