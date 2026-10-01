@@ -25,6 +25,7 @@ import {
 export interface WorkerProposalAuthority {
   /** The session mirrors the worker registry and version. */
   readonly initialized: boolean;
+  restart(): void;
   /** Initializes once; rejects when the worker cannot answer. */
   initialize(): Promise<void>;
   /** Mirrored geometry until hand-over. */
@@ -199,6 +200,13 @@ export function registerWorkerProposalAuthority(
   }, main);
   const authority: RegisteredAuthority = {
     get initialized() { return initialized; },
+    restart() {
+      if (!initialized || holdsState || failure || handingOver || !hooks.current()) return;
+      initialized = false;
+      initializing = null;
+      hooks.relayout();
+      notify();
+    },
     initialize() {
       if (failure) return Promise.reject(failure.error);
       if (initializing) return initializing;
@@ -210,9 +218,11 @@ export function registerWorkerProposalAuthority(
         snapshotPosted = true;
         const reply = await worker.proposal({ kind: 'snapshot' });
         assertCurrent();
+        const previousVersion = mirror?.version;
         initialized = true;
         store(reply);
         hooks.adopted(reply.mirror.version);
+        if (previousVersion !== undefined && previousVersion !== reply.mirror.version) hooks.relayout();
       });
       return initializing;
     },

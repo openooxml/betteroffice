@@ -92,6 +92,7 @@ function installWorker(options: {
   failOpen?: boolean;
   failState?: boolean;
   failProposal?: boolean;
+  crashProposalOnce?: boolean;
   holdState?: boolean;
   holdOpen?: boolean;
   oomStage?: 'open' | 'fontRequirements' | 'bootstrap' | 'encodeState' | 'proposal' |
@@ -110,6 +111,7 @@ function installWorker(options: {
   const replies = new Map<number, () => void>();
   const received = new Set<ResidentEngineWorkerRequest>();
   const replyWaiters = new Set<() => void>();
+  let proposalCrashed = false;
   globalThis.Worker = class {
     constructor() {
       const worker = startWorker();
@@ -142,6 +144,12 @@ function installWorker(options: {
               workers.length === 1)) {
           queueMicrotask(() => worker.onmessage?.({
             data: { id: request.id, ok: false, error: 'worker exhausted memory', terminal: true, outOfMemory: true },
+          } as MessageEvent));
+        } else if (options.crashProposalOnce && !proposalCrashed &&
+            request.type === 'proposal' && request.operation.kind === 'propose') {
+          proposalCrashed = true;
+          queueMicrotask(() => worker.onmessage?.({
+            data: { id: request.id, ok: false, error: 'proposal crashed', terminal: true },
           } as MessageEvent));
         } else if ((options.failOpen && request.type === 'open') ||
             (options.failState && request.type === 'encodeState')) {
@@ -1971,6 +1979,69 @@ test('an OOM during the first proposal starts a fresh worker instead of failing 
   }
 }, 15_000);
 
+test('a later proposal succeeds after an OOM during the first proposal', async () => {
+  const options: Parameters<typeof installWorker>[0] = {};
+  const { workers, posted } = installWorker(options);
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const api = () => result.current.ref.current!;
+    const session = result.current.core.session!;
+    const identities = await api().getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
+    const initial = await api().getProposals();
+    options.oomStage = 'proposal';
+    await act(async () => {
+      await expect(api().proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'failed-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Failed ',
+        }],
+      })).rejects.toThrow();
+    });
+    expect(registeredWorkerProposalAuthority(session)!.holdsWorkerState()).toBe(false);
+    expect(session.getProposals().proposals).toEqual([]);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    await act(async () => { await api().whenLayoutComplete({ timeoutMs: 5000 }); });
+    const recovered = await api().getProposals();
+    const recoveredParagraph = (await api().getParagraphIdentities()).paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    await act(async () => {
+      expect(await api().proposeChanges({
+        expectVersion: recovered.version,
+        proposals: [{
+          id: 'recovered-after-oom', paragraph: recoveredParagraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Recovered ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    const proposed = await api().getProposals();
+    expect(proposed.proposals.map(({ id }) => id)).toEqual(['recovered-after-oom']);
+    await act(async () => {
+      expect(await api().setProposalStates({
+        expectVersion: proposed.version,
+        expectPreviewVersion: proposed.previewVersion,
+        changes: [{ id: 'recovered-after-oom', state: 'accepted' }],
+      })).toMatchObject({ ok: true });
+    });
+    expect((await api().getProposals()).proposals).toMatchObject([
+      { id: 'recovered-after-oom', state: 'accepted' },
+    ]);
+    expect(workers).toHaveLength(2);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(2);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
 test.each([true, false])(
   'worker revisions are asked at the replica gate, before the completion finishes, with onWorkerRevisions=%s',
   async (withCallback) => {
@@ -2397,6 +2468,62 @@ test('a failed first proposal leaves the replica fallback available', async () =
     frames.restore();
   }
 });
+
+test('a later proposal succeeds after a terminal crash during the first proposal', async () => {
+  installWorker({ crashProposalOnce: true });
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const api = () => result.current.ref.current!;
+    const session = result.current.core.session!;
+    const identities = await api().getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
+    const initial = await api().getProposals();
+    await act(async () => {
+      await expect(api().proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'failed-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Failed ',
+        }],
+      })).rejects.toThrow('proposal crashed');
+    });
+    expect(registeredWorkerProposalAuthority(session)!.holdsWorkerState()).toBe(false);
+    expect(session.getProposals().proposals).toEqual([]);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    await act(async () => { await api().whenLayoutComplete({ timeoutMs: 5000 }); });
+    const recovered = await api().getProposals();
+    const recoveredParagraph = (await api().getParagraphIdentities()).paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    await act(async () => {
+      expect(await api().proposeChanges({
+        expectVersion: recovered.version,
+        proposals: [{
+          id: 'recovered-after-crash', paragraph: recoveredParagraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Recovered ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    const proposed = await api().getProposals();
+    expect(proposed.proposals.map(({ id }) => id)).toEqual(['recovered-after-crash']);
+    await act(async () => {
+      expect(await api().setProposalStates({
+        expectVersion: proposed.version,
+        expectPreviewVersion: proposed.previewVersion,
+        changes: [{ id: 'recovered-after-crash', state: 'accepted' }],
+      })).toMatchObject({ ok: true });
+    });
+    expect((await api().getProposals()).proposals).toMatchObject([
+      { id: 'recovered-after-crash', state: 'accepted' },
+    ]);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
 
 test('without worker proposals the ref waits for hydration before applying a proposal', async () => {
   const { posted, workers } = installWorker({ holdState: true });
