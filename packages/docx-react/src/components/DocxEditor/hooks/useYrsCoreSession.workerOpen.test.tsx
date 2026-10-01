@@ -109,6 +109,8 @@ function installWorker(options: {
   holdSync?: boolean;
   holdCompletion?: boolean;
   holdReply?: (request: ResidentEngineWorkerRequest) => boolean;
+  /** Decision replies arrive without the font requirements of the host's next pass. */
+  withoutDecisionFontRequirements?: boolean;
   refusePreview?: boolean;
 } = {}) {
   const workers: InProcessResidentWorker[] = [];
@@ -127,7 +129,12 @@ function installWorker(options: {
           const listener = onmessage;
           return (event: MessageEvent<ResidentEngineWorkerResponse>) => {
             const request = posted.find((request) => request.id === event.data.id);
-            const deliver = () => listener?.(event);
+            const data = event.data;
+            const delivered = options.withoutDecisionFontRequirements && data.ok && data.proposal &&
+              request?.type === 'proposal' && request.operation.kind === 'setStates'
+              ? { data: { ...data, proposal: { ...data.proposal, fontRequirements: undefined } } } as typeof event
+              : event;
+            const deliver = () => listener?.(delivered);
             if (request && options.holdReply?.(request)) replies.set(request.id, deliver);
             else deliver();
             if (request) received.add(request);
@@ -1927,10 +1934,54 @@ test('proposal font requirements are reused only for the same layout request', a
   }
 }, 15_000);
 
+test('decisions and their undos answer the font preflight from the decision reply', async () => {
+  const { posted } = installWorker();
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const api = result.current.ref.current!;
+    const session = result.current.core.session!;
+    const identities = await api.getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
+    const initial = await api.getProposals();
+    await act(async () => {
+      expect(await api.proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'decided', paragraph,
+          suggest: { author: 'Host', date: '2026-10-01T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Added text ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    await act(async () => { await api.whenLayoutComplete({ timeoutMs: 5000 }); });
+    const fonts = () => posted.filter(({ type }) => type === 'fontRequirements').length;
+    const before = fonts();
+    for (const state of ['accepted', 'proposed', 'rejected', 'proposed'] as const) {
+      const snapshot = await api.getProposals();
+      const syncs = posted.filter(({ type }) => type === 'sync').length;
+      await act(async () => {
+        expect(await api.setProposalStates({
+          expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion,
+          changes: [{ id: 'decided', state }],
+        })).toMatchObject({ ok: true });
+      });
+      await act(async () => { await api.whenLayoutComplete({ timeoutMs: 5000 }); });
+      expect(posted.filter(({ type }) => type === 'sync').length).toBeGreaterThan(syncs);
+      expect(revisionPreviewKeyOf(result.current.pipeline.layout))
+        .toBe(revisionPreviewKey(proposalRevisionPreview(session.getProposals())));
+    }
+    expect(fonts()).toBe(before);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
 test.each(['A then B', 'B then A'])('Undo keeps worker proposals through font preflight replies %s', async (order) => {
   let holdRequirements = false;
   const { posted, replies, reply, received } = installWorker({
     holdReply: (request) => holdRequirements && request.type === 'fontRequirements',
+    withoutDecisionFontRequirements: true,
   });
   const frames = holdFrames();
   const errorLog = spyOn(console, 'error').mockImplementation(() => {});
@@ -2099,10 +2150,8 @@ test.each(['unavailable', 'no adoption', 'no snapshot'])('a holding session with
     if (path === 'no adoption') session.adoptResidentWorkerLayout = undefined as never;
     try {
       act(() => result.current.pipeline.scheduleLayout('remote'));
-      await act(async () => {
-        frames.run();
-        await received('fontRequirements', requirements.at(-1)!.id);
-      });
+      await act(async () => { frames.run(); });
+      await waitFor(() => expect(result.current.renderer.error).not.toBeNull());
       const failure = result.current.renderer.error;
       expect(failure?.message).toBe('The resident worker holding proposals cannot lay out the document');
       expect(result.current.errors).toEqual([failure!]);
@@ -2111,7 +2160,7 @@ test.each(['unavailable', 'no adoption', 'no snapshot'])('a holding session with
       for (let frame = 0; frame < 8; frame += 1) await act(async () => frames.run());
       expect(requestFrame.mock.calls.length).toBe(frameRequests);
       expect(posted).toHaveLength(requests);
-      expect(posted.filter((request) => request.type === 'fontRequirements')).toHaveLength(requirements.length + 1);
+      expect(posted.filter((request) => request.type === 'fontRequirements')).toHaveLength(requirements.length);
       expect(result.current.errors).toEqual([failure!]);
       expect(errorLog).toHaveBeenCalledTimes(1);
       expect(layoutHere).not.toHaveBeenCalled();
