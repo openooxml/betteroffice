@@ -565,7 +565,10 @@ mod parity_tests {
             bits = bits.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             corpus.push(f32::from_bits(bits));
         }
-        let finite: Vec<f32> = corpus.into_iter().filter(|value| value.is_finite()).collect();
+        let finite: Vec<f32> = corpus
+            .into_iter()
+            .filter(|value| value.is_finite())
+            .collect();
         // The second pass reads the values the first one cached.
         for value in finite.iter().chain(finite.iter().rev()).copied() {
             let encoded = serde_json::to_string(&value).unwrap();
