@@ -95,6 +95,16 @@ struct ApplyInputProfile {
     encode_ms: f64,
 }
 
+fn validate_frame_epoch(epoch: f64) -> Result<u64, JsValue> {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    if !(epoch.is_finite() && epoch >= 0.0 && epoch.fract() == 0.0 && epoch <= MAX_SAFE_INTEGER) {
+        return Err(js_err(
+            "expected_frame_epoch must be a non-negative safe integer",
+        ));
+    }
+    Ok(epoch as u64)
+}
+
 fn js_err(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
 }
@@ -1774,19 +1784,10 @@ impl EditSession {
         input: &str,
         expected_frame_epoch: f64,
     ) -> Result<Vec<u8>, JsValue> {
-        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
         let _fonts = self.fonts.enter();
-        if !(expected_frame_epoch.is_finite()
-            && expected_frame_epoch >= 0.0
-            && expected_frame_epoch.fract() == 0.0
-            && expected_frame_epoch <= MAX_SAFE_INTEGER)
-        {
-            return Err(js_err(
-                "expected_frame_epoch must be a non-negative safe integer",
-            ));
-        }
+        let epoch = validate_frame_epoch(expected_frame_epoch)?;
         self.engine
-            .build_display_list_frame(input, expected_frame_epoch as u64)
+            .build_display_list_frame(input, epoch)
             .map_err(|error| JsValue::from_str(&error))
     }
 
@@ -1819,21 +1820,26 @@ impl EditSession {
         pages: Vec<u32>,
         expected_frame_epoch: f64,
     ) -> Result<Vec<u8>, JsValue> {
-        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
         let _fonts = self.fonts.enter();
-        if !(expected_frame_epoch.is_finite()
-            && expected_frame_epoch >= 0.0
-            && expected_frame_epoch.fract() == 0.0
-            && expected_frame_epoch <= MAX_SAFE_INTEGER)
-        {
-            return Err(js_err(
-                "expected_frame_epoch must be a non-negative safe integer",
-            ));
-        }
+        let epoch = validate_frame_epoch(expected_frame_epoch)?;
         let pages: Vec<usize> = pages.into_iter().map(|page| page as usize).collect();
         self.engine
-            .build_display_pages_frame(&pages, expected_frame_epoch as u64)
+            .build_display_pages_frame(&pages, epoch)
             .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Release display pages; an empty result means the request was superseded.
+    pub fn release_display_pages_frame(
+        &self,
+        pages: Vec<u32>,
+        expected_frame_epoch: f64,
+    ) -> Result<Vec<u8>, JsValue> {
+        let _fonts = self.fonts.enter();
+        let epoch = validate_frame_epoch(expected_frame_epoch)?;
+        let pages: Vec<usize> = pages.into_iter().map(|page| page as usize).collect();
+        self.engine
+            .release_display_pages_frame(&pages, epoch)
+            .map_err(js_err)
     }
 
     /// `{"frameEpoch", "caretRect": {…}|null}` for the session's own collapsed

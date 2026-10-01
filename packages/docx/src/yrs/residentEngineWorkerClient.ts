@@ -51,7 +51,7 @@ export interface ResidentEngineWorkerLayoutOptions {
   layoutExtras?: string;
   /** The host state vector the snapshot brings the worker to. */
   stateVector?: Uint8Array;
-  /** Bootstrap only: lay out just the body's first pages before replying. */
+  /** Lay out just the body's first pages before replying. */
   provisionalPages?: number;
   /** Bootstrap only: lay out the document {@link ResidentEngineWorkerClient.open} opened. */
   opened?: boolean;
@@ -92,6 +92,7 @@ const FRAME_REQUESTS = new Set<AwaitedRequest['type']>([
   'bootstrap',
   'sync',
   'buildFrame',
+  'releasePages',
   'applyInput',
   'applyDelete',
 ]);
@@ -449,6 +450,9 @@ export class ResidentEngineWorkerClient {
         expectedFrameEpoch,
         paintCaret,
         ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
+        ...(options.provisionalPages !== undefined
+          ? { provisionalPages: options.provisionalPages }
+          : {}),
         ...(options.displayWindow
           ? {
               displayWindow: options.displayWindow,
@@ -514,6 +518,20 @@ export class ResidentEngineWorkerClient {
     return frameResult(
       await this.request({ type: 'buildPages', pages, expectedFrameEpoch, paintCaret })
     );
+  }
+
+  async releasePages(
+    pages: Array<{ index: number; pageId: string }>,
+    expectedFrameEpoch: number,
+    paintCaret = false
+  ): Promise<ResidentEngineWorkerFrame | { superseded: true }> {
+    const response = await this.request({
+      type: 'releasePages',
+      pages,
+      expectedFrameEpoch,
+      paintCaret,
+    });
+    return response.superseded ? { superseded: true } : frameResult(response);
   }
 
   async applyInput(

@@ -1528,6 +1528,7 @@ fn synthetic_row(
         descent,
         line_height,
         synthetic_fallback: Some(true),
+        marker_tab_offset: None,
         ..TypesetRow::default()
     }
 }

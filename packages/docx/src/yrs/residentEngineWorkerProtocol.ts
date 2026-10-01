@@ -111,11 +111,19 @@ export type ResidentEngineWorkerRequest =
       layoutExtras?: string;
       displayWindow?: [number, number];
       retainBuiltPages?: boolean;
+      provisionalPages?: number;
     }
   | {
       id: number;
       type: 'buildPages';
       pages: number[];
+      expectedFrameEpoch: number;
+      paintCaret: boolean;
+    }
+  | {
+      id: number;
+      type: 'releasePages';
+      pages: Array<{ index: number; pageId: string }>;
       expectedFrameEpoch: number;
       paintCaret: boolean;
     }
@@ -191,6 +199,7 @@ export type ResidentEngineWorkerResponse = (
       id: number;
       ok: true;
       frame?: ArrayBuffer;
+      superseded?: true;
       updates?: ArrayBuffer[];
       engineMs?: number;
       workerTotalMs?: number;

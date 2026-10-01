@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, mock, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { useRef, type ReactNode } from 'react';
@@ -10,6 +10,8 @@ import {
   displayPositionToYrsLoc,
   yrsLocToDisplayPosition,
   yrsToDocument,
+  proposalSetIdentity,
+  type ResidentProposalReply,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import type { Document } from '@betteroffice/docx/types/document';
@@ -20,8 +22,9 @@ import type { PagedEditorRef } from '../PagedEditor';
 import { YrsInput, type YrsInputRef } from '../YrsInput';
 import { createCommentIdAllocator } from '../commentFactories';
 import { deferWorkerOpenReplica, workerOpenReplicaOnDemand } from '../internals/workerOpenReplica';
+import { beginWorkerProposalHandover, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { EditorMode } from '../internals/editing-modes';
-import { DOCX_REF_REPLICA_ACCESS, useDocxEditorRefApi } from './useDocxEditorRefApi';
+import { DOCX_REF_REPLICA_ACCESS, DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -154,11 +157,13 @@ async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, 
   const replica = deferWorkerOpenReplica(
     session,
     async () => {
+      const handover = await beginWorkerProposalHandover(session);
       await held;
       return () => {
         opens.push(false);
         session.openDocx(bytes, false);
-        session.loadState(state);
+        session.loadState(handover?.state ?? state);
+        handover?.complete();
       };
     },
     () => {
@@ -172,17 +177,62 @@ async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, 
   return { ...mounted, session, worker, replica, release, opens };
 }
 
+async function pendingWorkerProposalReplica() {
+  const pending = await pendingReplica('viewing', false, true);
+  const { session, worker } = pending;
+  let previewVersion = 0;
+  const reply = (): ResidentProposalReply => {
+    const snapshot = { version: worker.version(), previewVersion, proposals: [] };
+    return {
+      mirror: { version: snapshot.version, proposals: { previewVersion, entries: [] } },
+      result: { ok: true, snapshot },
+      changedStories: [],
+      geometry: {
+        version: snapshot.version, previewVersion,
+        proposals: proposalSetIdentity(snapshot), targets: {}, hidden: [],
+      },
+      updates: [],
+      stateVector: new Uint8Array(),
+    };
+  };
+  const transport = {
+    proposal: mock(async (op: { kind: string }) => {
+      if (op.kind === 'propose') previewVersion += 1;
+      return reply();
+    }),
+    documentRead: async () => { throw new Error('unexpected worker read'); },
+    handOver: mock(async () => ({
+      state: worker.encodeState(), version: worker.version(), proposals: reply().mirror.proposals,
+    })),
+  };
+  const authority = registerWorkerProposalAuthority(session, transport, {
+    relayout: () => {},
+    current: () => true,
+    laidOut: async () => {},
+    adopted: () => {},
+    handedOver: () => {},
+    contentChanged: () => {},
+  });
+  await authority.propose({ expectVersion: worker.version(), proposals: [] }, async () => {
+    throw new Error('unexpected main proposal');
+  });
+  expect(authority.holdsWorkerState()).toBe(true);
+  expect(pending.replica.started).toBe(false);
+  expect(pending.opens).toEqual([]);
+  return { ...pending, authority, transport };
+}
+
 test('every public ref API is classified for replica access', async () => {
   const { api } = await pendingReplica();
   expect(Object.keys(api).sort()).toEqual(Object.keys(DOCX_REF_REPLICA_ACCESS).sort());
   expect(Object.keys(DOCX_REF_REPLICA_ACCESS).sort()).toEqual([
     'addComment', 'applyEdits', 'applyFormatting', 'clearSearch', 'commands', 'exportStructuredWithPages',
     'findContentControls', 'findInDocument', 'findText', 'flushPendingInput', 'focus',
-    'getComments', 'getCurrentPage', 'getDocument', 'getEditorRef', 'getMemoryStats', 'getPageContent',
+    'getComments', 'getCurrentPage', 'getDocument', 'getEditorRef', 'getMemoryStats', 'getPageContent', 'getParagraphIdentities',
     'getPositionAtPoint', 'getProposals', 'getSearchState', 'getSelectionInfo', 'getTotalPages', 'getZoom',
     'highlightRange', 'insertBreak', 'listContentControls', 'loadDocument', 'loadDocumentBuffer',
     'onContentChange', 'onSearchChange', 'onSelectionChange', 'openPrintPreview', 'print', 'proposeChange',
-    'proposeChanges', 'readParagraphs', 'replyToComment', 'resolveComment', 'save',
+    'proposeChanges', 'readParagraphs', 'replyToComment', 'resolveComment', 'resolveParagraphAnchors', 'save',
     'search', 'searchGoTo', 'searchNext', 'searchPrevious',
     'scrollToChangeId', 'scrollToCommentId', 'scrollToPage', 'scrollToParaId', 'scrollToPosition',
     'setParagraphStyle', 'setProposalStates', 'setZoom', 'validateEdits', 'whenLayoutComplete',
@@ -406,6 +456,116 @@ test.each([
   act(() => { check(api); });
   expect(opens).toEqual([true]);
   expect(replica.pending).toBe(false);
+});
+
+test.each([
+  ['getDocument', (api: DocxEditorRef) => expect(api.getDocument()).not.toBeNull()],
+  ['getEditorRef', (api: DocxEditorRef) => expect(api.getEditorRef()).not.toBeNull()],
+  ['scrollToParaId', (api: DocxEditorRef) => expect(api.scrollToParaId('00000001')).toBe(true)],
+  ['scrollToCommentId', (api: DocxEditorRef) => expect(api.scrollToCommentId(-1)).toBe(false)],
+  ['scrollToChangeId', (api: DocxEditorRef) => expect(api.scrollToChangeId(-1)).toBe(false)],
+  ['findInDocument', (api: DocxEditorRef) => expect(api.findInDocument('map')).toContainEqual({
+    paraId: '00000001', match: 'map', before: 'Page ', after: '',
+  })],
+  ['getPageContent', (api: DocxEditorRef) => expect(api.getPageContent(1)).toEqual({
+    pageNumber: 1,
+    text: '[00000001] Page map',
+    paragraphs: [{ paraId: '00000001', text: 'Page map', styleId: 'Heading1' }],
+  })],
+  ['addComment', (api: DocxEditorRef) => expect(api.addComment({
+    paraId: '00000001', search: 'map', text: 'Check', author: 'Ann',
+  })).toEqual(expect.any(Number))],
+  ['proposeChange', (api: DocxEditorRef) => expect(api.proposeChange({
+    paraId: '00000001', search: 'map', replaceWith: 'plan', author: 'Agent',
+  })).toBe(true)],
+  ['applyFormatting', (api: DocxEditorRef) => expect(api.applyFormatting({
+    paraId: '00000001', search: 'map', marks: { bold: true },
+  })).toBe(true)],
+  ['setParagraphStyle', (api: DocxEditorRef) => expect(api.setParagraphStyle({
+    paraId: '00000001', styleId: 'Normal',
+  })).toBe(true)],
+  ['insertBreak', (api: DocxEditorRef) => expect(api.insertBreak({
+    paraId: '00000001', type: 'page',
+  })).toBe(true)],
+] as const)('%s requests hand-over and throws while proposals are held in the worker', async (method, check) => {
+  const { api, opens, replica, release, pagedEditorRef, authority, transport } =
+    await pendingWorkerProposalReplica();
+  if (method === 'getPageContent') {
+    pagedEditorRef.current!.getLayout = () => ({
+      pages: [{ fragments: [{ kind: 'paragraph', pmStart: 0 }] }],
+    }) as unknown as ReturnType<PagedEditorRef['getLayout']>;
+    pagedEditorRef.current!.displayPositionToYrsLoc = () => ({
+      story: 'body', paraId: '00000001', offset: 0,
+    });
+  }
+  let error: unknown;
+  act(() => {
+    try { check(api); } catch (failure) { error = failure; }
+  });
+  expect(error).toBeInstanceOf(DocxReplicaNotReadyError);
+  expect((error as DocxReplicaNotReadyError).member).toBe(method);
+  expect((error as Error).message).toContain(method);
+  expect((error as Error).message).toContain('flushPendingInput()');
+  expect(opens).toEqual([]);
+  expect(replica.started).toBe(true);
+  expect(replica.pending).toBe(true);
+  expect(authority.holdsWorkerState()).toBe(true);
+  const ready = api.flushPendingInput();
+  await act(async () => { release(); await ready; });
+  expect(transport.handOver).toHaveBeenCalledTimes(1);
+  expect(opens).toEqual([false]);
+  expect(replica.pending).toBe(false);
+  expect(authority.holdsWorkerState()).toBe(false);
+  act(() => { check(api); });
+  expect(opens).toEqual([false]);
+});
+
+test('selection and point reads return null while proposals are held in the worker', async () => {
+  const { api, opens, replica, release, transport } = await pendingWorkerProposalReplica();
+  let requests = 0;
+  replica.onDemand!.request = () => { requests += 1; replica.start(); };
+  expect(api.getSelectionInfo()).toBeNull();
+  expect(requests).toBe(0);
+  expect(replica.started).toBe(false);
+  expect(api.getPositionAtPoint(0, 0)).toBeNull();
+  expect(requests).toBe(1);
+  expect(replica.started).toBe(true);
+  expect(replica.pending).toBe(true);
+  expect(opens).toEqual([]);
+  await act(async () => { release(); await replica.ready; });
+  expect(transport.handOver).toHaveBeenCalledTimes(1);
+  expect(opens).toEqual([false]);
+  expect(replica.pending).toBe(false);
+});
+
+test('focus stays direct while proposals are held in the worker', async () => {
+  const { api, opens, replica, release, pagedEditorRef, transport } = await pendingWorkerProposalReplica();
+  const focus = mock(() => {});
+  pagedEditorRef.current!.focus = focus;
+  act(() => { expect(() => api.focus()).not.toThrow(); });
+  expect(focus).toHaveBeenCalledTimes(1);
+  expect(opens).toEqual([]);
+  expect(replica.started).toBe(false);
+  await act(async () => { release(); });
+  expect(transport.handOver).not.toHaveBeenCalled();
+  expect(opens).toEqual([]);
+  expect(replica.pending).toBe(true);
+});
+
+test('getProposals stays worker-served while proposals are held in the worker', async () => {
+  const { api, events, worker, opens, replica, release, transport } = await pendingWorkerProposalReplica();
+  let read!: ReturnType<DocxEditorRef['getProposals']>;
+  expect(() => { read = api.getProposals(); }).not.toThrow();
+  expect(read).toBeInstanceOf(Promise);
+  expect(await read).toEqual({ version: worker.version(), previewVersion: 1, proposals: [] });
+  expect(events).toEqual([]);
+  expect(transport.proposal.mock.calls.map(([op]) => op.kind)).toEqual(['snapshot', 'propose']);
+  expect(opens).toEqual([]);
+  expect(replica.started).toBe(false);
+  await act(async () => { release(); });
+  expect(transport.handOver).not.toHaveBeenCalled();
+  expect(opens).toEqual([]);
+  expect(replica.pending).toBe(true);
 });
 
 test('independent APIs do not start a replica open', async () => {

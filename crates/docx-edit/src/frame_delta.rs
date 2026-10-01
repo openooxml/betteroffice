@@ -2071,6 +2071,90 @@ mod tests {
     }
 
     #[test]
+    fn releasing_a_repeated_header_page_preserves_identity_through_rebuilds_and_edits() {
+        let list = |released: bool, suffix: &str| -> DisplayList {
+            let pages: Vec<_> = (0..4).map(|index| {
+                if released && index == 0 {
+                    serde_json::json!({
+                        "pageIndex": index, "width": 816, "height": 1056,
+                        "primitives": [], "unbuilt": true, "positionSpan": [1, 9]
+                    })
+                } else {
+                    serde_json::json!({
+                        "pageIndex": index, "width": 816, "height": 1056,
+                        "primitives": [{
+                            "kind": "text", "text": format!("page {index}{}", if index == 3 { suffix } else { "" }),
+                            "x": 96, "baselineY": 120, "width": 40, "font": "16px serif",
+                            "color": "#000000", "blockId": 7, "paraId": "HEADER"
+                        }]
+                    })
+                }
+            }).collect();
+            serde_json::from_value(serde_json::json!({ "contractVersion": 1, "pages": pages }))
+                .unwrap()
+        };
+        let epochs = |frame_epoch| FrameEpochs {
+            doc_epoch: frame_epoch,
+            layout_epoch: frame_epoch,
+            frame_epoch,
+            base_frame_epoch: frame_epoch - 1,
+        };
+        let mut next_id = 0;
+        let (_, before) =
+            encode_frame_delta(&list(false, ""), &[], epochs(1), true, &mut next_id).unwrap();
+        let (release, mut snapshots) = encode_frame_delta_pages(
+            &list(true, ""),
+            &before,
+            epochs(2),
+            &mut next_id,
+            &|index| index == 0,
+        )
+        .unwrap();
+        assert_eq!(u32_at(&release, 52), 1);
+        assert_eq!(release[FRAME_HEADER_LEN], PAGE_OP_UPSERT);
+        assert_eq!(u64_at(&release, FRAME_HEADER_LEN + 8), before[0].page_id);
+        assert!(snapshots[0].primitive_ids.is_empty());
+        assert!(snapshots[0].positions.is_empty());
+        for (actual, old) in snapshots.iter().zip(&before) {
+            assert_eq!(actual.page_id, old.page_id);
+        }
+        for (epoch, released, suffix, rebuilt) in [
+            (3, true, " edited", 3),
+            (4, false, " edited", 0),
+            (5, false, " edited again", 3),
+        ] {
+            let current = list(released, suffix);
+            let (_, next) = if rebuilt == 0 {
+                encode_frame_delta_pages(
+                    &current,
+                    &snapshots,
+                    epochs(epoch),
+                    &mut next_id,
+                    &|index| index == 0,
+                )
+                .unwrap()
+            } else {
+                encode_frame_delta_incremental(
+                    &current,
+                    &snapshots,
+                    epochs(epoch),
+                    &mut next_id,
+                    &HashSet::from([rebuilt]),
+                )
+                .unwrap()
+            };
+            let (_, fresh) =
+                encode_frame_delta(&current, &[], epochs(epoch), true, &mut 0).unwrap();
+            for (actual, expected) in next.iter().zip(&fresh) {
+                assert_eq!(actual.page_id, expected.page_id);
+                assert_eq!(actual.fingerprint, expected.fingerprint);
+                assert_eq!(actual.primitive_ids, expected.primitive_ids);
+            }
+            snapshots = next;
+        }
+    }
+
+    #[test]
     fn an_unbuilt_page_whose_position_span_moves_is_sent_again() {
         let list = |span: [i64; 2]| -> DisplayList {
             serde_json::from_value(serde_json::json!({ "contractVersion": 1, "pages": [

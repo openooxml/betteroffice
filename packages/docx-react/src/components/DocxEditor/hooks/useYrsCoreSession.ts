@@ -16,12 +16,21 @@ import type {
 } from '@betteroffice/docx/yrs';
 import type { DocxEditorCollaborationOptions } from '../types';
 import type { OpenInWorker, WorkerOpenedDocument } from './useDisplayList';
+import { markLayoutQueued } from '../internals/layoutProvenance';
 import {
+  adoptWorkerOpenHandoverVersion,
+  adoptWorkerOpenMirrorVersion,
   deferWorkerOpenReplica,
   ensureWorkerOpenReplica,
   requestWorkerOpenReplica,
   workerOpenReplicaPending,
 } from '../internals/workerOpenReplica';
+import {
+  beginWorkerProposalHandover,
+  registerWorkerProposalAuthority,
+  registeredWorkerProposalAuthority,
+  workerProposalFailure,
+} from '../internals/workerProposalAuthority';
 
 type YrsFacadeModule = typeof import('@betteroffice/docx/yrs');
 
@@ -34,6 +43,7 @@ export interface YrsCoreSession {
   hydrateOnDemand: boolean;
   /** Starts loading the main-thread replica when needed. */
   requestReplica(): void;
+  workerProposalsReady: boolean;
   replicaReadyRef?: React.RefObject<boolean>;
   experimentalWorkerOpen?: boolean;
   storyBlocks(storyId: string, env: YrsRenderEnv): LayoutBlock[] | null;
@@ -87,10 +97,16 @@ interface YrsCoreSessionCallbacks {
 interface WorkerOpenOptions {
   openInWorker: OpenInWorker;
   renderedFrame: object | null;
+  workerProposals?: boolean;
+  refreshWorkerLayout?: () => void;
   /** The engine whose provisional layout is shown with the rest not yet asked of the worker. */
   pendingCompletion?: unknown;
   /** Leaves the replica unhydrated until a caller needs it; see requestReplica. */
   hydrateOnDemand?: boolean;
+  /** A worker-held proposal changed document content. */
+  onWorkerContentChange?: () => void;
+  /** The worker found tracked changes of its own in the opened document. */
+  onWorkerRevisions?: () => void;
 }
 
 export interface YrsCoreSessionOptions {
@@ -344,6 +360,9 @@ export function useYrsCoreSession(
   const [session, setSession] = useState<YrsSession | null>(null);
   const [sessionGeneration, setSessionGeneration] = useState<number | null>(null);
   const [replicaReady, setReplicaReady] = useState(true);
+  const [workerProposalsReady, setWorkerProposalsReady] = useState(false);
+  const workerOpenRef = useRef(workerOpen);
+  workerOpenRef.current = workerOpen;
   const replicaReadyRef = useRef(true);
   const openInWorker = workerOpen?.openInWorker;
   const workerOpenEnabledRef = useRef(Boolean(openInWorker));
@@ -352,6 +371,7 @@ export function useYrsCoreSession(
   const startReplicaRef = useRef<(() => void) | null>(null);
   // Asks the worker whether the document has tracked changes, once per session.
   const revisionQueryRef = useRef<(() => void) | null>(null);
+  const workerLaidOutRef = useRef<(() => void) | null>(null);
   // An on-demand replica loads once wanted and past the point main's automatic load waits for.
   const replicaGateRef = useRef<{ reached: boolean; wanted: boolean } | null>(null);
   const requestReplicaRef = useRef<(() => void) | null>(null);
@@ -412,6 +432,7 @@ export function useYrsCoreSession(
 
   useEffect(() => {
     setSession(null);
+    setWorkerProposalsReady(false);
     setPreviewing(false);
     setHandoffFrom(null);
     if (openInWorker) {
@@ -623,15 +644,22 @@ export function useYrsCoreSession(
             const pending = deferWorkerOpenReplica(
               next,
               async () => {
-                const update = await worker.encodeState();
+                const handover = beginWorkerProposalHandover(next);
+                const handedOver = handover ? await handover : null;
+                const update = handedOver ? handedOver.state : await worker.encodeState();
                 return () => {
                   next.openDocx(source, false);
                   next.loadState(update);
+                  handedOver?.complete();
                 };
               },
               () => {
+                if (registeredWorkerProposalAuthority(next)?.holdsWorkerState()) {
+                  throw new Error('The resident worker holds proposals the main thread cannot rebuild');
+                }
                 worker.fallback();
                 next.openDocx(source, true);
+                if (registeredWorkerProposalAuthority(next)) next.mirrorWorkerDocument(null);
               },
               () => {
                 if (stale()) return;
@@ -642,6 +670,33 @@ export function useYrsCoreSession(
               },
               { active: () => hydrateOnDemandRef.current, request }
             );
+            if (workerOpenRef.current?.workerProposals) {
+              let laidOut = new Promise<void>((resolve) => {
+                workerLaidOutRef.current = resolve;
+              });
+              const authority = registerWorkerProposalAuthority(next, worker, {
+                relayout: () => {
+                  if (!authority.initialized) {
+                    laidOut = new Promise<void>((resolve) => {
+                      workerLaidOutRef.current = resolve;
+                    });
+                  }
+                  markLayoutQueued(next, true);
+                  workerOpenRef.current?.refreshWorkerLayout?.();
+                },
+                current: () => !stale(),
+                laidOut: () => laidOut,
+                contentChanged: () => workerOpenRef.current?.onWorkerContentChange?.(),
+                adopted: (version) => {
+                  adoptWorkerOpenMirrorVersion(next, version);
+                  worker.mirrorReady();
+                },
+                handedOver: (version) => adoptWorkerOpenHandoverVersion(next, version),
+              });
+              authority.subscribe(() => {
+                if (!stale()) setWorkerProposalsReady(authority.initialized);
+              });
+            }
             pendingReplicaRef.current = pending;
             replicaGateRef.current = gate;
             requestReplicaRef.current = request;
@@ -652,7 +707,13 @@ export function useYrsCoreSession(
               // Tracked changes show cards that read the replica.
               void worker.revisionCount().then(
                 (count) => {
-                  if (!stale() && sessionRef.current === next && count > 0) request();
+                  if (stale() || sessionRef.current !== next || count === 0) return;
+                  // Cards for them open the sidebar, whose trigger loads the replica.
+                  if (workerOpenRef.current?.onWorkerRevisions) {
+                    workerOpenRef.current.onWorkerRevisions();
+                  } else {
+                    request();
+                  }
                 },
                 () => {
                   if (!stale() && sessionRef.current === next) request();
@@ -729,6 +790,8 @@ export function useYrsCoreSession(
       pendingReplicaRef.current = null;
       startReplicaRef.current = null;
       revisionQueryRef.current = null;
+      workerLaidOutRef.current?.();
+      workerLaidOutRef.current = null;
       replicaGateRef.current = null;
       requestReplicaRef.current = null;
       if (replicaWaitTimerRef.current !== null) clearTimeout(replicaWaitTimerRef.current);
@@ -774,6 +837,13 @@ export function useYrsCoreSession(
       !start
     ) return;
     if (previewing || (handoffFrom && options?.shownEngine !== session)) return;
+    workerLaidOutRef.current?.();
+    const authority = registeredWorkerProposalAuthority(session);
+    if (authority) {
+      void authority.initialize().catch((error) => {
+        console.error('[yrs] failed to initialize worker proposals', error);
+      });
+    }
     // The replica blocks this thread: it loads once the worker is laying out the rest.
     if (workerOpen?.pendingCompletion === session) return;
     armReplicaGate(REPLICA_FRAME_WAIT_MS);
@@ -833,6 +903,9 @@ export function useYrsCoreSession(
       if (retiringRef.current !== null && (failOpeningRef.current?.(error, session) ?? false)) {
         return true;
       }
+      const owner = session ?? sessionRef.current;
+      if (owner === sessionRef.current && owner &&
+        workerProposalFailure(owner as YrsSession) === error) return false;
       if (session === undefined || session === sessionRef.current) startReplicaRef.current?.();
       return false;
     },
@@ -980,6 +1053,7 @@ export function useYrsCoreSession(
     replicaReady: !openInWorker || replicaReady,
     hydrateOnDemand,
     requestReplica,
+    workerProposalsReady,
     replicaReadyRef: openInWorker ? replicaReadyRef : undefined,
     experimentalWorkerOpen: Boolean(openInWorker),
     previewing,

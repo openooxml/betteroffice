@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
@@ -9,6 +9,7 @@ import {
   computeProposalGeometryMirror,
   proposalSetIdentity,
   resolveNavigationTarget,
+  resolveMirroredNavigationTarget,
   type ProposalGeometryReader,
 } from './proposalGeometry';
 import { createResidentEngineSession } from './residentEngineSession';
@@ -121,6 +122,27 @@ function duplicated(reader: ProposalGeometryReader): ProposalGeometryReader {
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
 
 describe('proposal geometry readers', () => {
+  test('can omit navigation targets without reading or building the sidebar projection', async () => {
+    const main = await proposedDocument();
+    const count = spyOn(main, 'paragraphIdCount');
+    const stories = spyOn(main, 'storyIds');
+    try {
+      const snapshot = main.getProposals();
+      const mirror = computeProposalGeometryMirror(main, snapshot, false);
+      expect(mirror.navigationTargets).toBeUndefined();
+      expect(count).not.toHaveBeenCalled();
+      expect(stories).not.toHaveBeenCalled();
+      const complete = computeProposalGeometryMirror(main, snapshot);
+      expect({ ...complete, navigationTargets: undefined }).toEqual<typeof mirror>(mirror);
+      expect(count).toHaveBeenCalled();
+      expect(stories).toHaveBeenCalledTimes(1);
+    } finally {
+      count.mockRestore();
+      stories.mockRestore();
+      main.destroy();
+    }
+  });
+
   test('matches the main session on a resident replica, including hidden and missing targets', async () => {
     const main = await proposedDocument();
     const resident = await createResidentEngineSession();
@@ -133,6 +155,13 @@ describe('proposal geometry readers', () => {
       expect({ ...actual, version: expected.version }).toEqual(expected);
       expect(actual.previewVersion).toBe(snapshot.previewVersion);
       expect(actual.proposals).toBe(proposalSetIdentity(snapshot));
+      for (const { id, paragraph } of snapshot.proposals) {
+        const navigation = resolveNavigationTarget(main, paragraph.story, paragraph.paraId);
+        expect(actual.navigationTargets?.[id]).toEqual(navigation);
+        expect(resolveMirroredNavigationTarget(
+          { ...actual, version: snapshot.version }, snapshot, paragraph.story, paragraph.paraId
+        )).toEqual(navigation);
+      }
       expect(Object.keys(actual.targets)).toEqual(snapshot.proposals.map(({ id }) => id));
       expect(actual.hidden).toHaveLength(2);
       expect(actual.hidden.every(({ from, to }) => from < to)).toBe(true);
@@ -183,10 +212,34 @@ describe('proposal geometry readers', () => {
         ok: false,
         failure: { code: 'ambiguous-target', message: 'The paragraph cannot be resolved uniquely' },
       });
+      expect(duplicateActual.navigationTargets?.same).toBe('ambiguous-target');
       expect(resolveNavigationTarget(duplicatedMain, 'body', '00000007')).toBe('ambiguous-target');
       expect(resolveNavigationTarget(duplicatedResident, 'body', '00000007')).toBe('ambiguous-target');
     } finally {
       resident.destroy();
+      main.destroy();
+    }
+  });
+
+  test('uses mirrored navigation only for a matching document, preview and proposal set', async () => {
+    const main = await proposedDocument();
+    try {
+      const snapshot = main.getProposals();
+      const mirror = computeProposalGeometryMirror(main, snapshot);
+      const paragraph = snapshot.proposals.find(({ id }) => id === 'cell')!.paragraph;
+      const resolve = (geometry: typeof mirror | null, current = snapshot) =>
+        resolveMirroredNavigationTarget(geometry, current, paragraph.story, paragraph.paraId);
+      expect(resolve(mirror)).toEqual(resolveNavigationTarget(main, paragraph.story, paragraph.paraId));
+      expect(resolve(null)).toBeNull();
+      expect(resolve({ ...mirror, navigationTargets: undefined })).toBeNull();
+      expect(resolve({ ...mirror, navigationTargets: {} })).toBeNull();
+      expect(resolve({ ...mirror, version: 'older' })).toBeNull();
+      expect(resolve({ ...mirror, previewVersion: snapshot.previewVersion + 1 })).toBeNull();
+      expect(resolve({ ...mirror, proposals: 'other' })).toBeNull();
+      expect(resolve(mirror, { ...snapshot, version: 'newer' })).toBeNull();
+      expect(resolveMirroredNavigationTarget(mirror, snapshot, 'body', 'unknown')).toBeNull();
+      expect(resolveMirroredNavigationTarget(mirror, snapshot, 'other', paragraph.paraId)).toBeNull();
+    } finally {
       main.destroy();
     }
   });

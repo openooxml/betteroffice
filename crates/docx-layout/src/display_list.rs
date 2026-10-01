@@ -2665,6 +2665,9 @@ pub(crate) struct LineIn {
     right_offset: Option<f64>,
     #[serde(default)]
     float_skip_before: Option<f64>,
+    /// Extra first-line px after a marker overruns its hanging indent.
+    #[serde(default)]
+    marker_tab_offset: Option<f64>,
     #[serde(default)]
     run_advances: Vec<TypesetRunAdvanceIn>,
     #[serde(default)]
@@ -5632,7 +5635,11 @@ pub(crate) fn emit_paragraph_fragment(
                 origin_y,
                 frag.width,
                 frag.height,
-                indent_left,
+                if !is_rtl && indent_left > 0.0 {
+                    indent_left - hanging
+                } else {
+                    indent_left
+                },
                 indent_right,
             );
         }
@@ -5965,13 +5972,23 @@ fn emit_line(
     // The first line carries the hanging or first-line shift.
     let has_hanging = geom.hanging > 0.0;
     let has_first_line = geom.first_line > 0.0;
+    let overrun = if geom.is_first_line
+        && geom.has_list_marker
+        && geom.indent_left > 0.0
+        && has_hanging
+        && !geom.is_rtl
+    {
+        line.marker_tab_offset.unwrap_or(0.0)
+    } else {
+        0.0
+    };
     let mut pad_left = geom.indent_left;
     let mut text_indent = 0.0;
     if geom.is_first_line {
         if geom.indent_left > 0.0 && has_hanging {
             text_indent = if geom.has_list_marker {
                 // The marker consumes the hanging width before body text.
-                (geom.hanging - geom.indent_left).max(0.0)
+                (geom.hanging - geom.indent_left).max(0.0) + overrun
             } else {
                 -geom.hanging
             };
@@ -6095,7 +6112,11 @@ fn emit_line(
         });
         marker_format.font_size =
             attrs.and_then(|attrs| attrs.list_marker_font_size.or(attrs.default_font_size));
-        let slot_width = geom.hanging.max(font_px_of(&marker_format));
+        let slot_width = if overrun > 0.0 {
+            geom.hanging + overrun
+        } else {
+            geom.hanging.max(font_px_of(&marker_format))
+        };
         let marker_x = if geom.is_rtl {
             pen_x + effective_line_width
         } else {
@@ -10733,6 +10754,64 @@ pub fn build_resident_display_pages_with_fonts(
     Ok(wanted)
 }
 
+pub fn release_resident_display_pages(
+    pagination: &crate::types::Input,
+    layout: &crate::types::Layout,
+    resident: &mut ResidentDisplayInput,
+    list: &mut DisplayList,
+    pages: &[usize],
+) -> Result<Vec<usize>, String> {
+    if list.pages.len() != layout.pages.len()
+        || resident.input.layout.pages.len() != layout.pages.len()
+    {
+        return Err("resident display list does not match the layout".to_owned());
+    }
+    if pages.iter().any(|&index| index >= layout.pages.len()) {
+        return Err("resident display release page index is invalid".to_owned());
+    }
+    let mut wanted: Vec<usize> = pages
+        .iter()
+        .copied()
+        .filter(|&index| !list.pages[index].unbuilt)
+        .collect();
+    wanted.sort_unstable();
+    wanted.dedup();
+    let blocks = source_blocks_by_key(pagination);
+    let replacements = wanted
+        .iter()
+        .map(|&index| {
+            let page: PageIn =
+                convert_resident_value(&layout.pages[index], "resident display layout page")?;
+            let placeholder = unbuilt_page_with_span(
+                &page,
+                index,
+                layout_page_position_span(&layout.pages[index], &blocks)?,
+            );
+            Ok((index, page, placeholder))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    for (index, page, placeholder) in replacements {
+        resident.input.layout.pages[index] = page;
+        list.pages[index] = placeholder;
+    }
+    prune_resident_display_measured(resident, list);
+    Ok(wanted)
+}
+
+fn prune_resident_display_measured(resident: &mut ResidentDisplayInput, list: &DisplayList) {
+    let keys: HashSet<String> = list
+        .pages
+        .iter()
+        .zip(&resident.input.layout.pages)
+        .filter(|(page, _)| !page.unbuilt)
+        .flat_map(|(_, page)| page.fragments.iter().filter_map(fragment_block_key))
+        .collect();
+    resident
+        .input
+        .measured
+        .retain(|measured| measured_block_key(measured).is_some_and(|key| keys.contains(&key)));
+}
+
 /// The pagination's rendered measured blocks by key, first occurrence winning
 /// as in [`build_display_list_selected`].
 fn source_blocks_by_key(
@@ -11149,6 +11228,9 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_observed(
             resident.input.layout.pages.get(page_index),
             position_deltas,
         );
+    }
+    if built.len() < selected.len() {
+        prune_resident_display_measured(resident, previous);
     }
     Ok(true)
 }
@@ -11608,6 +11690,286 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
+    #[test]
+    fn releasing_resident_pages_prunes_exclusive_blocks_and_keeps_a_split_table() {
+        let mut pagination = table_split_fixture();
+        let crate::types::LayoutBlock::Table(table) = &mut pagination.measured[0].block else {
+            panic!("expected a table");
+        };
+        let mut position = 1.0;
+        for cell in table.rows.iter_mut().flat_map(|row| row.cells.iter_mut()) {
+            for block in &mut cell.blocks {
+                if let crate::types::LayoutBlock::Paragraph(paragraph) = block {
+                    paragraph.pm_start = Some(position);
+                    paragraph.pm_end = Some(position + 8.0);
+                    position += 10.0;
+                }
+            }
+        }
+        let mut layout = crate::compute_layout_input(&mut pagination).unwrap();
+        assert!(layout.pages.len() > 1);
+        let mut exclusive = pagination.measured[0].clone();
+        let crate::types::LayoutBlock::Table(table) = &mut exclusive.block else {
+            panic!("expected a table");
+        };
+        table.id = crate::types::BlockId::Str("exclusive".to_owned());
+        pagination.measured.push(exclusive);
+        let mut page = layout.pages[0].clone();
+        for fragment in &mut page.fragments {
+            if let crate::types::Fragment::Table(table) = fragment {
+                table.block_id = crate::types::BlockId::Str("exclusive".to_owned());
+            }
+        }
+        layout.pages.push(page);
+        let last = layout.pages.len() - 1;
+        let fonts = ooxml_text::FontStore::default();
+        let (mut resident, mut list) = build_resident_display_list_partial_with_fonts_observed(
+            &pagination,
+            &layout,
+            "{}",
+            &fonts,
+            &|_| true,
+            &mut || {},
+        )
+        .unwrap();
+        let full = list.clone();
+        let (_, placeholders) = build_resident_display_list_partial_with_fonts_observed(
+            &pagination,
+            &layout,
+            "{}",
+            &fonts,
+            &|_| false,
+            &mut || {},
+        )
+        .unwrap();
+        assert_eq!(resident.input.measured.len(), 2);
+        assert_eq!(
+            release_resident_display_pages(
+                &pagination,
+                &layout,
+                &mut resident,
+                &mut list,
+                &[last, 0, last],
+            )
+            .unwrap(),
+            [0, last]
+        );
+        assert_eq!(list.pages[0], placeholders.pages[0]);
+        assert_eq!(list.pages[last], placeholders.pages[last]);
+        assert!(list.pages[0].position_span.is_some());
+        assert_eq!(resident.input.measured.len(), 1);
+        assert_ne!(
+            measured_block_key(&resident.input.measured[0]).unwrap(),
+            "exclusive"
+        );
+        assert_eq!(list.pages[1], full.pages[1]);
+        assert!(
+            release_resident_display_pages(
+                &pagination,
+                &layout,
+                &mut resident,
+                &mut list,
+                &[0, last],
+            )
+            .unwrap()
+            .is_empty()
+        );
+        build_resident_display_pages_with_fonts(
+            &pagination,
+            &layout,
+            &fonts,
+            &mut resident,
+            &mut list,
+            &[0, last],
+        )
+        .unwrap();
+        assert_eq!(list, full);
+        let all: Vec<usize> = (0..layout.pages.len()).collect();
+        release_resident_display_pages(&pagination, &layout, &mut resident, &mut list, &all)
+            .unwrap();
+        assert!(resident.input.measured.is_empty());
+        assert_eq!(list, placeholders);
+        resident.input.measured = resident_build_input(&pagination, &layout, "{}")
+            .unwrap()
+            .measured;
+        release_resident_display_pages(&pagination, &layout, &mut resident, &mut list, &[])
+            .unwrap();
+        assert!(resident.input.measured.is_empty());
+    }
+
+    #[test]
+    fn released_table_spans_read_current_pagination_blocks() {
+        let mut pagination = table_split_fixture();
+        let layout = crate::compute_layout_input(&mut pagination).unwrap();
+        let fonts = ooxml_text::FontStore::default();
+        let (mut resident, mut list) = build_resident_display_list_partial_with_fonts_observed(
+            &pagination,
+            &layout,
+            "{}",
+            &fonts,
+            &|_| true,
+            &mut || {},
+        )
+        .unwrap();
+        let crate::types::LayoutBlock::Table(table) = &mut pagination.measured[0].block else {
+            panic!("expected a table");
+        };
+        let mut position = 100.0;
+        for cell in table.rows.iter_mut().flat_map(|row| row.cells.iter_mut()) {
+            for block in &mut cell.blocks {
+                if let crate::types::LayoutBlock::Paragraph(paragraph) = block {
+                    paragraph.pm_start = Some(position);
+                    paragraph.pm_end = Some(position + 8.0);
+                    position += 10.0;
+                }
+            }
+        }
+        let (_, expected) = build_resident_display_list_partial_with_fonts_observed(
+            &pagination,
+            &layout,
+            "{}",
+            &fonts,
+            &|_| false,
+            &mut || {},
+        )
+        .unwrap();
+        let last = layout.pages.len() - 1;
+        release_resident_display_pages(&pagination, &layout, &mut resident, &mut list, &[0, last])
+            .unwrap();
+        for index in [0, last] {
+            assert_eq!(list.pages[index], expected.pages[index]);
+            assert!(list.pages[index].position_span.unwrap()[0] >= 100);
+        }
+    }
+
+    #[test]
+    fn resident_page_release_prepares_every_replacement_before_mutation() {
+        let mut pagination = table_split_fixture();
+        let mut layout = crate::compute_layout_input(&mut pagination).unwrap();
+        let fonts = ooxml_text::FontStore::default();
+        let (mut resident, mut list) = build_resident_display_list_partial_with_fonts_observed(
+            &pagination,
+            &layout,
+            "{}",
+            &fonts,
+            &|_| true,
+            &mut || {},
+        )
+        .unwrap();
+        let before = list.clone();
+        let measured = resident
+            .input
+            .measured
+            .iter()
+            .filter_map(measured_block_key)
+            .collect::<Vec<_>>();
+        let last = layout.pages.len() - 1;
+        assert!(last > 0);
+        assert!(
+            release_resident_display_pages(
+                &pagination,
+                &layout,
+                &mut resident,
+                &mut list,
+                &[0, layout.pages.len()],
+            )
+            .is_err()
+        );
+        assert_eq!(list, before);
+        layout.pages[last].size.w = f64::NAN;
+        assert!(
+            release_resident_display_pages(
+                &pagination,
+                &layout,
+                &mut resident,
+                &mut list,
+                &[0, last],
+            )
+            .is_err()
+        );
+        assert_eq!(list, before);
+        assert_eq!(
+            resident
+                .input
+                .measured
+                .iter()
+                .filter_map(measured_block_key)
+                .collect::<Vec<_>>(),
+            measured
+        );
+        layout.pages.pop();
+        assert!(
+            release_resident_display_pages(&pagination, &layout, &mut resident, &mut list, &[0],)
+                .is_err()
+        );
+        assert_eq!(list, before);
+    }
+
+    #[test]
+    fn incremental_placeholders_prune_converted_measured_blocks() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/keep-lines-paragraph.input.json");
+        let mut pagination: crate::types::Input =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let layout = crate::compute_layout_input(&mut pagination).unwrap();
+        assert!(layout.pages.len() > 1);
+        let fonts = ooxml_text::FontStore::default();
+        let (mut resident, mut list) = build_resident_display_list_partial_with_fonts_observed(
+            &pagination,
+            &layout,
+            "{}",
+            &fonts,
+            &|_| true,
+            &mut || {},
+        )
+        .unwrap();
+        let before = resident.input.measured.len();
+        assert!(
+            update_resident_display_list_incremental_partial_with_fonts_observed(
+                &pagination,
+                &layout,
+                &fonts,
+                &mut resident,
+                &mut list,
+                0,
+                layout.pages.len(),
+                &[],
+                &HashMap::new(),
+                &|index| index == 0,
+                &mut || {},
+            )
+            .unwrap()
+        );
+        assert!(resident.input.measured.len() < before);
+        let (_, expected) = build_resident_display_list_partial_with_fonts_observed(
+            &pagination,
+            &layout,
+            "{}",
+            &fonts,
+            &|index| index == 0,
+            &mut || {},
+        )
+        .unwrap();
+        assert_eq!(list, expected);
+        let all: Vec<usize> = (0..layout.pages.len()).collect();
+        build_resident_display_pages_with_fonts(
+            &pagination,
+            &layout,
+            &fonts,
+            &mut resident,
+            &mut list,
+            &all,
+        )
+        .unwrap();
+        assert_eq!(
+            list,
+            build_display_list(
+                &resident_build_input(&pagination, &layout, "{}").unwrap(),
+                &fonts
+            )
+        );
+    }
+
     /// Builds page 0 alone, then the rest, as a list to compare with a full build.
     fn partial_then_rest(
         pagination: &crate::types::Input,
@@ -11974,6 +12336,95 @@ mod tests {
             .find(|primitive| primitive["listMarker"] == true)
             .unwrap();
         assert_eq!(marker["color"], "#FF0000");
+    }
+
+    /// Marker overrun extends its slot and shifts only the first line's text.
+    #[test]
+    fn list_marker_tab_overrun_extends_the_first_line_marker_slot() {
+        for (left, hanging, offset) in [(113.0, 113.0, 30.0), (16.0, 4.0, 8.0)] {
+            let input = json!({
+                "contractVersion": 1,
+                "measured": [{
+                    "block": {
+                        "kind": "paragraph",
+                        "id": "list-item",
+                        "runs": [{ "kind": "text", "text": "firstsecond" }],
+                        "attrs": {
+                            "listMarker": "1.2.3.4.5.6.7.8.9",
+                            "listMarkerFontFamily": "Aptos",
+                            "listMarkerFontSize": 12,
+                            "indent": { "left": left, "hanging": hanging }
+                        }
+                    },
+                    "measure": {
+                        "kind": "paragraph",
+                        "totalHeight": 40,
+                        "lines": [
+                            {
+                                "headRun": 0,
+                                "headChar": 0,
+                                "tailRun": 0,
+                                "tailChar": 5,
+                                "width": 28,
+                                "ascent": 14,
+                                "descent": 4,
+                                "lineHeight": 20,
+                                "markerTabOffset": offset
+                            },
+                            {
+                                "headRun": 0,
+                                "headChar": 5,
+                                "tailRun": 0,
+                                "tailChar": 11,
+                                "width": 36,
+                                "ascent": 14,
+                                "descent": 4,
+                                "lineHeight": 20
+                            }
+                        ]
+                    }
+                }],
+                "options": {},
+                "layout": {
+                    "pages": [{
+                        "number": 1,
+                        "size": { "w": 400, "h": 400 },
+                        "margins": { "top": 20, "right": 20, "bottom": 20, "left": 20 },
+                        "fragments": [{
+                            "kind": "paragraph",
+                            "blockId": "list-item",
+                            "x": 20,
+                            "y": 20,
+                            "width": 360,
+                            "height": 40,
+                            "fromLine": 0,
+                            "toLine": 2
+                        }]
+                    }]
+                }
+            });
+            let output: Value =
+                serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap())
+                    .unwrap();
+            let primitives = output["pages"][0]["primitives"].as_array().unwrap();
+            let markers: Vec<_> = primitives
+                .iter()
+                .filter(|primitive| primitive["listMarker"] == true)
+                .collect();
+            assert_eq!(markers.len(), 1);
+            assert_eq!(markers[0]["x"], 20.0 + left - hanging);
+            assert_eq!(markers[0]["width"], hanging + offset);
+            let first = primitives
+                .iter()
+                .find(|primitive| primitive["text"] == "first")
+                .unwrap();
+            let second = primitives
+                .iter()
+                .find(|primitive| primitive["text"] == "second")
+                .unwrap();
+            assert_eq!(first["x"], 20.0 + left + offset);
+            assert_eq!(second["x"], 20.0 + left);
+        }
     }
 
     #[test]

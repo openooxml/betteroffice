@@ -122,6 +122,35 @@ function setup() {
   return { worker, client };
 }
 
+test('release requests carry page identities and return a frame', async () => {
+  const { worker, client } = setup();
+  const pages = [{ index: 8, pageId: '9007199254740993' }];
+  const released = client.releasePages(pages, 42, true);
+  expect(worker.posted.at(-1)).toEqual({
+    id: worker.lastId(),
+    type: 'releasePages',
+    pages,
+    expectedFrameEpoch: 42,
+    paintCaret: true,
+  });
+  expect(client.frameRequestPending()).toBe(true);
+  worker.reply(frameReply(worker.lastId()));
+  expect(await released).toMatchObject({ frame: new Uint8Array(), selection: null });
+  expect(client.frameRequestPending()).toBe(false);
+});
+
+test('superseded release replies need no frame and leave the client usable', async () => {
+  const { worker, client } = setup();
+  const released = client.releasePages([{ index: 2, pageId: '3' }], 7);
+  expect(worker.posted.at(-1)).toMatchObject({ type: 'releasePages', paintCaret: false });
+  worker.reply({ id: worker.lastId(), ok: true, superseded: true });
+  expect(await released).toEqual({ superseded: true });
+  expect(client.frameRequestPending()).toBe(false);
+  const built = client.buildPages([2], 7);
+  worker.reply(frameReply(worker.lastId()));
+  expect(await built).toHaveProperty('frame');
+});
+
 test('frame and edit requests carry the current display window and retention flag', async () => {
   const { worker, client } = setup();
   client.setRetainBuiltPages(true);

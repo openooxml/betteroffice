@@ -30,6 +30,7 @@ import {
 } from '../components/DocxEditor/internals/layoutProvenance';
 import { displayWindowOf } from '../components/DocxEditor/internals/displayWindow';
 import { resolvePointPosition } from '../components/DocxEditor/internals/pointPosition';
+import { workerProposalAuthority } from '../components/DocxEditor/internals/workerProposalAuthority';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { SelectionState } from '../components/DocxEditor/types';
 import type { ReactSidebarItem } from '../plugin-api/types';
@@ -117,6 +118,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   const layoutRef = useRef<DocxPluginLayout | null>(null);
   const formattingRef = useRef<SelectionState | null>(null);
   const layoutListeners = useRef(new Set<() => void>());
+  const detachAuthority = useRef<(() => void) | null>(null);
 
   const [host] = useState<DocxPluginHost>(() =>
     createDocxPluginHost({
@@ -191,7 +193,22 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   useEffect(() => {
     if (!options.session) return;
     host.open(options.session);
-    return () => host.close('document-replaced');
+    const unsubscribe = workerProposalAuthority(options.session)?.subscribe(() => {
+      host.geometryChanged();
+      if (layoutRef.current) host.layoutPresented(layoutRef.current);
+    });
+    let attached = true;
+    const detach = () => {
+      if (!attached) return;
+      attached = false;
+      unsubscribe?.();
+      if (detachAuthority.current === detach) detachAuthority.current = null;
+    };
+    detachAuthority.current = detach;
+    return () => {
+      detach();
+      host.close('document-replaced');
+    };
   }, [host, options.session, options.loadGeneration]);
 
   useEffect(() => {
@@ -324,11 +341,13 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
       () => {
         const editor = latest.current.pagedEditorRef.current;
         const session = editor?.getYrsSession();
+        const proposalGeometry = session ? workerProposalAuthority(session)?.geometry() : null;
         return editor && session
           ? {
               session,
               editor,
               presented: isPresented(dom.context.pagesContainer, dom.queries.displayList),
+              ...(proposalGeometry ? { proposalGeometry } : {}),
             }
           : null;
       },
@@ -426,7 +445,10 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     [host, activations, place, options.queries, options.zoom, version, moved]
   );
 
-  const beginLoad = useCallback(() => host.close('document-replaced'), [host]);
+  const beginLoad = useCallback(() => {
+    detachAuthority.current?.();
+    host.close('document-replaced');
+  }, [host]);
 
   return {
     host,

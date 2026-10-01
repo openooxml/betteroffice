@@ -392,6 +392,7 @@ test('worker registry operations match a direct registry and hand their records 
   expect(client.remoteStateVector()).toEqual(main.encodeStateVector());
   expect(applied.geometry.version).toBe(applied.mirror.version);
   expect(applied.geometry.previewVersion).toBe(0);
+  expect(applied.geometry.navigationTargets).toBeUndefined();
 
   const compareTexts = async () => {
     const fresh = await createYrsSession({ clientId: 5200 + sessions.length });
@@ -433,6 +434,14 @@ test('worker registry operations match a direct registry and hand their records 
   expect(decided.geometry.previewVersion).toBe(1);
   expect(decided.updates).toEqual([]);
   expect(decided.changedStories).toEqual([]);
+  for (const { id, paragraph } of applied.result.snapshot.proposals) {
+    expect(decided.geometry.navigationTargets?.[id]).toEqual(
+      resolveNavigationTarget(main, paragraph.story, paragraph.paraId)
+    );
+    expect(await client.documentRead({
+      kind: 'navigationTarget', story: paragraph.story, paraId: paragraph.paraId,
+    })).toEqual({ version: decided.mirror.version, value: decided.geometry.navigationTargets![id]! });
+  }
   await compareTexts();
 
   const withdrawn = await client.proposal({
@@ -444,6 +453,7 @@ test('worker registry operations match a direct registry and hand their records 
     proposalResultWithoutVersion(directWithdrawal)
   );
   expect(withdrawn.changedStories).toEqual(['body']);
+  expect(withdrawn.geometry.navigationTargets).toBeUndefined();
   expect(withdrawn.updates.length).toBeGreaterThan(0);
   fresh = await compareTexts();
   expect(paragraphTexts(fresh, 'original')).toEqual(['First', 'Beta', 'Gamma']);
@@ -503,6 +513,10 @@ test('worker registry operations match a direct registry and hand their records 
     version: retried.mirror.version,
     value: resolveNavigationTarget(main, paragraph.story, paragraph.paraId),
   });
+  expect(await client.documentRead({
+    kind: 'navigationTarget', story: paragraph.story, paraId: paragraph.paraId,
+  })).toEqual(navigation);
+  expect(retried.geometry.navigationTargets?.p1).toEqual(navigation.value);
 
   const handoff = await client.handOver();
   expect(handoff.version).toBe(retried.mirror.version);

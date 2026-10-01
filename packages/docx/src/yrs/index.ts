@@ -947,6 +947,8 @@ export interface YrsSession extends CollaborationReplica {
   setDisplayRetainBuiltPages(retain: boolean): void;
   /** Build the listed unbuilt pages into a FrameDelta v1. @internal */
   buildDisplayPagesFrame(pages: readonly number[], expectedFrameEpoch: number): Uint8Array;
+  /** Release built pages; null means the request was superseded. @internal */
+  releaseDisplayPagesFrame(pages: number[], expectedFrameEpoch: number): Uint8Array | null;
   /** Make the next frame a full one, for a host taking over from another engine; no-op once destroyed. */
   resetFrameBase(): void;
   /** Caret geometry from the current resident display frame. */
@@ -1896,6 +1898,10 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     setDisplayRetainBuiltPages: (retain) => session.set_display_retain_built_pages(retain),
     buildDisplayPagesFrame: (pages, expectedFrameEpoch) =>
       session.build_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch),
+    releaseDisplayPagesFrame: (pages, expectedFrameEpoch) => {
+      const frame = session.release_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch);
+      return frame.length === 0 ? null : frame;
+    },
     residentCaretSnapshot: () =>
       JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
     applyInput: (text, expectedFrameEpoch) => {
