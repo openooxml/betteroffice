@@ -31,6 +31,7 @@ import type { DocxImageInsert, DocxSaveOutcome } from './useDocxCommands';
 
 const INSERT_IMAGE_MAX_WIDTH_PX = 612;
 const lastSaveSessions = new WeakSet<YrsSession>();
+const editorSaves = new WeakMap<YrsSession, ArrayBuffer>();
 
 function toFileIOError(error: unknown, fallbackMessage: string): Error {
   return error instanceof Error ? error : new Error(fallbackMessage);
@@ -110,7 +111,8 @@ async function writeEditorDocument(
     !source ||
     keys.metadata !== source.keys.metadata ||
     (comments.length === 0 && source.keys.comments !== '[]') ||
-    lastSaveSessions.has(session)
+    lastSaveSessions.has(session) ||
+    (original !== editorSaves.get(session) && !sameBytes(original, source.buffer))
   ) {
     lastSaveSessions.add(session);
     const { bytes } = await writeSessionSave(session, document, capture, original, {}, () => false);
@@ -132,7 +134,20 @@ async function writeEditorDocument(
     patches,
     true
   );
-  return bytes.buffer as ArrayBuffer;
+  const saved = bytes.buffer as ArrayBuffer;
+  editorSaves.set(session, saved);
+  return saved;
+}
+
+function sameBytes(a: ArrayBuffer, b: ArrayBuffer): boolean {
+  if (a === b) return true;
+  if (a.byteLength !== b.byteLength) return false;
+  const left = new Uint8Array(a);
+  const right = new Uint8Array(b);
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
 }
 
 /**

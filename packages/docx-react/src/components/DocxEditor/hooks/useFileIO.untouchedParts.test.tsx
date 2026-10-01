@@ -346,6 +346,18 @@ test('no-edit React save preserves an image hyperlink and its relationship byte-
   expectUnchanged(source, saved, ['word/document.xml']);
 });
 
+test('a package part the host replaced in originalBuffer is saved', async () => {
+  const source = fixture((p) => p(run('Linked image') + drawing()), { image: true });
+  const editor = await mount(source.bytes);
+  const replaced = new Uint8Array([...PNG, 0]);
+  const document = editor.ref.current!.getDocument()!;
+  const parts = unzipContainer(new Uint8Array(document.originalBuffer!));
+  parts['word/media/pixel.png'] = replaced;
+  document.originalBuffer = rezipPartsToArrayBuffer(new Map(Object.entries(parts)));
+  const saved = unzipContainer(new Uint8Array(await editor.save()));
+  expect(Array.from(saved['word/media/pixel.png'] ?? [])).toEqual(Array.from(replaced));
+});
+
 test('no-edit React save preserves empty paragraph section properties byte-for-byte', async () => {
   const source = fixture((p) => p(run('First section'), '<w:pPr><w:sectPr/></w:pPr>') + p(run('Second section')));
   const editor = await mount(source.bytes);
