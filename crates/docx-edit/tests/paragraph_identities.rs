@@ -1943,6 +1943,18 @@ fn key_of(doc: &EditingDoc, story: &str, text: &str) -> String {
         .para_id
 }
 
+/// The fixture with `bofx:block` unwrapped: a foreign element inside `w:body` keeps the part whole.
+fn plain_parts() -> Vec<(String, Vec<u8>)> {
+    let mut parts = fixture_parts();
+    replace(&mut parts, "word/document.xml", "<bofx:block>", "");
+    replace(&mut parts, "word/document.xml", "</bofx:block>", "");
+    parts
+}
+
+fn plain_fixture() -> Vec<u8> {
+    ooxml_opc::rezip_parts(&plain_parts()).unwrap()
+}
+
 fn spliced(doc: &EditingDoc, part: &str) -> Option<SplicedPart> {
     doc.paragraph_save_plan()
         .spliced_parts
@@ -1952,7 +1964,7 @@ fn spliced(doc: &EditingDoc, part: &str) -> Option<SplicedPart> {
 
 #[test]
 fn story_parts_that_keep_their_paragraphs_splice_with_only_the_edited_ones_changed() {
-    let doc = seeded(&fixture());
+    let doc = seeded(&plain_fixture());
     let body = spliced(&doc, "word/document.xml").expect("an unchanged body splices");
     assert!(body.changed.is_empty());
     let lower = key_of(&doc, "body", "Lower");
@@ -2027,8 +2039,24 @@ fn a_paragraph_split_after_a_table_splices_after_it() {
 }
 
 #[test]
+fn a_part_holding_more_than_plain_xml_does_not_splice() {
+    let paragraph = |text: &str| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+    let body = [paragraph("A"), paragraph("B")].concat();
+    assert!(spliced(&seeded(&paragraphs_package(&body)), "word/document.xml").is_some());
+    for lenient in [
+        paragraph("A & B"),
+        "<!-- a--b -->".to_owned(),
+        "<!-- note -->".to_owned(),
+        "<?pi x?>".to_owned(),
+    ] {
+        let doc = seeded(&paragraphs_package(&format!("{body}{lenient}")));
+        assert_eq!(spliced(&doc, "word/document.xml"), None, "{lenient}");
+    }
+}
+
+#[test]
 fn a_moved_comment_anchor_changes_only_its_paragraph() {
-    let doc = seeded(&fixture());
+    let doc = seeded(&plain_fixture());
     let valid = key_of(&doc, "body", "Valid");
     let body = spliced(&doc, "word/document.xml").unwrap();
     let ordinal = body
@@ -2050,7 +2078,7 @@ fn a_moved_comment_anchor_changes_only_its_paragraph() {
 
 #[test]
 fn a_spliced_save_rewrites_only_the_edited_paragraph() {
-    let bytes = fixture();
+    let bytes = plain_fixture();
     let doc = seeded(&bytes);
     let lower = key_of(&doc, "body", "Lower");
     let at = doc.paragraph_mark_position(&lower).unwrap();
@@ -2104,7 +2132,7 @@ fn a_spliced_save_rewrites_only_the_edited_paragraph() {
     }))
     .unwrap();
     let saved = ooxml_opc::unzip_parts(&write_docx_s13(request, &bytes).unwrap()).unwrap();
-    let source = text(&fixture_parts(), "word/document.xml");
+    let source = text(&plain_parts(), "word/document.xml");
     let document = text(&saved, "word/document.xml");
     let start = source.find("<w:p w14:paraId=\"0000abcd\">").unwrap();
     let end = start + source[start..].find("</w:p>").unwrap() + "</w:p>".len();
@@ -2112,6 +2140,6 @@ fn a_spliced_save_rewrites_only_the_edited_paragraph() {
     assert!(document.ends_with(&source[end..]), "{document}");
     assert!(document[start..].contains("Lower!"));
     for part in ["word/header1.xml", "word/footnotes.xml"] {
-        assert_eq!(text(&saved, part), text(&fixture_parts(), part), "{part}");
+        assert_eq!(text(&saved, part), text(&plain_parts(), part), "{part}");
     }
 }

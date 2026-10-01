@@ -344,6 +344,8 @@ struct SourcePart {
     uri: String,
     /// Lowercase hex SHA-256 of the part's XML.
     sha256: String,
+    /// Whether the parser reads the part's XML exactly as written, so its bytes can be kept.
+    as_written: bool,
     kind: SourceStoryKind,
     occurrences: Vec<ParagraphOccurrence>,
     /// Occurrence ordinal to the session keys seeded from it: one per root
@@ -418,6 +420,7 @@ impl SourceIndex {
                     use sha2::{Digest, Sha256};
                     format!("{:x}", Sha256::digest(input.xml.as_bytes()))
                 },
+                as_written: docx_parse::xml::reads_as_written(input.xml.as_bytes()),
                 kind: input.kind,
                 occurrences: docx_parse::paragraph_identity::paragraph_occurrences(&input.xml)
                     .unwrap_or_default(),
@@ -2408,7 +2411,10 @@ fn spliced_part(
     by_key: &HashMap<&str, &Pilcrow>,
 ) -> Option<SplicedPart> {
     let part = &source.parts[index];
-    if part.kind == SourceStoryKind::Comment || part.backed.values().any(|views| views.len() != 1) {
+    if !part.as_written
+        || part.kind == SourceStoryKind::Comment
+        || part.backed.values().any(|views| views.len() != 1)
+    {
         return None;
     }
     let before = part_stories(seeded, part);

@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
@@ -9,7 +9,9 @@ import {
   computeProposalGeometryMirror,
   proposalSetIdentity,
   resolveNavigationTarget,
+  resolveMirroredNavigationTarget,
   type ProposalGeometryReader,
+  type ProposalGeometryRevision,
 } from './proposalGeometry';
 import { createResidentEngineSession } from './residentEngineSession';
 
@@ -121,6 +123,115 @@ function duplicated(reader: ProposalGeometryReader): ProposalGeometryReader {
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
 
 describe('proposal geometry readers', () => {
+  test('can omit navigation targets without reading or building the sidebar projection', async () => {
+    const main = await proposedDocument();
+    const count = spyOn(main, 'paragraphIdCount');
+    const stories = spyOn(main, 'storyIds');
+    try {
+      const snapshot = main.getProposals();
+      const mirror = computeProposalGeometryMirror(main, snapshot, false);
+      expect(mirror.navigationTargets).toBeUndefined();
+      expect(count).not.toHaveBeenCalled();
+      expect(stories).not.toHaveBeenCalled();
+      const complete = computeProposalGeometryMirror(main, snapshot);
+      expect({ ...complete, navigationTargets: undefined }).toEqual<typeof mirror>(mirror);
+      expect(count).toHaveBeenCalled();
+      expect(stories).toHaveBeenCalledTimes(1);
+    } finally {
+      count.mockRestore();
+      stories.mockRestore();
+      main.destroy();
+    }
+  });
+
+  test('resident proposal geometry reads text revisions from segments and falls back for structural revisions', async () => {
+    const main = await createYrsSession({ clientId: 79104 });
+    const resident = await createResidentEngineSession();
+    try {
+      const { paraId } = main.createStory('body', 'same 😀same same');
+      main.formatRange({
+        story: 'body',
+        start: { paraId, offset: 1 },
+        end: { paraId, offset: 3 },
+      }, { bold: true });
+      const snapshot = snapshotOf(main.proposeChanges({
+        expectVersion: main.version(),
+        proposals: [{
+          id: 'all',
+          paragraph: { kind: 'session', sessionId: main.paragraphIdentities().sessionId, story: 'body', paraId },
+          suggest: SUGGEST,
+          op: 'replaceText', search: 'same', replaceWith: 'new', occurrence: 'all',
+        }],
+      }));
+      resident.loadState(main.encodeState());
+      const listed = spyOn(resident.geometryReader, 'listRevisions');
+      try {
+        const expected = computeProposalGeometryMirror(main, snapshot);
+        const actual = computeProposalGeometryMirror(resident.geometryReader, snapshot);
+        expect({ ...actual, version: expected.version }).toEqual(expected);
+        expect(listed).not.toHaveBeenCalled();
+        expect(actual.targets.all).toMatchObject({ ok: true, ranges: expect.any(Array) });
+        const ids = snapshot.proposals.flatMap(({ revisionIds }) => revisionIds);
+        const fields = ({ revisionId, kind, story, range }: ProposalGeometryRevision) =>
+          ({ revisionId, kind, story, range });
+        expect(resident.geometryReader.proposalRevisions!(ids).map(fields)).toEqual(
+          main.listRevisions().filter(({ revisionId }) => ids.includes(revisionId)).map(fields)
+        );
+        const at = { paraId, offset: 0 };
+        main.setParagraphAttrs(
+          { story: 'body', start: at, end: at },
+          { alignment: 'right' },
+          { name: SUGGEST.author, date: SUGGEST.date }
+        );
+        const structural = main.listRevisions().find(({ kind }) => kind === 'pPrChange')!;
+        expect(ids).toContain(structural.revisionId);
+        resident.loadState(main.encodeState());
+        const expectedStructural = computeProposalGeometryMirror(main, main.getProposals());
+        const actualStructural = computeProposalGeometryMirror(resident.geometryReader, main.getProposals());
+        expect({ ...actualStructural, version: expectedStructural.version }).toEqual(expectedStructural);
+        expect(listed).toHaveBeenCalledTimes(1);
+      } finally {
+        listed.mockRestore();
+      }
+    } finally {
+      resident.destroy();
+      main.destroy();
+    }
+  });
+
+  test('resident geometry reuses unchanged stories and refreshes edited or reloaded stories', async () => {
+    const main = await createYrsSession({ clientId: 79103 });
+    const resident = await createResidentEngineSession();
+    try {
+      main.openDocx(fixture(), true);
+      resident.loadState(main.encodeState());
+      const reader = resident.geometryReader;
+      const body = reader.storySegments('body');
+      const cell = reader.storySegments('body:t0:r0c0');
+      const spans = reader.paragraphSpans('body');
+      expect(spans).toEqual(main.paragraphSpans('body'));
+      expect(reader.storySegments('body')).toBe(body);
+      expect(reader.paragraphSpans('body')).toBe(spans);
+      const vector = resident.encodeStateVector();
+      snapshotOf(main.proposeChanges({
+        expectVersion: main.version(),
+        proposals: [replace('edit', '00000001', 'Keep', 'Revised')],
+      }));
+      resident.applyUpdate(main.encodeStateAsUpdate(vector));
+      expect(reader.storySegments('body')).not.toBe(body);
+      expect(reader.storySegments('body')).toEqual(main.storySegments('body'));
+      expect(reader.paragraphSpans('body')).toEqual(main.paragraphSpans('body'));
+      expect(reader.storySegments('body:t0:r0c0')).toBe(cell);
+      const updated = reader.storySegments('body');
+      resident.loadState(main.encodeState());
+      expect(reader.storySegments('body')).not.toBe(updated);
+      expect(reader.storySegments('body')).toEqual(main.storySegments('body'));
+    } finally {
+      resident.destroy();
+      main.destroy();
+    }
+  });
+
   test('matches the main session on a resident replica, including hidden and missing targets', async () => {
     const main = await proposedDocument();
     const resident = await createResidentEngineSession();
@@ -133,6 +244,13 @@ describe('proposal geometry readers', () => {
       expect({ ...actual, version: expected.version }).toEqual(expected);
       expect(actual.previewVersion).toBe(snapshot.previewVersion);
       expect(actual.proposals).toBe(proposalSetIdentity(snapshot));
+      for (const { id, paragraph } of snapshot.proposals) {
+        const navigation = resolveNavigationTarget(main, paragraph.story, paragraph.paraId);
+        expect(actual.navigationTargets?.[id]).toEqual(navigation);
+        expect(resolveMirroredNavigationTarget(
+          { ...actual, version: snapshot.version }, snapshot, paragraph.story, paragraph.paraId
+        )).toEqual(navigation);
+      }
       expect(Object.keys(actual.targets)).toEqual(snapshot.proposals.map(({ id }) => id));
       expect(actual.hidden).toHaveLength(2);
       expect(actual.hidden.every(({ from, to }) => from < to)).toBe(true);
@@ -183,10 +301,34 @@ describe('proposal geometry readers', () => {
         ok: false,
         failure: { code: 'ambiguous-target', message: 'The paragraph cannot be resolved uniquely' },
       });
+      expect(duplicateActual.navigationTargets?.same).toBe('ambiguous-target');
       expect(resolveNavigationTarget(duplicatedMain, 'body', '00000007')).toBe('ambiguous-target');
       expect(resolveNavigationTarget(duplicatedResident, 'body', '00000007')).toBe('ambiguous-target');
     } finally {
       resident.destroy();
+      main.destroy();
+    }
+  });
+
+  test('uses mirrored navigation only for a matching document, preview and proposal set', async () => {
+    const main = await proposedDocument();
+    try {
+      const snapshot = main.getProposals();
+      const mirror = computeProposalGeometryMirror(main, snapshot);
+      const paragraph = snapshot.proposals.find(({ id }) => id === 'cell')!.paragraph;
+      const resolve = (geometry: typeof mirror | null, current = snapshot) =>
+        resolveMirroredNavigationTarget(geometry, current, paragraph.story, paragraph.paraId);
+      expect(resolve(mirror)).toEqual(resolveNavigationTarget(main, paragraph.story, paragraph.paraId));
+      expect(resolve(null)).toBeNull();
+      expect(resolve({ ...mirror, navigationTargets: undefined })).toBeNull();
+      expect(resolve({ ...mirror, navigationTargets: {} })).toBeNull();
+      expect(resolve({ ...mirror, version: 'older' })).toBeNull();
+      expect(resolve({ ...mirror, previewVersion: snapshot.previewVersion + 1 })).toBeNull();
+      expect(resolve({ ...mirror, proposals: 'other' })).toBeNull();
+      expect(resolve(mirror, { ...snapshot, version: 'newer' })).toBeNull();
+      expect(resolveMirroredNavigationTarget(mirror, snapshot, 'body', 'unknown')).toBeNull();
+      expect(resolveMirroredNavigationTarget(mirror, snapshot, 'other', paragraph.paraId)).toBeNull();
+    } finally {
       main.destroy();
     }
   });

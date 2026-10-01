@@ -147,6 +147,8 @@ export interface YrsDocxHost {
    * preview's cover only its own first pages.
    */
   unusedScriptFonts?: string[];
+  /** A preview whose cut holds the whole body. */
+  wholeBody?: true;
   embeddedFonts: Map<string, ArrayBuffer>;
   fontTableRelationshipsXml?: string;
 }
@@ -947,6 +949,8 @@ export interface YrsSession extends CollaborationReplica {
   setDisplayRetainBuiltPages(retain: boolean): void;
   /** Build the listed unbuilt pages into a FrameDelta v1. @internal */
   buildDisplayPagesFrame(pages: readonly number[], expectedFrameEpoch: number): Uint8Array;
+  /** Release built pages; null means the request was superseded. @internal */
+  releaseDisplayPagesFrame(pages: number[], expectedFrameEpoch: number): Uint8Array | null;
   /** Make the next frame a full one, for a host taking over from another engine; no-op once destroyed. */
   resetFrameBase(): void;
   /** Caret geometry from the current resident display frame. */
@@ -1020,6 +1024,11 @@ export interface YrsSession extends CollaborationReplica {
   openDocxPreview(bytes: Uint8Array, blocks: number): YrsDocxHost | null;
   /** Opened by {@link openDocxPreview}: its document refuses every change. @internal */
   isDisplayOnly(): boolean;
+  /**
+   * Marks this empty session as showing a preview another engine opened: it refuses every
+   * change, and {@link openDocxPreview} can still load the preview here. @internal
+   */
+  markDisplayOnly(): void;
   /**
    * Marks whether the document is a preview's, as a replica of one is: its
    * layouts render NUMPAGES empty. @internal
@@ -1555,6 +1564,7 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
     document: result.document,
     referencedFonts: wire.referencedFonts,
     unusedScriptFonts,
+    ...(wire.wholeBody === true ? { wholeBody: true as const } : {}),
     embeddedFonts: result.embeddedFonts,
     ...(result.fontTableRelationshipsXml === undefined
       ? {}
@@ -1638,6 +1648,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   let partialDocument = false;
   const mutate = <T>(operation: () => T): T => {
     if (displayOnly) throw new Error('A document preview is display-only');
+    return mutateAlways(operation);
+  };
+  const mutateAlways = <T>(operation: () => T): T => {
     invalidateReadCaches();
     wasmCallDepth += 1;
     try {
@@ -1788,13 +1801,17 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     openDocxPreview: (bytes, blocks) => {
       markDirty('all');
       resetMedia();
-      const json = mutate(() => session.open_docx_preview(bytes, blocks));
+      const json = mutateAlways(() => session.open_docx_preview(bytes, blocks));
       if (json === undefined) return null;
       displayOnly = true;
       partialDocument = true;
       return withHostMedia(decodeDocxHost(json, bytes));
     },
     isDisplayOnly: () => displayOnly,
+    markDisplayOnly: () => {
+      displayOnly = true;
+      partialDocument = true;
+    },
     setPartialDocument: (partial) => {
       partialDocument = partial;
       session.set_partial_document(partial);
@@ -1896,6 +1913,10 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     setDisplayRetainBuiltPages: (retain) => session.set_display_retain_built_pages(retain),
     buildDisplayPagesFrame: (pages, expectedFrameEpoch) =>
       session.build_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch),
+    releaseDisplayPagesFrame: (pages, expectedFrameEpoch) => {
+      const frame = session.release_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch);
+      return frame.length === 0 ? null : frame;
+    },
     residentCaretSnapshot: () =>
       JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
     applyInput: (text, expectedFrameEpoch) => {

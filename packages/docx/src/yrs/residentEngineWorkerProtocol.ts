@@ -36,6 +36,7 @@ export interface ResidentProposalResponse {
   updates: ArrayBuffer[];
   stateVector: ArrayBuffer;
   geometry: ProposalGeometryMirror;
+  fontRequirements?: { layoutInput: string; requirementsJson: string };
 }
 
 /** @internal */
@@ -90,6 +91,11 @@ export type ResidentEngineWorkerRequest =
       generation?: string;
       /** The most the worker's editing core may allocate at once. */
       heapLimitBytes?: number;
+      /**
+       * Opens a display-only preview of the first `previewBlocks` body blocks instead. A later
+       * `open` of the whole document replaces it.
+       */
+      previewBlocks?: number;
     }
   | { id: number; type: 'fontRequirements'; layoutInput: string }
   | { id: number; type: 'encodeState' }
@@ -111,11 +117,20 @@ export type ResidentEngineWorkerRequest =
       layoutExtras?: string;
       displayWindow?: [number, number];
       retainBuiltPages?: boolean;
+      provisionalPages?: number;
     }
   | {
       id: number;
       type: 'buildPages';
       pages: number[];
+      expectedFrameEpoch: number;
+      paintCaret: boolean;
+      background?: boolean;
+    }
+  | {
+      id: number;
+      type: 'releasePages';
+      pages: Array<{ index: number; pageId: string }>;
       expectedFrameEpoch: number;
       paintCaret: boolean;
     }
@@ -191,6 +206,9 @@ export type ResidentEngineWorkerResponse = (
       id: number;
       ok: true;
       frame?: ArrayBuffer;
+      pageFrames?: ArrayBuffer[];
+      pageBuildSuperseded?: boolean;
+      superseded?: true;
       updates?: ArrayBuffer[];
       engineMs?: number;
       workerTotalMs?: number;
@@ -213,6 +231,8 @@ export type ResidentEngineWorkerResponse = (
       layoutProvisional?: boolean;
       /** An `open` reply: the opened package's host metadata JSON. */
       hostJson?: string;
+      /** An `open` reply: the package cannot open as a preview; nothing was opened. */
+      previewRefused?: boolean;
       /** A `fontRequirements` reply. */
       requirementsJson?: string;
       /** An `encodeState` reply: the document state as one yrs v1 update. */

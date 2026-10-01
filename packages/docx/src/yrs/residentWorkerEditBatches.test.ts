@@ -12,7 +12,12 @@ import { preloadEditWasm } from '../wasm/edit';
 import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
 import { createYrsSession, type DocxEditRequest, type YrsSession } from './index';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
-import type { DocxProposalInput, DocxProposalResult, DocxProposalSnapshot } from './proposals';
+import {
+  proposalRevisionPreview,
+  type DocxProposalInput,
+  type DocxProposalResult,
+  type DocxProposalSnapshot,
+} from './proposals';
 import { resolveNavigationTarget } from './proposalGeometry';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
@@ -304,7 +309,7 @@ test('the worker lays a host batch out exactly as the main thread does', async (
   expect(inWorker).toEqual(JSON.parse(main.layoutDocumentWithRegionsRetainedJson(LAYOUT)));
 });
 
-function proposalDocument(): Uint8Array {
+function proposalDocument(texts = ['Alpha', 'Beta', 'Gamma']): Uint8Array {
   const parts: PartsMap = new Map();
   parts.set('[Content_Types].xml', toBytes(
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
@@ -314,7 +319,7 @@ function proposalDocument(): Uint8Array {
   ));
   parts.set('word/document.xml', toBytes(
     '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>' +
-      ['Alpha', 'Beta', 'Gamma'].map((text, index) =>
+      texts.map((text, index) =>
         `<w:p w14:paraId="0000000${index + 1}"><w:r><w:t>${text}</w:t></w:r></w:p>`
       ).join('') + '<w:sectPr/></w:body></w:document>'
   ));
@@ -331,6 +336,82 @@ function paragraphTexts(session: YrsSession, view: 'accepted' | 'original'): str
   if (!read.ok) throw new Error(read.failure.message);
   return read.paragraphs.map(({ text }) => text);
 }
+
+test('ASCII worker proposals carry verified font requirements and Unicode proposals invalidate them', async () => {
+  const bytes = proposalDocument();
+  const source = await createYrsSession({ clientId: 5111 });
+  sessions.push(source);
+  source.openDocx(bytes, true);
+  source.registerFont(new Uint8Array(readFileSync(FONT)));
+  source.adoptResidentWorkerLayout!(LAYOUT);
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  await client.open(bytes);
+  const requirementsJson = await client.fontRequirements(LAYOUT);
+  await client.bootstrap({ ...source.residentWorkerSnapshot()!, workerAuthoritative: true }, '', {
+    opened: true, layoutExtras: '{}', provisionalPages: 1,
+  });
+  const initial = await client.proposal({ kind: 'snapshot' });
+  const propose = (id: string, paraId: string, search: string, replaceWith: string) =>
+    client.proposal({ kind: 'propose', request: { expectVersion: clientVersion, proposals: [{
+      id,
+      paragraph: { kind: 'persisted', story: { kind: 'body', partUri: '/word/document.xml' }, paraId },
+      suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+      op: 'replaceText', search, replaceWith,
+    }] } });
+  let clientVersion = initial.mirror.version;
+  const ascii = await propose('ascii', '00000001', 'Alpha', 'First');
+  expect(ascii.result?.ok).toBe(true);
+  expect(ascii.fontRequirements).toEqual({ layoutInput: LAYOUT, requirementsJson });
+  expect(await client.fontRequirements(LAYOUT)).toBe(requirementsJson);
+  clientVersion = ascii.mirror.version;
+  const unicode = await propose('unicode', '00000002', 'Beta', '漢字');
+  expect(unicode.result?.ok).toBe(true);
+  expect(unicode.fontRequirements).toBeUndefined();
+  expect(await client.fontRequirements(LAYOUT)).not.toBe(requirementsJson);
+  const decided = await client.proposal({ kind: 'setStates', request: {
+    expectVersion: unicode.mirror.version,
+    expectPreviewVersion: unicode.geometry.previewVersion,
+    changes: [{ id: 'unicode', state: 'rejected' }],
+  } });
+  if (!decided.result?.ok) throw new Error('expected a decision');
+  const previewed = JSON.stringify({
+    ...JSON.parse(LAYOUT),
+    renderEnv: { revisionPreview: proposalRevisionPreview(decided.result.snapshot) },
+  });
+  expect(decided.fontRequirements).toEqual({
+    layoutInput: previewed,
+    requirementsJson: await client.fontRequirements(previewed),
+  });
+});
+
+test.each(['', '漢字 Alpha'])('worker font preflight is preserved for an ASCII insertion into %j', async (text) => {
+  const bytes = proposalDocument([text, 'Beta', 'Gamma']);
+  const source = await createYrsSession({ clientId: 5112 });
+  sessions.push(source);
+  source.openDocx(bytes, true);
+  source.registerFont(new Uint8Array(readFileSync(FONT)));
+  source.adoptResidentWorkerLayout!(LAYOUT);
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  await client.open(bytes);
+  await client.fontRequirements(LAYOUT);
+  await client.bootstrap({ ...source.residentWorkerSnapshot()!, workerAuthoritative: true }, '', {
+    opened: true, layoutExtras: '{}', provisionalPages: 1,
+  });
+  const initial = await client.proposal({ kind: 'snapshot' });
+  const inserted = await client.proposal({ kind: 'propose', request: {
+    expectVersion: initial.mirror.version,
+    proposals: [{
+      id: 'insert',
+      paragraph: { kind: 'persisted', story: { kind: 'body', partUri: '/word/document.xml' }, paraId: '00000001' },
+      suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+      op: 'insertText', at: 'end', text: ' Added',
+    }],
+  } });
+  expect(inserted.result?.ok).toBe(true);
+  expect(inserted.fontRequirements).toBeUndefined();
+});
 
 test('a worker that has not laid out its document refuses registry operations', async () => {
   const client = new ResidentEngineWorkerClient(startWorker());
@@ -392,6 +473,7 @@ test('worker registry operations match a direct registry and hand their records 
   expect(client.remoteStateVector()).toEqual(main.encodeStateVector());
   expect(applied.geometry.version).toBe(applied.mirror.version);
   expect(applied.geometry.previewVersion).toBe(0);
+  expect(applied.geometry.navigationTargets).toBeUndefined();
 
   const compareTexts = async () => {
     const fresh = await createYrsSession({ clientId: 5200 + sessions.length });
@@ -433,6 +515,14 @@ test('worker registry operations match a direct registry and hand their records 
   expect(decided.geometry.previewVersion).toBe(1);
   expect(decided.updates).toEqual([]);
   expect(decided.changedStories).toEqual([]);
+  for (const { id, paragraph } of applied.result.snapshot.proposals) {
+    expect(decided.geometry.navigationTargets?.[id]).toEqual(
+      resolveNavigationTarget(main, paragraph.story, paragraph.paraId)
+    );
+    expect(await client.documentRead({
+      kind: 'navigationTarget', story: paragraph.story, paraId: paragraph.paraId,
+    })).toEqual({ version: decided.mirror.version, value: decided.geometry.navigationTargets![id]! });
+  }
   await compareTexts();
 
   const withdrawn = await client.proposal({
@@ -444,6 +534,7 @@ test('worker registry operations match a direct registry and hand their records 
     proposalResultWithoutVersion(directWithdrawal)
   );
   expect(withdrawn.changedStories).toEqual(['body']);
+  expect(withdrawn.geometry.navigationTargets).toBeUndefined();
   expect(withdrawn.updates.length).toBeGreaterThan(0);
   fresh = await compareTexts();
   expect(paragraphTexts(fresh, 'original')).toEqual(['First', 'Beta', 'Gamma']);
@@ -503,6 +594,10 @@ test('worker registry operations match a direct registry and hand their records 
     version: retried.mirror.version,
     value: resolveNavigationTarget(main, paragraph.story, paragraph.paraId),
   });
+  expect(await client.documentRead({
+    kind: 'navigationTarget', story: paragraph.story, paraId: paragraph.paraId,
+  })).toEqual(navigation);
+  expect(retried.geometry.navigationTargets?.p1).toEqual(navigation.value);
 
   const handoff = await client.handOver();
   expect(handoff.version).toBe(retried.mirror.version);

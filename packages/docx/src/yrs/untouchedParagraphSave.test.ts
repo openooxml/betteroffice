@@ -92,7 +92,7 @@ describe('a session save after an edit', () => {
       '<w:p w14:paraId="00000001" w:rsidR="00AA0001" w:rsidRDefault="00AA0001"><w:r w:rsidRPr="00AA0002"><w:t>Finding QA</w:t></w:r></w:p>',
       '<w:p w14:paraId="00000002"><w:pPr><w:spacing w:after="0"/></w:pPr><w:r><w:t>Explicit override</w:t></w:r></w:p>',
       '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="50" w:type="pct"/></w:tcPr><w:p w14:paraId="00000003"><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>',
-      '<w:p w14:paraId="00000005"><w:bookmarkStart w:id="0" w:name="mark"/><w:r><w:t>Marked</w:t></w:r><w:bookmarkEnd w:id="0"/><w:ins w:id="9" w:author="A" w:date="2026-01-01T00:00:00Z"><w:r><w:t> inserted</w:t></w:r></w:ins></w:p>',
+      '<w:p w14:paraId="00000005"><w:bookmarkStart w:id="0" w:name="mark"/><w:r><w:t>Marked</w:t></w:r><w:bookmarkEnd w:id="0"/><w:ins w:id="9" w:author="A" w:date="2026-01-01T00:00:00Z"><w:r><w:t xml:space="preserve"> inserted</w:t></w:r></w:ins></w:p>',
       edited,
       '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>',
     ].join('');
@@ -194,8 +194,8 @@ describe('a session save after an edit', () => {
     ]);
   });
 
-  it.todo(
-    'keeps inherited paragraph properties inherited in the edited paragraph (#1067, deferred-after-0.4.1: touched paragraphs)',
+  it(
+    'keeps inherited paragraph properties inherited in the edited paragraph (#1067)',
     async () => {
       const session = await open(inheritedSpacing());
       insertAtStart(session, 'Conclusion QA', 'Edited ');
@@ -205,8 +205,8 @@ describe('a session save after an edit', () => {
       ]);
     }
   );
-  it.todo(
-    'keeps inherited paragraph properties inherited through yrsToDocument and repackDocx (#1067, deferred-after-0.4.1: full repack)',
+  it(
+    'keeps inherited paragraph properties inherited through yrsToDocument and repackDocx (#1067)',
     async () => {
       const session = await open(inheritedSpacing());
       const xml = part(

@@ -1,15 +1,25 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, expect, test } from 'bun:test';
+import { afterAll, afterEach, expect, spyOn, test } from 'bun:test';
 import type { LayoutComputation } from '@betteroffice/docx/editor';
 import { LayoutSelectionGate, type ResidentMeasurementConfig } from '@betteroffice/docx/layout';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
-import type { YrsRenderEnv, YrsSession } from '@betteroffice/docx/yrs';
+import { proposalSetIdentity, type ResidentProposalReply, type YrsRenderEnv, type YrsSession } from '@betteroffice/docx/yrs';
 import { isLayoutQueued, isSupersededLayout, sourceVersionOf } from '../internals/layoutProvenance';
+import { deferWorkerOpenReplica } from '../internals/workerOpenReplica';
+import { registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
+import type { FontRequirementsInWorker, WorkerLayoutComputation } from './useDisplayList';
+import { SupersededPreviewError } from '../internals/supersededPreview';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, renderHook } = await import('@testing-library/react');
+const { act, cleanup, renderHook } = await import('@testing-library/react');
 const { useLayoutPipeline } = await import('./useLayoutPipeline');
+const restoreFrames: Array<() => void> = [];
+
+afterEach(() => {
+  cleanup();
+  for (const restore of restoreFrames.splice(0)) restore();
+});
 
 afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
@@ -18,7 +28,8 @@ afterAll(async () => {
 interface WorkerPass {
   /** The document version the pass was asked for. */
   at: number;
-  answer(): void;
+  request: string;
+  answer(computation?: WorkerLayoutComputation): void;
   fail(): void;
 }
 
@@ -55,8 +66,27 @@ function fakeDocument() {
 }
 
 /** A document whose version each test moves on; worker passes answer when the test says. */
-async function opened() {
+async function opened({
+  experimentalWorkerOpen = false,
+  pendingReplica = false,
+  fontRequirementsInWorker = undefined as FontRequirementsInWorker | undefined,
+} = {}) {
+  let nextFrame = 0;
+  const frames = new Map<number, FrameRequestCallback>();
+  const requestFrame = spyOn(globalThis, 'requestAnimationFrame').mockImplementation((callback) => {
+    const id = ++nextFrame;
+    frames.set(id, callback);
+    return id;
+  });
+  const cancelFrame = spyOn(globalThis, 'cancelAnimationFrame').mockImplementation((id) => {
+    frames.delete(id);
+  });
+  restoreFrames.push(() => { requestFrame.mockRestore(); cancelFrame.mockRestore(); });
   const { doc, session } = fakeDocument();
+  const replica = pendingReplica
+    ? deferWorkerOpenReplica(session, () => new Promise(() => {}), () => {}, () => {})
+    : null;
+  const ensureReplica = replica ? spyOn(replica, 'ensure') : null;
   const worker: WorkerPass[] = [];
   const errors: Error[] = [];
   const syncCoordinator = new LayoutSelectionGate();
@@ -64,6 +94,7 @@ async function opened() {
     useLayoutPipeline({
       document: null,
       session,
+      experimentalWorkerOpen,
       renderEnv: renderEnv ?? ({} as YrsRenderEnv),
       pageGap: 24,
       zoom: 1,
@@ -74,13 +105,17 @@ async function opened() {
       syncCoordinator,
       getScrollContainer: () => null,
       onError: (error) => errors.push(error),
-      layoutInWorker: (asked) =>
+      fontRequirementsInWorker,
+      layoutInWorker: (asked, request) =>
         doc.workerAvailable
-          ? new Promise<LayoutComputation | null>((resolve) => {
+          ? new Promise<WorkerLayoutComputation | null>((resolve) => {
               worker.push({
                 at: Number(asked.version()),
-                answer: () =>
-                  resolve({ layout: { pages: [] } as unknown as Layout, notesConverged: true }),
+                request,
+                answer: (computation) =>
+                  resolve(computation ?? {
+                    layout: { pages: [] } as unknown as Layout, notesConverged: true,
+                  }),
                 fail: () => resolve(null),
               });
             })
@@ -90,19 +125,144 @@ async function opened() {
   );
   const frame = () =>
     act(async () => {
-      await new Promise((done) => setTimeout(done, 40));
+      const pending = [...frames];
+      for (const [id, callback] of pending) {
+        if (!frames.delete(id)) continue;
+        callback(performance.now());
+      }
     });
-  const answer = (index: number) =>
+  const answer = (index: number, computation?: WorkerLayoutComputation) =>
     act(async () => {
-      worker[index]!.answer();
-      await new Promise((done) => setTimeout(done, 0));
+      worker[index]!.answer(computation);
     });
   const shown = () => sourceVersionOf(hook.result.current.layout);
   act(() => hook.result.current.runLayoutPipeline());
   await answer(0);
   expect(shown()).toBe('1');
-  return { doc, session, worker, errors, hook, frame, answer, shown };
+  return {
+    doc, session, worker, errors, hook, frame, answer, shown, replica, ensureReplica,
+  };
 }
+
+async function holdProposals(session: YrsSession) {
+  const snapshot = { version: session.version(), previewVersion: 0, proposals: [] };
+  Object.assign(session, {
+    getProposals: () => snapshot,
+    mirrorWorkerDocument: () => {},
+  });
+  const reply: ResidentProposalReply = {
+    mirror: { version: snapshot.version, proposals: { previewVersion: 0, entries: [] } },
+    result: { ok: true, snapshot },
+    changedStories: [],
+    geometry: {
+      version: snapshot.version, previewVersion: 0,
+      proposals: proposalSetIdentity(snapshot), targets: {}, hidden: [],
+    },
+    updates: [],
+    stateVector: new Uint8Array(),
+  };
+  const authority = registerWorkerProposalAuthority(session, {
+    proposal: async () => reply,
+    documentRead: async () => { throw new Error('unexpected document read'); },
+    handOver: async () => { throw new Error('unexpected handover'); },
+  }, {
+    relayout: () => {}, current: () => true, laidOut: async () => {},
+    adopted: () => {}, handedOver: () => {}, contentChanged: () => {},
+  });
+  await authority.initialize();
+  await authority.setStates({
+    expectVersion: snapshot.version, expectPreviewVersion: 0, changes: [],
+  }, async () => {
+    throw new Error('unexpected main-thread toggle');
+  });
+  expect(authority.holdsWorkerState()).toBe(true);
+}
+
+test.each([false, true])('cached page totals are requested only with worker-open=%s', async (experimentalWorkerOpen) => {
+  const h = await opened({ experimentalWorkerOpen });
+  const request = JSON.parse(h.worker[0]!.request);
+  const retainedRequest = JSON.parse(h.hook.result.current.getLayoutRequest()!);
+  if (experimentalWorkerOpen) {
+    expect(request.cachedPageTotals).toBe(true);
+    expect(retainedRequest.cachedPageTotals).toBe(true);
+  } else {
+    expect(request).not.toHaveProperty('cachedPageTotals');
+    expect(retainedRequest).not.toHaveProperty('cachedPageTotals');
+  }
+});
+
+test('a superseded null completion requests the worker while it holds proposals', async () => {
+  const h = await opened({ experimentalWorkerOpen: true, pendingReplica: true });
+  await holdProposals(h.session);
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  let finish!: (computation: LayoutComputation | null) => void;
+  const complete = new Promise<LayoutComputation | null>((resolve) => { finish = resolve; });
+  const firstPages = { pages: [] } as unknown as Layout;
+  await h.answer(1, { layout: firstPages, notesConverged: true, complete });
+  await act(async () => finish(null));
+  expect(h.hook.result.current.layout).toBe(firstPages);
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(h.ensureReplica).not.toHaveBeenCalled();
+  expect(isLayoutQueued(h.session)).toBe(true);
+  await h.frame();
+  expect(h.worker).toHaveLength(3);
+  await h.answer(2);
+  expect(isLayoutQueued(h.session)).toBe(false);
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(h.ensureReplica).not.toHaveBeenCalled();
+  expect(h.errors).toEqual([]);
+});
+
+test.each([false, true])('a null completion without held proposals keeps the host path with worker-open=%s', async (experimentalWorkerOpen) => {
+  const h = await opened({ experimentalWorkerOpen, pendingReplica: true });
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  let finish!: (computation: LayoutComputation | null) => void;
+  const complete = new Promise<LayoutComputation | null>((resolve) => { finish = resolve; });
+  const firstPages = { pages: [] } as unknown as Layout;
+  await h.answer(1, { layout: firstPages, notesConverged: true, complete });
+  await act(async () => finish(null));
+  expect(h.hook.result.current.layout).not.toBe(firstPages);
+  expect(h.doc.laidOutHere).toEqual([1]);
+  expect(h.ensureReplica).toHaveBeenCalledTimes(experimentalWorkerOpen ? 1 : 0);
+  expect(isLayoutQueued(h.session)).toBe(false);
+  await h.frame();
+  expect(h.worker).toHaveLength(2);
+  expect(h.errors).toEqual([]);
+});
+
+test('worker proposals override deferred host passes, local changes and unavailable passes', async () => {
+  const h = await opened({ experimentalWorkerOpen: true, pendingReplica: true });
+  await holdProposals(h.session);
+  h.doc.fontsReady = false;
+  act(() => h.hook.result.current.runLayoutPipeline({ onHost: true }));
+  h.doc.version = 2;
+  h.doc.fontsReady = true;
+  h.doc.workerAvailable = false;
+  act(() => {
+    h.hook.result.current.scheduleLayout('remote');
+    h.hook.result.current.scheduleLayout('local');
+  });
+  await h.frame();
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(h.ensureReplica).not.toHaveBeenCalled();
+  expect(isLayoutQueued(h.session)).toBe(true);
+  h.doc.workerAvailable = true;
+  await h.frame();
+  expect(h.worker.map((pass) => pass.at)).toEqual([1, 2]);
+  act(() => h.hook.result.current.runLayoutPipeline({ onHost: true }));
+  expect(h.worker).toHaveLength(2);
+  await h.answer(1);
+  await h.frame();
+  expect(h.worker.map((pass) => pass.at)).toEqual([1, 2, 2]);
+  await h.answer(2);
+  expect(h.shown()).toBe('2');
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(h.ensureReplica).not.toHaveBeenCalled();
+  expect(h.replica?.pending).toBe(true);
+  expect(h.errors).toEqual([]);
+});
 
 test('host batches and remote updates lay out in the worker, local edits here', async () => {
   const { doc, worker, errors, hook, frame, answer, shown } = await opened();
@@ -223,6 +383,115 @@ test('updates that land while the worker lays out queue one pass for the latest 
   expect(errors).toEqual([]);
 });
 
+test('a stale worker reply queues one more worker pass while the replica is pending', async () => {
+  const h = await opened({ experimentalWorkerOpen: true, pendingReplica: true });
+  h.doc.version = 2;
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  expect(isLayoutQueued(h.session)).toBe(false);
+  h.doc.version = 3;
+
+  await h.answer(1);
+  expect(h.shown()).toBe('2');
+  expect(isSupersededLayout(h.hook.result.current.layout)).toBe(true);
+  expect(isLayoutQueued(h.session)).toBe(true);
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(h.ensureReplica).not.toHaveBeenCalled();
+  expect(h.replica?.pending).toBe(true);
+  expect(h.replica?.started).toBe(false);
+
+  await h.frame();
+  expect(h.worker.map((pass) => pass.at)).toEqual([1, 2, 3]);
+  expect(isLayoutQueued(h.session)).toBe(false);
+  await h.answer(2);
+  expect(h.shown()).toBe('3');
+  expect(isSupersededLayout(h.hook.result.current.layout)).toBe(false);
+  await h.frame();
+  expect(h.worker).toHaveLength(3);
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(h.ensureReplica).not.toHaveBeenCalled();
+  expect(h.replica?.pending).toBe(true);
+  expect(h.replica?.started).toBe(false);
+  expect(h.errors).toEqual([]);
+  h.hook.unmount();
+});
+
+test('a stale worker reply lays out here without a pending replica', async () => {
+  const { doc, session, worker, errors, hook, frame, answer, shown } = await opened({
+    experimentalWorkerOpen: true,
+  });
+  doc.version = 2;
+  act(() => hook.result.current.scheduleLayout('remote'));
+  await frame();
+  doc.version = 3;
+
+  await answer(1);
+  expect(shown()).toBe('3');
+  expect(isSupersededLayout(hook.result.current.layout)).toBe(false);
+  expect(isLayoutQueued(session)).toBe(false);
+  await frame();
+  expect(worker.map((pass) => pass.at)).toEqual([1, 2]);
+  expect(doc.laidOutHere).toEqual([3]);
+  expect(errors).toEqual([]);
+  hook.unmount();
+});
+
+for (const pendingReplica of [true, false]) {
+  const name = pendingReplica
+    ? 'a stale full worker layout queues another pass while the replica is pending'
+    : 'a stale full worker layout lays out here without a pending replica';
+  test(name, async () => {
+    const h = await opened({ experimentalWorkerOpen: true, pendingReplica });
+    h.doc.version = 2;
+    act(() => h.hook.result.current.scheduleLayout('remote'));
+    await h.frame();
+    let finish!: (computation: LayoutComputation | null) => void;
+    const complete = new Promise<LayoutComputation | null>((resolve) => { finish = resolve; });
+    const firstPages = { pages: [] } as unknown as Layout;
+    await h.answer(1, { layout: firstPages, notesConverged: true, complete });
+    expect(h.shown()).toBe('2');
+    expect(h.hook.result.current.layout).toBe(firstPages);
+    expect(isLayoutQueued(h.session)).toBe(false);
+    h.doc.version = 3;
+    const full = { pages: [] } as unknown as Layout;
+    await act(async () => {
+      finish({ layout: full, notesConverged: true });
+    });
+
+    if (pendingReplica) {
+      expect(h.hook.result.current.layout).toBe(firstPages);
+      expect(h.shown()).toBe('2');
+      expect(isLayoutQueued(h.session)).toBe(true);
+      expect(h.doc.laidOutHere).toEqual([]);
+      expect(h.ensureReplica).not.toHaveBeenCalled();
+      expect(h.replica?.pending).toBe(true);
+      expect(h.replica?.started).toBe(false);
+      await h.frame();
+      expect(h.worker.map((pass) => pass.at)).toEqual([1, 2, 3]);
+      expect(isLayoutQueued(h.session)).toBe(false);
+      await h.answer(2);
+      expect(h.shown()).toBe('3');
+      expect(isSupersededLayout(h.hook.result.current.layout)).toBe(false);
+      await h.frame();
+      expect(h.worker).toHaveLength(3);
+      expect(h.doc.laidOutHere).toEqual([]);
+      expect(h.ensureReplica).not.toHaveBeenCalled();
+      expect(h.replica?.pending).toBe(true);
+      expect(h.replica?.started).toBe(false);
+    } else {
+      expect(h.hook.result.current.layout).not.toBe(full);
+      expect(h.shown()).toBe('3');
+      expect(isSupersededLayout(h.hook.result.current.layout)).toBe(false);
+      expect(isLayoutQueued(h.session)).toBe(false);
+      await h.frame();
+      expect(h.worker.map((pass) => pass.at)).toEqual([1, 2]);
+      expect(h.doc.laidOutHere).toEqual([3]);
+    }
+    expect(h.errors).toEqual([]);
+    h.hook.unmount();
+  });
+}
+
 test('a pass no change asked to run here waits for the worker pass in flight', async () => {
   const { doc, session, worker, errors, hook, frame, answer, shown } = await opened();
 
@@ -281,7 +550,6 @@ test('a worker pass that fails with a pass queued behind it leaves the layout to
   await frame();
   await act(async () => {
     worker[1]!.fail();
-    await new Promise((done) => setTimeout(done, 0));
   });
   await frame();
   // Only the queued pass lays out, here: the failed one left it the layout.
@@ -290,6 +558,34 @@ test('a worker pass that fails with a pass queued behind it leaves the layout to
   expect(shown()).toBe('2');
   expect(isSupersededLayout(hook.result.current.layout)).toBe(false);
   expect(errors).toEqual([]);
+});
+
+test('a superseded font preflight drops its pass without an error', async () => {
+  let superseded = false;
+  const h = await opened({
+    experimentalWorkerOpen: true,
+    pendingReplica: true,
+    fontRequirementsInWorker: () => (superseded ? Promise.reject(new SupersededPreviewError()) : null),
+  });
+  superseded = true;
+  h.doc.version = 2;
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  expect(h.errors).toEqual([]);
+  expect(h.worker).toHaveLength(1);
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(h.shown()).toBe('1');
+  expect(isLayoutQueued(h.session)).toBe(false);
+
+  superseded = false;
+  h.doc.version = 3;
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  await h.answer(1);
+  expect(h.worker.map((pass) => pass.at)).toEqual([1, 3]);
+  expect(h.shown()).toBe('3');
+  expect(h.errors).toEqual([]);
+  h.hook.unmount();
 });
 
 test('a pass queued behind the worker never runs after unmount', async () => {

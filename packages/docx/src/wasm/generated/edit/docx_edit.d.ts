@@ -787,6 +787,10 @@ export class EditSession {
      */
     reject_change(target_json: string): string;
     /**
+     * Release display pages; an empty result means the request was superseded.
+     */
+    release_display_pages_frame(pages: Uint32Array, expected_frame_epoch: number): Uint8Array;
+    /**
      * Replaces `[start, end)` with `text` in one transaction. The inserted
      * text adopts the first replaced unit's formatting; in suggesting mode
      * the deletion and the insertion share one revision id. Receipt:
@@ -996,6 +1000,10 @@ export class EditSession {
      * Errors when that position holds no image.
      */
     set_image_geometry_at(story: string, para_id: string, offset: number, geometry_json: string): void;
+    /**
+     * Let an eligible resident text edit re-lower only its paragraph. Off by default.
+     */
+    set_local_lowering(enabled: boolean): void;
     /**
      * Whether [`EditSession::open_docx`] seeds images as `media:{n}` tokens,
      * which only a replica opened from the same package resolves, instead of
@@ -1495,8 +1503,20 @@ export function write_docx_s13_wasm(request_json: string, original_docx: Uint8Ar
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
-    readonly memory: WebAssembly.Memory;
+    readonly __externref_drop_slice: (a: number, b: number) => void;
+    readonly __externref_table_alloc: () => number;
+    readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbg_editsession_free: (a: number, b: number) => void;
+    readonly __wbindgen_exn_store: (a: number) => void;
+    readonly __wbindgen_externrefs: WebAssembly.Table;
+    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
+    readonly __wbindgen_malloc: (a: number, b: number) => number;
+    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+    readonly __wbindgen_start: () => void;
+    readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
+    readonly clear_measure_fonts: () => [number, number];
+    readonly close_display_list: (a: number) => void;
+    readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
     readonly editsession_accept_change: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_add_comment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_add_undo_boundary: (a: number) => void;
@@ -1605,6 +1625,7 @@ export interface InitOutput {
     readonly editsession_register_measure_font: (a: number, b: number, c: number) => [number, number, number];
     readonly editsession_register_substitute_measure_font: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly editsession_reject_change: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_release_display_pages_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_replace_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
     readonly editsession_reset_frame_base: (a: number) => void;
     readonly editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];
@@ -1637,6 +1658,7 @@ export interface InitOutput {
     readonly editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_set_image_geometry: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_set_image_geometry_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+    readonly editsession_set_local_lowering: (a: number, b: number) => void;
     readonly editsession_set_media_tokens: (a: number, b: number) => void;
     readonly editsession_set_paragraph_attr: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly editsession_set_paragraph_attrs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
@@ -1670,36 +1692,16 @@ export interface InitOutput {
     readonly export_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly export_docx_structured_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly find_docx_content_controls_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-    readonly list_docx_content_controls_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly render_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly render_docx_markdown_with_pages_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly wasm_failed_allocation_bytes: () => number;
-    readonly wasm_heap_counted: () => number;
-    readonly wasm_live_bytes: () => number;
-    readonly wasm_peak_bytes: () => number;
-    readonly set_wasm_heap_limit: (a: number) => void;
-    readonly reset_wasm_peak_bytes: () => void;
-    readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
-    readonly clear_measure_fonts: () => [number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly hit_test_regions_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly install_panic_hook: () => void;
     readonly layout_document_json: (a: number, b: number) => [number, number, number, number];
+    readonly list_docx_content_controls_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly measure_paragraph_json: (a: number, b: number) => [number, number, number, number];
+    readonly memory: WebAssembly.Memory;
     readonly open_display_list: (a: number, b: number) => [number, number, number];
     readonly outline_glyph_json: (a: number, b: number) => [number, number, number, number];
-    readonly range_rects_by_handle: (a: number, b: number, c: number) => [number, number, number, number];
-    readonly range_rects_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly range_rects_region_by_handle: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
-    readonly range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
-    readonly register_measure_font: (a: number, b: number) => [number, number, number];
-    readonly register_substitute_measure_font: (a: number, b: number, c: number) => [number, number, number];
-    readonly update_display_list: (a: number, b: number, c: number) => [number, number];
-    readonly vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
-    readonly vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-    readonly install_panic_hook: () => void;
-    readonly close_display_list: (a: number) => void;
-    readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s2: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s3: (a: number, b: number) => [number, number, number, number];
@@ -1710,19 +1712,27 @@ export interface InitOutput {
     readonly parse_docx_s8: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s9: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly parse_relationships_xml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly range_rects_by_handle: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly range_rects_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly range_rects_region_by_handle: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
+    readonly register_measure_font: (a: number, b: number) => [number, number, number];
+    readonly register_substitute_measure_font: (a: number, b: number, c: number) => [number, number, number];
+    readonly render_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly render_docx_markdown_with_pages_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly reset_wasm_peak_bytes: () => void;
     readonly serialize_docx_s10: (a: number, b: number) => [number, number, number, number];
     readonly serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
     readonly serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
+    readonly set_wasm_heap_limit: (a: number) => void;
+    readonly update_display_list: (a: number, b: number, c: number) => [number, number];
+    readonly vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly wasm_failed_allocation_bytes: () => number;
+    readonly wasm_heap_counted: () => number;
+    readonly wasm_live_bytes: () => number;
+    readonly wasm_peak_bytes: () => number;
     readonly write_docx_s13_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly __wbindgen_exn_store: (a: number) => void;
-    readonly __externref_table_alloc: () => number;
-    readonly __wbindgen_externrefs: WebAssembly.Table;
-    readonly __wbindgen_malloc: (a: number, b: number) => number;
-    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
-    readonly __externref_table_dealloc: (a: number) => void;
-    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
-    readonly __externref_drop_slice: (a: number, b: number) => void;
-    readonly __wbindgen_start: () => void;
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;

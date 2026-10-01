@@ -95,6 +95,16 @@ struct ApplyInputProfile {
     encode_ms: f64,
 }
 
+fn validate_frame_epoch(epoch: f64) -> Result<u64, JsValue> {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    if !(epoch.is_finite() && epoch >= 0.0 && epoch.fract() == 0.0 && epoch <= MAX_SAFE_INTEGER) {
+        return Err(js_err(
+            "expected_frame_epoch must be a non-negative safe integer",
+        ));
+    }
+    Ok(epoch as u64)
+}
+
 fn js_err(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
 }
@@ -1212,6 +1222,9 @@ struct DocxHostWire {
     /// Empty unless the stories were seeded from the package (a preview's
     /// from its cut).
     unused_script_fonts: Vec<String>,
+    /// A preview whose cut holds the whole body.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    whole_body: bool,
 }
 
 fn thin_header_footer(
@@ -1372,6 +1385,7 @@ impl EditSession {
             envelope: host_envelope,
             referenced_fonts: fonts.referenced,
             unused_script_fonts: fonts.unused_script,
+            whole_body: false,
         };
         let json = serde_json::to_string(&host).map_err(|error| error.to_string())?;
         self.docx_source.replace(Some(source));
@@ -1392,6 +1406,8 @@ impl EditSession {
             return Ok(None);
         };
         let host_envelope = thin_docx_envelope(&envelope);
+        // The cut stops only once it holds `blocks` blocks.
+        let whole_body = envelope.document.package.document.content.len() < blocks;
         let fonts = crate::seed::seed_preview_envelope(self.engine.doc(), envelope, media)?;
         self.engine.set_partial_document(true);
         self.engine.doc().rotate_version(js_entropy());
@@ -1399,6 +1415,7 @@ impl EditSession {
             envelope: host_envelope,
             referenced_fonts: fonts.referenced,
             unused_script_fonts: fonts.unused_script,
+            whole_body,
         })
         .map(Some)
         .map_err(|error| error.to_string())
@@ -1454,7 +1471,7 @@ impl EditSession {
                         return Ok(None);
                     }
                     Ok(Some((
-                        self.delete_resident_input(direction, selection)?,
+                        self.delete_resident_input(direction, selection, count == 1)?,
                         merges,
                     )))
                 });
@@ -1492,6 +1509,7 @@ impl EditSession {
         &self,
         direction: &str,
         selection: (String, String, u32),
+        local_lowering: bool,
     ) -> Result<String, JsValue> {
         let (story, para_id, head) = selection;
         let direction = match direction {
@@ -1505,14 +1523,20 @@ impl EditSession {
         match (direction, adjacent) {
             (DeleteDirection::Backward, Some(AdjacentStoryUnit::Content(width))) => {
                 self.engine
-                    .doc()
-                    .delete_range(&ctx, StoryRange::new(&story, head - width, head))
+                    .edit_resident_text(
+                        StoryRange::new(&story, head - width, head),
+                        None,
+                        local_lowering,
+                    )
                     .map_err(js_err)?;
             }
             (DeleteDirection::Forward, Some(AdjacentStoryUnit::Content(width))) => {
                 self.engine
-                    .doc()
-                    .delete_range(&ctx, StoryRange::new(&story, head, head + width))
+                    .edit_resident_text(
+                        StoryRange::new(&story, head, head + width),
+                        None,
+                        local_lowering,
+                    )
                     .map_err(js_err)?;
             }
             (direction, Some(AdjacentStoryUnit::Pilcrow)) => {
@@ -1774,19 +1798,10 @@ impl EditSession {
         input: &str,
         expected_frame_epoch: f64,
     ) -> Result<Vec<u8>, JsValue> {
-        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
         let _fonts = self.fonts.enter();
-        if !(expected_frame_epoch.is_finite()
-            && expected_frame_epoch >= 0.0
-            && expected_frame_epoch.fract() == 0.0
-            && expected_frame_epoch <= MAX_SAFE_INTEGER)
-        {
-            return Err(js_err(
-                "expected_frame_epoch must be a non-negative safe integer",
-            ));
-        }
+        let epoch = validate_frame_epoch(expected_frame_epoch)?;
         self.engine
-            .build_display_list_frame(input, expected_frame_epoch as u64)
+            .build_display_list_frame(input, epoch)
             .map_err(|error| JsValue::from_str(&error))
     }
 
@@ -1805,6 +1820,11 @@ impl EditSession {
         self.engine.set_display_retain_built_pages(retain);
     }
 
+    /// Let an eligible resident text edit re-lower only its paragraph. Off by default.
+    pub fn set_local_lowering(&self, enabled: bool) {
+        self.engine.set_local_lowering(enabled);
+    }
+
     /// Limit incremental rebuilds to the display window and caret pages. Off by default.
     pub fn set_windowed_incremental_builds(&self, enabled: bool) {
         let _fonts = self.fonts.enter();
@@ -1819,21 +1839,26 @@ impl EditSession {
         pages: Vec<u32>,
         expected_frame_epoch: f64,
     ) -> Result<Vec<u8>, JsValue> {
-        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
         let _fonts = self.fonts.enter();
-        if !(expected_frame_epoch.is_finite()
-            && expected_frame_epoch >= 0.0
-            && expected_frame_epoch.fract() == 0.0
-            && expected_frame_epoch <= MAX_SAFE_INTEGER)
-        {
-            return Err(js_err(
-                "expected_frame_epoch must be a non-negative safe integer",
-            ));
-        }
+        let epoch = validate_frame_epoch(expected_frame_epoch)?;
         let pages: Vec<usize> = pages.into_iter().map(|page| page as usize).collect();
         self.engine
-            .build_display_pages_frame(&pages, expected_frame_epoch as u64)
+            .build_display_pages_frame(&pages, epoch)
             .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Release display pages; an empty result means the request was superseded.
+    pub fn release_display_pages_frame(
+        &self,
+        pages: Vec<u32>,
+        expected_frame_epoch: f64,
+    ) -> Result<Vec<u8>, JsValue> {
+        let _fonts = self.fonts.enter();
+        let epoch = validate_frame_epoch(expected_frame_epoch)?;
+        let pages: Vec<usize> = pages.into_iter().map(|page| page as usize).collect();
+        self.engine
+            .release_display_pages_frame(&pages, epoch)
+            .map_err(js_err)
     }
 
     /// `{"frameEpoch", "caretRect": {…}|null}` for the session's own collapsed
@@ -1936,13 +1961,7 @@ impl EditSession {
         }
 
         self.engine
-            .doc()
-            .insert_text(
-                &EditCtx::local("", ""),
-                Position::new(&story, head),
-                text,
-                FormatPolicy::Inherit,
-            )
+            .edit_resident_text(StoryRange::new(&story, head, head), Some(text), true)
             .map_err(js_err)?;
         self.engine
             .apply_and_layout(&story, expected_frame_epoch as u64)
@@ -2008,13 +2027,7 @@ impl EditSession {
 
         let started = performance_now();
         self.engine
-            .doc()
-            .insert_text(
-                &EditCtx::local("", ""),
-                Position::new(&story, head),
-                text,
-                FormatPolicy::Inherit,
-            )
+            .edit_resident_text(StoryRange::new(&story, head, head), Some(text), true)
             .map_err(js_err)?;
         let edit_ms = performance_now() - started;
         let (frame, engine_profile) = self
@@ -5717,6 +5730,33 @@ mod tests {
     }
 
     #[test]
+    fn a_preview_reports_whether_its_cut_holds_the_whole_body() {
+        let body = (0..30)
+            .map(|index| format!("<w:p><w:r><w:t>Paragraph {index}</w:t></w:r></w:p>"))
+            .collect::<String>();
+        let document = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#
+        );
+        let bytes = ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/document.xml".to_owned(), document.into_bytes()),
+        ])
+        .unwrap();
+        for (blocks, whole) in [(10, false), (30, false), (31, true), (200, true)] {
+            let preview = EditSession::new(83.0).unwrap();
+            let host: Value =
+                serde_json::from_str(&preview.open_preview(&bytes, blocks).unwrap().unwrap())
+                    .unwrap();
+            assert_eq!(host.get("wholeBody").is_some(), whole, "{blocks} blocks");
+        }
+        let full = EditSession::new(84.0).unwrap();
+        let host: Value =
+            serde_json::from_str(&full.open_docx(&bytes, true, None, None).unwrap()).unwrap();
+        assert!(host.get("wholeBody").is_none());
+    }
+
+    #[test]
     fn a_preview_refuses_a_document_whose_later_body_reaches_its_first_pages() {
         let anchor = r#"<w:p><w:r><w:drawing><wp:anchor simplePos="0" relativeHeight="0" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="457200"/><wp:wrapTopAndBottom/><wp:docPr id="1" name="Float"/></wp:anchor></w:drawing></w:r></w:p>"#;
         let section_break = r#"<w:p><w:pPr><w:sectPr/></w:pPr></w:p>"#;
@@ -6000,7 +6040,7 @@ mod tests {
         let head = loc_index(session.engine.doc(), "body", "p1", 6).unwrap();
 
         session
-            .delete_resident_input("backward", ("body".into(), "p1".into(), head))
+            .delete_resident_input("backward", ("body".into(), "p1".into(), head), true)
             .unwrap();
 
         let paragraphs = session.engine.doc().paragraphs("body").unwrap();

@@ -143,18 +143,20 @@ fn boundary_chunks<T: yrs::ReadTxn>(story: &TextRef, txn: &T, index: u32) -> Vec
 /// after the text it strikes out, as Word places it, and at most before the
 /// story's final unit. None in plain mode, and where that unit is a block embed,
 /// which only a paragraph boundary may precede: the text then goes at the start.
+/// `chunks` cover `range` and the unit after it.
 fn after_struck_text(
     story: &TextRef,
     txn: &TransactionMut<'_>,
     ctx: &EditCtx,
     range: &StoryRange,
     len: u32,
+    chunks: &[Chunk],
 ) -> Option<u32> {
     if !ctx.is_suggesting() || len == 0 {
         return None;
     }
     let at = range.end.min(story.len(txn) - 1);
-    let block = snapshot_range(story, txn, at, at + 1).iter().any(|chunk| {
+    let block = chunks.iter().any(|chunk| {
         chunk.start == at
             && matches!(&chunk.kind, ChunkKind::Embed(Some(map))
                 if crate::map_string(map, txn, KIND_KEY)
@@ -173,7 +175,14 @@ pub(crate) fn suggest_delete(
     end: u32,
     chunks: &[Chunk],
 ) -> DeleteOutcome {
-    let final_pilcrow = last_pilcrow(story, txn).map(|(index, _)| index);
+    let final_pilcrow = chunks
+        .iter()
+        .any(|chunk| {
+            matches!(chunk.kind, ChunkKind::Pilcrow(_))
+                && chunk.end().min(end) > chunk.start.max(start)
+        })
+        .then(|| last_pilcrow(story, txn).map(|(index, _)| index))
+        .flatten();
     let mut removed = 0;
     for chunk in chunks.iter().rev() {
         let overlap_start = chunk.start.max(start);
@@ -235,7 +244,11 @@ pub(crate) fn plain_delete(
             _ => None,
         })
         .collect();
-    let final_pilcrow = last_pilcrow(story, txn);
+    let final_pilcrow = if pilcrows_in_range.is_empty() {
+        None
+    } else {
+        last_pilcrow(story, txn)
+    };
     let donor = pilcrows_in_range
         .first()
         .map(|(_, map)| capture_pilcrow(map, txn));
@@ -293,6 +306,17 @@ impl EditingDoc {
         text: &str,
         policy: FormatPolicy,
     ) -> OpResult<Receipt> {
+        self.insert_text_observed(ctx, at, text, policy, |_| {})
+    }
+
+    pub(crate) fn insert_text_observed(
+        &self,
+        ctx: &EditCtx,
+        at: Position,
+        text: &str,
+        policy: FormatPolicy,
+        observe: impl FnOnce(&Attrs),
+    ) -> OpResult<Receipt> {
         validate_text(text)?;
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
@@ -317,7 +341,9 @@ impl EditingDoc {
         let ins = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
-        story.insert_with_attributes(&mut txn, at.index, text, stamped_attrs(formatting, ins));
+        let attrs = stamped_attrs(formatting, ins);
+        observe(&attrs);
+        story.insert_with_attributes(&mut txn, at.index, text, attrs);
         let end = at.index + utf16_len(text);
         let range = loc_range_in_txn(&at.story, &story, &txn, at.index, end)?;
         Ok(Receipt {
@@ -397,18 +423,17 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
-        let after = after_struck_text(&story, &txn, ctx, &range, len);
-        let mut at = after.unwrap_or(range.start);
-        if !text.is_empty() {
-            crate::identity::promote_at(self, &mut txn, &range.story, &story, at);
-        }
-
         let chunks = snapshot_range(
             &story,
             &txn,
             range.start.saturating_sub(1),
             range.end.saturating_add(1),
         );
+        let after = after_struck_text(&story, &txn, ctx, &range, len, &chunks);
+        let mut at = after.unwrap_or(range.start);
+        if !text.is_empty() {
+            crate::identity::promote_at(self, &mut txn, &range.story, &story, at);
+        }
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, range.start, INS, &ctx.author)
                 .or_else(|| adjacent_revision_id(&chunks, range.start, DEL, &ctx.author))
@@ -509,17 +534,17 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
-        let after = after_struck_text(&story, &txn, ctx, &range, len);
-        let mut at = after.unwrap_or(range.start);
-        if total > 0 {
-            crate::identity::promote_at(self, &mut txn, &range.story, &story, at);
-        }
         let chunks = snapshot_range(
             &story,
             &txn,
             range.start.saturating_sub(1),
             range.end.saturating_add(1),
         );
+        let after = after_struck_text(&story, &txn, ctx, &range, len, &chunks);
+        let mut at = after.unwrap_or(range.start);
+        if total > 0 {
+            crate::identity::promote_at(self, &mut txn, &range.story, &story, at);
+        }
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, range.start, INS, &ctx.author)
                 .or_else(|| adjacent_revision_id(&chunks, range.start, DEL, &ctx.author))

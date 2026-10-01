@@ -67,6 +67,7 @@
 
 mod anchor;
 pub mod canonical;
+mod extent_key;
 pub mod hooks;
 pub mod page_flow;
 pub mod paragraph_spacing;
@@ -288,6 +289,8 @@ pub fn build_resident_display_list_partial_observed(
         )
     })
 }
+
+pub use display_list::release_resident_display_pages;
 
 /// Build unbuilt pages of an engine-owned display list; returns the pages built.
 pub fn build_resident_display_pages(
@@ -812,6 +815,13 @@ pub(crate) fn measure_paragraph_typed_resident(
     request: &ooxml_text::MeasureRequest<'_>,
 ) -> Result<ooxml_text::ParagraphExtentOut, ooxml_text::MeasureError> {
     with_measure_fonts(|store| ooxml_text::measure_paragraph_typed(&store.borrow(), request))
+}
+
+/// [`ooxml_text::min_content_width_typed`] against the resident font store.
+pub(crate) fn min_content_width_typed_resident(
+    request: &ooxml_text::MeasureRequest<'_>,
+) -> Result<f32, ooxml_text::MeasureError> {
+    with_measure_fonts(|store| ooxml_text::min_content_width_typed(&store.borrow(), request))
 }
 
 /// wasm wrapper over [`ooxml_text::FontStore::outline_glyph_json`]: the outline

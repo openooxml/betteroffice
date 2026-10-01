@@ -122,6 +122,109 @@ function setup() {
   return { worker, client };
 }
 
+test('pending proposal and navigation reads keep background page builds waiting', async () => {
+  const { worker, client } = setup();
+  const bootstrap = client.bootstrap(snapshot, '');
+  worker.reply(frameReply(worker.lastId()));
+  await bootstrap;
+  const proposal = client.proposal({ kind: 'snapshot' });
+  expect(client.frameRequestPending()).toBe(true);
+  worker.reply({ id: worker.lastId(), ok: false, error: 'proposal failed' });
+  await expect(proposal).rejects.toThrow('proposal failed');
+  expect(client.frameRequestPending()).toBe(false);
+  const read = client.documentRead({ kind: 'navigationTarget', story: 'body', paraId: 'p1' });
+  expect(client.frameRequestPending()).toBe(true);
+  worker.reply({ id: worker.lastId(), ok: true, read: { version: 'v1', value: 'missing-target' } });
+  expect(await read).toEqual({ version: 'v1', value: 'missing-target' });
+  expect(client.frameRequestPending()).toBe(false);
+  client.destroy();
+});
+
+test('a superseded background build completes without failing the worker', async () => {
+  const { worker, client } = setup();
+  const pending = client.buildPages([5, 6, 7, 8, 9], 1, false, true);
+  expect(worker.posted.at(-1)).toMatchObject({ type: 'buildPages', background: true });
+  worker.reply({ id: worker.lastId(), ok: true, pageBuildSuperseded: true });
+  expect(await pending).toBeNull();
+  expect(client.hasFailed()).toBe(false);
+  expect(worker.terminated).toBe(false);
+  client.destroy();
+});
+
+test('sliced page replies preserve the ordered frames for idle adoption', async () => {
+  const { worker, client } = setup();
+  const pending = client.buildPages([5, 6, 7, 8, 9], 1, false, true);
+  const first = Uint8Array.of(1).buffer;
+  const last = Uint8Array.of(2).buffer;
+  const reply = frameReply(worker.lastId());
+  worker.reply({ ...reply, ok: true, frame: last, pageFrames: [first, last] });
+  expect((await pending)?.pageFrames).toEqual([Uint8Array.of(1), Uint8Array.of(2)]);
+  client.destroy();
+});
+
+test('identical font requirement reads share one request until another request is posted', async () => {
+  const { worker, client } = setup();
+  const first = client.fontRequirements('{"a":1}');
+  const second = client.fontRequirements('{"a":1}');
+  const other = client.fontRequirements('{"b":2}');
+  const afterOther = client.fontRequirements('{"a":1}');
+  client.eraseCaret();
+  const afterPost = client.fontRequirements('{"a":1}');
+  const reads = worker.posted.flatMap((request) =>
+    request.type === 'fontRequirements' ? [request] : []
+  );
+  expect(reads.map(({ layoutInput }) => layoutInput)).toEqual(['{"a":1}', '{"b":2}', '{"a":1}', '{"a":1}']);
+  for (const [index, { id }] of reads.entries()) {
+    worker.reply({ id, ok: true, requirementsJson: `[${index}]` });
+  }
+  expect(await Promise.all([first, second, other, afterOther, afterPost])).toEqual([
+    '[0]', '[0]', '[1]', '[2]', '[3]',
+  ]);
+  const settled = client.fontRequirements('{"a":1}');
+  expect(worker.posted.at(-1)).toMatchObject({ type: 'fontRequirements', layoutInput: '{"a":1}' });
+  worker.reply({ id: worker.lastId(), ok: true, requirementsJson: '[4]' });
+  expect(await settled).toBe('[4]');
+});
+
+test('a shared font requirement read rejects every caller when the worker fails', async () => {
+  const { worker, client } = setup();
+  const first = client.fontRequirements('{}');
+  const second = client.fontRequirements('{}');
+  expect(worker.posted).toHaveLength(1);
+  worker.reply({ id: worker.lastId(), ok: false, error: 'boom' });
+  await expect(first).rejects.toThrow('boom');
+  await expect(second).rejects.toThrow('boom');
+});
+
+test('release requests carry page identities and return a frame', async () => {
+  const { worker, client } = setup();
+  const pages = [{ index: 8, pageId: '9007199254740993' }];
+  const released = client.releasePages(pages, 42, true);
+  expect(worker.posted.at(-1)).toEqual({
+    id: worker.lastId(),
+    type: 'releasePages',
+    pages,
+    expectedFrameEpoch: 42,
+    paintCaret: true,
+  });
+  expect(client.frameRequestPending()).toBe(true);
+  worker.reply(frameReply(worker.lastId()));
+  expect(await released).toMatchObject({ frame: new Uint8Array(), selection: null });
+  expect(client.frameRequestPending()).toBe(false);
+});
+
+test('superseded release replies need no frame and leave the client usable', async () => {
+  const { worker, client } = setup();
+  const released = client.releasePages([{ index: 2, pageId: '3' }], 7);
+  expect(worker.posted.at(-1)).toMatchObject({ type: 'releasePages', paintCaret: false });
+  worker.reply({ id: worker.lastId(), ok: true, superseded: true });
+  expect(await released).toEqual({ superseded: true });
+  expect(client.frameRequestPending()).toBe(false);
+  const built = client.buildPages([2], 7);
+  worker.reply(frameReply(worker.lastId()));
+  expect(await built).toHaveProperty('frame');
+});
+
 test('frame and edit requests carry the current display window and retention flag', async () => {
   const { worker, client } = setup();
   client.setRetainBuiltPages(true);
@@ -263,11 +366,58 @@ describe('preloaded worker', () => {
     client?.destroy();
   });
 
-  test('drops a failed spare so the next preload creates a fresh worker', async () => {
+  test('keeps a spare usable after a non-terminal warm failure', async () => {
+    installWorker();
+    const warm = preloadResidentEngineWorker();
+    const worker = FakeWorker.instances[0];
+    worker.reply({ id: worker.lastId(), ok: false, error: 'init failed' });
+    await expect(warm).rejects.toThrow('init failed');
+    expect(worker.terminated).toBe(false);
+    const client = takePreloadedResidentEngineWorker()!;
+    expect(client).not.toBeNull();
+    expect(client.hasFailed()).toBe(false);
+    const bootstrap = client.bootstrap(snapshot, '');
+    expect(worker.posted.at(-1)).toMatchObject({ type: 'bootstrap' });
+    worker.reply(frameReply(worker.lastId()));
+    await bootstrap;
+    client.destroy();
+  });
+
+  test('retries a non-terminal warm failure on the same spare', async () => {
+    installWorker();
+    const warm = preloadResidentEngineWorker();
+    const worker = FakeWorker.instances[0];
+    worker.reply({ id: worker.lastId(), ok: false, error: 'init failed' });
+    await expect(warm).rejects.toThrow('init failed');
+    const retry = preloadResidentEngineWorker();
+    const sharedRetry = preloadResidentEngineWorker();
+    expect(FakeWorker.instances).toHaveLength(1);
+    expect(retry).not.toBe(warm);
+    expect(sharedRetry).toBe(retry);
+    expect(worker.posted).toEqual([{ id: 1, type: 'warm' }, { id: 2, type: 'warm' }]);
+    worker.reply({ id: worker.lastId(), ok: true });
+    await retry;
+    expect(worker.terminated).toBe(false);
+  });
+
+  test('expires an unused spare after a non-terminal warm failure', async () => {
+    installWorker();
+    const warm = preloadResidentEngineWorker();
+    const worker = FakeWorker.instances[0];
+    worker.reply({ id: worker.lastId(), ok: false, error: 'init failed' });
+    await expect(warm).rejects.toThrow('init failed');
+    expect(worker.terminated).toBe(false);
+    expect(armedBudgets()).toEqual([RESIDENT_WORKER_SILENCE_MS]);
+    expireTimers();
+    expect(worker.terminated).toBe(true);
+    expect(takePreloadedResidentEngineWorker()).toBeNull();
+  });
+
+  test('drops a terminally failed spare so the next preload creates a fresh worker', async () => {
     installWorker();
     const warm = preloadResidentEngineWorker();
     const failed = FakeWorker.instances[0];
-    failed.reply({ id: failed.lastId(), ok: false, error: 'init failed' });
+    failed.reply({ id: failed.lastId(), ok: false, error: 'init failed', terminal: true });
     await expect(warm).rejects.toThrow('init failed');
     expect(failed.terminated).toBe(true);
     expect(takePreloadedResidentEngineWorker()).toBeNull();

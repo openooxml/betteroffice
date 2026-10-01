@@ -13,7 +13,6 @@ use super::context::RecordedParagraphs;
 use super::paragraph_ids::{S13SpliceAnchor, S13SplicedPart};
 use super::s13::element_span;
 
-const MC_NAMESPACE: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
 const W_NAMESPACE: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
 /// What the XML written for an unchanged paragraph must agree on with its source XML for the
@@ -200,59 +199,19 @@ fn bindings<'a>(xml: &'a str, tag: &Tag<'a>) -> HashMap<&'a str, &'a str> {
         .collect()
 }
 
-/// `source`'s root start tag binding every prefix in `prefixes` as `serialized`'s root does,
-/// ignorable where it is ignorable there; `None` when any element of `source` (its bindings in
-/// `bound`) binds one of them elsewhere.
-fn declared_root(
-    source: &str,
-    serialized: &str,
-    prefixes: &BTreeSet<&str>,
-    bound: &HashMap<&str, &str>,
-) -> Option<Option<(Range<usize>, String)>> {
+/// Whether `source`'s root binds every prefix in `prefixes` to the namespace `serialized`'s
+/// root binds it to, so that paragraphs written with them need no new declaration.
+fn root_binds(source: &str, serialized: &str, prefixes: &BTreeSet<&str>) -> Option<bool> {
     let root = root_tag(source)?;
-    let at_root = bindings(source, &root);
+    let bound = bindings(source, &root);
     let target = root_tag(serialized)?;
     let wanted = bindings(serialized, &target);
-    let target_ignorable: Vec<&str> = attribute(&target, "mc:Ignorable")
-        .map(|range| serialized[range].split_whitespace().collect())
-        .unwrap_or_default();
-    let mut declarations = String::new();
-    let mut ignorable = Vec::new();
-    for prefix in prefixes {
-        let uri = wanted.get(prefix)?;
-        match bound.get(prefix) {
-            Some(existing) if *existing == uri.trim() && at_root.contains_key(prefix) => {}
-            Some(existing) if *existing != uri.trim() => return None,
-            _ => {
-                declarations.push_str(&format!(" xmlns:{prefix}=\"{uri}\""));
-                if target_ignorable.contains(prefix) {
-                    ignorable.push(*prefix);
-                }
-            }
-        }
-    }
-    if declarations.is_empty() {
-        return Some(None);
-    }
-    let mut text = source[root.range.clone()].to_owned();
-    let base = root.range.start;
-    if !ignorable.is_empty() {
-        if let Some(range) = attribute(&root, "mc:Ignorable") {
-            let value = format!("{} {}", &source[range.clone()], ignorable.join(" "));
-            text.replace_range(range.start - base..range.end - base, &value);
-        } else {
-            match bound.get("mc") {
-                Some(uri) if *uri == MC_NAMESPACE && at_root.contains_key("mc") => {}
-                Some(uri) if *uri != MC_NAMESPACE => return None,
-                _ if prefixes.contains("mc") => {}
-                _ => declarations.push_str(&format!(" xmlns:mc=\"{MC_NAMESPACE}\"")),
-            }
-            declarations.push_str(&format!(" mc:Ignorable=\"{}\"", ignorable.join(" ")));
-        }
-    }
-    let close = text.len() - 1 - usize::from(text.ends_with("/>"));
-    text.insert_str(close, &declarations);
-    Some(Some((root.range, text)))
+    Some(prefixes.iter().all(|prefix| {
+        matches!(
+            (bound.get(prefix), wanted.get(prefix)),
+            (Some(existing), Some(uri)) if existing.trim() == uri.trim()
+        )
+    }))
 }
 
 /// Where the addressed paragraphs sit in a source part: each one's parent element and, for
@@ -291,9 +250,12 @@ impl Edges<'_> {
 }
 
 /// The [`Layout`] of the paragraphs at `spans` in `source`, with edges for those in `anchors`.
+/// Each addressed paragraph's parent element is `w:fldChar` for one that starts
+/// inside a complex field, whose code or result it belongs to.
 /// `None` unless every namespace prefix in `source` keeps one binding and every namespace one
 /// prefix, `w` is bound to WordprocessingML and no default namespace is declared, so that
-/// element names identify elements.
+/// element names identify elements, and every field character is a begin, separate or end
+/// that closes an open field.
 fn layout<'s>(
     source: &'s str,
     spans: &BTreeMap<u32, Range<usize>>,
@@ -312,6 +274,7 @@ fn layout<'s>(
     let mut prefixes: HashMap<&str, &str> = HashMap::new();
     let mut namespaces: HashMap<&str, &str> = HashMap::new();
     let mut stack: Vec<&str> = Vec::new();
+    let mut fields = 0usize;
     let mut layout = Layout {
         parents: HashMap::new(),
         edges: HashMap::new(),
@@ -326,6 +289,19 @@ fn layout<'s>(
         if tag.end {
             stack.pop();
             continue;
+        }
+        if tag
+            .name
+            .rsplit_once(':')
+            .map_or(tag.name, |(_, local)| local)
+            == "fldChar"
+        {
+            match &*unescaped(source, attribute(&tag, "w:fldCharType")?)? {
+                "begin" => fields += 1,
+                "separate" => {}
+                "end" => fields = fields.checked_sub(1)?,
+                _ => return None,
+            }
         }
         for (key, range) in &tag.attributes {
             if *key == "xmlns" {
@@ -343,7 +319,14 @@ fn layout<'s>(
             }
         }
         if let Some(ordinal) = starts.get(&tag.range.start) {
-            layout.parents.insert(*ordinal, *stack.last()?);
+            layout.parents.insert(
+                *ordinal,
+                if fields > 0 {
+                    "w:fldChar"
+                } else {
+                    *stack.last()?
+                },
+            );
             if anchors.contains(ordinal) {
                 layout.edges.entry(*ordinal).or_default().before = last;
             }
@@ -367,10 +350,29 @@ const PARENTS: [&str; 6] = [
     "w:endnote",
 ];
 
-/// Whether `xml`, one paragraph, holds no field characters, equations or content controls, and
-/// closes every bookmark, permission or range it opens after opening it, so that rewriting it
-/// leaves every other paragraph's markup whole. `None` on a range marker without an ID.
+/// Whether `xml`, one paragraph, holds no equations or content controls and pairs only within
+/// itself, so that rewriting it leaves every other paragraph's markup whole.
 fn simple(xml: &str) -> Option<bool> {
+    for tag in tags(xml)? {
+        if !tag.end
+            && matches!(
+                tag.name
+                    .rsplit_once(':')
+                    .map_or(tag.name, |(_, local)| local),
+                "oMath" | "oMathPara" | "sdt"
+            )
+        {
+            return Some(false);
+        }
+    }
+    pairs_within(xml)
+}
+
+/// Whether `xml`, one paragraph, holds both ends of everything in it that can pair across
+/// paragraphs: bookmarks, permissions, comment and custom XML ranges and proofing marks, each
+/// opened before it is closed; and no field character or move, whose partners lie elsewhere.
+/// `None` on a range marker without an ID or a proofing mark without a type.
+fn pairs_within(xml: &str) -> Option<bool> {
     let mut open: HashMap<(&str, String), usize> = HashMap::new();
     for tag in tags(xml)? {
         if tag.end {
@@ -380,26 +382,36 @@ fn simple(xml: &str) -> Option<bool> {
             .name
             .rsplit_once(':')
             .map_or(tag.name, |(_, local)| local);
-        if matches!(local, "fldChar" | "oMath" | "oMathPara" | "sdt") {
+        if local == "fldChar" || local.starts_with("move") || local.starts_with("customXmlMove") {
             return Some(false);
         }
-        let (kind, opens) = match local {
-            "bookmarkStart" => ("bookmark", true),
-            "bookmarkEnd" => ("bookmark", false),
-            "permStart" => ("perm", true),
-            "permEnd" => ("perm", false),
-            name => match (
-                name.strip_suffix("RangeStart"),
-                name.strip_suffix("RangeEnd"),
-            ) {
-                (Some(kind), _) => (kind, true),
-                (_, Some(kind)) => (kind, false),
-                _ => continue,
-            },
+        let (kind, id, opens) = if local == "proofErr" {
+            let (kind, opens) = match &*unescaped(xml, attribute(&tag, "w:type")?)? {
+                "spellStart" => ("spell", true),
+                "spellEnd" => ("spell", false),
+                "gramStart" => ("gram", true),
+                "gramEnd" => ("gram", false),
+                _ => return None,
+            };
+            (kind, String::new(), opens)
+        } else {
+            let (kind, opens) = match local {
+                "bookmarkStart" => ("bookmark", true),
+                "bookmarkEnd" => ("bookmark", false),
+                "permStart" => ("perm", true),
+                "permEnd" => ("perm", false),
+                name => match (
+                    name.strip_suffix("RangeStart"),
+                    name.strip_suffix("RangeEnd"),
+                ) {
+                    (Some(kind), _) => (kind, true),
+                    (_, Some(kind)) => (kind, false),
+                    _ => continue,
+                },
+            };
+            (kind, unescaped(xml, attribute(&tag, "w:id")?)?, opens)
         };
-        let count = open
-            .entry((kind, unescaped(xml, attribute(&tag, "w:id")?)?))
-            .or_insert(0);
+        let count = open.entry((kind, id)).or_insert(0);
         if opens {
             *count += 1;
         } else if *count == 0 {
@@ -466,7 +478,8 @@ fn placed<'r>(
 /// paragraphs no model paragraph is written from. `None` when the part cannot be spliced, so
 /// the caller writes `serialized` whole: among others when a paragraph to rewrite, remove or
 /// insert is not [`simple`] in its source or written XML, or sits in anything but a story root
-/// or table cell.
+/// or table cell, and when the result would need a namespace declaration the source does not
+/// have.
 pub(crate) fn splice_story_part(
     source: &str,
     serialized: &str,
@@ -554,6 +567,16 @@ pub(crate) fn splice_story_part(
             return None;
         }
     }
+    let mut prefixes = BTreeSet::new();
+    for ordinal in &replaced {
+        prefixes.extend(required_prefixes(&written[ordinal])?);
+    }
+    for (_, xml) in &inserted {
+        prefixes.extend(required_prefixes(xml)?);
+    }
+    if !root_binds(source, serialized, &prefixes)? {
+        return None;
+    }
     let mut ids = assignments.clone();
     for (&ordinal, xml) in written {
         let occurrence = &occurrences[ordinal as usize];
@@ -572,7 +595,11 @@ pub(crate) fn splice_story_part(
     let source: Cow<str> = if ids.is_empty() {
         Cow::Borrowed(source)
     } else {
-        Cow::Owned(patch_paragraph_ids(source, &ids, true)?)
+        let patched = patch_paragraph_ids(source, &ids, true)?;
+        if patched.matches("xmlns").count() != source.matches("xmlns").count() {
+            return None;
+        }
+        Cow::Owned(patched)
     };
     let occurrences = match &source {
         Cow::Borrowed(_) => occurrences,
@@ -580,14 +607,11 @@ pub(crate) fn splice_story_part(
     };
     let span = |ordinal: u32| paragraph_span(&source, occurrences.get(ordinal as usize)?);
     let mut edits: Vec<(Range<usize>, u8, &str)> = Vec::new();
-    let mut prefixes = BTreeSet::new();
     for &ordinal in replaced.iter().chain(&removed) {
         let xml = written.get(&ordinal).map_or("", String::as_str);
-        prefixes.extend(required_prefixes(xml)?);
         edits.push((span(ordinal)?, 2, xml));
     }
     for (anchor, xml) in &inserted {
-        prefixes.extend(required_prefixes(xml)?);
         let range = span(anchor.ordinal())?;
         edits.push(match anchor {
             S13SpliceAnchor::After(_) => (range.end..range.end, 0, xml),
@@ -595,13 +619,9 @@ pub(crate) fn splice_story_part(
         });
     }
     edits.sort_by_key(|(range, rank, _)| (range.start, *rank));
-    let root = declared_root(&source, serialized, &prefixes, &layout.bound)?;
-    let root = root
-        .as_ref()
-        .map(|(range, text)| (range.clone(), 0, text.as_str()));
     let mut output = String::with_capacity(source.len());
     let mut cursor = 0;
-    for (range, _, text) in root.into_iter().chain(edits) {
+    for (range, _, text) in edits {
         if range.start < cursor {
             return None;
         }
@@ -618,6 +638,8 @@ mod tests {
     use super::*;
 
     const ROOT: &str = "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" mc:Ignorable=\"w14\">";
+    const W_ONLY_ROOT: &str =
+        "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">";
     const SERIALIZED_ROOT: &str = "<w:document xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" mc:Ignorable=\"w14\">";
 
     /// Splices `source` with `paragraphs` as the written XML of their ordinals, serialized
@@ -904,8 +926,12 @@ mod tests {
 
     #[test]
     fn rewrites_an_unchanged_paragraph_whose_revision_or_note_ids_differ() {
+        let root = ROOT.replace(
+            "<w:document ",
+            "<w:document xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" ",
+        );
         let source = format!(
-            "{ROOT}<w:body><w:p><w:hyperlink r:id=\"rId4\"><w:moveTo w:id=\"7\"><w:r><w:t>x</w:t></w:r></w:moveTo></w:hyperlink><w:r><w:footnoteReference w:id=\"2\"/></w:r></w:p></w:body></w:document>"
+            "{root}<w:body><w:p><w:hyperlink r:id=\"rId4\"><w:ins w:id=\"7\"><w:r><w:t>x</w:t></w:r></w:ins></w:hyperlink><w:r><w:footnoteReference w:id=\"2\"/></w:r></w:p></w:body></w:document>"
         );
         for other in [
             "<w:p><w:hyperlink r:id=\"rId4\"><w:ins w:id=\"8\"><w:r><w:t>x</w:t></w:r></w:ins></w:hyperlink><w:r><w:footnoteReference w:id=\"2\"/></w:r></w:p>",
@@ -922,45 +948,44 @@ mod tests {
 
     #[test]
     fn patches_written_and_assigned_paragraph_ids_into_kept_paragraphs() {
-        let source = concat!(
-            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>",
-            "<w:p><w:r><w:t>a</w:t></w:r></w:p>",
-            "<w:p><w:r><w:t>b</w:t></w:r></w:p>",
-            "</w:body></w:document>"
+        let source = format!(
+            "{ROOT}<w:body><w:p><w:r><w:t>a</w:t></w:r></w:p><w:p><w:r><w:t>b</w:t></w:r></w:p></w:body></w:document>"
         );
-        let spliced = splice_around(
-            source,
-            &[(
-                0,
-                "<w:p w14:paraId=\"1234ABCD\"><w:r><w:t>a</w:t></w:r></w:p>",
-            )],
-            &[],
-            &[(1, "0BCD1234")],
-            ("", "<w:p><w:r><w:t>b</w:t></w:r></w:p>"),
-        )
-        .expect("spliced");
+        let patch = |source: &str| {
+            splice_around(
+                source,
+                &[(
+                    0,
+                    "<w:p w14:paraId=\"1234ABCD\"><w:r><w:t>a</w:t></w:r></w:p>",
+                )],
+                &[],
+                &[(1, "0BCD1234")],
+                ("", "<w:p><w:r><w:t>b</w:t></w:r></w:p>"),
+            )
+        };
+        let spliced = patch(&source).expect("spliced");
         let occurrences = paragraph_occurrences(&spliced).expect("occurrences");
         assert_eq!(occurrences[0].para_id.as_deref(), Some("1234ABCD"));
         assert_eq!(occurrences[1].para_id.as_deref(), Some("0BCD1234"));
+        assert!(spliced.starts_with(ROOT));
         assert!(spliced.contains("<w:r><w:t>a</w:t></w:r></w:p><w:p "));
-        assert!(
-            spliced.contains("xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\"")
-        );
+
+        let undeclared = source.replace(ROOT, W_ONLY_ROOT);
+        assert_eq!(patch(&undeclared), None);
     }
 
     #[test]
-    fn declares_the_prefixes_a_rewritten_paragraph_uses() {
+    fn writes_the_whole_part_when_a_rewritten_paragraph_needs_a_root_declaration() {
         let source = concat!(
             "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>",
             "<w:p><w:r><w:t>a</w:t></w:r></w:p>",
             "</w:body></w:document>"
         );
         let rewritten = "<w:p w14:paraId=\"1234ABCD\"><w:r><w:t>new</w:t></w:r></w:p>";
+        assert_eq!(splice(source, &[(0, rewritten)], &[0]), None);
         assert_eq!(
-            splice(source, &[(0, rewritten)], &[0]),
-            Some(format!(
-                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\" xmlns:mc=\"{MC_NAMESPACE}\" mc:Ignorable=\"w14\"><w:body>{rewritten}</w:body></w:document>"
-            ))
+            splice(source, &[(0, "<w:p><w:r><w:t>new</w:t></w:r></w:p>")], &[0]),
+            Some(source.replace("<w:t>a</w:t>", "<w:t>new</w:t>"))
         );
     }
 
@@ -1080,6 +1105,108 @@ mod tests {
         );
     }
 
+    /// Asserts that a paragraph holding `start` or `end` of a pair spanning two paragraphs is not
+    /// rewritten alone, and that an edit to a third paragraph keeps both.
+    fn refuses_rewriting_one_end(start: &str, end: &str) {
+        let opening = format!("<w:p>{start}<w:r><w:t>a</w:t></w:r></w:p>");
+        let closing = format!("<w:p><w:r><w:t>b</w:t></w:r>{end}</w:p>");
+        let outside = "<w:p><w:r><w:t>c</w:t></w:r></w:p>";
+        let source = format!("{ROOT}<w:body>{opening}{closing}{outside}</w:body></w:document>");
+        let edited = |xml: &str| xml.replace("</w:t>", ", edited</w:t>");
+        let (opening_edited, closing_edited) = (edited(&opening), edited(&closing));
+        for (paragraphs, changed) in [
+            (
+                [
+                    (0, opening_edited.as_str()),
+                    (1, closing.as_str()),
+                    (2, outside),
+                ],
+                0,
+            ),
+            (
+                [
+                    (0, opening.as_str()),
+                    (1, closing_edited.as_str()),
+                    (2, outside),
+                ],
+                1,
+            ),
+        ] {
+            assert_eq!(
+                splice(&source, &paragraphs, &[changed]),
+                None,
+                "{start} {end}"
+            );
+        }
+        let outside_edited = edited(outside);
+        assert_eq!(
+            splice(
+                &source,
+                &[
+                    (0, opening.as_str()),
+                    (1, closing.as_str()),
+                    (2, outside_edited.as_str())
+                ],
+                &[2]
+            ),
+            Some(format!(
+                "{ROOT}<w:body>{opening}{closing}{outside_edited}</w:body></w:document>"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_bookmark_across_paragraphs_is_not_rewritten_at_one_end() {
+        refuses_rewriting_one_end(
+            "<w:bookmarkStart w:id=\"1\" w:name=\"b\"/>",
+            "<w:bookmarkEnd w:id=\"1\"/>",
+        );
+    }
+
+    #[test]
+    fn a_comment_range_across_paragraphs_is_not_rewritten_at_one_end() {
+        refuses_rewriting_one_end(
+            "<w:commentRangeStart w:id=\"1\"/>",
+            "<w:commentRangeEnd w:id=\"1\"/><w:r><w:commentReference w:id=\"1\"/></w:r>",
+        );
+    }
+
+    #[test]
+    fn a_permission_across_paragraphs_is_not_rewritten_at_one_end() {
+        refuses_rewriting_one_end(
+            "<w:permStart w:id=\"1\" w:edGrp=\"everyone\"/>",
+            "<w:permEnd w:id=\"1\"/>",
+        );
+    }
+
+    #[test]
+    fn a_custom_xml_range_across_paragraphs_is_not_rewritten_at_one_end() {
+        refuses_rewriting_one_end(
+            "<w:customXmlInsRangeStart w:id=\"1\" w:author=\"A\"/>",
+            "<w:customXmlInsRangeEnd w:id=\"1\"/>",
+        );
+    }
+
+    #[test]
+    fn a_proofing_mark_across_paragraphs_is_not_rewritten_at_one_end() {
+        refuses_rewriting_one_end(
+            "<w:proofErr w:type=\"spellStart\"/>",
+            "<w:proofErr w:type=\"spellEnd\"/>",
+        );
+    }
+
+    #[test]
+    fn a_move_is_not_rewritten_at_either_half() {
+        refuses_rewriting_one_end(
+            "<w:moveFromRangeStart w:id=\"0\" w:name=\"m\" w:author=\"A\"/><w:moveFrom w:id=\"1\" w:author=\"A\"><w:r><w:delText>x</w:delText></w:r></w:moveFrom><w:moveFromRangeEnd w:id=\"0\"/>",
+            "<w:moveToRangeStart w:id=\"2\" w:name=\"m\" w:author=\"A\"/><w:moveTo w:id=\"3\" w:author=\"A\"><w:r><w:t>x</w:t></w:r></w:moveTo><w:moveToRangeEnd w:id=\"2\"/>",
+        );
+        let whole_move = "<w:p><w:moveFrom w:id=\"1\" w:author=\"A\"><w:r><w:delText>x</w:delText></w:r></w:moveFrom><w:moveTo w:id=\"3\" w:author=\"A\"><w:r><w:t>x</w:t></w:r></w:moveTo></w:p>";
+        let source = format!("{ROOT}<w:body>{whole_move}</w:body></w:document>");
+        let rewritten = "<w:p><w:del w:id=\"1\" w:author=\"A\"><w:r><w:delText>x</w:delText></w:r></w:del><w:ins w:id=\"3\" w:author=\"A\"><w:r><w:t>x, edited</w:t></w:r></w:ins></w:p>";
+        assert_eq!(splice(&source, &[(0, rewritten)], &[0]), None);
+    }
+
     #[test]
     fn a_field_spanning_paragraphs_is_kept_around_an_edit_elsewhere() {
         let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry</w:t></w:r></w:p>";
@@ -1114,6 +1241,36 @@ mod tests {
     }
 
     #[test]
+    fn refuses_rewriting_a_paragraph_that_starts_inside_a_field() {
+        let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText> IF 1 = 1 </w:instrText></w:r></w:p>";
+        let code = "<w:p><w:r><w:instrText>\"yes\" </w:instrText></w:r></w:p>";
+        let closing = "<w:p><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>yes</w:t></w:r><w:r><w:fldChar w:fldCharType=\"e&#110;d\"/></w:r></w:p>";
+        let outside = "<w:p><w:r><w:t>Outside</w:t></w:r></w:p>";
+        let source =
+            format!("{ROOT}<w:body>{opening}{code}{closing}{outside}</w:body></w:document>");
+        let typed = "<w:p><w:r><w:t>typed</w:t></w:r></w:p>";
+        assert_eq!(
+            splice(
+                &source,
+                &[(0, opening), (1, typed), (2, closing), (3, outside)],
+                &[1]
+            ),
+            None
+        );
+        let edited_outside = "<w:p><w:r><w:t>Outside, edited</w:t></w:r></w:p>";
+        assert_eq!(
+            splice(
+                &source,
+                &[(0, opening), (1, code), (2, closing), (3, edited_outside)],
+                &[3]
+            ),
+            Some(format!(
+                "{ROOT}<w:body>{opening}{code}{closing}{edited_outside}</w:body></w:document>"
+            ))
+        );
+    }
+
+    #[test]
     fn refuses_rewriting_a_paragraph_whose_range_ends_outside_every_paragraph_or_whose_prefix_an_ancestor_rebinds()
      {
         let paragraph = "<w:p><w:r><w:t>a</w:t></w:r><w:bookmarkEnd w:id=\"3\"/></w:p>";
@@ -1135,20 +1292,52 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_prefix_the_rewrite_needs_that_an_element_below_the_root_binds_elsewhere() {
+    fn writes_the_whole_part_when_a_prefix_the_rewrite_needs_is_not_bound_on_the_root_alone() {
         let rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
         let photo = "<w:p><w:r><w:t>Photo</w:t></w:r></w:p>";
         let pictured = "<w:p><w:r><w:t>Photo</w:t></w:r><w:r><w:drawing><a:blip xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" r:embed=\"rId9\"/></w:drawing></w:r></w:p>";
         let shadowed =
             format!("{ROOT}<w:body xmlns:r=\"urn:unused\">{photo}</w:body></w:document>");
-        assert!(splice(&shadowed, &[(0, pictured)], &[0]).is_none());
-
-        let bound = shadowed.replace("urn:unused", rel);
-        let spliced = splice(&bound, &[(0, pictured)], &[0]).unwrap();
-        assert!(spliced.contains(pictured));
-        assert!(
-            root_tag(&spliced).is_some_and(|root| bindings(&spliced, &root).get("r") == Some(&rel))
+        assert_eq!(splice(&shadowed, &[(0, pictured)], &[0]), None);
+        let below_root = shadowed.replace("urn:unused", rel);
+        assert_eq!(splice(&below_root, &[(0, pictured)], &[0]), None);
+        let rooted = format!(
+            "{}<w:body>{photo}</w:body></w:document>",
+            ROOT.replace("<w:document ", &format!("<w:document xmlns:r=\"{rel}\" "))
         );
+        let rebound = rooted.replace("<w:body>", "<w:body xmlns:r=\"urn:unused\">");
+        assert_eq!(splice(&rebound, &[(0, pictured)], &[0]), None);
+        assert_eq!(
+            splice(&rooted, &[(0, pictured)], &[0]),
+            Some(rooted.replace(photo, pictured))
+        );
+    }
+
+    #[test]
+    fn writes_the_whole_part_when_patched_ids_would_declare_a_namespace_a_rewrite_needs() {
+        let source = format!(
+            "{W_ONLY_ROOT}<w:body><w:p><w:r><w:t>A</w:t></w:r></w:p><w:p><w:r><w:t>B</w:t></w:r></w:p></w:body></w:document>"
+        );
+        let paragraphs = [
+            (0, "<w:p><w:r><w:t>A</w:t></w:r></w:p>"),
+            (
+                1,
+                "<w:p w14:paraId=\"0BCD1234\"><w:r><w:t>B, edited</w:t></w:r></w:p>",
+            ),
+        ];
+        let assigned = [(0, "1234ABCD")];
+        assert_eq!(
+            splice_around(&source, &paragraphs, &[1], &assigned, ("", "")),
+            None
+        );
+        let declared = source.replace(W_ONLY_ROOT, ROOT);
+        let spliced =
+            splice_around(&declared, &paragraphs, &[1], &assigned, ("", "")).expect("spliced");
+        assert!(spliced.starts_with(ROOT));
+        assert_eq!(spliced.matches("xmlns:w14=").count(), 1);
+        let occurrences = paragraph_occurrences(&spliced).expect("occurrences");
+        assert_eq!(occurrences[0].para_id.as_deref(), Some("1234ABCD"));
+        assert_eq!(occurrences[1].para_id.as_deref(), Some("0BCD1234"));
     }
 
     #[test]

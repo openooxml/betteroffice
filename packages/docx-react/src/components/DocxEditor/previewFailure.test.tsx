@@ -138,6 +138,16 @@ mock.module('./canvasReplay', () => ({
   },
 }));
 const { isPresented, onReplayFailed } = await import('./internals/layoutProvenance');
+const coreSessionModule = await import('./hooks/useYrsCoreSession');
+const { useYrsCoreSession } = coreSessionModule;
+let replicaError: ((error: Error) => void) | null = null;
+mock.module('./hooks/useYrsCoreSession', () => ({
+  ...coreSessionModule,
+  useYrsCoreSession: (...args: Parameters<typeof useYrsCoreSession>) => {
+    replicaError = (error) => args[6]?.onReplicaError?.(error, args[4]);
+    return useYrsCoreSession(...args);
+  },
+}));
 const { DocxEditor } = await import('../../index');
 type Editor = import('../../index').DocxEditorRef;
 
@@ -574,6 +584,50 @@ test('an ordinary editor logs a canvas replay rejection without failing the load
     console.error = previousError;
   }
 }, 30_000);
+
+test.each(['renderer first', 'replica first'])('renderer and replica notify once per error with %s', async (order) => {
+  created = 0;
+  fullSession = null;
+  shownPages = false;
+  fullOpen = 'open';
+  failRender = null;
+  const ref = createRef<Editor>();
+  const errors: Error[] = [];
+  const buffer = documentBuffer();
+  const onError = (error: Error) => errors.push(error);
+  let presented!: () => void;
+  const ready = new Promise<void>((resolve) => { presented = resolve; });
+  const element = () => (
+    <DocxEditor
+      ref={ref} previewFirstPage={false} documentBuffer={buffer} onError={onError}
+      onFirstPagePainted={presented}
+    />
+  );
+  const view = render(element());
+  await ready;
+  await act(async () => {});
+  expect(renderer!.status).toBe('ready');
+  const session = ref.current!.getEditorRef()!.getYrsSession()!;
+  const failure = new Error('resident layout failed');
+  const reportReplica = () => replicaError!(failure);
+  const reportRenderer = () => {
+    workerFailure = { error: failure, errorEngine: session };
+    view.rerender(element());
+  };
+  const reportFirst = order === 'renderer first' ? reportRenderer : reportReplica;
+  const reportSecond = order === 'renderer first' ? reportReplica : reportRenderer;
+  await act(async () => reportFirst());
+  expect(errors).toEqual([failure]);
+  renderer!.resetSettled();
+  await act(async () => reportSecond());
+  expect(errors).toEqual([failure]);
+  await act(async () => reportReplica());
+  await expect(renderer!.settledDisplayList(null, null)).rejects.toBe(failure);
+  expect(errors).toEqual([failure]);
+  const next = new Error(failure.message);
+  await act(async () => replicaError!(next));
+  expect(errors).toEqual([failure, next]);
+});
 
 test('a load whose full session fails to lay out fails once, and leaves no session behind', async () => {
   created = 0;

@@ -88,10 +88,10 @@ pub struct IncrementalLayout {
     pub rebuilt_page_ranges: Vec<std::ops::Range<usize>>,
 }
 
-struct ConvergenceInput<'a> {
+struct ConvergenceInput<'a, F: PartialEq> {
     previous_checkpoints: &'a [LayoutCheckpoint],
-    previous_fingerprints: &'a [u64],
-    next_fingerprints: &'a [u64],
+    previous_fingerprints: &'a [F],
+    next_fingerprints: &'a [F],
     dirty_index: usize,
     /// Every dirty block, ascending, when the block count is unchanged.
     dirty: Option<&'a [usize]>,
@@ -121,7 +121,7 @@ enum Convergence {
     },
 }
 
-impl ConvergenceInput<'_> {
+impl<F: PartialEq> ConvergenceInput<'_, F> {
     fn retained_match(&self, checkpoint: &LayoutCheckpoint) -> Option<Convergence> {
         if checkpoint.block_index <= self.dirty_index {
             return None;
@@ -423,7 +423,7 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
 
     let mut paginator = origin_paginator(&initial_config, &plan, options)?;
 
-    let placement = place(
+    let placement = place::<u64>(
         measured,
         &plan,
         &mut paginator,
@@ -449,6 +449,7 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
             footers: None,
             page_gap: options.page_gap,
             partial: false,
+            cached_page_totals: false,
         },
         checkpoints: placement.checkpoints,
         placed_blocks: placement.placed_blocks,
@@ -461,12 +462,12 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
 /// then stop as soon as page-start geometry and the measured suffix converge
 /// with the retained layout. Callers must conservatively gate unsupported
 /// dependency shapes (floats, notes, structural edits) before entering here.
-pub fn layout_document_incremental(
+pub fn layout_document_incremental<F: PartialEq>(
     input: &mut Input,
     previous_layout: &mut Layout,
     previous_checkpoints: &[LayoutCheckpoint],
-    previous_fingerprints: &[u64],
-    next_fingerprints: &[u64],
+    previous_fingerprints: &[F],
+    next_fingerprints: &[F],
     dirty_index: usize,
 ) -> Result<CheckpointedLayout, LayoutError> {
     layout_document_incremental_ranges(
@@ -481,12 +482,12 @@ pub fn layout_document_incremental(
 }
 
 /// [`layout_document_incremental`], reporting the page ranges it placed afresh.
-pub fn layout_document_incremental_ranges(
+pub fn layout_document_incremental_ranges<F: PartialEq>(
     input: &mut Input,
     previous_layout: &mut Layout,
     previous_checkpoints: &[LayoutCheckpoint],
-    previous_fingerprints: &[u64],
-    next_fingerprints: &[u64],
+    previous_fingerprints: &[F],
+    next_fingerprints: &[F],
     dirty_index: usize,
 ) -> Result<IncrementalLayout, LayoutError> {
     let options = &input.options;
@@ -726,6 +727,7 @@ pub fn layout_document_incremental_ranges(
                 footers: None,
                 page_gap: options.page_gap,
                 partial: false,
+                cached_page_totals: false,
             },
             checkpoints,
             placed_blocks,
@@ -789,7 +791,7 @@ fn section_start(plan: &LayoutPlan, section_index: usize) -> usize {
 /// The block walk itself, per the module's ordering rules. Returns early once
 /// a checkpoint matches the retained layout, which is how incremental placement
 /// detects convergence.
-fn place(
+fn place<F: PartialEq>(
     measured: &[MeasuredBlock],
     plan: &LayoutPlan,
     paginator: &mut Paginator,
@@ -797,7 +799,7 @@ fn place(
     start_index: usize,
     mut section_idx: usize,
     page_index_offset: usize,
-    convergence: Option<&ConvergenceInput<'_>>,
+    convergence: Option<&ConvergenceInput<'_, F>>,
 ) -> Result<PlacementOutcome, LayoutError> {
     let mut checkpoints = Vec::new();
     let mut placed_blocks = 0usize;
@@ -2831,6 +2833,69 @@ mod pagination_rule_tests {
                 ] }],
             },
         })
+    }
+
+    #[test]
+    fn a_split_side_wrapped_float_and_its_anchor_match_incremental_layout() {
+        let blocks = |height: f64, offset: f64, anchor_before: f64| {
+            let floating = json!({
+                "block": {
+                    "kind": "table", "id": 90, "columnWidths": [60],
+                    "rows": [
+                        {"id": 91, "height": 30, "heightRule": "exact", "cells": []},
+                        {"id": 92, "height": 30, "heightRule": "exact", "cells": []}
+                    ],
+                    "floating": {
+                        "horzAnchor": "text", "vertAnchor": "text",
+                        "tblpXSpec": "right", "tblpY": offset,
+                        "leftFromText": 10, "rightFromText": 10
+                    }
+                },
+                "measure": {
+                    "kind": "table", "columnWidths": [60], "totalWidth": 60, "totalHeight": 60,
+                    "rows": [{"height": 30, "cells": []}, {"height": 30, "cells": []}]
+                }
+            });
+            let mut anchor = paragraph(2, 3, 10.0, json!({"spacing": {"before": anchor_before}}));
+            for line in anchor["measure"]["lines"].as_array_mut().unwrap() {
+                line["rightOffset"] = json!(70);
+            }
+            vec![
+                paragraph(0, 1, 10.0, json!({})),
+                paragraph(
+                    1,
+                    1,
+                    height,
+                    json!({"pageBreakBefore": true, "spacing": {"after": 12}}),
+                ),
+                floating,
+                anchor,
+            ]
+        };
+        let split = blocks(40.0, 10.0, 0.0);
+        let spaced = blocks(40.0, 10.0, 12.0);
+        assert_incremental_matches_full(split.clone(), spaced.clone(), &[3]);
+        let retained = assert_incremental_matches_full(spaced, split.clone(), &[3]);
+        assert_eq!(retained.layout.pages.len(), 3);
+        let Some(Fragment::Table(first)) = retained.layout.pages[1].fragments.last() else {
+            panic!("first table fragment expected");
+        };
+        assert_eq!((first.y, first.row_start, first.row_end), (60.0, 0, 1));
+        assert_eq!(first.carried_to_next, Some(true));
+        let [Fragment::Table(table), Fragment::Paragraph(anchor)] =
+            retained.layout.pages[2].fragments.as_slice()
+        else {
+            panic!("table and anchor expected");
+        };
+        assert_eq!(
+            (table.x, table.y, table.row_start, table.row_end),
+            (130.0, 10.0, 1, 2)
+        );
+        assert_eq!((anchor.y, anchor.from_line), (10.0, 0));
+        let fitting = blocks(10.0, 10.0, 0.0);
+        assert_incremental_matches_full(split.clone(), fitting.clone(), &[1]);
+        assert_incremental_matches_full(fitting, split.clone(), &[1]);
+        assert_incremental_matches_full(split, blocks(40.0, 45.0, 0.0), &[2]);
     }
 
     #[test]

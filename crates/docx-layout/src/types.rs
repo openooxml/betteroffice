@@ -1818,6 +1818,9 @@ pub struct TypesetRow {
     pub segments: Option<Vec<TypesetRowSegment>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub float_skip_before: Option<f64>,
+    /// Extra first-line px after a marker overruns its hanging indent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker_tab_offset: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_advances: Option<Vec<TypesetRunAdvance>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2369,10 +2372,12 @@ pub struct Layout {
     pub footers: Option<BTreeMap<String, HeaderFooterLayout>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page_gap: Option<f64>,
-    /// Lays out only part of the document, so its page count is not the
-    /// document's and NUMPAGES fields render empty.
+    /// Covers only part of the document.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub partial: bool,
+    /// While `partial`, NUMPAGES renders the field's cached result.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cached_page_totals: bool,
 }
 
 // ---------------------------------------------------------------------------

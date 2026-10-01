@@ -221,6 +221,11 @@ const projections = new WeakMap<
 >();
 const segmentSources = new WeakMap<SidebarReader, YrsStorySegmentSource>();
 
+/** @internal */
+export function hasCachedYrsSidebarProjection(session: SidebarReader): boolean {
+  return projections.get(session)?.version === session.version();
+}
+
 /**
  * Build a lazy projection from live yrs stories to display positions.
  * The canonical yrs segment stream supplies paragraph/atom units; table-cell

@@ -9,6 +9,7 @@ import {
   applyFrameDelta,
   applyFrameDeltaOwned,
   decodeFrameDelta,
+  decodeFrameDeltaSteps,
   displayPageNoteAnchorRevision,
   displayPageRevision,
   displayPageShiftsSince,
@@ -28,6 +29,56 @@ const FONT = resolve(
 
 const PRESENT_ONLY = 1 << 7;
 const ABSENT_ANCHOR = -(2n ** 63n);
+
+it('resumable decoding matches synchronous decoding and still validates late failures', () => {
+  const bytes = shiftFrame([[0, 1, 1, 1]], []);
+  const steps = decodeFrameDeltaSteps(bytes);
+  let yields = 0;
+  let step = steps.next();
+  while (!step.done) {
+    yields += 1;
+    step = steps.next();
+  }
+  expect(yields).toBeGreaterThan(0);
+  expect(step.value).toEqual(decodeFrameDelta(bytes));
+  const invalid = shiftFrame([[0, 1, PRESENT_ONLY, 1]], []);
+  const invalidSteps = decodeFrameDeltaSteps(invalid);
+  expect(() => {
+    while (!invalidSteps.next().done) {}
+  }).toThrow();
+});
+
+it('a recovery upsert reuses only a page with matching identity, content and primitive ids', () => {
+  const previous = notedFrame();
+  const page = previous.pages[0]!;
+  const recovery: DecodedFrameDelta = {
+    protocolVersion: FRAME_DELTA_VERSION,
+    full: true,
+    docEpoch: 2,
+    layoutEpoch: 2,
+    frameEpoch: 2,
+    baseFrameEpoch: 0,
+    pageCount: 1,
+    bytes: new Uint8Array(),
+    operations: [{ kind: 'upsert', ...page, page: structuredClone(page.page) }],
+  };
+  const next = applyFrameDelta(previous, recovery);
+  expect(next.pages[0]).toBe(page);
+  expect(next.displayList.pages[0]).toBe(page.page);
+  expect([...next.damagedPageIds]).toEqual([]);
+  for (const changed of [
+    { fingerprint: 2n },
+    { pageId: 2n },
+    { primitiveIds: new BigUint64Array([2n]) },
+  ]) {
+    const updated = applyFrameDelta(previous, {
+      ...recovery,
+      operations: [{ kind: 'upsert', ...page, ...changed, page: structuredClone(page.page) }],
+    });
+    expect(updated.displayList.pages[0]).not.toBe(page.page);
+    expect(updated.damagedPageIds.size).toBe(1);
+  }
+});
 
 type CraftedRun = [start: number, count: number, mask: number, delta: number];
 type CraftedAnchor = [area: number, note: number, start: bigint, end: bigint];

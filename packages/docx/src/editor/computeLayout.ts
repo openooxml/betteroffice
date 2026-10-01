@@ -18,6 +18,8 @@ interface RetainedKernelInputs {
 
 export interface ResidentRegionLayoutRequest {
   bodyStory: 'body';
+  /** @internal Use saved page totals while the layout is partial. */
+  cachedPageTotals?: boolean;
   options: Pick<LayoutOptions, 'contractVersion' | 'pageGap'>;
   regions: {
     sections: Array<{
@@ -49,6 +51,8 @@ export interface ComputeLayoutInputs {
   >;
   renderEnv: YrsRenderEnv;
   measurement: ResidentMeasurementConfig;
+  /** @internal See `ResidentRegionLayoutRequest.cachedPageTotals`. */
+  cachedPageTotals?: boolean;
 }
 
 export interface LayoutComputation {
@@ -157,6 +161,7 @@ export function computeLayout(inputs: ComputeLayoutInputs): LayoutComputation {
     inputs.renderEnv
   );
   request.measurement = inputs.measurement;
+  if (inputs.cachedPageTotals) request.cachedPageTotals = true;
   const session = inputs.session;
   const output = JSON.parse(
     session.layoutDocumentWithRegionsRetainedJson(JSON.stringify(request))

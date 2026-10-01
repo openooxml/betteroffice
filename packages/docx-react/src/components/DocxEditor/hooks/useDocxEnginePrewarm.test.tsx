@@ -122,27 +122,28 @@ test('byte arrival retries warm in parallel with the main-thread open', async ()
     { initialProps: { bytes: null as Uint8Array | null } }
   );
   try {
-    const failed = FakeWorker.instances[0];
+    const worker = FakeWorker.instances[0];
     await act(async () => {
-      failed.reply({ id: failed.posted[0].id, ok: false, error: 'init failed' });
+      worker.reply({ id: worker.posted[0].id, ok: false, error: 'init failed' });
     });
-    await waitFor(() => expect(failed.terminated).toBe(true));
+    expect(worker.terminated).toBe(false);
     hook.rerender({
       bytes: new Uint8Array(
         readFileSync(resolve(import.meta.dir, '__fixtures__/probe-linked-header.docx'))
       ),
     });
-    const worker = FakeWorker.instances[1];
-    expect(worker.posted.map((request) => request.type)).toEqual(['warm']);
+    expect(FakeWorker.instances).toHaveLength(1);
+    expect(worker.posted.map((request) => request.type)).toEqual(['warm', 'warm']);
     await waitFor(() => {
       expect(errors).toEqual([]);
       expect(hook.result.current.session).not.toBeNull();
     });
-    expect(preparedWorkers).toEqual([2]);
-    expect(worker.posted.map((request) => request.type)).toEqual(['warm']);
+    expect(preparedWorkers).toEqual([1]);
+    expect(worker.posted.map((request) => request.type)).toEqual(['warm', 'warm']);
     await act(async () => {
-      worker.reply({ id: worker.posted[0].id, ok: true });
+      worker.reply({ id: worker.posted[1].id, ok: true });
     });
+    expect(worker.terminated).toBe(false);
   } finally {
     prepare.mockRestore();
     hook.unmount();
