@@ -298,6 +298,8 @@ export interface ResidentFrameApplyResult {
 
 /** Pages a worker's first frame builds before the viewport is known. */
 const INITIAL_DISPLAY_WINDOW: [number, number] = [0, 5];
+/** Pages a worker preview's frames build; the full document's frame brings the rest. */
+const WORKER_PREVIEW_DISPLAY_WINDOW: [number, number] = [0, 2];
 /** Unbuilt pages built per request while the complete list is awaited. */
 const SETTLE_BUILD_BATCH_PAGES = 128;
 /** Unbuilt pages built per idle period away from the viewport. */
@@ -1611,6 +1613,7 @@ export function useRustDisplayList(
       // A worker handed to another session builds its pages once it has
       // presented that session's frame.
       if (frameEngineRef.current !== worker.engine) return;
+      if (workerPreviewEnginesRef.current.has(worker.engine)) return;
       if (isLayoutQueued(worker.engine) || isSupersededLayout(layoutRef.current)) {
         retryPageBuildsRef.current(idle);
         return;
@@ -2031,7 +2034,9 @@ export function useRustDisplayList(
           ? owner.stateVector
           : hostEngine.encodeStateVector(),
         ...(bootstrapping && owner.opened ? { opened: true } : {}),
-        displayWindow: displayWindowRef.current,
+        displayWindow: workerPreviewEnginesRef.current.has(hostEngine)
+          ? WORKER_PREVIEW_DISPLAY_WINDOW
+          : displayWindowRef.current,
         ...(bootstrapping || snapshot.workerAuthoritative
           ? {
               provisionalPages: bootstrapping
@@ -2573,7 +2578,9 @@ export function useRustDisplayList(
                 ? worker.bootstrap(snapshot, extras, {
                     ...sent(),
                     ...(owner.opened ? { opened: true } : {}),
-                    displayWindow: displayWindowRef.current,
+                    displayWindow: workerPreviewEnginesRef.current.has(hostEngine)
+                      ? WORKER_PREVIEW_DISPLAY_WINDOW
+                      : displayWindowRef.current,
                     heapLimitBytes: workerHeapLimitRef.current,
                     ...followedFrameEpoch(snapshotRef.current.frame),
                   })
