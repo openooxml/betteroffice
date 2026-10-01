@@ -283,16 +283,41 @@ pub struct ParagraphSavePlan {
     pub spliced_parts: Vec<SplicedPart>,
 }
 
-/// A story part whose stories hold the paragraphs seeded from it, in order.
+/// A story part whose stories hold the paragraphs seeded from it that they still hold in the
+/// same order, with paragraphs the source lacks only next to one seeded from it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SplicedPart {
     pub part: String,
     /// Lowercase hex SHA-256 of the source part.
     pub sha256: String,
-    /// `(ordinal, session key)` of every paragraph seeded from the part.
+    /// `(ordinal, session key)` of every paragraph seeded from the part that the stories hold.
     pub paragraphs: Vec<(u32, String)>,
     /// The ordinals of those whose segments changed since seeding.
     pub changed: Vec<u32>,
+    /// Where each paragraph the source lacks goes, in document order.
+    pub inserted: Vec<SpliceAnchor>,
+    /// The ordinals of the paragraphs seeded from the part that the stories no longer hold.
+    pub removed: Vec<u32>,
+}
+
+/// Where a spliced part takes a paragraph its source lacks: next to a source paragraph of the
+/// same story, with no table or block content control between them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpliceAnchor {
+    /// Right before the source paragraph with this ordinal.
+    Before(u32),
+    /// Right after the source paragraph with this ordinal.
+    After(u32),
+}
+
+impl SpliceAnchor {
+    /// Orders anchors as the positions they name.
+    pub fn position(self) -> (u32, bool) {
+        match self {
+            Self::Before(ordinal) => (ordinal, false),
+            Self::After(ordinal) => (ordinal, true),
+        }
+    }
 }
 
 /// One paragraph as the seeder lowers it, in document order.
@@ -555,6 +580,13 @@ struct UnitState {
     blocks: [u8; 32],
     /// Whether the unit holds anything besides those embeds and its pilcrow.
     inline: bool,
+}
+
+impl UnitState {
+    fn has_blocks(&self) -> bool {
+        use sha2::{Digest, Sha256};
+        self.blocks != <[u8; 32]>::from(Sha256::new().finalize())
+    }
 }
 
 fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
@@ -2364,8 +2396,10 @@ fn part_stories<'a>(
 }
 
 /// `source.parts[index]` as a part a save can splice: one whose stories still hold, in order
-/// and each with the block embeds it was seeded with, every paragraph seeded from it and no
-/// other but empty editor-only ones, each the only view of its source paragraph.
+/// and each with the block embeds it was seeded with, the paragraphs seeded from it that they
+/// hold, each the only view of its source paragraph. Removed source paragraphs held no block
+/// embeds, and a paragraph the source lacks holds none and sits next to a source paragraph of
+/// its story with no block embed between them, unless it is an empty editor-only one.
 fn spliced_part(
     source: &SourceIndex,
     index: usize,
@@ -2382,46 +2416,121 @@ fn spliced_part(
     if !before.keys().eq(after.keys()) {
         return None;
     }
+    let synthetic = |key: &str| by_key.get(key).is_some_and(|pilcrow| pilcrow.synthetic);
     let mut paragraphs = Vec::new();
     let mut changed = Vec::new();
+    let mut inserted = Vec::new();
+    let mut removed = Vec::new();
     for (seed, now) in before.values().zip(after.values()) {
-        if seed.units.len() != now.units.len() {
+        let (was_units, was_tail) = split_tail(&seed.units);
+        let (is_units, is_tail) = split_tail(&now.units);
+        match (was_tail, is_tail) {
+            (None, None) => {}
+            (Some(was), Some(is))
+                if was.digest == is.digest && was.blocks == is.blocks && !is.inline => {}
+            _ => return None,
+        }
+        let was_keys: HashMap<&str, &UnitState> = was_units
+            .iter()
+            .map(|unit| Some((unit.key.as_deref()?, unit)))
+            .collect::<Option<_>>()?;
+        let is_keys: HashSet<&str> = is_units
+            .iter()
+            .map(|unit| unit.key.as_deref())
+            .collect::<Option<_>>()?;
+        let kept = |units: &[UnitState], keys: &dyn Fn(&str) -> bool| {
+            units
+                .iter()
+                .filter_map(|unit| unit.key.as_deref())
+                .filter(|key| keys(key))
+                .collect::<Vec<_>>()
+        };
+        if kept(was_units, &|key| is_keys.contains(key))
+            != kept(is_units, &|key| was_keys.contains_key(key))
+        {
             return None;
         }
-        for (was, is) in seed.units.iter().zip(&now.units) {
-            if was.key != is.key || was.blocks != is.blocks {
+        for was in was_units {
+            let key = was.key.as_deref()?;
+            if is_keys.contains(key) {
+                continue;
+            }
+            match source.view_of(key) {
+                Some(((part_index, ordinal), 0)) if part_index == index && !was.has_blocks() => {
+                    removed.push(ordinal);
+                }
+                None if !was.inline && !was.has_blocks() => {}
+                _ => return None,
+            }
+        }
+        let mut anchor = None;
+        let mut pending = 0usize;
+        for is in is_units {
+            let key = is.key.as_deref()?;
+            if is.has_blocks() {
+                anchor = None;
+                if pending > 0 {
+                    return None;
+                }
+            }
+            let Some(was) = was_keys.get(key) else {
+                if is.has_blocks() || source.view_of(key).is_some() {
+                    return None;
+                }
+                if synthetic(key) && !is.inline {
+                    continue;
+                }
+                match anchor {
+                    Some(ordinal) => inserted.push(SpliceAnchor::After(ordinal)),
+                    None => pending += 1,
+                }
+                continue;
+            };
+            if was.blocks != is.blocks {
                 return None;
             }
             let same = was.digest == is.digest;
-            let Some(key) = is.key.as_deref() else {
-                if same && !is.inline {
-                    continue;
-                }
-                return None;
-            };
             match source.view_of(key) {
                 Some(((part_index, ordinal), 0)) if part_index == index => {
                     paragraphs.push((ordinal, key.to_owned()));
                     if !same {
                         changed.push(ordinal);
                     }
+                    inserted.extend(std::iter::repeat_n(SpliceAnchor::Before(ordinal), pending));
+                    pending = 0;
+                    anchor = Some(ordinal);
                 }
-                None if same && by_key.get(key).is_some_and(|pilcrow| pilcrow.synthetic) => {}
+                None if same && synthetic(key) => {}
                 _ => return None,
             }
         }
+        if pending > 0 {
+            return None;
+        }
     }
-    if paragraphs.len() != part.backed.len() {
+    if paragraphs.len() + removed.len() != part.backed.len() {
         return None;
     }
     paragraphs.sort_unstable();
     changed.sort_unstable();
+    removed.sort_unstable();
+    inserted.sort_by_key(|anchor| anchor.position());
     Some(SplicedPart {
         part: part.path().to_owned(),
         sha256: part.sha256.clone(),
         paragraphs,
         changed,
+        inserted,
+        removed,
     })
+}
+
+/// `units` without, and then with, the segments after the last pilcrow.
+fn split_tail(units: &[UnitState]) -> (&[UnitState], Option<&UnitState>) {
+    match units.split_last() {
+        Some((tail, rest)) if tail.key.is_none() => (rest, Some(tail)),
+        _ => (units, None),
+    }
 }
 
 fn holder_ref(scan: &Scan, source: Option<&SourceIndex>, holder: Holder) -> Option<ParagraphRef> {

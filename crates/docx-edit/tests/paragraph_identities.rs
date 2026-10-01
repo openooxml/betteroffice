@@ -1970,10 +1970,60 @@ fn story_parts_that_keep_their_paragraphs_splice_with_only_the_edited_ones_chang
     assert_eq!(edited.changed, vec![ordinal]);
     let header = spliced(&doc, "word/header1.xml").expect("an unchanged header splices");
     assert!(header.changed.is_empty());
+}
 
-    doc.split_paragraph(&ctx(), Position::new("body", 0), None)
+fn ordinal_of(part: &SplicedPart, key: &str) -> u32 {
+    part.paragraphs
+        .iter()
+        .find(|(_, paragraph)| paragraph == key)
+        .expect("the paragraph is spliced")
+        .0
+}
+
+#[test]
+fn split_and_merged_paragraphs_splice_with_their_new_and_removed_ones() {
+    let doc = seeded(&fixture());
+    let body = spliced(&doc, "word/document.xml").unwrap();
+    let valid = key_of(&doc, "body", "Valid");
+    let lower = key_of(&doc, "body", "Lower");
+    let duplicate = key_of(&doc, "body", "Duplicate");
+    let (valid_at, lower_at, duplicate_at) = (
+        ordinal_of(&body, &valid),
+        ordinal_of(&body, &lower),
+        ordinal_of(&body, &duplicate),
+    );
+    let at = doc.paragraph_mark_position(&valid).unwrap();
+    doc.split_paragraph(&ctx(), Position::new("body", at.index - 2), None)
         .unwrap();
-    assert_eq!(spliced(&doc, "word/document.xml"), None);
+    let split = spliced(&doc, "word/document.xml").expect("a split body splices");
+    assert_eq!(split.paragraphs, body.paragraphs);
+    assert_eq!(split.changed, vec![valid_at]);
+    assert_eq!(split.inserted, vec![SpliceAnchor::After(valid_at)]);
+    assert!(split.removed.is_empty());
+
+    doc.merge_paragraphs(&ctx(), &lower, MergeDirection::Forward)
+        .unwrap();
+    let merged = spliced(&doc, "word/document.xml").expect("a merged body splices");
+    let mut remaining = body.paragraphs.clone();
+    remaining.retain(|(ordinal, _)| *ordinal != duplicate_at);
+    assert_eq!(merged.paragraphs, remaining);
+    assert_eq!(merged.changed, vec![valid_at, lower_at]);
+    assert_eq!(merged.inserted, vec![SpliceAnchor::After(valid_at)]);
+    assert_eq!(merged.removed, vec![duplicate_at]);
+}
+
+#[test]
+fn a_paragraph_split_after_a_table_splices_after_it() {
+    let doc = seeded(&fixture());
+    let tail = key_of(&doc, "body", "Tail");
+    let at = doc.paragraph_mark_position(&tail).unwrap();
+    doc.split_paragraph(&ctx(), Position::new("body", at.index - 4), None)
+        .unwrap();
+    let spliced_tail = spliced(&doc, "word/document.xml").expect("a split after a table splices");
+    assert_eq!(
+        spliced_tail.inserted,
+        vec![SpliceAnchor::After(ordinal_of(&spliced_tail, &tail))]
+    );
 }
 
 #[test]

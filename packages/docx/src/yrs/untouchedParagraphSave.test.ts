@@ -127,16 +127,71 @@ describe('a session save after an edit', () => {
     expect(part(bytes, 'word/styles.xml')).toBe(part(source, 'word/styles.xml'));
   });
 
-  it('still saves a part whose paragraphs were split', async () => {
+  it('writes split, merged and appended paragraphs and keeps every other paragraph as authored', async () => {
+    const kept = '<w:p w14:paraId="00000002" w:rsidR="00AA0001"><w:r w:rsidRPr="00AA0002"><w:t>Kept QA</w:t></w:r></w:p>';
+    const last = '<w:p w14:paraId="00000005" w:rsidR="00AA0003"><w:r><w:t>Last QA</w:t></w:r></w:p>';
+    const section = '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>';
     const source = docx(
-      '<w:p><w:r><w:t>First QA</w:t></w:r></w:p><w:p><w:r><w:t>Second QA</w:t></w:r></w:p>'
+      [
+        '<w:p w14:paraId="00000001"><w:r><w:t>First QA</w:t></w:r></w:p>',
+        kept,
+        '<w:p w14:paraId="00000003"><w:r><w:t>Merge QA</w:t></w:r></w:p>',
+        '<w:p w14:paraId="00000004"><w:r><w:t>Into QA</w:t></w:r></w:p>',
+        last,
+        section,
+      ].join(''),
+      `xmlns:w="${W}" xmlns:w14="${W14}"`
     );
     const session = await open(source);
+    const paragraph = (text: string) => {
+      const found = session.paragraphs('body').find((candidate) => candidate.text === text);
+      if (!found) throw new Error(`no paragraph reads ${text}`);
+      return found;
+    };
+    session.splitParagraph({ story: 'body', paraId: paragraph('First QA').paraId, offset: 5 });
+    session.mergeParagraphs('body', paragraph('Merge QA').paraId);
+    session.splitParagraph({ story: 'body', paraId: paragraph('Last QA').paraId, offset: 7 });
+    const bytes = (await saveYrsDocx(session, { updateModifiedDate: false })).bytes;
+    const xml = part(bytes);
+
+    expect(xml).toContain(`${kept}<w:p`);
+    expect(xml).toContain(last);
+    expect(xml.endsWith(`${section}</w:body></w:document>`)).toBe(true);
+    expect(paragraphsWith(xml, 'Merge QA')).toHaveLength(1);
+    expect(paragraphsWith(xml, 'Into QA')).toHaveLength(1);
+    const reopened = await open(bytes);
+    expect(reopened.paragraphs('body').map(({ text }) => text)).toEqual([
+      'First',
+      ' QA',
+      'Kept QA',
+      'Merge QAInto QA',
+      'Last QA',
+      '',
+    ]);
+  });
+
+  it('keeps the paragraphs around a tracked paragraph insertion as authored', async () => {
+    const before = '<w:p w14:paraId="00000001" w:rsidR="00AA0001"><w:r><w:t>Before QA</w:t></w:r></w:p>';
+    const after = '<w:p w14:paraId="00000002" w:rsidR="00AA0002"><w:r><w:t>After QA</w:t></w:r></w:p>';
+    const source = docx(`${before}${after}`, `xmlns:w="${W}" xmlns:w14="${W14}"`);
+    const session = await open(source);
     const [first] = session.paragraphs('body');
-    session.splitParagraph({ story: 'body', paraId: first!.paraId, offset: 5 });
-    const xml = part((await saveYrsDocx(session)).bytes);
-    expect(paragraphsWith(xml, 'First')).toHaveLength(1);
-    expect(paragraphsWith(xml, 'QA')).toHaveLength(2);
+    const author = { name: 'Reviewer', date: '2026-01-01T00:00:00Z' };
+    session.splitParagraph({ story: 'body', paraId: first!.paraId, offset: 'Before QA'.length }, author);
+    const inserted = session.paragraphs('body')[1]!;
+    session.insertText({ story: 'body', paraId: inserted.paraId, offset: 0 }, 'New QA', author);
+    const bytes = (await saveYrsDocx(session, { updateModifiedDate: false })).bytes;
+    const xml = part(bytes);
+
+    expect(xml).toContain(after);
+    expect(paragraphsWith(xml, 'New QA')).toHaveLength(1);
+    expect(paragraphsWith(xml, 'New QA')[0]).toContain('<w:ins ');
+    const reopened = await open(bytes);
+    expect(reopened.paragraphs('body').map(({ text }) => text)).toEqual([
+      'Before QA',
+      'New QA',
+      'After QA',
+    ]);
   });
 
   it.todo(
