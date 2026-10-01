@@ -6143,8 +6143,14 @@ mod tests {
     fn resident_plain_text_patch_matches_cold_full_in(enabled: bool) {
         use super::lowering_fixture::{Package, para, run};
         use crate::{Position, StoryRange};
-        let laid_out = |bytes: &[u8], client_id| {
+        let laid_out = |bytes: &[u8], client_id, single_section: bool| {
             let (engine, request) = lowering_pages::laid_out(bytes, client_id);
+            let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+            let sections = request["regions"]["sections"].as_array_mut().unwrap();
+            if single_section && sections.len() == 2 {
+                sections.truncate(1);
+            }
+            let request = request.to_string();
             engine.set_local_lowering(enabled);
             engine.render.replace(Default::default());
             engine
@@ -6187,7 +6193,11 @@ mod tests {
                 .apply_and_layout(story, epoch)
                 .unwrap_or_else(|error| panic!("{story} [{start}, {end}) {text:?}: {error}"));
             let after = Rc::as_ptr(&engine.render.borrow().stories["body"].blocks);
-            assert_eq!(before == after, patched && enabled);
+            assert_eq!(
+                before == after,
+                patched && enabled,
+                "{story} [{start}, {end}) {text:?} enabled={enabled}"
+            );
             let incremental = snapshot(engine);
             macro_rules! cold {
                 ($($field:ident)+) => {{
@@ -6253,7 +6263,7 @@ mod tests {
             ("contextual", Package::new(&format!(r#"<w:p w14:paraId="10000001"><w:pPr><w:contextualSpacing/></w:pPr><w:r><w:t>Before</w:t></w:r></w:p>{}"#, para("10000002", &run("After"))))),
         ];
         for (name, package) in packages {
-            let (engine, request) = laid_out(&package.bytes(), 9602);
+            let (engine, request) = laid_out(&package.bytes(), 9602, true);
             let patched = name == "table";
             step(&engine, &request, "body", (0, 0, Some("x")), patched);
             if name == "table" {
@@ -6267,7 +6277,7 @@ mod tests {
             "10000001",
             r#"<w:r><w:rPr><w:b/></w:rPr><w:t>Bold</w:t></w:r>"#,
         ));
-        let (engine, request) = laid_out(&bold.bytes(), 9604);
+        let (engine, request) = laid_out(&bold.bytes(), 9604, true);
         step(&engine, &request, "body", (2, 2, Some("x")), true);
         step(&engine, &request, "body", (0, 1, None), true);
         for bytes in [
@@ -6279,7 +6289,7 @@ mod tests {
             include_bytes!("../tests/fixtures/page-fragments/pages.docx").as_slice(),
             include_bytes!("../tests/fixtures/footnote-anchor.docx").as_slice(),
         ] {
-            let (engine, request) = laid_out(bytes, 9603);
+            let (engine, request) = laid_out(bytes, 9603, false);
             step(&engine, &request, "body", (0, 0, Some("x")), false);
         }
     }
