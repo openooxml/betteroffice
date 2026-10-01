@@ -85,6 +85,7 @@ afterEach(() => {
   for (const session of sessions.splice(0)) session.destroy();
 });
 afterAll(async () => {
+  await act(async () => {});
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
@@ -414,11 +415,21 @@ function holdFrames() {
     return nextId;
   };
   globalThis.cancelAnimationFrame = (id) => { frames.delete(id); };
+  const run = () => {
+    const pending = [...frames.values()];
+    frames.clear();
+    for (const callback of pending) callback(performance.now());
+  };
   return {
-    run() {
-      const pending = [...frames.values()];
-      frames.clear();
-      for (const callback of pending) callback(performance.now());
+    run,
+    async until<T>(promise: Promise<T>): Promise<T> {
+      let settled = false;
+      void promise.then(() => { settled = true; }, () => { settled = true; });
+      while (!settled) {
+        run();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      return promise;
     },
     restore() {
       globalThis.requestAnimationFrame = request;
@@ -1579,7 +1590,7 @@ test.each(['A then B', 'B then A'])('Undo keeps worker proposals through font pr
     await act(async () => { await received('open'); });
     await act(async () => { await received('bootstrap'); });
     await act(async () => { await received('proposal'); });
-    await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+    await act(async () => { await frames.until(result.current.renderer.settledDisplayList(null, null)); });
     const api = result.current.ref.current!;
     const session = result.current.core.session!;
     layoutHere = spyOn(session, 'layoutDocumentWithRegionsRetainedJson');
@@ -1600,7 +1611,7 @@ test.each(['A then B', 'B then A'])('Undo keeps worker proposals through font pr
     const settle = async () => {
       const previous = posted.filter((request) => request.type === 'sync').at(-1)?.id ?? 0;
       await act(async () => { frames.run(); await received('sync', previous); });
-      await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+      await act(async () => { await frames.until(result.current.renderer.settledDisplayList(null, null)); });
       expect(isLayoutQueued(session)).toBe(false);
     };
     const setState = async (state: 'accepted' | 'proposed' | 'rejected') => {
@@ -1681,7 +1692,7 @@ test.each(['A then B', 'B then A'])('Undo keeps worker proposals through font pr
     expect(result.current.errors).toEqual([]);
     expect(errorLog).not.toHaveBeenCalled();
     await act(async () => { await received('sync', previousSync); });
-    await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+    await act(async () => { await frames.until(result.current.renderer.settledDisplayList(null, null)); });
     expect(isLayoutQueued(session)).toBe(false);
     await assertCurrent();
     await setState('rejected');
@@ -1709,7 +1720,7 @@ test.each(['unavailable', 'no adoption', 'no snapshot'])('a holding session with
     await act(async () => { await received('open'); });
     await act(async () => { await received('bootstrap'); });
     await act(async () => { await received('proposal'); });
-    await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+    await act(async () => { await frames.until(result.current.renderer.settledDisplayList(null, null)); });
     const session = result.current.core.session!;
     const api = result.current.ref.current!;
     const snapshot = await api.getProposals();
@@ -1828,7 +1839,7 @@ test('a toggle and local refresh wait for an older worker sync without rebuildin
       expect(replies.has(latest.id)).toBe(true);
       await act(async () => reply(latest));
       await act(async () => {});
-      await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+      await act(async () => { await frames.until(result.current.renderer.settledDisplayList(null, null)); });
       expect(isLayoutQueued(session)).toBe(false);
       expect(revisionPreviewKeyOf(result.current.pipeline.layout)).toBe(
         revisionPreviewKey(proposalRevisionPreview(session.getProposals()))
