@@ -115,6 +115,7 @@ export function registerWorkerProposalAuthority(
   let mutating = 0;
   let handingOver = false;
   let handover: Promise<Handover> | null = null;
+  let transfer: (() => Promise<Handover>) | null = null;
   let versionRewrite: { worker: string; main: string } | null = null;
   const listeners = new Set<() => void>();
   const notify = () => { for (const listener of listeners) listener(); };
@@ -159,6 +160,8 @@ export function registerWorkerProposalAuthority(
         if (!initialized && !handingOver) await initializeNow();
         if (initialized) return call();
       }
+      // A hand-over queued behind this call runs now: nothing ahead of it is left for the worker.
+      if (transfer) void transfer().catch(() => {});
       await awaitWorkerOpenReplica(session);
       assertCurrent();
       return main();
@@ -281,7 +284,8 @@ export function registerWorkerProposalAuthority(
       if (handover) return handover;
       handingOver = true;
       stopWaiting();
-      const transfer = async (): Promise<Handover> => {
+      let transferring: Promise<Handover> | null = null;
+      const transferOnce = async (): Promise<Handover> => {
         assertCurrent();
         const handedOver = await worker.handOver();
         assertCurrent();
@@ -304,7 +308,16 @@ export function registerWorkerProposalAuthority(
           },
         };
       };
-      handover = snapshotPosted ? enqueue(transfer) : interruptible(transfer());
+      let started!: () => void;
+      const startedEarly = new Promise<void>((resolve) => { started = resolve; });
+      const start = (): Promise<Handover> => {
+        started();
+        return (transferring ??= transferOnce());
+      };
+      transfer = start;
+      handover = snapshotPosted
+        ? Promise.race([enqueue(start), interruptible(startedEarly.then(() => transferring!))])
+        : interruptible(start());
       return handover;
     },
   };
