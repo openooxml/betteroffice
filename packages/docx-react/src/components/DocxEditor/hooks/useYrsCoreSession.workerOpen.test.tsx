@@ -2525,6 +2525,54 @@ test('a later proposal succeeds after a terminal crash during the first proposal
   }
 }, 15_000);
 
+test('a call queued behind a first proposal that crashes runs on the replacement worker', async () => {
+  installWorker({ crashProposalOnce: true });
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const api = () => result.current.ref.current!;
+    const paragraph = (await api().getParagraphIdentities()).paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    const initial = await api().getProposals();
+    const request = (id: string, expectVersion: string) => ({
+      expectVersion,
+      proposals: [{
+        id, paragraph,
+        suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+        op: 'insertText' as const, at: 'start' as const, text: 'Queued ',
+      }],
+    });
+    let first!: Promise<unknown>;
+    let queued!: Promise<unknown>;
+    await act(async () => {
+      first = api().proposeChanges(request('failed-proposal', initial.version)).catch((error: Error) => error);
+      queued = api().proposeChanges(request('queued-proposal', initial.version)).catch((error: Error) => error);
+      expect(await first).toBeInstanceOf(Error);
+    });
+    let outcome: unknown;
+    await act(async () => {
+      outcome = await Promise.race([
+        queued,
+        new Promise((resolve) => setTimeout(() => resolve('hung'), 5000)),
+      ]);
+    });
+    expect(outcome).not.toBe('hung');
+    expect(outcome).toMatchObject({ ok: expect.any(Boolean) });
+    await act(async () => { await api().whenLayoutComplete({ timeoutMs: 5000 }); });
+    const current = await api().getProposals();
+    if (!current.proposals.some(({ id }) => id === 'queued-proposal')) {
+      await act(async () => {
+        expect(await api().proposeChanges(request('queued-proposal', current.version))).toMatchObject({ ok: true });
+      });
+    }
+    expect((await api().getProposals()).proposals.map(({ id }) => id)).toEqual(['queued-proposal']);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
 test('without worker proposals the ref waits for hydration before applying a proposal', async () => {
   const { posted, workers } = installWorker({ holdState: true });
   const { result } = renderHook(useHarness, {

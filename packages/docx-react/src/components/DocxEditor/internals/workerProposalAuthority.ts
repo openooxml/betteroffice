@@ -156,6 +156,7 @@ export function registerWorkerProposalAuthority(
       if (viaWorker) {
         await ready;
         assertCurrent();
+        if (!initialized && !handingOver) await initializeNow();
         if (initialized) return call();
       }
       await awaitWorkerOpenReplica(session);
@@ -198,6 +199,19 @@ export function registerWorkerProposalAuthority(
     if (!reply.result) throw new Error('The resident worker did not return a proposal result');
     return reply.result;
   }, main);
+  const initializeNow = async (): Promise<void> => {
+    await Promise.race([hooks.laidOut(), stopped]);
+    assertCurrent();
+    if (handingOver || initialized) return;
+    snapshotPosted = true;
+    const reply = await worker.proposal({ kind: 'snapshot' });
+    assertCurrent();
+    const previousVersion = mirror?.version;
+    initialized = true;
+    store(reply);
+    hooks.adopted(reply.mirror.version);
+    if (previousVersion !== undefined && previousVersion !== reply.mirror.version) hooks.relayout();
+  };
   const authority: RegisteredAuthority = {
     get initialized() { return initialized; },
     restart() {
@@ -211,19 +225,7 @@ export function registerWorkerProposalAuthority(
       if (failure) return Promise.reject(failure.error);
       if (initializing) return initializing;
       if (handingOver) return Promise.resolve(awaitWorkerOpenReplica(session));
-      initializing = enqueue(async () => {
-        await Promise.race([hooks.laidOut(), stopped]);
-        assertCurrent();
-        if (handingOver) return;
-        snapshotPosted = true;
-        const reply = await worker.proposal({ kind: 'snapshot' });
-        assertCurrent();
-        const previousVersion = mirror?.version;
-        initialized = true;
-        store(reply);
-        hooks.adopted(reply.mirror.version);
-        if (previousVersion !== undefined && previousVersion !== reply.mirror.version) hooks.relayout();
-      });
+      initializing = enqueue(initializeNow);
       return initializing;
     },
     geometry: () => geometry,
