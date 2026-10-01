@@ -792,19 +792,31 @@ mod min_content_tests {
             .collect()
     }
 
+    fn line_heads(block: serde_json::Value, max_width: f32) -> Vec<(u32, u32)> {
+        measure_paragraph(&store(), &input(block, max_width))
+            .unwrap()
+            .lines
+            .iter()
+            .map(|line| (line.head_run, line.head_char))
+            .collect()
+    }
+
     #[test]
     fn a_word_split_across_runs_wraps_whole() {
         let block = serde_json::json!({ "kind": "paragraph", "runs": [
             { "kind": "text", "text": "0000 00" },
             { "kind": "text", "text": "00 0" }
         ]});
-        let heads: Vec<_> = measure_paragraph(&store(), &input(block, 7.0 * W0))
-            .unwrap()
-            .lines
-            .iter()
-            .map(|line| (line.head_run, line.head_char))
-            .collect();
-        assert_eq!(heads, vec![(0, 0), (0, 5)]);
+        assert_eq!(line_heads(block, 7.0 * W0), vec![(0, 0), (0, 5)]);
+    }
+
+    #[test]
+    fn a_split_word_wider_than_a_line_still_breaks_at_the_seam() {
+        let block = serde_json::json!({ "kind": "paragraph", "runs": [
+            { "kind": "text", "text": "00 000" },
+            { "kind": "text", "text": "00000" }
+        ]});
+        assert_eq!(line_heads(block, 7.0 * W0), vec![(0, 0), (1, 0)]);
     }
 
     #[test]
