@@ -1315,7 +1315,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         firstPagePendingRef.current &&
         !awaitingDocument() &&
         !replacedListsRef.current.has(displayList) &&
-        shown.displayList?.pages.length
+        shown.displayList?.pages.some((page) => page.unbuilt !== true)
       ) {
         firstPagePendingRef.current = false;
         // The callback of the document whose pages presented, not of one committed since.
