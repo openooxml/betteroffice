@@ -166,10 +166,10 @@ enum AdjacentStoryUnit {
     Pilcrow,
 }
 
-/// Resolves a paragraph to its story span via the committed segment index.
+/// Resolves a paragraph to its story span via the committed paragraph index.
 /// Story-scoped: a `para_id` that lives in another story is "not found".
 fn find_para_span(doc: &EditingDoc, story: &str, para_id: &str) -> Result<ParaSpan, JsValue> {
-    doc.segment_index(story)
+    doc.paragraph_index(story)
         .map_err(js_err)?
         .para_span(para_id)
         .map(|(start, pilcrow)| ParaSpan { start, pilcrow })
@@ -231,8 +231,8 @@ fn comment_ranges(doc: &EditingDoc, ranges_json: &str) -> Result<Vec<StoryRange>
 /// awareness positions resolve to story indices; the JS facade never exposes
 /// that internal coordinate system.
 fn index_loc(doc: &EditingDoc, story: &str, index: u32) -> Result<IndexedLoc, JsValue> {
-    let segments = doc.segment_index(story).map_err(js_err)?;
-    let para = segments.para_at(index).ok_or_else(|| {
+    let paragraphs = doc.paragraph_index(story).map_err(js_err)?;
+    let para = paragraphs.para_at(index).ok_or_else(|| {
         js_err(format!(
             "selection index {index} does not resolve in story {story:?}"
         ))
@@ -4551,7 +4551,7 @@ impl EditSession {
         Ok(self
             .engine
             .doc()
-            .segment_index(story)
+            .paragraph_index(story)
             .map_err(js_err)?
             .para_id_count(para_id))
     }
