@@ -257,6 +257,65 @@ test('a resident delete does not merge a paragraph forward over a table', async 
   expect(client.isReady()).toBe(true);
 });
 
+test('input during completion paints first, inserts once and undoes in one step', async () => {
+  const main = await createYrsSession({ clientId: 5112 });
+  sessions.push(main);
+  const filler = 'lorem ipsum dolor sit amet '.repeat(8);
+  const paragraphs = Array.from({ length: 240 }, (_, index) => ({
+    text: index === 0 ? 'Seed' : `${index} ${filler}`,
+  }));
+  const ids = main.loadStories([{ storyId: 'body', paragraphs }]).body!;
+  main.registerFont(new Uint8Array(readFileSync(FONT)));
+  main.adoptResidentWorkerLayout!(LAYOUT);
+  main.setSelection({ story: 'body', paraId: ids[0]!, offset: paragraphs[0]!.text.length });
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  const booted = await client.bootstrap(main.residentWorkerSnapshot()!, '', {
+    layoutExtras: '{}', provisionalPages: 1, displayWindow: [0, 1],
+  });
+  expect(booted.layoutProvisional).toBe(true);
+  let frame = applyFrameDeltaOwned(null, decodeFrameDelta(booted.frame));
+  const order: string[] = [];
+  const completion = client.completeLayout(frame.frameEpoch, false, 1).then((reply) => {
+    order.push('complete');
+    return reply;
+  });
+  const typed = await client.applyInput(
+    ' typed', main.selection()!, frame.frameEpoch, false, false, [0, 1]
+  ).then((reply) => {
+    order.push('input');
+    return reply;
+  });
+  if (!typed.applied) throw new Error('the worker refused provisional input');
+  expect(order).toEqual(['input']);
+  expect(typed.layoutJson).toBeUndefined();
+  expect(typed.layoutProvisional).toBeUndefined();
+  expect(typed.selection?.head).toMatchObject({ offset: paragraphs[0]!.text.length + 6 });
+  expect(typed.caret.caretRect).not.toBeNull();
+  frame = applyFrameDeltaOwned(frame, decodeFrameDelta(typed.frame));
+  expect(frameText(frame)).toContain(`${paragraphs[0]!.text} typed`);
+  for (const update of typed.updates) main.applyLocalUpdate(update);
+
+  const completed = await completion;
+  if (!completed?.layoutJson) throw new Error('the worker omitted the completed layout');
+  expect(order).toEqual(['input', 'complete']);
+  const full = JSON.parse(completed.layoutJson) as { layout: { pages: unknown[] }; provisional?: boolean };
+  expect(full.provisional).not.toBe(true);
+  expect(full.layout.pages.length).toBeGreaterThan(3);
+  expect(full).toEqual(JSON.parse(main.layoutDocumentWithRegionsRetainedJson(LAYOUT)));
+  frame = applyFrameDeltaOwned(frame, decodeFrameDelta(completed.frame));
+  expect(frame.displayList.pages.length).toBe(full.layout.pages.length);
+  const read = await client.documentRead({ kind: 'readParagraphs', request: { view: 'accepted' } });
+  expect(read.value).toMatchObject({
+    ok: true,
+    paragraphs: paragraphs.map(({ text }, index) => ({ text: index === 0 ? `${text} typed` : text })),
+  });
+  expect(accepted(main)[0]).toBe(`${paragraphs[0]!.text} typed`);
+  expect(main.undo()).toBe(true);
+  expect(accepted(main)).toEqual(paragraphs.map(({ text }) => text));
+  expect(main.undo()).toBe(false);
+});
+
 test('the worker lays a host batch out exactly as the main thread does', async () => {
   const main = await createYrsSession({ clientId: 5110 });
   sessions.push(main);

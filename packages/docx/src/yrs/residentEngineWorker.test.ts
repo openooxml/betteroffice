@@ -1225,7 +1225,7 @@ describe('sliced layout completion', () => {
         calls.push('pages');
         return new Uint8Array([0]);
       },
-      residentCaretSnapshot: () => ({ frameEpoch: epoch, caretRect: null }),
+      residentCaretSnapshot: () => ({ frameEpoch: epoch, caretRect: w.harness.caret }),
       buildDisplayListFrame: () => {
         epoch += 1;
         // One page, as a provisional frame shows its prefix.
@@ -1304,6 +1304,178 @@ describe('sliced layout completion', () => {
     expect(calls.filter((call) => call === 'begin')).toHaveLength(2);
     expect(calls.indexOf('update')).toBeLessThan(calls.lastIndexOf('begin'));
     expect(calls).not.toContain('whole');
+  });
+
+  test('repeated input answers before completion and restarts without a synchronous pass', async () => {
+    const { w, calls, onResume, bootstrap } = steppedWorker(100_000);
+    await bootstrap();
+    w.harness.caret = { pageId: '1', pageIndex: 0, x: 10, y: 10, height: 12 };
+    const prefixPages: number[] = [];
+    Object.assign(w.harness.session, {
+      insertText: (_story: string, _paraId: string, _offset: number, text: string) => {
+        calls.push(`input:${text}`);
+      },
+      layoutDocumentWithRegionsPrefixRetainedJson: (_input: string, pages: number) => {
+        prefixPages.push(pages);
+        return provisional;
+      },
+    });
+    const order: string[] = [];
+    const inputs: Array<Promise<ResidentEngineWorkerResponse>> = [];
+    for (let index = 0; index < 6; index += 1) {
+      onResume.push(() => {
+        const loc = { story: 'body', paraId: '1', offset: index };
+        inputs.push(w.send({
+          type: 'applyInput', text: String(index), selection: { anchor: loc, head: loc },
+          expectedFrameEpoch: w.harness.delta!.frameEpoch, profile: false, paintCaret: false,
+          displayWindow: [0, index === 0 ? 5 : 1], retainBuiltPages: true,
+        }).then((reply) => {
+          order.push(`input:${index}`);
+          return reply;
+        }));
+      });
+    }
+    const completed = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 2,
+    }).then((reply) => {
+      order.push('complete');
+      return reply;
+    });
+    expect(order).toEqual([
+      'input:0', 'input:1', 'input:2', 'input:3', 'input:4', 'input:5', 'complete',
+    ]);
+    for (const reply of await Promise.all(inputs)) {
+      expect(reply.ok).toBe(true);
+      expect(reply.ok && reply.frame).toBeDefined();
+      expect(reply.ok && reply.layoutJson).toBeUndefined();
+      expect(reply.ok && reply.layoutProvisional).toBeUndefined();
+    }
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(prefixPages).toEqual([5, 5, 5, 5, 5, 5]);
+    expect(w.harness.retainBuiltPages.slice(-6)).toEqual([true, true, true, true, true, true]);
+    expect(calls.filter((call) => call === 'begin')).toHaveLength(7);
+    expect(calls).not.toContain('whole');
+  });
+
+  test('input whose prefix covers the document answers before the waiting completion', async () => {
+    const { w, calls, onResume, bootstrap } = steppedWorker(100);
+    await bootstrap();
+    w.harness.caret = { pageId: '1', pageIndex: 0, x: 10, y: 10, height: 12 };
+    Object.assign(w.harness.session, {
+      insertText: () => calls.push('input'),
+      layoutDocumentWithRegionsPrefixRetainedJson: () => full,
+    });
+    const order: string[] = [];
+    let input: Promise<ResidentEngineWorkerResponse> | undefined;
+    onResume.push(() => {
+      const loc = { story: 'body', paraId: '1', offset: 0 };
+      input = w.send({
+        type: 'applyInput', text: 'x', selection: { anchor: loc, head: loc },
+        expectedFrameEpoch: 1, profile: false, paintCaret: false,
+      }).then((reply) => {
+        order.push('input');
+        return reply;
+      });
+    });
+    const completed = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 2,
+    }).then((reply) => {
+      order.push('complete');
+      return reply;
+    });
+    const typed = await input!;
+    expect(typed.ok).toBe(true);
+    expect(typed.ok && typed.frame).toBeDefined();
+    expect(typed.ok && typed.layoutJson).toBeUndefined();
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(order).toEqual(['input', 'complete']);
+    expect(calls).toEqual(['begin', 'resume:2', 'input']);
+    const again = await w.send({ type: 'completeLayout', expectedFrameEpoch: 3, paintCaret: false });
+    expect(again.ok && again.frame).toBeUndefined();
+    expect(new Set(w.answered).size).toBe(w.answered.length);
+  });
+
+  test.each(['input', 'completion'] as const)(
+    'a %s frame failure after input completes the prefix answers each request once',
+    async (failure) => {
+      const { w, onResume, bootstrap } = steppedWorker(100);
+      let update: ((bytes: Uint8Array) => void) | undefined;
+      Object.assign(w.harness.session, {
+        onUpdate: (listener: (bytes: Uint8Array) => void) => {
+          update = listener;
+          return () => {};
+        },
+      });
+      await bootstrap();
+      w.harness.caret = { pageId: '1', pageIndex: 0, x: 10, y: 10, height: 12 };
+      const build = w.harness.session.buildDisplayListFrame;
+      let frames = 0;
+      const message = 'resident input state is not ready';
+      Object.assign(w.harness.session, {
+        insertText: () => update!(new Uint8Array([1])),
+        layoutDocumentWithRegionsPrefixRetainedJson: () => full,
+        buildDisplayListFrame: () => {
+          frames += 1;
+          if (frames === (failure === 'input' ? 1 : 2)) throw new Error(message);
+          return build();
+        },
+      });
+      let input: Promise<ResidentEngineWorkerResponse> | undefined;
+      onResume.push(() => {
+        const loc = { story: 'body', paraId: '1', offset: 0 };
+        input = w.send({
+          type: 'applyInput', text: 'x', selection: { anchor: loc, head: loc },
+          expectedFrameEpoch: 1, profile: false, paintCaret: false,
+        });
+      });
+      const completed = await w.send({
+        type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 2,
+      });
+      expect(completed).toMatchObject({ ok: false, error: message });
+      const typed = await input!;
+      if (failure === 'input') {
+        expect(typed).toMatchObject({
+          ok: false, error: message, residentUnavailable: true, terminal: true,
+        });
+      } else {
+        expect(typed.ok).toBe(true);
+      }
+      expect(new Set(w.answered).size).toBe(w.answered.length);
+    }
+  );
+
+  test('input outside the prefix finishes the pass and answers completion first', async () => {
+    const { w, calls, onResume, bootstrap } = steppedWorker(100);
+    await bootstrap();
+    Object.assign(w.harness.session, {
+      applyInput: () => {
+        calls.push('input');
+        w.harness.caret = { pageId: '1', pageIndex: 0, x: 10, y: 10, height: 12 };
+        return w.harness.session.buildDisplayListFrame();
+      },
+    });
+    const order: string[] = [];
+    let input: Promise<ResidentEngineWorkerResponse> | undefined;
+    onResume.push(() => {
+      const loc = { story: 'body', paraId: 'tail', offset: 0 };
+      input = w.send({
+        type: 'applyInput', text: 'x', selection: { anchor: loc, head: loc },
+        expectedFrameEpoch: 1, profile: false, paintCaret: false,
+      }).then((reply) => {
+        order.push('input');
+        return reply;
+      });
+    });
+    const completed = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 2,
+    }).then((reply) => {
+      order.push('complete');
+      return reply;
+    });
+    expect((await input!).ok).toBe(true);
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(order).toEqual(['complete', 'input']);
+    expect(calls).toEqual(['begin', 'resume:2', 'resume:100', 'input']);
   });
 
   test('a glyph trap while a frame request finishes the pass answers both requests once', async () => {
