@@ -3,6 +3,7 @@ import type { YrsSession } from '@betteroffice/docx/yrs';
 import {
   awaitWorkerOpenReplica,
   deferWorkerOpenReplica,
+  ensureWorkerOpenReplica,
   requestOnDemandWorkerOpenReplica,
   requestWorkerOpenReplica,
   workerOpenReplicaOnDemand,
@@ -130,4 +131,18 @@ test('a request after the replica was cancelled does not start it', async () => 
   replica.cancel();
   await expect(requestWorkerOpenReplica(session)!).rejects.toThrow();
   expect(hydrate).not.toHaveBeenCalled();
+});
+
+test.each(['rejection', 'load', 'ensure'] as const)('a replica %s fallback defaults to failure', async (cause) => {
+  const session = fakeSession();
+  const fallback = mock(() => {});
+  deferWorkerOpenReplica(session, async () => {
+    if (cause === 'rejection') throw new Error('Hydration rejected');
+    return () => { throw new Error('Hydration failed'); };
+  }, fallback, () => {});
+  if (cause === 'ensure') ensureWorkerOpenReplica(session);
+  else await requestWorkerOpenReplica(session);
+  expect(fallback).toHaveBeenCalledTimes(1);
+  expect(fallback).toHaveBeenCalledWith('failure');
+  expect(workerOpenReplicaPending(session)).toBe(false);
 });

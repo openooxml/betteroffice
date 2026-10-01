@@ -21,7 +21,7 @@ import type { DocxEditorRef } from '../../DocxEditor';
 import type { PagedEditorRef } from '../PagedEditor';
 import { YrsInput, type YrsInputRef } from '../YrsInput';
 import { createCommentIdAllocator } from '../commentFactories';
-import { deferWorkerOpenReplica, workerOpenReplicaOnDemand } from '../internals/workerOpenReplica';
+import { deferWorkerOpenReplica, workerOpenReplicaOnDemand, type WorkerOpenFallbackReason } from '../internals/workerOpenReplica';
 import { beginWorkerProposalHandover, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { EditorMode } from '../internals/editing-modes';
 import { DOCX_REF_REPLICA_ACCESS, DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
@@ -153,6 +153,7 @@ async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, 
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });
   const opens: boolean[] = [];
+  const fallbackReasons: WorkerOpenFallbackReason[] = [];
   const readiness = { current: false };
   const replica = deferWorkerOpenReplica(
     session,
@@ -166,7 +167,8 @@ async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, 
         handover?.complete();
       };
     },
-    () => {
+    (reason) => {
+      fallbackReasons.push(reason);
       opens.push(true);
       session.openDocx(bytes, true);
     },
@@ -174,7 +176,7 @@ async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, 
     { active: () => hydrateOnDemand, request: () => replica.start() }
   );
   const mounted = apiFor(session, document, mode, mountInput ? readiness : undefined);
-  return { ...mounted, session, worker, replica, release, opens };
+  return { ...mounted, session, worker, replica, release, opens, fallbackReasons };
 }
 
 async function pendingWorkerProposalReplica() {
@@ -291,7 +293,7 @@ test('async reads, save, exports and write refusals wait for the main replica', 
 });
 
 test('synchronous reads finish the main open without changing their return types', async () => {
-  const { api, session, replica, opens } = await pendingReplica();
+  const { api, session, replica, opens, fallbackReasons } = await pendingReplica();
   let document: Document | null = null;
   act(() => { document = api.getDocument(); });
   expect(document).not.toBeNull();
@@ -303,6 +305,7 @@ test('synchronous reads finish the main open without changing their return types
     paraId: first.paraId, match: first.text, before: '', after: '',
   });
   expect(api.scrollToParaId(first.paraId)).toBe(true);
+  expect(fallbackReasons).toEqual([{ syncAccess: 'getDocument' }]);
 });
 
 test('a batch chained from an early read edits the hydrated document', async () => {
@@ -582,7 +585,7 @@ test('independent APIs do not start a replica open', async () => {
 });
 
 test('getEditorRef immediately inserts text after synchronously finishing the replica', async () => {
-  const { api, session, replica, opens } = await pendingReplica('editing', true);
+  const { api, session, replica, opens, fallbackReasons } = await pendingReplica('editing', true);
   expect(replica.pending).toBe(true);
   await act(async () => {
     api.getEditorRef()!.insertText('Immediate ');
@@ -590,5 +593,6 @@ test('getEditorRef immediately inserts text after synchronously finishing the re
   });
   expect(replica.pending).toBe(false);
   expect(opens).toEqual([true]);
+  expect(fallbackReasons).toEqual([{ syncAccess: 'getEditorRef' }]);
   expect(session.paragraphs('body')[0]!.text).toStartWith('Immediate ');
 });
