@@ -3,4 +3,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-Vertical text in table rows with a minimum or automatic height stays on one line and the row grows to fit it, as in Word.
+Vertical text in vertically merged table cells wraps at the height of the merged cell, so merged header labels stay on one line like in Word.
