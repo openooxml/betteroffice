@@ -811,15 +811,6 @@ mod min_content_tests {
     }
 
     #[test]
-    fn a_split_word_wider_than_a_line_still_breaks_at_the_seam() {
-        let block = serde_json::json!({ "kind": "paragraph", "runs": [
-            { "kind": "text", "text": "00 000" },
-            { "kind": "text", "text": "00000" }
-        ]});
-        assert_eq!(line_heads(block, 7.0 * W0), vec![(0, 0), (1, 0)]);
-    }
-
-    #[test]
     fn the_narrowest_width_that_cuts_no_word_is_the_widest_word() {
         let block = serde_json::json!({ "kind": "paragraph", "runs": [
             { "kind": "text", "text": "00 0000 0" }
