@@ -231,7 +231,8 @@ export async function writeSessionSave(
   capture: DocxSessionSave,
   originalBuffer: ArrayBuffer,
   options: RepackOptions = {},
-  patches: (part: string) => boolean = () => true
+  patches: (part: string) => boolean = () => true,
+  skipMutations = false
 ): Promise<DocxSavedDocument> {
   const plan = {
     ...capture.plan,
@@ -245,7 +246,8 @@ export async function writeSessionSave(
     options,
     undefined,
     undefined,
-    plan
+    plan,
+    skipMutations
   );
   const bytes = new Uint8Array(buffer);
   const held = session.writtenParagraphIds(bytes);

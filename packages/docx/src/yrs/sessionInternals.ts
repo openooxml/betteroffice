@@ -1,6 +1,10 @@
 /** Engine operations the package runs on sessions it creates itself; not public API. */
 
+import type { editorSaveKeys } from './editorSaveKeys';
+import type { YrsSession } from './index';
+
 export interface YrsSessionInternals {
+  sourcePackage(): { buffer: ArrayBuffer; keys: ReturnType<typeof editorSaveKeys> } | null;
   /** Compares two DOCX packages into the empty session; bridge JSON. */
   compareDocx(original: Uint8Array, revised: Uint8Array, options: string): string;
   /** The final comparison result for the saved bytes; bridge JSON. */
@@ -10,6 +14,13 @@ export interface YrsSessionInternals {
 }
 
 const registry = new WeakMap<object, YrsSessionInternals>();
+
+/** Returns the session's opened source package when available. @internal */
+export function sessionSourcePackage(
+  session: YrsSession
+): { buffer: ArrayBuffer; keys: ReturnType<typeof editorSaveKeys> } | null {
+  return registry.get(session)?.sourcePackage() ?? null;
+}
 
 export function registerSessionInternals(session: object, internals: YrsSessionInternals): void {
   registry.set(session, internals);

@@ -1493,6 +1493,12 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly wasm_failed_allocation_bytes: () => number;
+    readonly wasm_heap_counted: () => number;
+    readonly wasm_live_bytes: () => number;
+    readonly wasm_peak_bytes: () => number;
+    readonly set_wasm_heap_limit: (a: number) => void;
+    readonly reset_wasm_peak_bytes: () => void;
     readonly __wbg_editsession_free: (a: number, b: number) => void;
     readonly editsession_accept_change: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_add_comment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
@@ -1670,12 +1676,6 @@ export interface InitOutput {
     readonly list_docx_content_controls_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly render_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly render_docx_markdown_with_pages_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly wasm_failed_allocation_bytes: () => number;
-    readonly wasm_heap_counted: () => number;
-    readonly wasm_live_bytes: () => number;
-    readonly wasm_peak_bytes: () => number;
-    readonly set_wasm_heap_limit: (a: number) => void;
-    readonly reset_wasm_peak_bytes: () => void;
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
     readonly clear_measure_fonts: () => [number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
