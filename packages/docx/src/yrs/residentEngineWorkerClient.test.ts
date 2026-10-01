@@ -408,10 +408,9 @@ describe('warmup', () => {
     );
     const { worker, client } = setup();
     const warm = client.warm();
-    const rejected = expect(warm).rejects.toThrow();
     if (ending === 'destroy') client.destroy();
     else worker.onerror?.({ message: 'crashed' } as ErrorEvent);
-    await rejected;
+    await expect(warm).rejects.toThrow();
     const posted = [...worker.posted];
     resolve(editModule);
     await Promise.resolve();
