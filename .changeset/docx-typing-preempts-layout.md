@@ -2,4 +2,4 @@
 "@betteroffice/docx": patch
 ---
 
-Typing right after opening a long document no longer waits for the rest of the document to be laid out first.
+Typing right after opening a long document is answered before the rest of the document finishes its layout.
