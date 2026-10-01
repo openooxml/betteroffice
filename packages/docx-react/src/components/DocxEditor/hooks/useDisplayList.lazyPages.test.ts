@@ -235,7 +235,7 @@ test('worker-open idle builds stop after the viewport margin', async () => {
   }
 });
 
-test('a visible request supersedes a background reply awaiting idle attachment', async () => {
+test('a visible request attaches a background reply awaiting idle attachment before building', async () => {
   const { engine, inputs, host } = lazyFixture(100);
   const overrides = { getInputs: () => inputs };
   const hook = renderHook(() => useRustDisplayList(
@@ -257,9 +257,11 @@ test('a visible request supersedes a background reply awaiting idle attachment',
     act(() => hook.result.current.setDisplayWindow(target, target + 1));
     await waitFor(() => expect(hook.result.current.displayList!.pages[target]!.unbuilt).toBeFalsy());
     expect(builds()).toHaveLength(2);
-    expect(builds()[1]).toMatchObject({ pages: [target], expectedFrameEpoch: before.frameEpoch });
+    expect(builds()[1]!.pages).toEqual([target]);
+    expect(builds()[1]!.expectedFrameEpoch).toBeGreaterThan(before.frameEpoch);
+    const pages = hook.result.current.displayList!.pages;
+    expect(builds()[0]!.pages.every((index) => !pages[index]!.unbuilt)).toBe(true);
     expect(hook.result.current.error).toBeNull();
-    expect(hook.result.current.frame!.frameEpoch).toBeGreaterThan(before.frameEpoch);
   } finally {
     hook.unmount();
     engine.free();
@@ -570,6 +572,91 @@ test('page builds wait for the frame of an edit in flight', async () => {
     expect(result.current.error).toBeNull();
     unmount();
   } finally {
+    engine.free();
+  }
+});
+
+test('a viewport build queued behind a page build keeps its timer when that build comes back stale', async () => {
+  const { engine, inputs, host } = lazyFixture();
+  const queued = new Map<number, () => void>();
+  let nextTimer = -1;
+  const schedule = globalThis.setTimeout;
+  const unschedule = globalThis.clearTimeout;
+  let timers: { mockRestore(): void } | undefined;
+  let clears: { mockRestore(): void } | undefined;
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(inputs.layout as Layout, overrides, undefined, undefined, host)
+    );
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    const pages = () => result.current.frame!.displayList.pages;
+    const pageBuilds = () => worker.posted.filter((request) => request.type === 'buildPages');
+    const last = pages().length - 1;
+    const middle = last - 1;
+    expect(pages()[middle]!.unbuilt).toBe(true);
+
+    worker.holdPageBuilds = true;
+    await act(async () => {
+      result.current.setDisplayWindow(last, last + 1);
+    });
+    await waitFor(() => expect(worker.heldPageBuilds).toHaveLength(1));
+    const { paraId } = JSON.parse(engine.paragraphs('body'))[0] as { paraId: string };
+    engine.set_selection('body', paraId, 1, paraId, 1);
+    worker.holdInputReplies = true;
+    let pendingEdit: ReturnType<typeof result.current.applyInput> | undefined;
+    await act(async () => {
+      pendingEdit = result.current.applyInput('New ');
+    });
+    await waitFor(() => expect(worker.heldInputReplies).toHaveLength(1));
+    await act(async () => {
+      result.current.setDisplayWindow(middle, middle + 1);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    timers = spyOn(globalThis, 'setTimeout').mockImplementation(
+      ((...input: Parameters<typeof setTimeout>) => {
+        const [callback, delay, ...args] = input;
+        if (delay === 50 && typeof callback === 'function') {
+          const id = nextTimer--;
+          queued.set(id, () => callback(...args));
+          return id as unknown as ReturnType<typeof setTimeout>;
+        }
+        return schedule(callback, delay, ...args);
+      }) as typeof setTimeout
+    );
+    clears = spyOn(globalThis, 'clearTimeout').mockImplementation(
+      ((id?: ReturnType<typeof setTimeout>) => {
+        if (!queued.delete(id as unknown as number)) unschedule(id);
+      }) as typeof clearTimeout
+    );
+    worker.holdInputReplies = false;
+    await act(async () => {
+      worker.releaseInputReplies();
+      expect(await pendingEdit!).not.toBeNull();
+    });
+    expect(pages()[middle]!.unbuilt).toBe(true);
+    worker.holdPageBuilds = false;
+    await act(async () => {
+      worker.releasePageBuilds();
+      await new Promise((resolve) => schedule(resolve, 0));
+    });
+    const before = pageBuilds().length;
+    await act(async () => {
+      const due = [...queued.values()];
+      queued.clear();
+      for (const run of due) run();
+    });
+    expect(pageBuilds().slice(before)).toEqual([expect.objectContaining({ pages: [middle] })]);
+    timers.mockRestore();
+    clears.mockRestore();
+    await waitFor(() => expect(pages()[middle]!.unbuilt).toBeFalsy());
+    expect(result.current.error).toBeNull();
+    unmount();
+  } finally {
+    timers?.mockRestore();
+    clears?.mockRestore();
     engine.free();
   }
 });
