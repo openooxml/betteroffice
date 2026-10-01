@@ -197,6 +197,7 @@ export function createWasmModuleState(options: {
       },
       (error: unknown) => {
         pending = undefined;
+        compiled = undefined;
         throw error instanceof Error ? error : new Error(String(error));
       }
     );

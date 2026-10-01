@@ -393,7 +393,7 @@ describe('warmup', () => {
     await Promise.resolve();
     expect(worker.posted).toEqual([
       { id: 1, type: 'warm', hostModule: true },
-      { type: 'editModule', module: null },
+      { type: 'editModule' as const, module: null },
     ]);
     worker.reply({ id: 1, ok: true });
     await warm;
@@ -434,11 +434,11 @@ describe('warmup', () => {
       expect(posting.mock.calls.map(([message]) => message)).toEqual([
         { id: 1, type: 'warm', hostModule: true },
         { type: 'editModule', module: editModule },
-        { type: 'editModule', module: null },
+        { type: 'editModule' as const, module: null },
       ]);
       expect(worker.posted).toEqual([
         { id: 1, type: 'warm', hostModule: true },
-        ...(!rejectNull ? [{ type: 'editModule', module: null }] : []),
+        ...(!rejectNull ? [{ type: 'editModule' as const, module: null }] : []),
       ]);
       worker.reply({ id: 1, ok: true });
       await warm;

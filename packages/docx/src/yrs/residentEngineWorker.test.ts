@@ -650,6 +650,44 @@ describe('resident worker warmup', () => {
     expect(w.answered).toEqual([1, 2, 3]);
   });
 
+  test('waits for a fresh host module after a failed warm', async () => {
+    const w = worker();
+    const bytes = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    const moduleA = new WebAssembly.Module(bytes);
+    const moduleB = new WebAssembly.Module(bytes);
+    w.harness.failWarm = new Error('init failed');
+    const warm = w.send({ type: 'warm', hostModule: true });
+    await Promise.resolve();
+    expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
+    const firstTimers = [...timers.keys()];
+    w.scope.onmessage({ data: { type: 'editModule', module: moduleA } });
+    const failed = await warm;
+    expect(failed).toMatchObject({ id: 1, ok: false, error: 'init failed' });
+    expect(failed).not.toHaveProperty('terminal');
+    expect(w.harness.preloadInputs).toEqual([moduleA]);
+    expect(w.harness.initializations).toBe(0);
+    expect(w.answered).toEqual([1]);
+    expect(armedBudgets()).toEqual([]);
+
+    const retry = w.send({ type: 'warm', hostModule: true });
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
+    expect([...timers.keys()]).not.toEqual(firstTimers);
+    advanceTimers(RESIDENT_HOST_MODULE_WAIT_MS - 1);
+    await Promise.resolve();
+    expect(w.harness.preloadInputs).toEqual([moduleA]);
+    expect(w.harness.initializations).toBe(0);
+    expect(w.answered).toEqual([1]);
+
+    w.scope.onmessage({ data: { type: 'editModule', module: moduleB } });
+    expect(await retry).toMatchObject({ id: 2, ok: true });
+    expect(w.harness.preloadInputs).toEqual([moduleA, moduleB]);
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect(w.answered).toEqual([1, 2]);
+    expect(armedBudgets()).toEqual([]);
+  });
+
   test('falls back to the asset preload when the host sends null', async () => {
     const w = worker();
     const warm = w.send({ type: 'warm', hostModule: true });

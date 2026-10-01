@@ -549,11 +549,11 @@ test('sync recovery rejects a cached layout frame from the old owner of the same
   try {
     const opening = result.current.openInWorker(engine, Uint8Array.of(1));
     const old = FakeWorker.last!;
-    old.reply({ id: old.posted[0].id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0) });
+    old.reply({ id: old.requestAt(0).id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0) });
     const opened = await opening;
     const first = result.current.layoutInWorker(engine, REQUEST);
     old.reply({
-      id: old.posted[1].id, ok: true, frame: frame.slice().buffer,
+      id: old.requestAt(1).id, ok: true, frame: frame.slice().buffer,
       caret: { frameEpoch: 1, caretRect: null }, selection: null, layoutRevision: 1, layoutJson,
     });
     const cached = await first!;
@@ -568,7 +568,7 @@ test('sync recovery rejects a cached layout frame from the old owner of the same
     expect(current.posted[0]).toMatchObject({ type: 'bootstrap' });
     expect(current.posted[0]).not.toHaveProperty('opened');
     current.reply({
-      id: current.posted[0].id, ok: true, frame: frame.slice().buffer,
+      id: current.requestAt(0).id, ok: true, frame: frame.slice().buffer,
       caret: { frameEpoch: 1, caretRect: null }, selection: null, layoutRevision: 2, layoutJson,
     });
     await next;
@@ -1076,7 +1076,7 @@ test('input that answers after the next document replaced its worker publishes n
       }
       expect(workerA.posted.at(-1)).toMatchObject({ type: 'applyInput', expectedFrameEpoch: 1 });
     });
-    const inputRequest = workerA.posted.at(-1)!;
+    const inputRequest = workerA.requestAt(-1);
     const inputFrameA = documentA.native.apply_input('!', 1);
     inputs = {
       ...JSON.parse(documentB.native.retained_kernel_inputs_json()),
@@ -1430,7 +1430,7 @@ test('after a worker layout the host dropped, the next one paints the current te
     const worker = () => FakeWorker.last!;
     const pass = async (built: { frame: Uint8Array; layoutJson: string }) => {
       const pending = result.current.layoutInWorker(engine, REQUEST)!;
-      const request = worker().posted.at(-1)!;
+      const request = worker().requestAt(-1);
       const epoch = decodeFrameDelta(built.frame.slice().buffer).frameEpoch;
       worker().reply({
         id: request.id,
@@ -1521,10 +1521,10 @@ test.each([[false, false], [true, false], [true, true]])(
         expect(authority.holdsWorkerState()).toBe(true);
       }
       const older = hook.result.current.layoutInWorker(engine, REQUEST)!;
-      const olderRequest = worker.posted.at(-1)!;
+      const olderRequest = worker.requestAt(-1);
       const olderFrame = native.build_display_list_frame('{}', 0);
       const newer = hook.result.current.layoutInWorker(engine, REQUEST)!;
-      const newerRequest = worker.posted.at(-1)!;
+      const newerRequest = worker.requestAt(-1);
       const newerFrame = native.build_display_list_frame('{}', 0);
       expect(olderRequest.type).toBe('sync');
       expect(newerRequest.type).toBe('sync');
@@ -2167,11 +2167,11 @@ test('a rejected completion after reload preserves the new session frame, querie
     );
     const opening = result.current.openInWorker(engine, Uint8Array.of(1));
     const oldWorker = FakeWorker.last!;
-    oldWorker.reply({ id: oldWorker.posted[0]!.id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0) });
+    oldWorker.reply({ id: oldWorker.requestAt(0).id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0) });
     const opened = (await opening)!;
     const layout = result.current.layoutInWorker(engine, REQUEST)!;
     oldWorker.reply({
-      id: oldWorker.posted[1]!.id,
+      id: oldWorker.requestAt(1).id,
       ok: true,
       frame: frame.slice().buffer,
       caret: { frameEpoch: 1, caretRect: null },
@@ -2199,7 +2199,7 @@ test('a rejected completion after reload preserves the new session frame, querie
     const replacement = result.current.layoutInWorker(next, REQUEST)!;
     const newWorker = FakeWorker.last!;
     newWorker.reply({
-      id: newWorker.posted[0]!.id,
+      id: newWorker.requestAt(0).id,
       ok: true,
       frame: frame.slice().buffer,
       caret: { frameEpoch: 1, caretRect: null },

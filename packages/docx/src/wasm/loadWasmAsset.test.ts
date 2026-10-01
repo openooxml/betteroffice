@@ -225,6 +225,46 @@ describe('shared module', () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it('recompiles after a shared module fails to initialize', async () => {
+    const fetch = installFetch();
+    const streaming = spyOn(WebAssembly, 'compileStreaming');
+    const seen: WasmAsyncInput[] = [];
+    const init = recordingInit(seen);
+    const error = new Error('init failed');
+    const state = createWasmModuleState({
+      label: 'test',
+      preloadName: 'preloadTestWasm',
+      assetUrl: () => remote,
+      initAsync: async (input) => {
+        await init(input);
+        if (seen.length === 1) throw error;
+      },
+      initSync: () => {},
+      shareModule: true,
+    });
+    try {
+      const loading = state.preload();
+      const compiling = state.module();
+      await expect(loading).rejects.toBe(error);
+      const first = await compiling;
+      expect(seen).toEqual([first]);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(streaming).toHaveBeenCalledTimes(1);
+
+      const retry = state.preload();
+      const recompiling = state.module();
+      expect(recompiling).not.toBe(compiling);
+      await retry;
+      const second = await recompiling;
+      expect(second).not.toBe(first);
+      expect(seen).toEqual([first, second]);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(streaming).toHaveBeenCalledTimes(2);
+    } finally {
+      streaming.mockRestore();
+    }
+  });
+
   it('initializes and caches a module supplied by the host without fetching', async () => {
     const fetch = installFetch();
     const module = new WebAssembly.Module(WASM_BYTES);

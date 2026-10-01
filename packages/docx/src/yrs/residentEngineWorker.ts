@@ -47,9 +47,7 @@ import {
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 let resolveHostEditModule: (module: WebAssembly.Module | null) => void;
-const hostEditModule = new Promise<WebAssembly.Module | null>((resolve) => {
-  resolveHostEditModule = resolve;
-});
+let hostEditModule = nextHostEditModule();
 let session: ResidentEngineSession | null = null;
 let proposals: DocxProposalRegistry | null = null;
 let lastProposalMirrorVersion: string | null = null;
@@ -159,6 +157,12 @@ scope.onmessage = (
 };
 scope.onmessageerror = () => resolveHostEditModule(null);
 
+function nextHostEditModule(): Promise<WebAssembly.Module | null> {
+  return new Promise((resolve) => {
+    resolveHostEditModule = resolve;
+  });
+}
+
 /** `current` drops an operation whose request was answered while it waited. */
 function enqueue(
   operation: () => Promise<void> | void,
@@ -225,6 +229,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       reply({ id: request.id, ok: true });
     } catch (error) {
       // No session exists yet, so a failed load is retried by the next request.
+      if (request.hostModule) hostEditModule = nextHostEditModule();
       reply({
         id: request.id,
         ok: false,
