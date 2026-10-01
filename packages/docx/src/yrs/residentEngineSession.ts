@@ -34,6 +34,7 @@ export type ResidentEngineSession = Pick<
   | 'beginRegionLayout'
   | 'buildDisplayListFrame'
   | 'buildDisplayPagesFrame'
+  | 'releaseDisplayPagesFrame'
   | 'clearFonts'
   | 'destroy'
   | 'encodeStateVector'
@@ -205,6 +206,10 @@ export async function createResidentEngineSession(
     setWindowedIncrementalBuilds: (enabled) => session.set_windowed_incremental_builds(enabled),
     buildDisplayPagesFrame: (pages, expectedFrameEpoch) =>
       session.build_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch),
+    releaseDisplayPagesFrame: (pages, expectedFrameEpoch) => {
+      const frame = session.release_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch);
+      return frame.length === 0 ? null : frame;
+    },
     residentCaretSnapshot: () =>
       JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
     selection: () => JSON.parse(session.selection()) as YrsSelection | null,

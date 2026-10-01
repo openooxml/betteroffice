@@ -929,6 +929,8 @@ struct DisplayState {
     frame_epoch: u64,
     display_builds: u64,
     binary_frame_epoch: u64,
+    encoded_doc_epoch: u64,
+    encoded_layout_epoch: u64,
     pages: Vec<FramePageSnapshot>,
     next_page_id: u64,
     extras_fingerprint: u64,
@@ -4242,6 +4244,8 @@ impl EngineSession {
         display.pages = pages;
         display.next_page_id = next_page_id;
         display.binary_frame_epoch = frame_epoch;
+        display.encoded_doc_epoch = epochs.doc_epoch;
+        display.encoded_layout_epoch = epochs.layout_epoch;
         display.fresh_base = false;
         Ok(bytes)
     }
@@ -4296,7 +4300,57 @@ impl EngineSession {
             };
             docx_layout::build_resident_display_pages(input, layout, resident_input, list, pages)?
         };
-        let rebuilt: HashSet<usize> = built.into_iter().collect();
+        self.encode_display_pages_frame(&built, expected_frame_epoch)
+    }
+
+    /// Release display pages; an empty result means the request was superseded.
+    pub fn release_display_pages_frame(
+        &self,
+        pages: &[usize],
+        expected_frame_epoch: u64,
+    ) -> Result<Vec<u8>, String> {
+        let released = {
+            let pagination = self.pagination.borrow();
+            let mut display = self.display.borrow_mut();
+            if expected_frame_epoch != display.binary_frame_epoch
+                || display.binary_frame_epoch == 0
+                || display.frame_epoch != display.binary_frame_epoch
+                || display.fresh_base
+                || display.encoded_doc_epoch != self.doc_epoch()
+                || display.encoded_layout_epoch != pagination.layout_epoch
+            {
+                return Ok(Vec::new());
+            }
+            let input = pagination
+                .input
+                .as_ref()
+                .ok_or_else(|| "resident pagination input is not built".to_owned())?;
+            let layout = pagination
+                .layout
+                .as_ref()
+                .ok_or_else(|| "resident layout is not built".to_owned())?;
+            if display.pages.len() != layout.pages.len() {
+                return Err("resident frame does not match the layout".to_owned());
+            }
+            let DisplayState {
+                list: Some(list),
+                resident_input: Some(resident_input),
+                ..
+            } = &mut *display
+            else {
+                return Err("resident display list is not built".to_owned());
+            };
+            docx_layout::release_resident_display_pages(input, layout, resident_input, list, pages)?
+        };
+        self.encode_display_pages_frame(&released, expected_frame_epoch)
+    }
+
+    fn encode_display_pages_frame(
+        &self,
+        changed_pages: &[usize],
+        expected_frame_epoch: u64,
+    ) -> Result<Vec<u8>, String> {
+        let rebuilt: HashSet<usize> = changed_pages.iter().copied().collect();
         let mut display = self.display.borrow_mut();
         display.frame_epoch = display
             .frame_epoch
@@ -4329,6 +4383,8 @@ impl EngineSession {
         display.pages = snapshots;
         display.next_page_id = next_page_id;
         display.binary_frame_epoch = frame_epoch;
+        display.encoded_doc_epoch = epochs.doc_epoch;
+        display.encoded_layout_epoch = epochs.layout_epoch;
         display.fresh_base = false;
         Ok(bytes)
     }
@@ -8988,6 +9044,191 @@ mod tests {
             engine.with_display_list(Clone::clone).unwrap().pages[last],
             full_build(&engine).pages[last]
         );
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn released_display_pages_keep_ids_and_rebuild_after_an_incremental_edit() {
+        let (engine, extras) = paged_filler_engine(214, 48);
+        engine.set_display_window(Some(0..1));
+        engine.set_windowed_incremental_builds(true);
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let last = engine
+            .with_display_list(|list| list.pages.len() - 1)
+            .unwrap();
+        assert!(last >= 3);
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.build_display_pages_frame(&[1, last], epoch).unwrap();
+        let before = engine.stats();
+        let old_snapshots = engine.display.borrow().pages.clone();
+        let expected_placeholders = {
+            let pagination = engine.pagination.borrow();
+            docx_layout::build_resident_display_list_partial_observed(
+                pagination.input.as_ref().unwrap(),
+                pagination.layout.as_ref().unwrap(),
+                &extras,
+                &|_| false,
+                &mut || {},
+            )
+            .unwrap()
+            .1
+        };
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let delta = engine
+            .release_display_pages_frame(&[last, 1, 1, 2], epoch)
+            .unwrap();
+        let after = engine.stats();
+        assert_eq!(after.doc_epoch, before.doc_epoch);
+        assert_eq!(after.layout_epoch, before.layout_epoch);
+        assert_eq!(after.frame_epoch, before.frame_epoch + 1);
+        assert_eq!(after.display_builds, before.display_builds);
+        assert_eq!(u32::from_le_bytes(delta[12..16].try_into().unwrap()), 0);
+        assert_eq!(u32::from_le_bytes(delta[52..56].try_into().unwrap()), 2);
+        for (operation, index) in [1, last].into_iter().enumerate() {
+            let start =
+                crate::frame_delta::FRAME_HEADER_LEN + operation * crate::frame_delta::PAGE_OP_LEN;
+            assert_eq!(delta[start], crate::frame_delta::PAGE_OP_UPSERT);
+            assert_eq!(
+                u32::from_le_bytes(delta[start + 4..start + 8].try_into().unwrap()),
+                index as u32
+            );
+            assert_eq!(
+                u64::from_le_bytes(delta[start + 8..start + 16].try_into().unwrap()),
+                old_snapshots[index].page_id
+            );
+            assert_eq!(
+                u32::from_le_bytes(delta[start + 24..start + 28].try_into().unwrap()),
+                0
+            );
+        }
+        let released = engine.with_display_list(Clone::clone).unwrap();
+        for index in [1, last] {
+            assert_eq!(released.pages[index], expected_placeholders.pages[index]);
+            assert!(released.pages[index].position_span.is_some());
+        }
+        {
+            let display = engine.display.borrow();
+            for (index, snapshot) in display.pages.iter().enumerate() {
+                assert_eq!(snapshot.page_id, old_snapshots[index].page_id);
+                if [1, last].contains(&index) {
+                    assert!(snapshot.primitive_ids.is_empty());
+                    assert!(snapshot.positions.is_empty());
+                    assert!(snapshot.note_anchors.is_empty());
+                }
+            }
+        }
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.build_display_pages_frame(&[last], epoch).unwrap();
+        assert_eq!(
+            engine.with_display_list(Clone::clone).unwrap().pages[last],
+            full_display_build(&engine, &extras).pages[last]
+        );
+
+        let paragraph = engine.doc().paragraphs("body").unwrap().remove(0);
+        let offset = u32::try_from(paragraph.text.encode_utf16().count()).unwrap();
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", offset),
+                " typed",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let edited_delta = engine.apply_and_layout("body", epoch).unwrap();
+        assert_eq!(&edited_delta[0..4], b"FDV1");
+        assert_eq!(
+            u64::from_le_bytes(edited_delta[40..48].try_into().unwrap()),
+            epoch
+        );
+        let expected = full_display_build(&engine, &extras);
+        let edited = engine.with_display_list(Clone::clone).unwrap();
+        for (page, full) in edited.pages.iter().zip(&expected.pages) {
+            if !page.unbuilt {
+                assert_eq!(page, full);
+            }
+        }
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let all: Vec<usize> = (0..edited.pages.len()).collect();
+        engine.build_display_pages_frame(&all, epoch).unwrap();
+        assert_eq!(engine.with_display_list(Clone::clone).unwrap(), expected);
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn superseded_display_page_releases_do_not_mutate_retained_state() {
+        let (engine, extras) = paged_filler_engine(215, 40);
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let before = engine.with_display_list(Clone::clone).unwrap();
+        let snapshots = engine.display.borrow().pages.clone();
+        let next_page_id = engine.display.borrow().next_page_id;
+        let resident = format!("{:?}", engine.display.borrow().resident_input);
+        let assert_unchanged = || {
+            assert_eq!(engine.with_display_list(Clone::clone).unwrap(), before);
+            let display = engine.display.borrow();
+            assert_eq!(display.pages, snapshots);
+            assert_eq!(display.frame_epoch, epoch);
+            assert_eq!(display.binary_frame_epoch, epoch);
+            assert_eq!(display.next_page_id, next_page_id);
+            assert_eq!(format!("{:?}", display.resident_input), resident);
+        };
+        for stale in [epoch - 1, epoch + 1] {
+            assert!(
+                engine
+                    .release_display_pages_frame(&[1], stale)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_unchanged();
+        }
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 0),
+                "x",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        assert_ne!(
+            engine.doc_epoch(),
+            engine.display.borrow().encoded_doc_epoch
+        );
+        assert!(
+            engine
+                .release_display_pages_frame(&[1], epoch)
+                .unwrap()
+                .is_empty()
+        );
+        assert_unchanged();
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn a_layout_replacement_supersedes_display_page_release() {
+        let (engine, extras) = paged_filler_engine(216, 40);
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let before = engine.with_display_list(Clone::clone).unwrap();
+        let snapshots = engine.display.borrow().pages.clone();
+        let input =
+            serde_json::to_string(engine.pagination.borrow().input.as_ref().unwrap()).unwrap();
+        engine.layout_document_json(&input).unwrap();
+        assert_ne!(
+            engine.stats().layout_epoch,
+            engine.display.borrow().encoded_layout_epoch
+        );
+        assert!(
+            engine
+                .release_display_pages_frame(&[1], epoch)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(engine.with_display_list(Clone::clone).unwrap(), before);
+        assert_eq!(engine.display.borrow().pages, snapshots);
+        assert_eq!(engine.display.borrow().binary_frame_epoch, epoch);
         docx_layout::clear_measure_fonts();
     }
 

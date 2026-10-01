@@ -433,6 +433,38 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     );
     return;
   }
+  if (request.type === 'releasePages') {
+    if (
+      !retainedFrame ||
+      retainedFrame.frameEpoch !== request.expectedFrameEpoch ||
+      request.pages.some(
+        ({ index, pageId }) => retainedFrame!.pages[index]?.pageId.toString() !== pageId
+      )
+    ) {
+      reply({ id: request.id, ok: true, superseded: true });
+      return;
+    }
+    const started = performance.now();
+    const frame = session.releaseDisplayPagesFrame(
+      request.pages.map(({ index }) => index),
+      request.expectedFrameEpoch
+    );
+    if (frame === null) {
+      reply({ id: request.id, ok: true, superseded: true });
+      return;
+    }
+    await replyFrame(
+      request.id,
+      frame,
+      performance.now() - started,
+      [],
+      undefined,
+      started,
+      false,
+      request.paintCaret
+    );
+    return;
+  }
   if (request.type === 'completeLayout') {
     setFrameDisplayWindow(session);
     if (incompleteLayout && request.sliceBlocks) {
@@ -486,7 +518,19 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     for (const pageId of request.activePageIds) {
       if (!activeOffscreenPageIds.has(pageId)) forcedPageIds.add(pageId);
     }
-    for (const { pageId, canvas } of request.pages) offscreenCanvases.set(pageId, canvas);
+    const unbuiltPageIds = new Set(
+      retainedFrame?.pages.filter(({ page }) => page.unbuilt).map(({ pageId }) => pageId.toString())
+    );
+    for (const { pageId, canvas } of request.pages) {
+      if (unbuiltPageIds.has(pageId)) {
+        releaseOffscreenPageCanvas(canvas);
+        canvas.width = 0;
+        canvas.height = 0;
+        forcedPageIds.delete(pageId);
+        continue;
+      }
+      offscreenCanvases.set(pageId, canvas);
+    }
     activeOffscreenPageIds = new Set(request.activePageIds);
     offscreenDpr = request.devicePixelRatio;
     offscreenZoom = request.zoom;
@@ -897,19 +941,32 @@ async function replyFrame(
   }
   const selection = session?.selection() ?? null;
   caretPaintRect = paintCaret ? (caret.caretRect ?? null) : null;
-  // Pages no longer in the document release their surfaces entirely (their
-  // elements unmounted main-side); off-window pages are only zeroed, so this
-  // is the sole place a live document's canvas reference is dropped.
-  const livePageIds = new Set(retainedFrame.pages.map((page) => page.pageId.toString()));
+  const builtPageIds = new Set(
+    retainedFrame.pages
+      .filter(({ page }) => !page.unbuilt)
+      .map(({ pageId }) => pageId.toString())
+  );
   for (const pageId of pendingOffscreenPageIds) {
-    if (!livePageIds.has(pageId)) pendingOffscreenPageIds.delete(pageId);
+    if (!builtPageIds.has(pageId)) pendingOffscreenPageIds.delete(pageId);
   }
-  for (const pageId of offscreenCanvases.keys()) {
-    if (!livePageIds.has(pageId)) {
-      offscreenCanvases.delete(pageId);
-      offscreenBackBuffers.delete(pageId);
-      forgetOffscreenPagePixels(pageId);
+  const surfacePageIds = new Set([...offscreenCanvases.keys(), ...offscreenBackBuffers.keys()]);
+  for (const pageId of surfacePageIds) {
+    if (builtPageIds.has(pageId)) continue;
+    const canvas = offscreenCanvases.get(pageId);
+    const buffer = offscreenBackBuffers.get(pageId);
+    if (canvas) {
+      releaseOffscreenPageCanvas(canvas);
+      canvas.width = 0;
+      canvas.height = 0;
     }
+    if (buffer) {
+      releaseOffscreenPageCanvas(buffer);
+      buffer.width = 0;
+      buffer.height = 0;
+    }
+    offscreenCanvases.delete(pageId);
+    offscreenBackBuffers.delete(pageId);
+    forgetOffscreenPagePixels(pageId);
   }
   const replayStarted = performance.now();
   const { replayedPages, caretPainted } = await replayOffscreen(false);
@@ -946,7 +1003,10 @@ async function replayOffscreen(
 ): Promise<{ replayedPages: number; caretPainted: boolean }> {
   const forcedPageIds = force === true ? activeOffscreenPageIds : force;
   if (forcedPageIds) {
-    for (const pageId of forcedPageIds) pendingOffscreenPageIds.add(pageId);
+    for (const { pageId, page } of retainedFrame?.pages ?? []) {
+      const key = pageId.toString();
+      if (!page.unbuilt && forcedPageIds.has(key)) pendingOffscreenPageIds.add(key);
+    }
   }
   if (!retainedFrame || offscreenCanvases.size === 0) {
     return { replayedPages: 0, caretPainted: false };
@@ -999,7 +1059,7 @@ async function replayOffscreen(
     if (!damaged && !gainsCaret && !losesCaret) continue;
     const canvas = offscreenCanvases.get(pageIdString);
     const page = retainedFrame.displayList.pages[index];
-    if (!canvas || !page) continue;
+    if (!canvas || !page || page.unbuilt) continue;
     const pageId = pageIdString;
     let buffer = offscreenBackBuffers.get(pageId);
     if (!buffer) {
