@@ -61,6 +61,7 @@ struct LoweredStory {
     revealable_blocks: Rc<Vec<LayoutBlock>>,
     /// Lazily serialized layout blocks.
     serialized_blocks: Option<String>,
+    local: crate::bridge::local::LocalLowering,
 }
 
 #[derive(Debug, Default)]
@@ -1847,6 +1848,76 @@ impl EngineSession {
         self.doc_epoch.get()
     }
 
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+    pub(crate) fn edit_resident_text(
+        &self,
+        range: crate::StoryRange,
+        text: Option<&str>,
+        lower_locally: bool,
+    ) -> crate::OpResult<crate::Receipt> {
+        let before = self.doc_epoch();
+        let mut attrs = None;
+        let ctx = crate::EditCtx::local("", "");
+        let receipt = match text {
+            Some(text) => self.doc.insert_text_observed(
+                &ctx,
+                crate::Position::new(&range.story, range.start),
+                text,
+                crate::FormatPolicy::Inherit,
+                |effective| attrs = Some(effective.clone()),
+            )?,
+            None => self.doc.delete_range(&ctx, range.clone())?,
+        };
+        let mut render = self.render.borrow_mut();
+        let eligible = lower_locally && (text.is_none() || range.start == range.end);
+        if let Some(lowered) = render.stories.get_mut(&range.story) {
+            lowered.local.edit = receipt
+                .range
+                .as_ref()
+                .filter(|_| eligible && lowered.doc_epoch == before)
+                .and_then(|range_result| {
+                    let paragraph = &range_result.start.para;
+                    Some(crate::bridge::local::TextEdit {
+                        offset: lowered.local.offset(paragraph, range.start)?,
+                        removed: range.end.checked_sub(range.start)?,
+                        paragraph: paragraph.clone(),
+                        text: text.unwrap_or_default().to_owned(),
+                        attributes: attrs,
+                        epochs: (before, self.doc_epoch()),
+                    })
+                });
+        }
+        Ok(receipt)
+    }
+
+    fn patch_lowered_body(&self, epoch: u64, env: &RenderEnv) -> Option<()> {
+        let mut render = self.render.borrow_mut();
+        let lowered = render.stories.get_mut("body")?;
+        let edit = lowered.local.edit.take()?;
+        if edit.epochs != (lowered.doc_epoch, epoch)
+            || epoch != lowered.doc_epoch.wrapping_add(1)
+            || lowered.env != *env
+            || lowered.media != self.doc.media_sources()
+            || !lowered.revealable_blocks.is_empty()
+            || !lowered.local.matches_source(&self.doc)
+            || self.regions.borrow().as_ref().is_some_and(|state| {
+                state.fast_path.as_ref().is_none_or(|fast| {
+                    !fast.notes_clear || fast.regions.sections.len() != 1 || fast.render_env != *env
+                })
+            })
+        {
+            return None;
+        }
+        self.pagination.borrow_mut().input_lowering = None;
+        let blocks = Rc::get_mut(&mut lowered.blocks)?;
+        let map = Rc::get_mut(&mut lowered.map)?;
+        let txn = self.doc.yrs_doc().transact();
+        lowered.local.patch(blocks, map, &txn, env, &edit)?;
+        lowered.doc_epoch = epoch;
+        lowered.serialized_blocks = None;
+        Some(())
+    }
+
     /// Runs a callback with resident lowered blocks.
     pub fn with_lowered_story<T>(
         &self,
@@ -1868,6 +1939,7 @@ impl EngineSession {
                 cached.doc_epoch == epoch
                     && cached.env == *env
                     && cached.media == self.doc.media_sources()
+                    && cached.local.matches_source(&self.doc)
             })
     }
 
@@ -1877,8 +1949,9 @@ impl EngineSession {
         epoch: u64,
         env: &RenderEnv,
     ) -> Result<(), BridgeError> {
+        let mut local = crate::bridge::local::LocalLowering::default();
         let (blocks, map, revealable_blocks) =
-            yrs_doc_to_mapped_layout_blocks_with_revealable(&self.doc, story, env)?;
+            yrs_doc_to_mapped_layout_blocks_with_revealable(&self.doc, story, env, &mut local)?;
         let mut render = self.render.borrow_mut();
         render.cache_misses = render.cache_misses.wrapping_add(1);
         render.stories.insert(
@@ -1891,6 +1964,7 @@ impl EngineSession {
                 map: Rc::new(map),
                 revealable_blocks: Rc::new(revealable_blocks),
                 serialized_blocks: None,
+                local,
             },
         );
         Ok(())
@@ -1923,7 +1997,7 @@ impl EngineSession {
         if self.story_is_resident(story, epoch, env) {
             let mut render = self.render.borrow_mut();
             render.cache_hits = render.cache_hits.wrapping_add(1);
-        } else {
+        } else if story != "body" || self.patch_lowered_body(epoch, env).is_none() {
             self.lower_story_into_cache(story, epoch, env)?;
         }
         let (blocks, map) = {
@@ -4848,6 +4922,16 @@ impl EngineSession {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/support/structured_fixture.rs"]
+mod lowering_fixture;
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/support/page_fixture.rs"]
+mod lowering_pages;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -5788,6 +5872,135 @@ mod tests {
             "renderEnv": {}
         })
         .to_string()
+    }
+
+    #[test]
+    fn resident_plain_text_patch_matches_cold_full() {
+        use super::lowering_fixture::{Package, para, run};
+        use crate::{Position, StoryRange};
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(lowering_pages::FONT).unwrap();
+        let request = small_page_request(font);
+        let snapshot = |engine: &EngineSession| {
+            let render = engine.render.borrow();
+            let lowered = &render.stories["body"];
+            let pagination = engine.pagination.borrow();
+            (
+                serde_json::to_string(lowered.blocks.as_ref()).unwrap(),
+                lowered.map.as_ref().clone(),
+                serde_json::to_string(&pagination.input.as_ref().unwrap().measured).unwrap(),
+                pagination.block_fingerprints.clone(),
+                serde_json::to_string(&pagination.layout.as_ref().unwrap().pages).unwrap(),
+            )
+        };
+        let step = |engine: &EngineSession,
+                    request: &str,
+                    story: &str,
+                    (start, end, text): (u32, u32, Option<&str>),
+                    patched: bool| {
+            let before = Rc::as_ptr(&engine.render.borrow().stories["body"].blocks);
+            if text.is_none() && start == end {
+                let ctx = crate::EditCtx::local("", "");
+                let position = Position::new(story, start);
+                engine.doc().split_paragraph(&ctx, position, None).unwrap();
+            } else {
+                let range = StoryRange::new(story, start, end);
+                engine.edit_resident_text(range, text, true).unwrap();
+            }
+            let epoch = engine.stats().frame_epoch;
+            engine.apply_and_layout(story, epoch).unwrap();
+            let after = Rc::as_ptr(&engine.render.borrow().stories["body"].blocks);
+            assert_eq!(before == after, patched);
+            let incremental = snapshot(engine);
+            macro_rules! cold {
+                ($($field:ident)+) => {{
+                    let ($($field,)+) = ($(engine.$field.replace(Default::default()),)+);
+                    engine.layout_document_with_regions_json(request).unwrap();
+                    let result = snapshot(engine);
+                    $(engine.$field.replace($field);)+
+                    result
+                }};
+            }
+            let oracle = cold!(render measurement pagination regions display capture resumable);
+            assert_eq!(incremental, oracle, "{story} [{start}, {end}) {text:?}");
+        };
+        let engine = paragraphs_engine(9600, 3);
+        engine.layout_document_with_regions_json(&request).unwrap();
+        for (paragraph, offset) in (0..3).flat_map(|p| [0, 13, u32::MAX].map(|at| (p, at))) {
+            let paragraphs = engine.doc().paragraphs("body").unwrap();
+            let width = paragraphs[0].text.encode_utf16().count() as u32;
+            let start = paragraph as u32 * (width + 1);
+            let at = start + offset.min(width);
+            step(&engine, &request, "body", (at, at, Some("😀")), true);
+            step(&engine, &request, "body", (at, at + 2, None), true);
+            step(&engine, &request, "body", (at, at, Some("x")), true);
+            step(&engine, &request, "body", (at, at + 1, None), true);
+        }
+        let wrapping = " wrap".repeat(250);
+        step(&engine, &request, "body", (2, 2, Some(&wrapping)), true);
+        step(&engine, &request, "body", (2, 4, None), false);
+        step(&engine, &request, "body", (2, 2, None), false);
+        let empty = EngineSession::new(9601);
+        let doc = empty.doc();
+        doc.create_story("body", "A", "Normal", "left").unwrap();
+        empty.layout_document_with_regions_json(&request).unwrap();
+        for (end, text) in [(1, None), (0, Some("😀")), (2, None), (0, Some("B"))] {
+            step(&empty, &request, "body", (0, end, text), true);
+        }
+        let cell = |id, text| format!("<w:tc><w:tcPr/>{}</w:tc>", para(id, &run(text)));
+        let table_body = format!(
+            r#"{}<w:tbl><w:tblPr><w:tblW w:w="4800" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/><w:gridCol w:w="2400"/></w:tblGrid><w:tr>{}{}</w:tr></w:tbl>{}"#,
+            para("10000001", &run("Before")),
+            cell("10000002", "First cell"),
+            cell("10000003", "Second cell"),
+            para("10000004", &run("After"))
+        );
+        let numbered = r#"<w:p w14:paraId="10000001"><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>List</w:t></w:r></w:p>"#;
+        let numbering = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#;
+        let packages = [
+            ("table", Package::new(&table_body)),
+            ("list", Package::new(numbered).numbering(numbering)),
+            ("field", Package::new(&para("10000001", r#"<w:fldSimple w:instr=" SEQ Example "><w:r><w:t>1</w:t></w:r></w:fldSimple>"#))),
+            ("bookmark", Package::new(&para("10000001", r#"<w:bookmarkStart w:id="0" w:name="mark"/><w:r><w:t>Book</w:t></w:r><w:bookmarkEnd w:id="0"/>"#))),
+            ("comment", Package::new(&para("10000001", r#"<w:commentRangeStart w:id="0"/><w:r><w:t>Comment</w:t></w:r><w:commentRangeEnd w:id="0"/>"#)).part(
+                "comments.xml", "rIdComments", "comments", "comments",
+                &format!(r#"<w:comments {}><w:comment w:id="0" w:author="A"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:comment></w:comments>"#, lowering_fixture::NS))),
+            ("tracked", Package::new(&para("10000001", r#"<w:ins w:id="1" w:author="A"><w:r><w:t>Change</w:t></w:r></w:ins>"#))),
+            ("formatting", Package::new(&para("10000001", r#"<w:r><w:rPr><w:b/><w:rPrChange w:id="1" w:author="A"><w:rPr/></w:rPrChange></w:rPr><w:t>Changed</w:t></w:r>"#))),
+            ("mixed", Package::new(&para("10000001", r#"<w:r><w:rPr><w:b/></w:rPr><w:t>Bold</w:t></w:r><w:r><w:t>Plain</w:t></w:r>"#))),
+            ("sections", Package::new(&format!(r#"<w:p w14:paraId="10000001"><w:pPr><w:sectPr><w:type w:val="nextPage"/></w:sectPr></w:pPr><w:r><w:t>First</w:t></w:r></w:p>{}"#, para("10000002", &run("Second"))))),
+            ("contextual", Package::new(&format!(r#"<w:p w14:paraId="10000001"><w:pPr><w:contextualSpacing/></w:pPr><w:r><w:t>Before</w:t></w:r></w:p>{}"#, para("10000002", &run("After"))))),
+        ];
+        for (name, package) in packages {
+            let (engine, request) = lowering_pages::laid_out(&package.bytes(), 9602);
+            let patched = name == "table";
+            step(&engine, &request, "body", (0, 0, Some("x")), patched);
+            if name == "table" {
+                step(&engine, &request, "body", (11, 11, Some("😀")), true);
+                step(&engine, &request, "body:t0:r0c1", (2, 2, Some("x")), false);
+            } else if name == "contextual" {
+                step(&engine, &request, "body", (8, 8, Some("x")), false);
+            }
+        }
+        let bold = Package::new(&para(
+            "10000001",
+            r#"<w:r><w:rPr><w:b/></w:rPr><w:t>Bold</w:t></w:r>"#,
+        ));
+        let (engine, request) = lowering_pages::laid_out(&bold.bytes(), 9604);
+        step(&engine, &request, "body", (2, 2, Some("x")), true);
+        step(&engine, &request, "body", (0, 1, None), true);
+        for bytes in [
+            include_bytes!(
+                "../tests/fixtures/field-code-paragraphs/body-field-code-paragraphs.docx"
+            )
+            .as_slice(),
+            include_bytes!("../tests/fixtures/suppressed-list-markers.docx").as_slice(),
+            include_bytes!("../tests/fixtures/page-fragments/pages.docx").as_slice(),
+            include_bytes!("../tests/fixtures/footnote-anchor.docx").as_slice(),
+        ] {
+            let (engine, request) = lowering_pages::laid_out(bytes, 9603);
+            step(&engine, &request, "body", (0, 0, Some("x")), false);
+        }
     }
 
     #[test]

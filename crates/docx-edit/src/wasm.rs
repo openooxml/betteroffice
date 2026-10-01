@@ -1454,7 +1454,7 @@ impl EditSession {
                         return Ok(None);
                     }
                     Ok(Some((
-                        self.delete_resident_input(direction, selection)?,
+                        self.delete_resident_input(direction, selection, count == 1)?,
                         merges,
                     )))
                 });
@@ -1492,6 +1492,7 @@ impl EditSession {
         &self,
         direction: &str,
         selection: (String, String, u32),
+        local_lowering: bool,
     ) -> Result<String, JsValue> {
         let (story, para_id, head) = selection;
         let direction = match direction {
@@ -1505,14 +1506,20 @@ impl EditSession {
         match (direction, adjacent) {
             (DeleteDirection::Backward, Some(AdjacentStoryUnit::Content(width))) => {
                 self.engine
-                    .doc()
-                    .delete_range(&ctx, StoryRange::new(&story, head - width, head))
+                    .edit_resident_text(
+                        StoryRange::new(&story, head - width, head),
+                        None,
+                        local_lowering,
+                    )
                     .map_err(js_err)?;
             }
             (DeleteDirection::Forward, Some(AdjacentStoryUnit::Content(width))) => {
                 self.engine
-                    .doc()
-                    .delete_range(&ctx, StoryRange::new(&story, head, head + width))
+                    .edit_resident_text(
+                        StoryRange::new(&story, head, head + width),
+                        None,
+                        local_lowering,
+                    )
                     .map_err(js_err)?;
             }
             (direction, Some(AdjacentStoryUnit::Pilcrow)) => {
@@ -1936,13 +1943,7 @@ impl EditSession {
         }
 
         self.engine
-            .doc()
-            .insert_text(
-                &EditCtx::local("", ""),
-                Position::new(&story, head),
-                text,
-                FormatPolicy::Inherit,
-            )
+            .edit_resident_text(StoryRange::new(&story, head, head), Some(text), true)
             .map_err(js_err)?;
         self.engine
             .apply_and_layout(&story, expected_frame_epoch as u64)
@@ -2008,13 +2009,7 @@ impl EditSession {
 
         let started = performance_now();
         self.engine
-            .doc()
-            .insert_text(
-                &EditCtx::local("", ""),
-                Position::new(&story, head),
-                text,
-                FormatPolicy::Inherit,
-            )
+            .edit_resident_text(StoryRange::new(&story, head, head), Some(text), true)
             .map_err(js_err)?;
         let edit_ms = performance_now() - started;
         let (frame, engine_profile) = self
@@ -5975,7 +5970,7 @@ mod tests {
         let head = loc_index(session.engine.doc(), "body", "p1", 6).unwrap();
 
         session
-            .delete_resident_input("backward", ("body".into(), "p1".into(), head))
+            .delete_resident_input("backward", ("body".into(), "p1".into(), head), true)
             .unwrap();
 
         let paragraphs = session.engine.doc().paragraphs("body").unwrap();

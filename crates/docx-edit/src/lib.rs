@@ -67,6 +67,9 @@ use yrs::{
     TextRef, Transact, Update,
 };
 
+#[cfg(test)]
+extern crate self as docx_edit;
+
 mod batch;
 mod comment_references;
 #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
