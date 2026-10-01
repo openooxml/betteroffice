@@ -7152,13 +7152,23 @@ mod tests {
             for inserted in ["x", "😀"] {
                 let (engine, request) = local_patch_laid_out(&bytes, 9612, true);
                 let patched = !matches!(offset, 3 | 5);
-                step(&engine, &request, "body", (offset, offset, Some(inserted)), patched);
+                step(
+                    &engine,
+                    &request,
+                    "body",
+                    (offset, offset, Some(inserted)),
+                    patched,
+                );
                 if patched {
                     step(
                         &engine,
                         &request,
                         "body",
-                        (offset, offset + inserted.encode_utf16().count() as u32, None),
+                        (
+                            offset,
+                            offset + inserted.encode_utf16().count() as u32,
+                            None,
+                        ),
                         true,
                     );
                 }
