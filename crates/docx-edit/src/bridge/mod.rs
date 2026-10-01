@@ -55,6 +55,7 @@ use yrs::{Any, Map, MapRef, OffsetKind, Out, ReadTxn, Text, Transact};
 use super::{COMMENTS, DEL, EditError, EditingDoc, INS, decode_anchor, is_pilcrow, story_ref};
 use crate::list_marker::{ListState, compute_list_marker};
 
+pub(crate) mod local;
 mod shapes;
 
 const AUTO_PARAGRAPH_SPACING_PX: f64 = 14.0;
@@ -330,7 +331,8 @@ pub fn yrs_doc_to_mapped_layout_blocks(
     story_id: &str,
     env: &RenderEnv,
 ) -> Result<(Vec<LayoutBlock>, LoweringMap), BridgeError> {
-    yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut None)
+    let mut local = local::LocalLowering::new(false);
+    yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut None, &mut local)
 }
 
 /// [`yrs_doc_to_mapped_layout_blocks`] plus the blocks it leaves out that a revision
@@ -339,9 +341,12 @@ pub(crate) fn yrs_doc_to_mapped_layout_blocks_with_revealable(
     doc: &EditingDoc,
     story_id: &str,
     env: &RenderEnv,
+    local: &mut local::LocalLowering,
 ) -> Result<(Vec<LayoutBlock>, LoweringMap, Vec<LayoutBlock>), BridgeError> {
     let mut revealable = Some(Vec::new());
-    let (blocks, map) = yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut revealable)?;
+    let (blocks, map) =
+        yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut revealable, local)?;
+    local.finish(&blocks, &map);
     Ok((blocks, map, revealable.unwrap_or_default()))
 }
 
@@ -350,6 +355,7 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
     story_id: &str,
     env: &RenderEnv,
     revealable: &mut Option<Vec<LayoutBlock>>,
+    local: &mut local::LocalLowering,
 ) -> Result<(Vec<LayoutBlock>, LoweringMap), BridgeError> {
     if doc.yrs_doc().offset_kind() != OffsetKind::Utf16 {
         return Err(BridgeError::WrongOffsetKind);
@@ -366,8 +372,18 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
         }
         _ => env,
     };
-    let mut list_state = ListState::new(doc.source_metadata().map(|source| source.numbering()));
+    let source = doc.source_metadata();
+    local.source = source.as_ref().map(Arc::downgrade).unwrap_or_default();
+    local.blocked |= source.as_ref().is_some_and(|source| {
+        source
+            .run_revision_stories()
+            .any(|story| story == "body" || story.starts_with("body:"))
+    });
+    let mut list_state = ListState::new(source.map(|source| source.numbering()));
     let txn = doc.yrs_doc().transact();
+    local.blocked |= txn
+        .get_map(COMMENTS)
+        .is_some_and(|comments| comments.len(&txn) != 0);
     let mut active_stories = BTreeSet::new();
     let mut map = LoweringMap::default();
     let session = txn.get_map(crate::identity::SESSION);
@@ -381,6 +397,7 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
                 .collect()
         })
         .unwrap_or_default();
+    local.blocked |= has_sequence_metadata;
     let (mut blocks, _) = lower_story(
         &txn,
         story_id,
@@ -392,6 +409,7 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
         &mut map,
         &mut opaque_sequences,
         revealable,
+        local,
     )?;
     // Word numbers SEQ fields in the main text only.
     if story_id == "body" && has_sequence_metadata {
@@ -422,6 +440,7 @@ fn lower_story<T: ReadTxn>(
     map: &mut LoweringMap,
     opaque_sequences: &mut BTreeSet<String>,
     revealable: &mut Option<Vec<LayoutBlock>>,
+    local: &mut local::LocalLowering,
 ) -> Result<(Vec<LayoutBlock>, u64), BridgeError> {
     if !active_stories.insert(story_id.to_owned()) {
         return Err(BridgeError::RecursiveStory(story_id.to_owned()));
@@ -451,8 +470,10 @@ fn lower_story<T: ReadTxn>(
         // header/footer stories simply never carry section properties.
         let mut section_margins = SectionMarginsTwips::default();
 
+        let mut plain = local::ParagraphSeed::default();
         for diff in story.diff(txn, YChange::identity) {
             let attributes = diff.attributes.as_deref();
+            local.observe(&mut plain, &diff, txn, story_id);
             match diff.insert {
                 Out::Any(Any::String(text)) => {
                     let text = text.as_ref();
@@ -472,6 +493,20 @@ fn lower_story<T: ReadTxn>(
                 }
                 Out::YMap(pilcrow) if is_pilcrow(&pilcrow, txn) => {
                     let values = pilcrow_values(&pilcrow, txn);
+                    local.observe_pilcrow(
+                        &mut plain,
+                        &pilcrow,
+                        &values,
+                        attributes,
+                        story_id,
+                        (
+                            paragraph_start,
+                            paragraph_pm_start,
+                            blocks.len(),
+                            map.paragraphs.len() as u32,
+                        ),
+                        story_index + 1 == story.len(txn),
+                    );
                     let para_id = value_string(values.get("paraId")).unwrap_or_default();
                     let code_join = pending_code_join.take();
                     let sectioned =
@@ -700,6 +735,7 @@ fn lower_story<T: ReadTxn>(
                         map,
                         opaque_sequences,
                         revealable,
+                        local,
                     )?;
                     if !hidden {
                         blocks.push(LayoutBlock::Table(lowered));
@@ -839,6 +875,7 @@ fn lower_story<T: ReadTxn>(
                         map,
                         opaque_sequences,
                         revealable,
+                        local,
                     )?;
                     stamp_sdt_group(&mut child_blocks, group);
                     if !previewed_out && !hidden_field_blocks.contains(&child_story) {
@@ -1476,6 +1513,7 @@ fn lower_table<T: ReadTxn>(
     map: &mut LoweringMap,
     opaque_sequences: &mut BTreeSet<String>,
     revealable: &mut Option<Vec<LayoutBlock>>,
+    local: &mut local::LocalLowering,
 ) -> Result<(TableBlock, u64), BridgeError> {
     let tbl_pr_value = shared_any(table, txn, "tblPr")
         .ok_or_else(|| malformed_table(parent_story, story_index, "missing tblPr"))?;
@@ -1518,8 +1556,9 @@ fn lower_table<T: ReadTxn>(
             _ => None,
         })
         .filter_map(any_map)
-        .find_map(|cell| map_string(cell, "story"))
-        .unwrap_or_else(|| story_index.to_string());
+        .find_map(|cell| map_string(cell, "story"));
+    local.blocked |= table_identity.is_none();
+    let table_identity = table_identity.unwrap_or_else(|| story_index.to_string());
     let table_id = format!("{parent_story}:table:{table_identity}");
 
     let table_margins = tbl_pr.get("cellMargins").and_then(any_map);
@@ -1590,6 +1629,7 @@ fn lower_table<T: ReadTxn>(
                 map,
                 opaque_sequences,
                 revealable,
+                local,
             )?;
 
             if env.compatibility_flags.allow_space_of_same_style_in_table {

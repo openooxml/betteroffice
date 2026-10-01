@@ -89,6 +89,7 @@ export async function createResidentEngineSession(
   await preloadEditWasm();
   setEditWasmHeapLimit(heapLimitBytes);
   const session = createEditSession(randomClientId());
+  session.set_local_lowering(true);
   const listeners = new Set<
     (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
   >();

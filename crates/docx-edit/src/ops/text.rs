@@ -306,6 +306,17 @@ impl EditingDoc {
         text: &str,
         policy: FormatPolicy,
     ) -> OpResult<Receipt> {
+        self.insert_text_observed(ctx, at, text, policy, |_| {})
+    }
+
+    pub(crate) fn insert_text_observed(
+        &self,
+        ctx: &EditCtx,
+        at: Position,
+        text: &str,
+        policy: FormatPolicy,
+        observe: impl FnOnce(&Attrs),
+    ) -> OpResult<Receipt> {
         validate_text(text)?;
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
@@ -330,7 +341,9 @@ impl EditingDoc {
         let ins = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
-        story.insert_with_attributes(&mut txn, at.index, text, stamped_attrs(formatting, ins));
+        let attrs = stamped_attrs(formatting, ins);
+        observe(&attrs);
+        story.insert_with_attributes(&mut txn, at.index, text, attrs);
         let end = at.index + utf16_len(text);
         let range = loc_range_in_txn(&at.story, &story, &txn, at.index, end)?;
         Ok(Receipt {
