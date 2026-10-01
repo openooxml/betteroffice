@@ -437,6 +437,7 @@ pub fn measure_paragraph_typed(
         justify: attrs.and_then(|attrs| attrs.alignment.as_deref()) == Some("justify"),
         store,
         prepared: &prepared,
+        runs: &request.block.runs,
         spacing,
         body_width,
         first_line_width,
@@ -789,6 +790,21 @@ mod min_content_tests {
             .iter()
             .map(|line| line.head_char)
             .collect()
+    }
+
+    #[test]
+    fn a_word_split_across_runs_wraps_whole() {
+        let block = serde_json::json!({ "kind": "paragraph", "runs": [
+            { "kind": "text", "text": "0000 00" },
+            { "kind": "text", "text": "00 0" }
+        ]});
+        let heads: Vec<_> = measure_paragraph(&store(), &input(block, 7.0 * W0))
+            .unwrap()
+            .lines
+            .iter()
+            .map(|line| (line.head_run, line.head_char))
+            .collect();
+        assert_eq!(heads, vec![(0, 0), (0, 5)]);
     }
 
     #[test]

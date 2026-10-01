@@ -66,6 +66,8 @@ pub(super) struct FillParams<'a> {
     pub justify: bool,
     pub store: &'a crate::font_store::FontStore,
     pub prepared: &'a [PreparedRun],
+    /// The paragraph's runs, index-aligned with `prepared`.
+    pub runs: &'a [RunIn],
     pub spacing: Option<&'a SpacingIn>,
     /// Content width for every line after the first (indents applied).
     pub body_width: f32,
@@ -579,6 +581,16 @@ impl Filler<'_> {
             let word = &t.chars[char_idx..next_break];
             let word_width = span_width(word, t.letter_spacing);
             let fitting_width = visible_span_width(word, t.letter_spacing);
+            let joined_width = if next_break == t.chars.len() {
+                fitting_width + self.word_continuation_width(ri as usize)
+            } else {
+                fitting_width
+            };
+            let wrap_width = if joined_width <= self.cur.available + WRAP_SLACK_PX {
+                joined_width
+            } else {
+                fitting_width
+            };
 
             if fitting_width > self.cur.available + WRAP_SLACK_PX {
                 // Overlong unbreakable word: fill the remaining space on the
@@ -617,7 +629,7 @@ impl Filler<'_> {
 
             if self.cur.width > 0.0
                 && fitting_width > 0.0
-                && self.cur.width + fitting_width
+                && self.cur.width + wrap_width
                     - if self.p.justify {
                         self.cur.space_width * 0.25
                     } else {
@@ -635,6 +647,34 @@ impl Filler<'_> {
             char_idx = next_break;
         }
         Ok(())
+    }
+
+    /// Width of the text after run `run_index` that continues the word the
+    /// run ends in, up to the next break opportunity: a word split across
+    /// runs wraps whole.
+    fn word_continuation_width(&self, run_index: usize) -> f32 {
+        let mut width = 0.0;
+        let mut from = run_index;
+        for (index, run) in self.p.prepared.iter().enumerate().skip(run_index + 1) {
+            match run {
+                PreparedRun::Text(t) if !t.chars.is_empty() => {
+                    if !runs_join(self.p.runs, from, index) {
+                        break;
+                    }
+                    let end = t.breaks.first().copied().unwrap_or(t.chars.len());
+                    width += visible_span_width(&t.chars[..end], t.letter_spacing);
+                    if end < t.chars.len() {
+                        break;
+                    }
+                    from = index;
+                }
+                PreparedRun::Text(_)
+                | PreparedRun::Hidden { .. }
+                | PreparedRun::SkippedImage { .. } => {}
+                _ => break,
+            }
+        }
+        width
     }
 
     /// Accumulates each run's extents above and below the shared baseline.
@@ -1379,6 +1419,7 @@ mod tests {
                 s
             },
             prepared,
+            runs: &[],
             spacing: None,
             body_width: width,
             first_line_width: width,
