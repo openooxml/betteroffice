@@ -100,6 +100,7 @@ dependencies = [
  "betteroffice-ooxml-diff",
  "betteroffice-ooxml-text",
  "betteroffice-opc",
+ "foldhash",
  "js-sys",
  "ryu-js",
  "serde",
@@ -116,6 +117,7 @@ version = "0.4.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-ooxml-text",
+ "foldhash",
  "serde",
  "serde_json",
  "unicode-segmentation",

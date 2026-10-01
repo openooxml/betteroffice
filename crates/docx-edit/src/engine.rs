@@ -37,6 +37,7 @@ use crate::bridge::{
     BridgeError, LoweringMap, RenderEnv, RevisionPreview,
     yrs_doc_to_mapped_layout_blocks_with_revealable,
 };
+use crate::fingerprint::Fingerprint;
 use crate::frame_delta::{
     FrameEpochs, FramePageSnapshot, encode_frame_delta, encode_frame_delta_incremental,
     encode_frame_delta_pages,
@@ -174,7 +175,7 @@ struct PreparedRegionLayout {
     resident_body: bool,
     /// Whether the pass lowers the `body` story, the one preview changes are traced in.
     main_body: bool,
-    block_fingerprints: Option<Vec<u64>>,
+    block_fingerprints: Option<Vec<Fingerprint>>,
     lowered_from: Option<Rc<Vec<LayoutBlock>>>,
     input_lowering: Option<(u64, Rc<LoweringMap>)>,
     has_floats: bool,
@@ -191,7 +192,7 @@ struct BodyMeasure {
     widths: Vec<f64>,
     flow: docx_layout::measure_blocks::FloatFlow,
     /// Fingerprints of the measured blocks, taken as they are measured.
-    fingerprints: Vec<u64>,
+    fingerprints: Vec<Fingerprint>,
 }
 
 impl PreparedRegionLayout {
@@ -248,7 +249,7 @@ pub struct RegionLayoutProgress {
 #[derive(Debug)]
 struct ResidentLayoutInput {
     input: LayoutInput,
-    block_fingerprints: Vec<u64>,
+    block_fingerprints: Vec<Fingerprint>,
     /// The doc epoch and lowering map `input` was built from.
     lowering: Option<(u64, Rc<LoweringMap>)>,
 }
@@ -913,7 +914,7 @@ struct PaginationState {
     note_changed_pages: Vec<usize>,
     layout: Option<Layout>,
     checkpoints: Vec<LayoutCheckpoint>,
-    block_fingerprints: Vec<u64>,
+    block_fingerprints: Vec<Fingerprint>,
     options_fingerprint: u64,
     revision_preview_key: u64,
     /// The decisions [`Self::revision_preview_key`] identifies.
@@ -1408,7 +1409,7 @@ fn paragraph_offset_position(start: f64, offset: u32) -> Option<i64> {
         .checked_add(1 + i64::from(offset))
 }
 
-fn measured_fingerprint(measured: &MeasuredBlock) -> Result<u64, String> {
+fn measured_fingerprint(measured: &MeasuredBlock) -> Result<Fingerprint, String> {
     crate::fingerprint::fingerprint_without_positions(&(
         measured,
         relative_run_position_fingerprint(&measured.block),
@@ -1477,7 +1478,10 @@ fn relative_run_position_fingerprint(block: &LayoutBlock) -> u64 {
 }
 
 /// [`measured_fingerprint`] of a block and its measure held apart.
-fn measured_parts_fingerprint(block: &LayoutBlock, measure: &BlockExtent) -> Result<u64, String> {
+fn measured_parts_fingerprint(
+    block: &LayoutBlock,
+    measure: &BlockExtent,
+) -> Result<Fingerprint, String> {
     #[derive(Serialize)]
     struct MeasuredParts<'a> {
         block: &'a LayoutBlock,
@@ -1538,8 +1542,8 @@ fn section_breaks_match_but_margins(next: &LayoutBlock, retained: &LayoutBlock) 
 /// pagination has to resume where the section begins.
 fn section_start_of_first_changed_break(
     measured: &[MeasuredBlock],
-    previous: &[u64],
-    next: &[u64],
+    previous: &[Fingerprint],
+    next: &[Fingerprint],
     dirty: usize,
 ) -> usize {
     let Some(changed) = (dirty..measured.len()).find(|&index| {
@@ -1556,7 +1560,7 @@ fn section_start_of_first_changed_break(
     dirty.min(section_start)
 }
 
-fn measured_fingerprints(input: &LayoutInput) -> Result<Vec<u64>, String> {
+fn measured_fingerprints(input: &LayoutInput) -> Result<Vec<Fingerprint>, String> {
     input.measured.iter().map(measured_fingerprint).collect()
 }
 
@@ -1685,7 +1689,7 @@ fn first_cell_paragraph(
 
 type ResidentWalkOut<'a> = (
     &'a mut Vec<MeasuredBlock>,
-    &'a mut Vec<u64>,
+    &'a mut Vec<Fingerprint>,
     &'a mut Vec<(usize, usize)>,
 );
 
@@ -1695,7 +1699,7 @@ fn resident_walk(
     blocks: &[LayoutBlock],
     any_block: bool,
     paragraph_merge: bool,
-    (previous, previous_fingerprints, take): (&mut [MeasuredBlock], &[u64], bool),
+    (previous, previous_fingerprints, take): (&mut [MeasuredBlock], &[Fingerprint], bool),
     measure_dirty: &mut dyn FnMut(
         usize,
         &str,
@@ -2740,7 +2744,7 @@ impl EngineSession {
             .map_err(|error| format!("fingerprint measurement config: {error}"))?;
         let resident_body = body_story.is_some();
         let main_body = body_story.as_deref() == Some("body");
-        let mut block_fingerprints: Option<Vec<u64>> = None;
+        let mut block_fingerprints: Option<Vec<Fingerprint>> = None;
         let mut lowered_from = None;
         let mut input_lowering = None;
         let mut has_floats = false;
@@ -2754,7 +2758,7 @@ impl EngineSession {
                 .as_ref()
                 .ok_or_else(|| "resident body layout requires a render environment".to_owned())?;
             enum Arena {
-                Reused(Vec<MeasuredBlock>, Vec<u64>),
+                Reused(Vec<MeasuredBlock>, Vec<Fingerprint>),
                 /// Blocks to measure, and whether floats couple the whole flow.
                 Full(Vec<LayoutBlock>, bool),
             }
@@ -3492,7 +3496,7 @@ impl EngineSession {
     fn layout_document_value_with_fingerprints(
         &self,
         mut input: LayoutInput,
-        mut block_fingerprints: Vec<u64>,
+        mut block_fingerprints: Vec<Fingerprint>,
         revision_preview: Option<(u64, &BTreeMap<String, RevisionPreview>, bool)>,
     ) -> Result<(), String> {
         if block_fingerprints.len() != input.measured.len() {
@@ -3806,7 +3810,7 @@ impl EngineSession {
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
         measurement_fingerprint: u64,
         floats: Option<&docx_layout::measure_blocks::FloatPageGeometry>,
-    ) -> Result<Option<(Vec<MeasuredBlock>, Vec<u64>)>, String> {
+    ) -> Result<Option<(Vec<MeasuredBlock>, Vec<Fingerprint>)>, String> {
         let pagination = &mut *self.pagination.borrow_mut();
         let Some(previous) = pagination.input.as_mut() else {
             return Ok(None);
@@ -5541,6 +5545,192 @@ mod tests {
             measured_fingerprint(&measured(100.0, 8.0)).unwrap()
         );
         assert_ne!(original, measured_fingerprint(&measured(0.0, 7.0)).unwrap());
+    }
+
+    #[test]
+    fn measured_fingerprints_tell_anchored_images_apart() {
+        let measured = |anchored: bool| {
+            serde_json::from_value::<MeasuredBlock>(serde_json::json!({
+                "block": {
+                    "kind": "image", "id": "i", "src": "", "width": 20, "height": 20,
+                    "anchor": {"isAnchored": anchored},
+                    "effects": [null, 13_100_772_350_407_709_573_u64, 18_232_552_688_281_235_959_u64]
+                },
+                "measure": {"kind": "image", "width": 20, "height": 20}
+            }))
+            .unwrap()
+        };
+        assert_ne!(
+            measured_fingerprint(&measured(false)).unwrap(),
+            measured_fingerprint(&measured(true)).unwrap()
+        );
+    }
+
+    #[test]
+    fn measured_block_fingerprints_match_exactly_when_the_measured_blocks_do() {
+        use std::path::{Path, PathBuf};
+
+        use serde_json::Value;
+
+        fn collect_docx(directory: &Path, paths: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    collect_docx(&path, paths);
+                } else if path
+                    .extension()
+                    .is_some_and(|extension| extension == "docx")
+                {
+                    paths.push(path);
+                }
+            }
+        }
+
+        fn region_request(
+            engine: &EngineSession,
+            bytes: &[u8],
+            font: u32,
+        ) -> Result<String, String> {
+            let package = docx_parse::parse_docx_s9_wire(bytes, Default::default())
+                .map_err(|error| error.to_string())?
+                .document
+                .package;
+            let mut sections: Vec<Value> = package
+                .document
+                .sections
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|section| json!({"sectionId": section.id, "properties": section.properties}))
+                .collect();
+            let last = sections
+                .last()
+                .map(|section| section["properties"].clone())
+                .unwrap_or_else(|| json!(package.document.final_section_properties));
+            sections.push(json!({"properties": last}));
+            let mut contents = Vec::new();
+            for (notes, kind) in [
+                (&package.footnotes, "footnote"),
+                (&package.endnotes, "endnote"),
+            ] {
+                for note in notes.iter().flatten() {
+                    if note.note_type.is_empty() || note.note_type == "normal" {
+                        contents.push(json!({"id": note.id as i64, "noteKind": kind, "height": 0}));
+                    }
+                }
+            }
+            let mut request = json!({
+                "bodyStory": "body",
+                "renderEnv": {},
+                "options": {"pageGap": 24},
+                "regions": {"sections": sections, "settings": package.settings},
+                "notes": {"contents": contents},
+            });
+            let requirements: Vec<Value> =
+                serde_json::from_str(&engine.layout_font_requirements_json(&request.to_string())?)
+                    .map_err(|error| error.to_string())?;
+            let chains: serde_json::Map<String, Value> = requirements
+                .iter()
+                .map(|requirement| {
+                    (
+                        requirement["key"].as_str().unwrap().to_owned(),
+                        json!([font]),
+                    )
+                })
+                .collect();
+            request["measurement"] = json!({
+                "fontChains": chains,
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "compat": {"noLeading": false, "doNotExpandShiftReturn": false},
+                "authoritativeShaping": true,
+            });
+            Ok(request.to_string())
+        }
+
+        fn remove_positions(value: &mut Value) {
+            match value {
+                Value::Object(object) => {
+                    for key in ["pmStart", "pmEnd", "docStart", "docEnd"] {
+                        object.remove(key);
+                    }
+                    for value in object.values_mut() {
+                        remove_positions(value);
+                    }
+                }
+                Value::Array(array) => {
+                    for value in array {
+                        remove_positions(value);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(FONT).unwrap();
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut paths = Vec::new();
+        collect_docx(&manifest.join("tests/fixtures"), &mut paths);
+        collect_docx(
+            &manifest.join("../betteroffice-docx/tests/corpus/fixtures"),
+            &mut paths,
+        );
+        paths.sort();
+        let mut by_key: HashMap<String, Fingerprint> = HashMap::new();
+        let mut by_fingerprint: HashMap<Fingerprint, String> = HashMap::new();
+        let mut laid_out = 0;
+        for path in paths {
+            let bytes = std::fs::read(&path).unwrap();
+            let engine = EngineSession::new(7);
+            let result = (|| -> Result<(), String> {
+                crate::seed::seed_from_docx(engine.doc(), &bytes)?;
+                let request = region_request(&engine, &bytes, font)?;
+                engine.layout_document_with_regions_retained_json(&request)?;
+                Ok(())
+            })();
+            if let Err(error) = result {
+                eprintln!("skip {}: {error}", path.display());
+                continue;
+            }
+            laid_out += 1;
+            let pagination = engine.pagination.borrow();
+            let measured = &pagination.input.as_ref().unwrap().measured;
+            assert_eq!(
+                measured.len(),
+                pagination.block_fingerprints.len(),
+                "{}",
+                path.display()
+            );
+            for (measured, &fingerprint) in measured.iter().zip(&pagination.block_fingerprints) {
+                let mut value = serde_json::to_value((
+                    measured,
+                    relative_run_position_fingerprint(&measured.block),
+                ))
+                .unwrap();
+                remove_positions(&mut value);
+                let key = serde_json::to_string(&value).unwrap();
+                if let Some(previous) = by_key.insert(key.clone(), fingerprint) {
+                    assert_eq!(
+                        previous,
+                        fingerprint,
+                        "equal measured blocks: {}",
+                        path.display()
+                    );
+                }
+                if let Some(previous) = by_fingerprint.insert(fingerprint, key.clone()) {
+                    assert_eq!(previous, key, "equal fingerprints: {}", path.display());
+                }
+            }
+        }
+        assert!(laid_out >= 20, "only {laid_out} documents laid out");
+        assert!(
+            by_key.len() > 500,
+            "only {} distinct measured blocks",
+            by_key.len()
+        );
     }
 
     #[test]
