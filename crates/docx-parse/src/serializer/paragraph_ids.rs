@@ -23,6 +23,26 @@ pub struct S13ParagraphIds {
     /// Parts written as their source bytes with only paragraph IDs patched.
     #[serde(default)]
     pub patched_parts: Vec<S13PatchedPart>,
+    /// Story parts written as their source bytes with only some paragraphs re-serialized.
+    #[serde(default)]
+    pub spliced_parts: Vec<S13SplicedPart>,
+}
+
+/// A story part whose model paragraphs each come from one source `w:p`, in source order: it is
+/// written as its source XML with only the paragraphs that changed, or whose written XML no
+/// longer agrees with their source on comments, revisions, notes or relationships, replaced.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct S13SplicedPart {
+    pub part: String,
+    /// Lowercase hex SHA-256 of the source part the ordinals address.
+    pub sha256: String,
+    /// The `sourceOrdinal` of every model paragraph written from the part.
+    #[serde(default)]
+    pub paragraphs: Vec<u32>,
+    /// Of those, the ones whose content changed since the source was opened.
+    #[serde(default)]
+    pub changed: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
