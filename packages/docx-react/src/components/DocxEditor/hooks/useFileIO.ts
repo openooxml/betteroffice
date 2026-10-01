@@ -1,6 +1,6 @@
 import { useCallback, useRef } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
-import type { Document } from '@betteroffice/docx/types/document';
+import type { Document, Endnote, Footnote } from '@betteroffice/docx/types/document';
 import {
   createDocx,
   injectReplyRangeMarkers,
@@ -10,6 +10,7 @@ import {
 import { readDocxFileFromInput, type DocxInput } from '@betteroffice/docx/utils';
 import {
   captureSessionSave,
+  sessionSourcePackage,
   writeSessionSave,
   yrsToDocument,
   type DocxSessionSave,
@@ -94,14 +95,68 @@ export interface DocxPrintJob {
 async function writeEditorDocument(
   document: Document,
   session: YrsSession | null,
-  capture: DocxSessionSave | null
+  capture: DocxSessionSave | null,
+  comments: Comment[],
+  injectedMarkers: boolean
 ): Promise<ArrayBuffer> {
   const original = document.originalBuffer;
   if (!original) return createDocx(document);
   if (!session || !capture) return repackDocx(document);
-  // The original buffer can be the last save rather than the session source, so none is patched.
+  const source = sessionSourcePackage(session);
+  if (source) {
+    const hostChanged = !sameSaveMetadata(document, source.document);
+    const commentsChanged = !sameSaveValue(comments, source.document.package.document.comments ?? []);
+    const bodyPart = capture.identities.paragraphs
+      .find(({ session: anchor, source }) => anchor?.story === 'body' && source)
+      ?.source?.partUri.slice(1);
+    const patches = (part: string): boolean =>
+      !hostChanged &&
+      (!commentsChanged || part !== 'word/comments.xml') &&
+      (!injectedMarkers || (bodyPart !== undefined && part !== bodyPart));
+    const { bytes } = await writeSessionSave(
+      session,
+      document,
+      capture,
+      source.buffer,
+      {},
+      patches,
+      true
+    );
+    return bytes.buffer as ArrayBuffer;
+  }
   const { bytes } = await writeSessionSave(session, document, capture, original, {}, () => false);
   return bytes.buffer as ArrayBuffer;
+}
+
+function sameSaveValue(a: unknown, b: unknown): boolean {
+  const stringify = (value: unknown) =>
+    JSON.stringify(value, (_key, entry) => (entry instanceof Map ? [...entry] : entry));
+  return a === b || stringify(a) === stringify(b);
+}
+
+function sameSaveMetadata(document: Document, opened: Document): boolean {
+  const withoutContent = <T extends { content: unknown }>(part: T) => {
+    const { content, ...metadata } = part;
+    return metadata;
+  };
+  const parts = (map: Document['package']['headers']) =>
+    [...(map ?? [])].map(([id, part]) => [id, withoutContent(part)]);
+  const notes = (entries: (Footnote | Endnote)[] | undefined) =>
+    (entries ?? []).map((note) => {
+      // The thin open omits these source fields; projection restores or clears them.
+      const { verbatimXml, sourceOrdinal, ...metadata } = withoutContent(note);
+      return metadata;
+    });
+  const metadata = ({ package: pkg }: Document) => ({
+    finalSectionProperties: pkg.document.finalSectionProperties,
+    sections: pkg.document.sections?.map(withoutContent),
+    headers: parts(pkg.headers),
+    footers: parts(pkg.footers),
+    footnotes: notes(pkg.footnotes),
+    endnotes: notes(pkg.endnotes),
+    relationships: [...(pkg.relationships ?? [])],
+  });
+  return sameSaveValue(metadata(document), metadata(opened));
 }
 
 /**
@@ -187,11 +242,20 @@ export function useFileIO({
 
         // Inject commentRangeStart/End for reply comments that share the parent's range.
         // Pages/Word require every comment (including replies) to have range markers in document.xml.
-        injectReplyRangeMarkers(document.package.document.content, comments);
+        const injectedReplies = injectReplyRangeMarkers(document.package.document.content, comments);
         // Also inject range markers for comments that reply to tracked changes.
-        injectTCReplyRangeMarkers(document.package.document.content, comments);
+        const injectedTCReplies = injectTCReplyRangeMarkers(
+          document.package.document.content,
+          comments
+        );
 
-        const buffer = await writeEditorDocument(document, session, capture);
+        const buffer = await writeEditorDocument(
+          document,
+          session,
+          capture,
+          comments,
+          injectedReplies || injectedTCReplies
+        );
         if (pagedEditorRef.current?.getYrsSession() !== session) {
           throw new Error('The document changed while saving');
         }

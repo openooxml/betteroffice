@@ -131,6 +131,7 @@ export {
   type DocxSavedParagraph,
   type DocxSessionSave,
 } from './saveYrsDocx';
+export { sessionSourcePackage } from './sessionInternals';
 export * from './yrsPositionProjection';
 export * from './proposalGeometry';
 
@@ -1601,6 +1602,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   };
   let residentFontsRevision = 0;
   let docxSource: Uint8Array | null = null;
+  let docxSourceDocument: Document | null = null;
 
   const invalidateReadCaches = (): void => {
     cachedSelection = undefined;
@@ -1730,6 +1732,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     });
     const host = withHostMedia(decodeDocxHost(json, source));
     docxSource = source;
+    docxSourceDocument = host.document;
     partialDocument = false;
     return host;
   };
@@ -2730,6 +2733,10 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   };
 
   registerSessionInternals(facade, {
+    sourcePackage: () =>
+      docxSource && docxSourceDocument
+        ? { buffer: docxSourceBuffer(docxSource), document: docxSourceDocument }
+        : null,
     compareDocx: (original, revised, options) => {
       markDirty('all');
       const json = mutate(() => {
@@ -2738,6 +2745,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         return compared;
       });
       docxSource = original.slice();
+      docxSourceDocument = null;
       return json;
     },
     finishComparedDocx: (bytes) => session.finish_compared_docx_json(bytes),
