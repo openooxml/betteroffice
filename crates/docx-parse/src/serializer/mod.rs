@@ -15,6 +15,7 @@ pub mod s12;
 pub mod s13;
 pub mod sdt;
 pub mod section;
+pub(crate) mod splice;
 pub mod table;
 pub mod watermark;
 pub mod xml_writer;
@@ -28,7 +29,7 @@ pub use paragraph::{
     serialize_inline_sdt, serialize_paragraph, serialize_paragraph_content,
     serialize_paragraph_formatting, synthesize_sdt_properties,
 };
-pub use paragraph_ids::{S13ParagraphId, S13ParagraphIds, S13PatchedPart};
+pub use paragraph_ids::{S13ParagraphId, S13ParagraphIds, S13PatchedPart, S13SplicedPart};
 pub use parts::{
     CommentParaInfo, serialize_comments_extended_part, serialize_comments_extensible_part,
     serialize_comments_ids_part, serialize_comments_part, serialize_comments_with_info,

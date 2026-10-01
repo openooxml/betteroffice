@@ -138,17 +138,17 @@ pub struct ParagraphOccurrence {
     pub item_id: Option<String>,
 }
 
-struct Tag<'a> {
-    range: Range<usize>,
-    name: &'a str,
-    end: bool,
-    empty: bool,
-    attributes: Vec<(&'a str, Range<usize>)>,
+pub(crate) struct Tag<'a> {
+    pub(crate) range: Range<usize>,
+    pub(crate) name: &'a str,
+    pub(crate) end: bool,
+    pub(crate) empty: bool,
+    pub(crate) attributes: Vec<(&'a str, Range<usize>)>,
 }
 
 /// Walks the tags of `xml` in order, skipping comments, CDATA, processing
 /// instructions and declarations. `None` on an unterminated construct.
-fn tags(xml: &str) -> Option<Vec<Tag<'_>>> {
+pub(crate) fn tags(xml: &str) -> Option<Vec<Tag<'_>>> {
     let bytes = xml.as_bytes();
     let mut result = Vec::new();
     let mut cursor = 0;
@@ -235,13 +235,13 @@ fn tags(xml: &str) -> Option<Vec<Tag<'_>>> {
 }
 
 /// An attribute value as the parser reads it; `None` when it does not unescape.
-fn unescaped(xml: &str, range: Range<usize>) -> Option<String> {
+pub(crate) fn unescaped(xml: &str, range: Range<usize>) -> Option<String> {
     quick_xml::escape::unescape(&xml[range])
         .ok()
         .map(|value| value.into_owned())
 }
 
-fn attribute<'a>(tag: &Tag<'a>, name: &str) -> Option<Range<usize>> {
+pub(crate) fn attribute<'a>(tag: &Tag<'a>, name: &str) -> Option<Range<usize>> {
     tag.attributes
         .iter()
         .find(|(key, _)| *key == name)

@@ -793,3 +793,26 @@ test('adding and removing a header across saves keeps relationship and content-t
   }
   expect((await reopened(lastSave)).package.document.finalSectionProperties?.headerReferences ?? []).toEqual([]);
 });
+
+test('an edit in one paragraph keeps the rest of the body byte-for-byte', async () => {
+  const source = fixture((p) =>
+    p(run('Edited here')) +
+    p('<w:hyperlink w:anchor="target"><w:fldSimple w:instr="DATE">' + run('October') + '</w:fldSimple></w:hyperlink>') +
+    p(run('Kept'), '<w:pPr><w:pageBreakBefore w:val="0"/><w:spacing w:after="0"/></w:pPr>') +
+    '<w:altChunk r:id="chunk"/>' +
+    p('<w:permStart w:edGrp="everyone" w:id="9"/>' + run('Permission') + '<w:permEnd w:id="9"/>') +
+    p('<w:bookmarkStart w:id="7" w:name="target"/>' + run('Target') + '<w:bookmarkEnd w:id="7"/>'),
+    { chunk: true }
+  );
+  const editor = await mount(source.bytes);
+  await typeBody(editor, 'Typed ');
+  const saved = xmlPart(unzipContainer(new Uint8Array(await editor.save())), 'word/document.xml');
+  const original = new TextDecoder().decode(source.parts.get('word/document.xml'));
+  const start = original.indexOf('<w:p ');
+  const end = original.indexOf('</w:p>', start) + '</w:p>'.length;
+  expectSameXml(saved.slice(0, start), original.slice(0, start), 'before the edited paragraph');
+  expectSameXml(saved.slice(saved.length - (original.length - end)), original.slice(end), 'after the edited paragraph');
+  expect(saved.slice(start, saved.length - (original.length - end)).replace(/<[^>]+>/g, '')).toBe(
+    'Typed Edited here'
+  );
+});
