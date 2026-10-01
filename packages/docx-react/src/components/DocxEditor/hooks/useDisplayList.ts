@@ -74,6 +74,7 @@ import {
   workerOpenSourceVersion,
 } from '../internals/workerOpenReplica';
 import { bindDisplayWindow, type DisplayWindow } from '../internals/displayWindow';
+import { sameLayoutInput } from '../internals/layoutInput';
 import {
   failWorkerProposalAuthority,
   registeredWorkerProposalAuthority,
@@ -1517,7 +1518,8 @@ export function useRustDisplayList(
       const owner = { current: workerRef.current };
       const pending = requestOpenedWorker(
         hostEngine,
-        (current) => current.proposalFontRequirements?.layoutInput === request
+        (current) => current.proposalFontRequirements &&
+          sameLayoutInput(current.proposalFontRequirements.layoutInput, request)
           ? Promise.resolve(current.proposalFontRequirements.requirementsJson)
           : current.client.fontRequirements(request),
         (current) => { owner.current = current; }

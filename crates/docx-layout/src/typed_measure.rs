@@ -291,12 +291,32 @@ fn rotation_bounds_in(bounds: Option<&Value>) -> Option<Option<RotationBoundsIn>
     }
 }
 
+const WIDENED_SLOTS: usize = 4096;
+
+thread_local! {
+    /// [`normalize_output`] results by `f32` bits, one per slot; an empty slot
+    /// holds NaN bits, which are never looked up.
+    static WIDENED: std::cell::RefCell<Box<[(u32, f64)]>> =
+        std::cell::RefCell::new(vec![(u32::MAX, 0.0); WIDENED_SLOTS].into_boxed_slice());
+}
+
 fn normalize_output(value: f32) -> f64 {
     if !value.is_finite() {
         return f64::from(value);
     }
-    let mut buffer = zmij::Buffer::new();
-    serde_json::from_str(buffer.format_finite(value)).unwrap_or_else(|_| f64::from(value))
+    let bits = value.to_bits();
+    let slot = (bits.wrapping_mul(0x9e37_79b1) >> 20) as usize;
+    WIDENED.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let entry = &mut cache[slot];
+        if entry.0 != bits {
+            let mut buffer = zmij::Buffer::new();
+            let widened = serde_json::from_str(buffer.format_finite(value))
+                .unwrap_or_else(|_| f64::from(value));
+            *entry = (bits, widened);
+        }
+        entry.1
+    })
 }
 
 fn extent_from_out(extent: ooxml_text::ParagraphExtentOut) -> crate::types::ParagraphExtent {
@@ -545,7 +565,12 @@ mod parity_tests {
             bits = bits.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             corpus.push(f32::from_bits(bits));
         }
-        for value in corpus.into_iter().filter(|value| value.is_finite()) {
+        let finite: Vec<f32> = corpus
+            .into_iter()
+            .filter(|value| value.is_finite())
+            .collect();
+        // The second pass reads the values the first one cached.
+        for value in finite.iter().chain(finite.iter().rev()).copied() {
             let encoded = serde_json::to_string(&value).unwrap();
             let expected: f64 = serde_json::from_str(&encoded).unwrap();
             assert_eq!(

@@ -5,6 +5,7 @@ import {
   createResidentEngineSession,
   type ResidentEngineSession,
 } from './residentEngineSession';
+import { finalPreviewDisplayWindow, finalPreviewPageCount } from './previewDisplayWindow';
 import { preloadEditWasm } from './wasm/index';
 import {
   createProposalRegistry,
@@ -51,17 +52,22 @@ let fontRequirements: {
   layoutInput: string;
   requirementsJson: string;
 } | null = null;
-/** Set while the session holds the document `open` seeded, with the heap limit it used. */
-let openedDocument: { heapLimitBytes?: number } | null = null;
-// The last font requirements answered, kept until the session's next document update.
-let requirementsAnswered: {
-  session: ResidentEngineSession;
-  layoutInput: string;
-  json: string;
+/** Font requirements by layout input, for one session at one document version. */
+let requirementsCache: {
+  owner: ResidentEngineSession;
+  version: string;
+  byInput: Map<string, string>;
   release: () => void;
 } | null = null;
+/** The layout input of the host's last font requirements request. */
+let requestedRequirements: { owner: ResidentEngineSession; layoutInput: string } | null = null;
+const REQUIREMENTS_CACHE_INPUTS = 8;
+/** Set while the session holds the document `open` seeded, with the heap limit it used. */
+let openedDocument: { heapLimitBytes?: number } | null = null;
 // The opened document is a display-only preview that an `open` of the whole package replaces.
 let previewing = false;
+/** Pages of a cut preview's layout that match the whole document's; null for a whole document. */
+let previewFinalPages: number | null = null;
 let unsubscribe: (() => void) | null = null;
 let pendingUpdates: Uint8Array[] = [];
 let layoutRevision = 0;
@@ -257,6 +263,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     }
     unsubscribe?.();
     unsubscribe = null;
+    previewFinalPages = null;
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     const { layoutJson, provisional } = hydrate(
       request.snapshot,
@@ -264,6 +271,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       request.layoutExtras !== undefined,
       request.opened !== true
     );
+    if (previewFinalPages !== null) {
+      setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
+    }
     if (provisional) {
       incompleteLayout = {
         layoutInput: request.snapshot.layoutInput,
@@ -294,25 +304,14 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'fontRequirements') {
     if (!session) throw new Error('Resident engine worker is not initialized');
-    if (
-      requirementsAnswered?.session !== session ||
-      requirementsAnswered.layoutInput !== request.layoutInput
-    ) {
-      forgetRequirements();
-      const json = session.layoutFontRequirementsJson(request.layoutInput);
-      requirementsAnswered = {
-        session,
-        layoutInput: request.layoutInput,
-        json,
-        release: session.onUpdate(forgetRequirements),
-      };
-    }
+    const requirementsJson = layoutFontRequirements(session, request.layoutInput);
+    requestedRequirements = { owner: session, layoutInput: request.layoutInput };
     fontRequirements = {
       version: session.proposalEngine.version(),
       layoutInput: request.layoutInput,
-      requirementsJson: requirementsAnswered.json,
+      requirementsJson,
     };
-    reply({ id: request.id, ok: true, requirementsJson: requirementsAnswered.json });
+    reply({ id: request.id, ok: true, requirementsJson });
     return;
   }
   if (request.type === 'encodeState') {
@@ -390,6 +389,21 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           (request.operation.kind === 'snapshot' && fontRequirements.version === snapshot.version))
           ? { ...fontRequirements, version: snapshot.version }
           : null;
+      // A decision changes only the preview: the host's next input is its last one previewing it.
+      const preview = proposalRevisionPreview(snapshot);
+      if (
+        request.operation.kind === 'setStates' &&
+        result?.ok === true &&
+        changedStories.length === 0 &&
+        requestedRequirements?.owner === session
+      ) {
+        fontRequirements = previewFontRequirements(
+          session,
+          requestedRequirements.layoutInput,
+          preview,
+          snapshot.version
+        );
+      }
       reply(
         {
           id: request.id,
@@ -454,12 +468,16 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'sync') {
     unsubscribe?.();
     unsubscribe = null;
+    previewFinalPages = null;
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     const { layoutJson, provisional } = hydrate(
       request.snapshot,
       request.provisionalPages,
       request.layoutExtras !== undefined
     );
+    if (previewFinalPages !== null) {
+      setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
+    }
     if (provisional) {
       incompleteLayout = {
         layoutInput: request.snapshot.layoutInput,
@@ -489,9 +507,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'buildPages') {
-    if (request.background && request.pages.length > BACKGROUND_SLICE_PAGES) {
+    const limit = previewFinalPages;
+    const pages = limit === null ? request.pages : request.pages.filter((index) => index < limit);
+    if (request.background && pages.length > BACKGROUND_SLICE_PAGES) {
       const build: BackgroundPageBuild = {
-        request, owner: session, frameEpoch: request.expectedFrameEpoch,
+        request: pages === request.pages ? request : { ...request, pages },
+        owner: session, frameEpoch: request.expectedFrameEpoch,
         frames: [], offset: 0, started: performance.now(), engineMs: 0,
       };
       backgroundPageBuild = build;
@@ -502,7 +523,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     // Pages of the provisional frame build between steps, as before a completion.
     pendingUpdates = [];
     const started = performance.now();
-    const frame = session.buildDisplayPagesFrame(request.pages, request.expectedFrameEpoch);
+    const frame = session.buildDisplayPagesFrame(pages, request.expectedFrameEpoch);
     await replyFrame(
       request.id,
       frame,
@@ -704,6 +725,7 @@ function hydrate(
     session.loadState(snapshot.state);
   }
   session.setPartialDocument(snapshot.partialDocument === true);
+  previewFinalPages = snapshot.partialDocument === true ? 0 : null;
   if (!snapshot.workerAuthoritative) session.loadMediaSources(snapshot.mediaSources ?? '');
   if (snapshot.fontsRevision !== fontsRevision) {
     // A mismatched revision always carries the full font set (the client only
@@ -719,17 +741,26 @@ function hydrate(
   for (const input of snapshot.measureInputs) session.measureParagraphJson(input);
   let layoutJson: string | null = null;
   let provisional = false;
+  let pageCount: number | null = null;
   if (snapshot.layoutWithRegions && provisionalPages !== undefined) {
     layoutJson = session.layoutDocumentWithRegionsPrefixRetainedJson(
       snapshot.layoutInput,
       provisionalPages
     );
-    provisional = (JSON.parse(layoutJson) as { provisional?: boolean }).provisional === true;
+    const layout = JSON.parse(layoutJson) as {
+      provisional?: boolean;
+      layout: { pages: unknown[] };
+    };
+    provisional = layout.provisional === true;
+    pageCount = layout.layout.pages.length;
   } else if (snapshot.layoutWithRegions && !reply) {
     session.layoutDocumentWithRegionsRetained(snapshot.layoutInput);
   } else if (snapshot.layoutWithRegions) {
     // the retained reply leaves out the tens-of-MB measured arena
     layoutJson = session.layoutDocumentWithRegionsRetainedJson(snapshot.layoutInput);
+    if (snapshot.partialDocument === true) {
+      pageCount = (JSON.parse(layoutJson) as { layout: { pages: unknown[] } }).layout.pages.length;
+    }
   } else {
     session.layoutDocumentJson(snapshot.layoutInput);
   }
@@ -738,7 +769,65 @@ function hydrate(
   }
   layoutRevision = snapshot.layoutRevision;
   pendingUpdates = [];
+  previewFinalPages = finalPreviewPageCount(
+    snapshot.partialDocument,
+    provisional,
+    provisionalPages,
+    pageCount
+  );
   return { layoutJson, provisional };
+}
+
+function forgetRequirementsCache(): void {
+  requirementsCache?.release();
+  requirementsCache = null;
+}
+
+function layoutFontRequirements(engine: ResidentEngineSession, layoutInput: string): string {
+  const version = engine.proposalEngine.version();
+  if (requirementsCache?.owner !== engine || requirementsCache.version !== version) {
+    forgetRequirementsCache();
+    requirementsCache = {
+      owner: engine,
+      version,
+      byInput: new Map(),
+      release: engine.onUpdate(forgetRequirementsCache),
+    };
+  }
+  const cached = requirementsCache.byInput.get(layoutInput);
+  if (cached !== undefined) return cached;
+  const requirementsJson = engine.layoutFontRequirementsJson(layoutInput);
+  if (requirementsCache.byInput.size >= REQUIREMENTS_CACHE_INPUTS) {
+    requirementsCache.byInput.delete(requirementsCache.byInput.keys().next().value as string);
+  }
+  requirementsCache.byInput.set(layoutInput, requirementsJson);
+  return requirementsJson;
+}
+
+/**
+ * The font requirements of `layoutInput` previewing `preview`, keyed by the input the host builds
+ * for it (its render environment with `revisionPreview` replaced), or null when they cannot be read.
+ */
+function previewFontRequirements(
+  engine: ResidentEngineSession,
+  layoutInput: string,
+  preview: ReturnType<typeof proposalRevisionPreview>,
+  version: string
+): NonNullable<typeof fontRequirements> | null {
+  try {
+    if (engine.proposalEngine.version() !== version) return null;
+    const request = JSON.parse(layoutInput) as { renderEnv?: Record<string, unknown> | null };
+    if (!request.renderEnv || typeof request.renderEnv !== 'object') return null;
+    if (preview === undefined) delete request.renderEnv.revisionPreview;
+    else request.renderEnv.revisionPreview = preview;
+    const next = JSON.stringify(request);
+    return { version, layoutInput: next, requirementsJson: layoutFontRequirements(engine, next) };
+  } catch (error) {
+    // The host reads them itself and meets the failure there.
+    if (trap) throw trap;
+    if (error instanceof WebAssembly.RuntimeError) throw error;
+    return null;
+  }
 }
 
 function setFrameDisplayWindow(
@@ -746,6 +835,12 @@ function setFrameDisplayWindow(
   window?: [number, number],
   retainBuiltPages?: boolean
 ): void {
+  if (previewFinalPages !== null) {
+    engine.setDisplayWindow(...finalPreviewDisplayWindow(window, previewFinalPages));
+    engine.setDisplayRetainBuiltPages(window !== undefined && retainBuiltPages === true);
+    engine.setWindowedIncrementalBuilds(true);
+    return;
+  }
   if (window) {
     engine.setDisplayWindow(...window);
     engine.setDisplayRetainBuiltPages(retainBuiltPages === true);
@@ -1043,11 +1138,6 @@ function asciiProposalFontsUnchanged(
   return true;
 }
 
-function forgetRequirements(): void {
-  requirementsAnswered?.release();
-  requirementsAnswered = null;
-}
-
 /**
  * Drops the document. `keepSurfaces` keeps the attached page canvases, still
  * showing the old pages, for a document that replaces it page for page.
@@ -1055,9 +1145,10 @@ function forgetRequirements(): void {
 function destroySession(keepSurfaces = false): void {
   supersedeBackgroundPageBuild();
   fontRequirements = null;
+  forgetRequirementsCache();
+  requestedRequirements = null;
   unsubscribe?.();
   unsubscribe = null;
-  forgetRequirements();
   proposals?.destroy();
   proposals = null;
   session?.destroy();
@@ -1065,6 +1156,7 @@ function destroySession(keepSurfaces = false): void {
   session = null;
   openedDocument = null;
   previewing = false;
+  previewFinalPages = null;
   pendingUpdates = [];
   layoutRevision = 0;
   fontsRevision = -1;
