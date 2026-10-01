@@ -226,6 +226,10 @@ export class EditSession {
      */
     clear_measure_fonts(): void;
     /**
+     * Drops a base [`EditSession::prepare_staging_base`] prepared.
+     */
+    clear_staging_base(): void;
+    /**
      * Stops queueing and discards anything not yet drained.
      */
     clear_update_event_observation(): void;
@@ -745,6 +749,14 @@ export class EditSession {
      */
     persist_paragraph_ids(): string;
     /**
+     * Prepares the base the next edit batch stages against, one step per call: `"bytes"`
+     * encodes the committed state, then `"replica"` decodes it for the batch's rehearsal.
+     * Returns whether the step's result is held for the current state. Opt-in: it stays
+     * resident until a batch uses it, the document changes, or `clear_staging_base`. The
+     * replica is skipped while a heap limit leaves less than twice the live bytes free.
+     */
+    prepare_staging_base(step: string): boolean;
+    /**
      * Versioned paragraph texts:
      * `{"story"?,"paraIds"?,"view":"accepted"|"original"}` ->
      * `{"ok":true,"version","view","paragraphs":[{"story","paraId","text",
@@ -1092,6 +1104,10 @@ export class EditSession {
      * `{"firstParaId","secondParaId","revisionId": string|null}`.
      */
     split_paragraph(story: string, para_id: string, offset: number, author_name?: string | null, author_date?: string | null): string;
+    /**
+     * Whether a prepared staging base and its replica match the committed state.
+     */
+    staging_base_ready(): boolean;
     /**
      * Starts queueing committed transactions for
      * [`EditSession::drain_update_event`] instead of pushing them through a
@@ -1541,6 +1557,7 @@ export interface InitOutput {
     readonly editsession_clear_content_control_value: (a: number, b: number, c: number) => [number, number];
     readonly editsession_clear_formatting: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly editsession_clear_measure_fonts: (a: number) => void;
+    readonly editsession_clear_staging_base: (a: number) => void;
     readonly editsession_clear_update_event_observation: (a: number) => void;
     readonly editsession_clear_update_observer: (a: number) => void;
     readonly editsession_client_id: (a: number) => number;
@@ -1615,6 +1632,7 @@ export interface InitOutput {
     readonly editsession_paragraph_spans: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_persist_paragraph_ids: (a: number) => [number, number, number, number];
+    readonly editsession_prepare_staging_base: (a: number, b: number, c: number) => [number, number, number];
     readonly editsession_read_paragraphs_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_record_saved_paragraph_ids: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_redo: (a: number) => number;
@@ -1666,6 +1684,7 @@ export interface InitOutput {
     readonly editsession_settle_revisions_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_split_cell: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_split_paragraph: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
+    readonly editsession_staging_base_ready: (a: number) => number;
     readonly editsession_start_update_event_observation: (a: number) => [number, number];
     readonly editsession_stories_changed_since: (a: number, b: number) => [number, number];
     readonly editsession_story_checksum: (a: number, b: number, c: number) => [number, number, number, number];
