@@ -1222,6 +1222,9 @@ struct DocxHostWire {
     /// Empty unless the stories were seeded from the package (a preview's
     /// from its cut).
     unused_script_fonts: Vec<String>,
+    /// A preview whose cut holds the whole body.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    whole_body: bool,
 }
 
 fn thin_header_footer(
@@ -1382,6 +1385,7 @@ impl EditSession {
             envelope: host_envelope,
             referenced_fonts: fonts.referenced,
             unused_script_fonts: fonts.unused_script,
+            whole_body: false,
         };
         let json = serde_json::to_string(&host).map_err(|error| error.to_string())?;
         self.docx_source.replace(Some(source));
@@ -1402,6 +1406,8 @@ impl EditSession {
             return Ok(None);
         };
         let host_envelope = thin_docx_envelope(&envelope);
+        // The cut stops only once it holds `blocks` blocks.
+        let whole_body = envelope.document.package.document.content.len() < blocks;
         let fonts = crate::seed::seed_preview_envelope(self.engine.doc(), envelope, media)?;
         self.engine.set_partial_document(true);
         self.engine.doc().rotate_version(js_entropy());
@@ -1409,6 +1415,7 @@ impl EditSession {
             envelope: host_envelope,
             referenced_fonts: fonts.referenced,
             unused_script_fonts: fonts.unused_script,
+            whole_body,
         })
         .map(Some)
         .map_err(|error| error.to_string())
@@ -5695,6 +5702,33 @@ mod tests {
         preview.delete_story("body").unwrap();
         preview.open_docx(&bytes, true, None, None).unwrap();
         assert_eq!(numpages(&preview), (pages.to_string(), pages));
+    }
+
+    #[test]
+    fn a_preview_reports_whether_its_cut_holds_the_whole_body() {
+        let body = (0..30)
+            .map(|index| format!("<w:p><w:r><w:t>Paragraph {index}</w:t></w:r></w:p>"))
+            .collect::<String>();
+        let document = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#
+        );
+        let bytes = ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/document.xml".to_owned(), document.into_bytes()),
+        ])
+        .unwrap();
+        for (blocks, whole) in [(10, false), (30, false), (31, true), (200, true)] {
+            let preview = EditSession::new(83.0).unwrap();
+            let host: Value =
+                serde_json::from_str(&preview.open_preview(&bytes, blocks).unwrap().unwrap())
+                    .unwrap();
+            assert_eq!(host.get("wholeBody").is_some(), whole, "{blocks} blocks");
+        }
+        let full = EditSession::new(84.0).unwrap();
+        let host: Value =
+            serde_json::from_str(&full.open_docx(&bytes, true, None, None).unwrap()).unwrap();
+        assert!(host.get("wholeBody").is_none());
     }
 
     #[test]

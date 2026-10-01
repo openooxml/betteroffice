@@ -242,10 +242,11 @@ async function openWorkerPreview(
 ): Promise<{ session: YrsSession; host: YrsDocxHost; laidOut: Promise<void> } | null> {
   const session = await yrs.createYrsSession({ clientId });
   session.markDisplayOnly();
+  // A cut that holds the whole body lays out like the whole document.
   const loadHere = (): void => {
-    if (!session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS)) {
-      throw new Error('The first-page preview cannot open');
-    }
+    const host = session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS);
+    if (!host) throw new Error('The first-page preview cannot open');
+    if (host.wholeBody) session.setPartialDocument(false);
   };
   let release = (): void => {};
   deferWorkerOpenReplica(session, async () => loadHere, loadHere, () => release());
@@ -255,11 +256,9 @@ async function openWorkerPreview(
     const opened = await pending;
     if (opened) {
       release = opened.release;
-      return {
-        session,
-        host: yrs.decodeDocxHostJson(opened.hostJson, bytes),
-        laidOut: opened.bootstrapPosted,
-      };
+      const host = yrs.decodeDocxHostJson(opened.hostJson, bytes);
+      if (host.wholeBody) session.setPartialDocument(false);
+      return { session, host, laidOut: opened.bootstrapPosted };
     }
   } catch (error) {
     console.warn('[yrs] the worker could not open the first-page preview', error);
