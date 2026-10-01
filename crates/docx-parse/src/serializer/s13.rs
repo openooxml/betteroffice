@@ -387,7 +387,13 @@ pub fn write_docx_s13_parts(
             }
             context.reserve_paragraph_ids(reserved);
         }
-        serialize_comment_parts(&request.document, &mut package, &mut context);
+        serialize_comment_parts(
+            &request.document,
+            &mut package,
+            &mut context,
+            &request.determinism.seed,
+            !patched.contains_key(COMMENTS_PART) && !assignments.contains_key(COMMENTS_PART),
+        );
     }
 
     if request.selective.is_none() {
@@ -884,6 +890,8 @@ fn serialize_comment_parts(
     document: &DocumentBody,
     package: &mut Package,
     context: &mut SerializerContext,
+    seed: &str,
+    allow_source_splice: bool,
 ) {
     let Some(comments) = document
         .comments
@@ -892,7 +900,26 @@ fn serialize_comment_parts(
     else {
         return;
     };
-    let (comments_xml, infos) = serialize_comments_with_info(comments, context);
+    let source_context = allow_source_splice
+        .then(|| package.original_bytes(COMMENTS_PART))
+        .flatten()
+        .map(|source| (source, context.clone()));
+    let (mut comments_xml, mut infos) = serialize_comments_with_info(comments, context);
+    if let Some((source, source_context)) = source_context {
+        let original_infos = infos.clone();
+        match super::comment_splice::splice_comments(
+            source,
+            package.original,
+            seed,
+            comments,
+            &comments_xml,
+            &mut infos,
+            source_context,
+        ) {
+            Ok(spliced) => comments_xml = spliced,
+            Err(_) => infos = original_infos,
+        }
+    }
     package.set_text("word/comments.xml", comments_xml);
 
     let companions = [
@@ -945,7 +972,9 @@ fn ensure_comment_parts(package: &mut Package) {
     if let Some(mut content_types) = package.text("[Content_Types].xml") {
         let mut changed = false;
         for (part_name, content_type, _, _) in parts {
-            if content_types.contains(part_name) {
+            if !package.contains(part_name.trim_start_matches('/'))
+                || content_types.contains(part_name)
+            {
                 continue;
             }
             let entry =
@@ -965,8 +994,10 @@ fn ensure_comment_parts(package: &mut Package) {
         return;
     };
     let mut relationships = RelationshipsIndex::parse(relationships_xml);
-    for (_, _, target, relationship_type) in parts {
-        if relationships.xml_contains(target) {
+    for (part_name, _, target, relationship_type) in parts {
+        if !package.contains(part_name.trim_start_matches('/'))
+            || relationships.xml_contains(target)
+        {
             continue;
         }
         let relationship_id = relationships.next_id();
