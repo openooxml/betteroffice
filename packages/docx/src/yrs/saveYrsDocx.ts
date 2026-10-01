@@ -1,7 +1,7 @@
 /** Session save that reports where each saved paragraph can be found after reopening. */
 
 import type { RepackOptions } from '../docx/rezip';
-import { writeDocumentWithRust } from '../docx/rustSaveFacade';
+import { type RustParagraphIds, writeDocumentWithRust } from '../docx/rustSaveFacade';
 import type { Comment, Paragraph } from '../types/content';
 import type { BlockContent, Document } from '../types/document';
 import type { YrsSession } from './index';
@@ -148,32 +148,63 @@ function savedParagraphs(
   return saved;
 }
 
-/** `blocks` without the empty editor-only paragraphs in `synthetic`; the same array when none is. */
-function withoutSynthetic(blocks: BlockContent[], synthetic: ReadonlySet<string>): BlockContent[] {
+/**
+ * `blocks` with each paragraph, in table cells and block content controls
+ * too, replaced by `map`'s result and dropped where it is `null`; the same
+ * array when nothing changes.
+ */
+function mapParagraphs(
+  blocks: BlockContent[],
+  map: (paragraph: Paragraph) => Paragraph | null
+): BlockContent[] {
   const kept: BlockContent[] = [];
   let changed = false;
   for (const block of blocks) {
     let next: BlockContent | null = block;
     if (block.type === 'paragraph') {
-      const key = projectedSessionKey(block);
-      if (block.content.length === 0 && key !== undefined && synthetic.has(key)) next = null;
+      next = map(block);
     } else if (block.type === 'table') {
       const rows = block.rows.map((row) => {
         const cells = row.cells.map((cell) => {
-          const content = withoutSynthetic(cell.content, synthetic);
+          const content = mapParagraphs(cell.content, map);
           return content === cell.content ? cell : { ...cell, content };
         });
         return cells.every((cell, index) => cell === row.cells[index]) ? row : { ...row, cells };
       });
       if (rows.some((row, index) => row !== block.rows[index])) next = { ...block, rows };
     } else if (block.type === 'blockSdt') {
-      const content = withoutSynthetic(block.content, synthetic);
+      const content = mapParagraphs(block.content, map);
       if (content !== block.content) next = { ...block, content };
     }
     changed ||= next !== block;
     if (next) kept.push(next);
   }
   return changed ? kept : blocks;
+}
+
+/** `document` with `map` applied to the paragraphs of every story; see {@link mapParagraphs}. */
+function mapStoryParagraphs(
+  document: Document,
+  map: (paragraph: Paragraph) => Paragraph | null
+): Document {
+  const withContent = <T extends { content: BlockContent[] }>(owner: T): T => {
+    const content = mapParagraphs(owner.content, map);
+    return content === owner.content ? owner : { ...owner, content };
+  };
+  const pkg = document.package;
+  const parts = (stories: typeof pkg.headers) =>
+    stories && new Map([...stories].map(([id, part]) => [id, withContent(part)] as const));
+  return {
+    ...document,
+    package: {
+      ...pkg,
+      document: withContent(pkg.document),
+      headers: parts(pkg.headers),
+      footers: parts(pkg.footers),
+      footnotes: pkg.footnotes?.map(withContent),
+      endnotes: pkg.endnotes?.map(withContent),
+    },
+  };
 }
 
 /** `document` without the editor-only paragraphs the session has not authored into. */
@@ -187,24 +218,30 @@ function withoutSyntheticParagraphs(
     )
   );
   if (synthetic.size === 0) return document;
-  const withContent = <T extends { content: BlockContent[] }>(owner: T): T => {
-    const content = withoutSynthetic(owner.content, synthetic);
-    return content === owner.content ? owner : { ...owner, content };
-  };
-  const pkg = document.package;
-  const parts = (map: typeof pkg.headers) =>
-    map && new Map([...map].map(([id, part]) => [id, withContent(part)] as const));
-  return {
-    ...document,
-    package: {
-      ...pkg,
-      document: withContent(pkg.document),
-      headers: parts(pkg.headers),
-      footers: parts(pkg.footers),
-      footnotes: pkg.footnotes?.map(withContent),
-      endnotes: pkg.endnotes?.map(withContent),
-    },
-  };
+  return mapStoryParagraphs(document, (paragraph) => {
+    const key = projectedSessionKey(paragraph);
+    return paragraph.content.length === 0 && key !== undefined && synthetic.has(key)
+      ? null
+      : paragraph;
+  });
+}
+
+/** `document` with each paragraph of a spliced part marked with the source occurrence it was seeded from. */
+function withSourceOrdinals(
+  document: Document,
+  parts: NonNullable<DocxParagraphSavePlan['splicedParts']>
+): Document {
+  const ordinals = new Map(
+    parts.flatMap(({ paragraphs }) => paragraphs.map(([ordinal, key]) => [key, ordinal] as const))
+  );
+  if (ordinals.size === 0) return document;
+  return mapStoryParagraphs(document, (paragraph) => {
+    const key = projectedSessionKey(paragraph);
+    const ordinal = key === undefined ? undefined : ordinals.get(key);
+    return ordinal === undefined || paragraph.sourceOrdinal === ordinal
+      ? paragraph
+      : { ...paragraph, sourceOrdinal: ordinal };
+  });
 }
 
 /** The identities and paragraph ID plan a session save applies. @internal */
@@ -221,8 +258,10 @@ export function captureSessionSave(session: YrsSession): DocxSessionSave {
 /**
  * Writes `document`, projected from `session` when `capture` was taken, and
  * records the Word paragraph IDs the bytes hold as saved. `patches` selects
- * the planned parts written as `originalBuffer`'s bytes with IDs patched in;
- * it selects none unless `originalBuffer` is the session's source package.
+ * the planned parts written as `originalBuffer`'s bytes with IDs patched in,
+ * and `splices` the story parts written as its bytes with only the
+ * paragraphs that need it re-serialized; each selects none unless
+ * `originalBuffer` is the session's source package.
  * @internal
  */
 export async function writeSessionSave(
@@ -232,16 +271,28 @@ export async function writeSessionSave(
   originalBuffer: ArrayBuffer,
   options: RepackOptions = {},
   patches: (part: string) => boolean = () => true,
-  skipMutations = false
+  skipMutations = false,
+  splices: (part: string) => boolean = patches
 ): Promise<DocxSavedDocument> {
-  const plan = {
-    ...capture.plan,
+  const spliced = (capture.plan.splicedParts ?? []).filter(({ part }) => splices(part));
+  const plan: RustParagraphIds = {
+    assignments: capture.plan.assignments,
     patchedParts: capture.plan.patchedParts.filter(({ part }) => patches(part)),
+    ...(spliced.length === 0
+      ? {}
+      : {
+          splicedParts: spliced.map(({ part, sha256, paragraphs, changed }) => ({
+            part,
+            sha256,
+            paragraphs: paragraphs.map(([ordinal]) => ordinal),
+            changed,
+          })),
+        }),
   };
   const output = withoutSyntheticParagraphs(document, capture.identities);
   const paragraphs = savedParagraphs(output, capture.identities);
   const { buffer } = await writeDocumentWithRust(
-    output,
+    withSourceOrdinals(output, spliced),
     originalBuffer,
     options,
     undefined,
