@@ -1096,6 +1096,7 @@ fn lower_story<T: ReadTxn>(
                         None,
                         &mut paragraph_runs,
                     );
+                    inherit_inline_revision(&mut paragraph_runs[first..], attributes, env);
                     if env.revision_hidden(attributes) {
                         hide_runs(&mut paragraph_runs[first..]);
                     }
@@ -2215,6 +2216,33 @@ fn authored_checkbox_value(values: &std::collections::HashMap<String, Any>) -> O
         .flatten()
 }
 
+fn inherit_inline_revision(runs: &mut [RawRun], attrs: Option<&Attrs>, env: &RenderEnv) {
+    if !attrs.is_some_and(|attrs| attrs.contains_key(crate::INS) || attrs.contains_key(crate::DEL))
+    {
+        return;
+    }
+    let inherited = lower_run_formatting(attrs, env);
+    if inherited.change_revision_id.is_none() {
+        return;
+    }
+    for run in runs {
+        if run.formatting.change_revision_id.is_none() {
+            run.formatting.is_insertion = inherited.is_insertion;
+            run.formatting.is_deletion = inherited.is_deletion;
+            run.formatting.change_revision_id = inherited.change_revision_id;
+            run.formatting.change_author = inherited.change_author.clone();
+            run.formatting.change_date = inherited.change_date.clone();
+            if let RawRunKind::Image(image) = &mut run.kind {
+                image.is_insertion = inherited.is_insertion;
+                image.is_deletion = inherited.is_deletion;
+                image.change_revision_id = inherited.change_revision_id;
+                image.change_author = inherited.change_author.clone();
+                image.change_date = inherited.change_date.clone();
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_inline_sdt<T: ReadTxn>(
     sdt: &MapRef,
@@ -2385,6 +2413,11 @@ fn lower_inline_sdt_values(
                         italic: Some(true),
                         font_family: Some("Cambria Math".to_owned()),
                         logical_order: Some(u64::MAX),
+                        is_insertion: formatting.is_insertion,
+                        is_deletion: formatting.is_deletion,
+                        change_revision_id: formatting.change_revision_id,
+                        change_author: formatting.change_author,
+                        change_date: formatting.change_date,
                         ..RunFormatting::default()
                     },
                     story_start: story_index,
@@ -2439,6 +2472,7 @@ fn lower_inline_sdt_values(
                     widget.clone(),
                     runs,
                 );
+                inherit_inline_revision(&mut runs[first..], Some(&attrs), env);
                 if env.revision_hidden(Some(&attrs)) {
                     hide_runs(&mut runs[first..]);
                 }

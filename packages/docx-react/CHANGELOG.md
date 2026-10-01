@@ -1,5 +1,63 @@
 # @betteroffice/docx-react
 
+## 0.4.1
+
+### Patch Changes
+
+- dab1fb3: Proposed changes, host edit batches and collaborators' updates are laid out in the background worker, so long documents stay responsive while they apply.
+- ece75fd: Jumping to a proposal or paragraph no longer freezes long documents while the target is resolved. New `YrsSession.paragraphIdCount` counts the paragraphs of a story that carry an id.
+- 2e160a2: Screen readers can read the text of every page again, including pages outside the visible window. Adds `reduceMirrorToText` and `buildMirrorPageText`.
+- 90033fe: Saving no longer adds zero wrap distances or a zero effect extent to a picture that had none, so inline pictures keep their position in LibreOffice after a save.
+- fbeac94: The first accept or reject of a proposal is laid out in the background worker like later ones, so it no longer freezes long documents.
+- 85a0488: With `allowHostProposals`, clicking a host proposal no longer opens the built-in sidebar, and host proposals are left out of it unless `showHostProposalsInSidebar` is set.
+- ddf51ae: With `experimentalWorkerOpen`, a read-only editor now loads its main-thread copy of the document only when something needs it, so a large document no longer freezes the page after it appears.
+- 397bb00: Background page building is faster and keeps the editor responsive on documents with thousands of pages.
+- e436875: Plugin overlays no longer vanish while an edit or proposal change lays out: they stay on the layout the pages still show until the new one arrives.
+- 59ee81b: A picture inserted with the editor's Insert Image picker is now saved with its image, instead of a broken reference.
+- 7460f7f: Accepting, rejecting or undoing a proposal no longer measures the whole document again when the decision shows or hides the only text in a font.
+- 78a6325: Accepting, rejecting or undoing a proposal lays the document out in the resident worker only, instead of on the main thread first.
+- a4c31e1: Saving from the editor keeps every part of the document you did not edit exactly as it was, so content the editor does not model survives the save.
+- 9b7cbd5: Swapping the document on a mounted editor no longer opens the sidebar for re-proposed host proposals. Documents with their own tracked changes still open the sidebar automatically.
+- db1a4b1: The sidebar no longer misses a new tracked change or comment that lands right after a document swap or relayout.
+- 334b31f: Copying a table with extreme merged-cell spans no longer freezes the editor.
+- 8231427: With `experimentalWorkerOpen` and `previewFirstPage`, the worker opens the full document while the preview paints, so large documents finish loading sooner.
+- ff04916: The sidebar no longer re-reads a long document's unchanged paragraphs after each proposal or edit. `createYrsSidebarProjection` takes an optional `YrsStorySegmentSource` to read story segments through.
+- ae7ffb2: Internal groundwork for keeping host proposals in the background worker while a read-only document opened there has no main-thread copy; nothing changes for editors yet.
+- Updated dependencies [66d0d66]
+- Updated dependencies [ff24d4d]
+- Updated dependencies [9d8c52e]
+- Updated dependencies [2624099]
+- Updated dependencies [37a8ff8]
+- Updated dependencies [36ab3fe]
+- Updated dependencies [55d0103]
+- Updated dependencies [4f2fcca]
+- Updated dependencies [d83c2fd]
+- Updated dependencies [81f0e0a]
+- Updated dependencies [74322c9]
+- Updated dependencies [dd21fb2]
+- Updated dependencies [c58aebc]
+- Updated dependencies [ece75fd]
+- Updated dependencies [c3ebdd0]
+- Updated dependencies [fd3f7d4]
+- Updated dependencies [2e160a2]
+- Updated dependencies [90033fe]
+- Updated dependencies [e8fb199]
+- Updated dependencies [a4c31e1]
+- Updated dependencies [980b07b]
+- Updated dependencies [a135ac1]
+- Updated dependencies [540af05]
+- Updated dependencies [eeffc30]
+- Updated dependencies [7ab1ed4]
+- Updated dependencies [28eaa43]
+- Updated dependencies [ff04916]
+- Updated dependencies [2988780]
+- Updated dependencies [c407a61]
+- Updated dependencies [570f8bf]
+- Updated dependencies [ae7ffb2]
+- Updated dependencies [7eeada9]
+  - @betteroffice/docx@0.4.1
+  - @betteroffice/docx-i18n@0.4.1
+
 ## 0.4.0
 
 ### Minor Changes
