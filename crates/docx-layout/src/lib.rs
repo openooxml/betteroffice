@@ -289,6 +289,8 @@ pub fn build_resident_display_list_partial_observed(
     })
 }
 
+pub use display_list::release_resident_display_pages;
+
 /// Build unbuilt pages of an engine-owned display list; returns the pages built.
 pub fn build_resident_display_pages(
     pagination: &types::Input,

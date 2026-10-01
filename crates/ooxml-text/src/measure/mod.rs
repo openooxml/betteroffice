@@ -188,6 +188,9 @@ pub struct TypesetRowOut {
     /// floats; painters render it as top margin, `totalHeight` includes it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub float_skip_before: Option<f32>,
+    /// Extra first-line px after a marker overruns its hanging indent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker_tab_offset: Option<f32>,
     /// Exact advances for run slices, emitted in visual paint order.
     /// `Some` only under `authoritativeShaping`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -444,15 +447,21 @@ pub fn measure_paragraph_typed(
                 .is_some_and(|marker| !marker.is_empty())
     });
     let hanging = indent.and_then(|i| i.hanging).unwrap_or(0.0);
+    let body_width = (request.max_width - indent_left - indent_right).max(1.0);
+    let marker_tab_overrun = match attrs {
+        Some(a) if visible_marker && hanging > 0.0 => {
+            list_marker::list_marker_tab_overrun(store, request, a)?
+        }
+        _ => 0.0,
+    };
     let first_line_offset = if visible_marker && hanging > 0.0 {
-        0.0
+        marker_tab_overrun
     } else {
         indent.and_then(|i| i.first_line).unwrap_or(0.0) - hanging
     };
-    let body_width = (request.max_width - indent_left - indent_right).max(1.0);
     let first_line_width = (body_width - first_line_offset - marker_inline_width).max(1.0);
 
-    line_filler::fill(line_filler::FillParams {
+    let mut extent = line_filler::fill(line_filler::FillParams {
         justify: attrs.and_then(|attrs| attrs.alignment.as_deref()) == Some("justify"),
         store,
         prepared: &prepared,
@@ -470,7 +479,13 @@ pub fn measure_paragraph_typed(
         authoritative_shaping: request.authoritative_shaping,
         snap_pitch_px,
         run_snaps: &run_snaps,
-    })
+    })?;
+    if marker_tab_overrun > 0.0
+        && let Some(line) = extent.lines.first_mut()
+    {
+        line.marker_tab_offset = Some(marker_tab_overrun);
+    }
+    Ok(extent)
 }
 
 /// JSON boundary: a [`MeasureInput`] envelope in, a serialized
@@ -498,6 +513,7 @@ fn zero_row() -> TypesetRowOut {
         right_offset: None,
         segments: None,
         float_skip_before: None,
+        marker_tab_offset: None,
         run_advances: None,
         cluster_advances: None,
         bidi_slices: None,

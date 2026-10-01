@@ -1499,7 +1499,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       syncYrsInputState,
       readOnly,
       replicaPending: () =>
-        yrsCore.hydrateOnDemand && !(yrsCore.replicaReadyRef?.current ?? yrsCore.replicaReady),
+        !!yrsCore.experimentalWorkerOpen && !(yrsCore.replicaReadyRef?.current ?? yrsCore.replicaReady),
       replicaReady: yrsCore.replicaReady,
       requestReplica: yrsCore.requestReplica,
       partEdit,
@@ -1902,6 +1902,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       bumpInputEpoch,
       bridgeRef: commandBridgeRef,
       experimentalWorkerOpen: yrsCore.experimentalWorkerOpen,
+      hydrateOnDemand: yrsCore.hydrateOnDemand,
       yrsInputRef,
       session: yrsCore.session,
       rootStory: activeYrsRootStory,
@@ -1965,7 +1966,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           enabled
           readOnly={readOnly || (!!partEdit && activeYrsRootStory === 'body')}
           replicaReadyRef={yrsCore.experimentalWorkerOpen ? yrsCore.replicaReadyRef : undefined}
-          requestReplica={yrsCore.hydrateOnDemand ? yrsCore.requestReplica : undefined}
+          requestReplica={yrsCore.experimentalWorkerOpen ? yrsCore.requestReplica : undefined}
           inputEpoch={inputEpoch}
           applyPendingSelection={applyPendingSelection}
           seedSelection={!yrsCore.hydrateOnDemand}
