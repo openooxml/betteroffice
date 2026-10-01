@@ -235,7 +235,7 @@ test('worker-open idle builds stop after the viewport margin', async () => {
   }
 });
 
-test('a visible request supersedes a background reply awaiting idle attachment', async () => {
+test('a visible request attaches a background reply awaiting idle attachment before building', async () => {
   const { engine, inputs, host } = lazyFixture(100);
   const overrides = { getInputs: () => inputs };
   const hook = renderHook(() => useRustDisplayList(
@@ -257,9 +257,11 @@ test('a visible request supersedes a background reply awaiting idle attachment',
     act(() => hook.result.current.setDisplayWindow(target, target + 1));
     await waitFor(() => expect(hook.result.current.displayList!.pages[target]!.unbuilt).toBeFalsy());
     expect(builds()).toHaveLength(2);
-    expect(builds()[1]).toMatchObject({ pages: [target], expectedFrameEpoch: before.frameEpoch });
+    expect(builds()[1]!.pages).toEqual([target]);
+    expect(builds()[1]!.expectedFrameEpoch).toBeGreaterThan(before.frameEpoch);
+    const pages = hook.result.current.displayList!.pages;
+    expect(builds()[0]!.pages.every((index) => !pages[index]!.unbuilt)).toBe(true);
     expect(hook.result.current.error).toBeNull();
-    expect(hook.result.current.frame!.frameEpoch).toBeGreaterThan(before.frameEpoch);
   } finally {
     hook.unmount();
     engine.free();

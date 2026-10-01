@@ -1637,12 +1637,15 @@ export function useRustDisplayList(
       let batch = unbuilt.filter((index) => index >= start && index < end);
       const background = batch.length === 0 && release.length === 0;
       const inFlight = pageBuildInFlightRef.current;
+      // Pages the worker has built for a background request come back as a
+      // whole-document frame to a request based on the display's older frame.
       const supersedingBackground =
+        workerOpenEnabledRef.current &&
         !background && release.length === 0 && inFlight?.kind === 'build' && inFlight.background;
       if (inFlight) {
         if (inFlight.kind === 'release') return;
-        if (settling) inFlight.promote();
-        if (background || release.length > 0 || !inFlight.background) return;
+        if (settling || (!background && !supersedingBackground)) inFlight.promote();
+        if (!supersedingBackground) return;
         inFlight.cancel();
         pageBuildInFlightRef.current = null;
       }
@@ -1689,7 +1692,10 @@ export function useRustDisplayList(
         );
       }
       let attachment: PageBuildTask | null = null;
-      let promote = (): void => {};
+      let promoted = false;
+      let promote = (): void => {
+        promoted = true;
+      };
       const build: PageBuildInFlight = release.length > 0
         ? { kind: 'release' }
         : { kind: 'build', background, cancel: () => attachment?.cancel(), promote: () => promote() };
@@ -1837,10 +1843,11 @@ export function useRustDisplayList(
           };
           let urgent = false;
           const attachDecode = (): void => {
-            urgent = settleWaitersRef.current.size > 0;
+            urgent = promoted || settleWaitersRef.current.size > 0;
             attachment = scheduleIdlePageBuild(decode, urgent);
           };
           promote = () => {
+            promoted = true;
             if (urgent || !attachment) return;
             attachment.cancel();
             attachDecode();
