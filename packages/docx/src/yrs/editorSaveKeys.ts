@@ -5,7 +5,7 @@ import type { Document, Endnote, Footnote } from '../types/document';
 export function editorSaveKeys(
   document: Document,
   comments?: readonly Comment[]
-): { metadata: string; comments: string } {
+): { metadata: string; comments: string; commentIds: number[] } {
   const withoutContent = <T extends { content: unknown }>(part: T) => {
     const { content, ...metadata } = part;
     return metadata;
@@ -29,8 +29,10 @@ export function editorSaveKeys(
   };
   const stringify = (value: unknown): string =>
     JSON.stringify(value, (_key, entry) => (entry instanceof Map ? [...entry] : entry));
+  const saved = comments ?? pkg.document.comments ?? [];
   return {
     metadata: stringify(metadata),
-    comments: stringify(comments ?? pkg.document.comments ?? []),
+    comments: stringify(saved),
+    commentIds: saved.map((comment) => comment.id),
   };
 }

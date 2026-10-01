@@ -418,7 +418,7 @@ test('an in-place host comment edit keeps its text and resolved state on save', 
   expect(reopenedComment?.done).toBe(true);
 });
 
-async function deleteTwoCommentsAcrossSaves() {
+function twoCommentFixture(): ArrayBuffer {
   const source = commentedFixture();
   const secondParaId = '10000002';
   const extend = (name: string, closing: string, xml: string) => {
@@ -428,7 +428,11 @@ async function deleteTwoCommentsAcrossSaves() {
   extend('word/comments.xml', '</w:comments>', `<w:comment w:id="2" w:author="B" w:date="2024-01-01T00:00:00Z" w:initials="B">${paragraph(secondParaId, run('Second comment'))}</w:comment>`);
   extend('word/commentsExtended.xml', '</w15:commentsEx>', `<w15:commentEx w15:paraId="${secondParaId}" w15:done="0"/>`);
   extend('word/document.xml', '<w:sectPr>', paragraph('00000002', '<w:commentRangeStart w:id="2"/>' + run('Second body text') + '<w:commentRangeEnd w:id="2"/><w:r><w:commentReference w:id="2"/></w:r>'));
-  const editor = await mount(rezipPartsToArrayBuffer(source.parts));
+  return rezipPartsToArrayBuffer(source.parts);
+}
+
+async function deleteTwoCommentsAcrossSaves() {
+  const editor = await mount(twoCommentFixture());
   await until(() => editor.ref.current!.getComments().length === 2);
   if (!editor.ref.current!.commands.getState('commentsSidebar').active) {
     await act(async () => {
@@ -448,6 +452,19 @@ async function deleteTwoCommentsAcrossSaves() {
   await deleteComment(2);
   return { first, saved: await editor.save() };
 }
+
+test('a comment the host removes through the comments prop leaves no markers or definition', async () => {
+  const editor = await mount(twoCommentFixture());
+  await until(() => editor.ref.current!.getComments().length === 2);
+  await act(async () => editor.setComments(editor.ref.current!.getComments().filter(({ id }) => id !== 1)));
+  await until(() => editor.ref.current!.getComments().length === 1);
+  const saved = await editor.save();
+  const parts = unzipContainer(new Uint8Array(saved));
+  const comments = new DOMParser().parseFromString(xmlPart(parts, 'word/comments.xml'), 'application/xml');
+  expect(xmlElements(comments, W, 'comment').map((entry) => entry.getAttribute('w:id'))).toEqual(['2']);
+  expect(markers(xmlPart(parts, 'word/document.xml'), 1)).toEqual([]);
+  expect((await reopened(saved)).package.document.comments?.map(({ id }) => id)).toEqual([2]);
+});
 
 test('deleting two comments across saves does not resurrect the first comment', async () => {
   const { first, saved } = await deleteTwoCommentsAcrossSaves();

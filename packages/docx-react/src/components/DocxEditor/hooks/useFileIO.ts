@@ -110,7 +110,7 @@ async function writeEditorDocument(
   if (
     !source ||
     keys.metadata !== source.keys.metadata ||
-    (comments.length === 0 && source.keys.comments !== '[]') ||
+    source.keys.commentIds.some((id) => !new Set(keys.commentIds).has(id)) ||
     lastSaveSessions.has(session) ||
     (original !== editorSaves.get(session) && !sameBytes(original, source.buffer))
   ) {
