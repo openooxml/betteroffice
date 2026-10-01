@@ -752,7 +752,13 @@ async function renderMainFallbackFixture(workerOpen = true, paragraphLength = 12
   stampSourceVersion(inputs.layout, 'main-v1');
   stampRevisionPreviewKey(inputs.layout, revisionPreviewKey(PREVIEW));
   const frameBuiltPages: number[] = [];
+  const updateListeners = new Set<(update: Uint8Array) => void>();
   Object.assign(host, {
+    onUpdate: (listener: (update: Uint8Array) => void) => {
+      updateListeners.add(listener);
+      return () => updateListeners.delete(listener);
+    },
+    residentCaretSnapshot: () => JSON.parse(engine.resident_caret_snapshot_json()),
     buildDisplayListJson: (input: string) => engine.build_display_list_json(input),
     buildDisplayListFrame: (input: string, epoch: number) => {
       const bytes = engine.build_display_list_frame(input, epoch);
@@ -824,8 +830,8 @@ async function renderMainFallbackFixture(workerOpen = true, paragraphLength = 12
     expect(hook.result.current.shownFrameEngine()).toBe(host);
     expect(frameBuilds).toHaveBeenCalledTimes(1);
     return {
-      ...hook, host, frameBuilds, frameBuiltPages, pageBuilds, releases, windows,
-      retention, incremental, hits, errors, dispose,
+      ...hook, host, mainLayout, updateListeners, frameBuilds, frameBuiltPages,
+      pageBuilds, releases, windows, retention, incremental, hits, errors, dispose,
     };
   } catch (error) {
     dispose();
@@ -899,6 +905,75 @@ test('worker-open main fallback builds distant pages, releases them at idle and 
     expect(EngineWorker.spawned).toBe(1);
     expect(result.current.error).toBeNull();
   } finally {
+    fixture.dispose();
+  }
+});
+
+test('worker-open main page builds wait for the relayout after an edit', async () => {
+  const fixture = await renderMainFallbackFixture();
+  const { result, rerender, mainLayout, updateListeners, frameBuilds, pageBuilds, releases } = fixture;
+  try {
+    const pages = () => result.current.frame!.displayList.pages;
+    await idleUntil(() => pages().slice(0, 7).every((page) => !page.unbuilt));
+    const frame = result.current.frame;
+    const queries = result.current.queries;
+    pageBuilds.mockClear();
+    await act(async () => {
+      for (const listener of updateListeners) listener(new Uint8Array());
+      result.current.setDisplayWindow(30, 34);
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      runIdleCallbacks();
+    });
+    expect(pageBuilds).not.toHaveBeenCalled();
+    expect(releases).not.toHaveBeenCalled();
+    expect(result.current.frame).toBe(frame);
+    expect(result.current.queries).toBe(queries);
+    expect(sourceVersionOf(result.current.queries)).toBe('main-v1');
+    expect(await result.current.resolveQueries()).toBeNull();
+    expect(pages().slice(30, 34).every((page) => page.unbuilt)).toBe(true);
+
+    const layout = { ...mainLayout };
+    stampSourceVersion(layout, 'main-v2');
+    stampRevisionPreviewKey(layout, revisionPreviewKey(PREVIEW));
+    await act(async () => rerender({ layout }));
+    await waitFor(() => expect(pages().slice(30, 34).every((page) => !page.unbuilt)).toBe(true));
+    await idleUntil(() => pages().slice(28, 36).every((page) => !page.unbuilt));
+    expect(frameBuilds).toHaveBeenCalledTimes(2);
+    expect(pageBuilds.mock.calls.map(([built]) => built)).toContainEqual([28, 29, 34, 35]);
+    expect(sourceVersionOf(result.current.queries)).toBe('main-v2');
+    expect(result.current.error).toBeNull();
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test('worker-open main release keeps the caret page', async () => {
+  const fixture = await renderMainFallbackFixture();
+  const { result, host, releases } = fixture;
+  const caret = spyOn(host, 'residentCaretSnapshot').mockImplementation(() => ({
+    frameEpoch: result.current.frame!.frameEpoch,
+    caretRect: {
+      pageIndex: 2,
+      pageId: result.current.frame!.pages[2]!.pageId.toString(),
+      x: 10,
+      y: 10,
+      height: 12,
+    },
+  }));
+  try {
+    const pages = () => result.current.frame!.displayList.pages;
+    const released = [0, 1, 3, 4, 5, 6];
+    await idleUntil(() => pages().slice(0, 7).every((page) => !page.unbuilt));
+    await act(async () => result.current.setDisplayWindow(30, 34));
+    await waitFor(() => expect(pages().slice(30, 34).every((page) => !page.unbuilt)).toBe(true));
+    await idleUntil(() => released.every((index) => pages()[index]!.unbuilt));
+    expect(pages()[2]!.unbuilt).toBeFalsy();
+    expect(releases.mock.calls[0]![0]).toEqual(released);
+    expect(releases.mock.calls.every(([indices]) => !indices.includes(2))).toBe(true);
+    expect(result.current.caret).toBeNull();
+    expect(result.current.error).toBeNull();
+  } finally {
+    caret.mockRestore();
     fixture.dispose();
   }
 });
