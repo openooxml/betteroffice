@@ -224,6 +224,42 @@ test('worker-open window settling leaves far pages unbuilt while document settli
   }
 });
 
+test('a worker-open window wait settles when the viewport returns to built pages before a build starts', async () => {
+  const { engine, inputs, host } = lazyFixture();
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(
+        inputs.layout as Layout, overrides, undefined, undefined, host,
+        undefined, undefined, undefined, true
+      )
+    );
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    const pageCount = result.current.frame!.displayList.pages.length;
+    expect(pageCount).toBeGreaterThan(10);
+    await act(async () => {
+      await result.current.settledDisplayList(null, null, 'window');
+    });
+    const builds = () =>
+      EngineWorker.last!.posted.filter((request) => request.type === 'buildPages').length;
+    const before = builds();
+    let settled = false;
+    await act(async () => {
+      result.current.setDisplayWindow(pageCount - 2, pageCount);
+      void result.current.settledDisplayList(null, null, 'window').then(() => {
+        settled = true;
+      });
+      result.current.setDisplayWindow(0, 5);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(settled).toBe(true);
+    expect(builds()).toBe(before);
+    unmount();
+  } finally {
+    engine.free();
+  }
+});
+
 test('a full worker rebuild retains built pages until released and rebuilds evicted pages on demand', async () => {
   const { engine, inputs, host } = lazyFixture();
   try {

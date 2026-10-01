@@ -1607,6 +1607,8 @@ export function useRustDisplayList(
       if (current[0] === start && current[1] === end) return;
       displayWindowRef.current = [start, end];
       schedulePageBuilds(0);
+      // A window wait may already be met by the pages the new window shows.
+      for (const waiter of [...settleWaitersRef.current.keys()]) waiter();
       for (const listener of [...displayWindowListenersRef.current]) listener();
     },
     [schedulePageBuilds]
