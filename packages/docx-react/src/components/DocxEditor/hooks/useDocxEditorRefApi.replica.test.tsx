@@ -503,8 +503,9 @@ test.each([
     try { check(api); } catch (failure) { error = failure; }
   });
   expect(error).toBeInstanceOf(DocxReplicaNotReadyError);
-  expect(error).toMatchObject({ member: method, message: expect.stringContaining(method) });
-  expect(error).toMatchObject({ message: expect.stringContaining('flushPendingInput()') });
+  expect((error as DocxReplicaNotReadyError).member).toBe(method);
+  expect((error as Error).message).toContain(method);
+  expect((error as Error).message).toContain('flushPendingInput()');
   expect(opens).toEqual([]);
   expect(replica.started).toBe(true);
   expect(replica.pending).toBe(true);

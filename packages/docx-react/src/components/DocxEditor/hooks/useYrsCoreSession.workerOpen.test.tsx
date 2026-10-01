@@ -162,6 +162,7 @@ interface HarnessProps {
 
 function useHarness(props: HarnessProps) {
   const relayout = useRef<(() => void) | null>(null);
+  const workerRelayout = useRef<(() => void) | null>(null);
   const handoffFromRef = useRef<YrsSession | null>(null);
   const renderer = useCanvasRenderer(
     undefined,
@@ -204,7 +205,7 @@ function useHarness(props: HarnessProps) {
       workerOpen: props.experimentalWorkerOpen ? {
         openInWorker,
         workerProposals: props.workerProposals,
-        refreshWorkerLayout: () => relayout.current?.(),
+        refreshWorkerLayout: () => workerRelayout.current?.(),
         renderedFrame: renderer.status === 'ready' ? renderer.displayList : null,
         ...(props.holdReplica ? { pendingCompletion: renderer.presentedEngine } : {}),
         ...(props.followCompletion ? { pendingCompletion: renderer.pendingCompletion } : {}),
@@ -256,6 +257,7 @@ function useHarness(props: HarnessProps) {
     },
   });
   relayout.current = pipeline.runLayoutPipeline;
+  workerRelayout.current = () => pipeline.scheduleLayout('remote', true);
   useEffect(() => {
     if (props.readOnly && core.session) relayout.current?.();
   }, [props.readOnly, core.session]);
@@ -265,7 +267,7 @@ function useHarness(props: HarnessProps) {
     getDocument: core.documentFromYrs,
     flushPendingInput: async () => {},
     syncYrsInputState: () => true,
-    refreshWorkerLayout: () => relayout.current?.(),
+    refreshWorkerLayout: () => workerRelayout.current?.(),
   } as unknown as PagedEditorRef : null;
   const ref = useRef<DocxEditorRef>(null);
   useDocxEditorRefApi({
@@ -874,7 +876,8 @@ test('failure of the accepted full session before its frame cancels deferred hyd
     expect(result.current.core.failOpening(new Error('late preview error'), preview)).toBe(false);
     act(() => { expect(result.current.core.failOpening(failure, full)).toBe(true); });
     const rejection = await pending.then(() => null, (error: unknown) => error);
-    expect(rejection).toMatchObject({ message: expect.stringContaining('document changed') });
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toContain('document changed');
     expect(replicaHelpers.workerOpenReplicaPending(full)).toBe(false);
     expect(destroyed).toHaveBeenCalledTimes(1);
     expect(result.current.core.session).toBeNull();
@@ -1375,6 +1378,7 @@ test('worker-held proposals fail the document on proposal OOM without reopening 
   const options: Parameters<typeof installWorker>[0] = {};
   const { workers, posted } = installWorker(options);
   const { result, unmount } = await openWorkerProposals();
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
   try {
     const api = result.current.ref.current!;
     const identities = await api.getParagraphIdentities();
@@ -1423,8 +1427,12 @@ test('worker-held proposals fail the document on proposal OOM without reopening 
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
     expect(result.current.core.replicaReady).toBe(false);
     expect(result.current.mainOpens).toEqual([]);
+    expect(errorLog.mock.calls.filter(([, error]) => error === failure)).toEqual([
+      ['[CanvasRenderer] Resident engine worker holding proposals ran out of memory', failure],
+    ]);
   } finally {
     unmount();
+    errorLog.mockRestore();
   }
 }, 15_000);
 
@@ -1465,6 +1473,7 @@ test.each([true, false])(
     const frames = holdFrames();
     const props = {
       ...workerProposalProps,
+      source: await longFixture(1200),
       followCompletion: true,
       onWorkerRevisions: withCallback ? onWorkerRevisions : undefined,
     };
@@ -1517,7 +1526,16 @@ test.each([true, false])(
       expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(true);
       expect(session.storyIds()).toEqual([]);
       expect(result.current.mainOpens).toEqual([]);
-      if (!withCallback) {
+      expect(result.current.core.workerProposalsReady).toBe(false);
+      expect(posted.some((request) => request.type === 'proposal')).toBe(false);
+      if (withCallback) {
+        await act(async () => { workers[0].release(); });
+        await waitFor(() => expect(result.current.core.workerProposalsReady).toBe(true));
+        expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(1);
+        expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+        expect(result.current.core.replicaReady).toBe(false);
+        expect(result.current.mainOpens).toEqual([]);
+      } else {
         await act(async () => {
           workers[0].release();
           await awaitWorkerOpenReplica(session);
@@ -1575,7 +1593,12 @@ test('worker content callbacks skip preview states and refused proposals', async
     expect(onWorkerContentChange).toHaveBeenCalledTimes(1);
     await act(async () => {
       expect(await api.proposeChanges({
-        expectVersion: initial.version, proposals: [],
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'refused-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'end', text: ' Refused',
+        }],
       })).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
     });
     expect(await api.getProposals()).toEqual(preview);
@@ -1682,7 +1705,7 @@ test('the host proposal gate refuses before initializing the worker authority', 
 });
 
 test('a failed hand-over refuses to reseed worker proposals', async () => {
-  installWorker({ failState: true });
+  const { workers, posted } = installWorker({ failState: true });
   const { result } = renderHook(useHarness, {
     initialProps: workerProposalProps,
   });
@@ -1695,11 +1718,18 @@ test('a failed hand-over refuses to reseed worker proposals', async () => {
       expectVersion: initial.version, expectPreviewVersion: initial.previewVersion, changes: [],
     })).toMatchObject({ ok: true });
   });
+  let failure!: Error;
   await act(async () => {
-    await expect(requestWorkerOpenReplica(session)!).rejects.toThrow(
-      'The resident worker holds proposals the main thread cannot rebuild'
-    );
+    await expect(requestWorkerOpenReplica(session)!.catch((error) => {
+      failure = error;
+      throw error;
+    })).rejects.toThrow('open failed');
   });
+  await expect(api().getProposals()).rejects.toBe(failure);
+  await expect(api().readParagraphs({ view: 'accepted' })).rejects.toBe(failure);
+  expect(result.current.renderer.error).toBe(failure);
+  expect(workers).toHaveLength(1);
+  expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
   expect(result.current.mainOpens).toEqual([]);
   expect(result.current.core.replicaReady).toBe(false);
 });

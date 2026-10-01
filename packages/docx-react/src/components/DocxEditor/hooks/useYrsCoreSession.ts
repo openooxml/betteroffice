@@ -675,7 +675,7 @@ export function useYrsCoreSession(
               const authority = registerWorkerProposalAuthority(next, worker, {
                 relayout: () => workerOpenRef.current?.refreshWorkerLayout?.(),
                 current: () => !stale(),
-                laidOut: () => laidOut,
+                laidOut: () => laidOut.then(() => worker.laidOut()),
                 contentChanged: () => workerOpenRef.current?.onWorkerContentChange?.(),
                 adopted: (version) => {
                   adoptWorkerOpenMirrorVersion(next, version);

@@ -204,10 +204,10 @@ for (const stage of ['fontRequirements', 'bootstrap'] as const) {
           : result.current.layoutInWorker(engine, REQUEST)!;
       });
       expect(worker.last().type).toBe(stage);
-      const rejected = expect(pending).rejects.toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+      const rejected = pending.catch((error: unknown) => error);
       await act(async () => {
         worker.outOfMemory();
-        await rejected;
+        expect(await rejected).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
       });
       expect(FakeWorker.spawned).toHaveLength(1);
       expect(worker.posted.filter((request) => request.type === 'open')).toHaveLength(1);
@@ -220,7 +220,7 @@ for (const stage of ['fontRequirements', 'bootstrap'] as const) {
       expect(replica.pending).toBe(false);
       expect(replica.started).toBe(true);
       expect(await settled).toBe(failure);
-      expect(result.current.error).toBe(failure);
+      expect(result.current.error).toBe(failure as Error);
       await expect(pending).rejects.toBe(failure);
       await expect(authority.getProposals(async () => engine.getProposals())).rejects.toBe(failure);
       await expect(workerProposals.beginWorkerProposalHandover(engine)!).rejects.toBe(failure);
@@ -246,20 +246,20 @@ test('a page-build failure with worker-held proposals fails the document and set
   const relayout = mock(() => {});
   try {
     const overrides = { getInputs: () => inputs };
-    const { result, unmount } = renderHook(() =>
-      useRustDisplayList(inputs.layout as Layout, overrides, undefined, undefined, host, relayout)
+    const { result, rerender, unmount } = renderHook(({ layout }) =>
+      useRustDisplayList(layout, overrides, undefined, undefined, host, relayout),
+      { initialProps: { layout: inputs.layout as Layout } }
     );
     await waitFor(() => expect(result.current.frame).not.toBeNull());
     expect(result.current.displayList!.pages.some((page) => page.unbuilt)).toBe(true);
     await hold();
     EngineWorker.failPageBuilds = true;
     const ready = replica.ready.catch((error: unknown) => error);
-    let settled!: Promise<unknown>;
+    let failure: unknown;
     await act(async () => {
-      settled = result.current.settledDisplayList(null, null).catch((error: unknown) => error);
+      failure = await result.current.settledDisplayList(null, null).catch((error: unknown) => error);
     });
-    const failure = await settled;
-    await waitFor(() => expect(result.current.error).toBe(failure));
+    await waitFor(() => expect(result.current.error).toBe(failure as Error));
     expect(failure).toBeInstanceOf(Error);
     expect((failure as Error).message).toBe('page build failed');
     expect(await ready).toBe(failure);
@@ -269,6 +269,10 @@ test('a page-build failure with worker-held proposals fails the document and set
     expect(EngineWorker.last!.terminated).toBe(true);
     expect(EngineWorker.spawned).toBe(1);
     expect(result.current.loading).toBe(false);
+    await act(async () => rerender({ layout: { ...inputs.layout } as Layout }));
+    expect(result.current.error).toBe(failure as Error);
+    await expect(result.current.settledDisplayList(null, null)).rejects.toBe(failure);
+    expect(EngineWorker.spawned).toBe(1);
     expect(errors).toHaveBeenCalledTimes(1);
     expect(relayout).not.toHaveBeenCalled();
     expect(unhandled).not.toHaveBeenCalled();
@@ -281,9 +285,9 @@ test('a page-build failure with worker-held proposals fails the document and set
   }
 });
 
-test('a terminal proposal failure with worker-held proposals fails the document after layout settles', async () => {
+test('a terminal failure with worker-held proposals rejects concurrent calls after layout settles', async () => {
   const { native, inputs, frame, engine, mainThreadBuilds } = setup();
-  const { authority, hold } = proposalAuthority(engine);
+  const { authority, hold, worker: transport } = proposalAuthority(engine);
   let mainOpens = 0;
   const replica = deferWorkerOpenReplica(engine, () => new Promise(() => {}), () => {
     mainOpens += 1;
@@ -318,15 +322,34 @@ test('a terminal proposal failure with worker-held proposals fails the document 
       });
     });
     expect(worker.last()).toMatchObject({ type: 'proposal', operation: { kind: 'setStates' } });
+    const rejected = pending.catch((error: unknown) => error);
+    let revisionCount!: Promise<unknown>;
+    let requirements!: Promise<unknown>;
+    let handover!: Promise<unknown>;
+    let proposals!: Promise<unknown>;
+    transport.handOver.mockImplementation(() => new Promise(() => {}));
+    await act(async () => {
+      revisionCount = opened!.revisionCount().catch((error: unknown) => error);
+      requirements = result.current.fontRequirementsInWorker(engine, REQUEST)!.catch((error: unknown) => error);
+      handover = workerProposals.beginWorkerProposalHandover(engine)!.catch((error: unknown) => error);
+      proposals = authority.getProposals(async () => engine.getProposals()).catch((error: unknown) => error);
+    });
+    expect(worker.posted.some((request) => request.type === 'fontRequirements')).toBe(true);
+    expect(transport.handOver).toHaveBeenCalledTimes(1);
     let failure: unknown;
     await act(async () => {
       worker.trapped();
-      failure = await pending.catch((error: unknown) => error);
+      failure = await rejected;
     });
     expect(failure).toBeInstanceOf(Error);
     expect(failure).not.toBeInstanceOf(ResidentWorkerOutOfMemoryError);
     expect((failure as Error).message).toBe('Resident engine worker trapped: unreachable');
     await expect(pending).rejects.toBe(failure);
+    expect(await revisionCount).toBe(failure);
+    expect(await requirements).toBe(failure);
+    expect(await handover).toBe(failure);
+    expect(await proposals).toBe(failure);
+    await expect(workerProposals.beginWorkerProposalHandover(engine)!).rejects.toBe(failure);
     await expect(authority.getProposals(async () => engine.getProposals())).rejects.toBe(failure);
     await expect(authority.readParagraphs({ view: 'accepted' }, async () => {
       throw new Error('unexpected main read');
@@ -334,7 +357,7 @@ test('a terminal proposal failure with worker-held proposals fails the document 
     expect(await ready).toBe(failure);
     expect(replica.pending).toBe(false);
     await expect(result.current.settledDisplayList(null, null)).rejects.toBe(failure);
-    expect(result.current.error).toBe(failure);
+    expect(result.current.error).toBe(failure as Error);
     expect(result.current.loading).toBe(false);
     expect(errors).toHaveBeenCalledTimes(1);
     expect(worker.terminated).toBe(true);
@@ -387,7 +410,7 @@ test('a provisional completion failure with worker-held proposals fails the docu
     expect((failure as Error).message).toBe('Resident engine worker trapped: unreachable');
     expect(await ready).toBe(failure);
     expect(await settled).toBe(failure);
-    expect(result.current.error).toBe(failure);
+    expect(result.current.error).toBe(failure as Error);
     expect(result.current.loading).toBe(false);
     expect(replica.pending).toBe(false);
     await expect(authority.getProposals(async () => engine.getProposals())).rejects.toBe(failure);

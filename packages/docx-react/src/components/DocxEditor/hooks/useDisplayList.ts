@@ -80,6 +80,7 @@ import { nearestPages } from './pageBuildOrder';
 
 export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
   encodeState(): Promise<Uint8Array>;
+  laidOut(): Promise<void>;
   revisionCount(): Promise<number>;
   proposal: ResidentEngineWorkerClient['proposal'];
   documentRead: ResidentEngineWorkerClient['documentRead'];
@@ -448,6 +449,7 @@ export function useRustDisplayList(
     opened?: boolean;
     stateVector?: Uint8Array;
     opening?: Promise<ResidentEngineWorkerOpened>;
+    layoutComplete?: Promise<LayoutComputation | null>;
   } | null>(null);
   const retainBuiltPagesRef = useRef(false);
   // The document load each session belongs to: the one under way when it was
@@ -1265,6 +1267,8 @@ export function useRustDisplayList(
           if (!isCurrentWorker(hostEngine, owner)) throw new SupersededPreviewError();
           return result;
         } catch (error) {
+          const failure = workerFailureRef.current.get(hostEngine);
+          if (failure) throw failure;
           if (error instanceof ResidentWorkerOutOfMemoryError) {
             if (replaceOutOfMemoryWorker(hostEngine, owner, error) === 'retry') {
               continue;
@@ -1301,6 +1305,9 @@ export function useRustDisplayList(
         return {
           ...opened,
           encodeState: () => requestOpenedWorker(hostEngine, (owner) => owner.client.encodeState()),
+          laidOut: () => requestOpenedWorker(hostEngine, async (owner) => {
+            await owner.layoutComplete;
+          }),
           revisionCount: () => requestOpenedWorker(hostEngine, (owner) => owner.client.revisionCount()),
           proposal: (op) =>
             requestOpenedWorker(hostEngine, (owner) => owner.client.proposal(op)),
@@ -1376,6 +1383,8 @@ export function useRustDisplayList(
           return requirements;
         })
         .catch((error: unknown) => {
+          const failure = workerFailureRef.current.get(hostEngine);
+          if (failure) throw failure;
           if (error instanceof ResidentWorkerOutOfMemoryError) throw error;
           if (error instanceof SupersededPreviewError) {
             if (workerFallbackEngineRef.current === hostEngine) return null;
@@ -1637,6 +1646,8 @@ export function useRustDisplayList(
         })
           .then(() => layoutInWorkerRef.current?.(hostEngine, request) ?? null)
           .catch((error: unknown) => {
+            const failure = workerFailureRef.current.get(hostEngine);
+            if (failure) throw failure;
             if (error instanceof ResidentWorkerOutOfMemoryError) throw error;
             if (error instanceof SupersededPreviewError) return null;
             if (owner.current && isCurrentWorker(hostEngine, owner.current) && !dropWorker(hostEngine, error)) {
@@ -1705,6 +1716,8 @@ export function useRustDisplayList(
         ) {
           return null;
         }
+        const failure = workerFailureRef.current.get(hostEngine);
+        if (failure) return rejectedWorkerLayout(failure);
         // A session whose replacement worker ran out of memory too lays out nowhere.
         const outOfMemory = cause instanceof ResidentWorkerOutOfMemoryError;
         if (outOfMemory && outOfMemoryRef.current.get(hostEngine)) return rejectedWorkerLayout(cause);
@@ -1785,6 +1798,7 @@ export function useRustDisplayList(
             });
           // A pass the host drops never observes this; the renderer reports the failure.
           complete.catch(() => {});
+          owner.layoutComplete = complete;
           return { ...computation, complete };
         })
         .catch(unavailable);
@@ -1851,6 +1865,7 @@ export function useRustDisplayList(
   );
 
   useEffect(() => {
+    if (residentEngine && workerFailureRef.current.has(residentEngine)) return;
     if (replacedLayoutRef.current && layout && layout !== replacedLayoutRef.current.layout) {
       replacedLayoutRef.current = null;
     }
@@ -2263,6 +2278,7 @@ export function useRustDisplayList(
     }
     pending
       .then((result) => {
+        if (residentEngine && workerFailureRef.current.has(residentEngine)) return;
         if (
           generation !== generationRef.current ||
           contentEpoch !== contentEpochRef.current
@@ -2302,6 +2318,7 @@ export function useRustDisplayList(
         );
       })
       .catch((error) => {
+        if (residentEngine && workerFailureRef.current.has(residentEngine)) return;
         if (error instanceof MainThreadLayoutPendingError) {
           setTimeout(() => requestLayoutRef.current?.(), 0);
           return;
