@@ -3982,8 +3982,9 @@ fn project_table(
         .or_else(|| field(field(default_style, "tblPr"), "borders"));
     let margin_layers: Vec<&Value> = [
         field(formatting, "cellMargins"),
-        field(field(table_style, "tblPr"), "cellMargins"),
-        field(field(default_style, "tblPr"), "cellMargins"),
+        field(field(table_style, "tblPr"), "cellMargins")
+            .filter(|margins| !margins.is_null())
+            .or_else(|| field(field(default_style, "tblPr"), "cellMargins")),
     ]
     .into_iter()
     .flatten()

@@ -1605,8 +1605,7 @@ function projectTable(
     table.formatting?.borders ?? tableStyle?.tblPr?.borders ?? defaultStyle?.tblPr?.borders;
   const marginLayers = [
     table.formatting?.cellMargins,
-    tableStyle?.tblPr?.cellMargins,
-    defaultStyle?.tblPr?.cellMargins,
+    tableStyle?.tblPr?.cellMargins ?? defaultStyle?.tblPr?.cellMargins,
   ].filter((margins): margins is CellMargins => margins != null);
   const marginSide = (...keys: (keyof CellMargins)[]) => {
     for (const margins of marginLayers) {
