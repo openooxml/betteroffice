@@ -15,7 +15,7 @@ import type {
   YrsSession,
 } from '@betteroffice/docx/yrs';
 import type { DocxEditorCollaborationOptions } from '../types';
-import type { OpenInWorker, WorkerOpenedDocument } from './useDisplayList';
+import type { OpenInWorker, OpenPreviewInWorker, WorkerOpenedDocument } from './useDisplayList';
 import { markLayoutQueued } from '../internals/layoutProvenance';
 import {
   adoptWorkerOpenHandoverVersion,
@@ -96,6 +96,8 @@ interface YrsCoreSessionCallbacks {
 
 interface WorkerOpenOptions {
   openInWorker: OpenInWorker;
+  /** Opens the first-page preview in the worker too, so this thread runs none of it. */
+  openPreviewInWorker?: OpenPreviewInWorker;
   renderedFrame: object | null;
   workerProposals?: boolean;
   refreshWorkerLayout?: () => void;
@@ -224,6 +226,46 @@ async function openPreview(
     session.destroy();
     return null;
   }
+}
+
+/**
+ * A display-only session of the first pages of `bytes` that the resident worker opened and lays
+ * out, or null when no worker takes it. The session holds no document of its own: it loads the
+ * preview on this thread only if something needs it here.
+ */
+async function openWorkerPreview(
+  yrs: YrsFacadeModule,
+  bytes: Uint8Array,
+  clientId: number | undefined,
+  openPreviewInWorker: OpenPreviewInWorker,
+  onPosted: () => void
+): Promise<{ session: YrsSession; host: YrsDocxHost; laidOut: Promise<void> } | null> {
+  const session = await yrs.createYrsSession({ clientId });
+  session.markDisplayOnly();
+  const loadHere = (): void => {
+    if (!session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS)) {
+      throw new Error('The first-page preview cannot open');
+    }
+  };
+  let release = (): void => {};
+  deferWorkerOpenReplica(session, async () => loadHere, loadHere, () => release());
+  try {
+    const pending = openPreviewInWorker(session, bytes, PREVIEW_BODY_BLOCKS);
+    onPosted();
+    const opened = await pending;
+    if (opened) {
+      release = opened.release;
+      return {
+        session,
+        host: yrs.decodeDocxHostJson(opened.hostJson, bytes),
+        laidOut: opened.bootstrapPosted,
+      };
+    }
+  } catch (error) {
+    console.warn('[yrs] the worker could not open the first-page preview', error);
+  }
+  session.destroy();
+  return null;
 }
 
 export interface YrsSeedSources {
@@ -365,6 +407,8 @@ export function useYrsCoreSession(
   workerOpenRef.current = workerOpen;
   const replicaReadyRef = useRef(true);
   const openInWorker = workerOpen?.openInWorker;
+  const openPreviewInWorkerRef = useRef(workerOpen?.openPreviewInWorker);
+  openPreviewInWorkerRef.current = workerOpen?.openPreviewInWorker;
   const workerOpenEnabledRef = useRef(Boolean(openInWorker));
   workerOpenEnabledRef.current = Boolean(openInWorker);
   const pendingReplicaRef = useRef<ReturnType<typeof deferWorkerOpenReplica> | null>(null);
@@ -504,16 +548,22 @@ export function useYrsCoreSession(
       .then(async (yrs) => {
         // A copy hashed with Web Crypto keeps the package's hash off this
         // thread; it hashes while the preview opens.
-        const prepared = seedBytes ? yrs.prepareDocxBytes(seedBytes) : Promise.resolve(null);
-        // Awaited below unless the load ends first.
-        prepared.catch(() => {});
+        let preparing: Promise<Uint8Array | null> | null = null;
+        const prepare = (): Promise<Uint8Array | null> => {
+          if (!preparing) {
+            preparing = seedBytes ? yrs.prepareDocxBytes(seedBytes) : Promise.resolve(null);
+            // Awaited below unless the load ends first.
+            preparing.catch(() => {});
+          }
+          return preparing;
+        };
         // The full session, opened in the worker when one takes it.
         const openFull = async (): Promise<{
           bytes: Uint8Array | null;
           next: YrsSession;
           host: YrsDocxHost | null;
         } | null> => {
-          const bytes = await prepared;
+          const bytes = await prepare();
           if (stale()) return null;
           const next = await yrs.createYrsSession({ clientId: collaborationClientId });
           if (stale()) {
@@ -550,14 +600,31 @@ export function useYrsCoreSession(
           }
           return { bytes, next, host };
         };
-        // A preview never lays out in the worker, so the worker opens the
-        // full document while the preview opens and paints.
+        // The worker opens the full document while the preview opens and paints. A preview the
+        // worker opened lays out there first: the full open queues right behind that layout.
+        const openPreviewInWorker =
+          openWorker &&
+          previewFirstPage &&
+          seedBytes &&
+          !collaborationInitialUpdate &&
+          yrs.canUseResidentEngineWorker()
+            ? openPreviewInWorkerRef.current
+            : undefined;
+        // The worker's preview open goes first; the hash then runs while the worker parses.
+        if (!openPreviewInWorker) void prepare();
+        let releaseFull = (): void => {};
+        const fullQueued = new Promise<void>((resolve) => {
+          releaseFull = resolve;
+        });
         const early =
           openWorker && previewFirstPage && seedBytes && !collaborationInitialUpdate
-            ? openFull()
+            ? openPreviewInWorker
+              ? fullQueued.then(openFull)
+              : openFull()
             : null;
         early?.catch(() => {});
         dropEarly = (): void => {
+          releaseFull();
           if (earlyTaken) return;
           earlyTaken = true;
           void early?.then((full) => {
@@ -568,11 +635,23 @@ export function useYrsCoreSession(
           }, () => {});
         };
         // A preview paints the first pages before the full open begins.
-        const opened =
-          previewFirstPage && seedBytes
-            ? await openPreview(yrs, seedBytes, collaborationClientId)
+        const inWorker =
+          openPreviewInWorker && seedBytes
+            ? await openWorkerPreview(
+                yrs,
+                seedBytes,
+                collaborationClientId,
+                openPreviewInWorker,
+                () => void prepare()
+              )
             : null;
+        const opened =
+          inWorker ??
+          (previewFirstPage && seedBytes && !stale()
+            ? await openPreview(yrs, seedBytes, collaborationClientId)
+            : null);
         shown = opened;
+        if (!inWorker) releaseFull();
         if (opened && stale()) {
           opened.session.destroy();
           dropEarly();
@@ -584,6 +663,7 @@ export function useYrsCoreSession(
             paintWaitRef.current = { session: opened.session, resolve };
             setTimeout(resolve, PREVIEW_PAINT_TIMEOUT_MS);
           });
+          if (inWorker) void Promise.race([inWorker.laidOut, painted]).then(releaseFull);
           sessionRef.current = opened.session;
           facadeRef.current = yrs;
           previewingRef.current = true;
@@ -823,20 +903,19 @@ export function useYrsCoreSession(
     retirePreview,
   ]);
 
+  const hasOwnWorkerFrame = workerOpen?.renderedFrame != null &&
+    workerOpen.renderedFrame !== inheritedFrameRef.current;
   useEffect(() => {
-    if (!openInWorker) return;
-    const frame = workerOpen?.renderedFrame;
-    const pending = pendingReplicaRef.current;
-    const start = startReplicaRef.current;
     if (
+      !openInWorker ||
       !session ||
       session !== sessionRef.current ||
-      !frame ||
-      frame === inheritedFrameRef.current ||
-      !pending?.pending ||
-      !start
+      !hasOwnWorkerFrame ||
+      !pendingReplicaRef.current?.pending ||
+      !startReplicaRef.current ||
+      previewing ||
+      (handoffFrom && options?.shownEngine !== session)
     ) return;
-    if (previewing || (handoffFrom && options?.shownEngine !== session)) return;
     workerLaidOutRef.current?.();
     const authority = registeredWorkerProposalAuthority(session);
     if (authority) {
@@ -844,6 +923,28 @@ export function useYrsCoreSession(
         console.error('[yrs] failed to initialize worker proposals', error);
       });
     }
+  }, [
+    openInWorker,
+    session,
+    hasOwnWorkerFrame,
+    workerOpen?.renderedFrame,
+    previewing,
+    handoffFrom,
+    options?.shownEngine,
+  ]);
+
+  useEffect(() => {
+    if (!openInWorker) return;
+    const pending = pendingReplicaRef.current;
+    const start = startReplicaRef.current;
+    if (
+      !session ||
+      session !== sessionRef.current ||
+      !hasOwnWorkerFrame ||
+      !pending?.pending ||
+      !start
+    ) return;
+    if (previewing || (handoffFrom && options?.shownEngine !== session)) return;
     // The replica blocks this thread: it loads once the worker is laying out the rest.
     if (workerOpen?.pendingCompletion === session) return;
     armReplicaGate(REPLICA_FRAME_WAIT_MS);
@@ -858,7 +959,7 @@ export function useYrsCoreSession(
   }, [
     openInWorker,
     session,
-    workerOpen?.renderedFrame,
+    hasOwnWorkerFrame,
     workerOpen?.pendingCompletion,
     workerOpen?.hydrateOnDemand,
     previewing,

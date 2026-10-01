@@ -9014,6 +9014,7 @@ struct TablePaintPlan {
     semantic_header_count: usize,
     header_height: f64,
     visible_height: f64,
+    full_bottom_border: bool,
     /// Clip band in page coordinates; every emitted rect and text clips to it,
     /// so a row sliced by the page break cannot paint past the fragment.
     clip_top_y: f64,
@@ -9026,6 +9027,17 @@ impl TablePaintPlan {
     fn new(frag: &TableFragmentIn, block: &TableBlockIn, measure: &TableExtentIn) -> Self {
         let row_tops = row_y_positions(&measure.rows);
         let grid = compute_cell_grid(block, &measure.column_widths);
+        let full_bottom_border = frag.row_end == block.rows.len()
+            && frag.clip_bottom.is_none()
+            && frag.carried_to_next != Some(true)
+            && grid.iter().any(|cell| {
+                cell.row_index + cell.row_span >= block.rows.len()
+                    && block.rows[cell.row_index].cells[cell.cell_index]
+                        .borders
+                        .as_ref()
+                        .and_then(|borders| borders.bottom.as_ref())
+                        .is_some_and(border_visible)
+            });
 
         let carried = frag.carried_from_prev == Some(true);
         let header_row_count = if carried {
@@ -9047,7 +9059,9 @@ impl TablePaintPlan {
         let win_top =
             row_tops.get(frag.row_start).copied().unwrap_or(0.0) + frag.clip_top.unwrap_or(0.0);
         let to_frag_y = |full_y: f64| header_height + (full_y - win_top);
-        let visible_height = if frag.clip_bottom.is_some() {
+        let visible_height = if full_bottom_border {
+            frag.height
+        } else if frag.clip_bottom.is_some() {
             frag.height.round()
         } else {
             to_frag_y(row_tops.get(frag.row_end).copied().unwrap_or(0.0))
@@ -9138,6 +9152,7 @@ impl TablePaintPlan {
             semantic_header_count,
             header_height,
             visible_height,
+            full_bottom_border,
             clip_top_y: frag.y,
             clip_bottom_y: frag.y + visible_height,
             visible,
@@ -9414,13 +9429,30 @@ pub(crate) fn emit_table_fragment(
             if p.is_first_row
                 && let Some(e) = &borders.top
             {
-                push_edge(cx, cy, cx + p.g.width, cy, e);
+                let starts_table = if carried {
+                    plan.header_row_count > 0
+                } else {
+                    frag.clip_top.unwrap_or(0.0) == 0.0
+                };
+                let inset = if p.g.row_index == 0 && starts_table {
+                    e.width.unwrap_or(1.0) / 2.0
+                } else {
+                    0.0
+                };
+                push_edge(cx, cy + inset, cx + p.g.width, cy + inset, e);
             }
             if let Some(e) = &borders.right {
                 push_edge(cx + p.g.width, cy, cx + p.g.width, cy + p.cell_h, e);
             }
             if let Some(e) = &borders.bottom {
-                push_edge(cx, cy + p.cell_h, cx + p.g.width, cy + p.cell_h, e);
+                let y = if plan.full_bottom_border
+                    && p.g.row_index + p.g.row_span >= block.rows.len()
+                {
+                    frag.y + frag.height - e.width.unwrap_or(1.0) / 2.0
+                } else {
+                    cy + p.cell_h
+                };
+                push_edge(cx, y, cx + p.g.width, y, e);
             }
             if is_first_col && let Some(e) = &borders.left {
                 push_edge(cx, cy, cx, cy + p.cell_h, e);

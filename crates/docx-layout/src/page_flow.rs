@@ -1062,6 +1062,20 @@ impl Paginator {
         self.states[idx].pen_y = y;
     }
 
+    /// The pending space-after and spent leading spacing a side-wrapped float
+    /// sets aside while its rows lay out.
+    pub(crate) fn spacing(&self, idx: usize) -> (f64, f64) {
+        (
+            self.states[idx].deferred_spacing,
+            self.leading_spacing_spent,
+        )
+    }
+
+    pub(crate) fn set_spacing(&mut self, idx: usize, (deferred, spent): (f64, f64)) {
+        self.states[idx].deferred_spacing = deferred;
+        self.leading_spacing_spent = spent;
+    }
+
     /// Restarts flow meeting a floating table's band below it, since Word never
     /// paints a page-anchored float over flow content. Declines when the first
     /// fragment's lead clears the band, needing a split this cannot do, or when

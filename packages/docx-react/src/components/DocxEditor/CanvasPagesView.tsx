@@ -587,8 +587,9 @@ export function CanvasPagesView({
   // One glyph-outline cache for the canvas lifetime (task contract: not
   // per-render). The wasm-backed outline provider loads lazily through the
   // SAME module the display-list builder already resolved — no extra fetch.
-  // `glyphCacheReady` re-runs the draw effect once the provider lands so the
-  // first shaped frame repaints as real glyph outlines (until then a glyphRun
+  // An engine's own provider is installed before the draw effect reads it, so
+  // its first replay already paints glyph outlines. `glyphCacheReady` re-runs
+  // the draw effect once a lazily loaded provider lands (until then a glyphRun
   // falls back to fillText inside the backend, so text is never blank).
   const glyphCacheRef = useRef<GlyphCache | null>(null);
   const [glyphCacheReady, setGlyphCacheReady] = useState(false);
@@ -600,18 +601,23 @@ export function CanvasPagesView({
   }, [offscreenReplay]);
   useEffect(() => {
     let cancelled = false;
-    glyphCacheRef.current = null;
-    setGlyphCacheReady(false);
     // A replay still rasterizing once its engine is replaced or unmounted reads no outline from
     // it (the engine may be freed) and falls back to text.
     const outlines = glyphOutlineProvider;
-    const provider = outlines
-      ? Promise.resolve<GlyphOutlineProvider>((fontId, glyphId) => {
+    if (outlines) {
+      glyphCacheRef.current = new GlyphCache({
+        provider: (fontId, glyphId) => {
           if (cancelled) throw new Error('The glyph outlines belong to a released engine');
           return outlines(fontId, glyphId);
-        })
-      : loadGlyphOutlineProvider();
-    void provider
+        },
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+    glyphCacheRef.current = null;
+    setGlyphCacheReady(false);
+    void loadGlyphOutlineProvider()
       .then((provider) => {
         if (cancelled) return;
         glyphCacheRef.current = new GlyphCache({ provider });
@@ -789,16 +795,18 @@ export function CanvasPagesView({
     return () => {
       replayGenerationRef.current += 1;
     };
-    // glyphCacheReady is a redraw trigger (the cache itself is read via ref);
-    // zoom re-runs the raster so the enlarged canvas paints at full resolution;
-    // windowStart/windowEnd re-run it so pages entering the window paint and
-    // the offscreen active set prunes pages that left it
+    // glyphOutlineProvider and glyphCacheReady are redraw triggers (the cache
+    // itself is read via ref); zoom re-runs the raster so the enlarged canvas
+    // paints at full resolution; windowStart/windowEnd re-run it so pages
+    // entering the window paint and the offscreen active set prunes pages that
+    // left it
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     displayList,
     frame,
     resolveImage,
     fontFamilies,
+    glyphOutlineProvider,
     glyphCacheReady,
     offscreenEligible,
     offscreenFailed,

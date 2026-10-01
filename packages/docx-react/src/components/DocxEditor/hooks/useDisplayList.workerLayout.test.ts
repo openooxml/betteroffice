@@ -1657,6 +1657,152 @@ test('a provisional layout paints first and settles only once the full layout fo
   }
 });
 
+test('a proposal prefix and completion reuse unchanged pages after an intervening visible build', async () => {
+  let request = JSON.stringify({
+    ...JSON.parse(REQUEST),
+    regions: { sections: [{ sectionId: 'main', properties: {
+      pageWidth: 4320, pageHeight: 2880,
+      marginTop: 300, marginRight: 300, marginBottom: 300, marginLeft: 300,
+    } }] },
+  });
+  const { native, engine } = setup(9398, 'Proposal pages. '.repeat(600), request);
+  const fontId = native.register_measure_font(new Uint8Array(readFileSync(resolve(
+    import.meta.dir, '../../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
+  ))));
+  request = JSON.stringify({ ...JSON.parse(request), measurement: {
+    ...JSON.parse(request).measurement,
+    fontChains: { 'calibri|0|0': [fontId] }, authoritativeShaping: true,
+  } });
+  const layoutJson = native.layout_document_with_regions_retained_json(request);
+  native.reset_frame_base();
+  const frame = native.build_display_list_frame('{}', 0);
+  const initialEpoch = decodeFrameDelta(frame).frameEpoch;
+  const snapshot = engine.residentWorkerSnapshot.bind(engine);
+  engine.residentWorkerSnapshot = (options) => ({ ...snapshot(options)!, workerAuthoritative: true });
+  const originalIdle = globalThis.requestIdleCallback;
+  const originalCancelIdle = globalThis.cancelIdleCallback;
+  const callbacks = new Map<number, IdleRequestCallback>();
+  let nextIdle = 1;
+  globalThis.requestIdleCallback = (callback) => {
+    const id = nextIdle++;
+    callbacks.set(id, callback);
+    return id;
+  };
+  globalThis.cancelIdleCallback = (id) => { callbacks.delete(id); };
+  const runIdle = (): void => {
+    const pending = [...callbacks.values()];
+    callbacks.clear();
+    for (const callback of pending) callback({ didTimeout: false, timeRemaining: () => 50 });
+  };
+  const hook = renderHook(
+    ({ layout, source }) => useRustDisplayList(layout, undefined, undefined, undefined, source),
+    { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+  );
+  try {
+    act(() => hook.result.current.setDisplayWindow(0, 1));
+    const first = hook.result.current.layoutInWorker(engine, request)!;
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: initialEpoch, caretRect: null }, selection: null, layoutRevision: 1, layoutJson,
+    });
+    const opened = (await act(() => first))!;
+    await act(async () => hook.rerender({ layout: opened.layout, source: engine }));
+    expect(hook.result.current.frame!.pages.length).toBeGreaterThan(5);
+    const unchanged = hook.result.current.displayList!.pages[0];
+    const proposalRequest = JSON.stringify({ ...JSON.parse(request), renderEnv: {
+      revisionPreview: { proposed: 'accepted' },
+    } });
+    const proposal = hook.result.current.layoutInWorker(engine, proposalRequest)!;
+    expect(worker.posted[1]).toMatchObject({ type: 'sync', provisionalPages: 3 });
+    const prefixJson = native.layout_document_with_regions_prefix_retained_json(proposalRequest, 5);
+    native.set_display_window(0, 1);
+    native.set_windowed_incremental_builds(true);
+    const prefixFrame = native.build_display_list_frame('{}', initialEpoch);
+    const prefixEpoch = decodeFrameDelta(prefixFrame).frameEpoch;
+    worker.reply({
+      id: worker.posted[1].id, ok: true, frame: prefixFrame.slice().buffer,
+      caret: { frameEpoch: prefixEpoch, caretRect: null }, selection: null,
+      layoutRevision: 2, layoutJson: prefixJson, layoutProvisional: true,
+    });
+    const prefix = (await act(() => proposal))!;
+    await act(async () => hook.rerender({ layout: prefix.layout, source: engine }));
+    expect(hook.result.current.displayList!.pages[0]).toBe(unchanged);
+    let settled = false;
+    void hook.result.current.settledDisplayList(null, null).then(() => { settled = true; });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      runIdle();
+    });
+    expect(worker.posted.filter((entry) => entry.type === 'buildPages')).toEqual([]);
+    expect(settled).toBe(false);
+
+    act(() => hook.result.current.setDisplayWindow(3, 4));
+    await waitFor(() => expect(worker.posted[2]).toMatchObject({ type: 'buildPages', pages: [3] }));
+    const visibleFrame = native.build_display_pages_frame(Uint32Array.of(3), prefixEpoch);
+    const visibleEpoch = decodeFrameDelta(visibleFrame).frameEpoch;
+    await act(async () => worker.reply({
+      id: worker.posted[2].id, ok: true, frame: visibleFrame.slice().buffer,
+      caret: { frameEpoch: visibleEpoch, caretRect: null }, selection: null, layoutRevision: 2,
+    }));
+    const visible = hook.result.current.displayList!.pages[3];
+    await act(async () => {
+      const attaching = hook.result.current.attachOffscreenCanvases(
+        [], [], 1, 1, { color: '#000', width: 2 }
+      );
+      worker.reply({ id: worker.posted[3].id, ok: true });
+      expect(await attaching).toBe(true);
+    });
+    await waitFor(() => expect(worker.posted[4]).toMatchObject({
+      type: 'completeLayout', expectedFrameEpoch: prefixEpoch,
+    }));
+    const completeJson = native.layout_document_with_regions_retained_json(proposalRequest);
+    native.set_display_window(3, 4);
+    native.set_windowed_incremental_builds(false);
+    const completedFrame = native.build_display_list_frame('{}', prefixEpoch);
+    expect(decodeFrameDelta(completedFrame).full).toBe(true);
+    worker.reply({
+      id: worker.posted[4].id, ok: true, frame: completedFrame.slice().buffer,
+      caret: { frameEpoch: decodeFrameDelta(completedFrame).frameEpoch, caretRect: null },
+      selection: null, layoutRevision: 2, layoutJson: completeJson,
+    });
+    const complete = (await prefix.complete)!;
+    await act(async () => hook.rerender({ layout: complete.layout, source: engine }));
+    expect(hook.result.current.displayList!.pages[0]).toBe(unchanged);
+    expect(hook.result.current.displayList!.pages[3]).toBe(visible);
+    expect(worker.posted.filter((entry) => entry.type === 'buildFrame')).toEqual([]);
+    let answered = 5;
+    for (let round = 0; round < 100 && !settled; round += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        runIdle();
+        for (; answered < worker.posted.length; answered += 1) {
+          const entry = worker.posted[answered]!;
+          if (entry.type !== 'buildPages') continue;
+          const built = native.build_display_pages_frame(Uint32Array.from(entry.pages), entry.expectedFrameEpoch);
+          worker.reply({
+            id: entry.id, ok: true, frame: built.slice().buffer,
+            caret: { frameEpoch: decodeFrameDelta(built).frameEpoch, caretRect: null },
+            selection: null, layoutRevision: 2,
+          });
+        }
+      });
+    }
+    expect(settled).toBe(true);
+    const builds = worker.posted.filter((entry) => entry.type === 'buildPages');
+    const builtPages = builds.flatMap((entry) => entry.pages);
+    expect(new Set(builtPages).size).toBe(builtPages.length);
+    expect(builtPages).not.toContain(0);
+    expect(builds).toHaveLength(2);
+    expect(hook.result.current.error).toBeNull();
+  } finally {
+    hook.unmount();
+    globalThis.requestIdleCallback = originalIdle;
+    globalThis.cancelIdleCallback = originalCancelIdle;
+    native.free();
+  }
+});
+
 test('with worker open, a provisional layout names its engine until the rest is asked of the worker', async () => {
   const { native, layoutJson, frame, engine } = setup();
   try {
