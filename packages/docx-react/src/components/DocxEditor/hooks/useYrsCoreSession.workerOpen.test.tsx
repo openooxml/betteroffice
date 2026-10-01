@@ -1378,6 +1378,67 @@ async function openWorkerProposals(props: HarnessProps = workerProposalProps) {
   return harness;
 }
 
+test('ASCII proposals skip font preflight and Unicode proposals request it before syncing', async () => {
+  const { posted } = installWorker();
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const api = result.current.ref.current!;
+    const identities = await api.getParagraphIdentities();
+    const paragraphs = identities.paragraphs.filter(({ session }) => session?.story === 'body');
+    const initialFonts = posted.filter(({ type }) => type === 'fontRequirements').length;
+    const initialSyncs = posted.filter(({ type }) => type === 'sync').length;
+    const propose = async (id: string, index: number, search: string, replaceWith: string) => {
+      const current = await api.getProposals();
+      await act(async () => {
+        expect(await api.proposeChanges({ expectVersion: current.version, proposals: [{
+          id, paragraph: paragraphs[index]!.session!,
+          suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+          op: 'replaceText', search, replaceWith,
+        }] })).toMatchObject({ ok: true });
+      });
+      await act(async () => { await api.whenLayoutComplete({ timeoutMs: 5000 }); });
+    };
+    await propose('ascii', 0, 'First', 'Leading');
+    expect(posted.filter(({ type }) => type === 'sync').length).toBeGreaterThan(initialSyncs);
+    expect(posted.filter(({ type }) => type === 'fontRequirements')).toHaveLength(initialFonts);
+    const beforeUnicode = posted.length;
+    await propose('unicode', 1, 'Paragraph', '漢字');
+    expect(posted.filter(({ type }) => type === 'fontRequirements')).toHaveLength(initialFonts + 1);
+    const followup = posted.slice(beforeUnicode).map(({ type }) => type);
+    expect(followup.indexOf('fontRequirements')).toBeGreaterThan(followup.indexOf('proposal'));
+    expect(followup.indexOf('sync')).toBeGreaterThan(followup.indexOf('fontRequirements'));
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
+test('proposal font requirements are reused only for the same layout request', async () => {
+  const { posted } = installWorker();
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const original = posted.find((request) => request.type === 'fontRequirements');
+    if (original?.type !== 'fontRequirements') throw new Error('expected font preflight');
+    const before = posted.filter(({ type }) => type === 'fontRequirements').length;
+    const session = result.current.core.session!;
+    const requirements = result.current.renderer.fontRequirementsInWorker;
+    await act(async () => { await requirements(session, original.layoutInput); });
+    expect(posted.filter(({ type }) => type === 'fontRequirements')).toHaveLength(before);
+    const changed = JSON.stringify({
+      ...JSON.parse(original.layoutInput),
+      measurement: { defaults: { fontFamily: 'Courier New', fontSize: 11 } },
+    });
+    let answer!: string | null;
+    await act(async () => { answer = await requirements(session, changed); });
+    expect(posted.filter(({ type }) => type === 'fontRequirements')).toHaveLength(before + 1);
+    expect(answer).toContain('Courier New');
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
 test('worker-held proposals fail the document on proposal OOM without reopening source bytes', async () => {
   const options: Parameters<typeof installWorker>[0] = {};
   const { workers, posted } = installWorker(options);

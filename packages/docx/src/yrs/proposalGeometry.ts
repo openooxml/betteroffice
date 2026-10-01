@@ -41,7 +41,15 @@ export type ProposalGeometryReader = AnchorReader &
   Pick<
     YrsSession,
     'storyIds' | 'paragraphs' | 'paragraphIdCount' | 'locateParagraph' | 'version'
-  >;
+  > & {
+    proposalRevisions?(ids: readonly string[]): readonly ProposalGeometryRevision[];
+  };
+
+/** @internal */
+export type ProposalGeometryRevision = Pick<
+  ReturnType<AnchorReader['listRevisions']>[number],
+  'revisionId' | 'kind' | 'story' | 'range'
+>;
 
 /** @internal */
 export type AnchorGeometryTarget =
@@ -65,6 +73,7 @@ type AnchorResolution =
 interface VersionReads {
   version: string;
   revisions?: ReturnType<AnchorReader['listRevisions']>;
+  proposalRevisions?: { ids: string; revisions: readonly ProposalGeometryRevision[] };
   spans: Map<string, ReturnType<AnchorReader['paragraphSpans']>>;
   segments: Map<string, readonly YrsStorySegment[]>;
   anchors: Map<string, ReturnType<AnchorReader['resolveParagraphAnchor']>>;
@@ -260,11 +269,12 @@ function resolveParagraph(
 export function hiddenRanges(
   session: AnchorReader,
   version: string,
-  snapshot: DocxProposalSnapshot | null
+  snapshot: DocxProposalSnapshot | null,
+  revisions?: readonly ProposalGeometryRevision[]
 ): RawAnchorRange[] {
   const preview = snapshot ? proposalRevisionPreview(snapshot) : undefined;
   if (!preview) return [];
-  return revisionsAt(session, version)
+  return (revisions ?? revisionsAt(session, version))
     .filter(
       ({ revisionId, kind }) =>
         (kind === 'deletion' && preview[revisionId] === 'accepted') ||
@@ -281,7 +291,8 @@ export function resolveAnchorTarget(
   session: AnchorReader,
   target: AnchorGeometryTarget,
   version: string,
-  snapshot: DocxProposalSnapshot | null = null
+  snapshot: DocxProposalSnapshot | null = null,
+  proposalRevisions?: readonly ProposalGeometryRevision[]
 ): AnchorResolution {
   if (target.kind === 'range') {
     if (target.version !== version) {
@@ -311,7 +322,7 @@ export function resolveAnchorTarget(
     if (target.kind === 'proposal' && !proposal) {
       return anchorFailure('unknown-proposal', 'The proposal is not registered in this document');
     }
-    const revisions = revisionsAt(session, version).filter((revision) =>
+    const revisions = (proposalRevisions ?? revisionsAt(session, version)).filter((revision) =>
       target.kind === 'revision'
         ? revision.revisionId === target.revisionId
         : proposal!.revisionIds.includes(revision.revisionId)
@@ -444,6 +455,19 @@ export function computeProposalGeometryMirror(
   includeNavigationTargets = true
 ): ProposalGeometryMirror {
   const version = reader.version();
+  let revisions: readonly ProposalGeometryRevision[] | undefined;
+  if (reader.proposalRevisions) {
+    const ids = [...new Set(snapshot.proposals.flatMap(({ revisionIds }) => revisionIds))].sort();
+    const key = JSON.stringify(ids);
+    const reads = readsAt(reader, version);
+    if (reads.proposalRevisions?.ids !== key) {
+      reads.proposalRevisions = {
+        ids: key,
+        revisions: ids.length > 0 ? reader.proposalRevisions(ids) : [],
+      };
+    }
+    revisions = reads.proposalRevisions.revisions;
+  }
   const projections = new Map<string, YrsPositionProjection | null>();
   const inputMaps = new Map<string, YrsInputPositionMap | null>();
   const projectionFor = (rootStory: string): YrsPositionProjection | null =>
@@ -470,7 +494,7 @@ export function computeProposalGeometryMirror(
   };
   const targets = Object.fromEntries(
     snapshot.proposals.map(({ id }): [string, ProposalGeometryTarget] => {
-      const resolved = resolveAnchorTarget(reader, { kind: 'proposal', id }, version, snapshot);
+      const resolved = resolveAnchorTarget(reader, { kind: 'proposal', id }, version, snapshot, revisions);
       if (!resolved.ok) return [id, resolved];
       const ranges: { from: number; to: number }[] = [];
       for (const range of resolved.ranges) {
@@ -492,7 +516,7 @@ export function computeProposalGeometryMirror(
     navigationTargets: includeNavigationTargets ? Object.fromEntries(snapshot.proposals.map(({ id, paragraph }) => [
       id, resolveNavigationTarget(reader, paragraph.story, paragraph.paraId),
     ])) : undefined,
-    hidden: hiddenRanges(reader, version, snapshot)
+    hidden: hiddenRanges(reader, version, snapshot, revisions)
       .map(display)
       .filter((range): range is { from: number; to: number } => range !== null),
   };

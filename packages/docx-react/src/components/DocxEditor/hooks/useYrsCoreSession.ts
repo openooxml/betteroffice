@@ -817,16 +817,16 @@ export function useYrsCoreSession(
     retirePreview,
   ]);
 
+  const hasOwnWorkerFrame = workerOpen?.renderedFrame != null &&
+    workerOpen.renderedFrame !== inheritedFrameRef.current;
   useEffect(() => {
     if (!openInWorker) return;
-    const frame = workerOpen?.renderedFrame;
     const pending = pendingReplicaRef.current;
     const start = startReplicaRef.current;
     if (
       !session ||
       session !== sessionRef.current ||
-      !frame ||
-      frame === inheritedFrameRef.current ||
+      !hasOwnWorkerFrame ||
       !pending?.pending ||
       !start
     ) return;
@@ -852,7 +852,7 @@ export function useYrsCoreSession(
   }, [
     openInWorker,
     session,
-    workerOpen?.renderedFrame,
+    hasOwnWorkerFrame,
     workerOpen?.pendingCompletion,
     workerOpen?.hydrateOnDemand,
     previewing,

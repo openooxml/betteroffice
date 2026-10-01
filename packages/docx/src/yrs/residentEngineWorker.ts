@@ -8,7 +8,9 @@ import {
 import { preloadEditWasm } from './wasm/index';
 import {
   createProposalRegistry,
+  proposalRevisionPreview,
   type DocxProposalRegistry,
+  type DocxProposalRequest,
   type DocxProposalResult,
 } from './proposals';
 import { computeProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
@@ -44,6 +46,11 @@ const scope = self as unknown as DedicatedWorkerGlobalScope;
 let session: ResidentEngineSession | null = null;
 let proposals: DocxProposalRegistry | null = null;
 let lastProposalMirrorVersion: string | null = null;
+let fontRequirements: {
+  version: string;
+  layoutInput: string;
+  requirementsJson: string;
+} | null = null;
 /** Set while the session holds the document `open` seeded, with the heap limit it used. */
 let openedDocument: { heapLimitBytes?: number } | null = null;
 let unsubscribe: (() => void) | null = null;
@@ -102,6 +109,18 @@ const COMPLETION_SLICE_MS = 24;
 const COMPLETION_RESTARTS = 3;
 const ALL_BLOCKS = 2 ** 32 - 1;
 
+interface BackgroundPageBuild {
+  request: Extract<ResidentEngineWorkerRequest, { type: 'buildPages' }>;
+  owner: ResidentEngineSession;
+  frameEpoch: number;
+  frames: Uint8Array[];
+  offset: number;
+  started: number;
+  engineMs: number;
+}
+let backgroundPageBuild: BackgroundPageBuild | null = null;
+const BACKGROUND_SLICE_PAGES = 4;
+
 // The request being handled, and the requests answered with a trap.
 let handlingId = 0;
 const trappedIds = new Set<number>();
@@ -159,6 +178,7 @@ function trapped(id: number, error: WebAssembly.RuntimeError): void {
 }
 
 async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
+  supersedeBackgroundPageBuild();
   if (request.type === 'warm') {
     try {
       await preloadEditWasm();
@@ -253,10 +273,16 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'fontRequirements') {
     if (!session) throw new Error('Resident engine worker is not initialized');
+    const requirementsJson = session.layoutFontRequirementsJson(request.layoutInput);
+    fontRequirements = {
+      version: session.proposalEngine.version(),
+      layoutInput: request.layoutInput,
+      requirementsJson,
+    };
     reply({
       id: request.id,
       ok: true,
-      requirementsJson: session.layoutFontRequirementsJson(request.layoutInput),
+      requirementsJson,
     });
     return;
   }
@@ -295,8 +321,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     let committed = false;
     try {
       const registry = proposals ??= createProposalRegistry(session.proposalEngine);
-      const since = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
       const previousVersion = session.proposalEngine.version();
+      const since = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
       let result: DocxProposalResult | undefined;
       switch (request.operation.kind) {
         case 'propose':
@@ -314,15 +340,27 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       if (changedStories.length > 0) completedLayout = null;
       const updates = pendingUpdates.map(exactBuffer);
       const stateVector = exactBuffer(session.encodeStateVector());
-      const version = session.proposalEngine.version();
+      const snapshot = registry.snapshot();
+      const version = snapshot.version;
       const geometry = computeProposalGeometryMirror(
         session.geometryReader,
-        registry.snapshot(),
+        snapshot,
         version === previousVersion && (
           version === lastProposalMirrorVersion || hasCachedYrsSidebarProjection(session.geometryReader)
         )
       );
       lastProposalMirrorVersion = geometry.version;
+      const unchangedFonts =
+        fontRequirements?.version === previousVersion &&
+        request.operation.kind === 'propose' &&
+        result?.ok === true &&
+        proposalRevisionPreview(snapshot) === undefined &&
+        asciiProposalFontsUnchanged(session, request.operation.request, result);
+      fontRequirements =
+        fontRequirements && (unchangedFonts ||
+          (request.operation.kind === 'snapshot' && fontRequirements.version === snapshot.version))
+          ? { ...fontRequirements, version: snapshot.version }
+          : null;
       reply(
         {
           id: request.id,
@@ -334,6 +372,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
             updates,
             stateVector,
             geometry,
+            ...(fontRequirements
+              ? { fontRequirements: {
+                  layoutInput: fontRequirements.layoutInput,
+                  requirementsJson: fontRequirements.requirementsJson,
+                } }
+              : {}),
           },
         },
         [...updates, stateVector]
@@ -416,6 +460,15 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'buildPages') {
+    if (request.background && request.pages.length > BACKGROUND_SLICE_PAGES) {
+      const build: BackgroundPageBuild = {
+        request, owner: session, frameEpoch: request.expectedFrameEpoch,
+        frames: [], offset: 0, started: performance.now(), engineMs: 0,
+      };
+      backgroundPageBuild = build;
+      scheduleBackgroundPageSlice(build);
+      return;
+    }
     setFrameDisplayWindow(session);
     // Pages of the provisional frame build between steps, as before a completion.
     pendingUpdates = [];
@@ -471,6 +524,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'applyUpdate') {
+    fontRequirements = null;
     session.applyUpdate(request.update);
     if (request.selection) session.setSelection(request.selection.anchor, request.selection.head);
     return;
@@ -508,6 +562,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   await completeProvisionalLayout();
+  fontRequirements = null;
   // The edit replaces the pagination a cached completion's frame would paint.
   completedLayout = null;
   setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
@@ -583,7 +638,10 @@ function hydrate(
   supersedeSlicedCompletion();
   incompleteLayout = null;
   completedLayout = null;
-  if (loadState && !snapshot.workerAuthoritative) session.loadState(snapshot.state);
+  if (loadState && !snapshot.workerAuthoritative) {
+    fontRequirements = null;
+    session.loadState(snapshot.state);
+  }
   session.setPartialDocument(snapshot.partialDocument === true);
   if (!snapshot.workerAuthoritative) session.loadMediaSources(snapshot.mediaSources ?? '');
   if (snapshot.fontsRevision !== fontsRevision) {
@@ -715,6 +773,52 @@ function nextTurn(callback: () => void): void {
   completionTurns.port2.postMessage(null);
 }
 
+function supersedeBackgroundPageBuild(): void {
+  const build = backgroundPageBuild;
+  if (!build) return;
+  backgroundPageBuild = null;
+  reply({ id: build.request.id, ok: true, pageBuildSuperseded: true });
+}
+
+function scheduleBackgroundPageSlice(build: BackgroundPageBuild): void {
+  nextTurn(() => {
+    if (backgroundPageBuild !== build) return;
+    enqueue(async () => {
+      try {
+        await backgroundPageSlice(build);
+      } catch (error) {
+        if (backgroundPageBuild === build) backgroundPageBuild = null;
+        throw error;
+      }
+    }, build.request.id, () => backgroundPageBuild === build);
+  });
+}
+
+async function backgroundPageSlice(build: BackgroundPageBuild): Promise<void> {
+  if (session !== build.owner || (build.offset > 0 && retainedFrame?.frameEpoch !== build.frameEpoch)) {
+    supersedeBackgroundPageBuild();
+    return;
+  }
+  setFrameDisplayWindow(build.owner);
+  const started = performance.now();
+  const pages = build.request.pages.slice(build.offset, build.offset + BACKGROUND_SLICE_PAGES);
+  const bytes = build.owner.buildDisplayPagesFrame(pages, build.frameEpoch);
+  build.engineMs += performance.now() - started;
+  build.offset += pages.length;
+  if (build.offset === build.request.pages.length) {
+    backgroundPageBuild = null;
+    await replyFrame(
+      build.request.id, bytes, build.engineMs, [], undefined, build.started,
+      false, build.request.paintCaret, undefined, false, undefined, build.frames
+    );
+    return;
+  }
+  applyWorkerFrame(bytes);
+  build.frameEpoch = retainedFrame!.frameEpoch;
+  build.frames.push(bytes);
+  scheduleBackgroundPageSlice(build);
+}
+
 /** Queues the next step of `completion`, which a later completion supersedes. */
 function scheduleCompletionSlice(completion: SlicedCompletion): void {
   nextTurn(() => {
@@ -831,11 +935,60 @@ function subscribe(): void {
   unsubscribe = session.onUpdate((update) => pendingUpdates.push(update.slice()));
 }
 
+function asciiProposalFontsUnchanged(
+  engine: ResidentEngineSession,
+  request: DocxProposalRequest,
+  result: DocxProposalResult
+): boolean {
+  if (!result.ok || !fontRequirements) return false;
+  const requirements = JSON.parse(fontRequirements.requirementsJson) as { scripts?: string[] }[];
+  const input = JSON.parse(fontRequirements.layoutInput) as {
+    renderEnv?: { revisionPreview?: Record<string, unknown> };
+  };
+  if (requirements.some(({ scripts }) => scripts && scripts.length > 0) ||
+    Object.keys(input.renderEnv?.revisionPreview ?? {}).length > 0) return false;
+  const stories = new Map<string, Set<string>>();
+  for (const proposal of request.proposals) {
+    const text = proposal.op === 'replaceText' ? proposal.replaceWith : proposal.text;
+    if (!/^[\x20-\x7e]*$/.test(text)) return false;
+    const record = result.snapshot.proposals.find(({ id }) => id === proposal.id);
+    if (!record?.changed) continue;
+    const { story, paraId } = record.paragraph;
+    const paragraphs = stories.get(story) ?? new Set<string>();
+    paragraphs.add(paraId);
+    stories.set(story, paragraphs);
+  }
+  for (const [story, targets] of stories) {
+    let ascii = true;
+    let existingText = false;
+    const found = new Set<string>();
+    for (const segment of engine.geometryReader.storySegments(story)) {
+      if (segment.kind === 'pilcrow') {
+        if (targets.has(segment.paraId)) {
+          if (!ascii || !existingText || found.has(segment.paraId)) return false;
+          found.add(segment.paraId);
+        }
+        ascii = true;
+        existingText = false;
+      } else if (segment.kind === 'text') {
+        ascii &&= /^[\x20-\x7e]*$/.test(segment.text);
+        existingText ||= segment.text.length > 0 && segment.attributes.ins == null;
+      } else {
+        ascii = false;
+      }
+    }
+    if (found.size !== targets.size) return false;
+  }
+  return true;
+}
+
 /**
  * Drops the document. `keepSurfaces` keeps the attached page canvases, still
  * showing the old pages, for a document that replaces it page for page.
  */
 function destroySession(keepSurfaces = false): void {
+  supersedeBackgroundPageBuild();
+  fontRequirements = null;
   unsubscribe?.();
   unsubscribe = null;
   proposals?.destroy();
@@ -873,6 +1026,11 @@ function forgetOffscreenPagePixels(pageId: string): void {
   }
 }
 
+function applyWorkerFrame(bytes: Uint8Array): void {
+  retainedFrame = applyFrameDeltaOwned(retainedFrame, decodeFrameDelta(bytes));
+  for (const pageId of retainedFrame.damagedPageIds) pendingOffscreenPageIds.add(pageId.toString());
+}
+
 async function replyFrame(
   id: number,
   bytes: Uint8Array,
@@ -884,12 +1042,12 @@ async function replyFrame(
   paintCaret = false,
   layoutJson?: string,
   layoutProvisional = false,
-  deletedUnits?: number
+  deletedUnits?: number,
+  precedingPageFrames: Uint8Array[] = []
 ): Promise<void> {
-  retainedFrame = applyFrameDeltaOwned(retainedFrame, decodeFrameDelta(bytes));
-  for (const pageId of retainedFrame.damagedPageIds) pendingOffscreenPageIds.add(pageId.toString());
+  applyWorkerFrame(bytes);
   const caret = session?.residentCaretSnapshot();
-  if (!caret || !residentCaretSnapshotForFrame(caret, retainedFrame)) {
+  if (!caret || !retainedFrame || !residentCaretSnapshotForFrame(caret, retainedFrame)) {
     throw new Error('Resident caret snapshot does not match the produced frame');
   }
   if (requireCaret && !caret.caretRect) {
@@ -915,6 +1073,7 @@ async function replyFrame(
   const { replayedPages, caretPainted } = await replayOffscreen(false);
   const replayMs = performance.now() - replayStarted;
   const frame = exactBuffer(bytes);
+  const pageFrames = precedingPageFrames.map(exactBuffer);
   const updateBuffers = updates.map(exactBuffer);
   const stateVector = session ? exactBuffer(session.encodeStateVector()) : undefined;
   reply(
@@ -922,6 +1081,7 @@ async function replyFrame(
       id,
       ok: true,
       frame,
+      ...(pageFrames.length > 0 ? { pageFrames: [...pageFrames, frame] } : {}),
       updates: updateBuffers,
       engineMs,
       workerTotalMs: performance.now() - requestStarted,
@@ -937,7 +1097,7 @@ async function replyFrame(
       ...(layoutJson !== undefined ? { layoutJson } : {}),
       ...(layoutProvisional ? { layoutProvisional } : {}),
     },
-    [frame, ...updateBuffers, ...(stateVector ? [stateVector] : [])]
+    [frame, ...pageFrames, ...updateBuffers, ...(stateVector ? [stateVector] : [])]
   );
 }
 

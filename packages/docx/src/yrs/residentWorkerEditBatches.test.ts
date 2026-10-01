@@ -304,7 +304,7 @@ test('the worker lays a host batch out exactly as the main thread does', async (
   expect(inWorker).toEqual(JSON.parse(main.layoutDocumentWithRegionsRetainedJson(LAYOUT)));
 });
 
-function proposalDocument(): Uint8Array {
+function proposalDocument(texts = ['Alpha', 'Beta', 'Gamma']): Uint8Array {
   const parts: PartsMap = new Map();
   parts.set('[Content_Types].xml', toBytes(
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
@@ -314,7 +314,7 @@ function proposalDocument(): Uint8Array {
   ));
   parts.set('word/document.xml', toBytes(
     '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>' +
-      ['Alpha', 'Beta', 'Gamma'].map((text, index) =>
+      texts.map((text, index) =>
         `<w:p w14:paraId="0000000${index + 1}"><w:r><w:t>${text}</w:t></w:r></w:p>`
       ).join('') + '<w:sectPr/></w:body></w:document>'
   ));
@@ -331,6 +331,75 @@ function paragraphTexts(session: YrsSession, view: 'accepted' | 'original'): str
   if (!read.ok) throw new Error(read.failure.message);
   return read.paragraphs.map(({ text }) => text);
 }
+
+test('ASCII worker proposals carry verified font requirements and Unicode proposals invalidate them', async () => {
+  const bytes = proposalDocument();
+  const source = await createYrsSession({ clientId: 5111 });
+  sessions.push(source);
+  source.openDocx(bytes, true);
+  source.registerFont(new Uint8Array(readFileSync(FONT)));
+  source.adoptResidentWorkerLayout!(LAYOUT);
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  await client.open(bytes);
+  const requirementsJson = await client.fontRequirements(LAYOUT);
+  await client.bootstrap({ ...source.residentWorkerSnapshot()!, workerAuthoritative: true }, '', {
+    opened: true, layoutExtras: '{}', provisionalPages: 1,
+  });
+  const initial = await client.proposal({ kind: 'snapshot' });
+  const propose = (id: string, paraId: string, search: string, replaceWith: string) =>
+    client.proposal({ kind: 'propose', request: { expectVersion: clientVersion, proposals: [{
+      id,
+      paragraph: { kind: 'persisted', story: { kind: 'body', partUri: '/word/document.xml' }, paraId },
+      suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+      op: 'replaceText', search, replaceWith,
+    }] } });
+  let clientVersion = initial.mirror.version;
+  const ascii = await propose('ascii', '00000001', 'Alpha', 'First');
+  expect(ascii.result?.ok).toBe(true);
+  expect(ascii.fontRequirements).toEqual({ layoutInput: LAYOUT, requirementsJson });
+  expect(await client.fontRequirements(LAYOUT)).toBe(requirementsJson);
+  clientVersion = ascii.mirror.version;
+  const unicode = await propose('unicode', '00000002', 'Beta', '漢字');
+  expect(unicode.result?.ok).toBe(true);
+  expect(unicode.fontRequirements).toBeUndefined();
+  expect(await client.fontRequirements(LAYOUT)).not.toBe(requirementsJson);
+  const decided = await client.proposal({ kind: 'setStates', request: {
+    expectVersion: unicode.mirror.version,
+    expectPreviewVersion: unicode.geometry.previewVersion,
+    changes: [{ id: 'unicode', state: 'rejected' }],
+  } });
+  expect(decided.result?.ok).toBe(true);
+  expect(decided.fontRequirements).toBeUndefined();
+});
+
+test.each(['', '漢字 Alpha'])('worker font preflight is preserved for an ASCII insertion into %j', async (text) => {
+  const bytes = proposalDocument([text, 'Beta', 'Gamma']);
+  const source = await createYrsSession({ clientId: 5112 });
+  sessions.push(source);
+  source.openDocx(bytes, true);
+  source.registerFont(new Uint8Array(readFileSync(FONT)));
+  source.adoptResidentWorkerLayout!(LAYOUT);
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  await client.open(bytes);
+  await client.fontRequirements(LAYOUT);
+  await client.bootstrap({ ...source.residentWorkerSnapshot()!, workerAuthoritative: true }, '', {
+    opened: true, layoutExtras: '{}', provisionalPages: 1,
+  });
+  const initial = await client.proposal({ kind: 'snapshot' });
+  const inserted = await client.proposal({ kind: 'propose', request: {
+    expectVersion: initial.mirror.version,
+    proposals: [{
+      id: 'insert',
+      paragraph: { kind: 'persisted', story: { kind: 'body', partUri: '/word/document.xml' }, paraId: '00000001' },
+      suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+      op: 'insertText', at: 'end', text: ' Added',
+    }],
+  } });
+  expect(inserted.result?.ok).toBe(true);
+  expect(inserted.fontRequirements).toBeUndefined();
+});
 
 test('a worker that has not laid out its document refuses registry operations', async () => {
   const client = new ResidentEngineWorkerClient(startWorker());

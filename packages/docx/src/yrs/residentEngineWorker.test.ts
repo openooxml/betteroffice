@@ -340,6 +340,58 @@ function deferred() {
   return { promise, resolve };
 }
 
+test('a background page batch yields between slices and returns their ordered frames once', async () => {
+  const w = worker();
+  await w.bootstrap(9);
+  const calls: number[][] = [];
+  Object.assign(w.harness.session, {
+    buildDisplayPagesFrame(pages: number[]) {
+      calls.push(pages);
+      const bytes = w.harness.session.applyInput();
+      w.harness.delta = { ...w.harness.delta!, pageCount: 9 };
+      return bytes;
+    },
+  });
+  const response = await w.send({
+    type: 'buildPages', pages: Array.from({ length: 9 }, (_, index) => index),
+    expectedFrameEpoch: 1, paintCaret: false, background: true,
+  });
+  expect(response.ok).toBe(true);
+  expect(calls).toEqual([[0, 1, 2, 3], [4, 5, 6, 7], [8]]);
+  if (!response.ok) throw new Error(response.error);
+  expect(response.pageFrames?.map((frame) => new Uint8Array(frame)[0])).toEqual([2, 3, 4]);
+  expect(response.caret?.frameEpoch).toBe(4);
+  expect(w.answered).toEqual([1, 2]);
+});
+
+test('a visible page request supersedes the remaining background slices', async () => {
+  const w = worker();
+  await w.bootstrap(9);
+  const calls: number[][] = [];
+  let visible!: Promise<ResidentEngineWorkerResponse>;
+  Object.assign(w.harness.session, {
+    buildDisplayPagesFrame(pages: number[]) {
+      calls.push(pages);
+      const bytes = w.harness.session.applyInput();
+      w.harness.delta = { ...w.harness.delta!, pageCount: 9 };
+      if (calls.length === 1) {
+        visible = w.send({
+          type: 'buildPages', pages: [8], expectedFrameEpoch: 2, paintCaret: false,
+        });
+      }
+      return bytes;
+    },
+  });
+  const background = await w.send({
+    type: 'buildPages', pages: Array.from({ length: 9 }, (_, index) => index),
+    expectedFrameEpoch: 1, paintCaret: false, background: true,
+  });
+  expect(background).toMatchObject({ ok: true, pageBuildSuperseded: true });
+  expect((await visible).ok).toBe(true);
+  expect(calls).toEqual([[0, 1, 2, 3], [8]]);
+  expect(w.answered).toEqual([1, 2, 3]);
+});
+
 describe('resident worker warmup', () => {
   test('initializes wasm without creating a session, then bootstraps a frame', async () => {
     const w = worker();

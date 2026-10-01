@@ -98,6 +98,7 @@ export {
   applyFrameDelta,
   applyFrameDeltaOwned,
   decodeFrameDelta,
+  decodeFrameDeltaSteps,
   displayPageNoteAnchorRevision,
   displayPageRevision,
   FRAME_DELTA_HEADER_BYTES,

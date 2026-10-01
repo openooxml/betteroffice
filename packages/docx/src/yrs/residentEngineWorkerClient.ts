@@ -26,6 +26,7 @@ export interface ResidentProposalReply
 
 export interface ResidentEngineWorkerFrame {
   frame: Uint8Array;
+  pageFrames?: Uint8Array[];
   updates: Uint8Array[];
   engineMs: number;
   workerTotalMs: number;
@@ -94,6 +95,8 @@ const FRAME_REQUESTS = new Set<AwaitedRequest['type']>([
   'buildFrame',
   'applyInput',
   'applyDelete',
+  'proposal',
+  'documentRead',
 ]);
 
 type PendingRequest = {
@@ -214,7 +217,7 @@ export class ResidentEngineWorkerClient {
     this.retainBuiltPages = retain;
   }
 
-  /** @internal Whether a frame request other than `buildPages` awaits its reply. */
+  /** @internal Whether foreground document or frame work awaits its reply. */
   frameRequestPending(): boolean {
     for (const { type } of this.pending.values()) {
       if (FRAME_REQUESTS.has(type)) return true;
@@ -509,14 +512,24 @@ export class ResidentEngineWorkerClient {
   }
 
   /** Build unbuilt display pages; the reply frame carries them. */
+  buildPages(
+    pages: number[], expectedFrameEpoch: number, paintCaret?: boolean
+  ): Promise<ResidentEngineWorkerFrame>;
+  /** @internal */
+  buildPages(
+    pages: number[], expectedFrameEpoch: number, paintCaret: boolean, background: boolean
+  ): Promise<ResidentEngineWorkerFrame | null>;
   async buildPages(
     pages: number[],
     expectedFrameEpoch: number,
-    paintCaret = false
-  ): Promise<ResidentEngineWorkerFrame> {
-    return frameResult(
-      await this.request({ type: 'buildPages', pages, expectedFrameEpoch, paintCaret })
-    );
+    paintCaret = false,
+    background = false
+  ): Promise<ResidentEngineWorkerFrame | null> {
+    const response = await this.request({
+      type: 'buildPages', pages, expectedFrameEpoch, paintCaret,
+      ...(background ? { background: true } : {}),
+    });
+    return background && response.pageBuildSuperseded ? null : frameResult(response);
   }
 
   async applyInput(
@@ -737,6 +750,7 @@ function frameResult(
   }
   return {
     frame: new Uint8Array(response.frame),
+    ...(response.pageFrames ? { pageFrames: response.pageFrames.map((frame) => new Uint8Array(frame)) } : {}),
     updates: (response.updates ?? []).map((update) => new Uint8Array(update)),
     engineMs: response.engineMs ?? 0,
     workerTotalMs: response.workerTotalMs ?? 0,

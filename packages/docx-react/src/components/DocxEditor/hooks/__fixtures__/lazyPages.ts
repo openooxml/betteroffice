@@ -16,6 +16,7 @@ export class EngineWorker {
   onmessageerror = null;
   posted: ResidentEngineWorkerRequest[] = [];
   holdPageBuilds = false;
+  slicePageBuilds = false;
   heldPageBuilds: (() => void)[] = [];
   holdInputReplies = false;
   heldInputReplies: (() => void)[] = [];
@@ -61,6 +62,7 @@ export class EngineWorker {
       return;
     }
     let frame: Uint8Array;
+    let pageFrames: Uint8Array[] | undefined;
     engine.set_windowed_incremental_builds(
       'displayWindow' in request && request.displayWindow !== undefined
     );
@@ -72,10 +74,22 @@ export class EngineWorker {
     if (request.type === 'bootstrap' || request.type === 'buildFrame') {
       frame = engine.build_display_list_frame(request.extras, request.expectedFrameEpoch);
     } else if (request.type === 'buildPages') {
-      frame = engine.build_display_pages_frame(
-        Uint32Array.from(request.pages),
-        request.expectedFrameEpoch
-      );
+      if (this.slicePageBuilds && request.background) {
+        pageFrames = [];
+        let epoch = request.expectedFrameEpoch;
+        for (let offset = 0; offset < request.pages.length; offset += 4) {
+          const built = engine.build_display_pages_frame(
+            Uint32Array.from(request.pages.slice(offset, offset + 4)), epoch
+          );
+          pageFrames.push(built);
+          epoch = JSON.parse(engine.resident_caret_snapshot_json()).frameEpoch;
+        }
+        frame = pageFrames[pageFrames.length - 1]!;
+      } else {
+        frame = engine.build_display_pages_frame(
+          Uint32Array.from(request.pages), request.expectedFrameEpoch
+        );
+      }
     } else {
       const { anchor, head } = request.selection;
       engine.set_selection(anchor.story, anchor.paraId, anchor.offset, head.paraId, head.offset);
@@ -89,6 +103,7 @@ export class EngineWorker {
           id: request.id,
           ok: true,
           frame: frame.slice().buffer,
+          ...(pageFrames ? { pageFrames: pageFrames.map((built) => built.slice().buffer) } : {}),
           caret,
           selection,
           layoutRevision: 1,
