@@ -583,7 +583,8 @@ export function useRustDisplayList(
   );
   const pageBuildTimerRef = useRef<PageBuildTimer | null>(null);
   const provisionalPageFrameRef = useRef(false);
-  const deferredPageBuildsRef = useRef(new WeakMap<ResidentEngineWorkerClient, {
+  const deferredPageBuildsRef = useRef(new WeakMap<YrsSession, {
+    client: ResidentEngineWorkerClient;
     layoutEpoch: number;
     pages: Set<number>;
   }>());
@@ -1680,8 +1681,11 @@ export function useRustDisplayList(
       const last = windowOnly
         ? Math.min(pages.length, end + WORKER_OPEN_BUILD_MARGIN_PAGES)
         : pages.length;
-      const deferred = deferredPageBuildsRef.current.get(worker.client);
-      const deferredPages = deferred?.layoutEpoch === frame.layoutEpoch ? deferred.pages : undefined;
+      const deferred = deferredPageBuildsRef.current.get(worker.engine);
+      const deferredPages = deferred?.client === worker.client &&
+        deferred.layoutEpoch === frame.layoutEpoch
+        ? deferred.pages
+        : undefined;
       const unbuilt: number[] = [];
       for (let index = first; index < last; index += 1) {
         if (pages[index]?.unbuilt && !deferredPages?.has(index)) unbuilt.push(index);
@@ -1837,15 +1841,16 @@ export function useRustDisplayList(
                       line
                     )
                   : { displayList: nextFrame.displayList, frame: nextFrame, queries: null, caret };
-              const deferred = deferredPageBuildsRef.current.get(worker.client);
-              const deferredPages = deferred?.layoutEpoch === nextFrame.layoutEpoch
+              const deferred = deferredPageBuildsRef.current.get(worker.engine);
+              const deferredPages = deferred?.client === worker.client &&
+                deferred.layoutEpoch === nextFrame.layoutEpoch
                 ? deferred.pages
                 : new Set<number>();
               for (const index of batch) {
                 if (nextFrame.displayList.pages[index]?.unbuilt) deferredPages.add(index);
               }
-              deferredPageBuildsRef.current.set(worker.client, {
-                layoutEpoch: nextFrame.layoutEpoch, pages: deferredPages,
+              deferredPageBuildsRef.current.set(worker.engine, {
+                client: worker.client, layoutEpoch: nextFrame.layoutEpoch, pages: deferredPages,
               });
               snapshotRef.current = nextSnapshot;
               publishQuerySnapshot(nextSnapshot, contentEpochRef.current);
