@@ -4141,6 +4141,7 @@ impl EngineSession {
         {
             return Ok(false);
         }
+        let misses = self.render.borrow().cache_misses;
         let outcome = self
             .with_lowered_story_mapped(
                 story,
@@ -4149,6 +4150,10 @@ impl EngineSession {
                 |blocks,
                  lowering|
                  -> Result<Option<(ResidentLayoutInput, usize, Vec<f64>)>, String> {
+                    // A repeated final section takes this path only for a locally patched body.
+                    if regions.sections.len() > 1 && self.render.borrow().cache_misses != misses {
+                        return Ok(None);
+                    }
                     let (widths, geometry, previous_pages) = {
                         let pagination = self.pagination.borrow();
                         let (Some(input), Some(layout), false) = (
@@ -6115,12 +6120,10 @@ mod tests {
             )
             .unwrap();
         engine
-            .doc()
-            .insert_text(
-                &crate::EditCtx::local("", ""),
-                crate::Position::new("body", 2),
-                "xx",
-                crate::FormatPolicy::Inherit,
+            .edit_resident_text(
+                crate::StoryRange::new("body", 2, 2),
+                Some("xx"),
+                local_lowering,
             )
             .unwrap();
 
@@ -6164,6 +6167,23 @@ mod tests {
             fast_json, full_json,
             "resident region fast path state is byte-identical to a full pass"
         );
+        if repeated_final && local_lowering {
+            engine
+                .doc()
+                .insert_text(
+                    &crate::EditCtx::local("", ""),
+                    crate::Position::new("body", 1),
+                    "y",
+                    crate::FormatPolicy::Inherit,
+                )
+                .unwrap();
+            assert!(
+                !engine
+                    .apply_and_layout_regions_resident("body", &mut |_| {})
+                    .unwrap(),
+                "an edit that needs the full lowering takes the full pass"
+            );
+        }
     }
 
     #[test]
@@ -6173,7 +6193,6 @@ mod tests {
         let mut request: serde_json::Value =
             serde_json::from_str(&small_page_request(font)).unwrap();
         request["regions"]["sections"][0]["properties"]["pageHeight"] = 5760.into();
-        repeat_final_section(&mut request);
         let request = request.to_string();
         let tops = |engine: &EngineSession| -> Vec<f64> {
             engine.pagination.borrow().layout.as_ref().unwrap().pages[0]
@@ -6269,10 +6288,7 @@ mod tests {
     fn resident_region_fast_path_restores_moved_extents_when_it_falls_back() {
         docx_layout::clear_measure_fonts();
         let font = docx_layout::register_measure_font(lowering_pages::FONT).unwrap();
-        let mut request: serde_json::Value =
-            serde_json::from_str(&small_page_request(font)).unwrap();
-        repeat_final_section(&mut request);
-        let request = request.to_string();
+        let request = small_page_request(font);
         let engine = paragraphs_engine(9607, 4);
         engine.set_local_lowering(true);
         engine.layout_document_with_regions_json(&request).unwrap();
