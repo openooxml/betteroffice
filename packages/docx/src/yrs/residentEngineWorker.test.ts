@@ -1970,7 +1970,7 @@ describe('worker proposals during sliced completion', () => {
       const undone = await decide('proposed');
       expect(undone.fontRequirements).toEqual({
         layoutInput: requirementsInput(),
-        requirementsJson: asked.requirementsJson,
+        requirementsJson: asked.requirementsJson!,
       });
       const base = await w.send({ type: 'fontRequirements', layoutInput: requirementsInput() });
       expect(base.ok && base.requirementsJson).toBe(asked.requirementsJson);
