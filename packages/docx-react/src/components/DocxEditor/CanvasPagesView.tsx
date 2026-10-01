@@ -51,6 +51,7 @@ export function CanvasPagedArea({
   sidebarOpen = false,
   zoom = 1,
   interactive = false,
+  holdChromeUntilPresented = false,
   fontFamilies,
   children,
 }: {
@@ -65,6 +66,8 @@ export function CanvasPagedArea({
   zoom?: number;
   /** mounts the focusable content-control (SDT) overlay above each page; off in read-only mode */
   interactive?: boolean;
+  /** See {@link CanvasPagesView}. */
+  holdChromeUntilPresented?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -78,6 +81,7 @@ export function CanvasPagedArea({
           sidebarOpen={sidebarOpen}
           zoom={zoom}
           interactive={interactive}
+          holdChromeUntilPresented={holdChromeUntilPresented}
           glyphOutlineProvider={renderer.glyphOutlineProvider}
           fontFamilies={fontFamilies}
           offscreenReplay={renderer.offscreenReplay}
@@ -109,6 +113,8 @@ const ON_DEMAND_CHROME_PAGES = 12;
 // A page already mounted stays mounted until it drifts one page beyond the
 // mount band, so slow scrolling at a boundary cannot thrash mount/unmount.
 const PAGE_WINDOW_HYSTERESIS = 1;
+/** Held chrome builds after this long even when no frame has shown. */
+const CHROME_HOLD_TIMEOUT_MS = 1500;
 type ChromeKind = 'mirror' | 'overlay';
 type ChromeHandles = Partial<Record<ChromeKind, PageChromeHandle>>;
 
@@ -151,6 +157,7 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
   chrome,
   inWindow,
   deferChrome,
+  holdChrome,
   registerCanvas,
   registerChrome,
 }: {
@@ -167,6 +174,7 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
   chrome: boolean;
   inWindow: boolean;
   deferChrome: boolean;
+  holdChrome: boolean;
   registerCanvas: (pageKey: string, el: HTMLCanvasElement | null) => void;
   registerChrome: (pageKey: string, kind: ChromeKind, handle: PageChromeHandle | null) => void;
 }) {
@@ -201,6 +209,7 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
         zoom={zoom}
         active={chrome}
         defer={deferChrome}
+        hold={holdChrome}
         visible={inWindow}
         register={registerMirror}
         noteAnchorRevision={noteAnchorRevision}
@@ -211,6 +220,7 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
           zoom={zoom}
           active={chrome}
           defer={deferChrome}
+          hold={holdChrome}
           register={registerOverlay}
         />
       ) : null}
@@ -226,6 +236,7 @@ export function CanvasPagesView({
   sidebarOpen = false,
   zoom = 1,
   interactive = false,
+  holdChromeUntilPresented = false,
   glyphOutlineProvider,
   fontFamilies,
   offscreenReplay,
@@ -255,6 +266,8 @@ export function CanvasPagesView({
    * owns the only clickable/focusable SDT controls on the canvas path.
    */
   interactive?: boolean;
+  /** Page mirrors and overlays first build once the first frame shows. */
+  holdChromeUntilPresented?: boolean;
   /** Outline source sharing the display engine's resident font store. */
   glyphOutlineProvider?: GlyphOutlineProvider | null;
   /** The CSS family each document font family paints browser text with, where they differ. */
@@ -295,6 +308,25 @@ export function CanvasPagesView({
   const offscreenFailedRef = useRef(false);
   const offscreenAttachedRef = useRef(false);
   const pendingAttachRef = useRef<{ generation: number; displayList: DisplayList } | null>(null);
+  const [chromeHeld, setChromeHeld] = useState(holdChromeUntilPresented);
+  const chromeReleaseRef = useRef(!holdChromeUntilPresented);
+  useEffect(() => {
+    if (!chromeHeld) return;
+    const bound = setTimeout(() => setChromeHeld(false), CHROME_HOLD_TIMEOUT_MS);
+    return () => clearTimeout(bound);
+  }, [chromeHeld]);
+  // The frame's pages show first; their chrome builds once two frames have passed.
+  const presented = useCallback(
+    (host: HTMLElement, list: DisplayList, options?: { worker: boolean }): void => {
+      markPresented(host, list, options);
+      if (chromeReleaseRef.current) return;
+      chromeReleaseRef.current = true;
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => setTimeout(() => setChromeHeld(false), 0))
+      );
+    },
+    []
+  );
   const workerPresentationRef = useRef(false);
   const publishWorkerPresentation = useCallback(
     (active: boolean) => {
@@ -706,7 +738,7 @@ export function CanvasPagesView({
           pendingAttachRef.current = null;
           const current = pendingAttach.generation === replayGenerationRef.current;
           if (attached && current && innerHostRef.current) {
-            markPresented(innerHostRef.current, pendingAttach.displayList, { worker: true });
+            presented(innerHostRef.current, pendingAttach.displayList, { worker: true });
           }
         }, () => {
           if (pendingAttachRef.current === pendingAttach) pendingAttachRef.current = null;
@@ -722,7 +754,7 @@ export function CanvasPagesView({
           pendingAttach.displayList = displayList;
         } else if (offscreenAttachedRef.current && host) {
           // The worker presents a frame before it replies with it, so these pages show no other.
-          markPresented(host, displayList, { worker: true });
+          presented(host, displayList, { worker: true });
         }
         // Heal any publish lost to ordering (StrictMode remount, late
         // resolution): the worker is attached and this pass kept it active.
@@ -782,8 +814,8 @@ export function CanvasPagesView({
       preparations,
       () => replayGeneration === replayGenerationRef.current
     ).then(
-      (presented) => {
-        if (presented && innerHostRef.current) markPresented(innerHostRef.current, displayList);
+      (painted) => {
+        if (painted && innerHostRef.current) presented(innerHostRef.current, displayList);
       },
       (error) => {
         if (replayGeneration === replayGenerationRef.current) {
@@ -816,6 +848,7 @@ export function CanvasPagesView({
     windowStart,
     windowEnd,
     publishWorkerPresentation,
+    presented,
   ]);
 
   // The host stays a full-width, un-transformed positioned box so the
@@ -865,6 +898,7 @@ export function CanvasPagesView({
               }
               inWindow={chromeInWindow(i)}
               deferChrome={windowPending || !chromeInWindow(i)}
+              holdChrome={chromeHeld}
               registerCanvas={registerCanvas}
               registerChrome={registerChrome}
             />

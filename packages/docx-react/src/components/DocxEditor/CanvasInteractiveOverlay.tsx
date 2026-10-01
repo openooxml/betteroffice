@@ -41,6 +41,7 @@ export function CanvasInteractiveOverlay({
   zoom = 1,
   active = true,
   defer = false,
+  hold = false,
   register,
 }: {
   page: DisplayPage;
@@ -49,6 +50,8 @@ export function CanvasInteractiveOverlay({
   active?: boolean;
   /** The first build may wait for idle time. */
   defer?: boolean;
+  /** Holds back the first build. */
+  hold?: boolean;
   /** Receives the handle that builds the overlay at once. */
   register?: (handle: PageChromeHandle | null) => void;
 }) {
@@ -61,6 +64,7 @@ export function CanvasInteractiveOverlay({
     t,
     active: active || controls,
     defer,
+    hold,
     rebuildAtOnce: true,
     // Its buttons carry the positions a shift moves.
     urgentRevision: displayPageRevision(page),

@@ -20,6 +20,7 @@ import { CanvasInteractiveOverlay } from './CanvasInteractiveOverlay';
 import { CanvasPageMirror } from './CanvasPageMirror';
 import { CanvasPagesView } from './CanvasPagesView';
 import type { PageChromeHandle } from './usePageChrome';
+import { onPresented } from './internals/layoutProvenance';
 
 const { act, cleanup, render } = await import('@testing-library/react');
 
@@ -284,6 +285,29 @@ test('pages in the window hold their links and controls before idle time', async
   const page = hostRef.current!.querySelector<HTMLElement>('.canvas-page[data-page-index="0"]')!;
   expect(page.querySelector('button[data-sdt-group-id="near"]')).not.toBeNull();
   expect(page.querySelector('.canvas-page-mirror a[href="#near"]')).not.toBeNull();
+});
+
+test('held chrome builds after the first frame shows', async () => {
+  const mirroredWhenShown = async (holdChromeUntilPresented: boolean) => {
+    const hostRef = createRef<HTMLDivElement>();
+    const shown: number[][] = [];
+    const off = onPresented(() => shown.push(mirroredPages(hostRef.current!)));
+    const { unmount } = render(
+      <CanvasPagesView
+        displayList={{ pages: blankPages(2) }}
+        hostRef={hostRef}
+        holdChromeUntilPresented={holdChromeUntilPresented}
+        glyphOutlineProvider={() => ''}
+      />
+    );
+    await act(() => new Promise<void>((resolve) => setTimeout(resolve, 200)));
+    off();
+    const after = mirroredPages(hostRef.current!);
+    unmount();
+    return { shown, after };
+  };
+  expect(await mirroredWhenShown(false)).toEqual({ shown: [[0, 1]], after: [0, 1] });
+  expect(await mirroredWhenShown(true)).toEqual({ shown: [[]], after: [0, 1] });
 });
 
 test('a page leaving the window keeps the links it built', async () => {

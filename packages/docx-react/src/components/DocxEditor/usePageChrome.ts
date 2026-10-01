@@ -15,6 +15,8 @@ export interface PageChromeOptions {
   defer: boolean;
   /** A rebuild after a content change never waits. */
   rebuildAtOnce: boolean;
+  /** Holds back a first build; the registered handle still builds at once. */
+  hold?: boolean;
   /**
    * Counts in-place changes that are content changes for this chrome. Other
    * in-place changes (position shifts, see `displayPageRevision`) rebuild it
@@ -143,6 +145,7 @@ export function usePageChrome(
     active,
     defer,
     rebuildAtOnce,
+    hold = false,
     urgentRevision,
     register,
     make,
@@ -221,7 +224,7 @@ export function usePageChrome(
 
   useEffect(() => {
     const host = hostRef.current;
-    if (!host) return;
+    if (!host || (hold && !builtForRef.current)) return;
     const idle = (work: () => void): (() => void) => {
       if (typeof requestIdleCallback === 'function') {
         const id = requestIdleCallback(work, { timeout: 1500 });
@@ -251,5 +254,5 @@ export function usePageChrome(
     }
     return idle(build);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, t, revision, urgentRevision, active, defer, build, showFallback, fallback]);
+  }, [page, t, revision, urgentRevision, active, defer, hold, build, showFallback, fallback]);
 }

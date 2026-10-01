@@ -2527,6 +2527,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             sidebarOpen={sidebarOpen}
             zoom={state.zoom}
             interactive={!readOnly && yrsCore.replicaReady}
+            holdChromeUntilPresented={experimentalWorkerOpen}
             fontFamilies={fontAliases}
           >
             <DocxEditorPagedArea
