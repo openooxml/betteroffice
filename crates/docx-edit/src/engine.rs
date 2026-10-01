@@ -161,6 +161,8 @@ struct RegionPass {
 struct PreparedRegionLayout {
     input_json: String,
     request_fingerprint: String,
+    request_options: docx_layout::types::LayoutOptions,
+    snapshot_eligible: bool,
     input: LayoutInput,
     regions: DocumentRegions,
     notes: docx_layout::footnotes::NoteLayoutInput,
@@ -189,7 +191,33 @@ struct BodyMeasure {
     fingerprints: Vec<u64>,
 }
 
+impl BodyMeasure {
+    fn safe_prefix_end(&self) -> usize {
+        let mut end = self.flow.measured();
+        while end > 0 && !is_prefix_boundary(&self.blocks, end) {
+            end -= 1;
+        }
+        end
+    }
+}
+
 impl PreparedRegionLayout {
+    fn covered_position(&self) -> Option<u32> {
+        match &self.body {
+            Some(body) => body.blocks[..body.safe_prefix_end()]
+                .iter()
+                .rev()
+                .find_map(LayoutBlock::pm_end),
+            None => self
+                .input
+                .measured
+                .iter()
+                .rev()
+                .find_map(|measured| measured.block.pm_end()),
+        }
+        .map(|end| end as u32)
+    }
+
     /// Measures up to `blocks` more body blocks; true once the body is measured.
     fn measure(&mut self, blocks: usize) -> Result<bool, String> {
         let Some(body) = self.body.as_mut() else {
@@ -235,6 +263,8 @@ struct ResumableRegionLayout {
 pub struct RegionLayoutProgress {
     pub measured_blocks: usize,
     pub body_blocks: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub covered_position: Option<u32>,
     /// The retained layout JSON, once the pass is complete.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layout_json: Option<String>,
@@ -463,11 +493,7 @@ fn initial_float_page_geometry(
     }
 }
 
-/// A block index a measured prefix may end at. The extent of a bare paragraph
-/// mark depends on whether a section break follows it, so no prefix ends just
-/// before one, or just before a mark that precedes one. A keep-with-next run
-/// is placed by its height through its follower, so no prefix ends inside one.
-fn prefix_boundary(blocks: &[LayoutBlock], mut end: usize) -> usize {
+fn is_prefix_boundary(blocks: &[LayoutBlock], end: usize) -> bool {
     let breaks_at = |index: usize| matches!(blocks.get(index), Some(LayoutBlock::SectionBreak(_)));
     let keeps_with_next = |index: usize| {
         matches!(
@@ -476,9 +502,16 @@ fn prefix_boundary(blocks: &[LayoutBlock], mut end: usize) -> usize {
                 if paragraph.attrs.as_ref().and_then(|attrs| attrs.keep_next) == Some(true)
         )
     };
-    while end < blocks.len()
-        && (breaks_at(end) || breaks_at(end + 1) || (end > 0 && keeps_with_next(end - 1)))
-    {
+    end >= blocks.len()
+        || !(breaks_at(end) || breaks_at(end + 1) || (end > 0 && keeps_with_next(end - 1)))
+}
+
+/// A block index a measured prefix may end at. The extent of a bare paragraph
+/// mark depends on whether a section break follows it, so no prefix ends just
+/// before one, or just before a mark that precedes one. A keep-with-next run
+/// is placed by its height through its follower, so no prefix ends inside one.
+fn prefix_boundary(blocks: &[LayoutBlock], mut end: usize) -> usize {
+    while !is_prefix_boundary(blocks, end) {
         end += 1;
     }
     end
@@ -2316,6 +2349,73 @@ impl EngineSession {
         self.region_layout_step(pending, blocks)
     }
 
+    pub fn region_layout_snapshot_json(&self) -> Result<Option<String>, String> {
+        let prepared = {
+            let resumable = self.resumable.borrow();
+            let Some(pending) = resumable.as_ref() else {
+                return Ok(None);
+            };
+            if pending.version != self.doc.version()
+                || pending.prepared.fonts != docx_layout::measure_fonts_generation()
+            {
+                return Err("the document or its fonts changed since the region layout began".into());
+            }
+            let prepared = &pending.prepared;
+            if !prepared.snapshot_eligible {
+                return Ok(None);
+            }
+            let Some(body) = prepared.body.as_ref() else {
+                return Ok(None);
+            };
+            let end = body.safe_prefix_end();
+            if end == 0 {
+                return Ok(None);
+            }
+            let last = section_breaks(&body.blocks[..end]);
+            let mut regions = prepared.regions.clone();
+            regions.sections.truncate(last + 1);
+            PreparedRegionLayout {
+                input_json: prepared.input_json.clone(),
+                request_fingerprint: prepared.request_fingerprint.clone(),
+                request_options: prepared.request_options.clone(),
+                snapshot_eligible: prepared.snapshot_eligible,
+                input: LayoutInput {
+                    measured: body.blocks[..end]
+                        .iter()
+                        .zip(&body.flow.extents()[..end])
+                        .map(|(block, measure)| MeasuredBlock {
+                            block: block.clone(),
+                            measure: measure.clone(),
+                        })
+                        .collect(),
+                    options: options_through_section(
+                        &prepared.request_options,
+                        &prepared.regions,
+                        last,
+                    ),
+                },
+                regions,
+                notes: prepared.notes.clone(),
+                measurement: prepared.measurement.clone(),
+                parsed_render_env: prepared.parsed_render_env.clone(),
+                measurement_fingerprint: prepared.measurement_fingerprint,
+                fonts: prepared.fonts,
+                resident_body: prepared.resident_body,
+                block_fingerprints: Some(body.fingerprints[..end].to_vec()),
+                lowered_from: prepared.lowered_from.clone(),
+                input_lowering: prepared.input_lowering.clone(),
+                has_floats: prepared.has_floats,
+                measured_widths: prepared.measured_widths[..end].to_vec(),
+                measured_table_wrap_frames: prepared.measured_table_wrap_frames[..end].to_vec(),
+                measured_float_geometry: prepared.measured_float_geometry,
+                provisional: true,
+                body: None,
+            }
+        };
+        let pass = self.finish_region_layout_inner(prepared, true)?;
+        self.retained_region_layout_json(&pass).map(Some)
+    }
+
     fn region_layout_step(
         &self,
         mut pending: ResumableRegionLayout,
@@ -2328,7 +2428,9 @@ impl EngineSession {
             .map_or(pending.prepared.input.measured.len(), |body| {
                 body.blocks.len()
             });
-        if !pending.prepared.measure(blocks)? {
+        let complete = pending.prepared.measure(blocks)?;
+        let covered_position = pending.prepared.covered_position();
+        if !complete {
             let measured_blocks = pending
                 .prepared
                 .body
@@ -2338,6 +2440,7 @@ impl EngineSession {
             return Ok(RegionLayoutProgress {
                 measured_blocks,
                 body_blocks,
+                covered_position,
                 layout_json: None,
             });
         }
@@ -2345,6 +2448,7 @@ impl EngineSession {
         Ok(RegionLayoutProgress {
             measured_blocks: body_blocks,
             body_blocks,
+            covered_position,
             layout_json: Some(self.retained_region_layout_json(&pass)?),
         })
     }
@@ -2479,6 +2583,7 @@ impl EngineSession {
         let mut measured_table_wrap_frames = Vec::new();
         let mut measured_float_geometry = None;
         let mut provisional = false;
+        let mut snapshot_eligible = false;
         let mut body = None;
         if let Some(story) = body_story.as_deref() {
             let render_env = parsed_render_env
@@ -2566,6 +2671,28 @@ impl EngineSession {
                     let (widths, table_wrap_frames) =
                         region_measurement_frames(blocks.iter(), &input, &regions);
                     let geometry = initial_float_page_geometry(&input, &regions);
+                    snapshot_eligible = !coupled
+                        && floats_follow_the_text(&blocks)
+                        && notes.contents.is_empty()
+                        && collect_note_refs(&blocks).is_empty()
+                        && input
+                            .options
+                            .columns
+                            .as_ref()
+                            .is_none_or(|columns| columns.count <= 1.0)
+                        && regions.sections.iter().all(|section| {
+                            section
+                                .columns
+                                .as_ref()
+                                .is_none_or(|columns| columns.count <= 1.0)
+                        })
+                        && blocks.iter().all(|block| match block {
+                            LayoutBlock::SectionBreak(section) => section
+                                .columns
+                                .as_ref()
+                                .is_none_or(|columns| columns.count <= 1.0),
+                            _ => true,
+                        });
                     match prefix_pages {
                         // Floats whose zones only settle later, such as shapes that page-side
                         // wrapping brings into the body, rule a prefix out too.
@@ -2621,6 +2748,8 @@ impl EngineSession {
         Ok(PreparedRegionLayout {
             input_json: input_json.to_owned(),
             request_fingerprint,
+            request_options,
+            snapshot_eligible,
             input,
             regions,
             notes,
@@ -2644,9 +2773,19 @@ impl EngineSession {
     /// Everything a region layout pass does after body measurement: header and
     /// footer measurement, pagination and notes, and the retained state.
     fn finish_region_layout(&self, prepared: PreparedRegionLayout) -> Result<RegionPass, String> {
+        self.finish_region_layout_inner(prepared, false)
+    }
+
+    fn finish_region_layout_inner(
+        &self,
+        prepared: PreparedRegionLayout,
+        snapshot: bool,
+    ) -> Result<RegionPass, String> {
         let PreparedRegionLayout {
             input_json,
             request_fingerprint,
+            request_options: _,
+            snapshot_eligible: _,
             mut input,
             regions,
             mut notes,
@@ -2669,6 +2808,13 @@ impl EngineSession {
             body.is_none(),
             "the body is measured before a pass finishes"
         );
+        let paginate = |input, fingerprints| {
+            if snapshot {
+                self.publish_layout_document_value_with_fingerprints(input, fingerprints, false)
+            } else {
+                self.layout_document_value_with_fingerprints(input, fingerprints)
+            }
+        };
         let mut measured_headers_footers = if let Some(render_env) = parsed_render_env.as_ref() {
             self.measure_header_footer_payload(&mut input, &regions, &measurement, render_env)?
         } else {
@@ -2713,7 +2859,7 @@ impl EngineSession {
             }))
         .then(|| input.clone());
         let (mut initial_layout, mut arena) = if refs.is_empty() {
-            self.layout_document_value_with_fingerprints(input, block_fingerprints.clone())?;
+            paginate(input, block_fingerprints.clone())?;
             let layout = self
                 .pagination
                 .borrow_mut()
@@ -2782,7 +2928,7 @@ impl EngineSession {
             } else {
                 block_fingerprints
             };
-            self.layout_document_value_with_fingerprints(final_input, fingerprints)?;
+            paginate(final_input, fingerprints)?;
         } else {
             self.pagination.borrow_mut().layout = Some(stabilized.layout);
         }
@@ -3120,13 +3266,25 @@ impl EngineSession {
     /// still enter through `layout_document_value` and fingerprint every block.
     fn layout_document_value_with_fingerprints(
         &self,
-        mut input: LayoutInput,
-        mut block_fingerprints: Vec<u64>,
+        input: LayoutInput,
+        block_fingerprints: Vec<u64>,
     ) -> Result<(), String> {
         if block_fingerprints.len() != input.measured.len() {
             return Err("resident pagination fingerprints do not match measured blocks".to_owned());
         }
         self.resumable.replace(None);
+        self.publish_layout_document_value_with_fingerprints(input, block_fingerprints, true)
+    }
+
+    fn publish_layout_document_value_with_fingerprints(
+        &self,
+        mut input: LayoutInput,
+        mut block_fingerprints: Vec<u64>,
+        allow_incremental: bool,
+    ) -> Result<(), String> {
+        if block_fingerprints.len() != input.measured.len() {
+            return Err("resident pagination fingerprints do not match measured blocks".to_owned());
+        }
         self.capture.borrow_mut().take();
         let input_options_fingerprint = options_fingerprint(&input)?;
         let mut incremental = false;
@@ -3161,6 +3319,7 @@ impl EngineSession {
                     )
                 });
             if let Some(dirty_index) = first_dirty
+                && allow_incremental
                 && incremental_eligible(&previous, &input, input_options_fingerprint)
             {
                 let previous = &mut *previous;
