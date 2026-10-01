@@ -3,4 +3,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-Table cells keep the left and right margins of the table style when a table sets only its top and bottom cell margins, so their text wraps like in Word.
+Tables that set only some of their cell margins take the other sides from the table style, so cell text wraps like in Word.
