@@ -126,6 +126,52 @@ function withoutIds(paragraph: string): string {
   );
 }
 
+function paragraphSources(kept: string[], from: string[]): (number | undefined)[] {
+  const sourceOf = new Array<number | undefined>(kept.length).fill(undefined);
+  const saved = kept.map(withoutIds);
+  const source = from.map(withoutIds);
+  if (saved.length === source.length) {
+    return saved.map((paragraph, index) => (paragraph === source[index] ? index : undefined));
+  }
+  let start = 0;
+  while (start < saved.length && start < source.length && saved[start] === source[start]) {
+    sourceOf[start] = start;
+    start += 1;
+  }
+  let keptEnd = saved.length;
+  let sourceEnd = source.length;
+  while (keptEnd > start && sourceEnd > start && saved[keptEnd - 1] === source[sourceEnd - 1]) {
+    keptEnd -= 1;
+    sourceEnd -= 1;
+    sourceOf[keptEnd] = sourceEnd;
+  }
+  const rows = keptEnd - start;
+  const columns = sourceEnd - start;
+  const lengths = Array.from({ length: rows + 1 }, () => new Array<number>(columns + 1).fill(0));
+  for (let i = rows - 1; i >= 0; i -= 1) {
+    for (let j = columns - 1; j >= 0; j -= 1) {
+      lengths[i]![j] =
+        saved[start + i] === source[start + j]
+          ? 1 + lengths[i + 1]![j + 1]!
+          : Math.max(lengths[i + 1]![j]!, lengths[i]![j + 1]!);
+    }
+  }
+  let i = 0;
+  let j = 0;
+  while (i < rows && j < columns) {
+    if (saved[start + i] === source[start + j]) {
+      sourceOf[start + i] = start + j;
+      i += 1;
+      j += 1;
+    } else if (lengths[i + 1]![j]! >= lengths[i]![j + 1]!) {
+      i += 1;
+    } else {
+      j += 1;
+    }
+  }
+  return sourceOf;
+}
+
 function decode(text: string): string {
   return text.replace(/&(#x[0-9a-fA-F]+|#[0-9]+|amp|lt|gt|quot|apos);/g, (_, entity: string) => {
     if (entity.startsWith('#x')) return String.fromCodePoint(Number.parseInt(entity.slice(2), 16));
@@ -321,6 +367,7 @@ describe('a spliced session save', () => {
           const session = await open(source);
           const edits = edit(session, next);
           if (edits.length === 0) continue;
+          const structural = edits.some((applied) => /^(split|merge)@/.test(applied));
           const base = session.materializeDocx()!;
           const capture = captureSessionSave(session);
           const document = yrsToDocument(session, base);
@@ -359,15 +406,48 @@ describe('a spliced session save', () => {
             const kept = paragraphs(xml);
             const written = paragraphs(whole[part]!);
             if (strayAmpersands(xml) > 0) fail(`${part} holds an ampersand the loader repairs`);
-            if (kept.spans.length !== from.spans.length || written.spans.length !== from.spans.length) {
+            if (
+              kept.spans.length !== written.spans.length ||
+              (!structural && kept.spans.length !== from.spans.length)
+            ) {
               fail(
                 `${part} paragraphs: source ${from.spans.length}, spliced ${kept.spans.length}, whole ${written.spans.length}`
               );
               continue;
             }
-            kept.gaps.forEach((gap, index) => {
-              if (gap !== from.gaps[index]) fail(`${part} XML before paragraph ${index} changed`);
+            const sourceOf = paragraphSources(kept.spans, from.spans);
+            const keptOf = new Array<number | undefined>(from.spans.length).fill(undefined);
+            sourceOf.forEach((source, index) => {
+              if (source !== undefined) keptOf[source] = index;
             });
+            if (kept.spans.length === from.spans.length) {
+              kept.gaps.forEach((gap, index) => {
+                if (gap !== from.gaps[index]) fail(`${part} XML before paragraph ${index} changed`);
+              });
+            } else {
+              let ka = -1;
+              let ja = -1;
+              const anchors: [number, number][] = [];
+              sourceOf.forEach((source, index) => {
+                if (source !== undefined) anchors.push([index, source]);
+              });
+              anchors.push([kept.spans.length, from.spans.length]);
+              for (const [kb, jb] of anchors) {
+                const saved = kept.gaps.slice(ka + 1, kb + 1);
+                const source = from.gaps.slice(ja + 1, jb + 1);
+                if (saved.length === source.length) {
+                  saved.forEach((gap, offset) => {
+                    if (gap !== source[offset]) {
+                      fail(`${part} XML before paragraph ${ka + 1 + offset} changed`);
+                    }
+                  });
+                } else if (saved.join('') !== source.join('')) {
+                  fail(`${part} XML around paragraphs ${ka + 1}..${kb - 1} changed`);
+                }
+                ka = kb;
+                ja = jb;
+              }
+            }
             const links = { spliced: relationships(spliced, part), whole: relationships(whole, part) };
             const groups = fieldGroups(from.spans);
             const grouped = new Map<number, number[]>();
@@ -376,25 +456,29 @@ describe('a spliced session save', () => {
               grouped.get(first)!.push(index);
             });
             const members = (first: number) => grouped.get(first)!;
-            const source = kept.spans.map(
-              (paragraph, index) => withoutIds(paragraph) === withoutIds(from.spans[index]!)
-            );
+            keptOf.forEach((index, source) => {
+              if (
+                index === undefined &&
+                members(groups[source]!).some((member) => keptOf[member] !== undefined)
+              ) {
+                fail(`${part} field group of paragraph ${source} is partly kept`);
+              }
+            });
             kept.spans.forEach((paragraph, index) => {
-              if (!source[index] && paragraph === written.spans[index]) {
+              const source = sourceOf[index];
+              if (source === undefined && paragraph === written.spans[index]) {
                 tally.rewritten += 1;
-                if (members(groups[index]!).some((member) => source[member])) {
-                  fail(`${part} field group of paragraph ${index} is partly kept`);
-                }
                 return;
               }
-              if (!source[index]) {
+              if (source === undefined) {
                 fail(`${part} paragraph ${index} is neither its source nor the written XML`);
                 return;
               }
               tally.kept += 1;
-              if (groups[index] !== index || kept.continued[index]) return;
-              const group = members(index);
-              const join = (spans: string[]) => group.map((member) => spans[member]!).join('');
+              if (groups[source] !== source || kept.continued[index]) return;
+              const group = members(source).map((member) => keptOf[member]);
+              if (group.some((member) => member === undefined)) return;
+              const join = (spans: string[]) => group.map((member) => spans[member!]!).join('');
               if (text(join(kept.spans)) !== text(join(written.spans))) {
                 fail(`${part} kept paragraph ${index} text differs from the model`);
               }
