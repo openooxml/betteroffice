@@ -22,6 +22,8 @@
  * documents. Living in core means both adapters get it for free.
  */
 
+import { visitTrackedControlContent } from '../utils/trackedControlContent';
+
 import type { BlockContent, Comment, ParagraphContent } from '../types/content';
 
 /**
@@ -101,21 +103,30 @@ export function injectTCReplyRangeMarkers(content: BlockContent[], comments: Com
     else replyIdsByRevision.set(r.parentId!, [r.id]);
   }
 
+  const noReplies: number[] = [];
   function revisionReplies(item: ParagraphContent): number[] {
-    if (
-      item.type === 'insertion' || item.type === 'deletion' ||
-      item.type === 'moveFrom' || item.type === 'moveTo'
-    ) {
-      return [...new Set([
-        ...(replyIdsByRevision.get(item.info.id) ?? []),
-        ...item.content.flatMap(revisionReplies),
-      ])];
-    }
-    if (item.type === 'inlineSdt') return [...new Set(item.content.flatMap(revisionReplies))];
-    if (item.type === 'hyperlink') return (item.structuredChildren ?? item.children).flatMap(revisionReplies);
-    if (item.type === 'simpleField') return (item.structuredResult?.inline ?? item.content).flatMap(revisionReplies);
-    if (item.type === 'complexField') return (item.structuredResult?.inline ?? item.fieldResult).flatMap(revisionReplies);
-    return [];
+    if (item.type === 'run') return noReplies;
+    const ordinary = item.type === 'insertion' || item.type === 'deletion'
+      ? replyIdsByRevision.get(item.info.id) ?? noReplies
+      : noReplies;
+    let nested: Set<number> | undefined;
+    visitTrackedControlContent(item, (node) => {
+      let revisionId: number | undefined;
+      if (
+        node.type === 'insertion' || node.type === 'deletion' ||
+        node.type === 'moveFrom' || node.type === 'moveTo'
+      ) revisionId = node.info.id;
+      else if (node.type === 'inlineSdt' && (
+        item.type === 'insertion' || item.type === 'deletion' ||
+        item.type === 'moveFrom' || item.type === 'moveTo'
+      )) revisionId = item.info.id;
+      if (revisionId === undefined) return;
+      const ids = replyIdsByRevision.get(revisionId);
+      if (!ids) return;
+      nested ??= new Set(ordinary);
+      for (const id of ids) nested.add(id);
+    });
+    return nested ? [...nested] : ordinary;
   }
 
   function walkBlocks(blocks: BlockContent[]): void {

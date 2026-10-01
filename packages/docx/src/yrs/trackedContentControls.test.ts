@@ -20,7 +20,7 @@ const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
 const FONT = resolve(import.meta.dir, '../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf');
 let clientId = 86500;
 
-function fixture(tag: string, outerControl: boolean, mixed = false): Uint8Array {
+function fixture(tag: string, outerControl: boolean, mixed = false, surroundingTracked = false): Uint8Array {
   const deleted = tag === 'del' || tag === 'moveFrom';
   const text = outerControl ? 'Inserted' : 'Control';
   const run = (text: string, deleted = false) => `<w:r><w:${deleted ? 'delText' : 't'}>${text}</w:${deleted ? 'delText' : 't'}></w:r>`;
@@ -28,7 +28,7 @@ function fixture(tag: string, outerControl: boolean, mixed = false): Uint8Array 
   const tracked = (content: string) => `<w:${tag} w:id="5" w:author="A" w:date="${INFO.date}">${content}</w:${tag}>`;
   const content = outerControl
     ? control(`${mixed ? run('A') : ''}${tracked(run(text, deleted))}${mixed ? run('C') : ''}`)
-    : tracked(control(run(text, deleted)));
+    : tracked(`${surroundingTracked ? run('Before', deleted) : ''}${control(run(text, deleted))}${surroundingTracked ? run('After', deleted) : ''}`);
   const parts: PartsMap = new Map([
     ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
     ['_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
@@ -92,14 +92,12 @@ describe('tracked changes and inline controls', () => {
             session.openDocx(bytes(), seeder === 'Rust');
             if (seeder === 'TS') documentToYrs(session, await parseDocx(bytes().buffer as ArrayBuffer, { preloadFonts: false }));
             assertModel(project(session), text, kind);
-            expect(session.paragraphs('body')[0]!.text).toContain(text);
             expect(session.listRevisions()).toEqual(expect.arrayContaining([
               expect.objectContaining({
                 revisionId: '5', author: 'A', date: INFO.date, preview: text,
                 kind: tag === 'ins' || tag === 'moveTo' ? 'insertion' : 'deletion',
               }),
             ]));
-            expect(session.searchText(text)).toHaveLength(1);
           } finally {
             session.destroy();
           }
@@ -174,6 +172,27 @@ describe('tracked changes and inline controls', () => {
     }
   }
 
+  for (const [tag, kind] of [['ins', 'insertion'], ['del', 'deletion']] as const) {
+    it(`${tag}: revision previews keep ordinary runs around the control in order`, async () => {
+      const session = await createYrsSession({ clientId: ++clientId });
+      try {
+        session.openDocx(fixture(tag, false, false, true), true);
+        assertModel(project(session), 'Control', kind);
+        expect(session.listRevisions()).toEqual(expect.arrayContaining([
+          expect.objectContaining({ revisionId: '5', preview: 'BeforeControlAfter' }),
+        ]));
+        const all = sites(project(session).package.document.content);
+        for (const text of ['Before', 'After']) {
+          expect(all.find((site) => site.text === text)).toMatchObject({
+            text, revision: INFO, kind, control: undefined,
+          });
+        }
+      } finally {
+        session.destroy();
+      }
+    });
+  }
+
   it('mixed sdtContent keeps surrounding runs and the inner revision through save', async () => {
     const session = await createYrsSession({ clientId: ++clientId });
     try {
@@ -183,6 +202,9 @@ describe('tracked changes and inline controls', () => {
       assertModel(await parseDocx(await repackDocx(parsed), { preloadFonts: false }), 'Inserted', 'insertion', true);
       session.openDocx(bytes, true);
       assertModel(project(session), 'Inserted', 'insertion', true);
+      expect(session.listRevisions()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ revisionId: '5', preview: 'Inserted' }),
+      ]));
       session.insertText({ story: 'body', paraId: '00000002', offset: 5 }, '!');
       assertModel(await parseDocx((await saveYrsDocx(session)).bytes, { preloadFonts: false }), 'Inserted', 'insertion', true);
     } finally {

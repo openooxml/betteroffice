@@ -16,7 +16,9 @@ fn run(text: &str, deleted: bool) -> String {
 }
 
 fn control(content: &str) -> String {
-    format!(r#"<w:sdt><w:sdtPr><w:tag w:val="tracked"/><w:alias w:val="Tracked control"/><w:id w:val="42"/></w:sdtPr><w:sdtContent>{content}</w:sdtContent></w:sdt>"#)
+    format!(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="tracked"/><w:alias w:val="Tracked control"/><w:id w:val="42"/></w:sdtPr><w:sdtContent>{content}</w:sdtContent></w:sdt>"#
+    )
 }
 
 fn tracked(tag: &str, content: &str) -> String {
@@ -68,9 +70,17 @@ fn round_trip(tag: &str, kind: &str, outer_control: bool, mixed: bool) {
     let content = if outer_control {
         control(&format!(
             "{}{}{}",
-            if mixed { run("A", false) } else { String::new() },
+            if mixed {
+                run("A", false)
+            } else {
+                String::new()
+            },
             tracked(tag, &text),
-            if mixed { run("C", false) } else { String::new() }
+            if mixed {
+                run("C", false)
+            } else {
+                String::new()
+            }
         ))
     } else {
         tracked(tag, &control(&text))
@@ -81,10 +91,17 @@ fn round_trip(tag: &str, kind: &str, outer_control: bool, mixed: bool) {
     let saved = repack(&original, model);
     assert_content(&parse(&saved), kind, outer_control, mixed);
     if matches!(tag, "del" | "moveFrom") {
-        let xml = ooxml_opc::unzip_parts(&saved).unwrap().into_iter()
-            .find(|(path, _)| path == "word/document.xml").unwrap().1;
-        assert!(String::from_utf8(xml).unwrap()
-            .contains("<w:delText>Inserted</w:delText>"));
+        let xml = ooxml_opc::unzip_parts(&saved)
+            .unwrap()
+            .into_iter()
+            .find(|(path, _)| path == "word/document.xml")
+            .unwrap()
+            .1;
+        assert!(
+            String::from_utf8(xml)
+                .unwrap()
+                .contains("<w:delText>Inserted</w:delText>")
+        );
     }
 }
 
@@ -93,7 +110,8 @@ fn repack(original: &[u8], model: Value) -> Vec<u8> {
         "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
         "document": {"content": model},
         "options": {"updateModifiedDate": false}
-    })).unwrap();
+    }))
+    .unwrap();
     write_docx_s13(request, original).unwrap()
 }
 
@@ -117,23 +135,55 @@ fn mixed_control_content_preserves_order_and_revision() {
 }
 
 #[test]
-fn tracked_children_preserve_controls_fields_and_math() {
+fn tracked_control_children_preserve_fields_and_math() {
     let content = format!(
         "{}{}{}",
-        control(&run("Control", false)),
+        run("Control", false),
         r#"<w:fldSimple w:instr="PAGE"><w:r><w:t>Field</w:t></w:r></w:fldSimple>"#,
         r#"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r><m:t>Equation</m:t></m:r></m:oMath>"#
     );
-    let original = package(&tracked("ins", &content));
+    let original = package(&tracked("ins", &control(&content)));
     let model = parse(&original);
     let reopened = parse(&repack(&original, model.clone()));
     for parsed in [&model, &reopened] {
         let children = &parsed[0]["content"][0]["content"];
         assert_eq!(children[0]["type"], "inlineSdt");
-        assert_eq!(children[0]["content"][0]["content"][0]["text"], "Control");
-        assert_eq!(children[1]["type"], "simpleField");
-        assert_eq!(children[1]["content"][0]["content"][0]["text"], "Field");
-        assert_eq!(children[2]["type"], "mathEquation");
-        assert_eq!(children[2]["plainText"], "Equation");
+        let content = &children[0]["content"];
+        assert_eq!(content[0]["content"][0]["text"], "Control");
+        assert_eq!(content[1]["type"], "simpleField");
+        assert_eq!(content[1]["content"][0]["content"][0]["text"], "Field");
+        assert_eq!(content[2]["type"], "mathEquation");
+        assert_eq!(content[2]["plainText"], "Equation");
     }
+}
+
+#[test]
+fn ordinary_tracked_children_keep_legacy_output() {
+    let content = format!(
+        "{}{}{}",
+        run("Deleted", true),
+        r#"<w:hyperlink w:anchor="target"><w:r><w:t>Linked</w:t></w:r></w:hyperlink>"#,
+        r#"<w:fldSimple w:instr="PAGE"><w:r><w:t>Field</w:t></w:r></w:fldSimple>"#,
+    );
+    let original = package(&tracked("del", &content));
+    let model = parse(&original);
+    let children = model[0]["content"][0]["content"].as_array().unwrap();
+    assert_eq!(children.len(), 2);
+    assert_eq!(children[0]["type"], "run");
+    assert_eq!(children[1]["type"], "hyperlink");
+    let saved = repack(&original, model);
+    let xml = ooxml_opc::unzip_parts(&saved)
+        .unwrap()
+        .into_iter()
+        .find(|(path, _)| path == "word/document.xml")
+        .unwrap()
+        .1;
+    let xml = String::from_utf8(xml).unwrap();
+    assert!(xml.contains("<w:delText>Deleted</w:delText>"));
+    assert!(
+        xml.contains(
+            r#"<w:hyperlink w:anchor="target"><w:r><w:t>Linked</w:t></w:r></w:hyperlink>"#
+        )
+    );
+    assert!(!xml.contains("<w:fldSimple"));
 }

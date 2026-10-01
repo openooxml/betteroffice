@@ -107,7 +107,9 @@ fn resolve_inline_content(
     filter: Option<&str>,
     resolved: &mut Vec<String>,
 ) -> Any {
-    let Any::Array(children) = content else { return content.clone() };
+    let Any::Array(children) = content else {
+        return content.clone();
+    };
     let mut remaining = Vec::new();
     for child in children.iter() {
         let Any::Map(child) = child else {
@@ -378,9 +380,17 @@ fn resolve_story(
                         && crate::map_string(map, txn, crate::KIND_KEY).as_deref() == Some("sdt")
                         && let Some(Out::Any(content)) = map.get(txn, "content")
                     {
-                        let updated = resolve_inline_content(&content, mode, filter, resolved);
-                        if updated != content {
-                            map.insert(txn, "content", updated);
+                        let mut tracked = false;
+                        crate::inline_content::visit(&content, &mut |child| {
+                            if let Some(Any::Map(attrs)) = child.get("attrs") {
+                                tracked |= attrs.contains_key(INS) || attrs.contains_key(DEL);
+                            }
+                        });
+                        if tracked {
+                            let updated = resolve_inline_content(&content, mode, filter, resolved);
+                            if updated != content {
+                                map.insert(txn, "content", updated);
+                            }
                         }
                     }
                     match mode {

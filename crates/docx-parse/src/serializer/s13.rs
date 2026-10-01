@@ -1325,21 +1325,44 @@ fn run_has_drawing_image(run: &Run) -> bool {
         .any(|content| matches!(content, RunContent::Drawing { .. }))
 }
 
-fn inline_has_drawing_image(node: &InlineNode) -> bool {
+fn inline_has_drawing_image(node: &InlineNode, control: bool, revision: bool) -> bool {
     match node {
-        InlineNode::Run(run) => run_has_drawing_image(run),
-        InlineNode::Hyperlink(link) => link.structured_children.as_ref().unwrap_or(&link.children).iter().any(inline_has_drawing_image),
-        InlineNode::InlineSdt(sdt) => sdt.content.iter().any(inline_has_drawing_image),
-        InlineNode::Tracked(change) => change.content.iter().any(inline_has_drawing_image),
-        InlineNode::SimpleField(field) => field.content.iter().any(run_has_drawing_image),
+        InlineNode::Run(run) => control && revision && run_has_drawing_image(run),
+        InlineNode::Hyperlink(link) => link
+            .structured_children
+            .as_ref()
+            .unwrap_or(&link.children)
+            .iter()
+            .any(|child| inline_has_drawing_image(child, control, revision)),
+        InlineNode::InlineSdt(sdt) => sdt
+            .content
+            .iter()
+            .any(|child| inline_has_drawing_image(child, true, revision)),
+        InlineNode::Tracked(change) => change
+            .content
+            .iter()
+            .any(|child| inline_has_drawing_image(child, control, true)),
+        InlineNode::SimpleField(field) => {
+            control && revision && field.content.iter().any(run_has_drawing_image)
+        }
         InlineNode::ComplexField(field) => {
-            field.field_code.iter().any(run_has_drawing_image)
-                || field.structured_result.as_ref()
+            control && revision && field.field_code.iter().any(run_has_drawing_image)
+                || field
+                    .structured_result
+                    .as_ref()
                     .filter(|result| result.blocks.is_none())
                     .and_then(|result| result.inline.as_ref())
                     .map_or_else(
-                        || field.field_result.iter().any(run_has_drawing_image),
-                        |nodes| nodes.iter().any(inline_has_drawing_image),
+                        || {
+                            control
+                                && revision
+                                && field.field_result.iter().any(run_has_drawing_image)
+                        },
+                        |nodes| {
+                            nodes
+                                .iter()
+                                .any(|child| inline_has_drawing_image(child, control, revision))
+                        },
                     )
         }
         _ => false,
@@ -1350,8 +1373,14 @@ fn blocks_have_drawing_image(blocks: &[BlockContent]) -> bool {
     blocks.iter().any(|block| match block {
         BlockContent::Paragraph(paragraph) => {
             paragraph.content.iter().any(|content| match content {
-                ParagraphContent::Inline(node) => inline_has_drawing_image(node),
-                ParagraphContent::Tracked(tracked) => tracked.content.iter().any(inline_has_drawing_image),
+                ParagraphContent::Inline(InlineNode::Run(run)) => run_has_drawing_image(run),
+                ParagraphContent::Inline(node) => inline_has_drawing_image(node, false, false),
+                ParagraphContent::Tracked(tracked) => {
+                    tracked.content.iter().any(|node| match node {
+                        InlineNode::Run(run) => run_has_drawing_image(run),
+                        _ => inline_has_drawing_image(node, false, true),
+                    })
+                }
                 _ => false,
             })
         }
@@ -1360,7 +1389,7 @@ fn blocks_have_drawing_image(blocks: &[BlockContent]) -> bool {
                 .iter()
                 .any(|cell| blocks_have_drawing_image(&cell.content))
         }),
-        BlockContent::BlockSdt(sdt) => blocks_have_drawing_image(&sdt.content),
+        BlockContent::BlockSdt(_) => false,
         BlockContent::RawXml(_) => false,
     })
 }
@@ -1377,10 +1406,19 @@ fn visit_new_images(
             BlockContent::Paragraph(paragraph) => {
                 for content in &mut Arc::make_mut(paragraph).content {
                     match content {
-                        ParagraphContent::Inline(node) => visit_inline_images(node, visit)?,
+                        ParagraphContent::Inline(InlineNode::Run(run)) => {
+                            visit_run_images(run, visit)?
+                        }
+                        ParagraphContent::Inline(node) => {
+                            visit_inline_images(node, visit, false, false)?
+                        }
                         ParagraphContent::Tracked(tracked) => {
                             for inline in &mut tracked.content {
-                                visit_inline_images(inline, visit)?;
+                                if let InlineNode::Run(run) = inline {
+                                    visit_run_images(run, visit)?;
+                                } else {
+                                    visit_inline_images(inline, visit, false, true)?;
+                                }
                             }
                         }
                         _ => {}
@@ -1394,7 +1432,7 @@ fn visit_new_images(
                     }
                 }
             }
-            BlockContent::BlockSdt(sdt) => visit_new_images(&mut Arc::make_mut(sdt).content, visit)?,
+            BlockContent::BlockSdt(_) => {}
             BlockContent::RawXml(_) => {}
         }
     }
@@ -1404,40 +1442,62 @@ fn visit_new_images(
 fn visit_inline_images(
     node: &mut InlineNode,
     visit: &mut impl FnMut(&mut Image) -> Result<(), ParseError>,
+    mut control: bool,
+    mut revision: bool,
 ) -> Result<(), ParseError> {
     let children = match node {
-        InlineNode::Run(run) => return visit_run_images(run, visit),
-        InlineNode::SimpleField(field) => {
-            for run in &mut field.content {
+        InlineNode::Run(run) => {
+            if control && revision {
                 visit_run_images(run, visit)?;
             }
             return Ok(());
         }
-        InlineNode::ComplexField(field) => {
-            for run in &mut field.field_code {
-                visit_run_images(run, visit)?;
+        InlineNode::SimpleField(field) => {
+            if control && revision {
+                for run in &mut field.content {
+                    visit_run_images(run, visit)?;
+                }
             }
-            if let Some(nodes) = field.structured_result.as_mut()
+            return Ok(());
+        }
+        InlineNode::ComplexField(field) => {
+            if control && revision {
+                for run in &mut field.field_code {
+                    visit_run_images(run, visit)?;
+                }
+            }
+            if let Some(nodes) = field
+                .structured_result
+                .as_mut()
                 .filter(|result| result.blocks.is_none())
                 .and_then(|result| result.inline.as_mut())
             {
                 for node in nodes {
-                    visit_inline_images(node, visit)?;
+                    visit_inline_images(node, visit, control, revision)?;
                 }
-            } else {
+            } else if control && revision {
                 for run in &mut field.field_result {
                     visit_run_images(run, visit)?;
                 }
             }
             return Ok(());
         }
-        InlineNode::Hyperlink(link) => link.structured_children.as_mut().unwrap_or(&mut link.children),
-        InlineNode::InlineSdt(sdt) => &mut sdt.content,
-        InlineNode::Tracked(change) => &mut change.content,
+        InlineNode::Hyperlink(link) => link
+            .structured_children
+            .as_mut()
+            .unwrap_or(&mut link.children),
+        InlineNode::InlineSdt(sdt) => {
+            control = true;
+            &mut sdt.content
+        }
+        InlineNode::Tracked(change) => {
+            revision = true;
+            &mut change.content
+        }
         _ => return Ok(()),
     };
     for child in children {
-        visit_inline_images(child, visit)?;
+        visit_inline_images(child, visit, control, revision)?;
     }
     Ok(())
 }
@@ -1808,14 +1868,17 @@ fn process_hyperlink_part<'a>(
 
 fn block_has_hyperlink(block: &BlockContent) -> bool {
     match block {
-        BlockContent::Paragraph(paragraph) => paragraph
-            .content
-            .iter()
-            .any(|content| match content {
-                ParagraphContent::Inline(node) => inline_has_hyperlink(node),
-                ParagraphContent::Tracked(change) => change.content.iter().any(inline_has_hyperlink),
+        BlockContent::Paragraph(paragraph) => {
+            paragraph.content.iter().any(|content| match content {
+                ParagraphContent::Inline(InlineNode::Hyperlink(_)) => true,
+                ParagraphContent::Inline(node) => inline_has_hyperlink(node, false, false),
+                ParagraphContent::Tracked(change) => change
+                    .content
+                    .iter()
+                    .any(|node| inline_has_hyperlink(node, false, true)),
                 _ => false,
-            }),
+            })
+        }
         BlockContent::Table(table) => table.rows.iter().any(|row| {
             row.cells
                 .iter()
@@ -1826,38 +1889,77 @@ fn block_has_hyperlink(block: &BlockContent) -> bool {
     }
 }
 
-fn inline_has_hyperlink(node: &InlineNode) -> bool {
+fn inline_has_hyperlink(node: &InlineNode, control: bool, revision: bool) -> bool {
     match node {
-        InlineNode::Hyperlink(_) => true,
-        InlineNode::InlineSdt(sdt) => sdt.content.iter().any(inline_has_hyperlink),
-        InlineNode::Tracked(change) => change.content.iter().any(inline_has_hyperlink),
-        InlineNode::ComplexField(field) => field.structured_result.as_ref()
+        InlineNode::Hyperlink(link) => {
+            control && revision
+                || link
+                    .structured_children
+                    .as_ref()
+                    .unwrap_or(&link.children)
+                    .iter()
+                    .any(|child| inline_has_hyperlink(child, control, revision))
+        }
+        InlineNode::InlineSdt(sdt) => sdt
+            .content
+            .iter()
+            .any(|child| inline_has_hyperlink(child, true, revision)),
+        InlineNode::Tracked(change) => change
+            .content
+            .iter()
+            .any(|child| inline_has_hyperlink(child, control, true)),
+        InlineNode::ComplexField(field) => field
+            .structured_result
+            .as_ref()
             .filter(|result| result.blocks.is_none())
             .and_then(|result| result.inline.as_ref())
-            .is_some_and(|nodes| nodes.iter().any(inline_has_hyperlink)),
+            .is_some_and(|nodes| {
+                nodes
+                    .iter()
+                    .any(|child| inline_has_hyperlink(child, control, revision))
+            }),
         _ => false,
     }
 }
 
-fn visit_inline_hyperlinks(node: &mut InlineNode, visit: &mut impl FnMut(&mut Hyperlink)) {
+fn visit_inline_hyperlinks(
+    node: &mut InlineNode,
+    visit: &mut impl FnMut(&mut Hyperlink),
+    mut control: bool,
+    mut revision: bool,
+) {
     let children = match node {
         InlineNode::Hyperlink(link) => {
-            visit(link);
-            link.structured_children.as_mut().unwrap_or(&mut link.children)
+            if control && revision {
+                visit(link);
+            }
+            link.structured_children
+                .as_mut()
+                .unwrap_or(&mut link.children)
         }
-        InlineNode::InlineSdt(sdt) => &mut sdt.content,
-        InlineNode::Tracked(change) => &mut change.content,
+        InlineNode::InlineSdt(sdt) => {
+            control = true;
+            &mut sdt.content
+        }
+        InlineNode::Tracked(change) => {
+            revision = true;
+            &mut change.content
+        }
         InlineNode::ComplexField(field) => {
-            let Some(nodes) = field.structured_result.as_mut()
+            let Some(nodes) = field
+                .structured_result
+                .as_mut()
                 .filter(|result| result.blocks.is_none())
                 .and_then(|result| result.inline.as_mut())
-            else { return };
+            else {
+                return;
+            };
             nodes
         }
         _ => return,
     };
     for child in children {
-        visit_inline_hyperlinks(child, visit);
+        visit_inline_hyperlinks(child, visit, control, revision);
     }
 }
 
@@ -1870,10 +1972,15 @@ fn visit_hyperlinks(blocks: &mut [BlockContent], visit: &mut impl FnMut(&mut Hyp
             BlockContent::Paragraph(paragraph) => {
                 for content in &mut Arc::make_mut(paragraph).content {
                     match content {
-                        ParagraphContent::Inline(node) => visit_inline_hyperlinks(node, visit),
+                        ParagraphContent::Inline(node) => {
+                            if let InlineNode::Hyperlink(link) = node {
+                                visit(link);
+                            }
+                            visit_inline_hyperlinks(node, visit, false, false);
+                        }
                         ParagraphContent::Tracked(change) => {
                             for node in &mut change.content {
-                                visit_inline_hyperlinks(node, visit);
+                                visit_inline_hyperlinks(node, visit, false, true);
                             }
                         }
                         _ => {}
@@ -1988,6 +2095,8 @@ pub fn build_patched_document_xml(
 #[derive(Default)]
 struct SelectiveParagraphIndex<'a> {
     count: usize,
+    in_control: bool,
+    in_revision: bool,
     by_id: HashMap<String, Vec<Paragraph>>,
     changed: HashSet<&'a str>,
     allocates_ids: bool,
@@ -2053,10 +2162,26 @@ impl<'a> SelectiveParagraphIndex<'a> {
                         change.node_type.as_str(),
                         "insertion" | "deletion" | "moveFrom" | "moveTo"
                     ) {
-                        for item in &change.content {
-                            self.inline(item)?;
-                        }
+                        let previous = std::mem::replace(&mut self.in_revision, true);
+                        self.tracked(&change.content)?;
+                        self.in_revision = previous;
                     }
+                }
+                _ => {}
+            }
+        }
+        Some(())
+    }
+
+    fn tracked(&mut self, content: &[InlineNode]) -> Option<()> {
+        for item in content {
+            match item {
+                _ if self.in_control => self.inline(item)?,
+                InlineNode::Run(run) => self.run(run)?,
+                InlineNode::Hyperlink(link) => self.hyperlink(link)?,
+                InlineNode::InlineSdt(_) => self.inline(item)?,
+                InlineNode::Tracked(_) if item.has_tracked_control(false, true) => {
+                    self.inline(item)?
                 }
                 _ => {}
             }
@@ -2101,15 +2226,17 @@ impl<'a> SelectiveParagraphIndex<'a> {
             InlineNode::InlineSdt(sdt) => {
                 self.raw_subtree(sdt.properties.raw_properties_xml.as_deref(), "sdtPr")?;
                 self.raw_subtree(sdt.properties.raw_end_properties_xml.as_deref(), "sdtEndPr")?;
+                let previous = std::mem::replace(&mut self.in_control, true);
                 for item in &sdt.content {
                     self.inline(item)?;
                 }
+                self.in_control = previous;
                 Some(())
             }
             InlineNode::Tracked(change) => {
-                for item in &change.content {
-                    self.inline(item)?;
-                }
+                let previous = std::mem::replace(&mut self.in_revision, true);
+                self.tracked(&change.content)?;
+                self.in_revision = previous;
                 Some(())
             }
             InlineNode::Math(math) => {
@@ -2124,8 +2251,22 @@ impl<'a> SelectiveParagraphIndex<'a> {
     }
 
     fn hyperlink(&mut self, hyperlink: &Hyperlink) -> Option<()> {
-        for child in hyperlink.structured_children.as_ref().unwrap_or(&hyperlink.children) {
-            self.inline(child)?;
+        let expanded = self.in_control && self.in_revision;
+        let nested = hyperlink.structured_children.as_ref().filter(|children| {
+            expanded
+                || children
+                    .iter()
+                    .any(|child| child.has_tracked_control(false, self.in_revision))
+        });
+        for child in nested.unwrap_or(&hyperlink.children) {
+            match child {
+                _ if expanded => self.inline(child)?,
+                InlineNode::Run(run) => self.run(run)?,
+                InlineNode::InlineSdt(_) if child.has_tracked_control(false, self.in_revision) => {
+                    self.inline(child)?
+                }
+                _ => {}
+            }
         }
         Some(())
     }

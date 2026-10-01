@@ -1144,11 +1144,7 @@ impl EditingDoc {
                         properties: properties.values,
                     });
                 }
-                SegmentContent::OtherEmbed { kind, payload } => {
-                    if kind == "sdt" && let Some(content) = payload.get("content") {
-                        text.push_str(&inline_content::text(content));
-                    }
-                }
+                SegmentContent::OtherEmbed { .. } => {}
             }
         }
         Ok(paragraphs)

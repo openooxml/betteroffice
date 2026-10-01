@@ -3,6 +3,7 @@
 /* eslint-disable max-lines -- the complete load projection is intentionally co-located */
 
 import { isRawXml } from '../types/content/rawXml';
+import { hasTrackedControlContent } from '../utils/trackedControlContent';
 import { emuToPixels } from '../utils/units';
 import { isWrapNone } from '../docx/wrapTypes';
 import { sdtPropsToAttrs } from '../types/sdtAttributes';
@@ -805,7 +806,10 @@ function hyperlinkToUnits(
       units.push(embedUnit('field', field.payload, [...field.marks, ...extraMarks, link]));
     } else if (child.type === 'mathEquation') {
       units.push(embedUnit('math', mathPayload(child), [...extraMarks, link]));
-    } else if (child.type === 'inlineSdt') {
+    } else if (child.type === 'inlineSdt' && (
+      extraMarks.some((mark) => mark.name === 'insertion' || mark.name === 'deletion') ||
+      hasTrackedControlContent(child)
+    )) {
       units.push(embedUnit(
         'sdt', sdtPayload(child, styleFormatting, styleResolver, opaqueSequences), [...extraMarks, link], 2
       ));
@@ -834,7 +838,8 @@ function trackedToUnits(
   content: Extract<ParagraphContent, { type: 'insertion' | 'deletion' | 'moveFrom' | 'moveTo' }>,
   styleFormatting: TextFormatting | undefined,
   styleResolver: StyleResolver | null,
-  opaqueSequences: string[]
+  opaqueSequences: string[],
+  inControl = false
 ): InlineUnit[] {
   const kind = content.type === 'insertion' || content.type === 'moveTo' ? 'insertion' : 'deletion';
   const mark = trackedMark(
@@ -850,8 +855,8 @@ function trackedToUnits(
       opaqueSequences.push(...hyperlinkSequenceNames(child));
       const linked = hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences, [mark]);
       units.push(...linked);
-    } else {
-      const nested = inlineContainerUnits(child, styleFormatting, styleResolver, opaqueSequences);
+    } else if (inControl || child.type === 'inlineSdt' || hasTrackedControlContent(child)) {
+      const nested = inlineContainerUnits(child, styleFormatting, styleResolver, opaqueSequences, inControl);
       const attrs = marksToYrsAttrs([mark]);
       units.push(...nested.map((unit) => ({
         ...unit,
@@ -867,7 +872,8 @@ function inlineContainerUnits(
   child: InlineSdt['content'][number],
   styleFormatting: TextFormatting | undefined,
   styleResolver: StyleResolver | null,
-  opaqueSequences: string[]
+  opaqueSequences: string[],
+  inControl: boolean
 ): InlineUnit[] {
   if (child.type === 'run') return runToUnits(child, styleFormatting, styleResolver, opaqueSequences);
   if (child.type === 'hyperlink') {
@@ -883,7 +889,7 @@ function inlineContainerUnits(
     return [embedUnit('sdt', sdtPayload(child, styleFormatting, styleResolver, opaqueSequences), [], 2)];
   }
   if (child.type === 'mathEquation') return [embedUnit('math', mathPayload(child))];
-  return trackedToUnits(child, styleFormatting, styleResolver, opaqueSequences);
+  return trackedToUnits(child, styleFormatting, styleResolver, opaqueSequences, inControl);
 }
 
 function sdtPayload(
@@ -920,7 +926,22 @@ function sdtPayload(
   };
 
   for (const child of sdt.content) {
-    inlineContainerUnits(child, styleFormatting, styleResolver, opaqueSequences).forEach(append);
+    if (child.type === 'run') {
+      runToUnits(child, styleFormatting, styleResolver, opaqueSequences).forEach(append);
+    } else if (child.type === 'hyperlink') {
+      opaqueSequences.push(...hyperlinkSequenceNames(child));
+      hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences).forEach(append);
+    } else if (child.type === 'simpleField' || child.type === 'complexField') {
+      opaqueSequences.push(...nestedSequenceNames(child));
+      const field = fieldPayload(child, styleFormatting);
+      append(embedUnit('field', field.payload, field.marks));
+    } else if (child.type === 'inlineSdt') {
+      append(embedUnit('sdt', sdtPayload(child, styleFormatting, styleResolver, opaqueSequences)));
+    } else if (child.type === 'mathEquation') {
+      append(embedUnit('math', mathPayload(child)));
+    } else {
+      trackedToUnits(child, styleFormatting, styleResolver, opaqueSequences, true).forEach(append);
+    }
   }
   return dropNulls({
     ...sdtPropsToAttrs(sdt.properties),

@@ -317,6 +317,7 @@ pub fn parse_paragraph(
         drawing,
         depth,
         false,
+        false,
     )?;
     apply_list_rendering(&mut paragraph, properties, styles, numbering);
     Ok(paragraph)
@@ -462,6 +463,7 @@ fn parse_paragraph_contents(
     mut drawing: Option<&mut DrawingContext<'_>>,
     depth: usize,
     deletion: bool,
+    in_control: bool,
 ) -> Result<Vec<ParagraphContent>, ParseError> {
     budget.check_nesting_depth(depth, part)?;
     let tracked_context = if deletion {
@@ -473,7 +475,9 @@ fn parse_paragraph_contents(
     let mut fields: Vec<OpenComplexField> = Vec::new();
     for child in transparent_children(element, false) {
         let normalized;
-        let child = if tracked_context == TrackedContext::Deletion {
+        let child = if tracked_context == TrackedContext::Deletion
+            && (in_control || matches!(child.local_name(), "r" | "sdt"))
+        {
             normalized = normalize_deletion_element(child);
             &normalized
         } else {
@@ -574,6 +578,7 @@ fn parse_paragraph_contents(
                         drawing.as_deref_mut(),
                         depth + 1,
                         tracked_context == TrackedContext::Deletion,
+                        true,
                     )?;
                     output.push(ParagraphContent::Inline(InlineNode::InlineSdt(Box::new(
                         InlineSdt {
@@ -583,7 +588,7 @@ fn parse_paragraph_contents(
                                 child.child("w", "sdtEndPr"),
                                 theme,
                             ),
-                            content: filter_field_inline(parsed),
+                            content: filter_field_inline(parsed, true),
                         },
                     ))));
                 }
@@ -601,8 +606,27 @@ fn parse_paragraph_contents(
                     drawing.as_deref_mut(),
                     depth + 1,
                     is_deletion,
+                    in_control,
                 )?;
-                let content = filter_field_inline(content);
+                let content = if in_control {
+                    filter_field_inline(content, true)
+                } else {
+                    content
+                        .into_iter()
+                        .filter_map(|content| match content {
+                            ParagraphContent::Inline(
+                                node @ (InlineNode::Run(_)
+                                | InlineNode::Hyperlink(_)
+                                | InlineNode::InlineSdt(_)),
+                            ) => Some(node),
+                            ParagraphContent::Tracked(change) => {
+                                let node = InlineNode::Tracked(Box::new(change));
+                                node.has_tracked_control(false, true).then_some(node)
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                };
                 let node_type = match child.local_name() {
                     "ins" => "insertion",
                     "del" => "deletion",
@@ -741,18 +765,22 @@ fn parse_simple_field_composed(
         .attribute(Some("w"), "instr")
         .unwrap_or_default()
         .to_owned();
-    let result = filter_field_inline(parse_paragraph_contents(
-        element,
-        relationships,
-        theme,
-        styles,
-        doc_defaults,
-        part,
-        budget,
-        drawing,
-        depth,
+    let result = filter_field_inline(
+        parse_paragraph_contents(
+            element,
+            relationships,
+            theme,
+            styles,
+            doc_defaults,
+            part,
+            budget,
+            drawing,
+            depth,
+            false,
+            false,
+        )?,
         false,
-    )?);
+    );
     let content = result
         .iter()
         .filter_map(|node| match node {
@@ -887,18 +915,22 @@ fn parse_inline_sdt_composed(
     let Some(container) = element.child("w", "sdtContent") else {
         return Ok(None);
     };
-    let content = filter_field_inline(parse_paragraph_contents(
-        container,
-        relationships,
-        theme,
-        styles,
-        doc_defaults,
-        part,
-        budget,
-        drawing,
-        depth,
-        false,
-    )?);
+    let content = filter_field_inline(
+        parse_paragraph_contents(
+            container,
+            relationships,
+            theme,
+            styles,
+            doc_defaults,
+            part,
+            budget,
+            drawing,
+            depth,
+            false,
+            true,
+        )?,
+        true,
+    );
     Ok(Some(InlineSdt {
         node_type: InlineSdtType::InlineSdt,
         // Pinned hyperlink quirk: the SDT's own run properties omit theme.
@@ -911,7 +943,7 @@ fn parse_inline_sdt_composed(
     }))
 }
 
-fn filter_field_inline(content: Vec<ParagraphContent>) -> Vec<InlineNode> {
+fn filter_field_inline(content: Vec<ParagraphContent>, control: bool) -> Vec<InlineNode> {
     content
         .into_iter()
         .filter_map(|content| match content {
@@ -923,7 +955,10 @@ fn filter_field_inline(content: Vec<ParagraphContent>) -> Vec<InlineNode> {
                 | InlineNode::InlineSdt(_)
                 | InlineNode::Math(_)),
             ) => Some(node),
-            ParagraphContent::Tracked(change) => Some(InlineNode::Tracked(Box::new(change))),
+            ParagraphContent::Tracked(change) => {
+                let node = InlineNode::Tracked(Box::new(change));
+                (control || node.has_tracked_control(false, false)).then_some(node)
+            }
             _ => None,
         })
         .collect()

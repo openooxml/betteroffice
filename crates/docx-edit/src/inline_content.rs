@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use yrs::Any;
 
 pub(crate) fn visit(content: &Any, visitor: &mut impl FnMut(&HashMap<String, Any>)) {
-    let Any::Array(children) = content else { return };
+    let Any::Array(children) = content else {
+        return;
+    };
     for child in children.iter() {
         let Any::Map(child) = child else { continue };
         visitor(child);
@@ -13,12 +15,6 @@ pub(crate) fn visit(content: &Any, visitor: &mut impl FnMut(&HashMap<String, Any
             visit(content, visitor);
         }
     }
-}
-
-pub(crate) fn text(content: &Any) -> String {
-    let mut text = String::new();
-    visit(content, &mut |child| append_text(child, &mut text));
-    text
 }
 
 fn append_text(child: &HashMap<String, Any>, text: &mut String) {
@@ -39,11 +35,14 @@ fn append_text(child: &HashMap<String, Any>, text: &mut String) {
 }
 
 pub(crate) fn revision_text(content: &Any, id: &str, key: &str, inherited: bool) -> String {
-    let Any::Array(children) = content else { return String::new() };
+    let Any::Array(children) = content else {
+        return String::new();
+    };
     let mut text = String::new();
     for child in children.iter() {
         let Any::Map(child) = child else { continue };
-        let matched = inherited || matches!(child.get("attrs"), Some(Any::Map(attrs))
+        let matched = inherited
+            || matches!(child.get("attrs"), Some(Any::Map(attrs))
             if attrs.get(key).and_then(crate::queries::revision_parts).is_some_and(|(revision, ..)| revision == id));
         if let Some(Any::Map(payload)) = child.get("payload")
             && let Some(content) = payload.get("content")

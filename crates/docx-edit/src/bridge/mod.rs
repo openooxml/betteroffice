@@ -2217,6 +2217,10 @@ fn authored_checkbox_value(values: &std::collections::HashMap<String, Any>) -> O
 }
 
 fn inherit_inline_revision(runs: &mut [RawRun], attrs: Option<&Attrs>, env: &RenderEnv) {
+    if !attrs.is_some_and(|attrs| attrs.contains_key(crate::INS) || attrs.contains_key(crate::DEL))
+    {
+        return;
+    }
     let inherited = lower_run_formatting(attrs, env);
     if inherited.change_revision_id.is_none() {
         return;
@@ -2409,7 +2413,12 @@ fn lower_inline_sdt_values(
                         italic: Some(true),
                         font_family: Some("Cambria Math".to_owned()),
                         logical_order: Some(u64::MAX),
-                        ..formatting
+                        is_insertion: formatting.is_insertion,
+                        is_deletion: formatting.is_deletion,
+                        change_revision_id: formatting.change_revision_id,
+                        change_author: formatting.change_author,
+                        change_date: formatting.change_date,
+                        ..RunFormatting::default()
                     },
                     story_start: story_index,
                     story_end: story_index + 1,

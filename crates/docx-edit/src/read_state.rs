@@ -408,6 +408,19 @@ impl EditingDoc {
             let bounds = crate::op::para_bounds(&story, &txn);
             let chunks = self.chunk_snapshot(&story_id, &story, &txn);
             let views = crate::queries::para_views(&txn, TextView::Raw, &chunks);
+            let controls: Vec<_> = chunks
+                .iter()
+                .filter_map(|chunk| {
+                    if let ChunkKind::Embed(Some(map)) = &chunk.kind
+                        && map_string(map, &txn, KIND_KEY).as_deref() == Some("sdt")
+                        && let Some(Out::Any(content)) = map.get(&txn, "content")
+                    {
+                        Some((chunk, content))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             for (change, _) in changes {
                 let preview = if matches!(
                     change.kind,
@@ -430,31 +443,38 @@ impl EditingDoc {
                         });
                     }
                     let mut full = String::new();
-                    for chunk in &chunks {
-                        let start = from.max(chunk.start);
-                        let end = to.min(chunk.end());
-                        if start >= end {
-                            continue;
+                    let mut start = from;
+                    let first = controls.partition_point(|(chunk, _)| chunk.end() <= from);
+                    for (chunk, content) in &controls[first..] {
+                        if chunk.start >= to {
+                            break;
                         }
-                        if let ChunkKind::Embed(Some(map)) = &chunk.kind
-                            && map_string(map, &txn, KIND_KEY).as_deref() == Some("sdt")
-                            && let Some(Out::Any(content)) = map.get(&txn, "content")
-                        {
-                            let key = if change.kind == crate::ChangeKind::Insertion {
-                                crate::INS
-                            } else {
-                                crate::DEL
-                            };
-                            let inherited = chunk.attrs.get(key)
-                                .and_then(crate::queries::revision_parts)
-                                .is_some_and(|(id, ..)| id == change.revision_id);
-                            full.push_str(&crate::inline_content::revision_text(
-                                &content, &change.revision_id, key, inherited,
-                            ));
-                        } else {
+                        if start < chunk.start {
                             for para in &views {
-                                para.view_slice_of_raw(start, end, &mut full);
+                                para.view_slice_of_raw(start, chunk.start, &mut full);
                             }
+                        }
+                        let key = if change.kind == crate::ChangeKind::Insertion {
+                            crate::INS
+                        } else {
+                            crate::DEL
+                        };
+                        let inherited = chunk
+                            .attrs
+                            .get(key)
+                            .and_then(crate::queries::revision_parts)
+                            .is_some_and(|(id, ..)| id == change.revision_id);
+                        full.push_str(&crate::inline_content::revision_text(
+                            content,
+                            &change.revision_id,
+                            key,
+                            inherited,
+                        ));
+                        start = to.min(chunk.end());
+                    }
+                    if start < to {
+                        for para in &views {
+                            para.view_slice_of_raw(start, to, &mut full);
                         }
                     }
                     full.chars().take(PREVIEW_MAX_CHARS).collect()

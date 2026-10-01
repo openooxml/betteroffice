@@ -149,12 +149,6 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
 
 /// Serialize one run, consuming any active rendered-page-break markers.
 pub fn serialize_run(run: &Run, context: &mut SerializerContext) -> Result<String, ParseError> {
-    if context.deletion {
-        context.deletion = false;
-        let result = serialize_deleted_run(run, context);
-        context.deletion = true;
-        return result;
-    }
     let mut output = String::from("<w:r>");
     for _ in 0..context.take_rendered_page_breaks() {
         output.push_str("<w:lastRenderedPageBreak/>");

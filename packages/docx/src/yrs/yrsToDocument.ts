@@ -2,6 +2,7 @@
 
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
 
+import { hasTrackedControlContent } from '../utils/trackedControlContent';
 import { isRawXml } from '../types/content/rawXml';
 import { pixelsToEmu } from '../utils/units';
 import {
@@ -898,7 +899,7 @@ function inlineSdtFromPayload(payload: Attrs): InlineSdt {
       attributes,
     });
   }
-  let content = inlineSdtContent(buildParagraphContent(items));
+  let content = inlineSdtContent(buildParagraphContent(items, undefined, true));
   const authoredValue = contentControlValue(payload.value);
   if (authoredValue) {
     try {
@@ -1002,9 +1003,22 @@ function tabRun(attributes: Attrs): Run {
   };
 }
 
-function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo): ParagraphContent {
-  const ordinary = ordinaryContentForItem(item);
-  const child = inlineSdtContent(ordinary ? [ordinary] : [])[0] ?? { type: 'run' as const, content: [] };
+function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inControl: boolean): ParagraphContent {
+  let child: TrackedWrapper['content'][number];
+  if (inControl) {
+    const ordinary = ordinaryContentForItem(item);
+    child = inlineSdtContent(ordinary ? [ordinary] : [])[0] ?? { type: 'run', content: [] };
+  } else if (item.kind === 'embed' && item.embedKind === 'sdt') child = inlineSdtFromPayload(item.payload);
+  else if (item.kind === 'embed' && item.embedKind === 'image') child = imageRunFromPayload(item.payload);
+  else if (item.kind === 'embed' && item.embedKind === 'tab') child = tabRun(item.attributes);
+  else if (item.kind === 'embed' && item.embedKind === 'horizontalRule')
+    child = horizontalRuleRun(item.payload, item.attributes);
+  else if (item.kind === 'embed' && item.embedKind === 'shape')
+    child = shapeRunFromPayload(item.payload);
+  else if (item.kind === 'embed' && item.embedKind === 'chart')
+    child = chartRunFromPayload(item.payload) ?? { type: 'run', content: [] };
+  else if (item.kind === 'text') child = createTextRun(item.text, item.attributes);
+  else child = { type: 'run', content: [] };
 
   const raw = asObject(item.attributes.ins) ?? asObject(item.attributes.del);
   const isMovePair = raw?.isMovePair === true;
@@ -1034,7 +1048,10 @@ function addToHyperlink(hyperlink: Hyperlink, item: InlineItem): void {
     child =
       commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes);
   } else if (item.embedKind === 'math') child = mathFromPayload(item.payload);
-  else if (item.embedKind === 'sdt') child = inlineSdtFromPayload(item.payload);
+  else if (item.embedKind === 'sdt') {
+    const control = inlineSdtFromPayload(item.payload);
+    if (item.attributes.ins || item.attributes.del || hasTrackedControlContent(control)) child = control;
+  }
   if (!child) return;
   if (child.type === 'run') hyperlink.children.push(child);
   if (child.type !== 'run' || hyperlink.structuredChildren) {
@@ -1133,7 +1150,8 @@ function isTrackedWrapper(content: ParagraphContent | undefined): content is Tra
 
 function buildParagraphContent(
   items: InlineItem[],
-  revisionIds?: RevisionIds
+  revisionIds?: RevisionIds,
+  inControl = false
 ): ParagraphContent[] {
   items = restoreProjectedFieldResults(items);
   const content: ParagraphContent[] = [];
@@ -1170,7 +1188,7 @@ function buildParagraphContent(
     if (revision) {
       flushRun();
       flushHyperlink();
-      const tracked = trackedContentForItem(item, revision);
+      const tracked = trackedContentForItem(item, revision, inControl);
       const previous = content[content.length - 1];
       if (
         isTrackedWrapper(previous) &&
