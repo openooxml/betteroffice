@@ -792,13 +792,13 @@ test('a page build out of memory restarts the worker once, then reports without 
   }
 });
 
-function renderReleaseFixture(workerOpen = true, caretAtStart = false) {
+function renderReleaseFixture(workerOpen = true, caretAtStart = false, builtPageBudget?: number) {
   const fixture = lazyFixture(160);
   if (caretAtStart) {
     const { paraId } = JSON.parse(fixture.engine.paragraphs('body'))[0] as { paraId: string };
     fixture.engine.set_selection('body', paraId, 1, paraId, 1);
   }
-  const overrides = { getInputs: () => fixture.inputs };
+  const overrides = { getInputs: () => fixture.inputs, builtPageBudget };
   const hook = renderHook(() =>
     useRustDisplayList(
       fixture.inputs.layout as Layout,
@@ -974,6 +974,58 @@ test('default worker mode builds every page and never requests releases', async 
     await idleUntil(() => result.current.frame!.displayList.pages.every((page) => !page.unbuilt));
     expect(worker.releaseRequests).toBe(0);
     expect(worker.posted.some((request) => request.type === 'releasePages')).toBe(false);
+    unmount();
+  } finally {
+    engine.free();
+  }
+});
+
+test('default worker mode keeps the built-page budget nearest the viewport and rebuilds released pages', async () => {
+  const { engine, result, unmount } = renderReleaseFixture(false, true, 12);
+  try {
+    await waitFor(() => expect(result.current.caret?.caretRect?.pageIndex).toBe(0));
+    const worker = EngineWorker.last!;
+    const pages = () => result.current.frame!.displayList.pages;
+    const built = () => pages().flatMap((page, index) => (page.unbuilt ? [] : [index]));
+    expect(pages().length).toBeGreaterThanOrEqual(30);
+    await act(async () => result.current.setDisplayWindow(0, 2));
+    await idleUntil(() => built().length === 12);
+    expect(built()).toEqual([...Array(12).keys()]);
+    const firstPrimitives = pages()[1]!.primitives;
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      runIdleCallbacks();
+    });
+    expect(built()).toHaveLength(12);
+    expect(worker.releaseRequests).toBe(0);
+
+    await act(async () => result.current.setDisplayWindow(20, 22));
+    await idleUntil(() => worker.releasedIndices.length > 0 && built().length === 12);
+    expect(built()).toEqual([0, 7, 8, 9, 10, 11, 18, 19, 20, 21, 22, 23]);
+    expect([...worker.releasedIndices].sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6]);
+
+    await act(async () => result.current.setDisplayWindow(0, 2));
+    await waitFor(() => expect(pages()[1]!.unbuilt).toBeFalsy());
+    expect(pages()[1]!.primitives).toEqual(firstPrimitives);
+    unmount();
+  } finally {
+    engine.free();
+  }
+});
+
+test('default worker mode document settling builds every page past the budget, then releases down to it', async () => {
+  const { engine, result, unmount } = renderReleaseFixture(false, false, 12);
+  try {
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    const built = () => result.current.frame!.displayList.pages.filter((page) => !page.unbuilt).length;
+    let settled: Awaited<ReturnType<typeof result.current.settledDisplayList>> | undefined;
+    await act(async () => {
+      settled = await settleWithIdle(result.current, null);
+    });
+    expect(settled!.pages.length).toBeGreaterThanOrEqual(30);
+    expect(settled!.pages.every((page) => !page.unbuilt)).toBe(true);
+    await idleUntil(() => worker.releasedIndices.length > 0 && built() === 12);
     unmount();
   } finally {
     engine.free();

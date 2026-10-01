@@ -306,6 +306,8 @@ const SETTLE_BUILD_BATCH_PAGES = 128;
 const BACKGROUND_BUILD_BATCH_PAGES = 16;
 const WORKER_OPEN_BUILD_MARGIN_PAGES = 2;
 const WORKER_OPEN_RETAIN_MARGIN_PAGES = 8;
+/** Built pages default mode keeps; past it, pages away from the viewport are released as with worker-open. */
+const DEFAULT_BUILT_PAGE_BUDGET = 192;
 /** How often a page build waiting behind a newer worker frame checks again. */
 const PAGE_BUILD_RETRY_MS = 50;
 /** How long a page build waits for the display to adopt a worker frame. */
@@ -337,6 +339,13 @@ function cancelPageBuilds(timer: { current: PageBuildTimer | null }): void {
 export interface RustDisplayListHookOverrides {
   build?: typeof buildRustDisplayList;
   getInputs?: typeof getLayoutKernelInputs;
+  builtPageBudget?: number;
+}
+
+function builtPageCount(pages: readonly { unbuilt?: boolean }[]): number {
+  let built = 0;
+  for (const page of pages) if (!page.unbuilt) built += 1;
+  return built;
 }
 
 type ResidentInputOperation =
@@ -497,6 +506,8 @@ export function useRustDisplayList(
     opening?: Promise<ResidentEngineWorkerOpened>;
   } | null>(null);
   const retainBuiltPagesRef = useRef(false);
+  const builtPageBudgetRef = useRef(overrides?.builtPageBudget);
+  builtPageBudgetRef.current = overrides?.builtPageBudget;
   // The document load each session belongs to: the one under way when it was
   // created, as the editor records it, else when it was first laid out or shown.
   const sessionLoadsRef = useRef(new WeakMap<YrsSession, number>());
@@ -1624,14 +1635,17 @@ export function useRustDisplayList(
     []
   );
 
+  const builtPageBudget = useCallback(
+    (): number =>
+      workerOpenEnabledRef.current ? 0 : (builtPageBudgetRef.current ?? DEFAULT_BUILT_PAGE_BUDGET),
+    []
+  );
+
   const pagesToRelease = useCallback((frame: RetainedFrame): number[] => {
-    if (
-      !workerOpenEnabledRef.current ||
-      retainBuiltPagesRef.current ||
-      settleWaitersRef.current.size > 0
-    ) {
-      return [];
-    }
+    if (retainBuiltPagesRef.current || settleWaitersRef.current.size > 0) return [];
+    const budget = builtPageBudget();
+    const built = budget === 0 ? 0 : builtPageCount(frame.displayList.pages);
+    if (budget > 0 && built <= budget) return [];
     const [start, end] = displayWindowRef.current;
     const first = Math.max(0, start - WORKER_OPEN_RETAIN_MARGIN_PAGES);
     const last = Math.min(frame.pages.length, end + WORKER_OPEN_RETAIN_MARGIN_PAGES);
@@ -1646,12 +1660,17 @@ export function useRustDisplayList(
         candidates.push(index);
       }
     }
-    return candidates;
-  }, []);
+    if (budget === 0) return candidates;
+    const distance = (index: number): number => (index < start ? start - index : index - end + 1);
+    return candidates
+      .sort((a, b) => distance(b) - distance(a) || b - a)
+      .slice(0, built - budget)
+      .sort((a, b) => a - b);
+  }, [builtPageBudget]);
 
   // Build the unbuilt pages of the worker frame: those the viewport shows
-  // first, then the rest while the main thread is idle, since accessibility
-  // mirrors and printing read every page's content.
+  // first, then, up to the built-page budget, the rest while the main thread
+  // is idle, since accessibility mirrors read built pages' content.
   const buildUnbuiltPages = useCallback(
     (idle = false): void => {
       pageBuildTimerRef.current = null;
@@ -1669,9 +1688,11 @@ export function useRustDisplayList(
       const pages = frame.displayList.pages;
       const [start, end] = displayWindowRef.current;
       const settling = settleWaitersRef.current.size > 0;
+      const budget = builtPageBudget();
+      const built = settling || budget === 0 ? 0 : builtPageCount(pages);
       const windowOnly = settling
         ? ![...settleWaitersRef.current.values()].includes('document')
-        : workerOpenEnabledRef.current;
+        : budget === 0 || built >= budget;
       const first = windowOnly ? Math.max(0, start - WORKER_OPEN_BUILD_MARGIN_PAGES) : 0;
       const last = windowOnly
         ? Math.min(pages.length, end + WORKER_OPEN_BUILD_MARGIN_PAGES)
@@ -1736,7 +1757,11 @@ export function useRustDisplayList(
           unbuilt,
           start,
           end,
-          settling ? SETTLE_BUILD_BATCH_PAGES : BACKGROUND_BUILD_BATCH_PAGES
+          settling
+            ? SETTLE_BUILD_BATCH_PAGES
+            : windowOnly
+              ? BACKGROUND_BUILD_BATCH_PAGES
+              : Math.min(BACKGROUND_BUILD_BATCH_PAGES, budget - built)
         );
       }
       let attachment: PageBuildTask | null = null;
@@ -1914,6 +1939,7 @@ export function useRustDisplayList(
     },
     [
       applyPaintedCaretReply,
+      builtPageBudget,
       dropWorker,
       isCurrentWorker,
       paintedCaretMachine,
