@@ -3806,6 +3806,15 @@ mod tests {
 
     #[test]
     fn vertical_labels_in_minimum_height_rows_stay_on_one_line_and_grow_the_row() {
+        let font_id = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font_id])]),
+            defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
+            ..MeasurementConfig::default()
+        };
         for height in [Some(20.0), None] {
             let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([{
                 "kind":"table","id":"table","columnWidths":[30],"rows":[{
@@ -3815,8 +3824,7 @@ mod tests {
                     }]
                 }]
             }])).unwrap();
-            let measured =
-                measure_blocks(&mut blocks, 200.0, &MeasurementConfig::default()).unwrap();
+            let measured = measure_blocks(&mut blocks, 200.0, &config).unwrap();
             let BlockExtent::Table(table) = &measured[0] else {
                 panic!()
             };
