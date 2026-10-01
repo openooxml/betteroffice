@@ -1562,9 +1562,7 @@ mod tests {
 
     #[test]
     fn a_style_indent_reads_start_and_end_when_left_and_right_are_absent() {
-        let style = root(
-            r#"<w:style><w:pPr><w:ind w:start="720" w:end="360"/></w:pPr></w:style>"#,
-        );
+        let style = root(r#"<w:style><w:pPr><w:ind w:start="720" w:end="360"/></w:pPr></w:style>"#);
         let paragraph = parse_paragraph_properties(style.child("w", "pPr"), None).unwrap();
         assert_eq!(paragraph.indent_left, Some(720.0));
         assert_eq!(paragraph.indent_right, Some(360.0));
