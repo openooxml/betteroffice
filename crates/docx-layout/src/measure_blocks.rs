@@ -1192,7 +1192,7 @@ const MAX_EXTENT_KEY_BYTES: usize = 256 * 1024;
 
 #[derive(Default)]
 struct ExtentCacheGeneration {
-    entries: HashMap<Vec<u8>, (ParagraphExtent, usize), foldhash::fast::FixedState>,
+    entries: HashMap<Vec<u8>, (ParagraphExtent, usize), foldhash::fast::RandomState>,
     key_bytes: usize,
     value_bytes: usize,
 }
