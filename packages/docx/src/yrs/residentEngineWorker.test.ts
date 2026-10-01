@@ -1999,7 +1999,7 @@ describe('worker proposals during sliced completion', () => {
     let clock = 0;
     try {
       Object.defineProperty(performance, 'now', { value: () => clock, configurable: true });
-      const session = progressive.w.harness.session as typeof progressive.engine;
+      const session = progressive.w.harness.session as unknown as typeof progressive.engine;
       const resume = session.resumeRegionLayout;
       const append = progressive.w.responses.push.bind(progressive.w.responses);
       const interims: Array<{ start: number; end: number; pages: number }> = [];
