@@ -46,8 +46,13 @@ let proposals: DocxProposalRegistry | null = null;
 let lastProposalMirrorVersion: string | null = null;
 /** Set while the session holds the document `open` seeded, with the heap limit it used. */
 let openedDocument: { heapLimitBytes?: number } | null = null;
-// The last font requirements answered, for the same request against an unchanged document.
-let requirementsAnswered: { layoutInput: string; stateVector: string; json: string } | null = null;
+// The last font requirements answered, kept until the session's next document update.
+let requirementsAnswered: {
+  session: ResidentEngineSession;
+  layoutInput: string;
+  json: string;
+  release: () => void;
+} | null = null;
 let unsubscribe: (() => void) | null = null;
 let pendingUpdates: Uint8Array[] = [];
 let layoutRevision = 0;
@@ -255,15 +260,17 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'fontRequirements') {
     if (!session) throw new Error('Resident engine worker is not initialized');
-    const stateVector = session.encodeStateVector().join(',');
     if (
-      requirementsAnswered?.layoutInput !== request.layoutInput ||
-      requirementsAnswered.stateVector !== stateVector
+      requirementsAnswered?.session !== session ||
+      requirementsAnswered.layoutInput !== request.layoutInput
     ) {
+      forgetRequirements();
+      const json = session.layoutFontRequirementsJson(request.layoutInput);
       requirementsAnswered = {
+        session,
         layoutInput: request.layoutInput,
-        stateVector,
-        json: session.layoutFontRequirementsJson(request.layoutInput),
+        json,
+        release: session.onUpdate(forgetRequirements),
       };
     }
     reply({ id: request.id, ok: true, requirementsJson: requirementsAnswered.json });
@@ -840,6 +847,11 @@ function subscribe(): void {
   unsubscribe = session.onUpdate((update) => pendingUpdates.push(update.slice()));
 }
 
+function forgetRequirements(): void {
+  requirementsAnswered?.release();
+  requirementsAnswered = null;
+}
+
 /**
  * Drops the document. `keepSurfaces` keeps the attached page canvases, still
  * showing the old pages, for a document that replaces it page for page.
@@ -847,13 +859,13 @@ function subscribe(): void {
 function destroySession(keepSurfaces = false): void {
   unsubscribe?.();
   unsubscribe = null;
+  forgetRequirements();
   proposals?.destroy();
   proposals = null;
   session?.destroy();
   lastProposalMirrorVersion = null;
   session = null;
   openedDocument = null;
-  requirementsAnswered = null;
   pendingUpdates = [];
   layoutRevision = 0;
   fontsRevision = -1;
