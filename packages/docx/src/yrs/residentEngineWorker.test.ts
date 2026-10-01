@@ -1984,52 +1984,6 @@ describe('worker proposals during sliced completion', () => {
     }
   });
 
-  test('font requirements prime one preview at idle, skip a queued request, and cache the next accept', async () => {
-    const { w, engine, proposal } = await proposalWorker();
-    const waiting = deferred();
-    try {
-      const decide = await decided(w, engine, proposal);
-      const reads: string[] = [];
-      const primed = deferred();
-      Object.assign(w.harness.session, {
-        layoutFontRequirementsJson: (input: string) => {
-          reads.push(input);
-          const requirements = engine.layoutFontRequirementsJson(input);
-          if (JSON.parse(input).renderEnv.revisionPreview) primed.resolve();
-          return requirements;
-        },
-      });
-
-      w.harness.preloadBlock = waiting.promise;
-      const asked = w.send({ type: 'fontRequirements', layoutInput: requirementsInput() });
-      const queued = w.send({ type: 'warm' });
-      expect((await asked).ok).toBe(true);
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(reads).toEqual([requirementsInput()]);
-      waiting.resolve();
-      expect((await queued).ok).toBe(true);
-      w.harness.preloadBlock = null;
-
-      expect((await w.send({ type: 'fontRequirements', layoutInput: requirementsInput() })).ok).toBe(true);
-      await primed.promise;
-      expect(reads).toHaveLength(2);
-      const accepted = await decide('accepted');
-      expect(accepted.preview).toBeDefined();
-      expect(accepted.fontRequirements).toEqual({
-        layoutInput: requirementsInput(accepted.preview),
-        requirementsJson: engine.layoutFontRequirementsJson(requirementsInput(accepted.preview)),
-      });
-      expect(reads).toEqual([requirementsInput(), requirementsInput(accepted.preview)]);
-
-      await w.send({ type: 'fontRequirements', layoutInput: requirementsInput() });
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(reads).toEqual([requirementsInput(), requirementsInput(accepted.preview)]);
-    } finally {
-      waiting.resolve();
-      void w.send({ type: 'destroy' });
-    }
-  });
-
   test('a decision whose font requirements cannot be read leaves them to the host', async () => {
     const { w, engine, proposal } = await proposalWorker();
     try {
@@ -2040,9 +1994,6 @@ describe('worker proposals during sliced completion', () => {
           throw new Error('unreadable');
         },
       });
-      const answered = w.answered.length;
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(w.answered).toHaveLength(answered);
       const accepted = await decide('accepted');
       expect(accepted.fontRequirements).toBeUndefined();
       const asked = await w.send({

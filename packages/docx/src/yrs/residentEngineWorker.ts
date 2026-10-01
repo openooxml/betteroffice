@@ -72,7 +72,6 @@ let layoutRevision = 0;
 // when the snapshot's revision matches what this session already holds.
 let fontsRevision = -1;
 let operations = Promise.resolve();
-let requestsWaiting = 0;
 let retainedFrame: RetainedFrame | null = null;
 let glyphCache: GlyphCache | null = null;
 const offscreenCanvases = new Map<string, OffscreenCanvas>();
@@ -139,14 +138,7 @@ let handlingId = 0;
 const trappedIds = new Set<number>();
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
-  requestsWaiting += 1;
-  enqueue(async () => {
-    try {
-      await handle(event.data);
-    } finally {
-      requestsWaiting -= 1;
-    }
-  }, event.data.id);
+  enqueue(() => handle(event.data), event.data.id);
 };
 
 /** `current` drops an operation whose request was answered while it waited. */
@@ -313,7 +305,6 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       requirementsJson,
     };
     reply({ id: request.id, ok: true, requirementsJson });
-    primePreviewFontRequirements(session, request.layoutInput, request.id);
     return;
   }
   if (request.type === 'encodeState') {
@@ -806,34 +797,6 @@ function previewFontRequirements(
     if (trap) throw trap;
     if (error instanceof WebAssembly.RuntimeError) throw error;
     return null;
-  }
-}
-
-function primePreviewFontRequirements(
-  engine: ResidentEngineSession,
-  layoutInput: string,
-  id: number
-): void {
-  if (!proposals) return;
-  try {
-    const request = JSON.parse(layoutInput) as { renderEnv?: Record<string, unknown> | null };
-    if (!request.renderEnv || request.renderEnv.revisionPreview !== undefined) return;
-    const snapshot = proposals.snapshot();
-    const first = snapshot.proposals.find((proposal) => proposal.revisionIds.length > 0);
-    if (!first) return;
-    const preview = proposalRevisionPreview({
-      ...snapshot,
-      proposals: [{ ...first, state: 'accepted' }],
-    });
-    setTimeout(() => {
-      if (session !== engine || requestsWaiting > 0) return;
-      enqueue(() => {
-        previewFontRequirements(engine, layoutInput, preview, snapshot.version);
-      }, id, () => session === engine && requestsWaiting === 0);
-    }, 0);
-  } catch (error) {
-    if (trap) throw trap;
-    if (error instanceof WebAssembly.RuntimeError) throw error;
   }
 }
 
