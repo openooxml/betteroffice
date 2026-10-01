@@ -562,3 +562,220 @@ test('a page build out of memory restarts the worker once, then reports without 
     engine.free();
   }
 });
+
+function renderReleaseFixture(workerOpen = true, caretAtStart = false) {
+  const fixture = lazyFixture(160);
+  if (caretAtStart) {
+    const { paraId } = JSON.parse(fixture.engine.paragraphs('body'))[0] as { paraId: string };
+    fixture.engine.set_selection('body', paraId, 1, paraId, 1);
+  }
+  const overrides = { getInputs: () => fixture.inputs };
+  const hook = renderHook(() =>
+    useRustDisplayList(
+      fixture.inputs.layout as Layout,
+      overrides,
+      undefined,
+      undefined,
+      fixture.host,
+      undefined,
+      undefined,
+      undefined,
+      workerOpen
+    )
+  );
+  return { ...fixture, ...hook };
+}
+
+async function idleUntil(done: () => boolean): Promise<void> {
+  for (let round = 0; round < 50 && !done(); round += 1) {
+    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    await act(async () => runIdleCallbacks());
+  }
+  expect(done()).toBe(true);
+}
+
+test('worker-open releases distant display pages and rebuilds them when scrolling back', async () => {
+  const { engine, result, unmount } = renderReleaseFixture();
+  try {
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    const pages = () => result.current.frame!.displayList.pages;
+    expect(pages().length).toBeGreaterThanOrEqual(30);
+    await act(async () => result.current.setDisplayWindow(0, 2));
+    await idleUntil(() => pages().slice(0, 4).every((page) => !page.unbuilt));
+    const identities = result.current.frame!.pages.map((page) => page.pageId);
+    const firstPrimitives = pages()[0]!.primitives;
+    await act(async () => result.current.setDisplayWindow(20, 22));
+    await waitFor(() => expect(pages().slice(20, 22).every((page) => !page.unbuilt)).toBe(true));
+    await idleUntil(() => worker.releasedIndices.length > 0);
+    expect(pages().slice(18, 24).every((page) => !page.unbuilt)).toBe(true);
+    const caretPage = result.current.caret?.caretRect?.pageIndex;
+    expect(pages().every((page, index) =>
+      (index >= 12 && index < 30) || index === caretPage || page.unbuilt
+    )).toBe(true);
+    expect(pages().filter((page) => !page.unbuilt).length).toBeLessThanOrEqual(2 + 2 * 2 + 2 * 8 + 1);
+    expect(result.current.frame!.pages.map((page) => page.pageId)).toEqual(identities);
+    const release = worker.posted.find((request) => request.type === 'releasePages')!;
+    expect(release).toMatchObject({ paintCaret: false });
+    expect(revisionPreviewKeyOf(result.current.queries)).toBe(revisionPreviewKey(PREVIEW));
+    await act(async () => result.current.setDisplayWindow(0, 2));
+    await waitFor(() => expect(pages().slice(0, 2).every((page) => !page.unbuilt)).toBe(true));
+    expect(pages()[0]!.primitives).toEqual(firstPrimitives);
+    await idleUntil(() => pages().slice(0, 4).every((page) => !page.unbuilt));
+    await idleUntil(() => pages().slice(18, 24).every((page, index) => index + 18 === caretPage || page.unbuilt));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      runIdleCallbacks();
+    });
+    expect(idleCallbacks.size).toBe(0);
+    unmount();
+  } finally {
+    engine.free();
+  }
+});
+
+test('worker-open retains the caret page outside the retention band', async () => {
+  const { engine, result, unmount } = renderReleaseFixture(true, true);
+  try {
+    await waitFor(() => expect(result.current.caret?.caretRect?.pageIndex).toBe(0));
+    const worker = EngineWorker.last!;
+    await act(async () => result.current.setDisplayWindow(20, 22));
+    await idleUntil(() => worker.releasedIndices.length > 0);
+    expect(result.current.frame!.displayList.pages[0]!.unbuilt).toBeFalsy();
+    expect(result.current.frame!.displayList.pages[1]!.unbuilt).toBe(true);
+    expect(worker.releasedIndices).not.toContain(0);
+    expect(result.current.caret?.caretRect?.pageIndex).toBe(0);
+    unmount();
+  } finally {
+    engine.free();
+  }
+});
+
+test('worker-open retains built pages until retention is disabled', async () => {
+  const { engine, result, unmount } = renderReleaseFixture();
+  try {
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    await act(async () => {
+      result.current.setRetainBuiltPages!(true);
+      await result.current.settledDisplayList(null, null, 'document');
+      result.current.setDisplayWindow(20, 22);
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      runIdleCallbacks();
+    });
+    expect(worker.releaseRequests).toBe(0);
+    expect(result.current.frame!.displayList.pages.every((page) => !page.unbuilt)).toBe(true);
+    await act(async () => result.current.setRetainBuiltPages!(false));
+    expect(worker.releaseRequests).toBe(0);
+    await idleUntil(() => worker.releasedIndices.length > 0);
+    expect(result.current.frame!.displayList.pages[1]!.unbuilt).toBe(true);
+    expect(result.current.frame!.displayList.pages.slice(12, 30).every((page) => !page.unbuilt)).toBe(true);
+    expect(worker.releaseRequests).toBe(1);
+    unmount();
+  } finally {
+    engine.free();
+  }
+});
+
+test('worker-open document settling suppresses release until every page is built', async () => {
+  const { engine, result, unmount } = renderReleaseFixture();
+  try {
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    worker.holdPageBuilds = true;
+    let pending: ReturnType<typeof result.current.settledDisplayList> | undefined;
+    await act(async () => {
+      pending = result.current.settledDisplayList(null, null, 'document');
+    });
+    await waitFor(() => expect(worker.heldPageBuilds).toHaveLength(1));
+    await act(async () => runIdleCallbacks());
+    expect(worker.releaseRequests).toBe(0);
+    worker.holdPageBuilds = false;
+    await act(async () => {
+      worker.releasePageBuilds();
+      const settled = await pending!;
+      expect(settled.pages.every((page) => !page.unbuilt)).toBe(true);
+      expect(worker.releaseRequests).toBe(0);
+    });
+    await idleUntil(() => worker.releasedIndices.length > 0);
+    expect(result.current.frame!.displayList.pages[20]!.unbuilt).toBe(true);
+    unmount();
+  } finally {
+    engine.free();
+  }
+});
+
+test('worker-open retries superseded releases without dropping the worker', async () => {
+  const { engine, result, unmount } = renderReleaseFixture();
+  try {
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    worker.supersedeNextRelease = true;
+    await act(async () => result.current.setDisplayWindow(20, 22));
+    await idleUntil(() => worker.releaseRequests === 1);
+    expect(worker.releasedIndices).toEqual([]);
+    expect(result.current.frame!.displayList.pages[1]!.unbuilt).toBeFalsy();
+    expect(worker.terminated).toBe(false);
+    expect(result.current.workerSurfacesActive).toBe(true);
+    expect(result.current.error).toBeNull();
+    await idleUntil(() => worker.releasedIndices.length > 0);
+    expect(worker.releaseRequests).toBe(2);
+    expect(worker.terminated).toBe(false);
+    expect(EngineWorker.spawned).toBe(1);
+    expect(result.current.frame!.displayList.pages[1]!.unbuilt).toBe(true);
+    expect(result.current.workerSurfacesActive).toBe(true);
+    expect(result.current.error).toBeNull();
+    unmount();
+  } finally {
+    engine.free();
+  }
+});
+
+test('default worker mode builds every page and never requests releases', async () => {
+  const { engine, result, unmount } = renderReleaseFixture(false);
+  try {
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    await act(async () => {
+      result.current.setDisplayWindow(20, 22);
+      result.current.setRetainBuiltPages!(false);
+    });
+    await idleUntil(() => result.current.frame!.displayList.pages.every((page) => !page.unbuilt));
+    expect(worker.releaseRequests).toBe(0);
+    expect(worker.posted.some((request) => request.type === 'releasePages')).toBe(false);
+    unmount();
+  } finally {
+    engine.free();
+  }
+});
+
+test('worker-open delays release while the caret is in the typing window', async () => {
+  const { engine, result, unmount } = renderReleaseFixture();
+  let now = performance.now();
+  const clock = spyOn(performance, 'now').mockImplementation(() => now);
+  try {
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    await act(async () => result.current.setDisplayWindow(20, 22));
+    await idleUntil(() => result.current.frame!.displayList.pages.slice(18, 24).every((page) => !page.unbuilt));
+    await act(async () => result.current.notifyCaretInput());
+    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      runIdleCallbacks();
+    });
+    expect(worker.releaseRequests).toBe(0);
+    now += 501;
+    await waitFor(async () => {
+      await act(async () => runIdleCallbacks());
+      expect(worker.releasedIndices.length).toBeGreaterThan(0);
+    });
+    expect(result.current.frame!.displayList.pages[1]!.unbuilt).toBe(true);
+    unmount();
+  } finally {
+    clock.mockRestore();
+    engine.free();
+  }
+});
