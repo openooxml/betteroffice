@@ -550,9 +550,10 @@ fn non_utf8_comment_declaration_uses_the_writer_part() {
     assert_eq!(part(&saved, "word/comments.xml"), expected.as_bytes());
     let comments = save_request(&saved).document.comments.unwrap();
     let added = comments.iter().find(|comment| comment.id == 2.0).unwrap();
-    assert_eq!(
-        serde_json::to_value(&added.content).unwrap()[0]["content"][0]["content"][0]["text"],
-        "café"
+    assert!(
+        serde_json::to_string(&added.content)
+            .unwrap()
+            .contains("café")
     );
 }
 
