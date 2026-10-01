@@ -35,7 +35,7 @@ impl Marks {
 }
 
 /// Run content that takes a position in the text, besides `w:t` and `w:delText` characters.
-const POSITIONED: [&str; 18] = [
+const POSITIONED: [&str; 19] = [
     "w:tab",
     "w:ptab",
     "w:br",
@@ -54,6 +54,7 @@ const POSITIONED: [&str; 18] = [
     "w:separator",
     "w:continuationSeparator",
     "w:annotationRef",
+    "m:oMath",
 ];
 
 fn marks(xml: &str) -> Option<Marks> {
@@ -257,7 +258,9 @@ fn declared_root(
 /// namespace bindings an element between the root and a paragraph declares.
 #[derive(Default)]
 struct Structure {
-    groups: Vec<BTreeSet<u32>>,
+    /// Each group as the first and last of its paragraphs in source order, overlapping groups
+    /// merged.
+    groups: Vec<(u32, u32)>,
     pinned: BTreeSet<u32>,
     bindings: HashMap<u32, Vec<(String, String)>>,
 }
@@ -274,16 +277,11 @@ fn structure(source: &str, spans: &BTreeMap<u32, Range<usize>>) -> Option<Struct
         .map(|(i, (o, _))| (*o, i))
         .collect();
     let mut result = Structure::default();
-    let link = |from: Option<u32>, to: Option<u32>, result: &mut Structure| match (from, to) {
+    let mut intervals: Vec<(usize, usize)> = Vec::new();
+    let mut link = |from: Option<u32>, to: Option<u32>, result: &mut Structure| match (from, to) {
         (Some(from), Some(to)) if from != to => {
-            let (low, high) = if index[&from] <= index[&to] {
-                (index[&from], index[&to])
-            } else {
-                (index[&to], index[&from])
-            };
-            result
-                .groups
-                .push(order[low..=high].iter().map(|(o, _)| *o).collect());
+            let (from, to) = (index[&from], index[&to]);
+            intervals.push((from.min(to), from.max(to)));
         }
         (Some(paragraph), None) | (None, Some(paragraph)) => {
             result.pinned.insert(paragraph);
@@ -335,13 +333,15 @@ fn structure(source: &str, spans: &BTreeMap<u32, Range<usize>>) -> Option<Struct
                 .unwrap_or_default()
         };
         if tag.name == "w:fldChar" {
-            match attribute(&tag, "w:fldCharType").map(|range| &source[range]) {
-                Some("begin") => fields.push(here),
-                Some("end") => {
+            let kind = unescaped(source, attribute(&tag, "w:fldCharType")?)?;
+            match kind.trim() {
+                "begin" => fields.push(here),
+                "end" => {
                     let begin = fields.pop()?;
                     link(begin, here, &mut result);
                 }
-                _ => {}
+                "separate" => {}
+                _ => return None,
             }
             continue;
         }
@@ -371,6 +371,18 @@ fn structure(source: &str, spans: &BTreeMap<u32, Range<usize>>) -> Option<Struct
     for start in fields.into_iter().chain(open.into_values()) {
         link(start, None, &mut result);
     }
+    intervals.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (low, high) in intervals {
+        match merged.last_mut() {
+            Some(last) if low <= last.1 => last.1 = last.1.max(high),
+            _ => merged.push((low, high)),
+        }
+    }
+    result.groups = merged
+        .into_iter()
+        .map(|(low, high)| (order[low].0, order[high].0))
+        .collect();
     Some(result)
 }
 
@@ -432,15 +444,9 @@ pub(crate) fn splice_story_part(
         }
     }
     let structure = structure(source, &spans)?;
-    loop {
-        let before = replaced.len();
-        for group in &structure.groups {
-            if group.iter().any(|ordinal| replaced.contains(ordinal)) {
-                replaced.extend(group.iter().copied());
-            }
-        }
-        if replaced.len() == before {
-            break;
+    for &(first, last) in &structure.groups {
+        if replaced.range(first..=last).next().is_some() {
+            replaced.extend(spans.range(first..=last).map(|(ordinal, _)| *ordinal));
         }
     }
     if replaced
@@ -673,6 +679,77 @@ mod tests {
         assert!(splice(&source, &[(0, narrowed)], &[]).is_some_and(|xml| xml.contains(narrowed)));
         let tabs = "<w:p><w:pPr><w:tabs><w:tab w:val=\"left\" w:pos=\"720\"/></w:tabs></w:pPr><w:commentRangeStart w:id=\"1\"/><w:r><w:tab/><w:tab/></w:r><w:commentRangeEnd w:id=\"1\"/><w:r><w:commentReference w:id=\"1\"/></w:r></w:p>";
         assert_eq!(splice(&source, &[(0, tabs)], &[]), Some(source.clone()));
+    }
+
+    #[test]
+    fn a_comment_range_moved_across_an_equation_rewrites_the_paragraph() {
+        let math = "<m:oMath xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"><m:r><m:t>x</m:t></m:r></m:oMath>";
+        let source = format!(
+            "{ROOT}<w:body><w:p><w:commentRangeStart w:id=\"1\"/>{math}{math}<w:commentRangeEnd w:id=\"1\"/><w:r><w:commentReference w:id=\"1\"/></w:r></w:p></w:body></w:document>"
+        );
+        let narrowed = format!(
+            "<w:p>{math}<w:commentRangeStart w:id=\"1\"/>{math}<w:commentRangeEnd w:id=\"1\"/><w:r><w:commentReference w:id=\"1\"/></w:r></w:p>"
+        );
+        assert!(
+            splice(&source, &[(0, narrowed.as_str())], &[])
+                .is_some_and(|xml| xml.contains(&narrowed))
+        );
+    }
+
+    #[test]
+    fn a_field_end_written_with_character_references_still_closes_its_field() {
+        let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First</w:t></w:r></w:p>";
+        let closing = "<w:p><w:r><w:t>Second</w:t></w:r><w:r><w:fldChar w:fldCharType=\"e&#110;d\"/></w:r></w:p>";
+        let source = format!("{ROOT}<w:body>{opening}{closing}</w:body></w:document>");
+        let written_opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        let written_closing = "<w:p><w:r><w:t>Second, edited</w:t></w:r></w:p>";
+        assert_eq!(
+            splice(&source, &[(0, written_opening), (1, written_closing)], &[1]),
+            Some(format!(
+                "{ROOT}<w:body>{written_opening}{written_closing}</w:body></w:document>"
+            ))
+        );
+        let unknown = "<w:p><w:r><w:fldChar w:fldCharType=\"other\"/></w:r></w:p>";
+        let source = format!("{ROOT}<w:body>{unknown}</w:body></w:document>");
+        assert_eq!(splice(&source, &[(0, unknown)], &[]), None);
+    }
+
+    #[test]
+    fn overlapping_ranges_are_rewritten_together_and_separate_ones_are_not() {
+        let paragraph =
+            |index: usize, marks: &str| format!("<w:p>{marks}<w:r><w:t>{index}</w:t></w:r></w:p>");
+        let marks = [
+            "<w:bookmarkStart w:id=\"1\" w:name=\"a\"/>",
+            "",
+            "<w:bookmarkEnd w:id=\"1\"/><w:bookmarkStart w:id=\"2\" w:name=\"b\"/>",
+            "<w:bookmarkEnd w:id=\"2\"/>",
+            "<w:bookmarkStart w:id=\"3\" w:name=\"c\"/>",
+            "<w:bookmarkEnd w:id=\"3\"/>",
+        ];
+        let source_paragraphs: Vec<String> = marks
+            .iter()
+            .enumerate()
+            .map(|(index, marks)| paragraph(index, marks))
+            .collect();
+        let written_paragraphs: Vec<String> = source_paragraphs
+            .iter()
+            .map(|xml| xml.replace("</w:p>", "<w:r/></w:p>"))
+            .collect();
+        let source = format!(
+            "{ROOT}<w:body>{}</w:body></w:document>",
+            source_paragraphs.concat()
+        );
+        let written: Vec<(u32, &str)> = written_paragraphs
+            .iter()
+            .enumerate()
+            .map(|(index, xml)| (index as u32, xml.as_str()))
+            .collect();
+        let expected = format!(
+            "{ROOT}<w:body>{}{}</w:body></w:document>",
+            written_paragraphs[..4].concat(),
+            source_paragraphs[4..].concat()
+        );
+        assert_eq!(splice(&source, &written, &[3]), Some(expected));
     }
 
     #[test]

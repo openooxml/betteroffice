@@ -1977,6 +1977,28 @@ fn story_parts_that_keep_their_paragraphs_splice_with_only_the_edited_ones_chang
 }
 
 #[test]
+fn a_moved_comment_anchor_changes_only_its_paragraph() {
+    let doc = seeded(&fixture());
+    let valid = key_of(&doc, "body", "Valid");
+    let body = spliced(&doc, "word/document.xml").unwrap();
+    let ordinal = body
+        .paragraphs
+        .iter()
+        .find(|(_, key)| *key == valid)
+        .unwrap()
+        .0;
+    let anchors = doc.resolve_comment("1").unwrap();
+    assert_eq!(anchors.len(), 1);
+    let (start, end) = (anchors[0].start, anchors[0].end);
+    doc.set_comment_ranges("1", &[StoryRange::new("body", start + 1, end)])
+        .unwrap();
+    assert_eq!(
+        spliced(&doc, "word/document.xml").unwrap().changed,
+        vec![ordinal]
+    );
+}
+
+#[test]
 fn a_spliced_save_rewrites_only_the_edited_paragraph() {
     let bytes = fixture();
     let doc = seeded(&bytes);

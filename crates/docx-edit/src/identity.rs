@@ -574,14 +574,15 @@ fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
     scan.stories
         .iter()
         .filter_map(|story| {
-            let (fingerprint, units) = story_fingerprint(doc, story)?;
+            let comments = comments.remove(story).unwrap_or_default();
+            let (fingerprint, units) = story_fingerprint(doc, story, &comments)?;
             Some((
                 story.clone(),
                 StoryState {
                     root: scan.root(story).to_owned(),
                     fingerprint,
                     units,
-                    comments: comments.remove(story).unwrap_or_default(),
+                    comments,
                 },
             ))
         })
@@ -589,9 +590,14 @@ fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
 }
 
 /// Each paragraph's [`UnitState`], hashing its save segments with media tokens expanded, map
-/// keys sorted and nulls kept, and the SHA-256 of those digests in order.
+/// keys sorted and nulls kept, and the starts and ends of the `comments` anchored in it relative
+/// to its first segment; and the SHA-256 of those digests in order.
 /// [`EditingDoc::story_segments`] already excludes paragraph identities.
-fn story_fingerprint(doc: &EditingDoc, story: &str) -> Option<([u8; 32], Vec<UnitState>)> {
+fn story_fingerprint(
+    doc: &EditingDoc,
+    story: &str,
+    comments: &BTreeMap<String, Vec<(u32, u32)>>,
+) -> Option<([u8; 32], Vec<UnitState>)> {
     use sha2::{Digest, Sha256};
     fn ordered(value: &Any) -> serde_json::Value {
         match value {
@@ -614,10 +620,22 @@ fn story_fingerprint(doc: &EditingDoc, story: &str) -> Option<([u8; 32], Vec<Uni
     if let Some(media) = doc.media_table() {
         crate::media::write_segment_data_urls(&mut segments, &media).ok()?;
     }
+    let mut boundaries: Vec<(u32, &str, bool)> = comments
+        .iter()
+        .flat_map(|(key, anchors)| {
+            anchors.iter().flat_map(move |(start, end)| {
+                [(*start, key.as_str(), false), (*end, key.as_str(), true)]
+            })
+        })
+        .collect();
+    boundaries.sort_unstable();
+    let mut boundaries = boundaries.into_iter().peekable();
     let mut units = Vec::new();
     let mut unit = Sha256::new();
     let mut blocks = Sha256::new();
     let mut inline = false;
+    let mut start = 0u32;
+    let mut position = 0u32;
     for segment in segments {
         let content = match &segment.content {
             crate::SegmentContent::Text(text) => serde_json::json!({ "text": text }),
@@ -632,13 +650,23 @@ fn story_fingerprint(doc: &EditingDoc, story: &str) -> Option<([u8; 32], Vec<Uni
         let bytes = serde_json::to_vec(&entry).ok()?;
         unit.update(&bytes);
         unit.update(b"\n");
+        position += match &segment.content {
+            crate::SegmentContent::Text(text) => u32::try_from(text.encode_utf16().count()).ok()?,
+            _ => 1,
+        };
         match &segment.content {
-            crate::SegmentContent::Pilcrow(properties) => units.push(UnitState {
-                key: Some(properties.para_id.clone()),
-                digest: std::mem::take(&mut unit).finalize().into(),
-                blocks: std::mem::take(&mut blocks).finalize().into(),
-                inline: std::mem::take(&mut inline),
-            }),
+            crate::SegmentContent::Pilcrow(properties) => {
+                while let Some((at, key, end)) = boundaries.next_if(|(at, ..)| *at < position) {
+                    unit.update(serde_json::to_vec(&(at - start, key, end)).ok()?);
+                }
+                start = position;
+                units.push(UnitState {
+                    key: Some(properties.para_id.clone()),
+                    digest: std::mem::take(&mut unit).finalize().into(),
+                    blocks: std::mem::take(&mut blocks).finalize().into(),
+                    inline: std::mem::take(&mut inline),
+                });
+            }
             crate::SegmentContent::OtherEmbed { kind, .. }
                 if matches!(kind.as_str(), "table" | "blockSdt") =>
             {
@@ -647,6 +675,9 @@ fn story_fingerprint(doc: &EditingDoc, story: &str) -> Option<([u8; 32], Vec<Uni
             }
             _ => inline = true,
         }
+    }
+    for (at, key, end) in boundaries {
+        unit.update(serde_json::to_vec(&(at.saturating_sub(start), key, end)).ok()?);
     }
     let trailing = unit.finalize().into();
     let empty: [u8; 32] = Sha256::new().finalize().into();
@@ -2456,11 +2487,11 @@ mod tests {
                 doc
             };
             let default = document(&url);
-            let expected = story_fingerprint(&default, "body").unwrap();
+            let expected = story_fingerprint(&default, "body", &BTreeMap::new()).unwrap();
             let segments = default.story_segments("body").unwrap();
             default.install_media(table.clone());
             assert_eq!(
-                story_fingerprint(&default, "body"),
+                story_fingerprint(&default, "body", &BTreeMap::new()),
                 Some(expected.clone()),
                 "{key}"
             );
@@ -2470,13 +2501,17 @@ mod tests {
             let tokens = document("media:0");
             tokens.install_media(table.clone());
             assert_eq!(
-                story_fingerprint(&tokens, "body"),
+                story_fingerprint(&tokens, "body", &BTreeMap::new()),
                 Some(expected.clone()),
                 "{key}"
             );
             let changed = document("data:image/png;base64,AQIDBQ==");
             changed.install_media(table.clone());
-            assert_ne!(story_fingerprint(&changed, "body"), Some(expected), "{key}");
+            assert_ne!(
+                story_fingerprint(&changed, "body", &BTreeMap::new()),
+                Some(expected),
+                "{key}"
+            );
         }
     }
 
