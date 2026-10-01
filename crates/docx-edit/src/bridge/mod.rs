@@ -1830,11 +1830,7 @@ fn image_outline(
         })
         .or_else(|| map_string(values, "borderColor").map(|color| css_hex(&color)))?;
     Some(CellBorderSpec {
-        width: Some(
-            map_number(values, "borderWidth")
-                .filter(|width| *width > 0.0)
-                .unwrap_or(1.0),
-        ),
+        width: Some(map_number(values, "borderWidth").unwrap_or(1.0)),
         color: Some(color),
         style: Some(map_string(values, "borderStyle").unwrap_or_else(|| "solid".to_owned())),
     })
