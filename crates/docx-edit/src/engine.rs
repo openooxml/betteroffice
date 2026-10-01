@@ -2400,7 +2400,9 @@ impl EngineSession {
             if pending.version != self.doc.version()
                 || pending.prepared.fonts != docx_layout::measure_fonts_generation()
             {
-                return Err("the document or its fonts changed since the region layout began".into());
+                return Err(
+                    "the document or its fonts changed since the region layout began".into(),
+                );
             }
             let prepared = &pending.prepared;
             if !prepared.snapshot_eligible {

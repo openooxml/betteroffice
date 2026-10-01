@@ -239,10 +239,8 @@ fn snapshot_body(body: &str) -> Vec<u8> {
 fn floating_table(anchor: &str, index: usize) -> String {
     format!(
         r#"<w:tbl><w:tblPr><w:tblpPr w:leftFromText="120" w:rightFromText="120" {anchor} w:horzAnchor="text" w:tblpY="60"/><w:tblW w:w="1800" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="1800"/></w:tblGrid>{rows}</w:tbl>"#,
-        rows = format!(
-            "<w:tr><w:tc><w:p><w:r><w:t>Float {index}</w:t></w:r></w:p></w:tc></w:tr>"
-        )
-        .repeat(4)
+        rows = format!("<w:tr><w:tc><w:p><w:r><w:t>Float {index}</w:t></w:r></w:p></w:tc></w:tr>")
+            .repeat(4)
     )
 }
 
@@ -337,7 +335,11 @@ fn snapshots_preserve_pages_progress_and_final_retained_state() {
                 }
                 let before_snapshot = serde_json::to_string(&progress).unwrap();
                 let snapshot = engine.region_layout_snapshot_json().unwrap();
-                assert_eq!(snapshot.is_some(), coverage.is_some(), "{name}: safe prefix");
+                assert_eq!(
+                    snapshot.is_some(),
+                    coverage.is_some(),
+                    "{name}: safe prefix"
+                );
                 if let Some(json) = snapshot {
                     snapshots += 1;
                     let snapshot: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -352,13 +354,13 @@ fn snapshots_preserve_pages_progress_and_final_retained_state() {
                         "{name}: {blocks} blocks a step, {} measured",
                         progress.measured_blocks
                     );
-                    let prefix_kernel: serde_json::Value = serde_json::from_str(
-                        &engine.retained_kernel_inputs_json().unwrap(),
-                    )
-                    .unwrap();
+                    let prefix_kernel: serde_json::Value =
+                        serde_json::from_str(&engine.retained_kernel_inputs_json().unwrap())
+                            .unwrap();
                     assert_eq!(last_covered_position(&prefix_kernel), coverage);
                     assert!(
-                        prefix_kernel["measured"].as_array().unwrap().len() <= progress.measured_blocks
+                        prefix_kernel["measured"].as_array().unwrap().len()
+                            <= progress.measured_blocks
                     );
                     let frame = engine.build_display_list_frame("{}", frame_epoch).unwrap();
                     let next_epoch = u64::from_le_bytes(frame[32..40].try_into().unwrap());
@@ -462,7 +464,10 @@ fn assert_snapshots_refused(bytes: &[u8], font: u32, references_only: bool) {
     }
     assert!(refused_prefixes > 0);
     assert_eq!(progress.layout_json.unwrap(), expected);
-    assert_eq!(engine.retained_kernel_inputs_json().unwrap(), expected_kernel);
+    assert_eq!(
+        engine.retained_kernel_inputs_json().unwrap(),
+        expected_kernel
+    );
 }
 
 #[test]
@@ -489,7 +494,10 @@ fn coupled_floats_refuse_snapshots_and_finish_alike() {
         "{}{}{}",
         p("00000001", &r("Before the inside shape")),
         p("00000002", INSIDE_SHAPE),
-        p("00000003", &r(&"Body text wraps around the shape. ".repeat(20))),
+        p(
+            "00000003",
+            &r(&"Body text wraps around the shape. ".repeat(20))
+        ),
     );
     assert_snapshots_refused(&snapshot_body(&body), font, false);
 }
@@ -512,11 +520,7 @@ fn notes_and_balanced_columns_refuse_snapshots() {
     let bytes = with_body_and_note(&body, &p("", &r("Note content")));
     assert_snapshots_refused(&bytes, font, false);
     assert_snapshots_refused(&bytes, font, true);
-    let body = format!(
-        "{}{}",
-        p("", &r("Columns")).repeat(20),
-        section(2, true)
-    );
+    let body = format!("{}{}", p("", &r("Columns")).repeat(20), section(2, true));
     assert_snapshots_refused(&snapshot_body(&body), font, false);
 }
 
