@@ -430,7 +430,8 @@ pub fn measure_paragraph_typed(
         .map(|font| (font, mark_size_pt));
 
     let body_width = (request.max_width - insets.left - insets.right).max(1.0);
-    let first_line_width = (body_width - insets.first_line).max(1.0);
+    let first_line_width =
+        (body_width - insets.first_line_offset - insets.marker_inline_width).max(1.0);
 
     let mut extent = line_filler::fill(line_filler::FillParams {
         justify: attrs.and_then(|attrs| attrs.alignment.as_deref()) == Some("justify"),
@@ -465,8 +466,8 @@ struct LineInsets {
     right: f32,
     /// Offset of the first line's text from the left indent.
     first_line_offset: f32,
-    /// Everything the first line loses beyond `left + right`.
-    first_line: f32,
+    /// Width an inline (zero-hanging) list marker takes from the first line.
+    marker_inline_width: f32,
     marker_tab_overrun: f32,
 }
 
@@ -503,7 +504,7 @@ fn line_insets(
         left: indent.and_then(|i| i.left).unwrap_or(0.0),
         right: indent.and_then(|i| i.right).unwrap_or(0.0),
         first_line_offset,
-        first_line: first_line_offset + marker_inline_width,
+        marker_inline_width,
         marker_tab_overrun,
     })
 }
@@ -538,7 +539,10 @@ pub fn min_content_width_typed(
     let insets = line_insets(store, request)?;
     let prepared = prepare::prepare_runs(store, request)?;
     let (widest, first) = line_filler::unbreakable_spans(&prepared, runs);
-    Ok((insets.left + insets.right + widest.max(first + insets.first_line)).max(0.0))
+    Ok((insets.left
+        + insets.right
+        + widest.max(first + insets.first_line_offset + insets.marker_inline_width))
+    .max(0.0))
 }
 
 /// JSON boundary: a [`MeasureInput`] envelope in, a serialized

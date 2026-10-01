@@ -8,9 +8,9 @@ use serde_json::Value;
 use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offset};
 use crate::floating_objects::{MIN_WRAP_SEGMENT_WIDTH, table_wrap_gaps};
 use crate::table_grid::{
-    ResolvedGridCell, content_sized_columns, count_table_columns, fits_columns_to_words,
-    grow_content_sized_columns, resolve_cell_grid, resolve_table_column_widths,
-    resolve_table_width_px, widen_columns_to_minimums,
+    ResolvedGridCell, WIDEN_TOLERANCE_PX, content_sized_columns, count_table_columns,
+    fits_columns_to_words, grow_content_sized_columns, resolve_cell_grid,
+    resolve_table_column_widths, resolve_table_width_px, widen_columns_to_minimums,
 };
 use crate::types::{
     BlockExtent, BlockId, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition,
@@ -2431,34 +2431,129 @@ fn starts_a_line_inside_a_word(paragraph: &ParagraphBlock, extent: &ParagraphExt
         Some(Run::Text(run)) if !run.text.is_empty() => Some(run.text.as_str()),
         _ => None,
     };
+    let mut cursor = (usize::MAX, 0usize, 0usize);
+    let mut opportunities: (usize, Vec<usize>) = (usize::MAX, Vec::new());
     extent.lines.iter().skip(1).any(|line| {
         let Some(current) = text(line.head_run) else {
             return false;
         };
-        let mut units = 0usize;
-        for (byte, character) in current.char_indices() {
-            if units > line.head_char {
-                return false;
-            }
-            if units == line.head_char {
-                let Some(before) = current[..byte].chars().next_back() else {
-                    return line
-                        .head_run
-                        .checked_sub(1)
-                        .and_then(text)
-                        .and_then(|previous| previous.chars().next_back())
-                        .is_some_and(|last| !ooxml_text::break_allowed_between(last, character));
-                };
-                return !before.is_whitespace()
-                    && !character.is_whitespace()
-                    && !ooxml_text::break_opportunities(current)
-                        .iter()
-                        .any(|opportunity| opportunity.byte_index == byte);
-            }
-            units += character.len_utf16();
+        if cursor.0 != line.head_run || cursor.2 > line.head_char {
+            cursor = (line.head_run, 0, 0);
         }
-        false
+        let (_, mut byte, mut units) = cursor;
+        while units < line.head_char {
+            let Some(character) = current[byte..].chars().next() else {
+                break;
+            };
+            units += character.len_utf16();
+            byte += character.len_utf8();
+        }
+        cursor = (line.head_run, byte, units);
+        let Some(character) = current[byte..]
+            .chars()
+            .next()
+            .filter(|_| units == line.head_char)
+        else {
+            return false;
+        };
+        let Some(before) = current[..byte].chars().next_back() else {
+            let previous = paragraph.runs[..line.head_run]
+                .iter()
+                .rev()
+                .find(|candidate| !matches!(candidate, Run::Text(run) if run.text.is_empty()));
+            return matches!(previous, Some(Run::Text(previous)) if previous
+                .text
+                .chars()
+                .next_back()
+                .is_some_and(|last| !ooxml_text::break_allowed_between(last, character)));
+        };
+        if breaking_space(before) || breaking_space(character) {
+            return false;
+        }
+        if opportunities.0 != line.head_run {
+            opportunities = (
+                line.head_run,
+                ooxml_text::break_opportunities(current)
+                    .iter()
+                    .map(|opportunity| opportunity.byte_index)
+                    .collect(),
+            );
+        }
+        opportunities.1.binary_search(&byte).is_err()
     })
+}
+
+/// Whitespace a line may break at; no-break spaces keep their word together.
+fn breaking_space(character: char) -> bool {
+    character.is_whitespace() && !matches!(character, '\u{00A0}' | '\u{2007}' | '\u{202F}')
+}
+
+/// The narrowest width that holds the widest word of the cell at `entry`,
+/// margins included: `Some(None)` when the cell holds anything but
+/// paragraphs, `None` when the entry names no cell.
+fn cell_content_minimum(
+    table: &TableBlock,
+    entry: &ResolvedGridCell,
+    rows: &[TableRowExtent],
+    content_width: f64,
+    config: &MeasurementConfig,
+) -> Option<Option<f64>> {
+    let cell = table
+        .rows
+        .get(entry.row_index)
+        .and_then(|row| row.cells.get(entry.cell_index))?;
+    let padding = cell
+        .padding
+        .as_ref()
+        .map_or(2.0 * DEFAULT_CELL_PADDING_X, |padding| {
+            padding.left + padding.right
+        });
+    let content = if is_rotated(cell) {
+        rows.get(entry.row_index)
+            .and_then(|row| row.cells.get(entry.cell_index))
+            .map(|measured| measured.blocks.iter().map(extent_height).sum::<f64>())
+    } else {
+        cell.blocks
+            .iter()
+            .try_fold(0.0_f64, |widest, block| match block {
+                LayoutBlock::Paragraph(paragraph) => {
+                    crate::typed_measure::min_content_width(paragraph, content_width, config)
+                        .map(|width| widest.max(width))
+                }
+                _ => None,
+            })
+    };
+    Some(content.map(|content| content + padding))
+}
+
+/// Whether every cell spanning several columns that held its widest word at
+/// `before` still holds it at `after`.
+fn spanning_cells_keep_their_words(
+    table: &TableBlock,
+    grid: &[ResolvedGridCell],
+    rows: &[TableRowExtent],
+    before: &[f64],
+    after: &[f64],
+    content_width: f64,
+    config: &MeasurementConfig,
+) -> bool {
+    let spanned = |widths: &[f64], entry: &ResolvedGridCell| -> f64 {
+        widths
+            .iter()
+            .skip(entry.column_index)
+            .take(entry.col_span)
+            .sum()
+    };
+    grid.iter()
+        .filter(|entry| entry.col_span > 1)
+        .all(|entry| {
+            let (was, now) = (spanned(before, entry), spanned(after, entry));
+            now >= was
+                || !matches!(
+                    cell_content_minimum(table, entry, rows, content_width, config),
+                    Some(Some(minimum)) if minimum <= was + WIDEN_TOLERANCE_PX && minimum > now + WIDEN_TOLERANCE_PX
+                )
+        })
 }
 
 /// Per column, the narrowest width that holds the widest word of every cell
@@ -2480,44 +2575,16 @@ fn column_content_minimums(
             continue;
         }
         let column = entry.column_index;
-        let Some(cell) = table
-            .rows
-            .get(entry.row_index)
-            .and_then(|row| row.cells.get(entry.cell_index))
-        else {
-            continue;
-        };
-        let padding = cell
-            .padding
-            .as_ref()
-            .map_or(2.0 * DEFAULT_CELL_PADDING_X, |padding| {
-                padding.left + padding.right
-            });
-        let content = if is_rotated(cell) {
-            rows.get(entry.row_index)
-                .and_then(|row| row.cells.get(entry.cell_index))
-                .map(|measured| measured.blocks.iter().map(extent_height).sum::<f64>())
-        } else {
-            cell.blocks
-                .iter()
-                .try_fold(0.0_f64, |widest, block| match block {
-                    LayoutBlock::Paragraph(paragraph) => {
-                        crate::typed_measure::min_content_width(paragraph, content_width, config)
-                            .map(|width| widest.max(width))
-                    }
-                    _ => None,
-                })
-        };
-        match content {
-            Some(content) => {
-                let width = content + padding;
+        match cell_content_minimum(table, entry, rows, content_width, config) {
+            Some(Some(width)) => {
                 minimums[column] = if minimums[column].is_nan() {
                     width
                 } else {
                     minimums[column].max(width)
                 };
             }
-            None => pinned[column] = true,
+            Some(None) => pinned[column] = true,
+            None => {}
         }
     }
     for (minimum, pinned) in minimums.iter_mut().zip(pinned) {
@@ -2551,21 +2618,31 @@ fn measure_table(
         target_width,
         config,
     )?;
-    if fits_columns_to_words(table)
-        && table_breaks_inside_a_word(table, &rows)
-        && widen_columns_to_minimums(
+    if fits_columns_to_words(table) && table_breaks_inside_a_word(table, &rows) {
+        let before = column_widths.clone();
+        if widen_columns_to_minimums(
             &mut column_widths,
             &column_content_minimums(table, &grid, &rows, content_width, config),
-        )
-    {
-        rows = measure_table_cells(
+        ) && spanning_cells_keep_their_words(
             table,
             &grid,
+            &rows,
+            &before,
             &column_widths,
             content_width,
-            target_width,
             config,
-        )?;
+        ) {
+            rows = measure_table_cells(
+                table,
+                &grid,
+                &column_widths,
+                content_width,
+                target_width,
+                config,
+            )?;
+        } else {
+            column_widths = before;
+        }
     }
 
     let mut exact = vec![false; rows.len()];
@@ -4868,7 +4945,15 @@ mod tests {
         assert_eq!(extent.rows[0].cells[1].width, 100.0);
     }
 
-    fn word_table(layout: Option<&str>) -> (TableExtent, ParagraphExtent) {
+    fn word_cell(text: &str, span: usize) -> serde_json::Value {
+        json!({"id":text,"colSpan":span,"padding":{"top":0,"bottom":0,"left":1,"right":1},"blocks":[
+            {"kind":"paragraph","id":text,"runs":[{"kind":"text","text":text}]}]})
+    }
+
+    fn word_table_rows(
+        layout: Option<&str>,
+        rows: Vec<Vec<serde_json::Value>>,
+    ) -> (TableExtent, ParagraphExtent) {
         let font = crate::register_measure_font(include_bytes!(
             "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
         ))
@@ -4878,13 +4963,14 @@ mod tests {
             defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
             ..Default::default()
         };
-        let cell = |text: &str| {
-            json!({"id":text,"padding":{"top":0,"bottom":0,"left":1,"right":1},"blocks":[
-                {"kind":"paragraph","id":text,"runs":[{"kind":"text","text":text}]}]})
-        };
+        let rows: Vec<_> = rows
+            .into_iter()
+            .enumerate()
+            .map(|(index, cells)| json!({"id":format!("row{index}"),"cells":cells}))
+            .collect();
         let mut table = json!({
             "kind":"table","id":"words","columnWidths":[60,100,100],"width":3900,"widthType":"dxa",
-            "rows":[{"id":"row","cells":[cell("0000000000"), cell("00 00"), cell("0 0")]}]
+            "rows":rows
         });
         if let Some(layout) = layout {
             table["layoutMode"] = json!(layout);
@@ -4898,6 +4984,17 @@ mod tests {
             panic!()
         };
         (extent, paragraph)
+    }
+
+    fn word_table(layout: Option<&str>) -> (TableExtent, ParagraphExtent) {
+        word_table_rows(
+            layout,
+            vec![vec![
+                word_cell("0000000000", 1),
+                word_cell("00 00", 1),
+                word_cell("0 0", 1),
+            ]],
+        )
     }
 
     #[test]
@@ -4919,5 +5016,41 @@ mod tests {
         let (extent, paragraph) = word_table(Some("fixed"));
         assert_eq!(extent.column_widths, vec![60.0, 100.0, 100.0]);
         assert_eq!(paragraph.lines.len(), 2);
+    }
+
+    #[test]
+    fn a_no_break_space_keeps_its_word_together_when_the_column_widens() {
+        let word = 9.0 * 1139.0 / 128.0 + 569.0 / 128.0 + 2.0;
+        let (extent, paragraph) = word_table_rows(
+            None,
+            vec![vec![
+                word_cell("000000\u{00A0}000", 1),
+                word_cell("00 00", 1),
+                word_cell("0 0", 1),
+            ]],
+        );
+        assert_eq!(paragraph.lines.len(), 1);
+        assert!((extent.column_widths[0] - word).abs() < 1e-3);
+    }
+
+    #[test]
+    fn columns_keep_their_widths_when_widening_would_break_a_word_in_a_spanning_cell() {
+        let (extent, paragraph) = word_table_rows(
+            None,
+            vec![
+                vec![
+                    word_cell("0000000000", 1),
+                    word_cell("00 00", 1),
+                    word_cell("0 0", 1),
+                ],
+                vec![word_cell("0", 1), word_cell("00000000000000000000", 2)],
+            ],
+        );
+        assert_eq!(extent.column_widths, vec![60.0, 100.0, 100.0]);
+        assert_eq!(paragraph.lines.len(), 2);
+        let BlockExtent::Paragraph(spanning) = &extent.rows[1].cells[1].blocks[0] else {
+            panic!()
+        };
+        assert_eq!(spanning.lines.len(), 1);
     }
 }
