@@ -1657,6 +1657,115 @@ test('a provisional layout paints first and settles only once the full layout fo
   }
 });
 
+test('a provisional input frame paints without settling the waiting full layout', async () => {
+  const { native, paraId, layoutJson, frame, engine } = setup();
+  native.set_selection('body', paraId, 0, paraId, 0);
+  Object.assign(engine, {
+    selection: () => JSON.parse(native.selection()) as YrsSelection,
+    applyLocalUpdate: mock(() => {}),
+  });
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) => useRustDisplayList(layout, undefined, undefined, undefined, source),
+      { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+    );
+    const pending = result.current.layoutInWorker(engine, REQUEST);
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null }, selection: engine.selection(),
+      layoutRevision: 1, layoutJson, layoutProvisional: true,
+    });
+    const provisional = (await pending!)!;
+    await act(async () => rerender({ layout: provisional.layout, source: engine }));
+    await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(1));
+    await act(async () => {
+      const attaching = result.current.attachOffscreenCanvases(
+        [], [], 1, 1, { color: '#000', width: 2 }
+      );
+      worker.reply({ id: worker.posted[1].id, ok: true });
+      expect(await attaching).toBe(true);
+    });
+    await waitFor(() => expect(worker.posted[2]).toMatchObject({ type: 'completeLayout' }));
+    let settled = false;
+    void result.current.settledDisplayList(() => {}).then(() => { settled = true; });
+    const input = result.current.applyInput('!');
+    await waitFor(() => expect(worker.posted[3]).toMatchObject({
+      type: 'applyInput', expectedFrameEpoch: 1,
+    }));
+    const inputFrame = native.apply_input('!', 1);
+    await act(async () => {
+      worker.reply({
+        id: worker.posted[3].id, ok: true, frame: inputFrame.slice().buffer, updates: [],
+        caret: { frameEpoch: 2, caretRect: null }, selection: engine.selection(),
+        layoutRevision: 1, layoutProvisional: true,
+      });
+      expect(await input).toMatchObject({ frameEpoch: 2 });
+    });
+    await act(async () => {});
+    expect(result.current.frame?.frameEpoch).toBe(2);
+    expect(settled).toBe(false);
+
+    const full = laidOut(native, 2);
+    worker.reply({
+      id: worker.posted[2].id, ok: true, frame: full.frame.slice().buffer,
+      caret: { frameEpoch: 3, caretRect: null }, selection: engine.selection(),
+      layoutRevision: 1, layoutJson: full.layoutJson,
+    });
+    const complete = (await provisional.complete!)!;
+    await act(async () => rerender({ layout: complete.layout, source: engine }));
+    expect(worker.posted[4]).toMatchObject({ type: 'buildFrame', expectedFrameEpoch: 2 });
+    const completeFrame = native.build_display_list_frame('{}', 2);
+    await act(async () => {
+      worker.reply({
+        id: worker.posted[4].id, ok: true, frame: completeFrame.slice().buffer,
+        caret: { frameEpoch: 4, caretRect: null }, selection: engine.selection(), layoutRevision: 1,
+      });
+    });
+    await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(4));
+    await waitFor(() => expect(settled).toBe(true));
+    unmount();
+  } finally {
+    native.free();
+  }
+});
+
+test('host relayout sync is foreground only within the painted-caret input window', async () => {
+  const { native, layoutJson, frame, engine } = setup();
+  const clock = spyOn(performance, 'now').mockReturnValue(1000);
+  try {
+    const { result, unmount } = renderHook(() => useRustDisplayList(null));
+    const bootstrap = result.current.layoutInWorker(engine, REQUEST);
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null }, selection: null, layoutRevision: 1, layoutJson,
+    });
+    await act(() => bootstrap!);
+    for (const [now, foreground] of [[1000, false], [1200, true], [1701, false]] as const) {
+      clock.mockReturnValue(now);
+      if (foreground) act(() => result.current.notifyCaretInput());
+      const pending = result.current.layoutInWorker(engine, REQUEST);
+      const request = worker.posted.at(-1)!;
+      expect(request).toMatchObject({ type: 'sync' });
+      if (foreground) expect(request).toHaveProperty('foreground', true);
+      else expect(request).not.toHaveProperty('foreground');
+      const nextFrame = native.build_display_list_frame('{}', 0);
+      const epoch = decodeFrameDelta(nextFrame.slice().buffer).frameEpoch;
+      worker.reply({
+        id: request.id, ok: true, frame: nextFrame.slice().buffer,
+        caret: { frameEpoch: epoch, caretRect: null }, selection: null,
+        layoutRevision: engine.residentWorkerProbe()!.layoutRevision, layoutJson,
+      });
+      expect(await act(() => pending!)).not.toBeNull();
+    }
+    unmount();
+  } finally {
+    clock.mockRestore();
+    native.free();
+  }
+});
+
 test('with worker open, a provisional layout names its engine until the rest is asked of the worker', async () => {
   const { native, layoutJson, frame, engine } = setup();
   try {

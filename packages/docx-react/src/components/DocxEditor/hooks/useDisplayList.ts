@@ -1100,7 +1100,8 @@ export function useRustDisplayList(
         setSnapshot(nextSnapshot);
         setError(null);
         setLoading(false);
-        markSettled(contentEpochRef.current);
+        // A frame of only the first pages settles nothing until the full layout follows.
+        if (!result.layoutProvisional) markSettled(contentEpochRef.current);
         applyPaintedCaretReply(Boolean(result.caretPainted && caret?.caretRect), paintToken);
         return {
           frameEpoch: nextFrame.frameEpoch,
@@ -1712,13 +1713,15 @@ export function useRustDisplayList(
             }
           : {}),
       };
-      const paintCaret =
-        !bootstrapping &&
-        workerPresentationActiveRef.current &&
-        paintedCaretMachine.shouldPaint(performance.now());
+      // A relayout right after the user's edit is one they wait on.
+      const foreground = !bootstrapping && paintedCaretMachine.shouldPaint(performance.now());
+      const paintCaret = foreground && workerPresentationActiveRef.current;
       const reply = bootstrapping
         ? worker.bootstrap(snapshot, '', options)
-        : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, options);
+        : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, {
+            ...options,
+            foreground,
+          });
       // A worker out of memory runs the pass again in a fresh worker; once
       // that one runs out too, the pass rejects and nothing lays out here.
       const unavailable = (
@@ -2198,10 +2201,8 @@ export function useRustDisplayList(
         });
         // Structural text input reaches the worker as a sync/buildFrame; keep
         // the painted caret glued to those frames while the typing burst lasts.
-        const paintCaret =
-          !bootstrapping &&
-          workerPresentationActiveRef.current &&
-          paintedCaretMachine.shouldPaint(performance.now());
+        const foreground = !bootstrapping && paintedCaretMachine.shouldPaint(performance.now());
+        const paintCaret = foreground && workerPresentationActiveRef.current;
         const snapshot =
           bootstrapping || worker.layoutRevision() !== probe.layoutRevision
             ? buildSnapshot()
@@ -2232,6 +2233,7 @@ export function useRustDisplayList(
                 : worker.sync(snapshot, extras, previousFrame?.frameEpoch ?? 0, paintCaret, {
                     ...sent(),
                     displayWindow: displayWindowRef.current,
+                    foreground,
                   });
         return workerFrame
           .then((result) => {

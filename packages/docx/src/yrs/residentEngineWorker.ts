@@ -633,7 +633,8 @@ async function applyProvisionalInput(
     const pages = Math.max(layout.pages, request.displayWindow?.[1] ?? 0);
     const layoutJson = session.layoutDocumentWithRegionsPrefixRetainedJson(layout.layoutInput, pages);
     layout.pages = pages;
-    if ((JSON.parse(layoutJson) as { provisional?: boolean }).provisional !== true) {
+    const provisional = (JSON.parse(layoutJson) as { provisional?: boolean }).provisional === true;
+    if (!provisional) {
       const { layoutInput: _input, ...fields } = layout;
       incompleteLayout = null;
       waiting = slicedCompletion;
@@ -659,7 +660,9 @@ async function applyProvisionalInput(
       undefined,
       started,
       true,
-      request.paintCaret
+      request.paintCaret,
+      undefined,
+      provisional
     );
   } catch (error) {
     if (waiting) replyFailure(waiting.id, error);
