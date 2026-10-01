@@ -87,7 +87,7 @@ interface LayoutRequest {
   layoutExtras?: string;
 }
 let incompleteLayout:
-  | (LayoutRequest & { layoutInput: string; workerAuthoritative?: boolean })
+  | (LayoutRequest & { layoutInput: string; pages: number; workerAuthoritative?: boolean })
   | null = null;
 let completedLayout:
   | (LayoutRequest & { layoutJson: string; headersFootersJson: string | undefined })
@@ -121,22 +121,69 @@ interface BackgroundPageBuild {
 let backgroundPageBuild: BackgroundPageBuild | null = null;
 const BACKGROUND_SLICE_PAGES = 4;
 
+// Foreground requests (what the user is waiting on) hold background work back:
+// a background step never starts while one is queued, and after an edit it
+// waits until the user has been idle for FOREGROUND_IDLE_MS.
+const FOREGROUND_IDLE_MS = 300;
+let foregroundQueued = 0;
+let backgroundIdleUntil = 0;
+
+/** Whether a request is one the user waits on: an edit, or a read that only jumps the queue. */
+function foregroundKind(request: ResidentEngineWorkerRequest): 'edit' | 'read' | null {
+  switch (request.type) {
+    case 'applyInput':
+    case 'applyDelete':
+    case 'proposal':
+      return 'edit';
+    case 'documentRead':
+      return 'read';
+    case 'sync':
+      return request.foreground === true ? 'edit' : null;
+    default:
+      return null;
+  }
+}
+
+/** Milliseconds background work must still wait, or 0 when it may run now. */
+function backgroundDelay(): number {
+  if (foregroundQueued > 0) return 1;
+  return Math.max(0, backgroundIdleUntil - performance.now());
+}
+
 // The request being handled, and the requests answered with a trap.
 let handlingId = 0;
 const trappedIds = new Set<number>();
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
-  enqueue(() => handle(event.data), event.data.id);
+  const request = event.data;
+  const kind = foregroundKind(request);
+  if (!kind) {
+    enqueue(() => handle(request), request.id);
+    return;
+  }
+  foregroundQueued += 1;
+  if (kind === 'edit') backgroundIdleUntil = performance.now() + FOREGROUND_IDLE_MS;
+  enqueue(
+    () => handle(request),
+    request.id,
+    () => true,
+    () => (foregroundQueued -= 1)
+  );
 };
 
-/** `current` drops an operation whose request was answered while it waited. */
+/**
+ * `current` drops an operation whose request was answered while it waited;
+ * `settled` runs once its turn has come, whether or not it ran.
+ */
 function enqueue(
   operation: () => Promise<void> | void,
   id: number,
-  current: () => boolean = () => true
+  current: () => boolean = () => true,
+  settled?: () => void
 ): void {
   operations = operations
     .then(() => {
+      settled?.();
       if (!current()) return;
       if (trap) throw trap;
       handlingId = id;
@@ -246,6 +293,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     if (provisional) {
       incompleteLayout = {
         layoutInput: request.snapshot.layoutInput,
+        pages: request.provisionalPages!,
         workerAuthoritative: request.snapshot.workerAuthoritative,
         extras: request.extras,
         layoutExtras: request.layoutExtras,
@@ -434,6 +482,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     if (provisional) {
       incompleteLayout = {
         layoutInput: request.snapshot.layoutInput,
+        pages: request.provisionalPages!,
         workerAuthoritative: request.snapshot.workerAuthoritative,
         extras: request.extras,
         layoutExtras: request.layoutExtras,
@@ -561,6 +610,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     reply({ id: request.id, ok: true });
     return;
   }
+  if (request.type === 'applyInput' && incompleteLayout && (await applyProvisionalInput(request))) return;
   await completeProvisionalLayout();
   fontRequirements = null;
   // The edit replaces the pagination a cached completion's frame would paint.
@@ -606,21 +656,98 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       request.type === 'applyDelete' ? session.residentDeletedUnits() : undefined
     );
   } catch (error) {
-    if (trap) throw trap;
-    if (error instanceof WebAssembly.RuntimeError) throw error;
-    const message = error instanceof Error ? error.message : String(error);
-    reply({
-      id: request.id,
-      ok: false,
-      error: message,
-      residentUnavailable: message.includes('resident input state is not ready'),
-      // The edit committed here but never reached the host: this replica is
-      // no longer the host's, so the host must replace it.
-      ...(pendingUpdates.length > 0 ? { terminal: true } : {}),
-    });
+    replyInputFailure(request.id, error);
   } finally {
     pendingUpdates = [];
   }
+}
+
+async function applyProvisionalInput(
+  request: Extract<ResidentEngineWorkerRequest, { type: 'applyInput' }>
+): Promise<boolean> {
+  const layout = incompleteLayout;
+  const { anchor, head } = request.selection;
+  if (
+    !session ||
+    !layout ||
+    head.story !== 'body' ||
+    anchor.story !== head.story ||
+    anchor.paraId !== head.paraId ||
+    anchor.offset !== head.offset
+  ) return false;
+  setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
+  session.setSelection(anchor, head);
+  if (!session.residentCaretSnapshot().caretRect) return false;
+
+  completedLayout = null;
+  pendingUpdates = [];
+  const started = performance.now();
+  let waiting: SlicedCompletion | null = null;
+  try {
+    session.insertText(head.story, head.paraId, head.offset, request.text);
+    const pages = Math.max(layout.pages, request.displayWindow?.[1] ?? 0);
+    const layoutJson = session.layoutDocumentWithRegionsPrefixRetainedJson(layout.layoutInput, pages);
+    layout.pages = pages;
+    if ((JSON.parse(layoutJson) as { provisional?: boolean }).provisional !== true) {
+      const { layoutInput: _input, ...fields } = layout;
+      incompleteLayout = null;
+      waiting = slicedCompletion;
+      slicedCompletion = null;
+      completedLayout = {
+        ...fields,
+        layoutJson,
+        headersFootersJson: session.retainedHeadersFootersJson(),
+      };
+    } else if (slicedCompletion) {
+      // The edit abandoned the pass; it begins again once the user is idle.
+      slicedCompletion.begun = false;
+    }
+    const frame = session.buildDisplayListFrame(
+      frameExtras(layout.extras, layout.layoutExtras, layoutJson),
+      request.expectedFrameEpoch
+    );
+    await replyFrame(
+      request.id,
+      frame,
+      performance.now() - started,
+      pendingUpdates,
+      undefined,
+      started,
+      true,
+      request.paintCaret
+    );
+  } catch (error) {
+    if (waiting) replyFailure(waiting.id, error);
+    replyInputFailure(request.id, error);
+    return true;
+  } finally {
+    pendingUpdates = [];
+  }
+  if (waiting) {
+    try {
+      await replyCompletedLayout(waiting.id, waiting.expectedFrameEpoch, waiting.paintCaret);
+    } catch (error) {
+      replyFailure(waiting.id, error);
+    } finally {
+      pendingUpdates = [];
+    }
+  }
+  return true;
+}
+
+function replyInputFailure(id: number, error: unknown): void {
+  if (trap) throw trap;
+  if (error instanceof WebAssembly.RuntimeError) throw error;
+  const message = error instanceof Error ? error.message : String(error);
+  reply({
+    id,
+    ok: false,
+    error: message,
+    residentUnavailable: message.includes('resident input state is not ready'),
+    // The edit committed here but never reached the host: this replica is
+    // no longer the host's, so the host must replace it.
+    ...(pendingUpdates.length > 0 ? { terminal: true } : {}),
+  });
 }
 
 /**
@@ -841,6 +968,11 @@ function scheduleCompletionSlice(completion: SlicedCompletion): void {
 /** One bounded step of a sliced completion, which then queues the next. */
 async function completionSlice(completion: SlicedCompletion): Promise<void> {
   if (!session || slicedCompletion !== completion || !incompleteLayout) return;
+  const delay = backgroundDelay();
+  if (delay > 0) {
+    setTimeout(() => scheduleCompletionSlice(completion), delay);
+    return;
+  }
   let progress;
   if (!completion.begun) {
     progress = session.beginRegionLayout(incompleteLayout.layoutInput);

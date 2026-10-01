@@ -65,6 +65,7 @@ export type ResidentEngineSession = Pick<
   geometryReader: ProposalGeometryReader;
   /** @internal */
   paragraphIdentities(): DocxParagraphIdentitySnapshot;
+  insertText(story: string, paraId: string, offset: number, text: string): void;
   /** The region layout of only as much of the body as fills `pages` pages. */
   layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
   /** Limit incremental rebuilds to the display window and caret pages. Off by default. */
@@ -329,6 +330,10 @@ export async function createResidentEngineSession(
     applyInput: (text, expectedFrameEpoch) => {
       ensureUndo();
       return session.apply_input(text, expectedFrameEpoch);
+    },
+    insertText: (story, paraId, offset, text) => {
+      ensureUndo();
+      session.insert_text(story, paraId, offset, text);
     },
     applyDelete: (direction, expectedFrameEpoch, count = 1) => {
       ensureUndo();
