@@ -6106,6 +6106,89 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resident_region_fast_path_beside_contextual_spacing_matches_a_cold_pass() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(lowering_pages::FONT).unwrap();
+        let mut request: serde_json::Value =
+            serde_json::from_str(&small_page_request(font)).unwrap();
+        repeat_final_section(&mut request);
+        let request = request.to_string();
+        let engine = paragraphs_engine(9605, 3);
+        engine.set_local_lowering(true);
+        for paragraph in engine.doc().paragraphs("body").unwrap().iter().take(2) {
+            let doc = engine.doc();
+            doc.set_paragraph_attr(
+                &paragraph.para_id,
+                "contextualSpacing",
+                yrs::Any::Bool(true),
+            )
+            .unwrap();
+            doc.set_paragraph_attr(&paragraph.para_id, "spaceAfter", yrs::Any::Number(300.0))
+                .unwrap();
+        }
+        engine.layout_document_with_regions_json(&request).unwrap();
+        engine.build_display_list_frame("{}", 0).unwrap();
+        let leading = engine.pagination.borrow().input.as_ref().unwrap().measured[0]
+            .block
+            .clone();
+        let LayoutBlock::Paragraph(leading) = leading else {
+            panic!("a paragraph leads the body");
+        };
+        assert!(contextual_spacing_enabled(&leading));
+        let snapshot = |engine: &EngineSession| {
+            let pagination = engine.pagination.borrow();
+            (
+                serde_json::to_string(&pagination.input.as_ref().unwrap().measured).unwrap(),
+                pagination.block_fingerprints.clone(),
+                serde_json::to_string(&pagination.layout.as_ref().unwrap().pages).unwrap(),
+            )
+        };
+        for (at, text) in [(0, Some("x")), (3, Some("y")), (0, None)] {
+            let ctx = crate::EditCtx::local("", "");
+            match text {
+                Some(text) => engine
+                    .doc()
+                    .insert_text(
+                        &ctx,
+                        crate::Position::new("body", at),
+                        text,
+                        crate::FormatPolicy::Inherit,
+                    )
+                    .map(|_| ()),
+                None => engine
+                    .doc()
+                    .delete_range(&ctx, crate::StoryRange::new("body", at, at + 1))
+                    .map(|_| ()),
+            }
+            .unwrap();
+            assert!(
+                engine
+                    .apply_and_layout_regions_resident("body", &mut |_| {})
+                    .unwrap()
+            );
+            let resident = snapshot(&engine);
+            let (render, measurement, pagination, regions, display, capture, resumable) = (
+                engine.render.replace(Default::default()),
+                engine.measurement.replace(Default::default()),
+                engine.pagination.replace(Default::default()),
+                engine.regions.replace(Default::default()),
+                engine.display.replace(Default::default()),
+                engine.capture.replace(Default::default()),
+                engine.resumable.replace(Default::default()),
+            );
+            engine.layout_document_with_regions_json(&request).unwrap();
+            assert_eq!(resident, snapshot(&engine), "[{at}] {text:?}");
+            engine.render.replace(render);
+            engine.measurement.replace(measurement);
+            engine.pagination.replace(pagination);
+            engine.regions.replace(regions);
+            engine.display.replace(display);
+            engine.capture.replace(capture);
+            engine.resumable.replace(resumable);
+        }
+    }
+
     fn paragraphs_engine(client_id: u64, paragraphs: usize) -> EngineSession {
         let engine = EngineSession::new(client_id);
         engine
@@ -6223,11 +6306,6 @@ mod tests {
                 .apply_and_layout(story, epoch)
                 .unwrap_or_else(|error| panic!("{story} [{start}, {end}) {text:?}: {error}"));
             let after = Rc::as_ptr(&engine.render.borrow().stories["body"].blocks);
-            assert_eq!(
-                before == after,
-                patched && enabled,
-                "{story} [{start}, {end}) {text:?} enabled={enabled}"
-            );
             let incremental = snapshot(engine);
             macro_rules! cold {
                 ($($field:ident)+) => {{
@@ -6240,6 +6318,11 @@ mod tests {
             }
             let oracle = cold!(render measurement pagination regions display capture resumable);
             assert_eq!(incremental, oracle, "{story} [{start}, {end}) {text:?}");
+            assert_eq!(
+                before == after,
+                patched && enabled,
+                "{story} [{start}, {end}) {text:?} enabled={enabled}"
+            );
         };
         for request in [small_page_request(font), repeated.to_string()] {
             let engine = paragraphs_engine(9600, 3);
@@ -6313,17 +6396,29 @@ mod tests {
         let (engine, request) = laid_out(&bold.bytes(), 9604);
         step(&engine, &request, "body", (2, 2, Some("x")), true);
         step(&engine, &request, "body", (0, 1, None), true);
-        for bytes in [
-            include_bytes!(
-                "../tests/fixtures/field-code-paragraphs/body-field-code-paragraphs.docx"
-            )
-            .as_slice(),
-            include_bytes!("../tests/fixtures/suppressed-list-markers.docx").as_slice(),
-            include_bytes!("../tests/fixtures/page-fragments/pages.docx").as_slice(),
-            include_bytes!("../tests/fixtures/footnote-anchor.docx").as_slice(),
+        for (bytes, patched) in [
+            (
+                include_bytes!(
+                    "../tests/fixtures/field-code-paragraphs/body-field-code-paragraphs.docx"
+                )
+                .as_slice(),
+                false,
+            ),
+            (
+                include_bytes!("../tests/fixtures/suppressed-list-markers.docx").as_slice(),
+                true,
+            ),
+            (
+                include_bytes!("../tests/fixtures/page-fragments/pages.docx").as_slice(),
+                false,
+            ),
+            (
+                include_bytes!("../tests/fixtures/footnote-anchor.docx").as_slice(),
+                false,
+            ),
         ] {
             let (engine, request) = laid_out(bytes, 9603);
-            step(&engine, &request, "body", (0, 0, Some("x")), false);
+            step(&engine, &request, "body", (0, 0, Some("x")), patched);
         }
     }
 
