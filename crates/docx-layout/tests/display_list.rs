@@ -3170,3 +3170,44 @@ fn unbuilt_page_spans_read_positions_as_a_fresh_build_does() {
         }
     }
 }
+
+/// Word draws a boxed paragraph's left edge where its hanging first line
+/// begins, so the outdented label sits inside the box.
+#[test]
+fn paragraph_borders_enclose_a_hanging_first_line() {
+    let edge = serde_json::json!({ "style": "single", "width": 1.0, "space": 0.0 });
+    for (hanging, left_edge) in [(60.0, 50.0), (20.0, 90.0), (0.0, 110.0)] {
+        let mut input = serde_json::json!({
+            "measured": [{
+                "block": { "kind": "paragraph", "id": 1, "pmStart": 0, "pmEnd": 6,
+                    "attrs": { "indent": { "left": 60.0, "right": 0.0, "hanging": hanging },
+                        "borders": { "top": edge, "bottom": edge, "left": edge, "right": edge } },
+                    "runs": [{ "kind": "text", "text": "Remark", "pmStart": 1 }] },
+                "measure": { "kind": "paragraph", "totalHeight": 20.0,
+                    "lines": [{ "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 6,
+                        "width": 40.0, "ascent": 12.0, "descent": 4.0, "lineHeight": 20.0 }] }
+            }],
+            "options": { "pageSize": { "w": 400.0, "h": 200.0 },
+                "margins": { "top": 20.0, "right": 20.0, "bottom": 20.0, "left": 50.0 } }
+        });
+        input["layout"] = serde_json::from_str(
+            &docx_layout::layout_to_canonical_json(&input.to_string()).unwrap(),
+        )
+        .unwrap();
+        let dl = build_dl(&input.to_string());
+        let verticals: Vec<f64> = dl.pages[0]
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                Primitive::Line(line)
+                    if line.role == Some(docx_layout::display_list::LineRole::Border)
+                        && line.x1 == line.x2 =>
+                {
+                    line.x1.as_f64()
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(verticals, vec![left_edge, 380.0], "hanging {hanging}");
+    }
+}

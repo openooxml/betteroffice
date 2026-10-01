@@ -5632,7 +5632,11 @@ pub(crate) fn emit_paragraph_fragment(
                 origin_y,
                 frag.width,
                 frag.height,
-                indent_left,
+                if !is_rtl && indent_left > 0.0 {
+                    indent_left - hanging
+                } else {
+                    indent_left
+                },
                 indent_right,
             );
         }

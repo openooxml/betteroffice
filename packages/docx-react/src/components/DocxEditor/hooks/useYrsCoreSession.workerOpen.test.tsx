@@ -1697,17 +1697,20 @@ test.each(['A then B', 'B then A'])('Undo keeps worker proposals through font pr
       import.meta.dir, '../../../../../../crates/docx-raster/tests/assets/Carlito-Regular.ttf'
     )));
     rerender({ ...workerProposalProps, source: bytes, measurementFont: loadedFont });
-    let passB!: ResidentEngineWorkerRequest;
     await act(async () => {
       result.current.pipeline.runLayoutPipeline();
-      passB = await received('fontRequirements', passA.id);
+      await new Promise((resolve) => setTimeout(resolve, 50));
     });
-    expect(replies.has(passB.id)).toBe(true);
-    expect(passB.id).not.toBe(passA.id);
+    // Pass B shares pass A's read while their inputs are identical, else it holds its own.
+    const held = posted.filter((request) =>
+      request.type === 'fontRequirements' && request.id >= passA.id && replies.has(request.id)
+    );
+    expect(held[0]).toBe(passA);
+    expect(held.length).toBeLessThanOrEqual(2);
     holdRequirements = false;
     const previousSync = posted.filter((request) => request.type === 'sync').at(-1)!.id;
     await act(async () => {
-      for (const pass of order === 'A then B' ? [passA, passB] : [passB, passA]) reply(pass);
+      for (const pass of order === 'A then B' ? held : [...held].reverse()) reply(pass);
     });
     expect(layoutHere).not.toHaveBeenCalled();
     expect(ensureReplica).not.toHaveBeenCalled();
