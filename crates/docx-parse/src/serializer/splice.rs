@@ -201,14 +201,16 @@ fn bindings<'a>(xml: &'a str, tag: &Tag<'a>) -> HashMap<&'a str, &'a str> {
 }
 
 /// `source`'s root start tag binding every prefix in `prefixes` as `serialized`'s root does,
-/// ignorable where it is ignorable there; `None` when `source` binds one of them elsewhere.
+/// ignorable where it is ignorable there; `None` when any element of `source` (its bindings in
+/// `bound`) binds one of them elsewhere.
 fn declared_root(
     source: &str,
     serialized: &str,
     prefixes: &BTreeSet<&str>,
+    bound: &HashMap<&str, &str>,
 ) -> Option<Option<(Range<usize>, String)>> {
     let root = root_tag(source)?;
-    let bound = bindings(source, &root);
+    let at_root = bindings(source, &root);
     let target = root_tag(serialized)?;
     let wanted = bindings(serialized, &target);
     let target_ignorable: Vec<&str> = attribute(&target, "mc:Ignorable")
@@ -219,9 +221,9 @@ fn declared_root(
     for prefix in prefixes {
         let uri = wanted.get(prefix)?;
         match bound.get(prefix) {
-            Some(existing) if existing.trim() == uri.trim() => {}
-            Some(_) => return None,
-            None => {
+            Some(existing) if *existing == uri.trim() && at_root.contains_key(prefix) => {}
+            Some(existing) if *existing != uri.trim() => return None,
+            _ => {
                 declarations.push_str(&format!(" xmlns:{prefix}=\"{uri}\""));
                 if target_ignorable.contains(prefix) {
                     ignorable.push(*prefix);
@@ -240,10 +242,10 @@ fn declared_root(
             text.replace_range(range.start - base..range.end - base, &value);
         } else {
             match bound.get("mc") {
-                Some(uri) if uri.trim() == MC_NAMESPACE => {}
-                Some(_) => return None,
-                None if prefixes.contains("mc") => {}
-                None => declarations.push_str(&format!(" xmlns:mc=\"{MC_NAMESPACE}\"")),
+                Some(uri) if *uri == MC_NAMESPACE && at_root.contains_key("mc") => {}
+                Some(uri) if *uri != MC_NAMESPACE => return None,
+                _ if prefixes.contains("mc") => {}
+                _ => declarations.push_str(&format!(" xmlns:mc=\"{MC_NAMESPACE}\"")),
             }
             declarations.push_str(&format!(" mc:Ignorable=\"{}\"", ignorable.join(" ")));
         }
@@ -258,6 +260,8 @@ fn declared_root(
 struct Layout<'s> {
     parents: HashMap<u32, &'s str>,
     edges: HashMap<u32, Edges<'s>>,
+    /// The one namespace each prefix in the part is bound to.
+    bound: HashMap<&'s str, &'s str>,
 }
 
 /// The tags around a paragraph, each as `(name, whether it is an end tag)`.
@@ -311,6 +315,7 @@ fn layout<'s>(
     let mut layout = Layout {
         parents: HashMap::new(),
         edges: HashMap::new(),
+        bound: HashMap::new(),
     };
     let mut previous = None;
     for tag in tags(source)? {
@@ -347,7 +352,8 @@ fn layout<'s>(
             stack.push(tag.name);
         }
     }
-    (prefixes.get("w") == Some(&W_NAMESPACE)).then_some(layout)
+    layout.bound = prefixes;
+    (layout.bound.get("w") == Some(&W_NAMESPACE)).then_some(layout)
 }
 
 /// The elements a rewritten paragraph may sit in: story roots and table cells, not content
@@ -589,7 +595,7 @@ pub(crate) fn splice_story_part(
         });
     }
     edits.sort_by_key(|(range, rank, _)| (range.start, *rank));
-    let root = declared_root(&source, serialized, &prefixes)?;
+    let root = declared_root(&source, serialized, &prefixes, &layout.bound)?;
     let root = root
         .as_ref()
         .map(|(range, text)| (range.clone(), 0, text.as_str()));
@@ -1126,6 +1132,23 @@ mod tests {
         );
         let link = "<w:p><w:hyperlink r:id=\"rId1\"><w:r><w:t>Link, edited</w:t></w:r></w:hyperlink></w:p>";
         assert!(splice(&rebound, &[(0, link)], &[0]).is_none());
+    }
+
+    #[test]
+    fn refuses_a_prefix_the_rewrite_needs_that_an_element_below_the_root_binds_elsewhere() {
+        let rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        let photo = "<w:p><w:r><w:t>Photo</w:t></w:r></w:p>";
+        let pictured = "<w:p><w:r><w:t>Photo</w:t></w:r><w:r><w:drawing><a:blip xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" r:embed=\"rId9\"/></w:drawing></w:r></w:p>";
+        let shadowed =
+            format!("{ROOT}<w:body xmlns:r=\"urn:unused\">{photo}</w:body></w:document>");
+        assert!(splice(&shadowed, &[(0, pictured)], &[0]).is_none());
+
+        let bound = shadowed.replace("urn:unused", rel);
+        let spliced = splice(&bound, &[(0, pictured)], &[0]).unwrap();
+        assert!(spliced.contains(pictured));
+        assert!(
+            root_tag(&spliced).is_some_and(|root| bindings(&spliced, &root).get("r") == Some(&rel))
+        );
     }
 
     #[test]
