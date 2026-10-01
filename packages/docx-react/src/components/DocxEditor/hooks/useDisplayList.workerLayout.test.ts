@@ -1736,6 +1736,91 @@ test.each([false, true])('the pipeline adopts progressive interims while layout-
   }
 });
 
+test('interims that land before the display adopts one apply in order, and so does the completion after them', async () => {
+  const source = setupLayoutPipeline();
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  const syncCoordinator = new LayoutSelectionGate();
+  const measurement: ResidentMeasurementConfig = {
+    fontChains: {}, defaults: { fontSize: 11, fontFamily: 'Calibri' },
+    compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true,
+  };
+  const hook = renderHook(() => {
+    const [layout, setLayout] = useState<Layout | null>(null);
+    const display = useRustDisplayList(
+      layout, undefined, undefined, undefined, source.engine,
+      undefined, undefined, undefined, true
+    );
+    const pipeline = useLayoutPipeline({
+      document: null, session: source.engine, experimentalWorkerOpen: true,
+      renderEnv: {} as YrsRenderEnv, pageGap: 24, zoom: 1,
+      residentMeasurementConfig: () => measurement, deferLayoutPass: () => false,
+      pagesContainerRef: { current: null }, viewportLayoutRef: { current: null },
+      syncCoordinator, getScrollContainer: () => null,
+      layoutInWorker: display.layoutInWorker, onLayoutComputed: setLayout,
+    });
+    return { display, pipeline };
+  });
+  try {
+    act(() => hook.result.current.pipeline.runLayoutPipeline());
+    const worker = FakeWorker.last!;
+    await waitFor(() => expect(worker.posted.at(-1)?.type).toBe('bootstrap'));
+    const full = JSON.parse(source.layoutJson);
+    const prefixJson = JSON.stringify({ ...full, layout: { ...full.layout, partial: true } });
+    await act(async () => worker.reply({
+      id: worker.posted.at(-1)!.id, ok: true, frame: source.frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null }, selection: null,
+      layoutRevision: 1, layoutJson: prefixJson, layoutProvisional: true,
+    }));
+    await waitFor(() => expect(hook.result.current.display.frame?.frameEpoch).toBe(1));
+    await act(async () => {
+      const attaching = hook.result.current.display.attachOffscreenCanvases(
+        [], [], 1, 1, { color: '#000', width: 2 }
+      );
+      worker.reply({ id: worker.posted.at(-1)!.id, ok: true });
+      await attaching;
+    });
+    await waitFor(() => expect(worker.posted.at(-1)?.type).toBe('completeLayout'));
+    const completionId = worker.posted.at(-1)!.id;
+    const completionIndex = worker.posted.length - 1;
+    const whenLayoutComplete = hook.result.current.display.settledDisplayList(null, null)
+      .then((list: DisplayList) => list.pages.length);
+    const first = source.native.build_display_list_frame('{}', 1);
+    const firstEpoch = decodeFrameDelta(first).frameEpoch;
+    const second = source.native.build_display_list_frame('{}', firstEpoch);
+    const secondEpoch = decodeFrameDelta(second).frameEpoch;
+    expect(decodeFrameDelta(second)).toMatchObject({ full: false, baseFrameEpoch: firstEpoch });
+    const interim = (frame: Uint8Array, frameEpoch: number): ResidentEngineWorkerResponse => ({
+      id: completionId, ok: true, interim: true, frame: frame.slice().buffer,
+      caret: { frameEpoch, caretRect: null }, selection: null,
+      layoutRevision: 1, layoutJson: prefixJson, layoutProvisional: true,
+    });
+    await act(async () => {
+      worker.reply(interim(first, firstEpoch));
+      worker.reply(interim(second, secondEpoch));
+    });
+    await waitFor(() => expect(hook.result.current.display.frame?.frameEpoch).toBe(secondEpoch));
+    const last = source.native.build_display_list_frame('{}', secondEpoch);
+    const lastEpoch = decodeFrameDelta(last).frameEpoch;
+    expect(decodeFrameDelta(last)).toMatchObject({ full: false, baseFrameEpoch: secondEpoch });
+    await act(async () => worker.reply({
+      id: completionId, ok: true, frame: last.slice().buffer,
+      caret: { frameEpoch: lastEpoch, caretRect: null }, selection: null,
+      layoutRevision: 1, layoutJson: source.layoutJson,
+    }));
+    await waitFor(() => expect(hook.result.current.display.frame?.frameEpoch).toBe(lastEpoch));
+    expect(await whenLayoutComplete).toBeGreaterThan(0);
+    expect(hook.result.current.pipeline.layout?.partial).not.toBe(true);
+    const later = worker.posted.slice(completionIndex + 1).map(({ type }) => type);
+    expect(later).not.toContain('sync');
+    expect(later).not.toContain('buildFrame');
+    expect(errors).not.toHaveBeenCalled();
+  } finally {
+    errors.mockRestore();
+    hook.unmount();
+    source.native.free();
+  }
+});
+
 test('a proposal prefix and completion reuse unchanged pages after an intervening visible build', async () => {
   let request = JSON.stringify({
     ...JSON.parse(REQUEST),

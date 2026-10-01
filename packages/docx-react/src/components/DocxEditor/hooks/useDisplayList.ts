@@ -18,6 +18,7 @@ import {
   type GlyphOutlineProvider,
   type ImageResolver,
   type RustDisplayListEngine,
+  type DecodedFrameDelta,
   type RetainedFrame,
   type ResidentDisplayListQueryEngine,
 } from '@betteroffice/docx/layout/render';
@@ -239,13 +240,35 @@ const COMPLETION_SLICE_BLOCKS = 64;
 
 interface WorkerLayoutFrame {
   result: ResidentEngineWorkerFrame;
-  previousFrame: RetainedFrame | null;
   engine: YrsSession;
   /** Content epoch and display extras the worker built the frame for. */
   contentEpoch: number;
   layoutExtras: string;
   /** The frame shows a layout of the first pages only. */
   provisional: boolean;
+  /** The interim frame of the same completion that this frame's delta builds on. */
+  predecessor?: WorkerLayoutFrame;
+}
+
+/**
+ * The deltas that take `base` to `entry`'s frame: its own, preceded by those of
+ * the interims the display skipped. Null when no chain starts at `base`.
+ */
+function workerLayoutFrameChain(
+  entry: WorkerLayoutFrame,
+  delta: DecodedFrameDelta,
+  base: RetainedFrame | null
+): DecodedFrameDelta[] | null {
+  const chain = [delta];
+  for (let link: WorkerLayoutFrame | undefined = entry; ;) {
+    const head = chain[0]!;
+    if (head.full ? !base || head.frameEpoch > base.frameEpoch : head.baseFrameEpoch === base?.frameEpoch) {
+      return chain;
+    }
+    link = link.predecessor;
+    if (!link || link.engine !== entry.engine || link.contentEpoch !== entry.contentEpoch) return null;
+    chain.unshift(decodeFrameDelta(link.result.frame));
+  }
 }
 
 /** The display fallback needs a main-thread layout of a worker-run one. */
@@ -1990,7 +2013,8 @@ export function useRustDisplayList(
       // display builds its own frame for the layout.
       const adopt = (
         result: ResidentEngineWorkerFrame,
-        base: RetainedFrame | null | undefined
+        base: RetainedFrame | null | undefined,
+        predecessor?: WorkerLayoutFrame
       ): LayoutComputation => {
         if (result.layoutJson === undefined) {
           throw new ResidentWorkerFailureError('Resident engine worker omitted its layout');
@@ -1999,11 +2023,11 @@ export function useRustDisplayList(
         if (base === undefined) return computation;
         workerLayoutFramesRef.current.set(computation.layout, {
           result,
-          previousFrame: base,
           engine: hostEngine,
           contentEpoch,
           layoutExtras: options.layoutExtras,
           provisional: result.layoutProvisional === true,
+          ...(predecessor ? { predecessor } : {}),
         });
         return computation;
       };
@@ -2027,6 +2051,7 @@ export function useRustDisplayList(
           const gate = { engine: hostEngine };
           const listeners = new Set<(interim: LayoutComputation) => void>();
           let latestInterim: LayoutComputation | null = null;
+          let interimFrame: WorkerLayoutFrame | undefined;
           const interims = (listener: (interim: LayoutComputation) => void) => {
             listeners.add(listener);
             if (latestInterim) listener(latestInterim);
@@ -2061,7 +2086,12 @@ export function useRustDisplayList(
                       onInterim: (interim: ResidentEngineWorkerFrame) => {
                         if (!isCurrentPass()) return;
                         const base = frameBase(hostEngine);
-                        latestInterim = adopt(interim, base?.docEpoch === provisionalDocEpoch ? base : undefined);
+                        latestInterim = adopt(
+                          interim,
+                          base?.docEpoch === provisionalDocEpoch ? base : undefined,
+                          interimFrame
+                        );
+                        interimFrame = workerLayoutFramesRef.current.get(latestInterim.layout);
                         for (const listener of listeners) listener(latestInterim);
                       },
                     }
@@ -2072,7 +2102,11 @@ export function useRustDisplayList(
                 if (!isCurrentPass()) return null;
                 if (completed) {
                   const base = frameBase(hostEngine);
-                  return adopt(completed, base?.docEpoch === provisionalDocEpoch ? base : undefined);
+                  return adopt(
+                    completed,
+                    base?.docEpoch === provisionalDocEpoch ? base : undefined,
+                    interimFrame
+                  );
                 }
                 if (!holdsWorkerProposals(hostEngine)) return null;
               }
@@ -2529,17 +2563,10 @@ export function useRustDisplayList(
         // The frame is adopted only while nothing newer reached the session
         // or the display since the worker built it. A whole frame (the worker
         // sends one when a page build ran first) replaces any older base.
-        const appliesTo = !prebuilt
-          ? undefined
-          : (base?.frameEpoch ?? null) === (prebuilt.previousFrame?.frameEpoch ?? null)
-            ? prebuilt.previousFrame
-            : delta?.full && (!base || delta.frameEpoch > base.frameEpoch)
-              ? base
-              : undefined;
+        const chain = prebuilt && delta ? workerLayoutFrameChain(prebuilt, delta, base) : null;
         if (
           prebuilt &&
-          delta &&
-          appliesTo !== undefined &&
+          chain &&
           prebuilt.engine === hostEngine &&
           workerRef.current?.engine === hostEngine &&
           prebuilt.contentEpoch === contentEpoch &&
@@ -2547,7 +2574,17 @@ export function useRustDisplayList(
         ) {
           // The worker ran this layout and built its frame in the same pass.
           const { result } = prebuilt;
-          const nextFrame = applyFrameDelta(appliesTo, delta);
+          let nextFrame = applyFrameDelta(base, chain[0]!);
+          if (chain.length > 1) {
+            const damagedPageIds = new Set(nextFrame.damagedPageIds);
+            const removedPageIds = new Set(nextFrame.removedPageIds);
+            for (const step of chain.slice(1)) {
+              nextFrame = applyFrameDelta(nextFrame, step);
+              for (const id of nextFrame.damagedPageIds) damagedPageIds.add(id);
+              for (const id of nextFrame.removedPageIds) removedPageIds.add(id);
+            }
+            nextFrame = { ...nextFrame, damagedPageIds, removedPageIds };
+          }
           pending = Promise.resolve({
             displayList: nextFrame.displayList,
             frame: nextFrame,
