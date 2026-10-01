@@ -492,6 +492,7 @@ pub(crate) fn compose_page_regions<'a>(
     page: &PageIn,
     page_index: usize,
     total_pages: u64,
+    cached_page_totals: bool,
     shape: Option<&'a ShapeFonts<'a>>,
 ) -> (Option<HfRegion>, Option<HfRegion>) {
     if page.parity_filler == Some(true) {
@@ -507,6 +508,7 @@ pub(crate) fn compose_page_regions<'a>(
             page_index,
             page_number,
             total_pages,
+            cached_page_totals,
             shape,
         )
     });
@@ -519,6 +521,7 @@ pub(crate) fn compose_page_regions<'a>(
             page_index,
             page_number,
             total_pages,
+            cached_page_totals,
             shape,
         )
     });
@@ -584,6 +587,7 @@ fn compose_region(
     page_index: usize,
     page_number: u64,
     total_pages: u64,
+    cached_page_totals: bool,
     shape: Option<&ShapeFonts<'_>>,
 ) -> HfRegion {
     // Field widths are scoped to one header/footer variant.
@@ -593,6 +597,7 @@ fn compose_region(
         page_label: page.page_label.clone(),
         page_index,
         total_pages,
+        cached_page_totals,
         shape,
         field_widths: field_widths.as_ref(),
     };
