@@ -1,6 +1,6 @@
 import { useCallback, useRef } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
-import type { Document, Endnote, Footnote } from '@betteroffice/docx/types/document';
+import type { Document } from '@betteroffice/docx/types/document';
 import {
   createDocx,
   injectReplyRangeMarkers,
@@ -10,6 +10,7 @@ import {
 import { readDocxFileFromInput, type DocxInput } from '@betteroffice/docx/utils';
 import {
   captureSessionSave,
+  editorSaveKeys,
   sessionSourcePackage,
   writeSessionSave,
   yrsToDocument,
@@ -29,6 +30,7 @@ import type { DocxEditorProps } from '../../DocxEditor';
 import type { DocxImageInsert, DocxSaveOutcome } from './useDocxCommands';
 
 const INSERT_IMAGE_MAX_WIDTH_PX = 612;
+const lastSaveSessions = new WeakSet<YrsSession>();
 
 function toFileIOError(error: unknown, fallbackMessage: string): Error {
   return error instanceof Error ? error : new Error(fallbackMessage);
@@ -103,60 +105,34 @@ async function writeEditorDocument(
   if (!original) return createDocx(document);
   if (!session || !capture) return repackDocx(document);
   const source = sessionSourcePackage(session);
-  if (source) {
-    const hostChanged = !sameSaveMetadata(document, source.document);
-    const commentsChanged = !sameSaveValue(comments, source.document.package.document.comments ?? []);
-    const bodyPart = capture.identities.paragraphs
-      .find(({ session: anchor, source }) => anchor?.story === 'body' && source)
-      ?.source?.partUri.slice(1);
-    const patches = (part: string): boolean =>
-      !hostChanged &&
-      (!commentsChanged || part !== 'word/comments.xml') &&
-      (!injectedMarkers || (bodyPart !== undefined && part !== bodyPart));
-    const { bytes } = await writeSessionSave(
-      session,
-      document,
-      capture,
-      source.buffer,
-      {},
-      patches,
-      true
-    );
+  const keys = editorSaveKeys(document, comments);
+  if (
+    !source ||
+    keys.metadata !== source.keys.metadata ||
+    (comments.length === 0 && source.keys.comments !== '[]') ||
+    lastSaveSessions.has(session)
+  ) {
+    lastSaveSessions.add(session);
+    const { bytes } = await writeSessionSave(session, document, capture, original, {}, () => false);
     return bytes.buffer as ArrayBuffer;
   }
-  const { bytes } = await writeSessionSave(session, document, capture, original, {}, () => false);
+  const commentsChanged = keys.comments !== source.keys.comments;
+  const bodyPart = capture.identities.paragraphs
+    .find(({ session: anchor, source }) => anchor?.story === 'body' && source)
+    ?.source?.partUri.slice(1);
+  const patches = (part: string): boolean =>
+    (!commentsChanged || part !== 'word/comments.xml') &&
+    (!injectedMarkers || (bodyPart !== undefined && part !== bodyPart));
+  const { bytes } = await writeSessionSave(
+    session,
+    document,
+    capture,
+    source.buffer,
+    {},
+    patches,
+    true
+  );
   return bytes.buffer as ArrayBuffer;
-}
-
-function sameSaveValue(a: unknown, b: unknown): boolean {
-  const stringify = (value: unknown) =>
-    JSON.stringify(value, (_key, entry) => (entry instanceof Map ? [...entry] : entry));
-  return a === b || stringify(a) === stringify(b);
-}
-
-function sameSaveMetadata(document: Document, opened: Document): boolean {
-  const withoutContent = <T extends { content: unknown }>(part: T) => {
-    const { content, ...metadata } = part;
-    return metadata;
-  };
-  const parts = (map: Document['package']['headers']) =>
-    [...(map ?? [])].map(([id, part]) => [id, withoutContent(part)]);
-  const notes = (entries: (Footnote | Endnote)[] | undefined) =>
-    (entries ?? []).map((note) => {
-      // The thin open omits these source fields; projection restores or clears them.
-      const { verbatimXml, sourceOrdinal, ...metadata } = withoutContent(note);
-      return metadata;
-    });
-  const metadata = ({ package: pkg }: Document) => ({
-    finalSectionProperties: pkg.document.finalSectionProperties,
-    sections: pkg.document.sections?.map(withoutContent),
-    headers: parts(pkg.headers),
-    footers: parts(pkg.footers),
-    footnotes: notes(pkg.footnotes),
-    endnotes: notes(pkg.endnotes),
-    relationships: [...(pkg.relationships ?? [])],
-  });
-  return sameSaveValue(metadata(document), metadata(opened));
 }
 
 /**

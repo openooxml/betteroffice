@@ -2,11 +2,12 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { createRef } from 'react';
+import { createRef, useState } from 'react';
 import { parseDocx, repackDocx } from '@betteroffice/docx/docx';
 import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
 import { unzipContainer } from '@betteroffice/docx/docx/wasm';
 import type { Comment } from '@betteroffice/docx/types/content';
+import type { Document as DocxDocument } from '@betteroffice/docx/types/document';
 import { getCommentText } from '@betteroffice/docx/utils/comments';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 
@@ -14,8 +15,12 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
 import { DocxEditor, type DocxEditorRef } from '../../../index';
+import type { PagedEditorRef } from '../PagedEditor';
+import type { PartEditTarget } from '../partEdit';
+import { useFileIO } from './useFileIO';
+import { useHeaderFooterEditing } from './useHeaderFooterEditing';
 
-const { act, cleanup, fireEvent, render, within } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, renderHook, within } = await import('@testing-library/react');
 const quiet = { error: console.error, warn: console.warn };
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
@@ -380,6 +385,69 @@ test('a comment text edited in React is saved and reopened', async () => {
   expect(getCommentText(comment!.content)).toBe('Edited by host');
 });
 
+test('an in-place host comment edit keeps its text and resolved state on save', async () => {
+  const editor = await mount(commentedFixture().bytes);
+  const [comment] = editor.ref.current!.getComments();
+  comment!.content = [{ type: 'paragraph', paraId: COMMENT_PARA_ID, content: [{ type: 'run', content: [{ type: 'text', text: 'Edited in place by host' }] }] }];
+  comment!.blockContent = undefined;
+  comment!.done = true;
+  await act(async () => editor.setComments([comment!]));
+  expect(editor.ref.current!.getComments()[0]).toBe(comment);
+  const saved = await editor.save();
+  const parts = unzipContainer(new Uint8Array(saved));
+  expect(xmlPart(parts, 'word/comments.xml')).toContain('Edited in place by host');
+  expect(xmlPart(parts, 'word/comments.xml')).not.toContain('Important');
+  const paraId = savedCommentParaId(parts, 1);
+  const extended = new DOMParser().parseFromString(xmlPart(parts, 'word/commentsExtended.xml'), 'application/xml');
+  const entry = xmlElements(extended, W15, 'commentEx').find((element) => element.getAttribute('w15:paraId') === paraId);
+  expect(entry?.getAttribute('w15:done')).toBe('1');
+  const [reopenedComment] = (await reopened(saved)).package.document.comments!;
+  expect(getCommentText(reopenedComment!.content)).toBe('Edited in place by host');
+  expect(reopenedComment?.done).toBe(true);
+});
+
+test('deleting two comments across saves does not resurrect the first comment', async () => {
+  const source = commentedFixture();
+  const secondParaId = '10000002';
+  const extend = (name: string, closing: string, xml: string) => {
+    const original = new TextDecoder().decode(source.parts.get(name)!);
+    source.parts.set(name, toBytes(original.replace(closing, xml + closing)));
+  };
+  extend('word/comments.xml', '</w:comments>', `<w:comment w:id="2" w:author="B" w:date="2024-01-01T00:00:00Z" w:initials="B">${paragraph(secondParaId, run('Second comment'))}</w:comment>`);
+  extend('word/commentsExtended.xml', '</w15:commentsEx>', `<w15:commentEx w15:paraId="${secondParaId}" w15:done="0"/>`);
+  extend('word/document.xml', '<w:sectPr>', paragraph('00000002', '<w:commentRangeStart w:id="2"/>' + run('Second body text') + '<w:commentRangeEnd w:id="2"/><w:r><w:commentReference w:id="2"/></w:r>'));
+  const editor = await mount(rezipPartsToArrayBuffer(source.parts));
+  await until(() => editor.ref.current!.getComments().length === 2);
+  if (!editor.ref.current!.commands.getState('commentsSidebar').active) {
+    await act(async () => {
+      expect((await editor.ref.current!.commands.execute('commentsSidebar', null)).ok).toBe(true);
+    });
+  }
+  const deleteComment = async (id: number) => {
+    await until(() => !!editor.view.container.querySelector(`[data-comment-id="${id}"]`));
+    const card = editor.view.container.querySelector<HTMLElement>(`[data-comment-id="${id}"]`)!;
+    await act(async () => fireEvent.click(card));
+    await act(async () => fireEvent.click(within(card).getByTitle('More options')));
+    await act(async () => fireEvent.click(within(card).getByRole('menuitem', { name: 'Delete', hidden: true })));
+    await until(() => !editor.ref.current!.getComments().some((comment) => comment.id === id));
+  };
+  await deleteComment(1);
+  const first = unzipContainer(new Uint8Array(await editor.save()));
+  const firstComments = new DOMParser().parseFromString(xmlPart(first, 'word/comments.xml'), 'application/xml');
+  expect(xmlElements(firstComments, W, 'comment').map((entry) => entry.getAttribute('w:id'))).toEqual(['2']);
+  expect(markers(xmlPart(first, 'word/document.xml'), 1)).toEqual([]);
+  await deleteComment(2);
+  const saved = await editor.save();
+  const last = unzipContainer(new Uint8Array(saved));
+  if (last['word/comments.xml']) {
+    const lastComments = new DOMParser().parseFromString(xmlPart(last, 'word/comments.xml'), 'application/xml');
+    expect(xmlElements(lastComments, W, 'comment').some((entry) => entry.getAttribute('w:id') === '1')).toBe(false);
+  }
+  expect(markers(xmlPart(last, 'word/document.xml'), 1)).toEqual([]);
+  expect(markers(xmlPart(last, 'word/document.xml'), 2)).toEqual([]);
+  expect((await reopened(saved)).package.document.comments?.some((comment) => comment.id === 1) ?? false).toBe(false);
+});
+
 test('a comment resolved in React is saved in commentsExtended and reopened', async () => {
   const editor = await mount(commentedFixture().bytes);
   await act(async () => editor.ref.current!.resolveComment(1));
@@ -615,4 +683,71 @@ test('a host page-setup change is saved even when body text is untouched', async
   const xml = new DOMParser().parseFromString(xmlPart(unzipContainer(new Uint8Array(saved)), 'word/document.xml'), 'application/xml');
   expect(xmlElements(xml, W, 'pgMar')[0]?.getAttribute('w:top')).toBe('2880');
   expect((await reopened(saved)).package.document.finalSectionProperties?.marginTop).toBe(2880);
+});
+
+test('adding and removing a header across saves keeps relationship and content-type targets', async () => {
+  const editor = await mount(fixture((p) => p(run('Body text'))).bytes);
+  const paged = editor.ref.current!.getEditorRef()!;
+  const session = paged.getYrsSession()!;
+  let host = paged.getDocument()!;
+  const errors: Error[] = [];
+  const pagedEditorRef = {
+    current: {
+      getYrsSession: () => session,
+      getDocument: () => host,
+      flushPendingInput: () => paged.flushPendingInput(),
+    } as PagedEditorRef,
+  };
+  const hook = renderHook(() => {
+    const [document, pushDocument] = useState<DocxDocument>(host);
+    const [partEditTarget, setPartEditTarget] = useState<PartEditTarget | null>(null);
+    host = document;
+    const editing = useHeaderFooterEditing({ document, pushDocument, partEditTarget, setPartEditTarget });
+    const io = useFileIO({
+      pagedEditorRef,
+      resolveImage: () => null,
+      comments: [],
+      documentName: undefined,
+      onSave: undefined,
+      downloadOnSave: false,
+      onOpen: undefined,
+      onError: (error) => errors.push(error),
+      onPrint: undefined,
+      onDocumentNameChange: undefined,
+      loadBuffer: async () => {},
+      focusActiveEditor: () => {},
+    });
+    return { editing, save: io.handleSave };
+  });
+  const save = async (): Promise<ArrayBuffer> => {
+    let saved: ArrayBuffer | null = null;
+    await act(async () => {
+      saved = await hook.result.current.save();
+    });
+    expect(errors.map(({ message }) => message)).toEqual([]);
+    expect(saved).not.toBeNull();
+    return saved!;
+  };
+  await act(async () => hook.result.current.editing.handleHeaderFooterDoubleClick('header', 1));
+  expect(host.package.headers?.size).toBe(1);
+  const firstSave = await save();
+  expect(unzipContainer(new Uint8Array(firstSave))['word/header1.xml']).toBeDefined();
+  await act(async () => hook.result.current.editing.handleRemoveHeaderFooter());
+  expect(host.package.headers?.size).toBe(0);
+  const lastSave = await save();
+  for (const saved of [firstSave, lastSave]) {
+    const parts = unzipContainer(new Uint8Array(saved));
+    const rels = new DOMParser().parseFromString(xmlPart(parts, 'word/_rels/document.xml.rels'), 'application/xml');
+    for (const entry of xmlElements(rels, RELS, 'Relationship')) {
+      if (entry.getAttribute('TargetMode') === 'External') continue;
+      const target = entry.getAttribute('Target')!;
+      const name = new URL(target, 'https://package.test/word/document.xml').pathname.slice(1);
+      expect(parts[name]).toBeDefined();
+    }
+    const types = new DOMParser().parseFromString(xmlPart(parts, '[Content_Types].xml'), 'application/xml');
+    for (const entry of xmlElements(types, 'http://schemas.openxmlformats.org/package/2006/content-types', 'Override')) {
+      expect(parts[entry.getAttribute('PartName')!.slice(1)]).toBeDefined();
+    }
+  }
+  expect((await reopened(lastSave)).package.document.finalSectionProperties?.headerReferences ?? []).toEqual([]);
 });
