@@ -709,14 +709,20 @@ pub fn layout_floating_table(
         && y + measure.total_height > state.content_limit
     {
         let pen_y = state.pen_y;
+        let spacing = paginator.spacing(state_idx);
+        if !full_width {
+            paginator.set_spacing(state_idx, (0.0, spacing.1));
+        }
         paginator.set_pen_y(state_idx, y);
         layout_table_with_position(block, measure, paginator, Some(x))?;
         let last_state = paginator.get_current();
         let resume = if full_width {
             paginator.state(last_state).pen_y + finite(floating.bottom_from_text).max(0.0)
         } else if last_state == state_idx {
+            paginator.set_spacing(state_idx, spacing);
             pen_y
         } else {
+            paginator.set_spacing(last_state, (0.0, f64::INFINITY));
             let last = paginator.state(last_state);
             paginator.pages[last.page_index]
                 .fragments

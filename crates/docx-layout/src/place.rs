@@ -2871,13 +2871,14 @@ mod pagination_rule_tests {
             ]
         };
         let split = blocks(40.0, 10.0, 0.0);
-        let retained =
-            assert_incremental_matches_full(split.clone(), blocks(40.0, 10.0, 12.0), &[3]);
+        let spaced = blocks(40.0, 10.0, 12.0);
+        assert_incremental_matches_full(split.clone(), spaced.clone(), &[3]);
+        let retained = assert_incremental_matches_full(spaced, split.clone(), &[3]);
         assert_eq!(retained.layout.pages.len(), 3);
         let Some(Fragment::Table(first)) = retained.layout.pages[1].fragments.last() else {
             panic!("first table fragment expected");
         };
-        assert_eq!((first.row_start, first.row_end), (0, 1));
+        assert_eq!((first.y, first.row_start, first.row_end), (60.0, 0, 1));
         assert_eq!(first.carried_to_next, Some(true));
         let [Fragment::Table(table), Fragment::Paragraph(anchor)] =
             retained.layout.pages[2].fragments.as_slice()
