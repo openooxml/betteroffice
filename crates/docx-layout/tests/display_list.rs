@@ -2145,7 +2145,17 @@ fn carried_table_borders_preserve_cell_content_across_slices() {
         assert_eq!(input["layout"]["pages"][1]["fragments"][0]["rowStart"], 1);
         assert!(dl.pages[1].primitives.iter().any(|primitive| {
             matches!(primitive, Primitive::Line(line)
-                if line.attrs.cell.as_ref().is_some_and(|cell| cell.owns_top_border == Some(true)))
+                if line.attrs.cell.as_ref().is_some_and(|cell| cell.owns_top_border == Some(true))
+                    && line.y1 == line.y2 && line.y1.as_f64() == Some(0.0))
+        }));
+        let last_fragment =
+            input["layout"]["pages"].as_array().unwrap().last().unwrap()["fragments"][0].clone();
+        let bottom_y =
+            last_fragment["y"].as_f64().unwrap() + last_fragment["height"].as_f64().unwrap() - 2.0;
+        assert!(dl.pages.last().unwrap().primitives.iter().any(|primitive| {
+            matches!(primitive, Primitive::Line(line)
+                if line.role == Some(docx_layout::display_list::LineRole::TableBorder)
+                    && line.y1 == line.y2 && line.y1.as_f64() == Some(bottom_y))
         }));
         let mut seen = Vec::new();
         for (page_index, page) in dl.pages.iter().enumerate().skip(1) {
@@ -2944,6 +2954,13 @@ fn table_border_lines_carry_cell_and_table_ownership() {
         .collect();
     assert_eq!(borders.len(), 4, "four bordered edges expected: {json}");
     for line in &borders {
+        if line.color == "#111111" {
+            assert_eq!(line.y1.as_f64(), Some(50.5));
+            assert_eq!(line.y2.as_f64(), Some(50.5));
+        } else if line.color == "#333333" {
+            assert_eq!(line.y1.as_f64(), Some(73.5));
+            assert_eq!(line.y2.as_f64(), Some(73.5));
+        }
         let cell = line.attrs.cell.as_ref().expect("border line carries cell");
         assert_eq!(
             (cell.row, cell.col, cell.row_span, cell.col_span),
