@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::de::Error as _;
@@ -39,7 +40,7 @@ use crate::{
 const MAX_STEPS: usize = 128;
 const MAX_INSERTED_UNITS: usize = 1_048_576;
 const MAX_INSERTED_PARAGRAPHS: usize = 1_024;
-const MAX_STAGING_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const MAX_STAGING_BYTES: usize = 256 * 1024 * 1024;
 /// Transaction origin of batches that stay out of local undo history.
 pub(crate) const HOST_ORIGIN: &str = "host";
 
@@ -677,8 +678,10 @@ struct Plan {
 
 /// The captured base state a batch stages against.
 struct Base {
-    update: Vec<u8>,
+    update: Arc<Vec<u8>>,
     state_vector: StateVector,
+    /// `update` is the prepared staging base.
+    prepared: bool,
 }
 
 /// A plan executed on a private clone, with the update that adopts it.
@@ -2598,7 +2601,14 @@ impl EditingDoc {
             ));
         }
         let base = if capture && steps.iter().any(|planned| planned.effect.is_some()) {
-            let update = deterministic::encode_state_as_update_v1(&txn, &StateVector::default());
+            let prepared = self.prepared_staging_bytes(&txn);
+            let is_prepared = prepared.is_some();
+            let update = prepared.unwrap_or_else(|| {
+                Arc::new(deterministic::encode_state_as_update_v1(
+                    &txn,
+                    &StateVector::default(),
+                ))
+            });
             if update.len() > staging_limit {
                 return Err(refusal(
                     version,
@@ -2612,6 +2622,7 @@ impl EditingDoc {
             Some(Base {
                 update,
                 state_vector: txn.state_vector(),
+                prepared: is_prepared,
             })
         } else {
             None
@@ -2639,7 +2650,7 @@ impl EditingDoc {
             Err(refusal) => return Ok(Err(refusal)),
         };
         if let Some(base) = base
-            && let Err(refusal) = self.stage(&plan, base)?
+            && let Err(refusal) = self.stage(&plan, base, false)?
         {
             return Ok(Err(refusal));
         }
@@ -2721,7 +2732,7 @@ impl EditingDoc {
                 receipts: receipts(&mut views, &plan.steps, &executed),
             }));
         };
-        let staged = match self.stage(&plan, base)? {
+        let staged = match self.stage(&plan, base, true)? {
             Ok(staged) => staged,
             Err(refusal) => return Ok(Err(refusal)),
         };
@@ -2773,8 +2784,14 @@ impl EditingDoc {
     }
 
     /// Executes a plan on a private [`EditingDoc::fork`], validates the staged stories, and
-    /// rehearses the resulting update against the base.
-    fn stage(&self, plan: &Plan, base: Base) -> EditResult<Result<Staged, EditRefusal>> {
+    /// rehearses the resulting update against the base, on the prepared replica when `adopting`
+    /// and the base is prepared.
+    fn stage(
+        &self,
+        plan: &Plan,
+        base: Base,
+        adopting: bool,
+    ) -> EditResult<Result<Staged, EditRefusal>> {
         let stage = self.fork(&base.update)?;
         let executed = execute(&stage, &plan.steps)?;
         let changed_stories: Vec<String> = plan
@@ -2792,9 +2809,15 @@ impl EditingDoc {
             return Ok(Err(refusal(plan.base_version.clone(), failure)));
         }
         let update = deterministic::encode_diff_v1(&stage.yrs_doc().transact(), &base.state_vector);
+        let prepared = if adopting && base.prepared {
+            self.take_staging_replica()
+        } else {
+            None
+        };
         rehearse(
             self.client_id,
             &base.update,
+            prepared,
             &update,
             &stage,
             &changed_stories,
@@ -3014,12 +3037,19 @@ fn validate_stage(
 fn rehearse(
     client_id: u64,
     base: &[u8],
+    prepared: Option<EditingDoc>,
     update: &[u8],
     stage: &EditingDoc,
     changed_stories: &[String],
 ) -> EditResult<()> {
-    let rehearsal = EditingDoc::new(client_id);
-    rehearsal.apply_verbatim_v1(base)?;
+    let rehearsal = match prepared {
+        Some(replica) => replica,
+        None => {
+            let rehearsal = EditingDoc::new(client_id);
+            rehearsal.apply_verbatim_v1(base)?;
+            rehearsal
+        }
+    };
     rehearsal.apply_verbatim_v1(update)?;
     let pending = {
         let txn = rehearsal.yrs_doc().transact();

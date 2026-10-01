@@ -295,7 +295,11 @@ function worker() {
     },
     async bootstrap(
       pageCount = 3,
-      { keepSurfaces = false, heapLimitBytes }: { keepSurfaces?: boolean; heapLimitBytes?: number } = {}
+      {
+        keepSurfaces = false,
+        heapLimitBytes,
+        opened = false,
+      }: { keepSurfaces?: boolean; heapLimitBytes?: number; opened?: boolean } = {}
     ) {
       delta(Array.from({ length: pageCount }, (_, index) => index + 1), true, 100, pageCount);
       return send({
@@ -303,6 +307,7 @@ function worker() {
         expectedFrameEpoch: 0,
         extras: '',
         ...(keepSurfaces ? { keepSurfaces } : {}),
+        ...(opened ? { opened } : {}),
         ...(heapLimitBytes !== undefined ? { heapLimitBytes } : {}),
         snapshot: {
           clientId: 1,
@@ -564,6 +569,72 @@ describe('resident display page release', () => {
     await w.send({ type: 'buildPages', pages: [2], expectedFrameEpoch: 2, paintCaret: false });
     expect(w.harness.rasterized).toEqual([3]);
     expect(canvas.pixels).toBe('3:100');
+  });
+});
+
+describe('resident worker staging base', () => {
+  function stagingWorker() {
+    const w = worker();
+    const calls: string[] = [];
+    Object.assign(w.harness.session, {
+      openDocx: () => '{"host":1}',
+      encodeState: () => {
+        calls.push('state');
+        return new Uint8Array([1]);
+      },
+      prepareStagingBase: (step: string) => {
+        calls.push(step);
+        return true;
+      },
+      clearStagingBase: () => calls.push('clear'),
+    });
+    const prepared = async (count: number) => {
+      for (let turn = 0; turn < 100 && calls.length < count; turn += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 2));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    };
+    return { w, calls, prepared };
+  }
+
+  test('an opened document prepares it once, after its first presented page, a step per turn', async () => {
+    const { w, calls, prepared } = stagingWorker();
+    expect((await w.send({ type: 'open', bytes: new Uint8Array([1]).buffer })).ok).toBe(true);
+    expect((await w.bootstrap(3, { opened: true })).ok).toBe(true);
+    await prepared(1);
+    expect(calls).toEqual([]);
+    expect((await w.attach([1])).ok).toBe(true);
+    const queued = w.send({ type: 'encodeState' });
+    expect(calls).toEqual([]);
+    expect((await queued).ok).toBe(true);
+    await prepared(3);
+    expect(calls).toEqual(['state', 'bytes', 'replica']);
+    expect((await w.attach([1, 2])).ok).toBe(true);
+    await prepared(4);
+    expect(calls).toEqual(['state', 'bytes', 'replica']);
+  });
+
+  test('a document the worker did not open never prepares one', async () => {
+    const { w, calls, prepared } = stagingWorker();
+    expect((await w.bootstrap()).ok).toBe(true);
+    expect((await w.attach([1, 2])).ok).toBe(true);
+    await prepared(1);
+    expect(calls).toEqual([]);
+  });
+
+  test('a step that holds nothing ends the preparation', async () => {
+    const { w, calls, prepared } = stagingWorker();
+    Object.assign(w.harness.session, {
+      prepareStagingBase: (step: string) => {
+        calls.push(step);
+        return false;
+      },
+    });
+    await w.send({ type: 'open', bytes: new Uint8Array([1]).buffer });
+    await w.bootstrap(3, { opened: true });
+    await w.attach([1]);
+    await prepared(2);
+    expect(calls).toEqual(['bytes']);
   });
 });
 

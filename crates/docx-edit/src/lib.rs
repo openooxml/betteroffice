@@ -95,6 +95,7 @@ mod script_fonts;
 mod search;
 mod seed;
 mod segments;
+mod staging_base;
 pub mod structured;
 mod target;
 mod undo;
@@ -529,6 +530,10 @@ pub struct EditingDoc {
     /// Bumped once per committed update (local ops, remote merges, undo/redo); segment
     /// indexes and chunk snapshots older than the current value are rebuilt on next lookup.
     epoch: Arc<AtomicU64>,
+    /// Bumped once per committed mutable transaction, empty ones included.
+    transactions: Arc<AtomicU64>,
+    /// The base the next edit batch stages against, when one was prepared ahead of it.
+    staging_base: Mutex<Option<staging_base::StagingBase>>,
     /// Process-unique identity of this replica object.
     instance: u64,
     /// Rotated whenever the replica's content or retained source is replaced.
@@ -565,9 +570,12 @@ impl EditingDoc {
         doc.get_or_insert_map(identity::SESSION);
         let epoch = Arc::new(AtomicU64::new(0));
         let observed = Arc::clone(&epoch);
+        let transactions = Arc::new(AtomicU64::new(0));
+        let committed = Arc::clone(&transactions);
         // after_transaction: bumps on any store-changing commit without encoding an update.
         let update_sub = doc
             .observe_after_transaction(move |txn| {
+                committed.fetch_add(1, Ordering::Relaxed);
                 if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
                     observed.fetch_add(1, Ordering::Relaxed);
                 }
@@ -585,6 +593,8 @@ impl EditingDoc {
             client_id,
             id_counter: AtomicU64::new(0),
             epoch,
+            transactions,
+            staging_base: Mutex::new(None),
             instance: DOC_INSTANCES.fetch_add(1, Ordering::Relaxed),
             version_nonce: AtomicU64::new(batch::mint_nonce(client_id, 0)),
             metadata: Mutex::new(None),
@@ -618,6 +628,7 @@ impl EditingDoc {
 
     /// Invalidates every version handed out so far. `entropy` is mixed into the new nonce.
     pub(crate) fn rotate_version(&self, entropy: u64) {
+        self.clear_staging_base();
         self.version_nonce.store(
             batch::mint_nonce(self.client_id, entropy),
             Ordering::Relaxed,

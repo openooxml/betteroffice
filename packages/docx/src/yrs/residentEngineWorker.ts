@@ -136,6 +136,12 @@ interface BackgroundPageBuild {
 let backgroundPageBuild: BackgroundPageBuild | null = null;
 const BACKGROUND_SLICE_PAGES = 4;
 
+/**
+ * The session whose staging base was scheduled or no longer needs one: a document `open` seeded
+ * here prepares its first proposal batch's base once a page is presented.
+ */
+let stagingBaseOwner: ResidentEngineSession | null = null;
+
 // The request being handled, and the requests answered with a trap.
 let handlingId = 0;
 const trappedIds = new Set<number>();
@@ -364,6 +370,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           break;
       }
       committed = request.operation.kind !== 'snapshot';
+      if (committed) {
+        stagingBaseOwner = session;
+        if (openedDocument) session.clearStagingBase();
+      }
       const changedStories = session.storiesChangedSince(since).stories;
       if (changedStories.length > 0) completedLayout = null;
       const updates = pendingUpdates.map(exactBuffer);
@@ -1154,6 +1164,7 @@ function destroySession(keepSurfaces = false): void {
   session?.destroy();
   lastProposalMirrorVersion = null;
   session = null;
+  stagingBaseOwner = null;
   openedDocument = null;
   previewing = false;
   previewFinalPages = null;
@@ -1377,7 +1388,36 @@ async function replayOffscreen(
     }
     pendingOffscreenPageIds.delete(pageId);
   }
+  if (prepared.length > 0) scheduleStagingBase();
   return { replayedPages: prepared.length, caretPainted };
+}
+
+function scheduleStagingBase(): void {
+  const owner = session;
+  if (!owner || !openedDocument || previewing || stagingBaseOwner === owner) return;
+  stagingBaseOwner = owner;
+  stagingBaseStep(owner, 'bytes');
+}
+
+/** One synchronous step per turn, so requests that arrive meanwhile run between them. */
+function stagingBaseStep(owner: ResidentEngineSession, step: 'bytes' | 'replica'): void {
+  nextTurn(() => {
+    if (session !== owner) return;
+    enqueue(
+      () => {
+        let held: boolean;
+        try {
+          held = owner.prepareStagingBase(step);
+        } catch (error) {
+          if (error instanceof WebAssembly.RuntimeError) trap = error;
+          return;
+        }
+        if (held && step === 'bytes') stagingBaseStep(owner, 'replica');
+      },
+      0,
+      () => session === owner && !trap
+    );
+  });
 }
 
 function exactBuffer(bytes: Uint8Array): ArrayBuffer {

@@ -81,6 +81,14 @@ export type ResidentEngineSession = Pick<
   layoutDocumentWithRegionsRetained(input: string): void;
   /** The retained region layout's `headersFooters` JSON, when it has any. */
   retainedHeadersFootersJson(): string | undefined;
+  /**
+   * Prepares the next edit batch's staging base ahead of it, one step per call; returns whether
+   * the step's result is held for the current state.
+   * @internal
+   */
+  prepareStagingBase(step: 'bytes' | 'replica'): boolean;
+  /** @internal */
+  clearStagingBase(): void;
 };
 
 export async function createResidentEngineSession(
@@ -303,6 +311,8 @@ export async function createResidentEngineSession(
           );
     },
     encodeState: () => session.encode_state(),
+    prepareStagingBase: (step) => session.prepare_staging_base(step),
+    clearStagingBase: () => session.clear_staging_base(),
     revisionCount: (excluding) =>
       (JSON.parse(session.list_revisions()) as { revisionId: string }[]).filter(
         (revision) => !excluding?.has(revision.revisionId)

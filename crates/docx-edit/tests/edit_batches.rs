@@ -2268,3 +2268,181 @@ fn settling_keeps_another_paragraphs_format_revision_undoable() {
     assert!(undo.undo());
     assert!(ids(&doc).is_empty());
 }
+
+/// Two replicas of one package under one client id; the second prepares its staging base.
+fn prepared_pair(replica: bool) -> (EditingDoc, EditingDoc) {
+    let (plain, prepared) = (basic(), basic());
+    let version = prepared.version();
+    assert!(prepared.prepare_staging_base_bytes(usize::MAX));
+    if replica {
+        assert!(prepared.prepare_staging_base_replica().unwrap());
+    }
+    assert_eq!(prepared.staging_base_ready(), replica);
+    assert_eq!(prepared.version(), version, "preparing changes nothing");
+    assert_eq!(
+        plain.encode_state_as_update_v1(),
+        prepared.encode_state_as_update_v1()
+    );
+    (plain, prepared)
+}
+
+fn committed_updates(
+    doc: &EditingDoc,
+) -> (Rc<std::cell::RefCell<Vec<Vec<u8>>>>, yrs::Subscription) {
+    let updates = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let observed = Rc::clone(&updates);
+    let subscription = doc
+        .yrs_doc()
+        .observe_update_v1(move |_, event| observed.borrow_mut().push(event.update.clone()))
+        .unwrap();
+    (updates, subscription)
+}
+
+fn proposal_batch() -> Vec<EditStep> {
+    vec![
+        suggested(replace(search("beta", "00000001"), "BETA"), "Host"),
+        suggested(
+            insert(search("target", "00000002"), TargetEdge::Start, "the "),
+            "Host",
+        ),
+        suggested(delete(search("Delta", "00000004")), "Host"),
+        suggested(
+            insert_paragraphs(
+                "00000004",
+                TargetEdge::End,
+                vec![new_paragraph("Added", Some("Quote"))],
+            ),
+            "Host",
+        ),
+    ]
+}
+
+/// Applies `steps` to both replicas and checks they commit the same bytes, state, receipts,
+/// identities and undo.
+fn assert_same_batches(plain: &EditingDoc, prepared: &EditingDoc, steps: fn() -> Vec<EditStep>) {
+    let (plain_updates, _plain_sub) = committed_updates(plain);
+    let (prepared_updates, _prepared_sub) = committed_updates(prepared);
+    let (plain_undo, prepared_undo) = (UndoSession::new(), UndoSession::new());
+    let a = apply(plain, &plain_undo, steps());
+    let b = apply(prepared, &prepared_undo, steps());
+    assert_eq!(
+        (a.applied, a.source, &a.changed_stories, &a.receipts),
+        (b.applied, b.source, &b.changed_stories, &b.receipts)
+    );
+    assert_eq!(*plain_updates.borrow(), *prepared_updates.borrow());
+    assert_eq!(
+        plain.encode_state_as_update_v1(),
+        prepared.encode_state_as_update_v1()
+    );
+    for view in [EditTextView::Accepted, EditTextView::Original] {
+        assert_eq!(texts(plain, "body", view), texts(prepared, "body", view));
+    }
+    assert_eq!(identities(plain), identities(prepared));
+    assert!(!prepared.staging_base_ready(), "a batch uses its base once");
+    assert!(plain_undo.undo() && prepared_undo.undo());
+    assert_eq!(
+        plain.encode_state_as_update_v1(),
+        prepared.encode_state_as_update_v1()
+    );
+    assert_eq!(
+        next_minted_id(plain, "probe"),
+        next_minted_id(prepared, "probe")
+    );
+}
+
+#[test]
+fn batches_on_a_prepared_staging_base_commit_what_fresh_ones_do() {
+    let (plain, prepared) = prepared_pair(true);
+    assert_same_batches(&plain, &prepared, proposal_batch);
+    assert_same_batches(&plain, &prepared, after_first);
+}
+
+#[test]
+fn batches_on_prepared_bytes_alone_commit_what_fresh_ones_do() {
+    let (plain, prepared) = prepared_pair(false);
+    assert_same_batches(&plain, &prepared, proposal_batch);
+    assert!(!prepared.prepare_staging_base_replica().unwrap());
+}
+
+#[test]
+fn a_staging_base_serves_only_the_state_it_encodes() {
+    let (plain, prepared) = prepared_pair(true);
+    for doc in [&plain, &prepared] {
+        type_text(doc, &UndoSession::new(), "00000004", "!");
+    }
+    assert!(!prepared.staging_base_ready());
+    assert_same_batches(&plain, &prepared, proposal_batch);
+
+    let (plain, prepared) = prepared_pair(true);
+    let version = prepared.version();
+    drop(prepared.yrs_doc().transact_mut());
+    assert_eq!(prepared.version(), version);
+    assert!(
+        !prepared.staging_base_ready(),
+        "any mutable transaction retires the base"
+    );
+    assert!(!prepared.prepare_staging_base_replica().unwrap());
+    assert_same_batches(&plain, &prepared, proposal_batch);
+}
+
+#[test]
+fn validation_and_refusals_keep_the_prepared_staging_base() {
+    let (plain, prepared) = prepared_pair(true);
+    for doc in [&plain, &prepared] {
+        let validation = doc
+            .validate_edits(&request(doc, proposal_batch()))
+            .unwrap()
+            .unwrap();
+        assert!(validation.would_apply);
+    }
+    let refused = refuse(
+        &prepared,
+        &UndoSession::new(),
+        vec![guarded(replace(search("beta", "00000001"), "x"), "gamma")],
+    );
+    assert_eq!(
+        refused.failure.code,
+        refuse(
+            &plain,
+            &UndoSession::new(),
+            vec![guarded(replace(search("beta", "00000001"), "x"), "gamma")],
+        )
+        .failure
+        .code
+    );
+    assert!(prepared.staging_base_ready());
+    assert_same_batches(&plain, &prepared, proposal_batch);
+}
+
+#[test]
+fn pending_updates_retire_the_prepared_staging_base() {
+    let (plain, prepared) = prepared_pair(true);
+    let peer = EditingDoc::new(7005);
+    peer.apply_update_v1(&plain.encode_state_as_update_v1())
+        .unwrap();
+    peer.insert_text(
+        &EditCtx::local("", ""),
+        Position::new("body", 0),
+        "one ",
+        FormatPolicy::Plain,
+    )
+    .unwrap();
+    let known = peer.encode_state_vector_v1();
+    peer.insert_text(
+        &EditCtx::local("", ""),
+        Position::new("body", 4),
+        "two ",
+        FormatPolicy::Plain,
+    )
+    .unwrap();
+    let pending = peer.encode_diff_v1(&known).unwrap();
+    for doc in [&plain, &prepared] {
+        doc.apply_update_v1(&pending).unwrap();
+        assert_eq!(
+            code(doc, vec![replace(search("beta", "00000001"), "x")]),
+            EditFailureCode::Unsupported
+        );
+    }
+    assert!(!prepared.staging_base_ready());
+    assert!(!prepared.prepare_staging_base_bytes(usize::MAX));
+}

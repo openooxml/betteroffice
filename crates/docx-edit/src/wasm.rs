@@ -3963,6 +3963,38 @@ impl EditSession {
         outcome_json(&outcome).map_err(js_err)
     }
 
+    /// Prepares the base the next edit batch stages against, one step per call: `"bytes"`
+    /// encodes the committed state, then `"replica"` decodes it for the batch's rehearsal.
+    /// Returns whether the step's result is held for the current state. Opt-in: it stays
+    /// resident until a batch uses it, the document changes, or `clear_staging_base`. The
+    /// replica is skipped while a heap limit leaves less than twice the live bytes free.
+    pub fn prepare_staging_base(&self, step: &str) -> Result<bool, JsValue> {
+        let doc = self.engine.doc();
+        match step {
+            "bytes" => Ok(doc.prepare_staging_base_bytes(crate::batch::MAX_STAGING_BYTES)),
+            "replica" => {
+                if !crate::wasm_memory::has_room_for(
+                    (crate::wasm_memory::wasm_live_bytes() as usize).saturating_mul(2),
+                ) {
+                    return Ok(false);
+                }
+                doc.prepare_staging_base_replica().map_err(js_err)
+            }
+            _ => Err(JsValue::from_str("unknown staging base step")),
+        }
+    }
+
+    /// Drops a base [`EditSession::prepare_staging_base`] prepared.
+    pub fn clear_staging_base(&self) {
+        self.engine.doc().clear_staging_base();
+    }
+
+    /// Whether a prepared staging base and its replica match the committed state.
+    #[doc(hidden)]
+    pub fn staging_base_ready(&self) -> bool {
+        self.engine.doc().staging_base_ready()
+    }
+
     /// Structured export of the committed document state:
     /// `{"revisionView","stories"?,"includeFormatting"?,"maxBlocks"?,"maxBytes"?}` ->
     /// `{"ok":true,"version","content"}` or `{"ok":false,"version","failure"}`. Anchors are scoped

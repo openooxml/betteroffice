@@ -120,6 +120,16 @@ pub fn wasm_failed_allocation_bytes() -> f64 {
     FAILED.load(Ordering::Relaxed) as f64
 }
 
+/// Whether `bytes` more stay within the limit.
+pub(crate) fn has_room_for(bytes: usize) -> bool {
+    let limit = LIMIT.load(Ordering::Relaxed);
+    limit == usize::MAX
+        || LIVE
+            .load(Ordering::Relaxed)
+            .checked_add(bytes)
+            .is_some_and(|live| live <= limit)
+}
+
 /// Caps the bytes allocated at once; an allocation past the cap fails. A
 /// non-finite or negative value removes the cap.
 #[wasm_bindgen]
