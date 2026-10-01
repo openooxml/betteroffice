@@ -132,9 +132,15 @@ const BACKGROUND_SLICE_PAGES = 4;
 // The request being handled, and the requests answered with a trap.
 let handlingId = 0;
 const trappedIds = new Set<number>();
+// Requests received but not yet started; a progressive snapshot waits while any are.
+let requestsWaiting = 0;
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
-  enqueue(() => handle(event.data), event.data.id);
+  requestsWaiting += 1;
+  enqueue(() => {
+    requestsWaiting -= 1;
+    return handle(event.data);
+  }, event.data.id);
 };
 
 /** `current` drops an operation whose request was answered while it waited. */
@@ -939,7 +945,7 @@ async function replyProgressiveLayout(
   const progressive = completion.progressive;
   if (!session || !incompleteLayout || slicedCompletion !== completion ||
     !progressive || progressive.disabled || coveredPosition === undefined ||
-    backgroundDelay() > 0) return;
+    requestsWaiting > 0) return;
   const reachesTarget = progressive.targets.some((target) => target <= coveredPosition);
   const interval = Math.max(progressive.minIntervalMs ?? 250, 100, 4 * progressive.lastSnapshotMs);
   if (!reachesTarget && (coveredPosition <= progressive.coveredPosition ||
