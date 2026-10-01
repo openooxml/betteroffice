@@ -24,7 +24,7 @@ import type { DocxHostSearch } from './useHostSearch';
 import { useYrsCoreSession } from './useYrsCoreSession';
 import type { DocxEditorCollaborationOptions } from '../types';
 import { awaitWorkerOpenReplica, ensureWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
-import { sourceVersionOf } from '../internals/layoutProvenance';
+import { isLayoutQueued, sourceVersionOf } from '../internals/layoutProvenance';
 import * as replicaHelpers from '../internals/workerOpenReplica';
 import type { DocxEditorRef } from '../../DocxEditor';
 import type { PagedEditorRef } from '../PagedEditor';
@@ -98,6 +98,7 @@ function installWorker(options: {
   failRevisionCount?: boolean;
   onRevisionCount?: () => void;
   holdBootstrap?: boolean;
+  holdSync?: boolean;
   holdCompletion?: boolean;
 } = {}) {
   const workers: InProcessResidentWorker[] = [];
@@ -111,6 +112,7 @@ function installWorker(options: {
         if ((options.holdState && request.type === 'encodeState') ||
             (options.holdOpen && request.type === 'open') ||
             (options.holdBootstrap && request.type === 'bootstrap') ||
+            (options.holdSync && request.type === 'sync') ||
             (options.holdRetryOpen && workers.length > 1 && request.type === 'open') ||
             (options.holdCompletion && request.type === 'completeLayout')) worker.hold();
         if (options.oomStage === request.type &&
@@ -1559,6 +1561,86 @@ test.each([true, false])(
   },
   15_000
 );
+
+test('worker content and preview mutations wait for the replacement frame before settling', async () => {
+  const options = { holdSync: false };
+  const { workers, posted } = installWorker(options);
+  const { result, unmount } = await openWorkerProposals({
+    ...workerProposalProps, source: await longFixture(45),
+  });
+  const frames = holdFrames();
+  try {
+    const api = result.current.ref.current!;
+    const session = result.current.core.session!;
+    const identities = await api.getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
+    const initialPages = result.current.renderer.displayList!.pages.length;
+    for (const kind of ['propose', 'reject', 'withdraw'] as const) {
+      const previous = result.current.renderer.displayList!;
+      expect(previous.pages.some((page) => page.unbuilt)).toBe(false);
+      const snapshot = await api.getProposals();
+      await act(async () => {
+        const changed = kind === 'propose'
+          ? await api.proposeChanges({
+              expectVersion: snapshot.version,
+              proposals: [{
+                id: 'layout-proposal', paragraph,
+                suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+                op: 'insertText', at: 'start', text: 'Added '.repeat(1000),
+              }],
+            })
+          : kind === 'reject'
+            ? await api.setProposalStates({
+                expectVersion: snapshot.version,
+                expectPreviewVersion: snapshot.previewVersion,
+                changes: [{ id: 'layout-proposal', state: 'rejected' }],
+              })
+            : await api.withdrawProposals({ expectVersion: snapshot.version, ids: ['layout-proposal'] });
+        expect(changed).toMatchObject({ ok: true });
+        if (kind === 'reject') expect(session.version()).toBe(snapshot.version);
+      });
+      let completed: number | null = null;
+      const complete = api.whenLayoutComplete().then((pages) => { completed = pages; return pages; });
+      void complete.catch(() => {});
+      await act(async () => {});
+      expect(completed).toBeNull();
+      expect(isLayoutQueued(session)).toBe(true);
+      expect(result.current.renderer.displayList).toBe(previous);
+
+      const layouts = posted.filter((request) => request.type === 'sync').length;
+      options.holdSync = true;
+      await act(async () => frames.run());
+      expect(posted.filter((request) => request.type === 'sync')).toHaveLength(layouts + 1);
+      expect(completed).toBeNull();
+      let duringLayout: number | null = null;
+      const during = api.whenLayoutComplete().then((pages) => { duringLayout = pages; return pages; });
+      void during.catch(() => {});
+      await act(async () => {});
+      expect(duringLayout).toBeNull();
+
+      options.holdSync = false;
+      await act(async () => workers[0]!.release());
+      for (let frame = 0; frame < 100 && completed === null; frame += 1) {
+        await act(async () => frames.run());
+      }
+      expect(completed).not.toBeNull();
+      const pages = await complete;
+      expect(await during).toBe(pages);
+      expect(result.current.renderer.displayList).not.toBe(previous);
+      expect(result.current.renderer.displayList!.pages.some((page) => page.unbuilt)).toBe(false);
+      expect(sourceVersionOf(result.current.renderer.queries)).toBe(session.version());
+      expect(isLayoutQueued(session)).toBe(false);
+      if (kind === 'propose') expect(pages).toBeGreaterThan(initialPages);
+      else expect(pages).toBe(initialPages);
+    }
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+    frames.restore();
+  }
+}, 15_000);
 
 test('worker content callbacks skip preview states and refused proposals', async () => {
   const onWorkerContentChange = mock(() => {});

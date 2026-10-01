@@ -15,13 +15,14 @@ import type { PluginInvocation } from '../../../../shared/plugin-host/runtime';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../commands/createDocxCommandStore';
 import * as editorBatches from '../components/DocxEditor/editorBatches';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
-import { stampSourceVersion } from '../components/DocxEditor/internals/layoutProvenance';
+import { stampRevisionPreviewKey, stampSourceVersion } from '../components/DocxEditor/internals/layoutProvenance';
 import * as workerOpenReplica from '../components/DocxEditor/internals/workerOpenReplica';
 import * as workerProposals from '../components/DocxEditor/internals/workerProposalAuthority';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import { createDocxPluginHost } from './createDocxPluginHost';
 import { createPluginClients, resolveParagraph } from './createPluginClients';
 import { defineDocxPlugin } from './defineDocxPlugin';
+import { currentPreviewKey } from './proposalPreview';
 import type { DocxPluginContext, DocxPluginGrant, DocxPluginSnapshot } from './types';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -352,6 +353,44 @@ describe('plugin edit client', () => {
 });
 
 describe('plugin read and navigation clients', () => {
+  test('worker navigation waits for the current preview at the same document version', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    const proposed = env.session.proposeChanges({
+      expectVersion: env.session.version(),
+      proposals: [{
+        id: 'preview-proposal',
+        paragraph: { kind: 'session', sessionId: env.session.paragraphIdentities().sessionId, story: 'body', paraId: '00000001' },
+        suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+        op: 'insertText', at: 'start', text: 'Added ',
+      }],
+    });
+    expect(proposed).toMatchObject({ ok: true });
+    const snapshot = env.session.getProposals();
+    stampSourceVersion(env.queries, snapshot.version);
+    stampRevisionPreviewKey(env.queries, currentPreviewKey(env.session));
+    expect(env.session.setProposalStates({
+      expectVersion: snapshot.version,
+      expectPreviewVersion: snapshot.previewVersion,
+      changes: [{ id: 'preview-proposal', state: 'rejected' }],
+    })).toMatchObject({ ok: true });
+    expect(env.session.version()).toBe(snapshot.version);
+    expect(currentPreviewKey(env.session)).not.toBe('');
+    const scroll = env.clients.navigation.scrollToParagraph(
+      { story: 'body', paraId: '00000002' }, { expectVersion: snapshot.version }
+    );
+    await env.waiting;
+    expect(env.layoutListeners.size).toBe(1);
+    env.publishLayout();
+    expect(env.events).toEqual([]);
+    stampRevisionPreviewKey(env.queries, currentPreviewKey(env.session));
+    env.publishLayout();
+    expect(await scroll).toEqual({ ok: true });
+    expect(worker.navigation).toHaveBeenCalledTimes(2);
+    expect(env.events).toEqual(['scroll:42']);
+    expect(worker.replica).not.toHaveBeenCalled();
+  });
+
   test('worker navigation resolves twice and reveals without flushing or requesting the replica', async () => {
     const env = await setup();
     const worker = routeWorker(env);

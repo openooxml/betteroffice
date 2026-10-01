@@ -16,6 +16,7 @@ import type {
 } from '@betteroffice/docx/yrs';
 import type { DocxEditorCollaborationOptions } from '../types';
 import type { OpenInWorker, WorkerOpenedDocument } from './useDisplayList';
+import { markLayoutQueued } from '../internals/layoutProvenance';
 import {
   adoptWorkerOpenHandoverVersion,
   adoptWorkerOpenMirrorVersion,
@@ -673,7 +674,10 @@ export function useYrsCoreSession(
                 workerLaidOutRef.current = resolve;
               });
               const authority = registerWorkerProposalAuthority(next, worker, {
-                relayout: () => workerOpenRef.current?.refreshWorkerLayout?.(),
+                relayout: () => {
+                  markLayoutQueued(next, true);
+                  workerOpenRef.current?.refreshWorkerLayout?.();
+                },
                 current: () => !stale(),
                 laidOut: () => laidOut,
                 contentChanged: () => workerOpenRef.current?.onWorkerContentChange?.(),

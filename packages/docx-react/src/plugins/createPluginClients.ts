@@ -15,7 +15,7 @@ import {
   modeRefusal,
 } from '../components/DocxEditor/editorBatches';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
-import { sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
+import { isLayoutQueued, sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
 import {
   requestWorkerOpenReplica,
   workerOpenSourceVersion,
@@ -26,6 +26,7 @@ import {
   type WorkerProposalAuthority,
 } from '../components/DocxEditor/internals/workerProposalAuthority';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
+import { currentPreviewKey, renderedPreviewKey } from './proposalPreview';
 import type {
   DocxPluginCommandClient,
   DocxPluginEditClient,
@@ -292,6 +293,16 @@ export function createPluginClients(
       : resolved.target;
   };
 
+  const layoutMatches = (
+    session: YrsSession,
+    version: string,
+    queries: DisplayListQueries | null
+  ): boolean =>
+    queries !== null &&
+    !isLayoutQueued(session) &&
+    workerOpenSourceVersion(session, sourceVersionOf(queries)) === navigationVersion(session, version) &&
+    renderedPreviewKey(queries) === currentPreviewKey(session);
+
   const settledLayout = (
     session: YrsSession,
     position: number,
@@ -323,7 +334,7 @@ export function createPluginClients(
           finish(false);
           return;
         }
-        if (queries && workerOpenSourceVersion(session, sourceVersionOf(queries)) === expected) {
+        if (queries && layoutMatches(session, version, queries)) {
           const source = queries.sourceState();
           if (source.status === 'error') {
             finish(false);
@@ -387,7 +398,10 @@ export function createPluginClients(
             return navigationFailure('stale-version', 'The document changed after that version');
           }
         }
-        if (!settled || request.signal.aborted) {
+        if (
+          !settled || request.signal.aborted ||
+          !layoutMatches(session, options.expectVersion, access.layout().queries)
+        ) {
           return navigationFailure(
             'layout-unavailable',
             request.signal.aborted

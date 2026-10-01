@@ -35,10 +35,13 @@ import { workerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { viewportMinHeightPx } from '../internals/scrollUtils';
 import {
+  isSupersededLayout,
   markLayoutQueued,
   markSupersededLayout,
   readSessionVersion,
   revisionPreviewKey,
+  revisionPreviewKeyOf,
+  sourceVersionOf,
   stampRevisionPreviewKey,
   stampSourceVersion,
 } from '../internals/layoutProvenance';
@@ -260,6 +263,15 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   // Total-pages notifier — fires only when count changes (including N → 0).
   const lastTotalPagesRef = useRef<number>(0);
   useEffect(() => {
+    if (
+      layout &&
+      session &&
+      workerProposalAuthority(session)?.initialized &&
+      !isSupersededLayout(layout) &&
+      sourceVersionOf(layout) === session.version() &&
+      revisionPreviewKeyOf(layout) ===
+        revisionPreviewKey(proposalRevisionPreview(session.getProposals()))
+    ) markLayoutQueued(session, false);
     onLayoutComputedRef.current?.(layout);
     const total = documentPageCount(layout);
     if (total === lastTotalPagesRef.current) return;
@@ -466,7 +478,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         }
         pendingOnHostRef.current = false;
         // A queued pass deferred above still holds settles until it gets this far.
-        markLayoutQueued(session, false);
+        if (!workerProposalAuthority(session)?.initialized) markLayoutQueued(session, false);
 
         const computeInputs = { document, pageGap, session, renderEnv: passRenderEnv, measurement };
         const sourceVersion = readSessionVersion(session);
