@@ -601,7 +601,11 @@ export function useYrsCoreSession(
         // The worker opens the full document while the preview opens and paints. A preview the
         // worker opened lays out there first: the full open queues right behind that layout.
         const openPreviewInWorker =
-          openWorker && previewFirstPage && seedBytes && !collaborationInitialUpdate
+          openWorker &&
+          previewFirstPage &&
+          seedBytes &&
+          !collaborationInitialUpdate &&
+          yrs.canUseResidentEngineWorker()
             ? openPreviewInWorkerRef.current
             : undefined;
         // The worker's preview open goes first; the hash then runs while the worker parses.
