@@ -5,6 +5,7 @@ use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::block::BlockContent;
 use crate::comments::Comment;
 use crate::paragraph::HexIdAllocator;
 use crate::paragraph_identity::{attribute, parse_paragraph_id, tags, unescaped};
@@ -129,8 +130,8 @@ fn can_replay(source: &Comment, written: &Comment, fragment: &str) -> Result<boo
         .para_id
         .as_deref()
         .is_some_and(|id| parse_paragraph_id(id).is_none())
-        || (source.para_id.is_none()
-            && (source.durable_id != written.durable_id || source.date_utc != written.date_utc))
+        || source.durable_id != written.durable_id
+        || source.date_utc != written.date_utc
         || !unchanged(source, written)?
     {
         return Ok(false);
@@ -153,15 +154,42 @@ fn can_replay(source: &Comment, written: &Comment, fragment: &str) -> Result<boo
         return Ok(false);
     }
     let fragment_tags = tags(fragment).ok_or_else(|| error_xml("invalid comment fragment"))?;
-    let last_para_id = fragment_tags
+    let root_tag = fragment_tags
+        .first()
+        .ok_or_else(|| error_xml("missing comment element"))?;
+    let id = js_number(written.id);
+    if attribute(root_tag, "w:id").map(|range| &fragment[range]) != Some(id.as_str()) {
+        return Ok(false);
+    }
+    let source_ids: Vec<_> = fragment_tags
         .iter()
-        .rev()
-        .filter(|tag| !tag.end)
-        .find_map(|tag| {
-            attribute(tag, "w14:paraId")
-                .and_then(|range| unescaped(fragment, range))
-                .map(|id| id.to_ascii_uppercase())
-        });
+        .filter(|tag| !tag.end && tag.name == "w:p")
+        .map(|tag| attribute(tag, "w14:paraId").and_then(|range| unescaped(fragment, range)))
+        .collect();
+    let Some(model_ids) = comment_paragraph_ids(written) else {
+        return Ok(false);
+    };
+    if source_ids.iter().all(Option::is_none) {
+        if source_ids.len() != model_ids.len() || model_ids.iter().any(Option::is_some) {
+            return Ok(false);
+        }
+    } else {
+        let source_ids: Option<Vec<_>> = source_ids
+            .iter()
+            .map(|id| id.as_deref().and_then(parse_paragraph_id))
+            .collect();
+        let model_ids: Option<Vec<_>> = model_ids
+            .iter()
+            .map(|id| id.and_then(parse_paragraph_id))
+            .collect();
+        if source_ids.is_none() || source_ids != model_ids {
+            return Ok(false);
+        }
+    }
+    let last_para_id = source_ids
+        .last()
+        .and_then(|id| id.as_ref())
+        .map(|id| id.to_ascii_uppercase());
     if last_para_id != source.para_id {
         return Ok(false);
     }
@@ -185,6 +213,57 @@ fn can_replay(source: &Comment, written: &Comment, fragment: &str) -> Result<boo
         return Ok(false);
     }
     Ok(true)
+}
+
+fn comment_paragraph_ids(comment: &Comment) -> Option<Vec<Option<&str>>> {
+    let mut ids = Vec::new();
+    if comment.block_content.is_empty() {
+        ids.extend(
+            comment
+                .content
+                .iter()
+                .map(|paragraph| paragraph.para_id.as_deref()),
+        );
+        return Some(ids);
+    }
+    let mut paragraphs = comment.content.iter();
+    for block in &comment.block_content {
+        if let BlockContent::Paragraph(block_paragraph) = block {
+            let paragraph = paragraphs.next()?;
+            let id = paragraph.para_id.as_deref();
+            let block_id = block_paragraph.para_id.as_deref();
+            match (id, block_id) {
+                (Some(id), Some(block_id)) if id.eq_ignore_ascii_case(block_id) => {}
+                (None, None) => {}
+                _ => return None,
+            }
+            ids.push(id);
+        } else {
+            block_paragraph_ids(block, &mut ids);
+        }
+    }
+    paragraphs.next().is_none().then_some(ids)
+}
+
+fn block_paragraph_ids<'a>(block: &'a BlockContent, ids: &mut Vec<Option<&'a str>>) {
+    match block {
+        BlockContent::Paragraph(paragraph) => ids.push(paragraph.para_id.as_deref()),
+        BlockContent::Table(table) => {
+            for row in &table.rows {
+                for cell in &row.cells {
+                    for block in &cell.content {
+                        block_paragraph_ids(block, ids);
+                    }
+                }
+            }
+        }
+        BlockContent::BlockSdt(sdt) => {
+            for block in &sdt.content {
+                block_paragraph_ids(block, ids);
+            }
+        }
+        BlockContent::RawXml(_) => {}
+    }
 }
 
 fn unchanged(source: &Comment, written: &Comment) -> Result<bool, ParseError> {

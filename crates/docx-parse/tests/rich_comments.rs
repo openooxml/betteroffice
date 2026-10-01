@@ -1,5 +1,7 @@
 use docx_parse::document::DocumentBody;
-use docx_parse::paragraph_identity::{paragraph_ids_by_part, parse_paragraph_id};
+use docx_parse::paragraph_identity::{
+    paragraph_ids_by_part, paragraph_occurrences, parse_paragraph_id,
+};
 use docx_parse::relationships::{
     RelationshipTarget, parse_relationships, resolve_relationship_target,
 };
@@ -714,4 +716,140 @@ fn reordered_comment_infos_keep_replayed_ids_and_reply_parents() {
         "w15:paraId=\"10000004\" w15:done=\"0\" w15:paraIdParent=\"{}\"",
         parent.para_id.as_deref().unwrap()
     )));
+}
+
+#[test]
+fn editing_an_inline_durable_id_uses_the_writer_fragment() {
+    let plain = PLAIN_COMMENT.replace(
+        "<w:comment ",
+        "<w:comment xmlns:w16cid=\"http://schemas.microsoft.com/office/word/2016/wordml/cid\" w16cid:durableId=\"20000001\" ",
+    );
+    let source = fixture_with_comment_parts(&format!("{RICH_COMMENT}\n{plain}"), &[]);
+    let mut request = save_request(&source);
+    let comment = &mut request.document.comments.as_mut().unwrap()[1];
+    assert_eq!(comment.durable_id.as_deref(), Some("20000001"));
+    comment.durable_id = Some("20000002".to_owned());
+    let saved = write_docx_s13(request, &source).unwrap();
+    assert_rich_comment(&saved);
+    let xml = String::from_utf8(part(&saved, "word/comments.xml")).unwrap();
+    assert!(!xml.contains("w16cid:durableId="));
+    assert!(!xml.contains("20000001"));
+    let ids = String::from_utf8(part(&saved, "word/commentsIds.xml")).unwrap();
+    assert!(ids.contains("w16cid:paraId=\"10000004\" w16cid:durableId=\"20000002\""));
+    let comments = save_request(&saved).document.comments.unwrap();
+    assert_eq!(comments.len(), 2);
+    let comment = comments.iter().find(|comment| comment.id == 1.0).unwrap();
+    assert_eq!(comment.durable_id.as_deref(), Some("20000002"));
+    assert_eq!(comment.para_id.as_deref(), Some("10000004"));
+}
+
+#[test]
+fn resolving_a_comment_with_a_trailing_unidentified_paragraph_uses_the_writer_fragment() {
+    let plain = PLAIN_COMMENT.replace("</w:comment>", "<w:p/></w:comment>");
+    let source = fixture_with_comment_parts(&format!("{RICH_COMMENT}\n{plain}"), &[]);
+    let mut request = save_request(&source);
+    request.document.comments.as_mut().unwrap()[1].done = Some(true);
+    let saved = write_docx_s13(request, &source).unwrap();
+    assert_rich_comment(&saved);
+    let xml = String::from_utf8(part(&saved, "word/comments.xml")).unwrap();
+    let paragraphs: Vec<_> = paragraph_occurrences(&xml)
+        .unwrap()
+        .into_iter()
+        .filter(|paragraph| paragraph.item_id.as_deref() == Some("1"))
+        .collect();
+    assert_eq!(paragraphs.len(), 2);
+    assert_eq!(paragraphs[1].para_id.as_deref(), Some("10000004"));
+    let extended = String::from_utf8(part(&saved, "word/commentsExtended.xml")).unwrap();
+    assert!(extended.contains("w15:paraId=\"10000004\" w15:done=\"1\""));
+    let comments = save_request(&saved).document.comments.unwrap();
+    assert_eq!(comments.len(), 2);
+    let comment = comments.iter().find(|comment| comment.id == 1.0).unwrap();
+    assert_eq!(comment.done, Some(true));
+    assert_eq!(comment.content.len(), 2);
+    assert_eq!(comment.content[1].para_id.as_deref(), Some("10000004"));
+    assert_eq!(comment.para_id.as_deref(), Some("10000004"));
+}
+
+#[test]
+fn editing_a_model_comment_paragraph_id_updates_all_comment_parts() {
+    let source = fixture();
+    let mut request = save_request(&source);
+    request.document.comments.as_mut().unwrap()[1].content[0].para_id =
+        Some("10000009".to_owned());
+    let saved = write_docx_s13(request, &source).unwrap();
+    for path in [
+        "word/comments.xml",
+        "word/commentsExtended.xml",
+        "word/commentsIds.xml",
+    ] {
+        let xml = String::from_utf8(part(&saved, path)).unwrap();
+        assert!(xml.contains("paraId=\"10000009\""), "{path}");
+        assert!(!xml.contains("10000004"), "{path}");
+    }
+    let comments = save_request(&saved).document.comments.unwrap();
+    assert_eq!(comments.len(), 2);
+    let comment = comments.iter().find(|comment| comment.id == 1.0).unwrap();
+    assert_eq!(comment.content[0].para_id.as_deref(), Some("10000009"));
+    assert_eq!(comment.para_id.as_deref(), Some("10000009"));
+}
+
+#[test]
+fn invalid_earlier_comment_paragraph_ids_use_the_writer_fragment() {
+    for id in ["10000001", "10000003"] {
+        let rich = RICH_COMMENT.replace(id, "1000000&quot;");
+        let source = fixture_with_comment_parts(&format!("{rich}\n{PLAIN_COMMENT}"), &[]);
+        let request = save_request(&source);
+        let written = serialize_comments_part(
+            &request.document.comments.as_ref().unwrap()[..1],
+            &mut SerializerContext::new(&request.determinism).unwrap(),
+        );
+        let start = written.find("<w:comment ").unwrap();
+        let end = written.find("</w:comment>").unwrap() + "</w:comment>".len();
+        let saved = write_docx_s13(request, &source).unwrap();
+        let xml = String::from_utf8(part(&saved, "word/comments.xml")).unwrap();
+        assert!(xml.contains(&written[start..end]));
+        assert!(!xml.contains("1000000&quot;"));
+        for paragraph in paragraph_occurrences(&xml).unwrap() {
+            if let Some(id) = paragraph.para_id {
+                assert!(parse_paragraph_id(&id).is_some());
+            }
+        }
+        let comments = save_request(&saved).document.comments.unwrap();
+        assert_eq!(comments.len(), 2);
+        let comment = comments.iter().find(|comment| comment.id == 0.0).unwrap();
+        assert_eq!(comment.content.len(), 3);
+        assert_eq!(comment.para_id.as_deref(), Some("10000006"));
+        for paragraph in &comment.content {
+            if let Some(id) = &paragraph.para_id {
+                assert!(parse_paragraph_id(id).is_some());
+            }
+        }
+        let content = serde_json::to_string(&comment.content).unwrap();
+        assert!(content.contains(" colorful"));
+        assert!(content.contains("Second"));
+    }
+}
+
+#[test]
+fn noncanonical_comment_id_uses_one_canonical_writer_fragment() {
+    let plain = PLAIN_COMMENT.replace("w:id=\"1\"", "w:id=\"1tail\"");
+    let source = fixture_with_comment_parts(&format!("{RICH_COMMENT}\n{plain}"), &[]);
+    let saved = write_docx_s13(save_request(&source), &source).unwrap();
+    let xml = part(&saved, "word/comments.xml");
+    assert!(!std::str::from_utf8(&xml).unwrap().contains("1tail"));
+    let limits = ParseLimits::default();
+    let document = parse_xml(&xml, "word/comments.xml", &mut ParseBudget::new(&limits)).unwrap();
+    let root = document.root().unwrap();
+    assert_eq!(root.children_by_local_name("comment").count(), 2);
+    assert_eq!(
+        root.children_by_local_name("comment")
+            .filter(|comment| comment.attribute(Some("w"), "id") == Some("1"))
+            .count(),
+        1
+    );
+    let comments = save_request(&saved).document.comments.unwrap();
+    assert_eq!(comments.len(), 2);
+    let comment = comments.iter().find(|comment| comment.id == 1.0).unwrap();
+    assert_eq!(comment.para_id.as_deref(), Some("10000004"));
+    assert!(serde_json::to_string(&comment.content).unwrap().contains("Plain"));
 }
