@@ -8,6 +8,7 @@ import type { ResidentCaretPaintStyle } from './residentCaret';
 import type {
   ResidentDocumentRead,
   ResidentDocumentReadValues,
+  ResidentEngineWorkerHostModule,
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerRequestWithoutId,
   ResidentEngineWorkerResponse,
@@ -16,6 +17,7 @@ import type {
 } from './residentEngineWorkerProtocol';
 import type { DocxProposalRegistryState } from './proposals';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
+import { editWasmModule } from './wasm/index';
 
 /** @internal */
 export interface ResidentProposalReply
@@ -122,7 +124,10 @@ export interface ResidentEngineWorkerPort {
   onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null;
   onerror: ((event: ErrorEvent) => void) | null;
   onmessageerror: ((event: MessageEvent) => void) | null;
-  postMessage(message: ResidentEngineWorkerRequest, transfer?: Transferable[]): void;
+  postMessage(
+    message: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule,
+    transfer?: Transferable[]
+  ): void;
   terminate(): void;
 }
 
@@ -433,7 +438,19 @@ export class ResidentEngineWorkerClient {
   }
 
   async warm(): Promise<void> {
-    await this.request({ type: 'warm' });
+    const response = this.request({ type: 'warm', hostModule: true });
+    const postModule = (module: WebAssembly.Module | null): void => {
+      if (this.terminalError) return;
+      try {
+        this.worker.postMessage({ type: 'editModule', module });
+      } catch {
+        try {
+          this.worker.postMessage({ type: 'editModule', module: null });
+        } catch {}
+      }
+    };
+    void editWasmModule().then(postModule, () => postModule(null));
+    await response;
   }
 
   async bootstrap(

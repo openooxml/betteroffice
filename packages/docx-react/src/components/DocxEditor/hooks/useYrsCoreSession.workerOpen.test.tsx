@@ -1,10 +1,11 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import { createRef, useCallback, useEffect, useRef, useState } from 'react';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
+import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import {
   createYrsSession,
   preloadResidentEngineWorker,
@@ -17,7 +18,11 @@ import {
   residentWorkerFactory,
   type InProcessResidentWorker,
 } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
-import type { ResidentEngineWorkerRequest, ResidentEngineWorkerResponse } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
+import type {
+  ResidentEngineWorkerHostModule,
+  ResidentEngineWorkerRequest,
+  ResidentEngineWorkerResponse,
+} from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { LayoutSelectionGate } from '@betteroffice/docx/layout';
 import { useCanvasRenderer, type OpenInWorker } from './useDisplayList';
 import { useLayoutPipeline } from './useLayoutPipeline';
@@ -73,6 +78,14 @@ const font = new Uint8Array(readFileSync(resolve(
 )));
 const sessions: YrsSession[] = [];
 let startWorker!: () => InProcessResidentWorker;
+const editModule = new WebAssembly.Module(
+  new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+);
+let compileModule: ReturnType<typeof spyOn<typeof wasm, 'editWasmModule'>>;
+
+beforeEach(() => {
+  compileModule = spyOn(wasm, 'editWasmModule').mockResolvedValue(editModule);
+});
 
 beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(resolve(
@@ -82,6 +95,7 @@ beforeAll(async () => {
 });
 afterEach(() => {
   cleanup();
+  compileModule.mockRestore();
   globalThis.Worker = originalWorker;
   for (const session of sessions.splice(0)) session.destroy();
 });
@@ -114,7 +128,7 @@ function installWorker(options: {
   refusePreview?: boolean;
 } = {}) {
   const workers: InProcessResidentWorker[] = [];
-  const posted: ResidentEngineWorkerRequest[] = [];
+  const posted: (ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule)[] = [];
   const replies = new Map<number, () => void>();
   const received = new Set<ResidentEngineWorkerRequest>();
   const replyWaiters = new Set<() => void>();
@@ -128,7 +142,9 @@ function installWorker(options: {
         get: () => {
           const listener = onmessage;
           return (event: MessageEvent<ResidentEngineWorkerResponse>) => {
-            const request = posted.find((request) => request.id === event.data.id);
+            const request = posted.find((request): request is ResidentEngineWorkerRequest =>
+              'id' in request && request.id === event.data.id
+            );
             const data = event.data;
             const delivered = options.withoutDecisionFontRequirements && data.ok && data.proposal &&
               request?.type === 'proposal' && request.operation.kind === 'setStates'
@@ -146,6 +162,10 @@ function installWorker(options: {
       const send = worker.postMessage.bind(worker);
       worker.postMessage = (request, transfer) => {
         posted.push(request);
+        if (request.type === 'editModule') {
+          send(request, transfer);
+          return;
+        }
         if ((options.holdState && request.type === 'encodeState') ||
             (options.holdOpen && request.type === 'open') ||
             (options.holdBootstrap && request.type === 'bootstrap') ||
@@ -1261,6 +1281,10 @@ test('a preloaded spare worker takes the open that starts alongside the preview'
   const { workers, posted } = installWorker();
   await preloadResidentEngineWorker();
   expect(workers).toHaveLength(1);
+  expect(posted).toEqual([
+    { id: 1, type: 'warm', hostModule: true },
+    { type: 'editModule', module: editModule },
+  ]);
   const frames = holdFrames();
   try {
     const { result, unmount } = renderHook(useHarness, {
@@ -1288,7 +1312,9 @@ test('a preloaded spare worker takes the open that starts alongside the preview'
 });
 
 test('a preview the worker opens lays out there, and the full open queues right behind its layout', async () => {
-  const fullOpen = (request: ResidentEngineWorkerRequest) =>
+  const fullOpen = (
+    request: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule
+  ): request is Extract<ResidentEngineWorkerRequest, { type: 'open' }> =>
     request.type === 'open' && request.previewBlocks === undefined;
   const { workers, posted, reply } = installWorker({ holdReply: fullOpen });
   const frames = holdFrames();
@@ -1356,7 +1382,9 @@ test('a preview the worker opens lays out there, and the full open queues right 
 });
 
 test('a preview font preflight answered after the full open took its worker over reports no error', async () => {
-  const fullOpen = (request: ResidentEngineWorkerRequest) =>
+  const fullOpen = (
+    request: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule
+  ): request is Extract<ResidentEngineWorkerRequest, { type: 'open' }> =>
     request.type === 'open' && request.previewBlocks === undefined;
   let holdRequirements = false;
   const held: ResidentEngineWorkerRequest[] = [];
@@ -2152,7 +2180,7 @@ test.each(['A then B', 'B then A'])('Undo keeps worker proposals through font pr
       await new Promise((resolve) => setTimeout(resolve, 50));
     });
     // Pass B shares pass A's read while their inputs are identical, else it holds its own.
-    const held = posted.filter((request) =>
+    const held = posted.filter((request): request is ResidentEngineWorkerRequest =>
       request.type === 'fontRequirements' && request.id >= passA.id && replies.has(request.id)
     );
     expect(held[0]).toBe(passA);

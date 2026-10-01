@@ -6,7 +6,7 @@ import {
   type ResidentEngineSession,
 } from './residentEngineSession';
 import { finalPreviewDisplayWindow, finalPreviewPageCount } from './previewDisplayWindow';
-import { preloadEditWasm } from './wasm/index';
+import { preloadEditWasm, preloadEditWasmFrom } from './wasm/index';
 import {
   createProposalRegistry,
   proposalRevisionPreview,
@@ -33,9 +33,11 @@ import {
   encodeDisplayListFrameExtras,
   type DisplayListBuildInputs,
 } from '../layout/render/rustDisplayList';
-import type {
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+import {
+  RESIDENT_HOST_MODULE_WAIT_MS,
+  type ResidentEngineWorkerHostModule,
+  type ResidentEngineWorkerRequest,
+  type ResidentEngineWorkerResponse,
 } from './residentEngineWorkerProtocol';
 import {
   residentCaretDeviceRect,
@@ -44,6 +46,10 @@ import {
 } from './residentCaret';
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
+let resolveHostEditModule: (module: WebAssembly.Module | null) => void;
+const hostEditModule = new Promise<WebAssembly.Module | null>((resolve) => {
+  resolveHostEditModule = resolve;
+});
 let session: ResidentEngineSession | null = null;
 let proposals: DocxProposalRegistry | null = null;
 let lastProposalMirrorVersion: string | null = null;
@@ -140,9 +146,18 @@ const BACKGROUND_SLICE_PAGES = 4;
 let handlingId = 0;
 const trappedIds = new Set<number>();
 
-scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
-  enqueue(() => handle(event.data), event.data.id);
+scope.onmessage = (
+  event: MessageEvent<ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule>
+) => {
+  const message = event.data;
+  if (message.type === 'editModule') {
+    // The queued warm waits for this message.
+    resolveHostEditModule(message.module);
+    return;
+  }
+  enqueue(() => handle(message), message.id);
 };
+scope.onmessageerror = () => resolveHostEditModule(null);
 
 /** `current` drops an operation whose request was answered while it waited. */
 function enqueue(
@@ -196,7 +211,17 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   supersedeBackgroundPageBuild();
   if (request.type === 'warm') {
     try {
-      await preloadEditWasm();
+      if (request.hostModule) {
+        const timer = setTimeout(() => resolveHostEditModule(null), RESIDENT_HOST_MODULE_WAIT_MS);
+        await preloadEditWasmFrom(
+          hostEditModule.then((module) => {
+            clearTimeout(timer);
+            return module;
+          })
+        );
+      } else {
+        await preloadEditWasm();
+      }
       reply({ id: request.id, ok: true });
     } catch (error) {
       // No session exists yet, so a failed load is retried by the next request.
