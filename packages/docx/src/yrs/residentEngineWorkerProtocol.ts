@@ -134,6 +134,7 @@ export type ResidentEngineWorkerRequest =
        * requests that arrive meanwhile run between steps; absent, in one step.
        */
       sliceBlocks?: number;
+      progressive?: { targets?: number[]; minIntervalMs?: number };
     }
   | {
       id: number;
@@ -195,6 +196,7 @@ export type ResidentEngineWorkerResponse = (
   | {
       id: number;
       ok: true;
+      interim?: boolean;
       frame?: ArrayBuffer;
       pageFrames?: ArrayBuffer[];
       pageBuildSuperseded?: boolean;

@@ -14,6 +14,7 @@ import type { YrsLoc, YrsSession } from '@betteroffice/docx/yrs';
 import type { YrsInputRef } from '../YrsInput';
 import { runAfterFrames } from '../internals/scrollUtils';
 import { scrollViewport } from '../internals/viewportBand';
+import { trackWorkerNavigationPosition } from '../internals/workerProposalAuthority';
 
 export interface UsePagedScrollApiOptions {
   pagesContainerRef: React.RefObject<HTMLDivElement | null>;
@@ -28,6 +29,7 @@ export interface UsePagedScrollApiOptions {
   onNavigationIntent?: () => void;
   /** Counts navigation intents; a scroll waiting for the full layout drops on a newer one. */
   navigationEpoch?: () => number;
+  experimentalWorkerOpen?: boolean;
   requestCanvasParagraphFlash?: (req: {
     from: number;
     to: number;
@@ -78,6 +80,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     canvasHostRef,
     onNavigationIntent,
     navigationEpoch,
+    experimentalWorkerOpen = false,
     requestCanvasParagraphFlash,
   } = opts;
   const scrollAbortRef = useRef<AbortController | null>(null);
@@ -85,6 +88,18 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
   // pages get built, the scroll follows the position until it lands on a built
   // page, the attempt runs out, or the user scrolls or navigates on their own.
   const pendingRefineRef = useRef<PendingRefine | null>(null);
+  const pendingPositionRef = useRef<{
+    position: number;
+    forParaIdScroll: boolean;
+    session: YrsSession | null;
+    version: string | undefined;
+    epoch: number | undefined;
+    release: () => void;
+  } | null>(null);
+  const clearPendingPosition = useCallback(() => {
+    pendingPositionRef.current?.release();
+    pendingPositionRef.current = null;
+  }, []);
   const clearPendingRefine = useCallback(() => {
     pendingRefineRef.current?.stop.abort();
     pendingRefineRef.current = null;
@@ -95,8 +110,9 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       scrollAbortRef.current?.abort();
       scrollAbortRef.current = null;
       clearPendingRefine();
+      clearPendingPosition();
     },
-    [clearPendingRefine]
+    [clearPendingPosition, clearPendingRefine]
   );
 
   const scrollRectIntoView = useCallback(
@@ -168,6 +184,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
 
   const scrollToPositionImpl = useCallback(
     (pmPos: number, forParaIdScroll = false) => {
+      clearPendingPosition();
       if (!Number.isInteger(pmPos) || pmPos < 0 || !displayListQueries) return;
       onNavigationIntent?.();
       clearPendingRefine();
@@ -175,12 +192,35 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       scrollAbortRef.current = new AbortController();
       const rect = displayListQueries.anchorRect(pmPos);
       if (rect) scrollAnchorIntoView(displayListQueries, rect, pmPos, !forParaIdScroll);
+      else if (experimentalWorkerOpen && layout?.partial && !yrsSession?.isDisplayOnly?.()) {
+        pendingPositionRef.current = {
+          position: pmPos, forParaIdScroll, session: yrsSession,
+          version: yrsSession?.version(), epoch: navigationEpoch?.(),
+          release: yrsSession ? trackWorkerNavigationPosition(yrsSession, pmPos) : () => {},
+        };
+      }
     },
-    [clearPendingRefine, displayListQueries, onNavigationIntent, scrollAnchorIntoView]
+    [clearPendingPosition, clearPendingRefine, displayListQueries, experimentalWorkerOpen, layout, navigationEpoch, onNavigationIntent,
+      scrollAnchorIntoView, yrsSession]
   );
+
+  useEffect(() => {
+    const pending = pendingPositionRef.current;
+    if (!pending || !displayListQueries) return;
+    if (pending.session !== yrsSession || pending.version !== yrsSession?.version() ||
+      pending.epoch !== navigationEpoch?.()) {
+      clearPendingPosition();
+      return;
+    }
+    const complete = layout && !layout.partial && displayListQueries.pageCount() === layout.pages.length;
+    if (displayListQueries.anchorRect(pending.position) || complete) {
+      scrollToPositionImpl(pending.position, pending.forParaIdScroll);
+    }
+  }, [clearPendingPosition, displayListQueries, layout, navigationEpoch, scrollToPositionImpl, yrsSession]);
 
   const revealPositionImpl = useCallback(
     (position: number, signal?: AbortSignal): RevealPositionOutcome => {
+      clearPendingPosition();
       if (!Number.isInteger(position) || position < 0) return 'unsupported';
       if (!displayListQueries) return 'layout-unavailable';
       clearPendingRefine();
@@ -203,7 +243,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       }
       return scrolled ? 'scrolled' : 'layout-unavailable';
     },
-    [clearPendingRefine, displayListQueries, onNavigationIntent, scrollAnchorIntoView, yrsSession]
+    [clearPendingPosition, clearPendingRefine, displayListQueries, onNavigationIntent, scrollAnchorIntoView, yrsSession]
   );
 
   const pendingPageRef = useRef<{
@@ -213,6 +253,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
   } | null>(null);
   const scrollToPageImpl = useCallback(
     (pageNumber: number): void => {
+      clearPendingPosition();
       pendingPageRef.current = null;
       clearPendingRefine();
       if (!Number.isInteger(pageNumber) || pageNumber < 1 || !displayListQueries) return;
@@ -231,6 +272,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       if (bounds) scrollRectIntoView(bounds, true);
     },
     [
+      clearPendingPosition,
       clearPendingRefine,
       displayListQueries,
       layout,

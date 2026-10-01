@@ -79,6 +79,28 @@ type RegisteredAuthority = WorkerProposalAuthority & {
   handedOverRequest<T extends { expectVersion: string }>(request: T): T;
 };
 const authorities = new WeakMap<YrsSession, RegisteredAuthority>();
+const navigationPositions = new WeakMap<YrsSession, Map<number, number>>();
+
+export function trackWorkerNavigationPosition(session: YrsSession, position: number): () => void {
+  let positions = navigationPositions.get(session);
+  if (!positions) {
+    positions = new Map();
+    navigationPositions.set(session, positions);
+  }
+  positions.set(position, (positions.get(position) ?? 0) + 1);
+  let waiting = true;
+  return () => {
+    if (!waiting) return;
+    waiting = false;
+    const count = positions.get(position)!;
+    if (count === 1) positions.delete(position);
+    else positions.set(position, count - 1);
+  };
+}
+
+export function pendingWorkerNavigationPositions(session: YrsSession): number[] {
+  return [...(navigationPositions.get(session)?.keys() ?? [])];
+}
 
 export function registerWorkerProposalAuthority(
   session: YrsSession,

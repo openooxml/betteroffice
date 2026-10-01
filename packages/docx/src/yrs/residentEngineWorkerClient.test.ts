@@ -9,6 +9,7 @@ import {
   takePreloadedResidentEngineWorker,
   ResidentWorkerOutOfMemoryError,
   type ResidentEngineWorkerPort,
+  type ResidentEngineWorkerFrame,
 } from './residentEngineWorkerClient';
 import type {
   ResidentEngineWorkerRequest,
@@ -121,6 +122,48 @@ function setup() {
   const client = new ResidentEngineWorkerClient(worker);
   return { worker, client };
 }
+
+test('completion interims update frame state and keep the final reply pending', async () => {
+  const { worker, client } = setup();
+  const interims: ResidentEngineWorkerFrame[] = [];
+  let settled = false;
+  const pending = client.completeLayout(4, false, 1, {
+    progressive: { targets: [10], minIntervalMs: 200 },
+    onInterim: (frame) => interims.push(frame),
+  }).then((frame) => { settled = true; return frame; });
+  const id = worker.lastId();
+  expect(worker.posted.at(-1)).toMatchObject({
+    type: 'completeLayout', progressive: { targets: [10], minIntervalMs: 200 },
+  });
+  expect(client.frameRequestPending()).toBe(false);
+  const revision = client.layoutRevision();
+  worker.reply({
+    ...frameReply(id), interim: true, layoutProvisional: true, layoutJson: 'prefix',
+    caret: { frameEpoch: 5, caretRect: null }, layoutRevision: 2,
+    stateVector: new Uint8Array([7]).buffer, engineMs: 12, workerTotalMs: 20,
+  });
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  expect(interims).toHaveLength(1);
+  expect(interims[0]).toMatchObject({
+    layoutJson: 'prefix', layoutProvisional: true, engineMs: 12, workerTotalMs: 20,
+  });
+  expect(client.answeredFrame()).toBe(5);
+  expect(client.layoutRevision()).toBe(revision);
+  expect(client.remoteStateVector()).toEqual(new Uint8Array([7]));
+  expect(client.frameRequestPending()).toBe(false);
+  expect(timers.size).toBe(1);
+  worker.reply({
+    ...frameReply(id), layoutJson: 'full', layoutRevision: 2,
+    caret: { frameEpoch: 6, caretRect: null },
+  });
+  expect((await pending)?.layoutJson).toBe('full');
+  expect(settled).toBe(true);
+  expect(interims).toHaveLength(1);
+  expect(client.answeredFrame()).toBe(6);
+  expect(timers.size).toBe(0);
+  client.destroy();
+});
 
 test('pending proposal and navigation reads keep background page builds waiting', async () => {
   const { worker, client } = setup();

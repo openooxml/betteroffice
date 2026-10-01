@@ -77,6 +77,7 @@ import { bindDisplayWindow, type DisplayWindow } from '../internals/displayWindo
 import {
   failWorkerProposalAuthority,
   registeredWorkerProposalAuthority,
+  pendingWorkerNavigationPositions,
 } from '../internals/workerProposalAuthority';
 import { nearestPages } from './pageBuildOrder';
 import { scheduleIdlePageBuild, type PageBuildTask } from './pageBuildScheduler';
@@ -224,6 +225,7 @@ export type LayoutInWorker = ((
  */
 export interface WorkerLayoutComputation extends LayoutComputation {
   complete?: Promise<LayoutComputation | null>;
+  interims?: (listener: (computation: LayoutComputation) => void) => () => void;
 }
 
 /** Pages the first worker layout covers before the rest of the body. */
@@ -1898,19 +1900,49 @@ export function useRustDisplayList(
             isCurrentWorker(hostEngine, owner) &&
             hostEngine.residentWorkerProbe()?.layoutRevision === adoptedRevision;
           const gate = { engine: hostEngine };
+          const listeners = new Set<(interim: LayoutComputation) => void>();
+          let latestInterim: LayoutComputation | null = null;
+          const interims = (listener: (interim: LayoutComputation) => void) => {
+            listeners.add(listener);
+            if (latestInterim) listener(latestInterim);
+            return () => { listeners.delete(listener); };
+          };
           if (workerOpenEnabledRef.current) setPendingCompletion(gate);
           const surfaced = new Promise<void>((resolve) => {
             completionGateRef.current = resolve;
             setTimeout(resolve, PROVISIONAL_SURFACE_WAIT_MS);
           });
-          const complete = surfaced
+          let complete = surfaced
             // A worker handed to another session lays out that session now.
             .then(async () => {
               setPendingCompletion((current) => (current === gate ? null : current));
               while (isCurrentPass()) {
-                const completed = await worker.completeLayout(
-                  provisionalEpoch, false, COMPLETION_SLICE_BLOCKS
-                );
+                const geometry = workerOpenEnabledRef.current
+                  ? registeredWorkerProposalAuthority(hostEngine)?.geometry()
+                  : null;
+                const firstTarget = geometry ? Object.values(geometry.targets)[0] : undefined;
+                const navigationTarget = geometry?.navigationTargets
+                  ? Object.values(geometry.navigationTargets)[0]
+                  : undefined;
+                const target = (firstTarget?.ok
+                  ? firstTarget.ranges[0]?.from ?? firstTarget.paragraph
+                  : undefined) ?? (typeof navigationTarget === 'object' ? navigationTarget.position : undefined);
+                const targets = workerOpenEnabledRef.current
+                  ? [...(target == null ? [] : [target]), ...pendingWorkerNavigationPositions(hostEngine)]
+                  : [];
+                const completionOptions = workerOpenEnabledRef.current
+                  ? {
+                      progressive: { ...(targets.length ? { targets } : {}) },
+                      onInterim: (interim: ResidentEngineWorkerFrame) => {
+                        if (!isCurrentPass()) return;
+                        latestInterim = adopt(interim, frameBase(hostEngine));
+                        for (const listener of listeners) listener(latestInterim);
+                      },
+                    }
+                  : undefined;
+                const completed = await (completionOptions
+                  ? worker.completeLayout(provisionalEpoch, false, COMPLETION_SLICE_BLOCKS, completionOptions)
+                  : worker.completeLayout(provisionalEpoch, false, COMPLETION_SLICE_BLOCKS));
                 if (!isCurrentPass()) return null;
                 if (completed) {
                   const base = frameBase(hostEngine);
@@ -1924,9 +1956,15 @@ export function useRustDisplayList(
               const retried = await unavailable(cause);
               return retried?.complete ?? retried;
             });
+          if (workerOpenEnabledRef.current) {
+            complete = complete.finally(() => {
+              latestInterim = null;
+              listeners.clear();
+            });
+          }
           // A pass the host drops never observes this; the renderer reports the failure.
           complete.catch(() => {});
-          return { ...computation, complete };
+          return { ...computation, complete, ...(workerOpenEnabledRef.current ? { interims } : {}) };
         })
         .catch(unavailable);
     },

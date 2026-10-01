@@ -21,6 +21,7 @@ import {
   workerOpenSourceVersion,
 } from '../components/DocxEditor/internals/workerOpenReplica';
 import {
+  trackWorkerNavigationPosition,
   handedOverRequest,
   workerProposalAuthority,
   type WorkerProposalAuthority,
@@ -313,13 +314,26 @@ export function createPluginClients(
       let done = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
       let unsubscribe = () => {};
+      const releaseTarget = workerProposalAuthority(session)
+        ? trackWorkerNavigationPosition(session, position)
+        : () => {};
       const finish = (ready: boolean) => {
         if (done) return;
         done = true;
         if (timer !== undefined) clearTimeout(timer);
         unsubscribe();
+        releaseTarget();
         signal.removeEventListener('abort', cancelled);
         resolve(ready);
+      };
+      const timedOut = () => {
+        if (workerProposalAuthority(session) &&
+          access.pagedEditorRef.current?.getLayout?.()?.partial && !session.isDisplayOnly?.()) {
+          check();
+          if (!done) timer = setTimeout(timedOut, LAYOUT_WAIT_MS);
+        } else {
+          cancelled();
+        }
       };
       const cancelled = () => finish(false);
       const check = () => {
@@ -350,7 +364,7 @@ export function createPluginClients(
       unsubscribe = access.subscribeLayout(check);
       if (done) unsubscribe();
       check();
-      if (!done) timer = setTimeout(cancelled, LAYOUT_WAIT_MS);
+      if (!done) timer = setTimeout(timedOut, LAYOUT_WAIT_MS);
     });
 
   const navigation: DocxPluginNavigation = {
