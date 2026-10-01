@@ -577,7 +577,7 @@ mod tests {
             "<w:document xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" ",
         );
         let source = format!(
-            "{root}<w:body><w:p><w:hyperlink r:id=\"rId4\"><w:moveTo w:id=\"7\"><w:r><w:t>x</w:t></w:r></w:moveTo></w:hyperlink><w:r><w:footnoteReference w:id=\"2\"/></w:r></w:p></w:body></w:document>"
+            "{root}<w:body><w:p><w:hyperlink r:id=\"rId4\"><w:ins w:id=\"7\"><w:r><w:t>x</w:t></w:r></w:ins></w:hyperlink><w:r><w:footnoteReference w:id=\"2\"/></w:r></w:p></w:body></w:document>"
         );
         for other in [
             "<w:p><w:hyperlink r:id=\"rId4\"><w:ins w:id=\"8\"><w:r><w:t>x</w:t></w:r></w:ins></w:hyperlink><w:r><w:footnoteReference w:id=\"2\"/></w:r></w:p>",
