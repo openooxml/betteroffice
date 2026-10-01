@@ -417,6 +417,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
 
       const passRenderEnv = workerProposalRenderEnv(session, renderEnv);
       const run = (workerRequirements?: string | null): void => {
+        performance.mark(workerRequirements === undefined ? 'bo:layout:run' : 'bo:layout:workerFontReq');
         let measurement: ResidentMeasurementConfig | null = null;
         try {
           const request = buildResidentRegionLayoutRequest(document, pageGap, passRenderEnv);
@@ -448,6 +449,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             workerRequirements ?? session.layoutFontRequirementsJson(input)
           ) as ResidentFontRequirement[];
           measurement = residentMeasurementConfig(requirements);
+          performance.mark(measurement ? 'bo:layout:fontsReady' : 'bo:layout:fontsPending');
         } catch (error) {
           console.error('[PagedEditor] Resident font preflight error:', error);
           markLayoutQueued(session, false);
@@ -574,7 +576,9 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             // An edit may have landed since the pass began.
             if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(session);
             const version = readSessionVersion(session);
+            performance.mark('bo:layout:main:start');
             const computation = computeLayout(computeInputs);
+            performance.mark('bo:layout:main:end');
             applyComputation(computation, layoutUpdateOrigin, version);
             const totalTime = performance.now() - pipelineStart;
             if (totalTime > 2000) {
@@ -622,6 +626,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                   : openedVersionRef.current.version)))
         ) {
           try {
+            performance.mark('bo:layout:worker:post');
             workerPass = layoutInWorkerRef.current?.(session, JSON.stringify(request)) ?? null;
           } catch (error) {
             if (workerProposalFailure(session) === error) {

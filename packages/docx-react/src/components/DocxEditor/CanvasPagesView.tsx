@@ -772,6 +772,7 @@ export function CanvasPagesView({
         },
       });
     }
+    performance.mark('bo:paint:replay');
     void presentCanvasReplay(
       preparations,
       () => replayGeneration === replayGenerationRef.current

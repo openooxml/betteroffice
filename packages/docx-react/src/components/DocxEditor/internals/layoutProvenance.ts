@@ -84,6 +84,7 @@ export function markPresented(
   displayList: object,
   options?: PresentationOptions
 ): void {
+  performance.mark(options?.worker ? 'bo:presented:worker' : 'bo:presented:main');
   presentedLists.set(host, displayList);
   for (const listener of [...presentListeners]) listener(displayList, options);
 }
