@@ -1980,7 +1980,8 @@ export function useRustDisplayList(
                       progressive: { ...(targets.length ? { targets } : {}) },
                       onInterim: (interim: ResidentEngineWorkerFrame) => {
                         if (!isCurrentPass()) return;
-                        latestInterim = adopt(interim, frameBase(hostEngine));
+                        const base = frameBase(hostEngine);
+                        latestInterim = adopt(interim, base?.docEpoch === provisionalDocEpoch ? base : undefined);
                         for (const listener of listeners) listener(latestInterim);
                       },
                     }
