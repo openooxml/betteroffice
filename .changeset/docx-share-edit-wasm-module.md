@@ -2,4 +2,4 @@
 "@betteroffice/docx": patch
 ---
 
-Prewarming downloads and compiles the editing engine once and shares it with the preloaded worker.
+`preloadDocxEngine()` and `experimentalPrewarm` now download and compile the editing engine once and share it with the preloaded worker, with or without `experimentalWorkerOpen`.
