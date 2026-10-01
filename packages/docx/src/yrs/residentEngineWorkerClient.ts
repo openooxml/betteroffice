@@ -26,6 +26,7 @@ export interface ResidentProposalReply
 
 export interface ResidentEngineWorkerFrame {
   frame: Uint8Array;
+  pageFrames?: Uint8Array[];
   updates: Uint8Array[];
   engineMs: number;
   workerTotalMs: number;
@@ -95,6 +96,8 @@ const FRAME_REQUESTS = new Set<AwaitedRequest['type']>([
   'releasePages',
   'applyInput',
   'applyDelete',
+  'proposal',
+  'documentRead',
 ]);
 
 type PendingRequest = {
@@ -144,6 +147,8 @@ export class ResidentEngineWorkerClient {
   /** Set once `open` is sent, with the heap limit it opened under. */
   private openedHeapLimit: { bytes?: number } | null = null;
   private bootstraps = 0;
+  /** The font-requirements read still in flight, shared while nothing was posted after it. */
+  private fontRead: { layoutInput: string; id: number; reply: Promise<string> } | null = null;
   /** Id of the last snapshot request sent; replies to earlier requests must
    * not replace the state it recorded. */
   private lastSnapshotId = 0;
@@ -216,7 +221,7 @@ export class ResidentEngineWorkerClient {
     this.retainBuiltPages = retain;
   }
 
-  /** @internal Whether a frame request other than `buildPages` awaits its reply. */
+  /** @internal Whether foreground document or frame work awaits its reply. */
   frameRequestPending(): boolean {
     for (const { type } of this.pending.values()) {
       if (FRAME_REQUESTS.has(type)) return true;
@@ -342,12 +347,24 @@ export class ResidentEngineWorkerClient {
   }
 
   /** The font requirements of a region layout request, read from the opened document. */
-  async fontRequirements(layoutInput: string): Promise<string> {
-    const response = await this.request({ type: 'fontRequirements', layoutInput });
-    if (response.requirementsJson === undefined) {
-      throw new ResidentWorkerFailureError('Resident engine worker omitted the font requirements');
+  fontRequirements(layoutInput: string): Promise<string> {
+    const shared = this.fontRead;
+    if (shared && shared.layoutInput === layoutInput && shared.id === this.nextId - 1) {
+      return shared.reply;
     }
-    return response.requirementsJson;
+    const reply = this.request({ type: 'fontRequirements', layoutInput }).then((response) => {
+      if (response.requirementsJson === undefined) {
+        throw new ResidentWorkerFailureError('Resident engine worker omitted the font requirements');
+      }
+      return response.requirementsJson;
+    });
+    const read = { layoutInput, id: this.nextId - 1, reply };
+    this.fontRead = read;
+    const settle = () => {
+      if (this.fontRead === read) this.fontRead = null;
+    };
+    reply.then(settle, settle);
+    return reply;
   }
 
   /** @internal */
@@ -560,14 +577,24 @@ export class ResidentEngineWorkerClient {
   }
 
   /** Build unbuilt display pages; the reply frame carries them. */
+  buildPages(
+    pages: number[], expectedFrameEpoch: number, paintCaret?: boolean
+  ): Promise<ResidentEngineWorkerFrame>;
+  /** @internal */
+  buildPages(
+    pages: number[], expectedFrameEpoch: number, paintCaret: boolean, background: boolean
+  ): Promise<ResidentEngineWorkerFrame | null>;
   async buildPages(
     pages: number[],
     expectedFrameEpoch: number,
-    paintCaret = false
-  ): Promise<ResidentEngineWorkerFrame> {
-    return frameResult(
-      await this.request({ type: 'buildPages', pages, expectedFrameEpoch, paintCaret })
-    );
+    paintCaret = false,
+    background = false
+  ): Promise<ResidentEngineWorkerFrame | null> {
+    const response = await this.request({
+      type: 'buildPages', pages, expectedFrameEpoch, paintCaret,
+      ...(background ? { background: true } : {}),
+    });
+    return background && response.pageBuildSuperseded ? null : frameResult(response);
   }
 
   async releasePages(
@@ -803,6 +830,7 @@ function frameResult(
   }
   return {
     frame: new Uint8Array(response.frame),
+    ...(response.pageFrames ? { pageFrames: response.pageFrames.map((frame) => new Uint8Array(frame)) } : {}),
     updates: (response.updates ?? []).map((update) => new Uint8Array(update)),
     engineMs: response.engineMs ?? 0,
     workerTotalMs: response.workerTotalMs ?? 0,

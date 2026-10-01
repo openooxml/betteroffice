@@ -371,6 +371,58 @@ function deferred() {
   return { promise, resolve };
 }
 
+test('a background page batch yields between slices and returns their ordered frames once', async () => {
+  const w = worker();
+  await w.bootstrap(9);
+  const calls: number[][] = [];
+  Object.assign(w.harness.session, {
+    buildDisplayPagesFrame(pages: number[]) {
+      calls.push(pages);
+      const bytes = w.harness.session.applyInput();
+      w.harness.delta = { ...w.harness.delta!, pageCount: 9 };
+      return bytes;
+    },
+  });
+  const response = await w.send({
+    type: 'buildPages', pages: Array.from({ length: 9 }, (_, index) => index),
+    expectedFrameEpoch: 1, paintCaret: false, background: true,
+  });
+  expect(response.ok).toBe(true);
+  expect(calls).toEqual([[0, 1, 2, 3], [4, 5, 6, 7], [8]]);
+  if (!response.ok) throw new Error(response.error);
+  expect(response.pageFrames?.map((frame) => new Uint8Array(frame)[0])).toEqual([2, 3, 4]);
+  expect(response.caret?.frameEpoch).toBe(4);
+  expect(w.answered).toEqual([1, 2]);
+});
+
+test('a visible page request supersedes the remaining background slices', async () => {
+  const w = worker();
+  await w.bootstrap(9);
+  const calls: number[][] = [];
+  let visible!: Promise<ResidentEngineWorkerResponse>;
+  Object.assign(w.harness.session, {
+    buildDisplayPagesFrame(pages: number[]) {
+      calls.push(pages);
+      const bytes = w.harness.session.applyInput();
+      w.harness.delta = { ...w.harness.delta!, pageCount: 9 };
+      if (calls.length === 1) {
+        visible = w.send({
+          type: 'buildPages', pages: [8], expectedFrameEpoch: 2, paintCaret: false,
+        });
+      }
+      return bytes;
+    },
+  });
+  const background = await w.send({
+    type: 'buildPages', pages: Array.from({ length: 9 }, (_, index) => index),
+    expectedFrameEpoch: 1, paintCaret: false, background: true,
+  });
+  expect(background).toMatchObject({ ok: true, pageBuildSuperseded: true });
+  expect((await visible).ok).toBe(true);
+  expect(calls).toEqual([[0, 1, 2, 3], [8]]);
+  expect(w.answered).toEqual([1, 2, 3]);
+});
+
 describe('resident display page release', () => {
   test('answers build, release, then input in FIFO order', async () => {
     const w = worker();
@@ -2235,6 +2287,34 @@ describe('resident worker opening', () => {
     expect(completed.ok && completed.layoutJson).toBe(full);
     expect(completed.ok && completed.layoutProvisional).toBeUndefined();
     expect(calls.slice(-3)).toEqual(['begin:{"request":1}', 'resume:2', 'frame:1']);
+  });
+
+  test('answers a repeated font requirements request from the last answer until the document updates', async () => {
+    const { w, calls } = openingWorker();
+    const listeners = new Set<() => void>();
+    Object.assign(w.harness.session, {
+      onUpdate: (listener: () => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    });
+    expect((await w.send({ type: 'open', bytes: new Uint8Array([1]).buffer })).ok).toBe(true);
+    const ask = async (layoutInput: string) => {
+      const answer = await w.send({ type: 'fontRequirements', layoutInput });
+      expect(answer.ok && answer.requirementsJson).toBe('[{"key":"a"}]');
+    };
+    for (const input of ['{"request":1}', '{"request":1}', '{"request":2}', '{"request":2}']) {
+      await ask(input);
+    }
+    for (const listener of [...listeners]) listener();
+    expect(listeners.size).toBe(0);
+    await ask('{"request":2}');
+    await ask('{"request":2}');
+    expect(calls.filter((call) => call.startsWith('requirements:'))).toEqual([
+      'requirements:{"request":1}',
+      'requirements:{"request":2}',
+      'requirements:{"request":2}',
+    ]);
   });
 
   test('opens a preview, lays it out, and replaces it with the whole package', async () => {

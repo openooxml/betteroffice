@@ -74,7 +74,7 @@ impl Default for ParseLimits {
 }
 
 /// One package-wide budget shared across every XML part.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ParseBudget<'a> {
     limits: &'a ParseLimits,
     xml_bytes: usize,
@@ -153,6 +153,10 @@ impl<'a> ParseBudget<'a> {
             "xmlBytes",
             part,
         )
+    }
+
+    pub(crate) fn limits(&self) -> &ParseLimits {
+        self.limits
     }
 
     /// XML events charged so far.
@@ -753,7 +757,7 @@ pub(crate) fn parse_xml_strict(
     Ok(XmlDocument { roots })
 }
 
-fn canonical_namespace(prefix: &str) -> Option<&'static str> {
+pub(crate) fn canonical_namespace(prefix: &str) -> Option<&'static str> {
     if !crate::serializer::parts::is_story_root_prefix(prefix) {
         return None;
     }
@@ -997,7 +1001,7 @@ fn malformed(reader: &Reader<&[u8]>, part: &str, error: impl ToString) -> ParseE
     }
 }
 
-fn escape_stray_ampersands(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+pub(crate) fn escape_stray_ampersands(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     // Stray ampersands are repaired only in UTF-8 or ASCII input.
     let mut output: Option<Vec<u8>> = None;
     let mut index = 0;
@@ -1016,7 +1020,7 @@ fn escape_stray_ampersands(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     output.map_or(std::borrow::Cow::Borrowed(xml), std::borrow::Cow::Owned)
 }
 
-fn is_legal_xml_character(character: char) -> bool {
+pub(crate) fn is_legal_xml_character(character: char) -> bool {
     matches!(character, '\u{9}' | '\u{A}' | '\u{D}')
         || matches!(character as u32, 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF)
 }

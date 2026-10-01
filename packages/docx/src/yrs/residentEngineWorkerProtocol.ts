@@ -36,6 +36,7 @@ export interface ResidentProposalResponse {
   updates: ArrayBuffer[];
   stateVector: ArrayBuffer;
   geometry: ProposalGeometryMirror;
+  fontRequirements?: { layoutInput: string; requirementsJson: string };
 }
 
 /** @internal */
@@ -124,6 +125,7 @@ export type ResidentEngineWorkerRequest =
       pages: number[];
       expectedFrameEpoch: number;
       paintCaret: boolean;
+      background?: boolean;
     }
   | {
       id: number;
@@ -204,6 +206,8 @@ export type ResidentEngineWorkerResponse = (
       id: number;
       ok: true;
       frame?: ArrayBuffer;
+      pageFrames?: ArrayBuffer[];
+      pageBuildSuperseded?: boolean;
       superseded?: true;
       updates?: ArrayBuffer[];
       engineMs?: number;

@@ -86,6 +86,7 @@ afterEach(() => {
   for (const session of sessions.splice(0)) session.destroy();
 });
 afterAll(async () => {
+  await act(async () => {});
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
@@ -626,11 +627,21 @@ function holdFrames() {
     return nextId;
   };
   globalThis.cancelAnimationFrame = (id) => { frames.delete(id); };
+  const run = () => {
+    const pending = [...frames.values()];
+    frames.clear();
+    for (const callback of pending) callback(performance.now());
+  };
   return {
-    run() {
-      const pending = [...frames.values()];
-      frames.clear();
-      for (const callback of pending) callback(performance.now());
+    run,
+    async until<T>(promise: Promise<T>): Promise<T> {
+      let settled = false;
+      void promise.then(() => { settled = true; }, () => { settled = true; });
+      while (!settled) {
+        run();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      return promise;
     },
     restore() {
       globalThis.requestAnimationFrame = request;
@@ -1854,6 +1865,67 @@ async function openWorkerProposals(props: HarnessProps = workerProposalProps) {
   return harness;
 }
 
+test('ASCII proposals skip font preflight and Unicode proposals request it before syncing', async () => {
+  const { posted } = installWorker();
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const api = result.current.ref.current!;
+    const identities = await api.getParagraphIdentities();
+    const paragraphs = identities.paragraphs.filter(({ session }) => session?.story === 'body');
+    const initialFonts = posted.filter(({ type }) => type === 'fontRequirements').length;
+    const initialSyncs = posted.filter(({ type }) => type === 'sync').length;
+    const propose = async (id: string, index: number, search: string, replaceWith: string) => {
+      const current = await api.getProposals();
+      await act(async () => {
+        expect(await api.proposeChanges({ expectVersion: current.version, proposals: [{
+          id, paragraph: paragraphs[index]!.session!,
+          suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+          op: 'replaceText', search, replaceWith,
+        }] })).toMatchObject({ ok: true });
+      });
+      await act(async () => { await api.whenLayoutComplete({ timeoutMs: 5000 }); });
+    };
+    await propose('ascii', 0, 'First', 'Leading');
+    expect(posted.filter(({ type }) => type === 'sync').length).toBeGreaterThan(initialSyncs);
+    expect(posted.filter(({ type }) => type === 'fontRequirements')).toHaveLength(initialFonts);
+    const beforeUnicode = posted.length;
+    await propose('unicode', 1, 'Paragraph', '漢字');
+    expect(posted.filter(({ type }) => type === 'fontRequirements')).toHaveLength(initialFonts + 1);
+    const followup = posted.slice(beforeUnicode).map(({ type }) => type);
+    expect(followup.indexOf('fontRequirements')).toBeGreaterThan(followup.indexOf('proposal'));
+    expect(followup.indexOf('sync')).toBeGreaterThan(followup.indexOf('fontRequirements'));
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
+test('proposal font requirements are reused only for the same layout request', async () => {
+  const { posted } = installWorker();
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const original = posted.find((request) => request.type === 'fontRequirements');
+    if (original?.type !== 'fontRequirements') throw new Error('expected font preflight');
+    const before = posted.filter(({ type }) => type === 'fontRequirements').length;
+    const session = result.current.core.session!;
+    const requirements = result.current.renderer.fontRequirementsInWorker;
+    await act(async () => { await requirements(session, original.layoutInput); });
+    expect(posted.filter(({ type }) => type === 'fontRequirements')).toHaveLength(before);
+    const changed = JSON.stringify({
+      ...JSON.parse(original.layoutInput),
+      measurement: { defaults: { fontFamily: 'Courier New', fontSize: 11 } },
+    });
+    let answer!: string | null;
+    await act(async () => { answer = await requirements(session, changed); });
+    expect(posted.filter(({ type }) => type === 'fontRequirements')).toHaveLength(before + 1);
+    expect(answer).toContain('Courier New');
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
 test.each(['A then B', 'B then A'])('Undo keeps worker proposals through font preflight replies %s', async (order) => {
   let holdRequirements = false;
   const { posted, replies, reply, received } = installWorker({
@@ -1870,7 +1942,7 @@ test.each(['A then B', 'B then A'])('Undo keeps worker proposals through font pr
     await act(async () => { await received('open'); });
     await act(async () => { await received('bootstrap'); });
     await act(async () => { await received('proposal'); });
-    await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+    await act(async () => { await frames.until(result.current.renderer.settledDisplayList(null, null)); });
     const api = result.current.ref.current!;
     const session = result.current.core.session!;
     layoutHere = spyOn(session, 'layoutDocumentWithRegionsRetainedJson');
@@ -1891,7 +1963,7 @@ test.each(['A then B', 'B then A'])('Undo keeps worker proposals through font pr
     const settle = async () => {
       const previous = posted.filter((request) => request.type === 'sync').at(-1)?.id ?? 0;
       await act(async () => { frames.run(); await received('sync', previous); });
-      await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+      await act(async () => { await frames.until(result.current.renderer.settledDisplayList(null, null)); });
       expect(isLayoutQueued(session)).toBe(false);
     };
     const setState = async (state: 'accepted' | 'proposed' | 'rejected') => {
@@ -1955,24 +2027,27 @@ test.each(['A then B', 'B then A'])('Undo keeps worker proposals through font pr
       import.meta.dir, '../../../../../../crates/docx-raster/tests/assets/Carlito-Regular.ttf'
     )));
     rerender({ ...workerProposalProps, source: bytes, measurementFont: loadedFont });
-    let passB!: ResidentEngineWorkerRequest;
     await act(async () => {
       result.current.pipeline.runLayoutPipeline();
-      passB = await received('fontRequirements', passA.id);
+      await new Promise((resolve) => setTimeout(resolve, 50));
     });
-    expect(replies.has(passB.id)).toBe(true);
-    expect(passB.id).not.toBe(passA.id);
+    // Pass B shares pass A's read while their inputs are identical, else it holds its own.
+    const held = posted.filter((request) =>
+      request.type === 'fontRequirements' && request.id >= passA.id && replies.has(request.id)
+    );
+    expect(held[0]).toBe(passA);
+    expect(held.length).toBeLessThanOrEqual(2);
     holdRequirements = false;
     const previousSync = posted.filter((request) => request.type === 'sync').at(-1)!.id;
     await act(async () => {
-      for (const pass of order === 'A then B' ? [passA, passB] : [passB, passA]) reply(pass);
+      for (const pass of order === 'A then B' ? held : [...held].reverse()) reply(pass);
     });
     expect(layoutHere).not.toHaveBeenCalled();
     expect(ensureReplica).not.toHaveBeenCalled();
     expect(result.current.errors).toEqual([]);
     expect(errorLog).not.toHaveBeenCalled();
     await act(async () => { await received('sync', previousSync); });
-    await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+    await act(async () => { await frames.until(result.current.renderer.settledDisplayList(null, null)); });
     expect(isLayoutQueued(session)).toBe(false);
     await assertCurrent();
     await setState('rejected');
@@ -2000,7 +2075,7 @@ test.each(['unavailable', 'no adoption', 'no snapshot'])('a holding session with
     await act(async () => { await received('open'); });
     await act(async () => { await received('bootstrap'); });
     await act(async () => { await received('proposal'); });
-    await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+    await act(async () => { await frames.until(result.current.renderer.settledDisplayList(null, null)); });
     const session = result.current.core.session!;
     const api = result.current.ref.current!;
     const snapshot = await api.getProposals();
@@ -2119,7 +2194,7 @@ test('a toggle and local refresh wait for an older worker sync without rebuildin
       expect(replies.has(latest.id)).toBe(true);
       await act(async () => reply(latest));
       await act(async () => {});
-      await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+      await act(async () => { await frames.until(result.current.renderer.settledDisplayList(null, null)); });
       expect(isLayoutQueued(session)).toBe(false);
       expect(revisionPreviewKeyOf(result.current.pipeline.layout)).toBe(
         revisionPreviewKey(proposalRevisionPreview(session.getProposals()))
