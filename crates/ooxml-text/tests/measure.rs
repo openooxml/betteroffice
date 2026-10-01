@@ -1795,6 +1795,275 @@ fn visible_list_marker_reserves_the_hanging_slot_on_the_first_line() {
     }
 }
 
+/// Attributes for a 12pt marker wider than its 113.4px hanging indent.
+fn overrun_marker_attrs() -> Value {
+    json!({
+        "listMarker": "1.2.3.4.5.6.7.8.9",
+        "listMarkerFontFamily": "Liberation Sans",
+        "listMarkerFontSize": 12.0,
+        "defaultTabStopTwips": 709.0,
+        "indent": { "left": 113.4, "hanging": 113.4 }
+    })
+}
+
+/// Measures a marker's natural width with the standard 12pt font.
+fn marker_natural_width(marker: &Value) -> f64 {
+    measure(json!([{ "kind": "text", "text": marker }]), 1000.0).unwrap()["lines"][0]["width"]
+        .as_f64()
+        .unwrap()
+}
+
+/// An overrun narrows the first full line and leaves following lines unchanged.
+#[test]
+fn list_marker_tab_overrun_narrows_only_the_first_line() {
+    let attrs = overrun_marker_attrs();
+    let left = 113.4;
+    let natural_width = marker_natural_width(&attrs["listMarker"]);
+    assert!(natural_width > left);
+    let grid_interval = 709.0 / 1440.0 * 96.0;
+    let grid_stop = ((natural_width / grid_interval).floor() + 1.0) * grid_interval;
+    let overrun = grid_stop - left;
+    let glyph_advance = overrun / 4.0;
+    let body_width = 20.0 * glyph_advance;
+    let runs = json!([{
+        "kind": "text",
+        "text": "0".repeat(80),
+        "horizontalScale": glyph_advance / W0 * 100.0
+    }]);
+    for suffix in [None, Some("tab")] {
+        let mut attrs = attrs.clone();
+        if let Some(suffix) = suffix {
+            attrs["listMarkerSuffix"] = json!(suffix);
+        }
+        let measured = measure_with(
+            json!({ "kind": "paragraph", "runs": runs, "attrs": attrs }),
+            left + body_width,
+        )
+        .unwrap();
+        let lines = measured["lines"].as_array().unwrap();
+        let mut expected_keys = BASE_LINE_KEYS.to_vec();
+        expected_keys.push("markerTabOffset");
+        expected_keys.sort_unstable();
+        assert_eq!(line_keys(&measured, 0), expected_keys);
+        approx(
+            lines[0]["markerTabOffset"].as_f64().unwrap(),
+            overrun,
+            "marker advances to the next column grid line",
+        );
+        let first_width = lines[0]["width"].as_f64().unwrap();
+        let second_width = lines[1]["width"].as_f64().unwrap();
+        approx(first_width, body_width - overrun, "first full line width");
+        approx(second_width, body_width, "second full line width");
+        approx(second_width - first_width, overrun, "first-line narrowing");
+        assert!(
+            lines[1..]
+                .iter()
+                .all(|line| line.get("markerTabOffset").is_none())
+        );
+
+        attrs["listMarker"] = json!("1.");
+        let short = measure_with(
+            json!({ "kind": "paragraph", "runs": runs, "attrs": attrs }),
+            left + body_width,
+        )
+        .unwrap();
+        assert!(short["lines"][0].get("markerTabOffset").is_none());
+        approx(
+            short["lines"][0]["width"].as_f64().unwrap(),
+            body_width,
+            "short marker keeps the existing first-line width",
+        );
+    }
+}
+
+/// Custom stops beat farther grid lines, while clear and bar stops are ignored.
+#[test]
+fn list_marker_tab_overrun_chooses_the_closest_stop() {
+    for (left, hanging) in [(113.4, 113.4), (150.0, 113.4)] {
+        let mut attrs = overrun_marker_attrs();
+        attrs["indent"] = json!({ "left": left, "hanging": hanging });
+        let natural_width = marker_natural_width(&attrs["listMarker"]);
+        let marker_end = left - hanging + natural_width;
+        assert!(marker_end > left);
+        let grid_interval = 709.0 / 1440.0 * 96.0;
+        let grid_stop = ((marker_end / grid_interval).floor() + 1.0) * grid_interval;
+        let custom_stop = (marker_end + grid_stop) / 2.0;
+        for (stop, expected) in [(custom_stop, custom_stop), (grid_stop + 10.0, grid_stop)] {
+            attrs["tabs"] = json!([
+                { "val": "clear", "pos": (marker_end + 1.0) * 15.0 },
+                { "val": "bar", "pos": (marker_end + 2.0) * 15.0 },
+                { "val": "start", "pos": stop * 15.0 }
+            ]);
+            let measured = measure_with(
+                json!({
+                    "kind": "paragraph",
+                    "runs": [{ "kind": "text", "text": "item" }],
+                    "attrs": attrs
+                }),
+                400.0,
+            )
+            .unwrap();
+            approx(
+                measured["lines"][0]["markerTabOffset"].as_f64().unwrap(),
+                expected - left,
+                "closest stop from the column left edge wins",
+            );
+        }
+    }
+}
+
+/// An overrun that leaves less than an em for the text keeps today's text start.
+#[test]
+fn list_marker_tab_overrun_without_room_keeps_the_text_at_the_indent() {
+    let mut attrs = overrun_marker_attrs();
+    let natural_width = marker_natural_width(&attrs["listMarker"]);
+    let grid_interval = 709.0 / 1440.0 * 96.0;
+    let overrun = ((natural_width / grid_interval).floor() + 1.0) * grid_interval - 113.4;
+    attrs["indent"]["right"] = json!(0.0);
+    for room in [-1.0, 5.0, 15.0] {
+        let measured = measure_with(
+            json!({
+                "kind": "paragraph",
+                "runs": [{ "kind": "text", "text": "00" }],
+                "attrs": attrs
+            }),
+            113.4 + overrun + room,
+        )
+        .unwrap();
+        assert!(measured["lines"][0].get("markerTabOffset").is_none());
+        approx(
+            measured["lines"][0]["width"].as_f64().unwrap(),
+            2.0 * W0,
+            "text stays on the first line at the indent",
+        );
+    }
+    let measured = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "00" }],
+            "attrs": attrs
+        }),
+        113.4 + overrun + 17.0,
+    )
+    .unwrap();
+    approx(
+        measured["lines"][0]["markerTabOffset"].as_f64().unwrap(),
+        overrun,
+        "an em of room keeps the overrun",
+    );
+}
+
+/// Without grid or custom stops, an overrunning marker receives a half-em gap.
+#[test]
+fn list_marker_tab_overrun_without_stops_uses_half_an_em() {
+    let mut attrs = overrun_marker_attrs();
+    attrs["defaultTabStopTwips"] = json!(0.0);
+    let natural_width = marker_natural_width(&attrs["listMarker"]);
+    let measured = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "item" }],
+            "attrs": attrs
+        }),
+        400.0,
+    )
+    .unwrap();
+    approx(
+        measured["lines"][0]["markerTabOffset"].as_f64().unwrap(),
+        natural_width + 8.0 - 113.4,
+        "half-em gap after the marker",
+    );
+}
+
+/// First-line tabs resolve from the overrun, while subsequent tabs keep the body origin.
+#[test]
+fn list_marker_tab_overrun_shifts_only_first_line_tab_positions() {
+    let attrs = overrun_marker_attrs();
+    let natural_width = marker_natural_width(&attrs["listMarker"]);
+    let grid_interval = 709.0 / 1440.0 * 96.0;
+    let body_start = ((natural_width / grid_interval).floor() + 1.0) * grid_interval;
+    let measured = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [
+                { "kind": "tab" },
+                { "kind": "text", "text": "0" },
+                { "kind": "lineBreak" },
+                { "kind": "tab" },
+                { "kind": "text", "text": "0" }
+            ],
+            "attrs": attrs
+        }),
+        400.0,
+    )
+    .unwrap();
+    assert_eq!(measured["lines"].as_array().unwrap().len(), 2);
+    approx(
+        measured["lines"][0]["width"].as_f64().unwrap(),
+        144.0 - body_start + W0,
+        "first-line tab advances from the marker stop",
+    );
+    approx(
+        measured["lines"][1]["width"].as_f64().unwrap(),
+        144.0 - 113.4 + W0,
+        "second-line tab advances from the left indent",
+    );
+    assert!(measured["lines"][1].get("markerTabOffset").is_none());
+}
+
+/// Excluded marker and indent cases preserve their measurement and font lookup behavior.
+#[test]
+fn list_marker_tab_overrun_leaves_other_cases_unchanged() {
+    for excluded in [
+        json!({ "bidi": true }),
+        json!({ "listMarkerSuffix": "space" }),
+        json!({ "listMarkerSuffix": "nothing" }),
+        json!({ "listMarkerSuffix": "unknown" }),
+        json!({ "listMarkerHidden": true }),
+        json!({ "listMarker": "" }),
+        json!({ "listMarker": null }),
+        json!({ "indent": { "left": 0.0, "hanging": 113.4 } }),
+        json!({ "indent": { "left": -24.0, "hanging": 113.4 } }),
+        json!({ "indent": { "left": 113.4, "hanging": 150.0 } }),
+    ] {
+        let mut attrs = overrun_marker_attrs();
+        attrs
+            .as_object_mut()
+            .unwrap()
+            .extend(excluded.as_object().unwrap().clone());
+        attrs["listMarkerFontFamily"] = json!("Nope");
+        let measured = measure_with(
+            json!({
+                "kind": "paragraph",
+                "runs": [{ "kind": "text", "text": "00 00" }],
+                "attrs": attrs
+            }),
+            500.0,
+        )
+        .expect("excluded cases skip marker font resolution");
+        assert!(measured["lines"][0].get("markerTabOffset").is_none());
+        approx(
+            measured["lines"][0]["width"].as_f64().unwrap(),
+            TEXT_00_00,
+            "excluded case keeps its text width",
+        );
+    }
+    for hanging in [0.0, -12.0] {
+        let mut attrs = overrun_marker_attrs();
+        attrs["indent"]["hanging"] = json!(hanging);
+        let measured = measure_with(
+            json!({
+                "kind": "paragraph",
+                "runs": [{ "kind": "text", "text": "00 00" }],
+                "attrs": attrs
+            }),
+            500.0,
+        )
+        .unwrap();
+        assert!(measured["lines"][0].get("markerTabOffset").is_none());
+    }
+}
+
 // ---- inline images ------------------------------------------------------
 //
 // Lines without a font-bearing run use the fallback at the 12pt default: ascent

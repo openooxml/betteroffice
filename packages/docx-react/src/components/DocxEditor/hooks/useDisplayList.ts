@@ -279,12 +279,16 @@ const SETTLE_BUILD_BATCH_PAGES = 128;
 /** Unbuilt pages built per idle period away from the viewport. */
 const BACKGROUND_BUILD_BATCH_PAGES = 16;
 const WORKER_OPEN_BUILD_MARGIN_PAGES = 2;
+const WORKER_OPEN_RETAIN_MARGIN_PAGES = 8;
 /** How often a page build waiting behind a newer worker frame checks again. */
 const PAGE_BUILD_RETRY_MS = 50;
 /** How long a page build waits for the display to adopt a worker frame. */
 const UNADOPTED_FRAME_WAIT_MS = 2000;
 
 type PageBuildTimer = ReturnType<typeof setTimeout> | PageBuildTask;
+type PageBuildInFlight =
+  | { kind: 'release' }
+  | { kind: 'build'; background: boolean; cancel(): void; promote(): void };
 
 function cancelPageBuilds(timer: { current: PageBuildTimer | null }): void {
   const scheduled = timer.current;
@@ -507,7 +511,7 @@ export function useRustDisplayList(
     }),
     []
   );
-  const pageBuildInFlightRef = useRef<{ background: boolean; cancel(): void; promote(): void } | null>(
+  const pageBuildInFlightRef = useRef<PageBuildInFlight | null>(
     null
   );
   const pageBuildTimerRef = useRef<PageBuildTimer | null>(null);
@@ -1459,6 +1463,31 @@ export function useRustDisplayList(
     []
   );
 
+  const pagesToRelease = useCallback((frame: RetainedFrame): number[] => {
+    if (
+      !workerOpenEnabledRef.current ||
+      retainBuiltPagesRef.current ||
+      settleWaitersRef.current.size > 0
+    ) {
+      return [];
+    }
+    const [start, end] = displayWindowRef.current;
+    const first = Math.max(0, start - WORKER_OPEN_RETAIN_MARGIN_PAGES);
+    const last = Math.min(frame.pages.length, end + WORKER_OPEN_RETAIN_MARGIN_PAGES);
+    const caretPage = snapshotRef.current.caret?.caretRect?.pageIndex;
+    const candidates: number[] = [];
+    for (let index = 0; index < frame.pages.length; index += 1) {
+      if (
+        !frame.displayList.pages[index]?.unbuilt &&
+        (index < first || index >= last) &&
+        index !== caretPage
+      ) {
+        candidates.push(index);
+      }
+    }
+    return candidates;
+  }, []);
+
   // Build the unbuilt pages of the worker frame: those the viewport shows
   // first, then the rest while the main thread is idle, since accessibility
   // mirrors and printing read every page's content.
@@ -1489,15 +1518,33 @@ export function useRustDisplayList(
       for (let index = first; index < last; index += 1) {
         if (pages[index]?.unbuilt) unbuilt.push(index);
       }
-      if (unbuilt.length === 0) return;
+      const release = unbuilt.length === 0 ? pagesToRelease(frame) : [];
+      if (unbuilt.length === 0 && release.length === 0) return;
       let batch = unbuilt.filter((index) => index >= start && index < end);
-      const background = batch.length === 0;
-      const supersedingBackground = !background && pageBuildInFlightRef.current?.background;
-      if (pageBuildInFlightRef.current) {
-        if (settling) pageBuildInFlightRef.current.promote();
-        if (background || !pageBuildInFlightRef.current.background) return;
-        pageBuildInFlightRef.current.cancel();
+      const background = batch.length === 0 && release.length === 0;
+      const inFlight = pageBuildInFlightRef.current;
+      const supersedingBackground =
+        !background && release.length === 0 && inFlight?.kind === 'build' && inFlight.background;
+      if (inFlight) {
+        if (inFlight.kind === 'release') return;
+        if (settling) inFlight.promote();
+        if (background || release.length > 0 || !inFlight.background) return;
+        inFlight.cancel();
         pageBuildInFlightRef.current = null;
+      }
+      if (release.length > 0) {
+        if (!idle) {
+          schedulePageBuildsWhenIdleRef.current();
+          return;
+        }
+        if (
+          worker.client.frameRequestPending() ||
+          worker.client.answeredFrame() > frame.frameEpoch ||
+          paintedCaretMachine.shouldPaint(performance.now())
+        ) {
+          retryPageBuildsRef.current(true);
+          return;
+        }
       }
       // Behind a worker frame the display has not adopted, the pages would
       // come back as a whole-document recovery frame: wait for it.
@@ -1529,7 +1576,9 @@ export function useRustDisplayList(
       }
       let attachment: PageBuildTask | null = null;
       let promote = (): void => {};
-      const build = { background, cancel: () => attachment?.cancel(), promote: () => promote() };
+      const build: PageBuildInFlight = release.length > 0
+        ? { kind: 'release' }
+        : { kind: 'build', background, cancel: () => attachment?.cancel(), promote: () => promote() };
       pageBuildInFlightRef.current = build;
       const buildBase = frame;
       const dispatchedEpoch = contentEpochRef.current;
@@ -1538,9 +1587,10 @@ export function useRustDisplayList(
         isCurrentWorker(worker.engine, worker) &&
         pageBuildInFlightRef.current === build &&
         generationRef.current === dispatchedGeneration &&
-        contentEpochRef.current === dispatchedEpoch &&
         frameEngineRef.current === worker.engine &&
-        !worker.client.frameRequestPending();
+        (build.kind === 'release' ||
+          (contentEpochRef.current === dispatchedEpoch && !worker.client.frameRequestPending())) &&
+        (!background || snapshotRef.current.frame?.frameEpoch === buildBase.frameEpoch);
       const finish = (): void => {
         if (pageBuildInFlightRef.current !== build) return;
         pageBuildInFlightRef.current = null;
@@ -1565,9 +1615,17 @@ export function useRustDisplayList(
         );
         requestLayoutRef.current?.();
       };
-      void worker.client.buildPages(batch, frame.frameEpoch, paintCaret, background).then(
+      const request =
+        release.length > 0
+          ? worker.client.releasePages(
+              release.map((index) => ({ index, pageId: frame.pages[index]!.pageId.toString() })),
+              frame.frameEpoch,
+              false
+            )
+          : worker.client.buildPages(batch, frame.frameEpoch, paintCaret, background);
+      void request.then(
         (result) => {
-          if (!result || !current()) {
+          if (!result || 'superseded' in result || !current()) {
             finish();
             return;
           }
@@ -1588,16 +1646,19 @@ export function useRustDisplayList(
                 worker.engine.selection(),
                 nextFrame
               );
-              const nextSnapshot = createRustDisplayListSnapshot(
-                nextFrame.displayList,
-                nextFrame,
-                caret,
-                null,
-                previous,
-                sourceVersionOf(previous.queries),
-                workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
-                line
-              );
+              const nextSnapshot =
+                contentEpochRef.current === dispatchedEpoch
+                  ? createRustDisplayListSnapshot(
+                      nextFrame.displayList,
+                      nextFrame,
+                      caret,
+                      null,
+                      previous,
+                      sourceVersionOf(previous.queries),
+                      workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
+                      line
+                    )
+                  : { displayList: nextFrame.displayList, frame: nextFrame, queries: null, caret };
               snapshotRef.current = nextSnapshot;
               publishQuerySnapshot(nextSnapshot, contentEpochRef.current);
               if (background) startTransition(() => setSnapshot(nextSnapshot));
@@ -1613,7 +1674,13 @@ export function useRustDisplayList(
           };
           if (!background) {
             try {
-              attach(applyFrameDeltaOwned(snapshotRef.current.frame, decodeFrameDelta(result.frame)));
+              const previous = snapshotRef.current.frame;
+              const delta = decodeFrameDelta(result.frame);
+              if (previous && delta.frameEpoch <= previous.frameEpoch) {
+                finish();
+                return;
+              }
+              attach(applyFrameDeltaOwned(previous, delta));
             } catch (error) {
               finish();
               failed(error);
@@ -1677,6 +1744,7 @@ export function useRustDisplayList(
       dropWorker,
       isCurrentWorker,
       paintedCaretMachine,
+      pagesToRelease,
       publishQuerySnapshot,
       replaceOutOfMemoryWorker,
       sourceLine,
@@ -1718,19 +1786,31 @@ export function useRustDisplayList(
     [schedulePageBuilds]
   );
 
-  const setRetainBuiltPages = useCallback((retain: boolean): void => {
-    retainBuiltPagesRef.current = retain;
-    workerRef.current?.client.setRetainBuiltPages(retain);
-  }, []);
+  const setRetainBuiltPages = useCallback(
+    (retain: boolean): void => {
+      retainBuiltPagesRef.current = retain;
+      workerRef.current?.client.setRetainBuiltPages(retain);
+      const frame = snapshotRef.current.frame;
+      if (!retain && frame && pagesToRelease(frame).length > 0) {
+        schedulePageBuildsWhenIdleRef.current();
+      }
+    },
+    [pagesToRelease]
+  );
 
   useEffect(() => {
-    if (!snapshot.frame?.displayList.pages.some((page) => page.unbuilt)) return;
-    schedulePageBuilds(pageBuildInFlightRef.current ? 50 : 16);
-  }, [schedulePageBuilds, snapshot.frame]);
+    const frame = snapshot.frame;
+    if (!frame) return;
+    if (frame.displayList.pages.some((page) => page.unbuilt)) {
+      schedulePageBuilds(pageBuildInFlightRef.current ? 50 : 16);
+    } else if (pagesToRelease(frame).length > 0) {
+      schedulePageBuildsWhenIdleRef.current();
+    }
+  }, [pagesToRelease, schedulePageBuilds, snapshot.frame]);
 
   useEffect(() => () => {
     cancelPageBuilds(pageBuildTimerRef);
-    pageBuildInFlightRef.current?.cancel();
+    if (pageBuildInFlightRef.current?.kind === 'build') pageBuildInFlightRef.current.cancel();
     pageBuildInFlightRef.current = null;
   }, []);
 

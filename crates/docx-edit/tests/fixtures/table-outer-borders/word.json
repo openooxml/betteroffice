@@ -1,0 +1,68 @@
+{
+ "tbl-noborder": {
+  "topA": 83.3,
+  "row01": [
+   "Row 01 c0",
+   97.0
+  ],
+  "bottomA": [
+   1,
+   511.1
+  ]
+ },
+ "tbl-border4": {
+  "topA": 83.3,
+  "row01": [
+   "Row 01 c0",
+   97.5
+  ],
+  "bottomA": [
+   1,
+   526.6
+  ]
+ },
+ "tbl-border24": {
+  "topA": 83.3,
+  "row01": [
+   "Row 01 c0",
+   100.0
+  ],
+  "bottomA": [
+   1,
+   604.2
+  ]
+ },
+ "tbl-border4-3col": {
+  "topA": 83.3,
+  "row01": [
+   "Row 01 c0",
+   97.5
+  ],
+  "bottomA": [
+   1,
+   526.6
+  ]
+ },
+ "tbl-border4-mar57": {
+  "topA": 83.3,
+  "row01": [
+   "Row 01 c0",
+   100.5
+  ],
+  "bottomA": [
+   1,
+   697.7
+  ]
+ },
+ "row-exact850-border4": {
+  "topA": 83.3,
+  "row01": [
+   "Row 01 a",
+   97.5
+  ],
+  "bottomA": [
+   2,
+   423.9
+  ]
+ }
+}
