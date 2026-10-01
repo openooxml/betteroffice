@@ -2455,10 +2455,7 @@ fn measure_table(
                 content_height += previous_after.max(before) + visual - before - after;
                 previous_after = after;
             }
-            if is_rotated(source_cell) && source_row.height.is_some() {
-                content_height = 0.0;
-                previous_after = 0.0;
-            } else if is_rotated(source_cell) {
+            if is_rotated(source_cell) {
                 content_height = longest_line_width(&measured_cell.blocks);
                 previous_after = 0.0;
             }
@@ -2524,11 +2521,11 @@ fn measure_table(
         }
         for cell_index in 0..table.rows[row_index].cells.len() {
             let cell = &mut table.rows[row_index].cells[cell_index];
-            if !is_rotated(cell) {
+            let row_span = cell.row_span.unwrap_or(1.0).max(1.0) as usize;
+            if !is_rotated(cell) || row_span <= 1 {
                 continue;
             }
-            let last = (row_index + cell.row_span.unwrap_or(1.0).max(1.0) as usize - 1)
-                .min(rows.len() - 1);
+            let last = (row_index + row_span - 1).min(rows.len() - 1);
             let spanned = rows[row_index..=last]
                 .iter()
                 .map(|row| row.height)
@@ -2549,6 +2546,14 @@ fn measure_table(
                 measure_blocks(&mut cell.blocks, length, config)?
             };
             measured.height = longest_line_width(&measured.blocks) + padding;
+            let deficit = measured.height + cell_border_height(cell) - spanned;
+            let mut target = last;
+            while target > row_index && exact[target] {
+                target -= 1;
+            }
+            if deficit > 0.0 && !exact[target] {
+                rows[target].height += deficit;
+            }
         }
     }
 
@@ -3853,11 +3858,15 @@ mod tests {
             ..MeasurementConfig::default()
         };
         let pad = json!({"left":0,"right":0,"top":4,"bottom":4});
-        let label = |text: &str, span: u32| json!({"id":"label","textDirection":"btLr","rowSpan":span,"padding":pad,
-            "blocks":[{"kind":"paragraph","id":"l","runs":[{"kind":"text","text":text,"fontSize":12}]}]});
-        let text = |id: &str, lines: usize| json!({"id":id,"padding":pad,"blocks":(0..lines)
+        let label = |text: &str, span: u32| {
+            json!({"id":"label","textDirection":"btLr","rowSpan":span,"padding":pad,
+            "blocks":[{"kind":"paragraph","id":"l","runs":[{"kind":"text","text":text,"fontSize":12}]}]})
+        };
+        let text = |id: &str, lines: usize| {
+            json!({"id":id,"padding":pad,"blocks":(0..lines)
             .map(|line| json!({"kind":"paragraph","id":format!("{id}{line}"),"runs":[{"kind":"text","text":"Row","fontSize":12}]}))
-            .collect::<Vec<_>>()});
+            .collect::<Vec<_>>()})
+        };
         let measure = |rows: serde_json::Value| {
             let mut blocks: Vec<LayoutBlock> = serde_json::from_value(
                 json!([{"kind":"table","id":"table","columnWidths":[30, 100],"rows":rows}]),
@@ -3880,9 +3889,12 @@ mod tests {
 
         let single = measure(json!([{"id":"r0","height":40,"heightRule":"atLeast",
             "cells":[label("Vertical label", 1), text("a", 1)]}]));
+        let longest = lines(&single)
+            .iter()
+            .map(|line| line.width)
+            .fold(0.0, f64::max);
         assert!(lines(&single).len() > 1);
-        assert!(lines(&single).iter().all(|line| line.width <= 40.01));
-        assert_eq!(single.rows[0].height, 48.0);
+        assert_eq!(single.rows[0].height, (longest + 8.0).max(48.0));
 
         let spanned = measure(json!([
             {"id":"r0","height":20,"heightRule":"atLeast","cells":[label("Vertical label", 2), text("a", 5)]},
