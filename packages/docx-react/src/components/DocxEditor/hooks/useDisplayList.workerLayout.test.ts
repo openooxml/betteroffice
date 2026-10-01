@@ -1623,6 +1623,56 @@ test('with worker open, a provisional layout names its engine until the rest is 
   }
 });
 
+test('a worker-authoritative relayout covers the visible prefix and completes it separately', async () => {
+  const { native, layoutJson, frame, engine } = setup();
+  const snapshot = engine.residentWorkerSnapshot.bind(engine);
+  engine.residentWorkerSnapshot = (options) => ({
+    ...snapshot(options)!, workerAuthoritative: true,
+  });
+  try {
+    const { result, unmount } = renderHook(() => useRustDisplayList(null));
+    const first = result.current.layoutInWorker(engine, REQUEST);
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null }, selection: null,
+      layoutRevision: 1, layoutJson,
+    });
+    await first!;
+    act(() => result.current.setDisplayWindow(4, 6));
+    const next = result.current.layoutInWorker(engine, REQUEST);
+    expect(worker.posted[1]).toMatchObject({
+      type: 'sync', provisionalPages: 6, displayWindow: [4, 6],
+      snapshot: { workerAuthoritative: true },
+    });
+    const nextFrame = native.build_display_list_frame('{}', 1);
+    worker.reply({
+      id: worker.posted[1].id, ok: true, frame: nextFrame.slice().buffer,
+      caret: { frameEpoch: 2, caretRect: null }, selection: null,
+      layoutRevision: 2, layoutJson, layoutProvisional: true,
+    });
+    const prefix = await act(() => next!);
+    expect(prefix!.complete).toBeInstanceOf(Promise);
+    await act(async () => {
+      void result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
+    });
+    worker.reply({ id: worker.posted[2].id, ok: true });
+    await waitFor(() => expect(worker.posted[3]).toMatchObject({
+      type: 'completeLayout', expectedFrameEpoch: 2, sliceBlocks: 64,
+    }));
+    const completedFrame = native.build_display_list_frame('{}', 2);
+    worker.reply({
+      id: worker.posted[3].id, ok: true, frame: completedFrame.slice().buffer,
+      caret: { frameEpoch: 3, caretRect: null }, selection: null,
+      layoutRevision: 2, layoutJson,
+    });
+    expect(await prefix!.complete).not.toBeNull();
+    unmount();
+  } finally {
+    native.free();
+  }
+});
+
 function settleHarness() {
   const displayList = { pages: [] };
   const overrides = {

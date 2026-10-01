@@ -111,6 +111,7 @@ export type ResidentEngineWorkerRequest =
       layoutExtras?: string;
       displayWindow?: [number, number];
       retainBuiltPages?: boolean;
+      provisionalPages?: number;
     }
   | {
       id: number;

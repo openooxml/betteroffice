@@ -77,7 +77,9 @@ interface LayoutRequest {
   extras: string;
   layoutExtras?: string;
 }
-let incompleteLayout: (LayoutRequest & { layoutInput: string }) | null = null;
+let incompleteLayout:
+  | (LayoutRequest & { layoutInput: string; workerAuthoritative?: boolean })
+  | null = null;
 let completedLayout:
   | (LayoutRequest & { layoutJson: string; headersFootersJson: string | undefined })
   | null = null;
@@ -222,6 +224,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     if (provisional) {
       incompleteLayout = {
         layoutInput: request.snapshot.layoutInput,
+        workerAuthoritative: request.snapshot.workerAuthoritative,
         extras: request.extras,
         layoutExtras: request.layoutExtras,
       };
@@ -286,7 +289,6 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (!session) throw new Error('Resident engine worker is not initialized');
   if (request.type === 'proposal') {
     if (!unsubscribe) throw new Error('Resident engine worker has not laid out its document');
-    await completeProvisionalLayout();
     pendingUpdates = [];
     let committed = false;
     try {
@@ -339,7 +341,6 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'documentRead') {
-    await completeProvisionalLayout();
     const engine = session.proposalEngine;
     let value: unknown;
     switch (request.read.kind) {
@@ -369,7 +370,19 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     unsubscribe?.();
     unsubscribe = null;
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
-    const { layoutJson } = hydrate(request.snapshot, undefined, request.layoutExtras !== undefined);
+    const { layoutJson, provisional } = hydrate(
+      request.snapshot,
+      request.provisionalPages,
+      request.layoutExtras !== undefined
+    );
+    if (provisional) {
+      incompleteLayout = {
+        layoutInput: request.snapshot.layoutInput,
+        workerAuthoritative: request.snapshot.workerAuthoritative,
+        extras: request.extras,
+        layoutExtras: request.layoutExtras,
+      };
+    }
     subscribe();
     const started = performance.now();
     const frame = session.buildDisplayListFrame(
@@ -385,7 +398,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       started,
       false,
       request.paintCaret,
-      request.layoutExtras === undefined ? undefined : (layoutJson ?? undefined)
+      request.layoutExtras === undefined ? undefined : (layoutJson ?? undefined),
+      provisional
     );
     return;
   }
@@ -427,7 +441,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'buildFrame') {
-    await completeProvisionalLayout();
+    if (!incompleteLayout?.workerAuthoritative) await completeProvisionalLayout();
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     pendingUpdates = [];
     const started = performance.now();
@@ -721,11 +735,17 @@ async function completionSlice(completion: SlicedCompletion): Promise<void> {
       progress = session.resumeRegionLayout(completion.blocks);
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) throw error;
-      // A change in between abandoned the pass: begin again on the new state,
-      // or finish in one step once changes keep coming.
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        message !== 'no region layout to resume' &&
+        message !== 'the document or its fonts changed since the region layout began'
+      ) throw error;
+      // A change in between abandoned the pass: begin again on the new state. Host
+      // proposals on a worker-authoritative document keep yielding to user requests;
+      // other changes finish in one step once they keep coming.
       completion.begun = false;
       completion.restarts += 1;
-      if (completion.restarts > COMPLETION_RESTARTS) {
+      if (completion.restarts > COMPLETION_RESTARTS && !incompleteLayout.workerAuthoritative) {
         try {
           await completeProvisionalLayout();
         } catch {

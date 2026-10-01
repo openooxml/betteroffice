@@ -51,7 +51,7 @@ export interface ResidentEngineWorkerLayoutOptions {
   layoutExtras?: string;
   /** The host state vector the snapshot brings the worker to. */
   stateVector?: Uint8Array;
-  /** Bootstrap only: lay out just the body's first pages before replying. */
+  /** Lay out just the body's first pages before replying. */
   provisionalPages?: number;
   /** Bootstrap only: lay out the document {@link ResidentEngineWorkerClient.open} opened. */
   opened?: boolean;
@@ -449,6 +449,9 @@ export class ResidentEngineWorkerClient {
         expectedFrameEpoch,
         paintCaret,
         ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
+        ...(options.provisionalPages !== undefined
+          ? { provisionalPages: options.provisionalPages }
+          : {}),
         ...(options.displayWindow
           ? {
               displayWindow: options.displayWindow,

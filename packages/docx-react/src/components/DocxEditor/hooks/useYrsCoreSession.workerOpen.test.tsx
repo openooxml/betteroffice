@@ -97,6 +97,7 @@ function installWorker(options: {
   revisionCount?: number;
   failRevisionCount?: boolean;
   onRevisionCount?: () => void;
+  holdBootstrap?: boolean;
   holdCompletion?: boolean;
 } = {}) {
   const workers: InProcessResidentWorker[] = [];
@@ -109,6 +110,7 @@ function installWorker(options: {
         posted.push(request);
         if ((options.holdState && request.type === 'encodeState') ||
             (options.holdOpen && request.type === 'open') ||
+            (options.holdBootstrap && request.type === 'bootstrap') ||
             (options.holdRetryOpen && workers.length > 1 && request.type === 'open') ||
             (options.holdCompletion && request.type === 'completeLayout')) worker.hold();
         if (options.oomStage === request.type &&
@@ -1466,6 +1468,7 @@ test.each([true, false])(
     const onWorkerRevisions = mock(() => {});
     const { workers, posted } = installWorker({
       holdState: true,
+      holdBootstrap: true,
       holdCompletion: true,
       revisionCount: 1,
       onRevisionCount: () => asked.push(completionReplied),
@@ -1488,6 +1491,10 @@ test.each([true, false])(
         )) completionReplied = true;
         receive?.(event);
       };
+      await waitFor(() => expect(posted.map((request) => request.type)).toContain('bootstrap'));
+      expect(result.current.core.workerProposalsReady).toBe(false);
+      expect(posted.some((request) => request.type === 'proposal')).toBe(false);
+      await act(async () => { workers[0].release(); });
       await waitFor(() => expect(posted.map((request) => request.type)).toContain('completeLayout'), {
         timeout: 5000,
       });
@@ -1526,8 +1533,9 @@ test.each([true, false])(
       expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(true);
       expect(session.storyIds()).toEqual([]);
       expect(result.current.mainOpens).toEqual([]);
-      expect(result.current.core.workerProposalsReady).toBe(false);
-      expect(posted.some((request) => request.type === 'proposal')).toBe(false);
+      await waitFor(() => expect(result.current.core.workerProposalsReady).toBe(true));
+      expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(1);
+      expect(completionReplied).toBe(false);
       if (withCallback) {
         await act(async () => { workers[0].release(); });
         await waitFor(() => expect(result.current.core.workerProposalsReady).toBe(true));
