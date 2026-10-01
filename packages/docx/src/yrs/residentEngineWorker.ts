@@ -108,7 +108,10 @@ interface SlicedCompletion {
     minIntervalMs?: number;
     lastInterimAt: number;
     coveredPosition: number;
-    lastSnapshotMs: number;
+    /** Pages the last interim laid out. */
+    coveredPages: number;
+    /** What the last interim cost the worker, from its snapshot to its replayed frame. */
+    lastInterimMs: number;
     disabled: boolean;
   };
 }
@@ -128,6 +131,15 @@ interface BackgroundPageBuild {
 }
 let backgroundPageBuild: BackgroundPageBuild | null = null;
 const BACKGROUND_SLICE_PAGES = 4;
+/** Pages past the display window that interims fill at their regular cadence. */
+const INTERIM_WINDOW_GUARD_PAGES = 2;
+/**
+ * Past the display window, an interim waits this many times its own cost, so
+ * interims take about 5% of the completion's time.
+ */
+const INTERIM_SPACING_PAST_WINDOW = 19;
+/** The end of the page window the host last displayed. */
+let displayWindowEnd = 0;
 
 // The request being handled, and the requests answered with a trap.
 let handlingId = 0;
@@ -549,7 +561,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
             minIntervalMs: request.progressive.minIntervalMs,
             lastInterimAt: performance.now(),
             coveredPosition: -1,
-            lastSnapshotMs: 0,
+            coveredPages: 0,
+            lastInterimMs: 0,
             disabled: false,
           },
         } : {}),
@@ -742,6 +755,7 @@ function setFrameDisplayWindow(
   retainBuiltPages?: boolean
 ): void {
   if (window) {
+    displayWindowEnd = window[1];
     engine.setDisplayWindow(...window);
     engine.setDisplayRetainBuiltPages(retainBuiltPages === true);
   }
@@ -979,7 +993,14 @@ async function replyProgressiveLayout(
     !progressive || progressive.disabled || coveredPosition === undefined ||
     requestsWaiting > 0) return;
   const reachesTarget = progressive.targets.some((target) => target <= coveredPosition);
-  const interval = Math.max(progressive.minIntervalMs ?? 250, 100, 4 * progressive.lastSnapshotMs);
+  const spacing = progressive.coveredPages < displayWindowEnd + INTERIM_WINDOW_GUARD_PAGES
+    ? 4
+    : INTERIM_SPACING_PAST_WINDOW;
+  const interval = Math.max(
+    progressive.minIntervalMs ?? 250,
+    100,
+    spacing * progressive.lastInterimMs
+  );
   if (!reachesTarget && (coveredPosition <= progressive.coveredPosition ||
     performance.now() - progressive.lastInterimAt < interval)) return;
   const started = performance.now();
@@ -992,7 +1013,6 @@ async function replyProgressiveLayout(
     if (message === 'the document or its fonts changed since the region layout began') return;
     throw error;
   }
-  progressive.lastSnapshotMs = performance.now() - started;
   if (layoutJson === undefined) {
     progressive.disabled = true;
     return;
@@ -1004,8 +1024,10 @@ async function replyProgressiveLayout(
     { ...incompleteLayout, layoutJson, headersFootersJson: session.retainedHeadersFootersJson() },
     completion
   );
+  progressive.lastInterimMs = performance.now() - started;
   if (!emitted) return;
   completion.expectedFrameEpoch = retainedFrame!.frameEpoch;
+  progressive.coveredPages = retainedFrame!.displayList.pages.length;
   progressive.coveredPosition = coveredPosition;
   progressive.targets = progressive.targets.filter((target) => target > coveredPosition);
   progressive.lastInterimAt = performance.now();
