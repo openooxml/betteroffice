@@ -253,6 +253,9 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   const workerPassRef = useRef<{ pass: number; session: YrsSession; opening: boolean } | null>(
     null
   );
+  const nullCompletionRetryRef = useRef<{ session: YrsSession; version: string | null } | null>(
+    null
+  );
   const queuedBehindWorkerRef = useRef(false);
   const schedulerRef = useRef<number | null>(null);
   const runRef = useRef<() => void>(() => {});
@@ -363,7 +366,9 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   const workerHeld = useCallback(
     (owner: YrsSession): boolean =>
       registeredWorkerProposalAuthority(owner)?.holdsWorkerState() === true ||
-      (workerOpenEnabledRef.current && workerOpenReplicaPending(owner)),
+      (workerOpenEnabledRef.current &&
+        (workerOpenReplicaPending(owner) ||
+          layoutInWorkerRef.current?.ownsDocument?.(owner) === true)),
     []
   );
   const queueWorkerPass = useCallback((owner: YrsSession): void => {
@@ -702,6 +707,16 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                     (complete && workerHeld(session)) ||
                     (!complete && registeredWorkerProposalAuthority(session)?.holdsWorkerState() === true)
                   ) {
+                    queueWorkerPass(session);
+                    requestPass();
+                  } else if (
+                    !complete &&
+                    workerOpenEnabledRef.current &&
+                    layoutInWorkerRef.current?.ownsDocument?.(session) === true &&
+                    (nullCompletionRetryRef.current?.session !== session ||
+                      nullCompletionRetryRef.current.version !== sourceVersion)
+                  ) {
+                    nullCompletionRetryRef.current = { session, version: sourceVersion };
                     queueWorkerPass(session);
                     requestPass();
                   } else {

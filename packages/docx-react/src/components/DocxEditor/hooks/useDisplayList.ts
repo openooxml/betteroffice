@@ -242,6 +242,8 @@ export type LayoutInWorker = ((
   request: string
 ) => Promise<WorkerLayoutComputation | null> | null) & {
   prewarm?: (session: YrsSession) => (() => void) | null;
+  /** A live resident worker holds this session's document. */
+  ownsDocument?: (session: YrsSession) => boolean;
 };
 
 /**
@@ -2000,6 +2002,20 @@ export function useRustDisplayList(
       ),
     [overrides?.build]
   );
+  const ownsDocument = useCallback(
+    (hostEngine: YrsSession): boolean => {
+      const owner = workerRef.current;
+      return workerOpenEnabledRef.current &&
+        owner !== null &&
+        isCurrentWorker(hostEngine, owner) &&
+        !owner.client.hasFailed() &&
+        // A successful bootstrap also retains documents supplied by sync.
+        ((owner.opened === true && owner.stateVector !== undefined) ||
+          (owner.client.bootstrapSent() && owner.client.isReady())) &&
+        canLayoutInWorker(hostEngine);
+    },
+    [canLayoutInWorker, isCurrentWorker]
+  );
   const prewarmLayoutWorker = useCallback(
     (hostEngine: YrsSession): (() => void) | null => {
       const current = workerRef.current;
@@ -2268,8 +2284,8 @@ export function useRustDisplayList(
   const layoutInWorkerRef: { current: LayoutInWorker } = useRef<LayoutInWorker>(layoutInWorker);
   layoutInWorkerRef.current = layoutInWorker;
   const prewarmableLayoutInWorker = useMemo(
-    () => Object.assign(layoutInWorker, { prewarm: prewarmLayoutWorker }),
-    [layoutInWorker, prewarmLayoutWorker]
+    () => Object.assign(layoutInWorker, { prewarm: prewarmLayoutWorker, ownsDocument }),
+    [layoutInWorker, prewarmLayoutWorker, ownsDocument]
   );
 
   const attachOffscreenCanvases = useCallback(
