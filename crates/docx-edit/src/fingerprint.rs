@@ -17,10 +17,21 @@ use serde::ser::{self, Serializer};
 
 pub(crate) type Fingerprint = u128;
 
-static SHARED_A: foldhash::SharedSeed = foldhash::SharedSeed::from_u64(0x243f_6a88_85a3_08d3);
-static SHARED_B: foldhash::SharedSeed = foldhash::SharedSeed::from_u64(0x1319_8a2e_0370_7344);
-const PER_HASHER_SEED_A: u64 = 0xa409_3822_299f_31d0;
-const PER_HASHER_SEED_B: u64 = 0x082e_fa98_ec4e_6c89;
+struct Seeds {
+    shared: [foldhash::SharedSeed; 2],
+    per_hasher: [u64; 2],
+}
+
+fn seeds() -> &'static Seeds {
+    static SEEDS: std::sync::OnceLock<Seeds> = std::sync::OnceLock::new();
+    SEEDS.get_or_init(|| {
+        let [a, b] = crate::identity::entropy();
+        Seeds {
+            shared: [a, b].map(foldhash::SharedSeed::from_u64),
+            per_hasher: crate::identity::entropy(),
+        }
+    })
+}
 
 const POSITION_KEYS: [&str; 4] = ["pmStart", "pmEnd", "docStart", "docEnd"];
 
@@ -61,8 +72,9 @@ fn is_position_key(key: &str) -> bool {
     POSITION_KEYS.contains(&key)
 }
 
-/// Two independently seeded 64-bit foldhash lanes with fixed seeds: deterministic
-/// within a process, which is all a session-local fingerprint needs.
+/// Two independently seeded 64-bit foldhash lanes. The seeds are drawn once per
+/// process: deterministic within it, which is all a session-local fingerprint
+/// needs, and unknown to the content being hashed.
 struct Hasher {
     a: FoldHasher<'static>,
     b: FoldHasher<'static>,
@@ -71,9 +83,10 @@ struct Hasher {
 
 impl Hasher {
     fn new() -> Self {
+        let seeds = seeds();
         Self {
-            a: FoldHasher::with_seed(PER_HASHER_SEED_A, &SHARED_A),
-            b: FoldHasher::with_seed(PER_HASHER_SEED_B, &SHARED_B),
+            a: FoldHasher::with_seed(seeds.per_hasher[0], &seeds.shared[0]),
+            b: FoldHasher::with_seed(seeds.per_hasher[1], &seeds.shared[1]),
             keep_positions: false,
         }
     }

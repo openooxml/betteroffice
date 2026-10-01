@@ -5378,6 +5378,25 @@ mod tests {
     }
 
     #[test]
+    fn measured_fingerprints_tell_anchored_images_apart() {
+        let measured = |anchored: bool| {
+            serde_json::from_value::<MeasuredBlock>(serde_json::json!({
+                "block": {
+                    "kind": "image", "id": "i", "src": "", "width": 20, "height": 20,
+                    "anchor": {"isAnchored": anchored},
+                    "effects": [null, 13_100_772_350_407_709_573_u64, 18_232_552_688_281_235_959_u64]
+                },
+                "measure": {"kind": "image", "width": 20, "height": 20}
+            }))
+            .unwrap()
+        };
+        assert_ne!(
+            measured_fingerprint(&measured(false)).unwrap(),
+            measured_fingerprint(&measured(true)).unwrap()
+        );
+    }
+
+    #[test]
     fn measured_block_fingerprints_match_exactly_when_the_measured_blocks_do() {
         use std::path::{Path, PathBuf};
 
