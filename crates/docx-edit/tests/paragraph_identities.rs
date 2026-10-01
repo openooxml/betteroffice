@@ -1994,7 +1994,7 @@ fn ordinal_of(part: &SplicedPart, key: &str) -> u32 {
 
 #[test]
 fn split_and_merged_paragraphs_splice_with_their_new_and_removed_ones() {
-    let doc = seeded(&fixture());
+    let doc = seeded(&plain_fixture());
     let body = spliced(&doc, "word/document.xml").unwrap();
     let valid = key_of(&doc, "body", "Valid");
     let lower = key_of(&doc, "body", "Lower");
@@ -2026,7 +2026,14 @@ fn split_and_merged_paragraphs_splice_with_their_new_and_removed_ones() {
 
 #[test]
 fn a_paragraph_split_after_a_table_splices_after_it() {
-    let doc = seeded(&fixture());
+    let doc = seeded(&fixture_with(|parts| {
+        replace(
+            parts,
+            "word/document.xml",
+            r#"<bofx:block><w:p w14:paraId="5E6F7A8B"><w:r><w:t>Retained</w:t></w:r></w:p></bofx:block>"#,
+            "",
+        )
+    }));
     let tail = key_of(&doc, "body", "Tail");
     let at = doc.paragraph_mark_position(&tail).unwrap();
     doc.split_paragraph(&ctx(), Position::new("body", at.index - 4), None)

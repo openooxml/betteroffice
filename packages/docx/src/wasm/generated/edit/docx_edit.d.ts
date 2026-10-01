@@ -716,8 +716,9 @@ export class EditSession {
      * `paragraphIds` request field: `{"assignments":[{"part","ordinal",
      * "paraId"}],"patchedParts":[{"part","paraIds":[[ordinal,"ID"]]}]}`,
      * plus `"splicedParts":[{"part","sha256","paragraphs":[[ordinal,"key"]],
-     * "changed":[ordinal]}]`, whose session keys the caller resolves to the
-     * model paragraphs it marks with their ordinals.
+     * "changed":[ordinal],"inserted":[{"before"|"after":ordinal}],"removed":[ordinal]}]`,
+     * whose session keys the caller resolves to the model paragraphs it marks
+     * with their ordinals.
      */
     paragraph_save_plan(): string;
     /**
