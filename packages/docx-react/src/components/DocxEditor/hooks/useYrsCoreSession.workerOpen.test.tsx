@@ -1371,16 +1371,17 @@ test('a preview font preflight answered after the full open took its worker over
   const fullOpenGate = new Promise<void>((resolve) => { openFull = resolve; });
   const frames = holdFrames();
   try {
+    const openInWorker: OpenInWorker = async (...args) => {
+      await fullOpenGate;
+      return result.current.renderer.openInWorker(...args);
+    };
     const { result, unmount } = renderHook(useHarness, {
       initialProps: {
         ...initialProps,
         previewFirstPage: true,
         workerPreview: true,
         source: longBytes,
-        openInWorker: async (...args) => {
-          await fullOpenGate;
-          return result.current.renderer.openInWorker(...args);
-        },
+        openInWorker,
       },
     });
     await waitFor(() => expect(result.current.core.previewing).toBe(true));
