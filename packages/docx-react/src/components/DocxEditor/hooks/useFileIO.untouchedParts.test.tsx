@@ -406,7 +406,7 @@ test('an in-place host comment edit keeps its text and resolved state on save', 
   expect(reopenedComment?.done).toBe(true);
 });
 
-test('deleting two comments across saves does not resurrect the first comment', async () => {
+async function deleteTwoCommentsAcrossSaves() {
   const source = commentedFixture();
   const secondParaId = '10000002';
   const extend = (name: string, closing: string, xml: string) => {
@@ -433,11 +433,15 @@ test('deleting two comments across saves does not resurrect the first comment', 
   };
   await deleteComment(1);
   const first = unzipContainer(new Uint8Array(await editor.save()));
+  await deleteComment(2);
+  return { first, saved: await editor.save() };
+}
+
+test('deleting two comments across saves does not resurrect the first comment', async () => {
+  const { first, saved } = await deleteTwoCommentsAcrossSaves();
   const firstComments = new DOMParser().parseFromString(xmlPart(first, 'word/comments.xml'), 'application/xml');
   expect(xmlElements(firstComments, W, 'comment').map((entry) => entry.getAttribute('w:id'))).toEqual(['2']);
   expect(markers(xmlPart(first, 'word/document.xml'), 1)).toEqual([]);
-  await deleteComment(2);
-  const saved = await editor.save();
   const last = unzipContainer(new Uint8Array(saved));
   if (last['word/comments.xml']) {
     const lastComments = new DOMParser().parseFromString(xmlPart(last, 'word/comments.xml'), 'application/xml');
@@ -445,6 +449,11 @@ test('deleting two comments across saves does not resurrect the first comment', 
   }
   expect(markers(xmlPart(last, 'word/document.xml'), 1)).toEqual([]);
   expect((await reopened(saved)).package.document.comments?.some((comment) => comment.id === 1) ?? false).toBe(false);
+});
+
+test.todo('deleting the last comment removes its body range markers (deferred-after-0.4.1: last-comment delete leaves markers)', async () => {
+  const { saved } = await deleteTwoCommentsAcrossSaves();
+  expect(markers(xmlPart(unzipContainer(new Uint8Array(saved)), 'word/document.xml'), 2)).toEqual([]);
 });
 
 test('a comment resolved in React is saved in commentsExtended and reopened', async () => {
