@@ -2,4 +2,4 @@
 "@betteroffice/docx-react": patch
 ---
 
-In read-only mode, double-clicking a header or footer no longer opens header and footer editing.
+In read-only mode, double-clicking a header or footer keeps the page read-only and opens no header and footer editing.
