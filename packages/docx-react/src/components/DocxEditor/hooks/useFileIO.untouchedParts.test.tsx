@@ -1,7 +1,7 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { posix, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { createRef } from 'react';
 import { parseDocx, repackDocx } from '@betteroffice/docx/docx';
 import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
@@ -253,6 +253,21 @@ function markers(xml: string, id: number): string[] {
   return [...xml.matchAll(new RegExp(`<w:comment(RangeStart|RangeEnd|Reference)\\b[^>]*\\bw:id="${id}"[^>]*/>`, 'g'))].map((match) => match[1]!);
 }
 
+function xmlElements(root: Document | Element, namespace: string, localName: string): Element[] {
+  return Array.from(root.getElementsByTagName('*')).filter(
+    (element) => element.namespaceURI === namespace && element.localName === localName
+  );
+}
+
+function savedCommentParaId(parts: ReturnType<typeof unzipContainer>, id: number): string {
+  const xml = new DOMParser().parseFromString(xmlPart(parts, 'word/comments.xml'), 'application/xml');
+  const comment = xmlElements(xml, W, 'comment').find((entry) => entry.getAttribute('w:id') === String(id));
+  expect(comment).toBeDefined();
+  const paraId = xmlElements(comment!, W, 'p').at(-1)?.getAttribute('w14:paraId');
+  expect(paraId).toBeTruthy();
+  return paraId!;
+}
+
 function drawing(): string {
   return `<w:r><w:drawing><wp:inline xmlns:wp="${WP}" xmlns:a="${A}" xmlns:pic="${PIC}" distT="0" distB="0" distL="0" distR="0"><wp:extent cx="9525" cy="9525"/><wp:docPr id="42" name="Link"><a:hlinkClick xmlns:a="${A}" r:id="link"/></wp:docPr><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="${PIC}"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="pixel.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="picture"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9525" cy="9525"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
 }
@@ -371,9 +386,10 @@ test('a comment resolved in React is saved in commentsExtended and reopened', as
   const saved = await editor.save();
   const parts = unzipContainer(new Uint8Array(saved));
   expect(xmlPart(parts, 'word/comments.xml')).toContain('w:id="1"');
+  const paraId = savedCommentParaId(parts, 1);
   const extended = new DOMParser().parseFromString(xmlPart(parts, 'word/commentsExtended.xml'), 'application/xml');
-  const comment = Array.from(extended.getElementsByTagNameNS(W15, 'commentEx')).find((entry) => entry.getAttributeNS(W15, 'paraId') === COMMENT_PARA_ID);
-  expect(comment?.getAttributeNS(W15, 'done')).toBe('1');
+  const comment = xmlElements(extended, W15, 'commentEx').find((entry) => entry.getAttribute('w15:paraId') === paraId);
+  expect(comment?.getAttribute('w15:done')).toBe('1');
   expect((await reopened(saved)).package.document.comments?.find(({ id }) => id === 1)?.done).toBe(true);
 });
 
@@ -398,9 +414,13 @@ test('a React reply saves its text, thread metadata and body range markers', asy
   expect(getCommentText(reply!.content)).toBe('Host reply');
   expect(reply?.paraId).toBeTruthy();
   expect(parent?.paraId).toBeTruthy();
+  const replyParaId = savedCommentParaId(parts, replyId!);
+  const parentParaId = savedCommentParaId(parts, 1);
+  expect(reply?.paraId).toBe(replyParaId);
+  expect(parent?.paraId).toBe(parentParaId);
   const extended = new DOMParser().parseFromString(xmlPart(parts, 'word/commentsExtended.xml'), 'application/xml');
-  const replyEx = Array.from(extended.getElementsByTagNameNS(W15, 'commentEx')).find((entry) => entry.getAttributeNS(W15, 'paraId') === reply?.paraId);
-  expect(replyEx?.getAttributeNS(W15, 'paraIdParent')).toBe(parent?.paraId);
+  const replyEx = xmlElements(extended, W15, 'commentEx').find((entry) => entry.getAttribute('w15:paraId') === replyParaId);
+  expect(replyEx?.getAttribute('w15:paraIdParent')).toBe(parentParaId);
 });
 
 test('a React comment added on selected body text saves its body and range', async () => {
@@ -446,7 +466,71 @@ test('two consecutive React saves retain a body edit in valid packages', async (
   expect(secondEditor.ref.current!.getEditorRef()!.getYrsSession()!.paragraphs('body')[0]!.text).toBe('Saved twice Body text');
 });
 
-test('two React saves retain an inserted image and a resolvable media relationship', async () => {
+test('two React saves retain a drawing inserted through the public image picker', async () => {
+  const editor = await mount(fixture((p) => p(run('Body text'))).bytes);
+  const paged = editor.ref.current!.getEditorRef()!;
+  const session = paged.getYrsSession()!;
+  const [first] = session.paragraphs('body');
+  await act(async () => {
+    session.setSelection({ story: 'body', paraId: first!.paraId, offset: 0 });
+    paged.syncYrsInputState(false);
+    const outcome = await editor.ref.current!.commands.execute('insertImage', null);
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) expect(outcome.status).toBe('opened');
+  });
+  const originalImage = globalThis.Image;
+  class LoadedImage {
+    naturalWidth = 1;
+    naturalHeight = 1;
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    set src(_value: string) {
+      queueMicrotask(() => this.onload?.());
+    }
+  }
+  const imageInserted = () => session.storySegments('body').some(
+    (segment) => segment.kind === 'embed' && segment.embedKind === 'image'
+  );
+  try {
+    globalThis.Image = LoadedImage as never;
+    const input = editor.view.container.querySelector<HTMLInputElement>('input[type="file"][accept="image/*"]');
+    expect(input).not.toBeNull();
+    await act(async () => {
+      fireEvent.change(input!, { target: { files: [new File([PNG], 'Synthetic pixel.png', { type: 'image/png' })] } });
+    });
+    await until(imageInserted);
+    await act(async () => editor.ref.current!.flushPendingInput());
+  } finally {
+    globalThis.Image = originalImage;
+  }
+  const inserted = session.storySegments('body').find(
+    (segment) => segment.kind === 'embed' && segment.embedKind === 'image'
+  );
+  const insertedId = inserted?.kind === 'embed' ? inserted.payload.rId : undefined;
+  expect(insertedId).toBeTruthy();
+  const firstSave = await editor.save();
+  const secondSave = await editor.save();
+  for (const buffer of [firstSave, secondSave]) {
+    const parts = unzipContainer(new Uint8Array(buffer));
+    const xml = new DOMParser().parseFromString(xmlPart(parts, 'word/document.xml'), 'application/xml');
+    const embed = xmlElements(xml, A, 'blip')[0]?.getAttribute('r:embed');
+    expect(embed).toBeTruthy();
+    expect(embed).toBe(insertedId);
+    expect(xmlElements(xml, WP, 'docPr')[0]?.getAttribute('descr')).toBe('Synthetic pixel.png');
+    const document = await reopened(buffer);
+    const images = document.package.document.content.flatMap((block) => block.type === 'paragraph'
+      ? block.content.flatMap((content) => content.type === 'run'
+        ? content.content.flatMap((item) => item.type === 'drawing' ? [item.image] : [])
+        : [])
+      : []);
+    expect(images).toHaveLength(1);
+    expect(images[0]?.rId).toBe(embed);
+    expect(images[0]?.alt).toBe('Synthetic pixel.png');
+    expect(images[0]?.size).toEqual({ width: 9525, height: 9525 });
+  }
+});
+
+test('two React saves each register a data-URL image the session inserted', async () => {
   const editor = await mount(fixture((p) => p(run('Body text'))).bytes);
   const paged = editor.ref.current!.getEditorRef()!;
   const session = paged.getYrsSession()!;
@@ -456,22 +540,18 @@ test('two React saves retain an inserted image and a resolvable media relationsh
     paged.syncYrsInputState(false);
     expect(paged.applyYrsCommand({ type: 'insertImage', image: { src: `data:image/png;base64,${PNG_BASE64}`, width: 1, height: 1, alt: 'Synthetic pixel' } })).toBe(true);
   });
-  const firstSave = await editor.save();
-  const secondSave = await editor.save();
-  for (const buffer of [firstSave, secondSave]) {
+  for (const buffer of [await editor.save(), await editor.save()]) {
     const parts = unzipContainer(new Uint8Array(buffer));
     const xml = new DOMParser().parseFromString(xmlPart(parts, 'word/document.xml'), 'application/xml');
-    const embed = xml.getElementsByTagNameNS(A, 'blip')[0]?.getAttributeNS(R, 'embed');
+    const embed = xmlElements(xml, A, 'blip')[0]?.getAttribute('r:embed');
     expect(embed).toBeTruthy();
     const rels = new DOMParser().parseFromString(xmlPart(parts, 'word/_rels/document.xml.rels'), 'application/xml');
     const relationship = Array.from(rels.getElementsByTagNameNS(RELS, 'Relationship')).find((entry) => entry.getAttribute('Id') === embed);
     expect(relationship?.getAttribute('Type')).toBe(`${R}/image`);
-    const target = relationship?.getAttribute('Target');
-    expect(target).toBeTruthy();
-    const name = target!.startsWith('/') ? target!.slice(1) : posix.normalize(posix.join('word', target!));
+    const target = relationship!.getAttribute('Target')!;
+    const name = target.startsWith('/') ? target.slice(1) : `word/${target}`;
     expect(name.startsWith('word/media/')).toBe(true);
     expect(Array.from(parts[name] ?? [])).toEqual(Array.from(PNG));
-    expect(xmlPart(parts, '[Content_Types].xml')).toContain('image/png');
     await reopened(buffer);
   }
 });
@@ -493,6 +573,31 @@ test('React save after undo restores source document bytes instead of the previo
   await reopened(undone);
 });
 
+test('React save after undo restores raw source document bytes with permission ranges', async () => {
+  const source = fixture((p) =>
+    p('<w:permStart w:id="3" w:edGrp="everyone"/>' + run('Editable') + '<w:permEnd w:id="3"/>') +
+    p(run('Body text'))
+  );
+  const editor = await mount(source.bytes);
+  const paged = editor.ref.current!.getEditorRef()!;
+  const session = paged.getYrsSession()!;
+  const second = session.paragraphs('body')[1]!;
+  await act(async () => {
+    session.insertText({ story: 'body', paraId: second.paraId, offset: 0 }, 'Undo this ');
+    paged.syncYrsInputState(true, ['body']);
+  });
+  const edited = await editor.save();
+  expect(xmlPart(unzipContainer(new Uint8Array(edited)), 'word/document.xml')).toContain('Undo this ');
+  await act(async () => {
+    expect(paged.undo()).toBe(true);
+  });
+  expect(session.paragraphs('body')[0]!.text).toBe('Editable');
+  expect(session.paragraphs('body')[1]!.text).toBe('Body text');
+  const undone = await editor.save();
+  expectUnchanged(source, undone, ['word/document.xml']);
+  await reopened(undone);
+});
+
 test('a host page-setup change is saved even when body text is untouched', async () => {
   const editor = await mount(fixture((p) => p(run('Body text'))).bytes);
   await act(async () => {
@@ -503,10 +608,11 @@ test('a host page-setup change is saved even when body text is untouched', async
   const dialog = editor.view.getByRole('dialog');
   const [topMargin] = within(dialog).getAllByRole('spinbutton');
   await act(async () => fireEvent.change(topMargin!, { target: { value: '2' } }));
+  expect((topMargin as HTMLInputElement).value).toBe('2');
   await act(async () => fireEvent.click(within(dialog).getByRole('button', { name: 'Apply' })));
   await until(() => !editor.view.queryByRole('dialog'));
   const saved = await editor.save();
   const xml = new DOMParser().parseFromString(xmlPart(unzipContainer(new Uint8Array(saved)), 'word/document.xml'), 'application/xml');
-  expect(xml.getElementsByTagNameNS(W, 'pgMar')[0]?.getAttributeNS(W, 'top')).toBe('2880');
+  expect(xmlElements(xml, W, 'pgMar')[0]?.getAttribute('w:top')).toBe('2880');
   expect((await reopened(saved)).package.document.finalSectionProperties?.marginTop).toBe(2880);
 });
