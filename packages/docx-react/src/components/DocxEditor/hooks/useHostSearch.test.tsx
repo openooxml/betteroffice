@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import { createYrsSession, type ResidentProposalReply, type YrsSession } from '@betteroffice/docx/yrs';
+import { createYrsSession, type ResidentProposalReply, type YrsSession, type YrsStickyPosition } from '@betteroffice/docx/yrs';
 import { readResidentSearch } from '@betteroffice/docx/yrs/residentSearch';
 import type { ResidentDocumentRead } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import type { WorkerOpenedDocument } from './useDisplayList';
@@ -158,10 +158,28 @@ async function workerSearch(h: Awaited<ReturnType<typeof mount>>) {
     changedStories: [], updates: [], stateVector: new Uint8Array(),
   });
   let blocked: Promise<void> | null = null;
-  const reads: ResidentDocumentRead[] = [];
+  let blockedAnchor: Promise<void> | null = null;
+  const reads: Extract<ResidentDocumentRead, { kind: 'searchText' }>[] = [];
+  const anchorReads: Extract<ResidentDocumentRead, { kind: 'stickyAnchor' }>[] = [];
+  const anchors: Array<YrsStickyPosition | null> = [];
   const worker = {
     proposal: async () => snapshot(),
     documentRead: async (read: ResidentDocumentRead) => {
+      if (read.kind === 'stickyAnchor') {
+        anchorReads.push(read);
+        const waiting = blockedAnchor;
+        blockedAnchor = null;
+        let value: YrsStickyPosition | null = null;
+        if (session.version() === read.version) {
+          try {
+            value = session.encodeStickyPosition(read.loc);
+          } catch {}
+        }
+        anchors.push(value);
+        const version = session.version();
+        await waiting;
+        return { version, value };
+      }
       if (read.kind !== 'searchText') throw new Error('unexpected read');
       reads.push(read);
       const waiting = blocked;
@@ -179,17 +197,27 @@ async function workerSearch(h: Awaited<ReturnType<typeof mount>>) {
     relayout: () => {}, current: () => h.pagedEditorRef.current?.getYrsSession() === h.session,
     laidOut: async () => {}, adopted: () => {}, handedOver: () => {}, contentChanged: () => {},
   });
+  let replicaRequests = 0;
   deferWorkerOpenReplica(h.session, async () => {
+    replicaRequests += 1;
     const handover = await beginWorkerProposalHandover(h.session)!;
     return () => { h.session.loadState(handover.state); handover.complete(); };
   }, () => { throw new Error('unexpected main fallback'); }, () => {});
   return {
     session,
     reads,
+    anchorReads,
+    anchors,
+    replicaRequests: () => replicaRequests,
     mirror: () => h.session.mirrorWorkerDocument(snapshot().mirror),
     holdRead: () => {
       let release!: () => void;
       blocked = new Promise<void>((resolve) => { release = resolve; });
+      return release;
+    },
+    holdAnchor: () => {
+      let release!: () => void;
+      blockedAnchor = new Promise<void>((resolve) => { release = resolve; });
       return release;
     },
   };
@@ -213,36 +241,42 @@ test('worker search starts in view and navigates cached body and table ranges', 
     }))).toEqual(readResidentSearch(worker.session, 'the', false).matches.map(({ displayFrom, displayTo }) => ({
       displayFrom, displayTo,
     })));
-    act(() => {
+    await act(async () => {
       expect(api.searchGoTo(4)?.current).toBe(4);
       expect(api.searchNext()?.current).toBe(0);
       expect(api.searchPrevious()?.current).toBe(4);
     });
     expect(worker.reads).toHaveLength(1);
+    expect(worker.anchorReads.map(({ loc }) => loc)).toEqual([2, 4, 0, 4].map((index) => {
+      const match = readResidentSearch(worker.session, 'the', false).matches[index];
+      return { story: match.story, paraId: match.paraId, offset: match.start };
+    }));
     for (const read of mainReads) expect(read).not.toHaveBeenCalled();
   } finally {
     for (const read of mainReads) read.mockRestore();
   }
+  expect(worker.replicaRequests()).toBe(0);
 });
 
-test('worker refresh coalesces reads, follows the latest navigation and retries stale versions', async () => {
+test('worker refresh survives ref replacement, coalesces reads and retries stale versions', async () => {
   const h = await mount();
   const worker = await workerSearch(h);
   const api = h.hook.result.current.api;
   await act(async () => { await api.search('the'); });
   h.layOut(() => false);
-  act(() => api.searchGoTo(3));
+  await act(async () => { api.searchGoTo(3); api.searchGoTo(4); });
+  const before = h.hook.result.current.highlight!.matches[4].displayFrom;
   worker.session.insertText({ story: 'body', paraId: h.first, offset: 0 }, 'the ');
   worker.mirror();
   const release = worker.holdRead();
   act(() => {
-    expect(api.getSearchState()).toMatchObject({ total: 5, current: 3 });
+    expect(api.getSearchState()).toMatchObject({ total: 5, current: 4 });
     api.getSearchState();
-    api.searchGoTo(4);
   });
   h.stamp(1, worker.session.version());
   h.hook.rerender({ version: 1 });
   await waitFor(() => expect(worker.reads).toHaveLength(2));
+  h.pagedEditorRef.current = { ...h.pagedEditorRef.current! };
   expect(h.hook.result.current.highlight?.matches).toHaveLength(5);
   const published = h.events.length;
   worker.session.insertText({ story: 'body', paraId: h.first, offset: 0 }, 'the ');
@@ -253,9 +287,13 @@ test('worker refresh coalesces reads, follows the latest navigation and retries 
   await act(async () => { release(); });
   await waitFor(() => expect(h.hook.result.current.highlight?.matches).toHaveLength(7));
   expect(api.getSearchState()).toMatchObject({ total: 7, current: 6 });
+  expect(h.hook.result.current.highlight!.matches[6].displayFrom).toBe(before + 8);
   expect(worker.reads).toHaveLength(3);
   expect(h.events.slice(published).map((state) => state?.total)).toEqual([7]);
   expect(h.reveals.at(-1)).toBe(h.hook.result.current.highlight!.matches[6].displayFrom);
+  act(() => { expect(api.searchPrevious()).toMatchObject({ total: 7, current: 5 }); });
+  expect(h.reveals.at(-1)).toBe(h.hook.result.current.highlight!.matches[5].displayFrom);
+  expect(worker.replicaRequests()).toBe(0);
 });
 
 test('a newer search and clear discard in-flight worker refreshes', async () => {
@@ -283,6 +321,7 @@ test('a newer search and clear discard in-flight worker refreshes', async () => 
   expect(api.getSearchState()).toBeNull();
   expect(h.hook.result.current.highlight).toBeNull();
   expect(h.events).toHaveLength(events);
+  expect(worker.replicaRequests()).toBe(0);
 });
 
 test('initial worker search retries a version change and clearing cancels a pending search', async () => {
@@ -309,7 +348,90 @@ test('initial worker search retries a version change and clearing cancels a pend
   await waitFor(() => expect(worker.reads).toHaveLength(4));
   h.pagedEditorRef.current = { ...h.pagedEditorRef.current! };
   await act(async () => { replacedRelease(); await searched; });
-  expect(h.hook.result.current.highlight).toBeNull();
+  expect(api.getSearchState()).toMatchObject({ total: 6, current: 0 });
+  expect(h.hook.result.current.highlight!.matches).toEqual(readResidentSearch(worker.session, 'the', false).matches);
+  act(() => { expect(api.searchGoTo(5)).toMatchObject({ total: 6, current: 5 }); });
+  expect(h.reveals.at(-1)).toBe(h.hook.result.current.highlight!.matches[5].displayFrom);
+  expect(worker.replicaRequests()).toBe(0);
+});
+
+test('worker refresh waits for the navigated match anchor before carrying it through an edit', async () => {
+  const h = await mount();
+  const worker = await workerSearch(h);
+  const api = h.hook.result.current.api;
+  await act(async () => { await api.search('the'); });
+  const release = worker.holdAnchor();
+  act(() => { api.searchGoTo(3); });
+  await waitFor(() => expect(worker.anchorReads).toHaveLength(2));
+  const before = h.hook.result.current.highlight!.matches[3].displayFrom;
+  const events = h.events.length;
+  worker.session.insertText({ story: 'body', paraId: h.first, offset: 0 }, 'the ');
+  worker.mirror();
+  h.stamp(1, worker.session.version());
+  h.hook.rerender({ version: 1 });
+  expect(worker.reads).toHaveLength(1);
+  await act(async () => { release(); });
+  await waitFor(() => expect(h.hook.result.current.highlight?.matches).toHaveLength(6));
+  expect(api.getSearchState()).toMatchObject({ total: 6, current: 4 });
+  expect(h.hook.result.current.highlight!.matches[4].displayFrom).toBe(before + 4);
+  expect(worker.reads[1].carry).toEqual(worker.anchors[1]);
+  expect(worker.reads[1].carry).not.toBeNull();
+  expect(h.events.slice(events).map((state) => state?.current)).toEqual([4]);
+  expect(worker.replicaRequests()).toBe(0);
+});
+
+test('navigation whose queued anchor is stale falls back to the first match on refresh', async () => {
+  const h = await mount();
+  const worker = await workerSearch(h);
+  const api = h.hook.result.current.api;
+  await act(async () => { await api.search('the'); });
+  const release = worker.holdRead();
+  worker.session.insertText({ story: 'body', paraId: h.first, offset: 0 }, 'the ');
+  worker.mirror();
+  act(() => { api.getSearchState(); });
+  await waitFor(() => expect(worker.reads).toHaveLength(2));
+  h.layOut(() => false);
+  act(() => { expect(api.searchGoTo(4)?.current).toBe(4); });
+  worker.session.insertText({ story: 'body', paraId: h.first, offset: 0 }, 'the ');
+  worker.mirror();
+  h.stamp(1, worker.session.version());
+  h.hook.rerender({ version: 1 });
+  h.layOut(() => true);
+  await act(async () => { release(); });
+  await waitFor(() => expect(h.hook.result.current.highlight?.matches).toHaveLength(7));
+  expect(worker.anchors[1]).toBeNull();
+  expect(worker.reads.at(-1)!.carry).toBeNull();
+  expect(api.getSearchState()).toMatchObject({ total: 7, current: 0 });
+  expect(h.hook.result.current.highlight!.matches).toEqual(readResidentSearch(worker.session, 'the', false).matches);
+  expect(h.reveals.at(-1)).toBe(h.hook.result.current.highlight!.matches[0].displayFrom);
+  expect(worker.replicaRequests()).toBe(0);
+});
+
+test('worker display placement retries a pending reveal without another document read', async () => {
+  const h = await mount();
+  const worker = await workerSearch(h);
+  const api = h.hook.result.current.api;
+  h.stamp(0, 'older');
+  h.layOut(() => false);
+  await act(async () => { await api.search('the'); });
+  const matches = h.hook.result.current.highlight!.matches;
+  const events = h.events.length;
+  h.stamp(1, 'older');
+  h.hook.rerender({ version: 1 });
+  expect(h.events).toHaveLength(events);
+  expect(h.reveals).toHaveLength(2);
+  h.layOut(() => true);
+  h.stamp(2, worker.session.version());
+  h.hook.rerender({ version: 2 });
+  expect(h.events).toHaveLength(events + 1);
+  expect(h.reveals).toHaveLength(3);
+  h.stamp(3, worker.session.version());
+  h.hook.rerender({ version: 3 });
+  expect(h.reveals).toHaveLength(3);
+  expect(worker.reads).toHaveLength(1);
+  expect(worker.anchorReads).toHaveLength(1);
+  expect(h.hook.result.current.highlight!.matches).toBe(matches);
+  expect(worker.replicaRequests()).toBe(0);
 });
 
 test('worker search carries portable anchors through hand-over and subsequent main edits', async () => {
@@ -319,7 +441,9 @@ test('worker search carries portable anchors through hand-over and subsequent ma
   await act(async () => { await api.search('the'); });
   act(() => api.searchGoTo(3));
   const before = h.hook.result.current.highlight!.matches[3].displayFrom;
+  expect(worker.replicaRequests()).toBe(0);
   await act(async () => { await requestWorkerOpenReplica(h.session); });
+  expect(worker.replicaRequests()).toBe(1);
   expect(workerProposalAuthority(h.session)).toBeNull();
   h.session.insertText({ story: 'body', paraId: h.first, offset: 0 }, 'the ');
   h.hook.rerender({ version: 1 });

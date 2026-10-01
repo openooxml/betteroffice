@@ -22,23 +22,22 @@ function reader() {
     storySegments: () => segments,
     paragraphSpans: () => [{ paraId: 'p1', length: 7 }],
     searchText: mock(() => hits),
-    encodeStickyPosition: (loc: YrsLoc) => ({ story: loc.story, encoded: Uint8Array.of(loc.offset) }),
+    encodeStickyPosition: mock((_loc: YrsLoc) => { throw new Error('unexpected anchor encoding'); }),
     resolveStickyPosition: () => null as YrsLoc | null,
   };
 }
 
-test('resident search filters unsupported stories and ranges, sorts and caches anchors', () => {
+test('resident search filters unsupported stories and ranges and sorts without encoding anchors', () => {
   const source = reader();
   expect(readResidentSearch(source, 'cat', true)).toEqual({
     carried: 0,
     matches: [
-      { story: 'body', paraId: 'p1', start: 0, displayFrom: 1, displayTo: 4,
-        anchor: { story: 'body', encoded: Uint8Array.of(0) } },
-      { story: 'body', paraId: 'p1', start: 4, displayFrom: 5, displayTo: 8,
-        anchor: { story: 'body', encoded: Uint8Array.of(4) } },
+      { story: 'body', paraId: 'p1', start: 0, displayFrom: 1, displayTo: 4 },
+      { story: 'body', paraId: 'p1', start: 4, displayFrom: 5, displayTo: 8 },
     ],
   });
   expect(source.searchText).toHaveBeenCalledWith('cat', { caseSensitive: true });
+  expect(source.encodeStickyPosition).not.toHaveBeenCalled();
 });
 
 test('resident search carries exact locations, the first at or after, and the last', () => {
@@ -54,11 +53,10 @@ test('resident search carries exact locations, the first at or after, and the la
   expect(readResidentSearch(source, 'cat', false, carry).carried).toBe(0);
 });
 
-test('resident search retains matches when anchors cannot be encoded and handles empty results', () => {
+test('resident search handles empty results without encoding anchors', () => {
   const source = reader();
-  source.encodeStickyPosition = () => { throw new Error('unavailable anchor'); };
-  expect(readResidentSearch(source, 'cat', false).matches.map(({ anchor }) => anchor)).toEqual([null, null]);
   expect(readResidentSearch(source, '', false)).toEqual({ matches: [], carried: -1 });
   source.searchText.mockReturnValue([]);
   expect(readResidentSearch(source, 'missing', false)).toEqual({ matches: [], carried: -1 });
+  expect(source.encodeStickyPosition).not.toHaveBeenCalled();
 });

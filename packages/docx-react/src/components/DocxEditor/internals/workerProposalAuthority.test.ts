@@ -685,7 +685,7 @@ test('search reads retain the worker version and queue behind other document rea
   const posted = deferred<void>();
   const carry = { story: 'body', encoded: Uint8Array.of(1) };
   const value = { matches: [{
-    story: 'body', paraId: 'p1', start: 2, displayFrom: 3, displayTo: 7, anchor: carry,
+    story: 'body', paraId: 'p1', start: 2, displayFrom: 3, displayTo: 7,
   }], carried: 0 };
   h.worker.documentRead.mockImplementation(async (read) => {
     h.events.push(read.kind);
@@ -708,6 +708,59 @@ test('search reads retain the worker version and queue behind other document rea
     kind: 'searchText'; query: string; caseSensitive: boolean; carry: typeof carry;
   }>({ kind: 'searchText', query: 'term', caseSensitive: true, carry });
   expect(h.events).toEqual(['snapshot', 'readParagraphs', 'searchText', 'navigationTarget']);
+});
+
+test('sticky anchor reads keep their place before and after mutations without a main read', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  const loc = { story: 'body', paraId: 'p1', offset: 2 };
+  const anchor = { story: 'body', encoded: Uint8Array.of(2) };
+  h.worker.documentRead.mockImplementation(async (read) => {
+    h.events.push(read.kind);
+    return { version: h.session.version(), value:
+      (read as { version?: string }).version === h.session.version() ? anchor : null } as never;
+  });
+  h.worker.proposal.mockImplementation(async (op) => {
+    h.events.push(op.kind);
+    return reply('worker-2', ['body']);
+  });
+  const main = mock(() => { throw new Error('unexpected main call'); });
+  const before = h.authority.stickyAnchor(loc, 'worker-1', main);
+  const mutation = h.authority.propose(request, unusedMain);
+  const after = h.authority.stickyAnchor(loc, 'worker-1', main);
+  expect(await before).toEqual(anchor);
+  await mutation;
+  expect(await after).toBeNull();
+  expect(h.worker.documentRead.mock.calls.map(([read]) => read)).toEqual<Array<{
+    kind: string; loc: typeof loc; version: string;
+  }>>([
+    { kind: 'stickyAnchor', loc, version: 'worker-1' },
+    { kind: 'stickyAnchor', loc, version: 'worker-1' },
+  ]);
+  expect(h.events).toEqual(['snapshot', 'stickyAnchor', 'propose', 'stickyAnchor']);
+  expect(main).not.toHaveBeenCalled();
+});
+
+test('sticky anchors queued after hand-over use the version-checked main fallback', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  deferWorkerOpenReplica(h.session, async () => {
+    const handover = await beginWorkerProposalHandover(h.session)!;
+    return () => { h.mainVersion('main-2'); handover.complete(); };
+  }, () => { throw new Error('unexpected fallback'); }, () => {});
+  const ready = requestWorkerOpenReplica(h.session)!;
+  const loc = { story: 'body', paraId: 'p1', offset: 2 };
+  const anchor = { story: 'body', encoded: Uint8Array.of(2) };
+  const encode = mock(() => anchor);
+  const main = (version: string) => () => h.session.version() === version ? encode() : null;
+  const stale = h.authority.stickyAnchor(loc, 'worker-1', main('worker-1'));
+  const current = h.authority.stickyAnchor(loc, 'main-2', main('main-2'));
+  await ready;
+  expect(await stale).toBeNull();
+  expect(await current).toEqual(anchor);
+  expect(encode).toHaveBeenCalledTimes(1);
+  expect(h.worker.documentRead).not.toHaveBeenCalled();
+  expect(h.events).toEqual(['snapshot', 'handOver']);
 });
 
 

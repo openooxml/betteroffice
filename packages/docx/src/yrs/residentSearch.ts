@@ -12,7 +12,6 @@ export interface ResidentSearchMatch {
   start: number;
   displayFrom: number;
   displayTo: number;
-  anchor: YrsStickyPosition | null;
 }
 
 /** @internal */
@@ -27,7 +26,6 @@ type SearchReader = Pick<
   | 'storySegments'
   | 'paragraphSpans'
   | 'searchText'
-  | 'encodeStickyPosition'
   | 'resolveStickyPosition'
 >;
 
@@ -63,12 +61,8 @@ export function readResidentSearch(
     const displayFrom = positionFor(loc);
     const displayTo = positionFor({ ...loc, offset: hit.end });
     if (displayFrom == null || displayTo == null || displayFrom >= displayTo) continue;
-    let anchor: YrsStickyPosition | null = null;
-    try {
-      anchor = reader.encodeStickyPosition(loc);
-    } catch {}
     matches.push({
-      story: hit.story, paraId: hit.paraId, start: hit.start, displayFrom, displayTo, anchor,
+      story: hit.story, paraId: hit.paraId, start: hit.start, displayFrom, displayTo,
     });
   }
   matches.sort((a, b) => a.displayFrom - b.displayFrom);

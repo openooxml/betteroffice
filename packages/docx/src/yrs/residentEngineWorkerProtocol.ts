@@ -1,5 +1,6 @@
 import type {
   YrsEngineApplyProfile,
+  YrsLoc,
   YrsResidentCaretSnapshot,
   YrsResidentWorkerSnapshot,
   YrsSelection,
@@ -47,6 +48,7 @@ export type ResidentDocumentRead =
   | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
   | { kind: 'readParagraphs'; request: DocxReadParagraphsRequest }
   | { kind: 'searchText'; query: string; caseSensitive: boolean; carry?: YrsStickyPosition | null }
+  | { kind: 'stickyAnchor'; loc: YrsLoc; version: string }
   | { kind: 'navigationTarget'; story: string; paraId: string };
 
 /** @internal */
@@ -56,6 +58,7 @@ export interface ResidentDocumentReadValues {
   readParagraphs: DocxReadParagraphsResult;
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
   searchText: ResidentSearchResult;
+  stickyAnchor: YrsStickyPosition | null;
 }
 
 export type ResidentEngineWorkerRequest =

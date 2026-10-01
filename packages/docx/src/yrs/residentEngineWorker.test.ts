@@ -2248,18 +2248,44 @@ describe('worker proposals during sliced completion', () => {
       if (!reply.ok || !reply.read) throw new Error('expected search read');
       const value = reply.read.value as ReturnType<typeof readResidentSearch>;
       expect(value).toEqual(readResidentSearch({ ...engine.geometryReader, ...engine }, 'paragraph', false));
-      expect(value.matches.map(({ anchor: _anchor, ...match }) => match)).toEqual(expected);
+      expect(value.matches).toEqual(expected);
       expect(value.matches).toHaveLength(43);
       expect(value.matches.slice(0, 5).map(({ paraId }) => paraId)).toEqual([
         '00000001', '00000100', '00000101', '00000102', '00000002',
       ]);
-      expect(value.matches.every(({ anchor }) => anchor !== null)).toBe(true);
+      expect(value.matches.every((match) => !('anchor' in match))).toBe(true);
       expect(value.carried).toBe(0);
       expect(reply.read.version).toBe(engine.proposalEngine.version());
       expect(order).toEqual(['search', 'complete']);
       expect(calls.filter((call) => call === 'begin')).toHaveLength(1);
       await expectFullLayout(completed);
-      const search = async (caseSensitive: boolean, carry = value.matches[2].anchor) => {
+      const searchVersion = reply.read.version;
+      const anchor = async (index: number, version = searchVersion) => {
+        const match = value.matches[index];
+        const loc = { story: match.story, paraId: match.paraId, offset: match.start };
+        const answer = await w.send({ type: 'documentRead', read: { kind: 'stickyAnchor', loc, version } });
+        expect(answer.ok).toBe(true);
+        if (!answer.ok || !answer.read) throw new Error('expected sticky anchor read');
+        const sticky = answer.read.value as ReturnType<typeof engine.encodeStickyPosition> | null;
+        if (version === engine.proposalEngine.version()) {
+          expect(sticky).not.toBeNull();
+          expect(engine.resolveStickyPosition(sticky!)).toEqual(loc);
+          expect(main.resolveStickyPosition(sticky!)).toEqual(loc);
+        } else {
+          expect(sticky).toBeNull();
+        }
+        return sticky;
+      };
+      const firstAnchor = await anchor(0);
+      const cellAnchor = await anchor(2);
+      const lastAnchor = await anchor(value.matches.length - 1);
+      await anchor(2, 'stale-version');
+      const invalid = await w.send({ type: 'documentRead', read: {
+        kind: 'stickyAnchor', loc: { story: 'missing', paraId: 'missing', offset: 0 },
+        version: engine.proposalEngine.version(),
+      } });
+      expect(invalid).toMatchObject({ ok: true, read: { value: null } });
+      const search = async (caseSensitive: boolean, carry = cellAnchor) => {
         const answer = await w.send({ type: 'documentRead', read: {
           ...read, query: 'Paragraph', caseSensitive, carry,
         } });
@@ -2279,11 +2305,12 @@ describe('worker proposals during sliced completion', () => {
           text: 'Changed 1',
         }],
       }).ok).toBe(true);
-      const after = await search(false, value.matches[0].anchor);
+      await anchor(0);
+      const after = await search(false, firstAnchor);
       expect(after.matches).toHaveLength(42);
       expect(after.carried).toBe(0);
       expect(after.matches[after.carried].paraId).toBe('00000100');
-      expect((await search(false, value.matches.at(-1)!.anchor)).carried).toBe(41);
+      expect((await search(false, lastAnchor)).carried).toBe(41);
       expect(engine.proposalEngine.applyEdits({
         expectVersion: engine.proposalEngine.version(),
         steps: [{
@@ -2291,7 +2318,7 @@ describe('worker proposals during sliced completion', () => {
           text: 'Changed tail',
         }],
       }).ok).toBe(true);
-      const last = await search(false, value.matches.at(-1)!.anchor);
+      const last = await search(false, lastAnchor);
       expect(last.matches).toHaveLength(41);
       expect(last.carried).toBe(40);
       const empty = await w.send({ type: 'documentRead', read: { ...read, query: '' } });

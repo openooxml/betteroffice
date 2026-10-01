@@ -467,13 +467,20 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           {
             ...session.geometryReader,
             searchText: session.searchText,
-            encodeStickyPosition: session.encodeStickyPosition,
             resolveStickyPosition: session.resolveStickyPosition,
           },
           request.read.query,
           request.read.caseSensitive,
           request.read.carry
         );
+        break;
+      case 'stickyAnchor':
+        value = null;
+        if (engine.version() === request.read.version) {
+          try {
+            value = session.encodeStickyPosition(request.read.loc);
+          } catch {}
+        }
         break;
     }
     reply({ id: request.id, ok: true, read: { version: engine.version(), value } });

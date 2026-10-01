@@ -12,6 +12,7 @@ import type {
   ProposalGeometryMirror,
   ResidentProposalReply,
   ResidentEngineWorkerClient,
+  YrsLoc,
   YrsSession,
   YrsStickyPosition,
   resolveNavigationTarget,
@@ -64,6 +65,11 @@ export interface WorkerProposalAuthority {
     carry: YrsStickyPosition | null,
     main: () => SearchRead['value']
   ): Promise<SearchRead>;
+  stickyAnchor(
+    loc: YrsLoc,
+    version: string,
+    main: () => YrsStickyPosition | null
+  ): Promise<YrsStickyPosition | null>;
   resolveParagraphAnchors(
     anchors: readonly DocxParagraphAnchor[],
     main: (anchors: readonly DocxParagraphAnchor[]) => Promise<{
@@ -278,6 +284,11 @@ export function registerWorkerProposalAuthority(
       assertCurrent();
       return read;
     }, () => ({ version: session.version(), value: main() })),
+    stickyAnchor: (loc, version, main) => route(async () => {
+      const read = await worker.documentRead({ kind: 'stickyAnchor', loc, version });
+      assertCurrent();
+      return read.value;
+    }, main),
     resolveParagraphAnchors: (anchors, main) => route(async () => {
       const read = await worker.documentRead({ kind: 'resolveParagraphAnchors', anchors: [...anchors] });
       assertCurrent();
