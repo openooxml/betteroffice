@@ -501,7 +501,7 @@ function buildDisplayListUpdateJson(
       displayPageRevision(page) === storeRevision
         ? []
         : displayPageShiftsSince(page, storeRevision);
-    if (shifts === null) {
+    if (shifts === null || shifts.some((step) => step.spanDelta !== undefined)) {
       replace.push([index, placeholderPage(page)]);
       revisions.push(UNLOADED);
     } else if (shifts.length === 0) {
