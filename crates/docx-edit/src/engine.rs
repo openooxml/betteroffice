@@ -1689,7 +1689,7 @@ fn first_cell_paragraph(
 
 type ResidentWalkOut<'a> = (
     &'a mut Vec<MeasuredBlock>,
-    &'a mut Vec<u64>,
+    &'a mut Vec<Fingerprint>,
     &'a mut Vec<(usize, usize)>,
 );
 
@@ -1699,7 +1699,7 @@ fn resident_walk(
     blocks: &[LayoutBlock],
     any_block: bool,
     paragraph_merge: bool,
-    (previous, previous_fingerprints, take): (&mut [MeasuredBlock], &[u64], bool),
+    (previous, previous_fingerprints, take): (&mut [MeasuredBlock], &[Fingerprint], bool),
     measure_dirty: &mut dyn FnMut(
         usize,
         &str,
