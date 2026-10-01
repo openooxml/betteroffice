@@ -5183,9 +5183,7 @@ impl EngineSession {
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
-#[path = "../tests/support/structured_fixture.rs"]
-mod lowering_fixture;
+use crate::seed::fixture as lowering_fixture;
 
 #[cfg(test)]
 #[allow(dead_code)]
