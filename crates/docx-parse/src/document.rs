@@ -426,6 +426,14 @@ pub(crate) fn streaming_body_cut(
 }
 
 pub(crate) fn body_prefix(xml: &[u8], keep: usize) -> Option<Vec<u8>> {
+    // The kept ranges are reader offsets into `xml`, which a BOM shifts; other encodings
+    // decode attribute names the byte scan does not see.
+    if [&b"\xEF\xBB\xBF"[..], b"\xFE\xFF", b"\xFF\xFE"]
+        .iter()
+        .any(|bom| xml.starts_with(bom))
+    {
+        return None;
+    }
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().check_end_names = true;
     reader.config_mut().allow_dangling_amp = true;
@@ -529,6 +537,14 @@ pub(crate) fn body_prefix(xml: &[u8], keep: usize) -> Option<Vec<u8>> {
                     body_end = Some(begin);
                 }
                 stack.pop()?;
+            }
+            Event::Decl(ref declaration) => {
+                if let Some(encoding) = declaration.encoding() {
+                    let encoding = encoding.ok()?;
+                    if !encoding.eq_ignore_ascii_case(b"utf-8") {
+                        return None;
+                    }
+                }
             }
             Event::DocType(_) => return None,
             Event::Eof => break,
@@ -1277,6 +1293,19 @@ mod tests {
         assert!(String::from_utf8(prefix).unwrap().contains("first & stray"));
         assert!(body_prefix(xml, 6).is_none());
         assert!(body_prefix(xml, 7).is_none());
+    }
+
+    #[test]
+    fn body_prefix_falls_back_for_a_bom_or_a_declared_encoding_other_than_utf8() {
+        let body = "<w:body><w:p/><w:p/><w:p/><w:sectPr/></w:body></w:document>";
+        let plain = format!("<w:document xmlns:w=\"w\">{body}");
+        assert!(body_prefix(plain.as_bytes(), 1).is_some());
+        let declared = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>{plain}");
+        assert!(body_prefix(declared.as_bytes(), 1).is_some());
+        let bom = [b"\xEF\xBB\xBF".as_slice(), plain.as_bytes()].concat();
+        assert!(body_prefix(&bom, 1).is_none());
+        let other = format!("<?xml version=\"1.0\" encoding=\"ISO-2022-JP\"?>{plain}");
+        assert!(body_prefix(other.as_bytes(), 1).is_none());
     }
 
     #[test]
