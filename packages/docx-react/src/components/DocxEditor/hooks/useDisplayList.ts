@@ -2231,8 +2231,11 @@ export function useRustDisplayList(
             .then(async () => {
               setPendingCompletion((current) => (current === gate ? null : current));
               while (isCurrentPass()) {
+                const base = frameBase(hostEngine);
                 const completed = await worker.completeLayout(
-                  provisionalEpoch, false, COMPLETION_SLICE_BLOCKS
+                  base?.docEpoch === provisionalDocEpoch ? base.frameEpoch : provisionalEpoch,
+                  false,
+                  COMPLETION_SLICE_BLOCKS
                 );
                 if (!isCurrentPass()) {
                   if (recoveredEngine(hostEngine) &&
@@ -2240,7 +2243,6 @@ export function useRustDisplayList(
                   return null;
                 }
                 if (completed) {
-                  const base = frameBase(hostEngine);
                   return adopt(completed, base?.docEpoch === provisionalDocEpoch ? base : undefined);
                 }
                 if (!holdsWorkerProposals(hostEngine)) return null;
