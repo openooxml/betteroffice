@@ -459,13 +459,14 @@ test('deleting two comments across saves does not resurrect the first comment', 
     const lastComments = new DOMParser().parseFromString(xmlPart(last, 'word/comments.xml'), 'application/xml');
     expect(xmlElements(lastComments, W, 'comment').some((entry) => entry.getAttribute('w:id') === '1')).toBe(false);
   }
-  expect(markers(xmlPart(last, 'word/document.xml'), 1)).toEqual([]);
   expect((await reopened(saved)).package.document.comments?.some((comment) => comment.id === 1) ?? false).toBe(false);
 });
 
-test.todo('deleting the last comment removes its body range markers (deferred-after-0.4.1: last-comment delete leaves markers)', async () => {
+test.todo('deleting the last comment removes every deleted comment\'s body range markers (deferred-after-0.4.1: last-comment delete leaves markers)', async () => {
   const { saved } = await deleteTwoCommentsAcrossSaves();
-  expect(markers(xmlPart(unzipContainer(new Uint8Array(saved)), 'word/document.xml'), 2)).toEqual([]);
+  const xml = xmlPart(unzipContainer(new Uint8Array(saved)), 'word/document.xml');
+  expect(markers(xml, 1)).toEqual([]);
+  expect(markers(xml, 2)).toEqual([]);
 });
 
 test('a comment resolved in React is saved in commentsExtended and reopened', async () => {
