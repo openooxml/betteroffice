@@ -109,19 +109,22 @@ const FOREGROUND_IDLE_MS = 300;
 let foregroundQueued = 0;
 let backgroundIdleUntil = 0;
 
-/** Whether a request is one the user waits on: an edit, or a read that only jumps the queue. */
-function foregroundKind(request: ResidentEngineWorkerRequest): 'edit' | 'read' | null {
+/**
+ * Whether a request is an edit the user waits on. Reads and proposal
+ * snapshots keep their queue order, so nothing queued behind a completion
+ * slice (replica encoding included) overtakes it.
+ */
+function isForeground(request: ResidentEngineWorkerRequest): boolean {
   switch (request.type) {
     case 'applyInput':
     case 'applyDelete':
+      return true;
     case 'proposal':
-      return 'edit';
-    case 'documentRead':
-      return 'read';
+      return request.operation.kind !== 'snapshot';
     case 'sync':
-      return request.foreground === true ? 'edit' : null;
+      return request.foreground === true;
     default:
-      return null;
+      return false;
   }
 }
 
@@ -137,13 +140,12 @@ const trappedIds = new Set<number>();
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
   const request = event.data;
-  const kind = foregroundKind(request);
-  if (!kind) {
+  if (!isForeground(request)) {
     enqueue(() => handle(request), request.id);
     return;
   }
   foregroundQueued += 1;
-  if (kind === 'edit') backgroundIdleUntil = performance.now() + FOREGROUND_IDLE_MS;
+  backgroundIdleUntil = performance.now() + FOREGROUND_IDLE_MS;
   enqueue(
     () => handle(request),
     request.id,

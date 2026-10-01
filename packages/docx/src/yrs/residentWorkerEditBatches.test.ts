@@ -289,7 +289,7 @@ test('input during completion paints first, inserts once and undoes in one step'
   if (!typed.applied) throw new Error('the worker refused provisional input');
   expect(order).toEqual(['input']);
   expect(typed.layoutJson).toBeUndefined();
-  expect(typed.layoutProvisional).toBeUndefined();
+  expect(typed.layoutProvisional).toBe(true);
   expect(typed.selection?.head).toMatchObject({ offset: paragraphs[0]!.text.length + 6 });
   expect(typed.caret.caretRect).not.toBeNull();
   frame = applyFrameDeltaOwned(frame, decodeFrameDelta(typed.frame));
