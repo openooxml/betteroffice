@@ -10,6 +10,8 @@ import {
 import { readDocxFileFromInput, type DocxInput } from '@betteroffice/docx/utils';
 import {
   captureSessionSave,
+  editorSaveKeys,
+  sessionSourcePackage,
   writeSessionSave,
   yrsToDocument,
   type DocxSessionSave,
@@ -28,6 +30,8 @@ import type { DocxEditorProps } from '../../DocxEditor';
 import type { DocxImageInsert, DocxSaveOutcome } from './useDocxCommands';
 
 const INSERT_IMAGE_MAX_WIDTH_PX = 612;
+const lastSaveSessions = new WeakSet<YrsSession>();
+const editorSaves = new WeakMap<YrsSession, ArrayBuffer>();
 
 function toFileIOError(error: unknown, fallbackMessage: string): Error {
   return error instanceof Error ? error : new Error(fallbackMessage);
@@ -94,14 +98,56 @@ export interface DocxPrintJob {
 async function writeEditorDocument(
   document: Document,
   session: YrsSession | null,
-  capture: DocxSessionSave | null
+  capture: DocxSessionSave | null,
+  comments: Comment[],
+  injectedMarkers: boolean
 ): Promise<ArrayBuffer> {
   const original = document.originalBuffer;
   if (!original) return createDocx(document);
   if (!session || !capture) return repackDocx(document);
-  // The original buffer can be the last save rather than the session source, so none is patched.
-  const { bytes } = await writeSessionSave(session, document, capture, original, {}, () => false);
-  return bytes.buffer as ArrayBuffer;
+  const source = sessionSourcePackage(session);
+  const keys = editorSaveKeys(document, comments);
+  if (
+    !source ||
+    keys.metadata !== source.keys.metadata ||
+    source.keys.commentIds.some((id) => !new Set(keys.commentIds).has(id)) ||
+    lastSaveSessions.has(session) ||
+    (original !== editorSaves.get(session) && !sameBytes(original, source.buffer))
+  ) {
+    lastSaveSessions.add(session);
+    const { bytes } = await writeSessionSave(session, document, capture, original, {}, () => false);
+    return bytes.buffer as ArrayBuffer;
+  }
+  const commentsChanged = keys.comments !== source.keys.comments;
+  const bodyPart = capture.identities.paragraphs
+    .find(({ session: anchor, source }) => anchor?.story === 'body' && source)
+    ?.source?.partUri.slice(1);
+  const patches = (part: string): boolean =>
+    (!commentsChanged || part !== 'word/comments.xml') &&
+    (!injectedMarkers || (bodyPart !== undefined && part !== bodyPart));
+  const { bytes } = await writeSessionSave(
+    session,
+    document,
+    capture,
+    source.buffer,
+    {},
+    patches,
+    true
+  );
+  const saved = bytes.buffer as ArrayBuffer;
+  editorSaves.set(session, saved);
+  return saved;
+}
+
+function sameBytes(a: ArrayBuffer, b: ArrayBuffer): boolean {
+  if (a === b) return true;
+  if (a.byteLength !== b.byteLength) return false;
+  const left = new Uint8Array(a);
+  const right = new Uint8Array(b);
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
 }
 
 /**
@@ -187,11 +233,20 @@ export function useFileIO({
 
         // Inject commentRangeStart/End for reply comments that share the parent's range.
         // Pages/Word require every comment (including replies) to have range markers in document.xml.
-        injectReplyRangeMarkers(document.package.document.content, comments);
+        const injectedReplies = injectReplyRangeMarkers(document.package.document.content, comments);
         // Also inject range markers for comments that reply to tracked changes.
-        injectTCReplyRangeMarkers(document.package.document.content, comments);
+        const injectedTCReplies = injectTCReplyRangeMarkers(
+          document.package.document.content,
+          comments
+        );
 
-        const buffer = await writeEditorDocument(document, session, capture);
+        const buffer = await writeEditorDocument(
+          document,
+          session,
+          capture,
+          comments,
+          injectedReplies || injectedTCReplies
+        );
         if (pagedEditorRef.current?.getYrsSession() !== session) {
           throw new Error('The document changed while saving');
         }
