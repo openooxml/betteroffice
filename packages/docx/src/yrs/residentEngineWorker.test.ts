@@ -1989,6 +1989,72 @@ describe('worker proposals during sliced completion', () => {
     }
   });
 
+  test('periodic interims past the display window wait nineteen times their cost', async () => {
+    const progressive = await proposalWorker();
+    const ordinary = await proposalWorker();
+    const now = Object.getOwnPropertyDescriptor(performance, 'now');
+    const SLICE_MS = 50;
+    const INTERIM_COST_MS = 30;
+    const windowEnd = 1;
+    let clock = 0;
+    try {
+      Object.defineProperty(performance, 'now', { value: () => clock, configurable: true });
+      const session = progressive.w.harness.session as typeof progressive.engine;
+      const resume = session.resumeRegionLayout;
+      const append = progressive.w.responses.push.bind(progressive.w.responses);
+      const interims: Array<{ start: number; end: number; pages: number }> = [];
+      let interimStarted = 0;
+      let finished = false;
+      progressive.w.responses.push = (...replies) => {
+        for (const reply of replies) {
+          if (reply.ok && reply.interim) interims.push({
+            start: interimStarted, end: clock,
+            pages: JSON.parse(reply.layoutJson!).layout.pages.length,
+          });
+        }
+        return append(...replies);
+      };
+      Object.assign(session, {
+        resumeRegionLayout: (blocks: number) => {
+          clock += SLICE_MS;
+          const progress = resume(blocks);
+          finished = progress.layoutJson !== undefined;
+          return progress;
+        },
+        buildDisplayListFrame: (extras: string, epoch: number) => {
+          interimStarted = clock;
+          const frame = progressive.engine.buildDisplayListFrame(extras, epoch);
+          progressive.w.harness.delta = decodeFrameDelta(frame);
+          if (!finished) clock += INTERIM_COST_MS;
+          return frame;
+        },
+      });
+      const completed = await progressive.w.send({
+        type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 1,
+        progressive: { minIntervalMs: 0 },
+      });
+      const final = await ordinary.complete();
+      expect(completed.ok).toBe(true);
+      expect(final.ok).toBe(true);
+      if (!completed.ok || !final.ok) throw new Error('Completion failed');
+      expect(completed.layoutJson).toBe(final.layoutJson);
+      expect(interims.some(({ pages }) => pages < windowEnd + 2)).toBe(true);
+      expect(interims.filter(({ pages }) => pages >= windowEnd + 2).length).toBeGreaterThanOrEqual(3);
+      for (let index = 1; index < interims.length; index += 1) {
+        const earlier = interims[index - 1]!;
+        const later = interims[index]!;
+        if (earlier.pages >= windowEnd + 2) {
+          expect(later.start - earlier.end).toBeGreaterThanOrEqual(19 * (earlier.end - earlier.start));
+        }
+      }
+    } finally {
+      if (now) Object.defineProperty(performance, 'now', now);
+      else Reflect.deleteProperty(performance, 'now');
+      progressive.engine.destroy();
+      ordinary.engine.destroy();
+    }
+  });
+
   test('a progressive snapshot yields to a foreground request queued during its resume', async () => {
     const { w, engine, onResume } = await proposalWorker();
     try {
