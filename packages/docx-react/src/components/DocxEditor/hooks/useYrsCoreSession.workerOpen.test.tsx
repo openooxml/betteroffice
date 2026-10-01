@@ -35,6 +35,7 @@ import { createCommentIdAllocator } from '../commentFactories';
 import { DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
 import { usePagedEditorCommandBridge, type PagedEditorCommandBridge } from './usePagedEditorRefApi';
 import { YrsInput, type YrsInputRef } from '../YrsInput';
+import { flushEditorInput } from '../editorBatches';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -492,6 +493,114 @@ test('eager worker open preserves input and command order after first paint unti
   load.mockRestore();
   insert.mockRestore();
 });
+
+test('read-only on-demand worker open supersedes pending select-all when admitting a command', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+  });
+  const source = await longFixture(2);
+  const editor = createRef<PagedEditorRef>();
+  const bridge = { current: null as PagedEditorCommandBridge | null };
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  function ReadOnly() {
+    harness = useHarness({ ...initialProps, source, readOnly: true, hydrateOnDemand: true });
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core} readOnly
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={harness.renderer.layoutInWorker}
+        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries}
+        commandBridgeRef={bridge} />
+    </>;
+  }
+  const view = render(<ReadOnly />);
+  await waitFor(() => expect(harness.renderer.status).toBe('ready'));
+  act(() => harness.presentFrame());
+  const session = harness.core.session!;
+  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  expect(textarea.readOnly).toBe(true);
+  expect(harness.core.replicaReady).toBe(false);
+  fireEvent.keyDown(textarea, { key: 'a', ctrlKey: true });
+  await waitFor(() => expect(posted.some((r) => r.type === 'encodeState')).toBe(true));
+  const command = bridge.current!.runAfterPendingInput(() => session.selection());
+  let selected!: ReturnType<YrsSession['selection']>;
+  await act(async () => { workers[0].release(); selected = await command; });
+  const paragraphs = session.paragraphs('body');
+  expect(selected).not.toEqual({
+    anchor: { story: 'body', paraId: paragraphs[0].paraId, offset: 0 },
+    head: { story: 'body', paraId: paragraphs.at(-1)!.paraId, offset: paragraphs.at(-1)!.text.length },
+  });
+});
+
+test('eager worker-open hydration failure rejects flush, command and save during composition', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+  });
+  const source = await longFixture(1);
+  const editor = createRef<PagedEditorRef>();
+  const bridge = { current: null as PagedEditorCommandBridge | null };
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  function Editable() {
+    harness = useHarness({ ...initialProps, source, hydrateOnDemand: false });
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={harness.renderer.layoutInWorker}
+        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries}
+        commandBridgeRef={bridge} />
+    </>;
+  }
+  const view = render(<Editable />);
+  await waitFor(() => expect(harness.host).not.toBeNull());
+  act(() => harness.pipeline.runLayoutPipeline());
+  await waitFor(() => expect(harness.renderer.status).toBe('ready'));
+  act(() => harness.presentFrame());
+  await waitFor(() => expect(posted.some((r) => r.type === 'encodeState')).toBe(true));
+  const session = harness.core.session!;
+  const failure = new Error('hydration failed');
+  const open = spyOn(session, 'openDocx').mockImplementation(() => { throw failure; });
+  const insert = spyOn(session, 'insertText');
+  const operation = mock(() => true);
+  try {
+    const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    expect(textarea.readOnly).toBe(false);
+    expect(harness.core.replicaReady).toBe(false);
+    fireEvent.compositionStart(textarea);
+    textarea.value = '日本';
+    const calls = Promise.allSettled([
+      editor.current!.flushPendingInput(),
+      bridge.current!.runAfterPendingInput(operation),
+      flushEditorInput(editor, true),
+    ]);
+    const request = posted.find((r) => r.type === 'encodeState')!;
+    await act(async () => {
+      workers[0].onmessage?.({
+        data: { id: request.id, ok: false, error: failure.message },
+      } as MessageEvent<ResidentEngineWorkerResponse>);
+    });
+    const settled = await calls;
+    expect(settled[0]).toEqual({ status: 'rejected', reason: failure });
+    expect(settled[1]).toEqual({ status: 'rejected', reason: failure });
+    expect(settled[2]).toEqual({
+      status: 'fulfilled', value: { ok: false, code: 'input-failed', error: failure },
+    });
+    expect(editor.current!.hasPendingInput()).toBe(true);
+    expect(textarea.value).toBe('日本');
+    expect(operation).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
+    expect(session.storyIds()).toEqual([]);
+  } finally {
+    open.mockRestore();
+    insert.mockRestore();
+  }
+}, 3_000);
 
 function texts(session: YrsSession) {
   return Object.fromEntries(session.storyIds().sort().map((story) => [

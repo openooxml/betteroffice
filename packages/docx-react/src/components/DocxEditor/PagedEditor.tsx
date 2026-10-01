@@ -1902,6 +1902,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       bumpInputEpoch,
       bridgeRef: commandBridgeRef,
       experimentalWorkerOpen: yrsCore.experimentalWorkerOpen,
+      hydrateOnDemand: yrsCore.hydrateOnDemand,
       yrsInputRef,
       session: yrsCore.session,
       rootStory: activeYrsRootStory,
