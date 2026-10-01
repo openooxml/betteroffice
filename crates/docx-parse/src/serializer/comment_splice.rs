@@ -13,6 +13,7 @@ use crate::s8::{find_part, parse_comment_part};
 use crate::styles::StyleMap;
 use crate::xml::{
     ParseBudget, ParseError, ParseLimits, parse_javascript_integer_prefix, parse_xml,
+    parse_xml_strict,
 };
 
 use super::parts::CommentParaInfo;
@@ -46,6 +47,15 @@ pub(super) fn splice_comments(
     if models.len() != comments.len() || originals.len() != original.len() {
         return Err(error_xml("duplicate comment ids"));
     }
+    let parent_ids: HashSet<_> = comments
+        .iter()
+        .filter_map(|comment| comment.parent_id.map(js_number))
+        .collect();
+    let info_indices: HashMap<_, _> = infos
+        .iter()
+        .enumerate()
+        .map(|(index, info)| (js_number(info.comment_id), index))
+        .collect();
     let mut kept = HashSet::new();
     let mut without_ids = HashSet::new();
     let mut output = String::new();
@@ -56,15 +66,13 @@ pub(super) fn splice_comments(
         if let Some(comment) = models.get(&id) {
             kept.insert(id.clone());
             if let Some(original) = originals.get(&id)
+                && (original.para_id.is_some() || !parent_ids.contains(&id))
                 && can_replay(original, comment, &source[span.clone()])?
             {
                 output.push_str(&source[span.clone()]);
                 if let Some(para_id) = &original.para_id {
-                    if let Some(info) = infos
-                        .iter_mut()
-                        .find(|info| js_number(info.comment_id) == id)
-                    {
-                        info.last_para_id.clone_from(para_id);
+                    if let Some(&index) = info_indices.get(&id) {
+                        infos[index].last_para_id.clone_from(para_id);
                     }
                 } else {
                     without_ids.insert(id.clone());
@@ -91,6 +99,17 @@ pub(super) fn splice_comments(
     }
     output.push_str(&source[end..]);
     infos.retain(|info| !without_ids.contains(&js_number(info.comment_id)));
+    if infos.is_empty()
+        && [
+            "word/commentsExtended.xml",
+            "word/commentsIds.xml",
+            "word/commentsExtensible.xml",
+        ]
+        .iter()
+        .any(|path| find_part(parts, path).is_some())
+    {
+        return Err(error_xml("empty comment companions"));
+    }
     if rewritten {
         output = with_writer_namespaces(output)?;
     }
@@ -106,8 +125,37 @@ fn can_replay(source: &Comment, written: &Comment, fragment: &str) -> Result<boo
     if !unchanged(source, written)? {
         return Ok(false);
     }
+    let limits = ParseLimits::default();
+    let Ok(document) = parse_xml_strict(
+        fragment.as_bytes(),
+        "word/comments.xml",
+        &mut ParseBudget::new(&limits),
+    ) else {
+        return Ok(false);
+    };
+    let root = document
+        .root()
+        .ok_or_else(|| error_xml("missing comment element"))?;
+    if root.attributes.get("w:author") != Some(&written.author)
+        || root.attributes.get("w:date") != written.date.as_ref()
+        || root.attributes.get("w:initials") != written.initials.as_ref()
+    {
+        return Ok(false);
+    }
+    let fragment_tags = tags(fragment).ok_or_else(|| error_xml("invalid comment fragment"))?;
+    let last_para_id = fragment_tags
+        .iter()
+        .rev()
+        .filter(|tag| !tag.end)
+        .find_map(|tag| {
+            attribute(tag, "w14:paraId")
+                .and_then(|range| unescaped(fragment, range))
+                .map(|id| id.to_ascii_uppercase())
+        });
+    if last_para_id != source.para_id {
+        return Ok(false);
+    }
     if source_metadata_changed(source, written) {
-        let fragment_tags = tags(fragment).ok_or_else(|| error_xml("invalid comment fragment"))?;
         let root = fragment_tags
             .first()
             .ok_or_else(|| error_xml("missing comment element"))?;
