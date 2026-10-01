@@ -91,6 +91,11 @@ export type ResidentEngineWorkerRequest =
       generation?: string;
       /** The most the worker's editing core may allocate at once. */
       heapLimitBytes?: number;
+      /**
+       * Opens a display-only preview of the first `previewBlocks` body blocks instead. A later
+       * `open` of the whole document replaces it.
+       */
+      previewBlocks?: number;
     }
   | { id: number; type: 'fontRequirements'; layoutInput: string }
   | { id: number; type: 'encodeState' }
@@ -226,6 +231,8 @@ export type ResidentEngineWorkerResponse = (
       layoutProvisional?: boolean;
       /** An `open` reply: the opened package's host metadata JSON. */
       hostJson?: string;
+      /** An `open` reply: the package cannot open as a preview; nothing was opened. */
+      previewRefused?: boolean;
       /** A `fontRequirements` reply. */
       requirementsJson?: string;
       /** An `encodeState` reply: the document state as one yrs v1 update. */
