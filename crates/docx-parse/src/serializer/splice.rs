@@ -213,10 +213,11 @@ fn root_binds(source: &str, serialized: &str, prefixes: &BTreeSet<&str>) -> Opti
     }))
 }
 
-/// Each addressed paragraph's parent element, by ordinal. `None` unless every namespace prefix
-/// in `source` keeps one binding and every namespace one prefix, `w` is bound to
-/// WordprocessingML and no default namespace is declared, so that element names identify
-/// elements.
+/// Each addressed paragraph's parent element, by ordinal, or `w:fldChar` for one that starts
+/// inside a complex field, whose code or result it belongs to. `None` unless every namespace
+/// prefix in `source` keeps one binding and every namespace one prefix, `w` is bound to
+/// WordprocessingML, no default namespace is declared, so that element names identify elements,
+/// and every field character is a begin, separate or end that closes an open field.
 fn parents<'s>(
     source: &'s str,
     spans: &BTreeMap<u32, Range<usize>>,
@@ -229,10 +230,24 @@ fn parents<'s>(
     let mut namespaces: HashMap<&str, &str> = HashMap::new();
     let mut stack: Vec<&str> = Vec::new();
     let mut parents = HashMap::new();
+    let mut fields = 0usize;
     for tag in tags(source)? {
         if tag.end {
             stack.pop();
             continue;
+        }
+        if tag
+            .name
+            .rsplit_once(':')
+            .map_or(tag.name, |(_, local)| local)
+            == "fldChar"
+        {
+            match &*unescaped(source, attribute(&tag, "w:fldCharType")?)? {
+                "begin" => fields += 1,
+                "separate" => {}
+                "end" => fields = fields.checked_sub(1)?,
+                _ => return None,
+            }
         }
         for (key, range) in &tag.attributes {
             if *key == "xmlns" {
@@ -250,7 +265,14 @@ fn parents<'s>(
             }
         }
         if let Some(ordinal) = starts.get(&tag.range.start) {
-            parents.insert(*ordinal, *stack.last()?);
+            parents.insert(
+                *ordinal,
+                if fields > 0 {
+                    "w:fldChar"
+                } else {
+                    *stack.last()?
+                },
+            );
         }
         if !tag.empty {
             stack.push(tag.name);
@@ -729,6 +751,36 @@ mod tests {
             ),
             Some(format!(
                 "{ROOT}<w:body>{opening}{closing}{edited_outside}</w:body></w:document>"
+            ))
+        );
+    }
+
+    #[test]
+    fn refuses_rewriting_a_paragraph_that_starts_inside_a_field() {
+        let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText> IF 1 = 1 </w:instrText></w:r></w:p>";
+        let code = "<w:p><w:r><w:instrText>\"yes\" </w:instrText></w:r></w:p>";
+        let closing = "<w:p><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>yes</w:t></w:r><w:r><w:fldChar w:fldCharType=\"e&#110;d\"/></w:r></w:p>";
+        let outside = "<w:p><w:r><w:t>Outside</w:t></w:r></w:p>";
+        let source =
+            format!("{ROOT}<w:body>{opening}{code}{closing}{outside}</w:body></w:document>");
+        let typed = "<w:p><w:r><w:t>typed</w:t></w:r></w:p>";
+        assert_eq!(
+            splice(
+                &source,
+                &[(0, opening), (1, typed), (2, closing), (3, outside)],
+                &[1]
+            ),
+            None
+        );
+        let edited_outside = "<w:p><w:r><w:t>Outside, edited</w:t></w:r></w:p>";
+        assert_eq!(
+            splice(
+                &source,
+                &[(0, opening), (1, code), (2, closing), (3, edited_outside)],
+                &[3]
+            ),
+            Some(format!(
+                "{ROOT}<w:body>{opening}{code}{closing}{edited_outside}</w:body></w:document>"
             ))
         );
     }
