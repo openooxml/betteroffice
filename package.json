@@ -68,6 +68,7 @@
     "pretest:e2e:browser": "bun run build:packages && bun run --filter @betteroffice/desktop build",
     "test:e2e:browser": "playwright test --config e2e/browser/playwright.config.ts",
     "test:e2e:browser:plugins": "playwright test --config e2e/browser/plugin-host/playwright.config.ts",
+    "bench:docx-typing": "playwright test --config e2e/browser/plugin-host/bench.config.ts",
     "typecheck:e2e": "tsc -p e2e/tsconfig.json"
   },
   "license": "Apache-2.0",
