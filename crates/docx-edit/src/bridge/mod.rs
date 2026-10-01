@@ -1697,6 +1697,8 @@ fn lower_table<T: ReadTxn>(
     let compatibility_mode = map_number(tbl_pr, "compatibilityMode").and_then(|value| {
         (value.is_finite() && (0.0..=255.0).contains(&value)).then_some(value as u8)
     });
+    let layout_mode = map_string(tbl_pr, "tableLayout")
+        .filter(|value| matches!(value.as_str(), "fixed" | "autofit"));
     let cell_margin_left = table_margins
         .and_then(|margins| map_number(margins, "left"))
         .map(twips_to_pixels)
@@ -1712,8 +1714,8 @@ fn lower_table<T: ReadTxn>(
             width: map_number(tbl_pr, "width"),
             width_type: map_string(tbl_pr, "widthType"),
             preferred_width: None,
-            layout_mode: None,
-            width_algorithm: None,
+            width_algorithm: layout_mode.is_some().then(|| "legacy".to_owned()),
+            layout_mode,
             style_cascade: None,
             background: None,
             justification: map_string(tbl_pr, "justification"),

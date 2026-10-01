@@ -58,6 +58,31 @@ pub(crate) fn measure_paragraph(
     Some(extent_from_out(extent))
 }
 
+/// The paragraph's narrowest width without a line breaking inside a word,
+/// per [`ooxml_text::min_content_width_typed`]; `None` when the typed path
+/// cannot measure it.
+pub(crate) fn min_content_width(
+    paragraph: &ParagraphBlock,
+    content_width: f64,
+    config: &MeasurementConfig,
+) -> Option<f64> {
+    let block = block_in(paragraph, content_width)?;
+    let defaults = defaults_in(&config.defaults)?;
+    let request = MeasureRequest {
+        block: &block,
+        max_width: content_width as f32,
+        font_chains: FontChains::BTree(&config.font_chains),
+        defaults: &defaults,
+        compat: compat_in(&config.compat)?,
+        floating_zones: None,
+        paragraph_y_offset: None,
+        authoritative_shaping: config.authoritative_shaping,
+    };
+    crate::min_content_width_typed_resident(&request)
+        .ok()
+        .map(f64::from)
+}
+
 fn block_in(paragraph: &ParagraphBlock, content_width: f64) -> Option<BlockIn> {
     let attrs = paragraph.attrs.as_ref();
     let indent = attrs.and_then(|attrs| attrs.indent.as_ref());

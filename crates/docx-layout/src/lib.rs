@@ -816,6 +816,13 @@ pub(crate) fn measure_paragraph_typed_resident(
     with_measure_fonts(|store| ooxml_text::measure_paragraph_typed(&store.borrow(), request))
 }
 
+/// [`ooxml_text::min_content_width_typed`] against the resident font store.
+pub(crate) fn min_content_width_typed_resident(
+    request: &ooxml_text::MeasureRequest<'_>,
+) -> Result<f32, ooxml_text::MeasureError> {
+    with_measure_fonts(|store| ooxml_text::min_content_width_typed(&store.borrow(), request))
+}
+
 /// wasm wrapper over [`ooxml_text::FontStore::outline_glyph_json`]: the outline
 /// of a registered font's glyph, in font design units, as JSON:
 /// `{"upem":2048,"cmds":[{"t":"M","x":..,"y":..},{"t":"L","x":..,"y":..},
