@@ -218,8 +218,10 @@ export type ResidentEngineWorkerResponse = (
       stateVector?: ArrayBuffer;
       /** The region layout the worker ran, for a request carrying `layoutExtras`. */
       layoutJson?: string;
-      /** `layoutJson` covers only the first pages of the body. */
+      /** The layout (`layoutJson`, or an input reply's frame) covers only the first pages of the body. */
       layoutProvisional?: boolean;
+      /** An input reply answered ahead of the pending `completeLayout`, whose layout includes the input. */
+      precedesCompletion?: boolean;
       /** An `open` reply: the opened package's host metadata JSON. */
       hostJson?: string;
       /** A `fontRequirements` reply. */

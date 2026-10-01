@@ -4,7 +4,12 @@ import type { LayoutComputation } from '@betteroffice/docx/editor';
 import { LayoutSelectionGate, type ResidentMeasurementConfig } from '@betteroffice/docx/layout';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { proposalSetIdentity, type ResidentProposalReply, type YrsRenderEnv, type YrsSession } from '@betteroffice/docx/yrs';
-import { isLayoutQueued, isSupersededLayout, sourceVersionOf } from '../internals/layoutProvenance';
+import {
+  isLayoutQueued,
+  isSupersededLayout,
+  noteProvisionalInputVersion,
+  sourceVersionOf,
+} from '../internals/layoutProvenance';
 import { deferWorkerOpenReplica } from '../internals/workerOpenReplica';
 import { registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { WorkerLayoutComputation } from './useDisplayList';
@@ -523,6 +528,53 @@ for (const pendingReplica of [true, false]) {
     h.hook.unmount();
   });
 }
+
+test.each(
+  ([false, true] as const).flatMap((experimentalWorkerOpen) =>
+    (
+      [
+        ['answered before it', [['2', '3']], 3, true],
+        ['answered twice before it', [['2', '3'], ['3', '4']], 4, true],
+        ['with another change after it', [['2', '3']], 4, false],
+      ] as const
+    ).map(([name, transitions, version, applies]) => ({
+      name, transitions, version, applies, experimentalWorkerOpen,
+    }))
+  )
+)(
+  'a full worker layout of input the worker $name applies only then, worker-open=$experimentalWorkerOpen',
+  async ({ transitions, version, applies, experimentalWorkerOpen }) => {
+    const h = await opened({ experimentalWorkerOpen });
+    h.doc.version = 2;
+    act(() => h.hook.result.current.scheduleLayout('remote'));
+    await h.frame();
+    let finish!: (computation: LayoutComputation | null) => void;
+    const complete = new Promise<LayoutComputation | null>((resolve) => { finish = resolve; });
+    const firstPages = { pages: [] } as unknown as Layout;
+    await h.answer(1, { layout: firstPages, notesConverged: true, complete });
+    expect(h.hook.result.current.layout).toBe(firstPages);
+    for (const [before, after] of transitions) noteProvisionalInputVersion(h.session, before, after);
+    h.doc.version = version;
+    const full = { pages: [] } as unknown as Layout;
+    await act(async () => {
+      finish({ layout: full, notesConverged: true });
+    });
+    await h.frame();
+    if (applies) {
+      expect(h.hook.result.current.layout).toBe(full);
+      expect(h.shown()).toBe(String(version));
+      expect(h.doc.laidOutHere).toEqual([]);
+    } else {
+      expect(h.hook.result.current.layout).not.toBe(full);
+      expect(h.doc.laidOutHere).toEqual([version]);
+    }
+    expect(isSupersededLayout(h.hook.result.current.layout)).toBe(false);
+    expect(isLayoutQueued(h.session)).toBe(false);
+    expect(h.worker).toHaveLength(2);
+    expect(h.errors).toEqual([]);
+    h.hook.unmount();
+  }
+);
 
 test('a pass no change asked to run here waits for the worker pass in flight', async () => {
   const { doc, session, worker, errors, hook, frame, answer, shown } = await opened();

@@ -1662,7 +1662,7 @@ pub(crate) fn hyperlink_sequence_names(hyperlink: &Value) -> Vec<String> {
                     .or_else(|| field(Some(node), "children"));
                 pending.extend(array(children).iter().rev());
             }
-            Some("inlineSdt") => {
+            Some("inlineSdt" | "insertion" | "deletion" | "moveFrom" | "moveTo") => {
                 pending.extend(array(field(Some(node), "content")).iter().rev());
             }
             Some("simpleField" | "complexField") => {
@@ -1916,6 +1916,34 @@ fn run_to_units(
         .collect()
 }
 
+fn has_tracked_control(value: &Value, control: bool, revision: bool) -> bool {
+    let mut pending = vec![(value, control, revision)];
+    while let Some((node, control, revision)) = pending.pop() {
+        let kind = string(field(Some(node), "type"));
+        let control = control || kind == Some("inlineSdt");
+        let revision =
+            revision || matches!(kind, Some("insertion" | "deletion" | "moveFrom" | "moveTo"));
+        if control && revision {
+            return true;
+        }
+        let children = match kind {
+            Some("inlineSdt" | "insertion" | "deletion" | "moveFrom" | "moveTo") => {
+                field(Some(node), "content")
+            }
+            Some("hyperlink") => {
+                field(Some(node), "structuredChildren").or_else(|| field(Some(node), "children"))
+            }
+            _ => None,
+        };
+        pending.extend(
+            array(children)
+                .iter()
+                .map(|child| (child, control, revision)),
+        );
+    }
+    false
+}
+
 fn hyperlink_to_units(
     hyperlink: &Value,
     style_formatting: Option<&Value>,
@@ -1957,6 +1985,24 @@ fn hyperlink_to_units(
                     .chain(std::iter::once(link.clone()))
                     .collect();
                 units.push(embed_unit("math", math_payload(child), &marks, 1));
+            }
+            "inlineSdt"
+                if extra_marks
+                    .iter()
+                    .any(|mark| matches!(mark.name.as_str(), "insertion" | "deletion"))
+                    || has_tracked_control(child, false, false) =>
+            {
+                let marks: Vec<Mark> = extra_marks
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(link.clone()))
+                    .collect();
+                units.push(embed_unit(
+                    "sdt",
+                    sdt_payload(child, style_formatting, styles, source, opaque_sequences),
+                    &marks,
+                    2,
+                ));
             }
             _ => {}
         }
@@ -2081,6 +2127,24 @@ fn tracked_to_units(
     source: &BTreeMap<String, String>,
     opaque_sequences: &mut Vec<String>,
 ) -> Vec<InlineUnit> {
+    tracked_to_units_in_control(
+        content,
+        style_formatting,
+        styles,
+        source,
+        opaque_sequences,
+        false,
+    )
+}
+
+fn tracked_to_units_in_control(
+    content: &Value,
+    style_formatting: Option<&Value>,
+    styles: &StyleResolver,
+    source: &BTreeMap<String, String>,
+    opaque_sequences: &mut Vec<String>,
+    in_control: bool,
+) -> Vec<InlineUnit> {
     let content_type = string(field(Some(content), "type")).unwrap_or_default();
     let kind = if matches!(content_type, "insertion" | "moveTo") {
         "insertion"
@@ -2102,10 +2166,8 @@ fn tracked_to_units(
                 std::slice::from_ref(&marker),
                 source,
             ));
-        } else {
-            if string(field(Some(child), "type")) == Some("hyperlink") {
-                opaque_sequences.extend(hyperlink_sequence_names(child));
-            }
+        } else if string(field(Some(child), "type")) == Some("hyperlink") {
+            opaque_sequences.extend(hyperlink_sequence_names(child));
             let linked = hyperlink_to_units(
                 child,
                 style_formatting,
@@ -2115,9 +2177,75 @@ fn tracked_to_units(
                 opaque_sequences,
             );
             units.extend(linked);
+        } else if in_control
+            || string(field(Some(child), "type")) == Some("inlineSdt")
+            || has_tracked_control(child, false, true)
+        {
+            let inherited = marks_to_attrs(std::slice::from_ref(&marker));
+            for mut unit in inline_container_units(
+                child,
+                style_formatting,
+                styles,
+                source,
+                opaque_sequences,
+                in_control,
+            ) {
+                let mut attrs = inherited.clone();
+                attrs.extend(unit.attrs);
+                unit.attrs = attrs;
+                if !unit.marks.iter().any(|mark| mark.name == marker.name) {
+                    unit.marks.push(marker.clone());
+                }
+                units.push(unit);
+            }
         }
     }
     units
+}
+
+fn inline_container_units(
+    child: &Value,
+    style_formatting: Option<&Value>,
+    styles: &StyleResolver,
+    source: &BTreeMap<String, String>,
+    opaque_sequences: &mut Vec<String>,
+    in_control: bool,
+) -> Vec<InlineUnit> {
+    match string(field(Some(child), "type")).unwrap_or_default() {
+        "run" => run_to_units(child, style_formatting, styles, &[], source),
+        "hyperlink" => {
+            opaque_sequences.extend(hyperlink_sequence_names(child));
+            hyperlink_to_units(
+                child,
+                style_formatting,
+                styles,
+                &[],
+                source,
+                opaque_sequences,
+            )
+        }
+        "simpleField" | "complexField" => {
+            opaque_sequences.extend(nested_sequence_names(child));
+            let (payload, marks) = field_payload(child, style_formatting, source);
+            vec![embed_unit("field", payload, &marks, 1)]
+        }
+        "inlineSdt" => vec![embed_unit(
+            "sdt",
+            sdt_payload(child, style_formatting, styles, source, opaque_sequences),
+            &[],
+            2,
+        )],
+        "mathEquation" => vec![embed_unit("math", math_payload(child), &[], 1)],
+        "insertion" | "deletion" | "moveFrom" | "moveTo" => tracked_to_units_in_control(
+            child,
+            style_formatting,
+            styles,
+            source,
+            opaque_sequences,
+            in_control,
+        ),
+        _ => Vec::new(),
+    }
 }
 
 fn sdt_properties_attrs(properties: &Value, source: &BTreeMap<String, String>) -> JsonObject {
@@ -2220,6 +2348,18 @@ fn sdt_payload(
                 &mut content,
                 embed_unit("math", math_payload(child), &[], 1),
             ),
+            "insertion" | "deletion" | "moveFrom" | "moveTo" => {
+                for unit in tracked_to_units_in_control(
+                    child,
+                    style_formatting,
+                    styles,
+                    source,
+                    opaque_sequences,
+                    true,
+                ) {
+                    append(&mut content, unit);
+                }
+            }
             _ => {}
         }
     }
@@ -2803,7 +2943,21 @@ fn control_break_offsets(
                 offset += 1;
             }
             "insertion" | "deletion" | "moveFrom" | "moveTo" => {
-                offsets.extend(std::iter::repeat_n(vec![offset], below));
+                let (nested, _) = control_break_offsets(child, styles, source);
+                offsets.extend(nested.into_iter().map(|mut path| {
+                    if let Some(first) = path.first_mut() {
+                        *first += offset;
+                    }
+                    path
+                }));
+                offset += units_width(&tracked_to_units_in_control(
+                    child,
+                    None,
+                    styles,
+                    source,
+                    &mut Vec::new(),
+                    true,
+                ));
             }
             _ => {}
         }
@@ -2821,6 +2975,7 @@ fn content_breaks(
     source: &BTreeMap<String, String>,
     output: &mut Vec<FlowBreak>,
     positions: bool,
+    in_control: bool,
 ) {
     let runs = |key: &str, output: &mut Vec<FlowBreak>| {
         let mut found = Vec::new();
@@ -2861,7 +3016,7 @@ fn content_breaks(
         "inlineSdt" => {
             let mut nested = Vec::new();
             for child in array(field(Some(content), "content")) {
-                content_breaks(child, start, styles, source, &mut nested, false);
+                content_breaks(child, start, styles, source, &mut nested, false, true);
             }
             let offsets = positions
                 .then(|| control_break_offsets(content, styles, source).0)
@@ -2895,6 +3050,34 @@ fn content_breaks(
                         source,
                         output,
                     );
+                } else if in_control
+                    || string(field(Some(child), "type")) == Some("inlineSdt")
+                    || has_tracked_control(child, false, true)
+                {
+                    let first = output.len();
+                    content_breaks(
+                        child,
+                        start + offset,
+                        styles,
+                        source,
+                        output,
+                        positions,
+                        in_control,
+                    );
+                    for found in &mut output[first..] {
+                        if found.revision.is_none() {
+                            found.revision = Some(revision.clone());
+                        }
+                    }
+                    offset += inline_container_units(
+                        child,
+                        None,
+                        styles,
+                        source,
+                        &mut Vec::new(),
+                        in_control,
+                    )
+                    .len();
                 } else {
                     offset +=
                         hyperlink_to_units(child, None, styles, &[], source, &mut Vec::new()).len();
@@ -2947,15 +3130,12 @@ fn unmodelled_nodes(content: &Value, output: &mut Vec<String>) {
         "inlineSdt" => {
             for child in children("content") {
                 match string(field(Some(child), "type")).unwrap_or_default() {
-                    "run" | "hyperlink" | "simpleField" | "complexField" | "inlineSdt" => {
+                    "run" | "hyperlink" | "simpleField" | "complexField" | "inlineSdt"
+                    | "insertion" | "deletion" | "moveFrom" | "moveTo" => {
                         unmodelled_nodes(child, output)
                     }
                     "mathEquation" | "bookmarkStart" | "bookmarkEnd" | "commentRangeStart"
                     | "commentRangeEnd" => {}
-                    "insertion" => output.push("w:ins".to_owned()),
-                    "deletion" => output.push("w:del".to_owned()),
-                    "moveFrom" => output.push("w:moveFrom".to_owned()),
-                    "moveTo" => output.push("w:moveTo".to_owned()),
                     "rawXml" => output.push(crate::structured::source::element_name(
                         string(field(Some(child), "xml")).unwrap_or_default(),
                     )),
@@ -3074,7 +3254,7 @@ fn paragraph_units(
             "bookmarkStart" | "bookmarkEnd" | "rawXml" => {}
             _ => boundaries = None,
         }
-        content_breaks(content, start, styles, source, &mut breaks, true);
+        content_breaks(content, start, styles, source, &mut breaks, true, false);
         let mut elements = Vec::new();
         unmodelled_nodes(content, &mut elements);
         if !elements.is_empty() {

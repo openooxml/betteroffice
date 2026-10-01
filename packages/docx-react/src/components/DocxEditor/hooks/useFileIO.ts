@@ -383,13 +383,11 @@ export function useFileIO({
             height = Math.round(height * (INSERT_IMAGE_MAX_WIDTH_PX / width));
             width = INSERT_IMAGE_MAX_WIDTH_PX;
           }
-          const rId = `rId_img_${Date.now()}_${Math.round(Math.random() * 1e9)}`;
           const picture = {
             src: dataUrl,
             alt: file.name,
             width,
             height,
-            rId,
             wrapType: 'inline',
             displayMode: 'inline',
             distTop: 0,

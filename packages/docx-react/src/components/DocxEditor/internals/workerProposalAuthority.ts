@@ -25,6 +25,7 @@ import {
 export interface WorkerProposalAuthority {
   /** The session mirrors the worker registry and version. */
   readonly initialized: boolean;
+  restart(): void;
   /** Initializes once; rejects when the worker cannot answer. */
   initialize(): Promise<void>;
   /** Mirrored geometry until hand-over. */
@@ -136,6 +137,7 @@ export function registerWorkerProposalAuthority(
   let mutating = 0;
   let handingOver = false;
   let handover: Promise<Handover> | null = null;
+  let transfer: (() => Promise<Handover>) | null = null;
   let versionRewrite: { worker: string; main: string } | null = null;
   const listeners = new Set<() => void>();
   const notify = () => { for (const listener of listeners) listener(); };
@@ -177,8 +179,11 @@ export function registerWorkerProposalAuthority(
       if (viaWorker) {
         await ready;
         assertCurrent();
+        if (!initialized && !handingOver) await initializeNow();
         if (initialized) return call();
       }
+      // A hand-over queued behind this call runs now: nothing ahead of it is left for the worker.
+      if (transfer) void transfer().catch(() => {});
       await awaitWorkerOpenReplica(session);
       assertCurrent();
       return main();
@@ -219,23 +224,34 @@ export function registerWorkerProposalAuthority(
     if (!reply.result) throw new Error('The resident worker did not return a proposal result');
     return reply.result;
   }, main);
+  const initializeNow = async (): Promise<void> => {
+    await Promise.race([hooks.laidOut(), stopped]);
+    assertCurrent();
+    if (handingOver || initialized) return;
+    snapshotPosted = true;
+    const reply = await worker.proposal({ kind: 'snapshot' });
+    assertCurrent();
+    const previousVersion = mirror?.version;
+    initialized = true;
+    store(reply);
+    hooks.adopted(reply.mirror.version);
+    if (previousVersion !== undefined && previousVersion !== reply.mirror.version) hooks.relayout();
+  };
   const authority: RegisteredAuthority = {
     get initialized() { return initialized; },
+    restart() {
+      if (!initialized || holdsState || failure || handingOver || !hooks.current()) return;
+      initialized = false;
+      initializing = null;
+      snapshotPosted = false;
+      hooks.relayout();
+      notify();
+    },
     initialize() {
       if (failure) return Promise.reject(failure.error);
       if (initializing) return initializing;
       if (handingOver) return Promise.resolve(awaitWorkerOpenReplica(session));
-      initializing = enqueue(async () => {
-        await Promise.race([hooks.laidOut(), stopped]);
-        assertCurrent();
-        if (handingOver) return;
-        snapshotPosted = true;
-        const reply = await worker.proposal({ kind: 'snapshot' });
-        assertCurrent();
-        initialized = true;
-        store(reply);
-        hooks.adopted(reply.mirror.version);
-      });
+      initializing = enqueue(initializeNow);
       return initializing;
     },
     geometry: () => geometry,
@@ -290,7 +306,8 @@ export function registerWorkerProposalAuthority(
       if (handover) return handover;
       handingOver = true;
       stopWaiting();
-      const transfer = async (): Promise<Handover> => {
+      let transferring: Promise<Handover> | null = null;
+      const transferOnce = async (): Promise<Handover> => {
         assertCurrent();
         const handedOver = await worker.handOver();
         assertCurrent();
@@ -303,7 +320,7 @@ export function registerWorkerProposalAuthority(
             completed = true;
             hooks.handedOver(handedOver.version);
             geometry = null;
-            if (initialized) {
+            if (mirror) {
               session.mirrorWorkerDocument({ version: handedOver.version, proposals: handedOver.proposals });
               session.mirrorWorkerDocument(null);
               versionRewrite = { worker: handedOver.version, main: session.version() };
@@ -313,7 +330,16 @@ export function registerWorkerProposalAuthority(
           },
         };
       };
-      handover = snapshotPosted ? enqueue(transfer) : interruptible(transfer());
+      let started!: () => void;
+      const startedEarly = new Promise<void>((resolve) => { started = resolve; });
+      const start = (): Promise<Handover> => {
+        started();
+        return (transferring ??= transferOnce());
+      };
+      transfer = start;
+      handover = snapshotPosted
+        ? Promise.race([enqueue(start), interruptible(startedEarly.then(() => transferring!))])
+        : interruptible(start());
       return handover;
     },
   };

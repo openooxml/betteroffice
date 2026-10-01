@@ -136,19 +136,22 @@ const FOREGROUND_IDLE_MS = 300;
 let foregroundQueued = 0;
 let backgroundIdleUntil = 0;
 
-/** Whether a request is one the user waits on: an edit, or a read that only jumps the queue. */
-function foregroundKind(request: ResidentEngineWorkerRequest): 'edit' | 'read' | null {
+/**
+ * Whether a request is an edit the user waits on. Reads and proposal
+ * snapshots keep their queue order, so nothing queued behind a completion
+ * slice (replica encoding included) overtakes it.
+ */
+function isForeground(request: ResidentEngineWorkerRequest): boolean {
   switch (request.type) {
     case 'applyInput':
     case 'applyDelete':
+      return true;
     case 'proposal':
-      return 'edit';
-    case 'documentRead':
-      return 'read';
+      return request.operation.kind !== 'snapshot';
     case 'sync':
-      return request.foreground === true ? 'edit' : null;
+      return request.foreground === true;
     default:
-      return null;
+      return false;
   }
 }
 
@@ -164,13 +167,12 @@ const trappedIds = new Set<number>();
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
   const request = event.data;
-  const kind = foregroundKind(request);
-  if (!kind) {
+  if (!isForeground(request)) {
     enqueue(() => handle(request), request.id);
     return;
   }
   foregroundQueued += 1;
-  if (kind === 'edit') backgroundIdleUntil = performance.now() + FOREGROUND_IDLE_MS;
+  backgroundIdleUntil = performance.now() + FOREGROUND_IDLE_MS;
   enqueue(
     () => handle(request),
     request.id,
@@ -706,7 +708,8 @@ async function applyProvisionalInput(
     const pages = Math.max(layout.pages, request.displayWindow?.[1] ?? 0);
     const layoutJson = session.layoutDocumentWithRegionsPrefixRetainedJson(layout.layoutInput, pages);
     layout.pages = pages;
-    if ((JSON.parse(layoutJson) as { provisional?: boolean }).provisional !== true) {
+    const provisional = (JSON.parse(layoutJson) as { provisional?: boolean }).provisional === true;
+    if (!provisional) {
       const { layoutInput: _input, ...fields } = layout;
       incompleteLayout = null;
       waiting = slicedCompletion;
@@ -732,7 +735,13 @@ async function applyProvisionalInput(
       undefined,
       started,
       true,
-      request.paintCaret
+      request.paintCaret,
+      undefined,
+      provisional,
+      undefined,
+      [],
+      undefined,
+      true
     );
   } catch (error) {
     if (waiting) replyFailure(waiting.id, error);
@@ -1252,7 +1261,8 @@ async function replyFrame(
   layoutProvisional = false,
   deletedUnits?: number,
   precedingPageFrames: Uint8Array[] = [],
-  interim?: SlicedCompletion
+  interim?: SlicedCompletion,
+  precedesCompletion = false
 ): Promise<boolean> {
   applyWorkerFrame(bytes);
   const caret = session?.residentCaretSnapshot();
@@ -1306,6 +1316,7 @@ async function replyFrame(
       ...(stateVector ? { stateVector } : {}),
       ...(layoutJson !== undefined ? { layoutJson } : {}),
       ...(layoutProvisional ? { layoutProvisional } : {}),
+      ...(precedesCompletion ? { precedesCompletion } : {}),
     },
     [frame, ...pageFrames, ...updateBuffers, ...(stateVector ? [stateVector] : [])]
   );

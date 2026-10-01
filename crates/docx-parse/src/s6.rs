@@ -213,6 +213,11 @@ fn project_s6_inline(node: &mut InlineNode, depth: usize) {
                 project_s6_inline(child, depth + 1);
             }
         }
+        InlineNode::Tracked(change) => {
+            for child in &mut change.content {
+                project_s6_inline(child, depth + 1);
+            }
+        }
         _ => {}
     }
 }

@@ -9,8 +9,9 @@ use std::collections::HashMap;
 
 use docx_edit::content_controls::{
     Anchor, ContentControl, ContentControlQuery, ContentControlsOptions, ContentControlsSnapshot,
-    ControlPlacement, ControlValue, DiagnosticCode, StorySelection, ValueUnavailable,
-    find_docx_content_controls, list_docx_content_controls, list_package_content_controls,
+    ControlMetadata, ControlPlacement, ControlValue, DiagnosticCode, EffectiveLock, StorySelection,
+    ValueUnavailable, find_docx_content_controls, list_docx_content_controls,
+    list_package_content_controls,
 };
 use docx_edit::structured::{
     BlockKind, ExportFailureCode, ExportOptions, InlineKind, RevisionView, export_docx_structured,
@@ -1748,7 +1749,130 @@ fn controls_locked_against_deletion_are_filled() {
 }
 
 #[test]
-fn controls_parsing_leaves_out_block_tag_writes() {
+fn controls_inside_revisions_are_listed_as_tracked() {
+    let tagged = |id: &str, text: &str| {
+        inline_sdt(
+            &format!(r#"<w:tag w:val="customer.name"/><w:id w:val="{id}"/><w:text/>"#),
+            &run(text),
+        )
+    };
+    for wrapper in ["ins", "moveTo"] {
+        for tracked_ooxml_id in ["1", "2"] {
+            let bytes = package(&format!(
+                r#"{}<w:p w14:paraId="0F000011"><w:{wrapper} w:id="7" w:author="Ada" w:date="2026-01-01T00:00:00Z">{}</w:{wrapper}></w:p>"#,
+                para("0F000010", &tagged("1", "kept")),
+                tagged(tracked_ooxml_id, "tracked")
+            ));
+            let snapshot =
+                list_docx_content_controls(&bytes, &ContentControlsOptions::default()).unwrap();
+            assert_eq!(snapshot.controls.len(), 2, "{wrapper}");
+            assert_eq!(text(&snapshot.controls[0]), "kept");
+            assert_eq!(
+                snapshot.controls[1],
+                ContentControl {
+                    metadata: ControlMetadata {
+                        control_id: "body|0F000011|0".to_owned(),
+                        ooxml_id: Some(tracked_ooxml_id.to_owned()),
+                        control_type: "plainText".to_owned(),
+                        tag: Some("customer.name".to_owned()),
+                        alias: None,
+                        lock: None,
+                        showing_placeholder: false,
+                        data_bound: false,
+                    },
+                    placement: ControlPlacement::Inline,
+                    anchor: Anchor::Control {
+                        story: "body".to_owned(),
+                        control_id: "body|0F000011|0".to_owned(),
+                    },
+                    parent_control_id: None,
+                    value: ControlValue::Unavailable {
+                        reason: ValueUnavailable::TrackedRevisions,
+                    },
+                    multi_line: Some(false),
+                    effective_lock: EffectiveLock {
+                        content: false,
+                        control: false,
+                        known: true,
+                    },
+                },
+                "{wrapper}"
+            );
+            assert!(snapshot.complete, "{wrapper}: {:?}", snapshot.diagnostics);
+            assert!(
+                snapshot
+                    .diagnostics
+                    .iter()
+                    .all(|diagnostic| diagnostic.code != DiagnosticCode::ProvenanceUnavailable),
+                "{wrapper}: {:?}",
+                snapshot.diagnostics
+            );
+            let doc = open(&bytes);
+            let session = list(&doc);
+            assert_eq!(session.controls, snapshot.controls, "{wrapper}");
+            assert!(session.complete, "{wrapper}");
+            assert!(
+                session
+                    .diagnostics
+                    .iter()
+                    .all(|diagnostic| diagnostic.code != DiagnosticCode::ProvenanceUnavailable),
+                "{wrapper}: {:?}",
+                session.diagnostics
+            );
+            assert_eq!(
+                reason(&doc, vec![by_tag_step("customer.name", "x")]),
+                (
+                    EditFailureCode::AmbiguousTarget,
+                    Some(EditFailureReason::AmbiguousTag)
+                ),
+                "{wrapper}"
+            );
+            assert_eq!(
+                reason(
+                    &doc,
+                    vec![by_id(&snapshot.controls[1].metadata.control_id, "x")]
+                ),
+                (EditFailureCode::TrackedRevisionConflict, None),
+                "{wrapper}"
+            );
+            let undo = UndoSession::new();
+            if tracked_ooxml_id == "1" {
+                assert_eq!(
+                    reason(&doc, vec![by_ooxml_id_step("1", "x")]),
+                    (
+                        EditFailureCode::AmbiguousTarget,
+                        Some(EditFailureReason::AmbiguousOoxmlId)
+                    ),
+                    "{wrapper}"
+                );
+            } else {
+                assert_eq!(
+                    reason(&doc, vec![by_ooxml_id_step("2", "x")]),
+                    (EditFailureCode::TrackedRevisionConflict, None),
+                    "{wrapper}"
+                );
+                assert!(apply(&doc, &undo, vec![by_ooxml_id_step("1", "x")]).applied);
+                assert_eq!(text(&list(&doc).controls[0]), "x");
+                assert!(undo.undo());
+                assert_eq!(list(&doc).controls, snapshot.controls, "{wrapper}");
+            }
+            assert!(
+                apply(
+                    &doc,
+                    &undo,
+                    vec![by_id(&snapshot.controls[0].metadata.control_id, "filled")],
+                )
+                .applied
+            );
+            let filled = list(&doc);
+            assert_eq!(text(by_tag(&filled, "customer.name")), "filled");
+            assert_eq!(filled.controls[1], snapshot.controls[1], "{wrapper}");
+        }
+    }
+}
+
+#[test]
+fn controls_omitted_inside_hyperlinks_block_tag_writes() {
     for wrapper in ["ins", "moveTo"] {
         let tagged = |id: &str, text: &str| {
             inline_sdt(
@@ -1757,7 +1881,7 @@ fn controls_parsing_leaves_out_block_tag_writes() {
             )
         };
         let bytes = package(&format!(
-            r#"{}<w:p w14:paraId="0F000011"><w:{wrapper} w:id="7" w:author="Ada" w:date="2026-01-01T00:00:00Z">{}</w:{wrapper}></w:p>"#,
+            r#"{}<w:p w14:paraId="0F000011"><w:hyperlink w:anchor="target"><w:{wrapper} w:id="7" w:author="Ada" w:date="2026-01-01T00:00:00Z">{}</w:{wrapper}></w:hyperlink></w:p>"#,
             para("0F000010", &tagged("1", "kept")),
             tagged("2", "tracked")
         ));
@@ -1771,7 +1895,7 @@ fn controls_parsing_leaves_out_block_tag_writes() {
                     && matches!(
                         &diagnostic.anchor,
                         Some(Anchor::SourcePart { part, path, .. })
-                            if part == "word/document.xml" && path == &[0, 1, 0, 0]
+                            if part == "word/document.xml" && path == &[0, 1, 0, 0, 0]
                     )
             }),
             "{wrapper}: {:?}",

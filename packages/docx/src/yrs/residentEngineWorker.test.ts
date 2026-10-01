@@ -1247,6 +1247,7 @@ describe('sliced layout completion', () => {
     let begun = false;
     let changed = false;
     const onResume: Array<() => void> = [];
+    const onBegin: Array<() => void> = [];
     const resumable = Object.assign(w.harness.session, {
       layoutDocumentWithRegionsPrefixRetainedJson: () => provisional,
       layoutDocumentWithRegionsRetainedJson: () => {
@@ -1255,6 +1256,7 @@ describe('sliced layout completion', () => {
       },
       beginRegionLayout: () => {
         calls.push('begin');
+        for (const listener of onBegin) listener();
         begun = true;
         changed = false;
         measured = 0;
@@ -1320,7 +1322,7 @@ describe('sliced layout completion', () => {
         layoutExtras: '{}',
         provisionalPages: 3,
       });
-    return { w, calls, onResume, bootstrap, invalidate: resumable.applyUpdate };
+    return { w, calls, onResume, onBegin, bootstrap, invalidate: resumable.applyUpdate };
   }
 
   test('disables snapshots after an ineligible progressive snapshot', async () => {
@@ -1478,7 +1480,8 @@ describe('sliced layout completion', () => {
       expect(reply.ok).toBe(true);
       expect(reply.ok && reply.frame).toBeDefined();
       expect(reply.ok && reply.layoutJson).toBeUndefined();
-      expect(reply.ok && reply.layoutProvisional).toBeUndefined();
+      expect(reply.ok && reply.layoutProvisional).toBe(true);
+      expect(reply.ok && reply.precedesCompletion).toBe(true);
     }
     expect(completed.ok && completed.layoutJson).toBe(full);
     expect(prefixPages).toEqual([5, 5, 5, 5, 5, 5]);
@@ -1488,7 +1491,7 @@ describe('sliced layout completion', () => {
   });
 
   test('the completion resumes only once input has been idle for a while', async () => {
-    const { w, calls, onResume, bootstrap } = steppedWorker(100_000);
+    const { w, calls, onResume, onBegin, bootstrap } = steppedWorker(100_000);
     await bootstrap();
     w.harness.caret = { pageId: '1', pageIndex: 0, x: 10, y: 10, height: 12 };
     let answered = 0;
@@ -1497,12 +1500,8 @@ describe('sliced layout completion', () => {
       insertText: () => calls.push('input'),
       layoutDocumentWithRegionsPrefixRetainedJson: () => provisional,
     });
-    const begin = w.harness.session.beginRegionLayout;
-    Object.assign(w.harness.session, {
-      beginRegionLayout: (input: string) => {
-        if (answered && !resumed) resumed = performance.now();
-        return begin(input);
-      },
+    onBegin.push(() => {
+      if (answered && !resumed) resumed = performance.now();
     });
     onResume.push(() => {
       const loc = { story: 'body', paraId: '1', offset: 0 };
@@ -1519,6 +1518,39 @@ describe('sliced layout completion', () => {
     expect(completed.ok && completed.layoutJson).toBe(full);
     expect(answered).toBeGreaterThan(0);
     expect(resumed - answered).toBeGreaterThanOrEqual(250);
+  });
+
+  test.each([
+    ['a document read', { type: 'documentRead', read: { kind: 'readParagraphs', request: { view: 'accepted' } } }],
+    ['a proposal snapshot', { type: 'proposal', operation: { kind: 'snapshot' } }],
+  ] as const)('%s keeps replica encoding behind a queued completion slice', async (_name, request) => {
+    const turns: Array<() => void> = [];
+    const Original = globalThis.MessageChannel;
+    globalThis.MessageChannel = class {
+      port1 = { onmessage: null as (() => void) | null };
+      port2 = { postMessage: () => turns.push(() => this.port1.onmessage?.()) };
+    } as unknown as typeof MessageChannel;
+    try {
+      const { w, bootstrap } = steppedWorker(1);
+      Object.assign(w.harness.session, {
+        proposalEngine: { version: () => 'v', readParagraphs: () => ({}) },
+      });
+      await bootstrap();
+      const order: string[] = [];
+      const complete = w
+        .send({ type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 1 })
+        .then(() => order.push('complete'));
+      await w.send({ type: 'revisionCount' });
+      turns.shift()!();
+      await w.send({ type: 'revisionCount' });
+      turns.shift()!();
+      const asked = w.send(request).then(() => order.push('request'));
+      await w.send({ type: 'encodeState' }).then(() => order.push('encode'));
+      expect(order).toEqual(['complete', 'request', 'encode']);
+      await Promise.all([complete, asked]);
+    } finally {
+      globalThis.MessageChannel = Original;
+    }
   });
 
   test('input whose prefix covers the document answers before the waiting completion', async () => {
@@ -1551,6 +1583,8 @@ describe('sliced layout completion', () => {
     expect(typed.ok).toBe(true);
     expect(typed.ok && typed.frame).toBeDefined();
     expect(typed.ok && typed.layoutJson).toBeUndefined();
+    expect(typed.ok && typed.layoutProvisional).toBeUndefined();
+    expect(typed.ok && typed.precedesCompletion).toBe(true);
     expect(completed.ok && completed.layoutJson).toBe(full);
     expect(order).toEqual(['input', 'complete']);
     expect(calls).toEqual(['begin', 'resume:2', 'input']);
@@ -1636,7 +1670,9 @@ describe('sliced layout completion', () => {
       order.push('complete');
       return reply;
     });
-    expect((await input!).ok).toBe(true);
+    const typed = await input!;
+    expect(typed.ok).toBe(true);
+    expect(typed.ok && typed.precedesCompletion).toBeUndefined();
     expect(completed.ok && completed.layoutJson).toBe(full);
     expect(order).toEqual(['complete', 'input']);
     expect(calls).toEqual(['begin', 'resume:2', 'resume:100', 'input']);
@@ -2021,12 +2057,16 @@ describe('worker proposals during sliced completion', () => {
   });
 
   test('a progressive snapshot yields to a foreground request queued during its resume', async () => {
-    const { w, engine, onResume } = await proposalWorker();
+    const { w, engine, onResume, proposal } = await proposalWorker();
     try {
       let foreground!: Promise<ResidentEngineWorkerResponse>;
       onResume.push(() => {
         foreground = w.send({
-          type: 'documentRead', read: { kind: 'navigationTarget', story: 'body', paraId: '00000001' },
+          type: 'proposal',
+          operation: {
+            kind: 'propose',
+            request: { expectVersion: engine.proposalEngine.version(), proposals: [proposal()] },
+          },
         });
       });
       const completed = await w.send({

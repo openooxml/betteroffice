@@ -55,6 +55,7 @@ import { CARET_PAINT_IDLE_MS, PaintedCaretMachine } from '../paintedCaret';
 import {
   isLayoutQueued,
   isSupersededLayout,
+  noteProvisionalInputVersion,
   readSessionVersion,
   revisionPreviewKey,
   revisionPreviewKeyOf,
@@ -1047,12 +1048,19 @@ export function useRustDisplayList(
         if (dropped()) return { frameEpoch: null, caretSynchronized: false };
         if (!result.applied) return null;
         const delta = workerDelta ?? decodeFrameDelta(result.frame);
+        const before = result.precedesCompletion ? readSessionVersion(worker.engine) : null;
+        let shown = before;
         suppressWorkerInvalidationRef.current += 1;
         try {
-          for (const update of result.updates) worker.engine.applyLocalUpdate(update);
+          for (const update of result.updates) {
+            const produced = worker.engine.applyLocalUpdate(update);
+            // A change an update listener made is not in the worker's completion.
+            if (shown !== null) shown = produced === readSessionVersion(worker.engine) ? produced : null;
+          }
         } finally {
           suppressWorkerInvalidationRef.current -= 1;
         }
+        if (before !== null && shown !== null) noteProvisionalInputVersion(worker.engine, before, shown);
         if (workerRef.current !== worker) {
           return { frameEpoch: null, caretSynchronized: false, deletedUnits: result.deletedUnits };
         }
@@ -1108,7 +1116,8 @@ export function useRustDisplayList(
         setSnapshot(nextSnapshot);
         setError(null);
         setLoading(false);
-        markSettled(contentEpochRef.current);
+        // A frame of only the first pages settles nothing until the full layout follows.
+        if (!result.layoutProvisional) markSettled(contentEpochRef.current);
         applyPaintedCaretReply(Boolean(result.caretPainted && caret?.caretRect), paintToken);
         return {
           frameEpoch: nextFrame.frameEpoch,
@@ -1278,19 +1287,38 @@ export function useRustDisplayList(
           if (failure) throw failure;
           if (error instanceof ResidentWorkerOutOfMemoryError) {
             if (replaceOutOfMemoryWorker(hostEngine, owner, error) === 'retry') {
+              if (holdsWorkerProposals(hostEngine)) {
+                registeredWorkerProposalAuthority(hostEngine)?.restart();
+              }
               continue;
             }
           } else {
             if (!isCurrentWorker(hostEngine, owner)) throw new SupersededPreviewError();
-            if (owner.client.hasFailed() && holdsCommittedWorkerProposals(hostEngine)) {
-              throw failWorkerDocument(hostEngine, error);
+            if (owner.client.hasFailed()) {
+              if (holdsCommittedWorkerProposals(hostEngine)) {
+                throw failWorkerDocument(hostEngine, error);
+              }
+              if (holdsWorkerProposals(hostEngine)) {
+                owner.client.destroy();
+                workerRef.current = null;
+                setWorkerSurfacesActive(false);
+                setWorkerPresentationActive(false);
+                registeredWorkerProposalAuthority(hostEngine)?.restart();
+              }
             }
           }
           throw error;
         }
       }
     },
-    [failWorkerDocument, isCurrentWorker, replaceOutOfMemoryWorker, sessionLoad, workerFor]
+    [
+      failWorkerDocument,
+      isCurrentWorker,
+      replaceOutOfMemoryWorker,
+      sessionLoad,
+      setWorkerPresentationActive,
+      workerFor,
+    ]
   );
 
   const openInWorker = useCallback<OpenInWorker>(
@@ -1810,13 +1838,15 @@ export function useRustDisplayList(
             }
           : {}),
       };
-      const paintCaret =
-        !bootstrapping &&
-        workerPresentationActiveRef.current &&
-        paintedCaretMachine.shouldPaint(performance.now());
+      // A relayout right after the user's edit is one they wait on.
+      const foreground = !bootstrapping && paintedCaretMachine.shouldPaint(performance.now());
+      const paintCaret = foreground && workerPresentationActiveRef.current;
       const reply = bootstrapping
         ? worker.bootstrap(snapshot, '', options)
-        : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, options);
+        : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, {
+            ...options,
+            foreground,
+          });
       // A worker out of memory runs the pass again in a fresh worker; once
       // that one runs out too, the pass rejects and nothing lays out here.
       const unavailable = (
@@ -2332,10 +2362,8 @@ export function useRustDisplayList(
         });
         // Structural text input reaches the worker as a sync/buildFrame; keep
         // the painted caret glued to those frames while the typing burst lasts.
-        const paintCaret =
-          !bootstrapping &&
-          workerPresentationActiveRef.current &&
-          paintedCaretMachine.shouldPaint(performance.now());
+        const foreground = !bootstrapping && paintedCaretMachine.shouldPaint(performance.now());
+        const paintCaret = foreground && workerPresentationActiveRef.current;
         const snapshot =
           bootstrapping || worker.layoutRevision() !== probe.layoutRevision
             ? buildSnapshot()
@@ -2366,6 +2394,7 @@ export function useRustDisplayList(
                 : worker.sync(snapshot, extras, previousFrame?.frameEpoch ?? 0, paintCaret, {
                     ...sent(),
                     displayWindow: displayWindowRef.current,
+                    foreground,
                   });
         return workerFrame
           .then((result) => {
