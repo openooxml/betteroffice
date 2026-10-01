@@ -85,11 +85,11 @@ test.each(['unmount', 'provider replacement'] as const)(
     try {
       const { rerender, unmount } = render(view(originalProvider));
       await act(async () => {});
-      expect(resolveImage).toHaveBeenCalledTimes(2);
+      expect(resolveImage).toHaveBeenCalledTimes(1);
       expect(resolveImage).toHaveBeenCalledWith('held-image');
       expect(originalProvider).not.toHaveBeenCalled();
       const pendingBuffers = [...contexts].filter(([canvas]) => !canvas.isConnected);
-      expect(pendingBuffers).toHaveLength(2);
+      expect(pendingBuffers).toHaveLength(1);
       for (const [, context] of pendingBuffers) {
         expect(context.drawImage).not.toHaveBeenCalled();
         expect(context.fillText).not.toHaveBeenCalled();
@@ -119,3 +119,50 @@ test.each(['unmount', 'provider replacement'] as const)(
     }
   }
 );
+
+test("an engine's glyph outlines paint its first replay, rasterized once", async () => {
+  const contexts = new Map<HTMLCanvasElement, ReturnType<typeof canvasContext>>();
+  const getContext = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+    function (this: HTMLCanvasElement) {
+      let context = contexts.get(this);
+      if (!context) {
+        context = canvasContext();
+        contexts.set(this, context);
+      }
+      return context as unknown as CanvasRenderingContext2D;
+    } as unknown as typeof HTMLCanvasElement.prototype.getContext
+  );
+  const provider = mock((_fontId: number, _glyphId: number) =>
+    JSON.stringify({ upem: 1000, cmds: [] })
+  );
+  const displayList: DisplayList = {
+    pages: [
+      {
+        pageIndex: 0,
+        width: 100,
+        height: 100,
+        primitives: [
+          {
+            kind: 'glyphRun',
+            fontId: 7,
+            size: 12,
+            color: '#000000',
+            text: 'A',
+            glyphs: [{ id: 42, x: 10, y: 20, cluster: 0, advance: 8 }],
+          },
+        ],
+      },
+    ],
+  };
+  try {
+    render(<CanvasPagesView displayList={displayList} glyphOutlineProvider={provider} />);
+    await act(async () => {});
+    const buffers = [...contexts].filter(([canvas]) => !canvas.isConnected);
+    expect(buffers).toHaveLength(1);
+    expect(provider).toHaveBeenCalledWith(7, 42);
+    expect(buffers[0]![1].fillText).not.toHaveBeenCalled();
+  } finally {
+    cleanup();
+    getContext.mockRestore();
+  }
+});

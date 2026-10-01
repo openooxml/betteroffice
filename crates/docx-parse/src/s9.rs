@@ -267,6 +267,21 @@ pub fn parse_docx_s9_preview_from_parts(
     parse_s9_package(parts, &[], options, limits, Some(blocks), None)
 }
 
+#[doc(hidden)]
+pub fn parse_docx_s9_preview_from_parts_full_dom(
+    parts: &[(String, Vec<u8>)],
+    blocks: usize,
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+) -> Result<Option<S9WireEnvelope>, ParseError> {
+    if options.determinism_seed.is_none() || options.include_canonical {
+        return Err(ParseError::Canonical(
+            "parsing parts needs a determinism seed and no canonical envelope".to_owned(),
+        ));
+    }
+    parse_s9_package_impl(parts, &[], options, limits, Some(blocks), None, false)
+}
+
 /// [`parse_docx_s9_preview_from_parts`] with images naming their parts by
 /// `table`'s tokens, as [`parse_docx_s9_wire_with_media_table`] does; `parts`
 /// need not hold the media.
@@ -294,6 +309,18 @@ fn parse_s9_package(
     limits: &ParseLimits,
     body_blocks: Option<usize>,
     media_table: Option<&MediaTable>,
+) -> Result<Option<S9WireEnvelope>, ParseError> {
+    parse_s9_package_impl(parts, data, options, limits, body_blocks, media_table, true)
+}
+
+fn parse_s9_package_impl(
+    parts: &[(String, Vec<u8>)],
+    data: &[u8],
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+    body_blocks: Option<usize>,
+    media_table: Option<&MediaTable>,
+    prefix_preview: bool,
 ) -> Result<Option<S9WireEnvelope>, ParseError> {
     if media_table.is_some() && options.include_canonical {
         return Err(ParseError::Canonical(
@@ -377,7 +404,31 @@ fn parse_s9_package(
     let mut warnings = Vec::new();
     let mut body = match document_part.filter(|(_, xml)| !xml.is_empty()) {
         Some((path, xml)) => {
-            let parsed = parse_xml(xml, path, &mut budget)?;
+            let mut scanned_budget = body_blocks
+                .filter(|_| prefix_preview)
+                .map(|_| budget.clone());
+            let prefix = if let Some(blocks) = body_blocks.filter(|_| prefix_preview) {
+                match crate::document::streaming_body_cut(xml, scanned_budget.as_mut().unwrap()) {
+                    Ok(refused) => {
+                        if refused {
+                            return Ok(None);
+                        }
+                        let keep = blocks.saturating_mul(2).max(blocks.saturating_add(64));
+                        crate::document::body_prefix(xml, keep).map(|xml| (xml, keep))
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let parsed = parse_xml(
+                prefix.as_ref().map_or(xml, |(xml, _)| xml.as_slice()),
+                path,
+                &mut budget,
+            )?;
+            if prefix.is_some() {
+                budget = scanned_budget.unwrap();
+            }
             match parsed.root() {
                 Some(root) => {
                     if body_blocks.is_some() && crate::document::refuses_a_body_cut(root) {
@@ -396,7 +447,40 @@ fn parse_s9_package(
                         ids: &mut ids,
                         part: path,
                     };
-                    parse_document_body_compact(root, &mut parser, body_blocks)?
+                    if let Some((_, keep)) = &prefix {
+                        let kept_children = root.child("w", "body").map_or(0, |body| {
+                            body.child_elements()
+                                .take(*keep)
+                                .map(|child| {
+                                    if matches!(child.local_name(), "customXml" | "smartTag") {
+                                        crate::block::transparent_children(child, false).len()
+                                    } else {
+                                        1
+                                    }
+                                })
+                                .sum::<usize>()
+                        });
+                        let (body, read) = crate::document::parse_document_body_compact_with_read(
+                            root,
+                            &mut parser,
+                            body_blocks,
+                            kept_children,
+                        )?;
+                        if read >= kept_children {
+                            return parse_s9_package_impl(
+                                parts,
+                                data,
+                                options,
+                                limits,
+                                body_blocks,
+                                media_table,
+                                false,
+                            );
+                        }
+                        body
+                    } else {
+                        parse_document_body_compact(root, &mut parser, body_blocks)?
+                    }
                 }
                 None => DocumentBody::default(),
             }

@@ -27,6 +27,7 @@ export class EngineWorker {
   private engineFrame: RetainedFrame | null = null;
   private releasedEpochs = 0;
   holdPageBuilds = false;
+  slicePageBuilds = false;
   heldPageBuilds: (() => void)[] = [];
   holdInputReplies = false;
   heldInputReplies: (() => void)[] = [];
@@ -103,6 +104,7 @@ export class EngineWorker {
       return;
     }
     let frame: Uint8Array;
+    let pageFrames: Uint8Array[] | undefined;
     const expectedEpoch = request.expectedFrameEpoch - this.releasedEpochs;
     engine.set_windowed_incremental_builds(
       'displayWindow' in request && request.displayWindow !== undefined
@@ -115,31 +117,52 @@ export class EngineWorker {
     if (request.type === 'bootstrap' || request.type === 'buildFrame') {
       frame = engine.build_display_list_frame(request.extras, expectedEpoch);
     } else if (request.type === 'buildPages') {
-      frame = engine.build_display_pages_frame(Uint32Array.from(request.pages), expectedEpoch);
+      if (this.slicePageBuilds && request.background) {
+        pageFrames = [];
+        let epoch = expectedEpoch;
+        for (let offset = 0; offset < request.pages.length; offset += 4) {
+          const built = engine.build_display_pages_frame(
+            Uint32Array.from(request.pages.slice(offset, offset + 4)), epoch
+          );
+          pageFrames.push(built);
+          epoch = JSON.parse(engine.resident_caret_snapshot_json()).frameEpoch;
+        }
+        frame = pageFrames[pageFrames.length - 1]!;
+      } else {
+        frame = engine.build_display_pages_frame(
+          Uint32Array.from(request.pages), expectedEpoch
+        );
+      }
     } else {
       const { anchor, head } = request.selection;
       engine.set_selection(anchor.story, anchor.paraId, anchor.offset, head.paraId, head.offset);
       frame = engine.apply_input(request.text, expectedEpoch);
     }
-    this.engineFrame = applyFrameDeltaOwned(this.engineFrame, decodeFrameDelta(frame));
-    if (this.releasedEpochs > 0) {
-      if (request.type === 'buildPages') {
-        frame = pageFrame(this.frame!, request.pages.map((index) => this.engineFrame!.pages[index]!));
-      } else {
-        const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
-        view.setBigUint64(32, BigInt(this.engineFrame.frameEpoch + this.releasedEpochs), true);
-        const base = view.getBigUint64(40, true);
-        if (base > 0n) view.setBigUint64(40, base + BigInt(this.releasedEpochs), true);
+    const frames = (pageFrames ?? [frame]).map((bytes, slice) => {
+      this.engineFrame = applyFrameDeltaOwned(this.engineFrame, decodeFrameDelta(bytes));
+      if (this.releasedEpochs > 0) {
+        if (request.type === 'buildPages') {
+          const indices = pageFrames ? request.pages.slice(slice * 4, slice * 4 + 4) : request.pages;
+          bytes = pageFrame(this.frame!, indices.map((index) => this.engineFrame!.pages[index]!));
+        } else {
+          const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+          view.setBigUint64(32, BigInt(this.engineFrame.frameEpoch + this.releasedEpochs), true);
+          const base = view.getBigUint64(40, true);
+          if (base > 0n) view.setBigUint64(40, base + BigInt(this.releasedEpochs), true);
+        }
       }
-    }
-    this.frame = applyFrameDeltaOwned(this.frame, decodeFrameDelta(frame));
-    const respond = this.response(request.id, frame);
+      this.frame = applyFrameDeltaOwned(this.frame, decodeFrameDelta(bytes));
+      return bytes;
+    });
+    frame = frames[frames.length - 1]!;
+    if (pageFrames) pageFrames = frames;
+    const respond = this.response(request.id, frame, pageFrames);
     if (request.type === 'buildPages' && this.holdPageBuilds) this.heldPageBuilds.push(respond);
     else if (request.type === 'applyInput' && this.holdInputReplies)
       this.heldInputReplies.push(respond);
     else queueMicrotask(respond);
   }
-  private response(id: number, frame: Uint8Array): () => void {
+  private response(id: number, frame: Uint8Array, pageFrames?: Uint8Array[]): () => void {
     const engine = EngineWorker.engine!;
     const caret = JSON.parse(engine.resident_caret_snapshot_json());
     caret.frameEpoch = this.frame!.frameEpoch;
@@ -150,6 +173,7 @@ export class EngineWorker {
           id,
           ok: true,
           frame: frame.slice().buffer,
+          ...(pageFrames ? { pageFrames: pageFrames.map((built) => built.slice().buffer) } : {}),
           caret,
           selection,
           layoutRevision: 1,

@@ -86,6 +86,7 @@ afterEach(() => {
   for (const session of sessions.splice(0)) session.destroy();
 });
 afterAll(async () => {
+  await act(async () => {});
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
@@ -108,6 +109,7 @@ function installWorker(options: {
   holdSync?: boolean;
   holdCompletion?: boolean;
   holdReply?: (request: ResidentEngineWorkerRequest) => boolean;
+  refusePreview?: boolean;
 } = {}) {
   const workers: InProcessResidentWorker[] = [];
   const posted: ResidentEngineWorkerRequest[] = [];
@@ -161,6 +163,10 @@ function installWorker(options: {
           void options.failReplacementSnapshot.then(() => worker.onmessage?.({
             data: { id: request.id, ok: false, error: 'snapshot failed' },
           } as MessageEvent));
+        } else if (options.refusePreview && request.type === 'open' && request.previewBlocks !== undefined) {
+          queueMicrotask(() => worker.onmessage?.({
+            data: { id: request.id, ok: true, previewRefused: true },
+          } as MessageEvent));
         } else if ((options.failOpen && request.type === 'open') ||
             (options.failState && request.type === 'encodeState')) {
           queueMicrotask(() => worker.onmessage?.({
@@ -210,6 +216,8 @@ interface HarnessProps {
   experimentalWorkerOpen: boolean;
   hydrateOnDemand?: boolean;
   previewFirstPage?: boolean;
+  /** Opens the first-page preview in the worker, as DocxEditor does. */
+  workerPreview?: boolean;
   openInWorker?: OpenInWorker;
   source: Uint8Array;
   generation: number;
@@ -284,6 +292,7 @@ function useHarness(props: HarnessProps) {
       shownEngine: renderer.presentedEngine,
       workerOpen: props.experimentalWorkerOpen ? {
         openInWorker,
+        ...(props.workerPreview ? { openPreviewInWorker: renderer.openPreviewInWorker } : {}),
         workerProposals: props.workerProposals,
         refreshWorkerLayout: () => workerRelayout.current?.(),
         renderedFrame: renderer.status === 'ready' ? renderer.displayList : null,
@@ -618,11 +627,21 @@ function holdFrames() {
     return nextId;
   };
   globalThis.cancelAnimationFrame = (id) => { frames.delete(id); };
+  const run = () => {
+    const pending = [...frames.values()];
+    frames.clear();
+    for (const callback of pending) callback(performance.now());
+  };
   return {
-    run() {
-      const pending = [...frames.values()];
-      frames.clear();
-      for (const callback of pending) callback(performance.now());
+    run,
+    async until<T>(promise: Promise<T>): Promise<T> {
+      let settled = false;
+      void promise.then(() => { settled = true; }, () => { settled = true; });
+      while (!settled) {
+        run();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      return promise;
     },
     restore() {
       globalThis.requestAnimationFrame = request;
@@ -1261,6 +1280,146 @@ test('a preloaded spare worker takes the open that starts alongside the preview'
   }
 });
 
+test('a preview the worker opens lays out there, and the full open queues right behind its layout', async () => {
+  const fullOpen = (request: ResidentEngineWorkerRequest) =>
+    request.type === 'open' && request.previewBlocks === undefined;
+  const { workers, posted, reply } = installWorker({ holdReply: fullOpen });
+  const frames = holdFrames();
+  try {
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, previewFirstPage: true, workerPreview: true, source: longBytes },
+    });
+    await waitFor(() => expect(result.current.core.previewing).toBe(true));
+    const preview = result.current.core.session!;
+    expect(preview.isDisplayOnly()).toBe(true);
+    // This thread parsed none of it: the worker holds the preview.
+    expect(preview.storyIds()).toEqual([]);
+    expect(posted.map((request) => request.type)).toEqual(['open']);
+    expect(posted[0].type === 'open' && posted[0].previewBlocks).toBeGreaterThan(0);
+
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(preview));
+    expect(result.current.renderer.status).toBe('ready');
+    expect(result.current.renderer.displayList?.pages.length).toBeGreaterThan(0);
+    // The preview paints here: the full open runs in that worker next.
+    expect(result.current.renderer.workerSurfacesActive).toBe(false);
+    await waitFor(() => expect(posted.filter(fullOpen)).toHaveLength(1));
+    const bootstrap = posted.findIndex((request) => request.type === 'bootstrap');
+    expect(bootstrap).toBeGreaterThan(0);
+    expect(posted[bootstrap].type === 'bootstrap' && posted[bootstrap].opened).toBe(true);
+    expect(posted.findIndex(fullOpen)).toBeGreaterThan(bootstrap);
+    expect(posted.map((request) => request.type)).not.toContain('encodeState');
+    expect(preview.storyIds()).toEqual([]);
+    expect(result.current.mainOpens).toEqual([]);
+    // A relayout of the preview after the full open took its worker over keeps the shown
+    // layout: it asks nothing of the worker and opens nothing here.
+    const shownLayout = result.current.pipeline.layout;
+    const before = posted.length;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(posted.length).toBe(before);
+    expect(result.current.pipeline.layout).toBe(shownLayout);
+    expect(preview.storyIds()).toEqual([]);
+    expect(result.current.errors).toEqual([]);
+
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await act(async () => {
+      reply(posted.find(fullOpen)!);
+    });
+    await waitFor(() => expect(result.current.core.previewing).toBe(false));
+    const full = result.current.core.session!;
+    expect(full).not.toBe(preview);
+    expect(full.isDisplayOnly()).toBe(false);
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(full));
+    expect(workers).toHaveLength(1);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(2);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
+
+test('a worker preview loaded here before its first layout stops using the worker', async () => {
+  const { workers, posted } = installWorker();
+  const frames = holdFrames();
+  try {
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, previewFirstPage: true, workerPreview: true, source: longBytes },
+    });
+    await waitFor(() => expect(result.current.core.previewing).toBe(true));
+    const preview = result.current.core.session!;
+    expect(preview.storyIds()).toEqual([]);
+    // Something on this thread needs the preview's content before its first layout.
+    await act(async () => {
+      await requestWorkerOpenReplica(preview);
+    });
+    expect(preview.storyIds()).not.toEqual([]);
+    expect(preview.isDisplayOnly()).toBe(true);
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(preview));
+    expect(posted.map((request) => request.type)).not.toContain('bootstrap');
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await waitFor(() => expect(result.current.core.previewing).toBe(false));
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() =>
+      expect(result.current.renderer.presentedEngine).toBe(result.current.core.session)
+    );
+    // The preview's worker went with it; the full document opened in a new one.
+    expect(workers).toHaveLength(2);
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
+
+test('a package the worker cannot preview opens its preview here and the full document in that worker', async () => {
+  const { workers, posted } = installWorker({ refusePreview: true });
+  const frames = holdFrames();
+  try {
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, previewFirstPage: true, workerPreview: true, source: longBytes },
+    });
+    await waitFor(() => expect(result.current.core.previewing).toBe(true));
+    const preview = result.current.core.session!;
+    expect(preview.isDisplayOnly()).toBe(true);
+    expect(preview.storyIds()).not.toEqual([]);
+    await waitFor(() => expect(posted.filter((request) => request.type === 'open')).toHaveLength(2));
+    expect(
+      posted
+        .filter((request) => request.type === 'open')
+        .map((request) => request.type === 'open' && request.previewBlocks !== undefined)
+    ).toEqual([true, false]);
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(preview));
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await waitFor(() => expect(result.current.core.previewing).toBe(false));
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() =>
+      expect(result.current.renderer.presentedEngine).toBe(result.current.core.session)
+    );
+    expect(workers).toHaveLength(1);
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
+
 test('the replica waits while the shown engine is still to ask the worker for the rest of its layout', async () => {
   const { posted } = installWorker();
   const frames = holdFrames();
@@ -1706,6 +1865,67 @@ async function openWorkerProposals(props: HarnessProps = workerProposalProps) {
   return harness;
 }
 
+test('ASCII proposals skip font preflight and Unicode proposals request it before syncing', async () => {
+  const { posted } = installWorker();
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const api = result.current.ref.current!;
+    const identities = await api.getParagraphIdentities();
+    const paragraphs = identities.paragraphs.filter(({ session }) => session?.story === 'body');
+    const initialFonts = posted.filter(({ type }) => type === 'fontRequirements').length;
+    const initialSyncs = posted.filter(({ type }) => type === 'sync').length;
+    const propose = async (id: string, index: number, search: string, replaceWith: string) => {
+      const current = await api.getProposals();
+      await act(async () => {
+        expect(await api.proposeChanges({ expectVersion: current.version, proposals: [{
+          id, paragraph: paragraphs[index]!.session!,
+          suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+          op: 'replaceText', search, replaceWith,
+        }] })).toMatchObject({ ok: true });
+      });
+      await act(async () => { await api.whenLayoutComplete({ timeoutMs: 5000 }); });
+    };
+    await propose('ascii', 0, 'First', 'Leading');
+    expect(posted.filter(({ type }) => type === 'sync').length).toBeGreaterThan(initialSyncs);
+    expect(posted.filter(({ type }) => type === 'fontRequirements')).toHaveLength(initialFonts);
+    const beforeUnicode = posted.length;
+    await propose('unicode', 1, 'Paragraph', '漢字');
+    expect(posted.filter(({ type }) => type === 'fontRequirements')).toHaveLength(initialFonts + 1);
+    const followup = posted.slice(beforeUnicode).map(({ type }) => type);
+    expect(followup.indexOf('fontRequirements')).toBeGreaterThan(followup.indexOf('proposal'));
+    expect(followup.indexOf('sync')).toBeGreaterThan(followup.indexOf('fontRequirements'));
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
+test('proposal font requirements are reused only for the same layout request', async () => {
+  const { posted } = installWorker();
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const original = posted.find((request) => request.type === 'fontRequirements');
+    if (original?.type !== 'fontRequirements') throw new Error('expected font preflight');
+    const before = posted.filter(({ type }) => type === 'fontRequirements').length;
+    const session = result.current.core.session!;
+    const requirements = result.current.renderer.fontRequirementsInWorker;
+    await act(async () => { await requirements(session, original.layoutInput); });
+    expect(posted.filter(({ type }) => type === 'fontRequirements')).toHaveLength(before);
+    const changed = JSON.stringify({
+      ...JSON.parse(original.layoutInput),
+      measurement: { defaults: { fontFamily: 'Courier New', fontSize: 11 } },
+    });
+    let answer!: string | null;
+    await act(async () => { answer = await requirements(session, changed); });
+    expect(posted.filter(({ type }) => type === 'fontRequirements')).toHaveLength(before + 1);
+    expect(answer).toContain('Courier New');
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
 test.each(['A then B', 'B then A'])('Undo keeps worker proposals through font preflight replies %s', async (order) => {
   let holdRequirements = false;
   const { posted, replies, reply, received } = installWorker({
@@ -1722,7 +1942,7 @@ test.each(['A then B', 'B then A'])('Undo keeps worker proposals through font pr
     await act(async () => { await received('open'); });
     await act(async () => { await received('bootstrap'); });
     await act(async () => { await received('proposal'); });
-    await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+    await act(async () => { await frames.until(result.current.renderer.settledDisplayList(null, null)); });
     const api = result.current.ref.current!;
     const session = result.current.core.session!;
     layoutHere = spyOn(session, 'layoutDocumentWithRegionsRetainedJson');
@@ -1743,7 +1963,7 @@ test.each(['A then B', 'B then A'])('Undo keeps worker proposals through font pr
     const settle = async () => {
       const previous = posted.filter((request) => request.type === 'sync').at(-1)?.id ?? 0;
       await act(async () => { frames.run(); await received('sync', previous); });
-      await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+      await act(async () => { await frames.until(result.current.renderer.settledDisplayList(null, null)); });
       expect(isLayoutQueued(session)).toBe(false);
     };
     const setState = async (state: 'accepted' | 'proposed' | 'rejected') => {
@@ -1807,24 +2027,27 @@ test.each(['A then B', 'B then A'])('Undo keeps worker proposals through font pr
       import.meta.dir, '../../../../../../crates/docx-raster/tests/assets/Carlito-Regular.ttf'
     )));
     rerender({ ...workerProposalProps, source: bytes, measurementFont: loadedFont });
-    let passB!: ResidentEngineWorkerRequest;
     await act(async () => {
       result.current.pipeline.runLayoutPipeline();
-      passB = await received('fontRequirements', passA.id);
+      await new Promise((resolve) => setTimeout(resolve, 50));
     });
-    expect(replies.has(passB.id)).toBe(true);
-    expect(passB.id).not.toBe(passA.id);
+    // Pass B shares pass A's read while their inputs are identical, else it holds its own.
+    const held = posted.filter((request) =>
+      request.type === 'fontRequirements' && request.id >= passA.id && replies.has(request.id)
+    );
+    expect(held[0]).toBe(passA);
+    expect(held.length).toBeLessThanOrEqual(2);
     holdRequirements = false;
     const previousSync = posted.filter((request) => request.type === 'sync').at(-1)!.id;
     await act(async () => {
-      for (const pass of order === 'A then B' ? [passA, passB] : [passB, passA]) reply(pass);
+      for (const pass of order === 'A then B' ? held : [...held].reverse()) reply(pass);
     });
     expect(layoutHere).not.toHaveBeenCalled();
     expect(ensureReplica).not.toHaveBeenCalled();
     expect(result.current.errors).toEqual([]);
     expect(errorLog).not.toHaveBeenCalled();
     await act(async () => { await received('sync', previousSync); });
-    await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+    await act(async () => { await frames.until(result.current.renderer.settledDisplayList(null, null)); });
     expect(isLayoutQueued(session)).toBe(false);
     await assertCurrent();
     await setState('rejected');
@@ -1852,7 +2075,7 @@ test.each(['unavailable', 'no adoption', 'no snapshot'])('a holding session with
     await act(async () => { await received('open'); });
     await act(async () => { await received('bootstrap'); });
     await act(async () => { await received('proposal'); });
-    await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+    await act(async () => { await frames.until(result.current.renderer.settledDisplayList(null, null)); });
     const session = result.current.core.session!;
     const api = result.current.ref.current!;
     const snapshot = await api.getProposals();
@@ -1971,7 +2194,7 @@ test('a toggle and local refresh wait for an older worker sync without rebuildin
       expect(replies.has(latest.id)).toBe(true);
       await act(async () => reply(latest));
       await act(async () => {});
-      await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+      await act(async () => { await frames.until(result.current.renderer.settledDisplayList(null, null)); });
       expect(isLayoutQueued(session)).toBe(false);
       expect(revisionPreviewKeyOf(result.current.pipeline.layout)).toBe(
         revisionPreviewKey(proposalRevisionPreview(session.getProposals()))
