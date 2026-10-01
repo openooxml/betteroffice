@@ -492,6 +492,15 @@ export function useRustDisplayList(
   // Display-only previews the worker opened and lays out; their load's whole document takes
   // their worker over.
   const workerPreviewEnginesRef = useRef(new WeakSet<YrsSession>());
+  // A worker preview's first pass and font requirements: once the whole document took its
+  // worker over, a pass of the preview answers with these instead of laying out again.
+  const workerPreviewPassesRef = useRef(new WeakMap<YrsSession, Promise<WorkerLayoutComputation | null>>());
+  const workerPreviewRequirementsRef = useRef(new WeakMap<YrsSession, Promise<string | null>>());
+  const handedOverPreview = useCallback(
+    (hostEngine: YrsSession): boolean =>
+      workerPreviewEnginesRef.current.has(hostEngine) && handedOverEnginesRef.current.has(hostEngine),
+    []
+  );
   const workerOpenEnabledRef = useRef(experimentalWorkerOpen);
   workerOpenEnabledRef.current = experimentalWorkerOpen;
   const spawnedWorkerEnginesRef = useRef(new WeakSet<YrsSession>());
@@ -1272,7 +1281,7 @@ export function useRustDisplayList(
           throw new SupersededPreviewError();
         }
         if (workerRef.current?.engine !== hostEngine) {
-          if (!source) throw new SupersededPreviewError();
+          if (!source || handedOverPreview(hostEngine)) throw new SupersededPreviewError();
           const owner = workerFor(hostEngine);
           owner.opened = true;
           const opening =
@@ -1330,7 +1339,7 @@ export function useRustDisplayList(
         }
       }
     },
-    [failWorkerDocument, isCurrentWorker, replaceOutOfMemoryWorker, sessionLoad, workerFor]
+    [failWorkerDocument, handedOverPreview, isCurrentWorker, replaceOutOfMemoryWorker, sessionLoad, workerFor]
   );
 
   const openInWorker = useCallback<OpenInWorker>(
@@ -1452,6 +1461,9 @@ export function useRustDisplayList(
 
   const fontRequirementsInWorker = useCallback<FontRequirementsInWorker>(
     (hostEngine, request) => {
+      if (handedOverPreview(hostEngine)) {
+        return workerPreviewRequirementsRef.current.get(hostEngine) ?? null;
+      }
       if (!holdsWorkerProposals(hostEngine) &&
         (!workerOpenEnabledRef.current || !workerOpenReplicaPending(hostEngine))) return null;
       if (!workerOpenSourcesRef.current.has(hostEngine) && !holdsWorkerProposals(hostEngine)) {
@@ -1459,7 +1471,7 @@ export function useRustDisplayList(
         return null;
       }
       const owner = { current: workerRef.current };
-      return requestOpenedWorker(
+      const pending = requestOpenedWorker(
         hostEngine,
         (current) => current.client.fontRequirements(request),
         (current) => { owner.current = current; }
@@ -1481,8 +1493,12 @@ export function useRustDisplayList(
           }
           return null;
         });
+      if (workerPreviewEnginesRef.current.has(hostEngine)) {
+        workerPreviewRequirementsRef.current.set(hostEngine, pending);
+      }
+      return pending;
     },
-    [dropWorker, ensureRebuildableReplica, isCurrentWorker, requestOpenedWorker]
+    [dropWorker, ensureRebuildableReplica, handedOverPreview, isCurrentWorker, requestOpenedWorker]
   );
 
   const shownFrameEngine = useCallback((): unknown => frameEngineRef.current, []);
@@ -1717,6 +1733,7 @@ export function useRustDisplayList(
 
   const layoutInWorker: LayoutInWorker = useCallback<LayoutInWorker>(
     (hostEngine, request) => {
+      if (handedOverPreview(hostEngine)) return workerPreviewPassesRef.current.get(hostEngine) ?? null;
       if (!canLayoutInWorker(hostEngine) || !hostEngine.adoptResidentWorkerLayout) {
         if (holdsWorkerProposals(hostEngine)) {
           workerFor(hostEngine);
@@ -1876,7 +1893,7 @@ export function useRustDisplayList(
         });
         return computation;
       };
-      return reply
+      const pass = reply
         .then((result): WorkerLayoutComputation | null => {
           if (holdsWorkerProposals(hostEngine) &&
             (!isCurrentWorker(hostEngine, owner) ||
@@ -1924,10 +1941,15 @@ export function useRustDisplayList(
           return { ...computation, complete };
         })
         .catch(unavailable);
+      if (workerPreviewEnginesRef.current.has(hostEngine)) {
+        workerPreviewPassesRef.current.set(hostEngine, pass);
+      }
+      return pass;
     },
     [
       canLayoutInWorker,
       dropWorker,
+      handedOverPreview,
       ensureRebuildableReplica,
       failWorkerDocument,
       frameBase,

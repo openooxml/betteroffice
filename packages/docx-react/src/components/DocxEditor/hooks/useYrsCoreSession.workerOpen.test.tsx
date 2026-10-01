@@ -1096,6 +1096,18 @@ test('a preview the worker opens lays out there, and the full open queues right 
     expect(posted.map((request) => request.type)).not.toContain('encodeState');
     expect(preview.storyIds()).toEqual([]);
     expect(result.current.mainOpens).toEqual([]);
+    // A relayout of the preview after the full open took its worker over keeps the shown
+    // layout: it asks nothing of the worker and opens nothing here.
+    const shownLayout = result.current.pipeline.layout;
+    const before = posted.length;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(posted.length).toBe(before);
+    expect(result.current.pipeline.layout).toBe(shownLayout);
+    expect(preview.storyIds()).toEqual([]);
+    expect(result.current.errors).toEqual([]);
 
     act(() => result.current.presentFrame());
     act(() => frames.run());
