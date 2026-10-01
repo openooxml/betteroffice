@@ -330,10 +330,7 @@ pub fn yrs_doc_to_mapped_layout_blocks(
     story_id: &str,
     env: &RenderEnv,
 ) -> Result<(Vec<LayoutBlock>, LoweringMap), BridgeError> {
-    let mut local = local::LocalLowering {
-        blocked: true,
-        ..Default::default()
-    };
+    let mut local = local::LocalLowering::new(false);
     yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut None, &mut local)
 }
 

@@ -994,6 +994,10 @@ export class EditSession {
      */
     set_image_geometry_at(story: string, para_id: string, offset: number, geometry_json: string): void;
     /**
+     * Let an eligible resident text edit re-lower only its paragraph. Off by default.
+     */
+    set_local_lowering(enabled: boolean): void;
+    /**
      * Whether [`EditSession::open_docx`] seeds images as `media:{n}` tokens,
      * which only a replica opened from the same package resolves, instead of
      * `data:` URLs. Off by default.

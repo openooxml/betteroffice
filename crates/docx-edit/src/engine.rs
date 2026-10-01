@@ -1042,6 +1042,8 @@ pub struct EngineSession {
     font_fingerprints: RefCell<HashMap<(u64, u32), String>>,
     /// The document holds part of a package, such as a preview's first blocks.
     partial_document: Cell<bool>,
+    /// Resident text edits re-lower only their paragraph when eligible.
+    local_lowering: Cell<bool>,
 }
 
 /// The font requirements of `blocks` that `measurement` gives no chain of registered fonts, so
@@ -1829,7 +1831,13 @@ impl EngineSession {
             resumable: RefCell::new(None),
             font_fingerprints: RefCell::new(HashMap::new()),
             partial_document: Cell::new(false),
+            local_lowering: Cell::new(false),
         }
+    }
+
+    /// Lets an eligible resident text edit re-lower only its paragraph. Off by default.
+    pub fn set_local_lowering(&self, enabled: bool) {
+        self.local_lowering.set(enabled);
     }
 
     /// Marks whether the document is part of a package, such as a preview's
@@ -1869,7 +1877,9 @@ impl EngineSession {
             None => self.doc.delete_range(&ctx, range.clone())?,
         };
         let mut render = self.render.borrow_mut();
-        let eligible = lower_locally && (text.is_none() || range.start == range.end);
+        let eligible = lower_locally
+            && self.local_lowering.get()
+            && (text.is_none() || range.start == range.end);
         if let Some(lowered) = render.stories.get_mut(&range.story) {
             lowered.local.edit = receipt
                 .range
@@ -1949,7 +1959,7 @@ impl EngineSession {
         epoch: u64,
         env: &RenderEnv,
     ) -> Result<(), BridgeError> {
-        let mut local = crate::bridge::local::LocalLowering::default();
+        let mut local = crate::bridge::local::LocalLowering::new(self.local_lowering.get());
         let (blocks, map, revealable_blocks) =
             yrs_doc_to_mapped_layout_blocks_with_revealable(&self.doc, story, env, &mut local)?;
         let mut render = self.render.borrow_mut();
@@ -5876,8 +5886,23 @@ mod tests {
 
     #[test]
     fn resident_plain_text_patch_matches_cold_full() {
+        for enabled in [false, true] {
+            resident_plain_text_patch_matches_cold_full_in(enabled);
+        }
+    }
+
+    fn resident_plain_text_patch_matches_cold_full_in(enabled: bool) {
         use super::lowering_fixture::{Package, para, run};
         use crate::{Position, StoryRange};
+        let laid_out = |bytes: &[u8], client_id| {
+            let (engine, request) = lowering_pages::laid_out(bytes, client_id);
+            engine.set_local_lowering(enabled);
+            engine.render.replace(Default::default());
+            engine
+                .layout_document_with_regions_retained_json(&request)
+                .unwrap();
+            (engine, request)
+        };
         docx_layout::clear_measure_fonts();
         let font = docx_layout::register_measure_font(lowering_pages::FONT).unwrap();
         let request = small_page_request(font);
@@ -5910,7 +5935,7 @@ mod tests {
             let epoch = engine.stats().frame_epoch;
             engine.apply_and_layout(story, epoch).unwrap();
             let after = Rc::as_ptr(&engine.render.borrow().stories["body"].blocks);
-            assert_eq!(before == after, patched);
+            assert_eq!(before == after, patched && enabled);
             let incremental = snapshot(engine);
             macro_rules! cold {
                 ($($field:ident)+) => {{
@@ -5925,6 +5950,7 @@ mod tests {
             assert_eq!(incremental, oracle, "{story} [{start}, {end}) {text:?}");
         };
         let engine = paragraphs_engine(9600, 3);
+        engine.set_local_lowering(enabled);
         engine.layout_document_with_regions_json(&request).unwrap();
         for (paragraph, offset) in (0..3).flat_map(|p| [0, 13, u32::MAX].map(|at| (p, at))) {
             let paragraphs = engine.doc().paragraphs("body").unwrap();
@@ -5941,6 +5967,7 @@ mod tests {
         step(&engine, &request, "body", (2, 4, None), false);
         step(&engine, &request, "body", (2, 2, None), false);
         let empty = EngineSession::new(9601);
+        empty.set_local_lowering(enabled);
         let doc = empty.doc();
         doc.create_story("body", "A", "Normal", "left").unwrap();
         empty.layout_document_with_regions_json(&request).unwrap();
@@ -5972,7 +5999,7 @@ mod tests {
             ("contextual", Package::new(&format!(r#"<w:p w14:paraId="10000001"><w:pPr><w:contextualSpacing/></w:pPr><w:r><w:t>Before</w:t></w:r></w:p>{}"#, para("10000002", &run("After"))))),
         ];
         for (name, package) in packages {
-            let (engine, request) = lowering_pages::laid_out(&package.bytes(), 9602);
+            let (engine, request) = laid_out(&package.bytes(), 9602);
             let patched = name == "table";
             step(&engine, &request, "body", (0, 0, Some("x")), patched);
             if name == "table" {
@@ -5986,7 +6013,7 @@ mod tests {
             "10000001",
             r#"<w:r><w:rPr><w:b/></w:rPr><w:t>Bold</w:t></w:r>"#,
         ));
-        let (engine, request) = lowering_pages::laid_out(&bold.bytes(), 9604);
+        let (engine, request) = laid_out(&bold.bytes(), 9604);
         step(&engine, &request, "body", (2, 2, Some("x")), true);
         step(&engine, &request, "body", (0, 1, None), true);
         for bytes in [
@@ -5998,7 +6025,7 @@ mod tests {
             include_bytes!("../tests/fixtures/page-fragments/pages.docx").as_slice(),
             include_bytes!("../tests/fixtures/footnote-anchor.docx").as_slice(),
         ] {
-            let (engine, request) = lowering_pages::laid_out(bytes, 9603);
+            let (engine, request) = laid_out(bytes, 9603);
             step(&engine, &request, "body", (0, 0, Some("x")), false);
         }
     }

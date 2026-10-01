@@ -1812,6 +1812,11 @@ impl EditSession {
         self.engine.set_display_retain_built_pages(retain);
     }
 
+    /// Let an eligible resident text edit re-lower only its paragraph. Off by default.
+    pub fn set_local_lowering(&self, enabled: bool) {
+        self.engine.set_local_lowering(enabled);
+    }
+
     /// Limit incremental rebuilds to the display window and caret pages. Off by default.
     pub fn set_windowed_incremental_builds(&self, enabled: bool) {
         let _fonts = self.fonts.enter();

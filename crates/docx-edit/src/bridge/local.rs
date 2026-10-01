@@ -54,6 +54,13 @@ fn unsafe_value(key: &str, value: &Any) -> bool {
 }
 
 impl LocalLowering {
+    pub(crate) fn new(enabled: bool) -> Self {
+        Self {
+            blocked: !enabled,
+            ..Default::default()
+        }
+    }
+
     pub(super) fn observe<T: ReadTxn>(
         &mut self,
         paragraph: &mut ParagraphSeed,
