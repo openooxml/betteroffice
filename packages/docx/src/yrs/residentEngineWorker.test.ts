@@ -1910,6 +1910,102 @@ describe('worker proposals during sliced completion', () => {
     }
   });
 
+  const requirementsInput = (preview?: ReturnType<typeof proposalRevisionPreview>) => JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    renderEnv: { revisionPreview: preview },
+  });
+
+  async function decided(
+    w: Awaited<ReturnType<typeof proposalWorker>>['w'],
+    engine: Awaited<ReturnType<typeof proposalWorker>>['engine'],
+    proposal: Awaited<ReturnType<typeof proposalWorker>>['proposal']
+  ) {
+    const applied = await w.send({
+      type: 'proposal', operation: {
+        kind: 'propose', request: { expectVersion: engine.proposalEngine.version(), proposals: [proposal()] },
+      },
+    });
+    if (!applied.ok || !applied.proposal?.result?.ok) throw new Error('expected a proposal');
+    let previewVersion = applied.proposal.mirror.proposals.previewVersion;
+    return async (state: 'proposed' | 'accepted' | 'rejected') => {
+      const reply = await w.send({
+        type: 'proposal', operation: {
+          kind: 'setStates', request: {
+            expectVersion: applied.proposal!.mirror.version,
+            expectPreviewVersion: previewVersion,
+            changes: [{ id: 'p1', state }],
+          },
+        },
+      });
+      const result = reply.ok ? reply.proposal?.result : undefined;
+      if (!reply.ok || !reply.proposal || !result?.ok) throw new Error('expected a decision');
+      previewVersion = reply.proposal.mirror.proposals.previewVersion;
+      return { fontRequirements: reply.proposal.fontRequirements, preview: proposalRevisionPreview(result.snapshot) };
+    };
+  }
+
+  test('a decision answers with the font requirements of the layout input the host builds next, and an undo reads cached ones', async () => {
+    const { w, engine, proposal } = await proposalWorker();
+    try {
+      const decide = await decided(w, engine, proposal);
+      const asked = await w.send({ type: 'fontRequirements', layoutInput: requirementsInput() });
+      if (!asked.ok) throw new Error('expected font requirements');
+      let reads = 0;
+      Object.assign(w.harness.session, {
+        layoutFontRequirementsJson: (input: string) => {
+          reads += 1;
+          return engine.layoutFontRequirementsJson(input);
+        },
+      });
+
+      const accepted = await decide('accepted');
+      expect(accepted.preview).toBeDefined();
+      expect(accepted.fontRequirements).toEqual({
+        layoutInput: requirementsInput(accepted.preview),
+        requirementsJson: engine.layoutFontRequirementsJson(requirementsInput(accepted.preview)),
+      });
+      await w.send({ type: 'fontRequirements', layoutInput: requirementsInput(accepted.preview) });
+
+      const undone = await decide('proposed');
+      expect(undone.fontRequirements).toEqual({
+        layoutInput: requirementsInput(),
+        requirementsJson: asked.requirementsJson!,
+      });
+      const base = await w.send({ type: 'fontRequirements', layoutInput: requirementsInput() });
+      expect(base.ok && base.requirementsJson).toBe(asked.requirementsJson);
+      const rejected = await decide('rejected');
+      expect(rejected.fontRequirements?.layoutInput).toBe(requirementsInput(rejected.preview));
+      const again = await w.send({ type: 'fontRequirements', layoutInput: requirementsInput(rejected.preview) });
+      expect(again.ok && again.requirementsJson).toBe(rejected.fontRequirements!.requirementsJson);
+      expect(reads).toBe(2);
+    } finally {
+      void w.send({ type: 'destroy' });
+    }
+  });
+
+  test('a decision whose font requirements cannot be read leaves them to the host', async () => {
+    const { w, engine, proposal } = await proposalWorker();
+    try {
+      const decide = await decided(w, engine, proposal);
+      await w.send({ type: 'fontRequirements', layoutInput: requirementsInput() });
+      Object.assign(w.harness.session, {
+        layoutFontRequirementsJson: () => {
+          throw new Error('unreadable');
+        },
+      });
+      const accepted = await decide('accepted');
+      expect(accepted.fontRequirements).toBeUndefined();
+      const asked = await w.send({
+        type: 'fontRequirements',
+        layoutInput: requirementsInput(accepted.preview),
+      });
+      expect(asked.ok).toBe(false);
+    } finally {
+      void w.send({ type: 'destroy' });
+    }
+  });
+
   test('cached navigation targets populate the first mirror and changed versions defer rebuilding', async () => {
     const { w, engine, proposal } = await proposalWorker();
     try {
