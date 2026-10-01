@@ -1965,9 +1965,13 @@ describe('worker proposals during sliced completion', () => {
         layoutInput: requirementsInput(accepted.preview),
         requirementsJson: engine.layoutFontRequirementsJson(requirementsInput(accepted.preview)),
       });
+      await w.send({ type: 'fontRequirements', layoutInput: requirementsInput(accepted.preview) });
 
       const undone = await decide('proposed');
-      expect(undone.fontRequirements).toBeUndefined();
+      expect(undone.fontRequirements).toEqual({
+        layoutInput: requirementsInput(),
+        requirementsJson: asked.requirementsJson,
+      });
       const base = await w.send({ type: 'fontRequirements', layoutInput: requirementsInput() });
       expect(base.ok && base.requirementsJson).toBe(asked.requirementsJson);
       const rejected = await decide('rejected');
@@ -1976,7 +1980,53 @@ describe('worker proposals during sliced completion', () => {
       expect(again.ok && again.requirementsJson).toBe(rejected.fontRequirements!.requirementsJson);
       expect(reads).toBe(2);
     } finally {
-      engine.destroy();
+      void w.send({ type: 'destroy' });
+    }
+  });
+
+  test('font requirements prime one preview at idle, skip a queued request, and cache the next accept', async () => {
+    const { w, engine, proposal } = await proposalWorker();
+    const waiting = deferred();
+    try {
+      const decide = await decided(w, engine, proposal);
+      const reads: string[] = [];
+      const primed = deferred();
+      Object.assign(w.harness.session, {
+        layoutFontRequirementsJson: (input: string) => {
+          reads.push(input);
+          const requirements = engine.layoutFontRequirementsJson(input);
+          if (JSON.parse(input).renderEnv.revisionPreview) primed.resolve();
+          return requirements;
+        },
+      });
+
+      w.harness.preloadBlock = waiting.promise;
+      const asked = w.send({ type: 'fontRequirements', layoutInput: requirementsInput() });
+      const queued = w.send({ type: 'warm' });
+      expect((await asked).ok).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(reads).toEqual([requirementsInput()]);
+      waiting.resolve();
+      expect((await queued).ok).toBe(true);
+      w.harness.preloadBlock = null;
+
+      expect((await w.send({ type: 'fontRequirements', layoutInput: requirementsInput() })).ok).toBe(true);
+      await primed.promise;
+      expect(reads).toHaveLength(2);
+      const accepted = await decide('accepted');
+      expect(accepted.preview).toBeDefined();
+      expect(accepted.fontRequirements).toEqual({
+        layoutInput: requirementsInput(accepted.preview),
+        requirementsJson: engine.layoutFontRequirementsJson(requirementsInput(accepted.preview)),
+      });
+      expect(reads).toEqual([requirementsInput(), requirementsInput(accepted.preview)]);
+
+      await w.send({ type: 'fontRequirements', layoutInput: requirementsInput() });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(reads).toEqual([requirementsInput(), requirementsInput(accepted.preview)]);
+    } finally {
+      waiting.resolve();
+      void w.send({ type: 'destroy' });
     }
   });
 
@@ -1990,6 +2040,9 @@ describe('worker proposals during sliced completion', () => {
           throw new Error('unreadable');
         },
       });
+      const answered = w.answered.length;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(w.answered).toHaveLength(answered);
       const accepted = await decide('accepted');
       expect(accepted.fontRequirements).toBeUndefined();
       const asked = await w.send({
@@ -1998,7 +2051,7 @@ describe('worker proposals during sliced completion', () => {
       });
       expect(asked.ok).toBe(false);
     } finally {
-      engine.destroy();
+      void w.send({ type: 'destroy' });
     }
   });
 

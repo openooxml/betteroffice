@@ -56,6 +56,7 @@ let requirementsCache: {
   owner: ResidentEngineSession;
   version: string;
   byInput: Map<string, string>;
+  release: () => void;
 } | null = null;
 /** The layout input of the host's last font requirements request. */
 let requestedRequirements: { owner: ResidentEngineSession; layoutInput: string } | null = null;
@@ -71,6 +72,7 @@ let layoutRevision = 0;
 // when the snapshot's revision matches what this session already holds.
 let fontsRevision = -1;
 let operations = Promise.resolve();
+let requestsWaiting = 0;
 let retainedFrame: RetainedFrame | null = null;
 let glyphCache: GlyphCache | null = null;
 const offscreenCanvases = new Map<string, OffscreenCanvas>();
@@ -137,7 +139,14 @@ let handlingId = 0;
 const trappedIds = new Set<number>();
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
-  enqueue(() => handle(event.data), event.data.id);
+  requestsWaiting += 1;
+  enqueue(async () => {
+    try {
+      await handle(event.data);
+    } finally {
+      requestsWaiting -= 1;
+    }
+  }, event.data.id);
 };
 
 /** `current` drops an operation whose request was answered while it waited. */
@@ -304,6 +313,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       requirementsJson,
     };
     reply({ id: request.id, ok: true, requirementsJson });
+    primePreviewFontRequirements(session, request.layoutInput, request.id);
     return;
   }
   if (request.type === 'encodeState') {
@@ -387,7 +397,6 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         request.operation.kind === 'setStates' &&
         result?.ok === true &&
         changedStories.length === 0 &&
-        preview !== undefined &&
         requestedRequirements?.owner === session
       ) {
         fontRequirements = previewFontRequirements(
@@ -748,10 +757,21 @@ function hydrate(
   return { layoutJson, provisional };
 }
 
+function forgetRequirementsCache(): void {
+  requirementsCache?.release();
+  requirementsCache = null;
+}
+
 function layoutFontRequirements(engine: ResidentEngineSession, layoutInput: string): string {
   const version = engine.proposalEngine.version();
   if (requirementsCache?.owner !== engine || requirementsCache.version !== version) {
-    requirementsCache = { owner: engine, version, byInput: new Map() };
+    forgetRequirementsCache();
+    requirementsCache = {
+      owner: engine,
+      version,
+      byInput: new Map(),
+      release: engine.onUpdate(forgetRequirementsCache),
+    };
   }
   const cached = requirementsCache.byInput.get(layoutInput);
   if (cached !== undefined) return cached;
@@ -770,13 +790,15 @@ function layoutFontRequirements(engine: ResidentEngineSession, layoutInput: stri
 function previewFontRequirements(
   engine: ResidentEngineSession,
   layoutInput: string,
-  preview: NonNullable<ReturnType<typeof proposalRevisionPreview>>,
+  preview: ReturnType<typeof proposalRevisionPreview>,
   version: string
 ): NonNullable<typeof fontRequirements> | null {
   try {
+    if (engine.proposalEngine.version() !== version) return null;
     const request = JSON.parse(layoutInput) as { renderEnv?: Record<string, unknown> | null };
     if (!request.renderEnv || typeof request.renderEnv !== 'object') return null;
-    request.renderEnv.revisionPreview = preview;
+    if (preview === undefined) delete request.renderEnv.revisionPreview;
+    else request.renderEnv.revisionPreview = preview;
     const next = JSON.stringify(request);
     return { version, layoutInput: next, requirementsJson: layoutFontRequirements(engine, next) };
   } catch (error) {
@@ -784,6 +806,34 @@ function previewFontRequirements(
     if (trap) throw trap;
     if (error instanceof WebAssembly.RuntimeError) throw error;
     return null;
+  }
+}
+
+function primePreviewFontRequirements(
+  engine: ResidentEngineSession,
+  layoutInput: string,
+  id: number
+): void {
+  if (!proposals) return;
+  try {
+    const request = JSON.parse(layoutInput) as { renderEnv?: Record<string, unknown> | null };
+    if (!request.renderEnv || request.renderEnv.revisionPreview !== undefined) return;
+    const snapshot = proposals.snapshot();
+    const first = snapshot.proposals.find((proposal) => proposal.revisionIds.length > 0);
+    if (!first) return;
+    const preview = proposalRevisionPreview({
+      ...snapshot,
+      proposals: [{ ...first, state: 'accepted' }],
+    });
+    setTimeout(() => {
+      if (session !== engine || requestsWaiting > 0) return;
+      enqueue(() => {
+        previewFontRequirements(engine, layoutInput, preview, snapshot.version);
+      }, id, () => session === engine && requestsWaiting === 0);
+    }, 0);
+  } catch (error) {
+    if (trap) throw trap;
+    if (error instanceof WebAssembly.RuntimeError) throw error;
   }
 }
 
@@ -1096,7 +1146,7 @@ function asciiProposalFontsUnchanged(
 function destroySession(keepSurfaces = false): void {
   supersedeBackgroundPageBuild();
   fontRequirements = null;
-  requirementsCache = null;
+  forgetRequirementsCache();
   requestedRequirements = null;
   unsubscribe?.();
   unsubscribe = null;
