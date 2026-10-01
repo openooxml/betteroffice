@@ -5877,7 +5877,7 @@ pub(crate) fn seed_stories(document: &EditingDoc, bytes: &[u8]) -> Result<(), St
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../tests/support/structured_fixture.rs"]
-mod fixture;
+pub(crate) mod fixture;
 
 #[cfg(test)]
 mod tests {

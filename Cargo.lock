@@ -116,6 +116,7 @@ version = "0.4.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-ooxml-text",
+ "foldhash",
  "serde",
  "serde_json",
  "unicode-segmentation",
