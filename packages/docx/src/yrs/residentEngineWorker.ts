@@ -62,6 +62,8 @@ let requestedRequirements: { owner: ResidentEngineSession; layoutInput: string }
 const REQUIREMENTS_CACHE_INPUTS = 8;
 /** Set while the session holds the document `open` seeded, with the heap limit it used. */
 let openedDocument: { heapLimitBytes?: number } | null = null;
+// The opened document is a display-only preview that an `open` of the whole package replaces.
+let previewing = false;
 let unsubscribe: (() => void) | null = null;
 let pendingUpdates: Uint8Array[] = [];
 let layoutRevision = 0;
@@ -207,22 +209,34 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'open') {
-    // One document per worker, so every queued request addresses the one it was sent for.
-    if (session) {
+    // One document per worker, so every queued request addresses the one it was sent for;
+    // only a preview gives way, to the whole document.
+    if (session && (!previewing || request.previewBlocks !== undefined)) {
       throw new Error('Resident engine worker already holds a document');
     }
+    // The preview's memory goes before the whole package seeds; its pages stay painted.
+    if (session) destroySession(true);
     const opening = await createResidentEngineSession(request.heapLimitBytes);
-    let hostJson: string;
+    let hostJson: string | null;
     try {
-      hostJson = opening.openDocx(new Uint8Array(request.bytes), request.digest, request.generation);
+      hostJson =
+        request.previewBlocks === undefined
+          ? opening.openDocx(new Uint8Array(request.bytes), request.digest, request.generation)
+          : opening.openDocxPreview(new Uint8Array(request.bytes), request.previewBlocks);
     } catch (error) {
       if (!(error instanceof WebAssembly.RuntimeError)) opening.destroy();
       throw error;
+    }
+    if (hostJson === null) {
+      opening.destroy();
+      reply({ id: request.id, ok: true, previewRefused: true });
+      return;
     }
     proposals?.destroy();
     proposals = null;
     session = opening;
     openedDocument = { heapLimitBytes: request.heapLimitBytes };
+    previewing = request.previewBlocks !== undefined;
     const stateVector = exactBuffer(session.encodeStateVector());
     reply({ id: request.id, ok: true, hostJson, stateVector }, [stateVector]);
     return;
@@ -289,11 +303,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       layoutInput: request.layoutInput,
       requirementsJson,
     };
-    reply({
-      id: request.id,
-      ok: true,
-      requirementsJson,
-    });
+    reply({ id: request.id, ok: true, requirementsJson });
     return;
   }
   if (request.type === 'encodeState') {
@@ -1096,6 +1106,7 @@ function destroySession(keepSurfaces = false): void {
   lastProposalMirrorVersion = null;
   session = null;
   openedDocument = null;
+  previewing = false;
   pendingUpdates = [];
   layoutRevision = 0;
   fontsRevision = -1;
