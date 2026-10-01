@@ -276,6 +276,26 @@ test('a numbered paragraph keeps an indent edit that equals its style indent', a
   expect(paragraphs(xml)[0]).toContain('w:left="720"');
 });
 
+test('an indent edit is kept on a paragraph whose new style is numbered', async () => {
+  const numbering =
+    '<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/>' +
+    '<w:lvlText w:val="%1."/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum>' +
+    '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>';
+  const styles = `<w:styles xmlns:w="${W}">
+  <w:docDefaults><w:pPrDefault><w:pPr><w:ind w:left="720"/></w:pPr></w:pPrDefault></w:docDefaults>
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="List"><w:name w:val="List"/><w:basedOn w:val="Normal"/><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:style>
+</w:styles>`;
+  const xml = await repackAfter(fixture('', '', '', { styles, numbering }), (session) => {
+    const first = session.paragraphs('body')[0]!;
+    const position = { paraId: first.paraId, offset: 0 };
+    session.applyParagraphStyle({ story: 'body', start: position, end: position }, 'List');
+    setFirst(session, { indentLeft: 720 });
+  });
+  expect(paragraphs(xml)[0]).toContain('<w:pStyle w:val="List"/>');
+  expect(paragraphs(xml)[0]).toContain('w:left="720"');
+});
+
 test('a spacing edit is kept when the resolver synthesizes the paragraph defaults', async () => {
   const bytes = fixture('', '', '', { styles: `<w:styles xmlns:w="${W}"/>` });
   const xml = await repackAfter(bytes, (session) => setFirst(session, { spaceAfter: 160 }));
