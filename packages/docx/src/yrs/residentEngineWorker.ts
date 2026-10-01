@@ -51,15 +51,18 @@ let fontRequirements: {
   layoutInput: string;
   requirementsJson: string;
 } | null = null;
-/** Set while the session holds the document `open` seeded, with the heap limit it used. */
-let openedDocument: { heapLimitBytes?: number } | null = null;
-// The last font requirements answered, kept until the session's next document update.
-let requirementsAnswered: {
-  session: ResidentEngineSession;
-  layoutInput: string;
-  json: string;
+/** Font requirements by layout input, for one session at one document version. */
+let requirementsCache: {
+  owner: ResidentEngineSession;
+  version: string;
+  byInput: Map<string, string>;
   release: () => void;
 } | null = null;
+/** The layout input of the host's last font requirements request. */
+let requestedRequirements: { owner: ResidentEngineSession; layoutInput: string } | null = null;
+const REQUIREMENTS_CACHE_INPUTS = 8;
+/** Set while the session holds the document `open` seeded, with the heap limit it used. */
+let openedDocument: { heapLimitBytes?: number } | null = null;
 // The opened document is a display-only preview that an `open` of the whole package replaces.
 let previewing = false;
 let unsubscribe: (() => void) | null = null;
@@ -294,25 +297,14 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'fontRequirements') {
     if (!session) throw new Error('Resident engine worker is not initialized');
-    if (
-      requirementsAnswered?.session !== session ||
-      requirementsAnswered.layoutInput !== request.layoutInput
-    ) {
-      forgetRequirements();
-      const json = session.layoutFontRequirementsJson(request.layoutInput);
-      requirementsAnswered = {
-        session,
-        layoutInput: request.layoutInput,
-        json,
-        release: session.onUpdate(forgetRequirements),
-      };
-    }
+    const requirementsJson = layoutFontRequirements(session, request.layoutInput);
+    requestedRequirements = { owner: session, layoutInput: request.layoutInput };
     fontRequirements = {
       version: session.proposalEngine.version(),
       layoutInput: request.layoutInput,
-      requirementsJson: requirementsAnswered.json,
+      requirementsJson,
     };
-    reply({ id: request.id, ok: true, requirementsJson: requirementsAnswered.json });
+    reply({ id: request.id, ok: true, requirementsJson });
     return;
   }
   if (request.type === 'encodeState') {
@@ -390,6 +382,21 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           (request.operation.kind === 'snapshot' && fontRequirements.version === snapshot.version))
           ? { ...fontRequirements, version: snapshot.version }
           : null;
+      // A decision changes only the preview: the host's next input is its last one previewing it.
+      const preview = proposalRevisionPreview(snapshot);
+      if (
+        request.operation.kind === 'setStates' &&
+        result?.ok === true &&
+        changedStories.length === 0 &&
+        requestedRequirements?.owner === session
+      ) {
+        fontRequirements = previewFontRequirements(
+          session,
+          requestedRequirements.layoutInput,
+          preview,
+          snapshot.version
+        );
+      }
       reply(
         {
           id: request.id,
@@ -741,6 +748,58 @@ function hydrate(
   return { layoutJson, provisional };
 }
 
+function forgetRequirementsCache(): void {
+  requirementsCache?.release();
+  requirementsCache = null;
+}
+
+function layoutFontRequirements(engine: ResidentEngineSession, layoutInput: string): string {
+  const version = engine.proposalEngine.version();
+  if (requirementsCache?.owner !== engine || requirementsCache.version !== version) {
+    forgetRequirementsCache();
+    requirementsCache = {
+      owner: engine,
+      version,
+      byInput: new Map(),
+      release: engine.onUpdate(forgetRequirementsCache),
+    };
+  }
+  const cached = requirementsCache.byInput.get(layoutInput);
+  if (cached !== undefined) return cached;
+  const requirementsJson = engine.layoutFontRequirementsJson(layoutInput);
+  if (requirementsCache.byInput.size >= REQUIREMENTS_CACHE_INPUTS) {
+    requirementsCache.byInput.delete(requirementsCache.byInput.keys().next().value as string);
+  }
+  requirementsCache.byInput.set(layoutInput, requirementsJson);
+  return requirementsJson;
+}
+
+/**
+ * The font requirements of `layoutInput` previewing `preview`, keyed by the input the host builds
+ * for it (its render environment with `revisionPreview` replaced), or null when they cannot be read.
+ */
+function previewFontRequirements(
+  engine: ResidentEngineSession,
+  layoutInput: string,
+  preview: ReturnType<typeof proposalRevisionPreview>,
+  version: string
+): NonNullable<typeof fontRequirements> | null {
+  try {
+    if (engine.proposalEngine.version() !== version) return null;
+    const request = JSON.parse(layoutInput) as { renderEnv?: Record<string, unknown> | null };
+    if (!request.renderEnv || typeof request.renderEnv !== 'object') return null;
+    if (preview === undefined) delete request.renderEnv.revisionPreview;
+    else request.renderEnv.revisionPreview = preview;
+    const next = JSON.stringify(request);
+    return { version, layoutInput: next, requirementsJson: layoutFontRequirements(engine, next) };
+  } catch (error) {
+    // The host reads them itself and meets the failure there.
+    if (trap) throw trap;
+    if (error instanceof WebAssembly.RuntimeError) throw error;
+    return null;
+  }
+}
+
 function setFrameDisplayWindow(
   engine: ResidentEngineSession,
   window?: [number, number],
@@ -1043,11 +1102,6 @@ function asciiProposalFontsUnchanged(
   return true;
 }
 
-function forgetRequirements(): void {
-  requirementsAnswered?.release();
-  requirementsAnswered = null;
-}
-
 /**
  * Drops the document. `keepSurfaces` keeps the attached page canvases, still
  * showing the old pages, for a document that replaces it page for page.
@@ -1055,9 +1109,10 @@ function forgetRequirements(): void {
 function destroySession(keepSurfaces = false): void {
   supersedeBackgroundPageBuild();
   fontRequirements = null;
+  forgetRequirementsCache();
+  requestedRequirements = null;
   unsubscribe?.();
   unsubscribe = null;
-  forgetRequirements();
   proposals?.destroy();
   proposals = null;
   session?.destroy();

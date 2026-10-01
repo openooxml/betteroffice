@@ -1682,8 +1682,8 @@ export interface InitOutput {
     readonly wasm_heap_counted: () => number;
     readonly wasm_live_bytes: () => number;
     readonly wasm_peak_bytes: () => number;
-    readonly set_wasm_heap_limit: (a: number) => void;
     readonly reset_wasm_peak_bytes: () => void;
+    readonly set_wasm_heap_limit: (a: number) => void;
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
     readonly clear_measure_fonts: () => [number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -1702,8 +1702,8 @@ export interface InitOutput {
     readonly update_display_list: (a: number, b: number, c: number) => [number, number];
     readonly vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-    readonly install_panic_hook: () => void;
     readonly close_display_list: (a: number) => void;
+    readonly install_panic_hook: () => void;
     readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s2: (a: number, b: number) => [number, number, number, number];
