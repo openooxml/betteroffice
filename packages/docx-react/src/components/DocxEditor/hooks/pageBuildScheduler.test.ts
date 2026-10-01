@@ -70,3 +70,18 @@ test('the frame fallback skips busy frames and cancellation stops the deferred f
     clock.mockRestore();
   }
 });
+
+test('urgent work runs from a timer within the budget without waiting for idle time', async () => {
+  let idleRequests = 0;
+  globalThis.requestIdleCallback = (() => ++idleRequests) as typeof requestIdleCallback;
+  const remaining: number[] = [];
+  await new Promise<void>((resolve) => {
+    scheduleIdlePageBuild((deadline) => {
+      remaining.push(deadline.timeRemaining());
+      resolve();
+    }, true);
+  });
+  expect(idleRequests).toBe(0);
+  expect(remaining[0]).toBeGreaterThan(0);
+  expect(remaining[0]).toBeLessThanOrEqual(8);
+});

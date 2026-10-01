@@ -3,8 +3,16 @@ const FRAME_BUDGET_MS = 8;
 export type PageBuildTask = { cancel(): void };
 
 export function scheduleIdlePageBuild(
-  run: (deadline: Pick<IdleDeadline, 'timeRemaining'>) => void
+  run: (deadline: Pick<IdleDeadline, 'timeRemaining'>) => void,
+  urgent = false
 ): PageBuildTask {
+  if (urgent) {
+    const id = setTimeout(() => {
+      const started = performance.now();
+      run({ timeRemaining: () => Math.max(0, FRAME_BUDGET_MS - (performance.now() - started)) });
+    }, 0);
+    return { cancel: () => clearTimeout(id) };
+  }
   if (typeof requestIdleCallback === 'function') {
     const id = requestIdleCallback((deadline) => {
       const started = performance.now();
