@@ -426,7 +426,8 @@ export function useRustDisplayList(
   // The engine whose layout the shown frame is of: another engine's frames
   // never apply to it as a base.
   const frameEngineRef = useRef<unknown>(null);
-  const mainFrameEngineRef = useRef<YrsSession | null>(null);
+  // The worker-open main-engine frame shown, and the content epoch it was built for.
+  const mainFrameRef = useRef<{ engine: YrsSession; contentEpoch: number } | null>(null);
   const [presentedEngine, setPresentedEngine] = useState<unknown>(null);
   const [snapshot, setSnapshot] = useState<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
   const snapshotRef = useRef<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
@@ -731,7 +732,8 @@ export function useRustDisplayList(
     const hostEngine = residentEngineRef.current;
     return workerOpenEnabledRef.current &&
       hostEngine?.setDisplayWindow &&
-      mainFrameEngineRef.current === hostEngine &&
+      mainFrameRef.current?.engine === hostEngine &&
+      mainFrameRef.current.contentEpoch === contentEpochRef.current &&
       frameEngineRef.current === hostEngine &&
       hostEngine.isDisplayOnly?.() !== true &&
       !workerPreviewEnginesRef.current.has(hostEngine) &&
@@ -854,7 +856,7 @@ export function useRustDisplayList(
       setSnapshot(fallbackSnapshot);
       endOpenLines(false);
       workerFallbackEngineRef.current = hostEngine;
-      mainFrameEngineRef.current = hostEngine;
+      mainFrameRef.current = null;
     },
     [endOpenLines, failWorkerDocument, queryEpochGate, setMainFrameDisplayWindow]
   );
@@ -1064,6 +1066,7 @@ export function useRustDisplayList(
           sourceLine(hostEngine)
         );
         generationRef.current += 1;
+        mainFrameRef.current = null;
         snapshotRef.current = nextSnapshot;
         publishQuerySnapshot(nextSnapshot, contentEpochRef.current);
         setSnapshot(nextSnapshot);
@@ -1174,7 +1177,7 @@ export function useRustDisplayList(
           return { frameEpoch: null, caretSynchronized: false, deletedUnits: result.deletedUnits };
         }
         const nextFrame = applyFrameDeltaOwned(previous.frame, delta);
-        mainFrameEngineRef.current = null;
+        mainFrameRef.current = null;
         const caret = residentCaretForSelection(
           result.caret,
           result.selection,
@@ -1653,6 +1656,16 @@ export function useRustDisplayList(
     []
   );
 
+  const mainCaretPage = (): number | undefined => {
+    const main = mainFrameRef.current;
+    if (!main || frameEngineRef.current !== main.engine) return undefined;
+    try {
+      return main.engine.residentCaretSnapshot().caretRect?.pageIndex;
+    } catch {
+      return undefined;
+    }
+  };
+
   const pagesToRelease = useCallback((frame: RetainedFrame): number[] => {
     if (
       !workerOpenEnabledRef.current ||
@@ -1664,7 +1677,7 @@ export function useRustDisplayList(
     const [start, end] = displayWindowRef.current;
     const first = Math.max(0, start - WORKER_OPEN_RETAIN_MARGIN_PAGES);
     const last = Math.min(frame.pages.length, end + WORKER_OPEN_RETAIN_MARGIN_PAGES);
-    const caretPage = snapshotRef.current.caret?.caretRect?.pageIndex;
+    const caretPage = snapshotRef.current.caret?.caretRect?.pageIndex ?? mainCaretPage();
     const candidates: number[] = [];
     for (let index = 0; index < frame.pages.length; index += 1) {
       if (
@@ -1682,6 +1695,8 @@ export function useRustDisplayList(
     (idle = false): void => {
       pageBuildTimerRef.current = null;
       const mainEngine = mainPageBuildEngine();
+      // A main-engine frame of an older content epoch waits for the frame of its relayout.
+      if (!mainEngine && mainFrameRef.current?.engine === frameEngineRef.current) return;
       const worker = mainEngine ? null : workerRef.current;
       const targetEngine = worker?.engine ?? mainEngine;
       const frame = snapshotRef.current.frame;
@@ -2852,7 +2867,10 @@ export function useRustDisplayList(
         publishQuerySnapshot(nextSnapshot, contentEpoch);
         setSnapshot(nextSnapshot);
         frameEngineRef.current = residentEngine ?? engine ?? null;
-        mainFrameEngineRef.current = result.workerProduced || !result.frame ? null : residentEngine;
+        mainFrameRef.current =
+          workerOpenEnabledRef.current && residentEngine && result.frame && !result.workerProduced
+            ? { engine: residentEngine, contentEpoch }
+            : null;
         setPresentedEngine(residentEngine ?? engine ?? null);
         setError(null);
         setLoading(false);
