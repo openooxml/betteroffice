@@ -27,6 +27,15 @@ pub fn break_opportunities(text: &str) -> Vec<BreakOpportunity> {
         .collect()
 }
 
+/// Whether a line may break between `before` and `after` when they meet,
+/// e.g. at the seam of two runs.
+pub fn break_allowed_between(before: char, after: char) -> bool {
+    let pair: String = [before, after].iter().collect();
+    break_opportunities(&pair)
+        .iter()
+        .any(|opportunity| opportunity.byte_index == before.len_utf8())
+}
+
 /// UAX-14 keeps a hyphen glued to the number after it, so `COVID-19` never
 /// wraps. PowerPoint breaks there, as its own render of the corpus shows, so a
 /// slide takes this set instead: the UAX-14 opportunities plus one after every
