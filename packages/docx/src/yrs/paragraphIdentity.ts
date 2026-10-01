@@ -137,5 +137,15 @@ export type DocxParagraphAnchorResult =
   | { status: 'ambiguous'; candidates: DocxParagraphRef[] }
   | { status: 'unsupported'; reason: 'foreign-session' | 'foreign-package' | 'no-source-package' };
 
-/** The paragraph IDs a session save applies, as the package writer's `paragraphIds`. @internal */
-export type DocxParagraphSavePlan = RustParagraphIds;
+/**
+ * The paragraph IDs a session save applies, as the package writer's
+ * `paragraphIds`, with each spliced part's paragraphs as `[ordinal, session key]`. @internal
+ */
+export interface DocxParagraphSavePlan extends Omit<RustParagraphIds, 'splicedParts'> {
+  splicedParts?: Array<{
+    part: string;
+    sha256: string;
+    paragraphs: Array<[number, string]>;
+    changed: number[];
+  }>;
+}

@@ -4709,7 +4709,10 @@ impl EditSession {
 
     /// The paragraph IDs a save applies, as the package writer's
     /// `paragraphIds` request field: `{"assignments":[{"part","ordinal",
-    /// "paraId"}],"patchedParts":[{"part","paraIds":[[ordinal,"ID"]]}]}`.
+    /// "paraId"}],"patchedParts":[{"part","paraIds":[[ordinal,"ID"]]}]}`,
+    /// plus `"splicedParts":[{"part","sha256","paragraphs":[[ordinal,"key"]],
+    /// "changed":[ordinal]}]`, whose session keys the caller resolves to the
+    /// model paragraphs it marks with their ordinals.
     pub fn paragraph_save_plan(&self) -> Result<String, JsValue> {
         let plan = self.engine.doc().paragraph_save_plan();
         serde_json::to_string(&json!({
@@ -4724,6 +4727,18 @@ impl EditSession {
                 .patched_parts
                 .iter()
                 .map(|(part, para_ids)| json!({ "part": part, "paraIds": para_ids }))
+                .collect::<Vec<_>>(),
+            "splicedParts": plan
+                .spliced_parts
+                .iter()
+                .map(|part| {
+                    json!({
+                        "part": part.part,
+                        "sha256": part.sha256,
+                        "paragraphs": part.paragraphs,
+                        "changed": part.changed,
+                    })
+                })
                 .collect::<Vec<_>>(),
         }))
         .map_err(js_err)
