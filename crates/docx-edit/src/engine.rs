@@ -2105,13 +2105,7 @@ impl EngineSession {
             || epoch != lowered.doc_epoch.wrapping_add(1)
             || lowered.env != *env
             || lowered.media != self.doc.media_sources()
-            || !lowered.revealable_blocks.is_empty()
             || !lowered.local.matches_source(&self.doc)
-            || self.regions.borrow().as_ref().is_some_and(|state| {
-                state.fast_path.as_ref().is_none_or(|fast| {
-                    !fast.notes_clear || fast.regions.sections.is_empty() || fast.render_env != *env
-                })
-            })
         {
             return None;
         }
@@ -2119,7 +2113,10 @@ impl EngineSession {
         let blocks = Rc::get_mut(&mut lowered.blocks)?;
         let map = Rc::get_mut(&mut lowered.map)?;
         let txn = self.doc.yrs_doc().transact();
-        lowered.local.patch(blocks, map, &txn, env, &edit)?;
+        let revealable = Rc::get_mut(&mut lowered.revealable_blocks)?;
+        lowered
+            .local
+            .patch(blocks, map, revealable, &txn, env, &edit)?;
         lowered.doc_epoch = epoch;
         lowered.serialized_blocks = None;
         Some(())
@@ -6697,6 +6694,7 @@ mod tests {
             (
                 serde_json::to_string(lowered.blocks.as_ref()).unwrap(),
                 lowered.map.as_ref().clone(),
+                serde_json::to_string(lowered.revealable_blocks.as_ref()).unwrap(),
                 serde_json::to_string(&pagination.input.as_ref().unwrap().measured).unwrap(),
                 pagination.block_fingerprints.clone(),
                 serde_json::to_string(&pagination.layout.as_ref().unwrap().pages).unwrap(),
@@ -6733,6 +6731,569 @@ mod tests {
             patched && enabled,
             "{story} [{start}, {end}) {text:?} enabled={enabled}"
         );
+    }
+
+    fn local_blocker_sweep(bytes: &[u8], targets: &[(usize, bool)]) {
+        local_blocker_sweep_with(bytes, targets, None);
+    }
+
+    fn local_blocker_sweep_with(
+        bytes: &[u8],
+        targets: &[(usize, bool)],
+        setup: Option<&dyn Fn(&EngineSession)>,
+    ) {
+        let laid_out = || {
+            let (engine, request) = local_patch_laid_out(bytes, 9620, true);
+            if let Some(setup) = setup {
+                setup(&engine);
+                engine.render.replace(Default::default());
+                engine
+                    .layout_document_with_regions_retained_json(&request)
+                    .unwrap();
+                engine.build_display_list_frame("{}", 0).unwrap();
+            }
+            (engine, request)
+        };
+        let (initial, _) = laid_out();
+        let index = initial.doc().paragraph_index("body").unwrap();
+        let mut ranges = Vec::new();
+        let mut cursor = 0;
+        while let Some(paragraph) = index.para_at(cursor) {
+            ranges.push((paragraph.node_start, paragraph.pilcrow));
+            cursor = paragraph.pilcrow + 1;
+        }
+        for &(paragraph, patched) in targets {
+            let (start, end) = ranges[paragraph];
+            for at in start..=end {
+                for inserted in ["x", "😀"] {
+                    let (engine, request) = laid_out();
+                    local_patch_step(&engine, &request, "body", (at, at, Some(inserted)), patched);
+                    local_patch_step(
+                        &engine,
+                        &request,
+                        "body",
+                        (at, at + inserted.encode_utf16().count() as u32, None),
+                        patched,
+                    );
+                }
+                if at < end {
+                    let (engine, request) = laid_out();
+                    local_patch_step(&engine, &request, "body", (at, at + 1, None), patched);
+                }
+            }
+        }
+    }
+
+    fn local_blocker_matrix(
+        feature: impl Fn(&str) -> String,
+        package: impl Fn(lowering_fixture::Package) -> lowering_fixture::Package,
+    ) {
+        use super::lowering_fixture::{Package, para, run};
+        for owner in 0..3 {
+            let body: String = (0..3)
+                .map(|paragraph| {
+                    let id = format!("{:08X}", 0x10000001 + paragraph);
+                    if paragraph == owner {
+                        feature(&id)
+                    } else {
+                        para(&id, &run("ab"))
+                    }
+                })
+                .collect();
+            let bytes = package(Package::new(&body)).bytes();
+            let targets: Vec<_> = (0..3)
+                .map(|paragraph| (paragraph, paragraph != owner))
+                .collect();
+            local_blocker_sweep(&bytes, &targets);
+        }
+    }
+
+    fn local_comment_package(package: lowering_fixture::Package) -> lowering_fixture::Package {
+        package.part(
+            "comments.xml", "rIdComments", "comments", "comments",
+            &format!(r#"<w:comments {}><w:comment w:id="0" w:author="A"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:comment></w:comments>"#, lowering_fixture::NS),
+        )
+    }
+
+    fn local_note_package(package: lowering_fixture::Package) -> lowering_fixture::Package {
+        ["footnote", "endnote"].into_iter().fold(package, |package, kind| {
+            package.part(
+                &format!("{kind}s.xml"), &format!("rId{kind}"),
+                if kind == "footnote" { "footnotes" } else { "endnotes" },
+                if kind == "footnote" { "footnotes" } else { "endnotes" },
+                &format!(r#"<w:{kind}s {}><w:{kind} w:id="1"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:{kind}></w:{kind}s>"#, lowering_fixture::NS),
+            )
+        })
+    }
+
+    const LOCAL_INLINE_IMAGE: &str = r#"<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="picture"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#;
+
+    fn local_anchored_image() -> String {
+        LOCAL_INLINE_IMAGE
+            .replace("<wp:inline>", r#"<wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="0" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:wrapSquare wrapText="bothSides"/>"#)
+            .replace("</wp:inline>", "</wp:anchor>")
+    }
+
+    fn local_image_package(package: lowering_fixture::Package) -> lowering_fixture::Package {
+        package.rel("rIdImage", "image", "media/image1.png")
+    }
+
+    #[test]
+    fn resident_bookmark_paragraph_blockers_match_cold_full() {
+        use super::lowering_fixture::{Package, para, run};
+        local_blocker_matrix(
+            |id| {
+                para(
+                    id,
+                    r#"<w:bookmarkStart w:id="0" w:name="mark"/><w:r><w:t>ab</w:t></w:r><w:bookmarkEnd w:id="0"/>"#,
+                )
+            },
+            |package| package,
+        );
+        let body = format!(
+            "{}{}{}{}{}",
+            para("10000001", &run("ab")),
+            para(
+                "10000002",
+                r#"<w:bookmarkStart w:id="0" w:name="mark"/><w:r><w:t>ab</w:t></w:r>"#
+            ),
+            para("10000003", &run("ab")),
+            para(
+                "10000004",
+                r#"<w:r><w:t>ab</w:t></w:r><w:bookmarkEnd w:id="0"/>"#
+            ),
+            para("10000005", &run("ab")),
+        );
+        local_blocker_sweep(
+            &Package::new(&body).bytes(),
+            &[(0, true), (1, false), (2, true), (3, false), (4, true)],
+        );
+    }
+
+    #[test]
+    fn resident_comment_range_blockers_match_cold_full() {
+        use super::lowering_fixture::{Package, para, run};
+        local_blocker_matrix(
+            |id| {
+                para(
+                    id,
+                    r#"<w:commentRangeStart w:id="0"/><w:r><w:t>ab</w:t></w:r><w:commentRangeEnd w:id="0"/>"#,
+                )
+            },
+            local_comment_package,
+        );
+        let body = format!(
+            "{}{}{}{}{}",
+            para("10000001", &run("ab")),
+            para(
+                "10000002",
+                r#"<w:commentRangeStart w:id="0"/><w:r><w:t>ab</w:t></w:r>"#
+            ),
+            para("10000003", &run("ab")),
+            para(
+                "10000004",
+                r#"<w:r><w:t>ab</w:t></w:r><w:commentRangeEnd w:id="0"/>"#
+            ),
+            para("10000005", &run("ab")),
+        );
+        local_blocker_sweep(
+            &local_comment_package(Package::new(&body)).bytes(),
+            &[(0, true), (1, false), (2, false), (3, false), (4, true)],
+        );
+        let plain: String = (0..3)
+            .map(|index| para(&format!("{:08X}", 0x10000001 + index), &run("ab")))
+            .collect();
+        let bytes = Package::new(&plain).bytes();
+        local_blocker_sweep_with(
+            &bytes,
+            &[(0, true), (1, true), (2, true)],
+            Some(&|engine| {
+                engine
+                    .doc()
+                    .create_story("fn:1", "ab", "Normal", "left")
+                    .unwrap();
+                engine
+                    .doc()
+                    .add_comment(
+                        &[crate::StoryRange::new("fn:1", 0, 2)],
+                        "A",
+                        "",
+                        yrs::Any::Null,
+                    )
+                    .unwrap();
+            }),
+        );
+        local_blocker_sweep_with(
+            &bytes,
+            &[(0, true), (1, false), (2, true)],
+            Some(&|engine| {
+                engine
+                    .doc()
+                    .add_comment(
+                        &[crate::StoryRange::new("body", 4, 4)],
+                        "A",
+                        "",
+                        yrs::Any::Null,
+                    )
+                    .unwrap();
+            }),
+        );
+    }
+
+    #[test]
+    fn resident_hyperlink_paragraph_blockers_match_cold_full() {
+        local_blocker_matrix(
+            |id| {
+                lowering_fixture::para(
+                    id,
+                    r#"<w:hyperlink w:anchor="mark" w:tooltip="Tip"><w:r><w:t>ab</w:t></w:r></w:hyperlink>"#,
+                )
+            },
+            |package| package,
+        );
+    }
+
+    #[test]
+    fn resident_field_paragraph_blockers_match_cold_full() {
+        for content in [
+            r#"<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>"#,
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> REF mark </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>ab</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+        ] {
+            local_blocker_matrix(|id| lowering_fixture::para(id, content), |package| package);
+        }
+    }
+
+    #[test]
+    fn resident_spanning_field_dependencies_match_cold_full() {
+        use super::lowering_fixture::{Package, para, run};
+        let body = format!(
+            "{}{}{}{}{}",
+            para("10000001", &run("ab")),
+            para(
+                "10000002",
+                r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> 123 </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>cached</w:t></w:r>"#
+            ),
+            para("10000003", &run("ab")),
+            para("10000004", r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#),
+            para("10000005", &run("ab")),
+        );
+        let bytes = Package::new(&body).bytes();
+        let (engine, _) = local_patch_laid_out(&bytes, 9620, true);
+        assert!(
+            !engine.render.borrow().stories["body"]
+                .revealable_blocks
+                .is_empty()
+        );
+        local_blocker_sweep(
+            &bytes,
+            &[(0, true), (1, false), (2, false), (3, false), (4, true)],
+        );
+    }
+
+    #[test]
+    fn resident_inline_image_paragraph_blockers_match_cold_full() {
+        local_blocker_matrix(
+            |id| {
+                lowering_fixture::para(
+                    id,
+                    &format!("{}{}", lowering_fixture::run("ab"), LOCAL_INLINE_IMAGE),
+                )
+            },
+            local_image_package,
+        );
+    }
+
+    #[test]
+    fn resident_anchored_drawing_paragraph_blockers_match_cold_full() {
+        for drawing in [local_anchored_image(), INSIDE_SHAPE.to_owned()] {
+            local_blocker_matrix(
+                |id| {
+                    lowering_fixture::para(
+                        id,
+                        &format!("{}{}", lowering_fixture::run("ab"), drawing),
+                    )
+                },
+                local_image_package,
+            );
+        }
+    }
+
+    #[test]
+    fn resident_note_reference_paragraph_blockers_match_cold_full() {
+        for kind in ["footnote", "endnote"] {
+            local_blocker_matrix(
+                |id| {
+                    lowering_fixture::para(
+                        id,
+                        &format!(
+                            r#"{}<w:r><w:{kind}Reference w:id="1"/></w:r>"#,
+                            lowering_fixture::run("ab")
+                        ),
+                    )
+                },
+                local_note_package,
+            );
+        }
+    }
+
+    #[test]
+    fn resident_hidden_paragraph_blockers_match_cold_full() {
+        for content in [
+            r#"<w:r><w:rPr><w:vanish/></w:rPr><w:t>ab</w:t></w:r>"#,
+            r#"<w:pPr><w:rPr><w:vanish/></w:rPr></w:pPr><w:r><w:rPr><w:vanish/></w:rPr><w:t>ab</w:t></w:r>"#,
+        ] {
+            local_blocker_matrix(|id| lowering_fixture::para(id, content), |package| package);
+        }
+    }
+
+    #[test]
+    fn resident_contextual_spacing_paragraph_blockers_match_cold_full() {
+        local_blocker_matrix(
+            |id| {
+                lowering_fixture::para(
+                    id,
+                    r#"<w:pPr><w:contextualSpacing/><w:spacing w:before="240" w:after="240"/></w:pPr><w:r><w:t>ab</w:t></w:r>"#,
+                )
+            },
+            |package| package,
+        );
+        use super::lowering_fixture::{Package, para, run};
+        let body = format!(
+            r#"{}{}<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>{}"#,
+            para(
+                "10000001",
+                r#"<w:pPr><w:contextualSpacing/><w:spacing w:before="240" w:after="240"/></w:pPr><w:r><w:t>ab</w:t></w:r>"#
+            ),
+            para("10000002", ""),
+            para("20000001", &run("ab")),
+            para("10000003", &run("ab")),
+        );
+        local_blocker_sweep(
+            &Package::new(&body).bytes(),
+            &[(0, false), (1, true), (2, true)],
+        );
+    }
+
+    #[test]
+    fn resident_opaque_sequences_allow_unrelated_local_lowering() {
+        local_blocker_matrix(
+            |id| {
+                lowering_fixture::para(
+                    id,
+                    r#"<w:fldSimple w:instr=" SEQ Example "><w:r><w:t>1</w:t></w:r></w:fldSimple>"#,
+                )
+            },
+            |package| package,
+        );
+        use super::lowering_fixture::{Package, para, run};
+        use yrs::{Map, ReadTxn};
+        let bytes = Package::new(&para("10000001", &run("ab"))).bytes();
+        for names in [Vec::new(), vec![Any::from("Example")]] {
+            local_blocker_sweep_with(
+                &bytes,
+                &[(0, true)],
+                Some(&|engine| {
+                    let mut txn = engine.doc().yrs_doc().transact_mut();
+                    txn.get_map(crate::identity::SESSION).unwrap().insert(
+                        &mut txn,
+                        crate::seed::OPAQUE_SEQUENCES,
+                        Any::Array(names.clone().into()),
+                    );
+                }),
+            );
+        }
+    }
+
+    #[test]
+    fn resident_revision_paragraph_blockers_match_cold_full() {
+        for content in [
+            r#"<w:ins w:id="1" w:author="A"><w:r><w:t>ab</w:t></w:r></w:ins>"#,
+            r#"<w:del w:id="1" w:author="A"><w:r><w:delText>ab</w:delText></w:r></w:del>"#,
+            r#"<w:r><w:rPr><w:b/><w:rPrChange w:id="1" w:author="A"><w:rPr/></w:rPrChange></w:rPr><w:t>ab</w:t></w:r>"#,
+            r#"<w:pPr><w:pPrChange w:id="1" w:author="A"><w:pPr/></w:pPrChange></w:pPr><w:r><w:t>ab</w:t></w:r>"#,
+            r#"<w:moveTo w:id="1" w:author="A"><w:r><w:t>ab</w:t></w:r></w:moveTo>"#,
+            r#"<w:moveFrom w:id="1" w:author="A"><w:r><w:delText>ab</w:delText></w:r></w:moveFrom>"#,
+        ] {
+            local_blocker_matrix(|id| lowering_fixture::para(id, content), |package| package);
+        }
+    }
+
+    #[test]
+    fn resident_duplicate_paragraph_ids_exclude_only_their_seeds() {
+        use super::lowering_fixture::{Package, para, run};
+        use yrs::{Map, Text, Transact};
+        let bytes = Package::new(
+            &(0..4)
+                .map(|index| para(&format!("{:08X}", 0x10000001 + index), &run("ab")))
+                .collect::<String>(),
+        )
+        .bytes();
+        for paragraph in 0..4 {
+            for offset in 0..=2 {
+                for (removed, text) in [(0, Some("x")), (0, Some("😀")), (1, None)] {
+                    if offset + removed > 2 {
+                        continue;
+                    }
+                    let (engine, request) = local_patch_laid_out(&bytes, 9620, true);
+                    let mut txn = engine.doc().yrs_doc().transact_mut();
+                    let story = crate::story_ref(&txn, "body").unwrap();
+                    let mut marks = 0;
+                    for diff in story.diff(&txn, yrs::types::text::YChange::identity) {
+                        if let yrs::Out::YMap(mark) = diff.insert
+                            && crate::is_pilcrow(&mark, &txn)
+                        {
+                            if matches!(marks, 1 | 2) {
+                                mark.insert(&mut txn, "paraId", "10000002");
+                            }
+                            marks += 1;
+                        }
+                    }
+                    drop(txn);
+                    engine.render.replace(Default::default());
+                    engine
+                        .layout_document_with_regions_retained_json(&request)
+                        .unwrap();
+                    engine.build_display_list_frame("{}", 0).unwrap();
+                    let at = paragraph * 3 + offset;
+                    local_patch_step(
+                        &engine,
+                        &request,
+                        "body",
+                        (at, at + removed, text),
+                        matches!(paragraph, 0 | 3),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resident_horizontal_rule_paragraph_blockers_match_cold_full() {
+        local_blocker_matrix(
+            |id| {
+                lowering_fixture::para(
+                    id,
+                    r#"<w:r><w:t>ab</w:t></w:r><w:r><w:pict><v:rect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" o:hr="t" o:hrstd="t" o:hrpct="1000" style="width:100pt;height:2pt"/></w:pict></w:r>"#,
+                )
+            },
+            |package| package,
+        );
+    }
+
+    #[test]
+    fn resident_break_paragraph_blockers_match_cold_full() {
+        for kind in ["page", "column"] {
+            local_blocker_matrix(
+                |id| {
+                    lowering_fixture::para(
+                        id,
+                        &format!(r#"<w:r><w:t>a</w:t><w:br w:type="{kind}"/><w:t>b</w:t></w:r>"#),
+                    )
+                },
+                |package| package,
+            );
+        }
+        use super::lowering_fixture::{Package, para, run};
+        for content in ["", "ab"] {
+            let body = format!(
+                "{}{}{}",
+                para("10000001", &run("ab")),
+                local_patch_list_paragraph(
+                    "10000002",
+                    1,
+                    0,
+                    "",
+                    &format!(r#"{}<w:r><w:br w:type="page"/></w:r>"#, run(content))
+                ),
+                para("10000003", &run("ab")),
+            );
+            local_blocker_sweep(
+                &Package::new(&body)
+                    .numbering(&local_patch_numbering("decimal", "%1."))
+                    .bytes(),
+                &[(0, true), (1, false), (2, true)],
+            );
+        }
+        let body = format!(
+            "{}{}{}",
+            para("10000001", &run("ab")),
+            local_patch_list_paragraph("10000002", 1, 0, "", ""),
+            para("10000003", &run("ab")),
+        );
+        let bytes = Package::new(&body)
+            .numbering(&local_patch_numbering("decimal", "%1."))
+            .bytes();
+        local_blocker_sweep_with(
+            &bytes,
+            &[(0, true), (1, false), (2, true)],
+            Some(&|engine| {
+                engine
+                    .doc()
+                    .insert_embed(
+                        &crate::EditCtx::local("", ""),
+                        crate::Position::new("body", 4),
+                        "pageBreak",
+                        Vec::new(),
+                    )
+                    .unwrap();
+            }),
+        );
+    }
+
+    #[test]
+    fn resident_section_paragraph_blockers_match_cold_full() {
+        local_blocker_matrix(
+            |id| {
+                lowering_fixture::para(
+                    id,
+                    r#"<w:pPr><w:sectPr><w:type w:val="continuous"/><w:pgMar w:left="720" w:right="720"/></w:sectPr></w:pPr><w:r><w:t>ab</w:t></w:r>"#,
+                )
+            },
+            |package| package,
+        );
+    }
+
+    #[test]
+    fn resident_table_suffixes_match_cold_full() {
+        use super::lowering_fixture::{Package, para, run};
+        let table = format!(
+            r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>"#,
+            para("20000001", &format!("{}{}", run("ab"), LOCAL_INLINE_IMAGE))
+        );
+        for slot in 0..=3 {
+            let mut blocks: Vec<_> = (0..3)
+                .map(|index| para(&format!("{:08X}", 0x10000001 + index), &run("ab")))
+                .collect();
+            blocks.insert(slot, table.clone());
+            local_blocker_sweep(
+                &local_image_package(Package::new(&blocks.concat())).bytes(),
+                &[(0, true), (1, true), (2, true)],
+            );
+        }
+    }
+
+    #[test]
+    fn resident_content_control_suffixes_match_cold_full() {
+        use super::lowering_fixture::{Package, para, run};
+        local_blocker_matrix(
+            |id| {
+                para(
+                    id,
+                    r#"<w:r><w:t>ab</w:t></w:r><w:sdt><w:sdtPr><w:id w:val="7"/><w14:checkbox><w14:checked w14:val="0"/></w14:checkbox></w:sdtPr><w:sdtContent><w:r><w:t>0</w:t></w:r></w:sdtContent></w:sdt>"#,
+                )
+            },
+            |package| package,
+        );
+        for slot in 0..=3 {
+            let mut blocks: Vec<_> = (0..3)
+                .map(|index| para(&format!("{:08X}", 0x10000001 + index), &run("ab")))
+                .collect();
+            blocks.insert(slot, format!(r#"<w:sdt><w:sdtPr><w:id w:val="8"/><w:tag w:val="block"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>"#, para("20000001", &run("ab"))));
+            local_blocker_sweep(
+                &Package::new(&blocks.concat()).bytes(),
+                &[(0, true), (1, true), (2, true)],
+            );
+        }
     }
 
     #[test]
@@ -6864,15 +7425,37 @@ mod tests {
             ("contextual", Package::new(&format!(r#"<w:p w14:paraId="10000001"><w:pPr><w:contextualSpacing/></w:pPr><w:r><w:t>Before</w:t></w:r></w:p>{}"#, para("10000002", &run("After"))))),
         ];
         for (name, package) in packages {
-            let (engine, request) = laid_out(&package.bytes(), 9602);
+            let mut parts = package.parts();
+            let document = parts
+                .iter_mut()
+                .find(|(name, _)| name == "word/document.xml")
+                .unwrap();
+            document.1 = String::from_utf8(document.1.clone())
+                .unwrap()
+                .replace(
+                    "</w:body>",
+                    &format!("{}</w:body>", para("10000009", &run("Unrelated"))),
+                )
+                .into_bytes();
+            let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+            let (engine, request) = laid_out(&bytes, 9602);
             let patched = matches!(name, "table" | "list" | "mixed");
             step(&engine, &request, "body", (0, 0, Some("x")), patched);
             if name == "table" {
                 step(&engine, &request, "body", (11, 11, Some("😀")), true);
                 step(&engine, &request, "body:t0:r0c1", (2, 2, Some("x")), false);
             } else if name == "contextual" {
-                step(&engine, &request, "body", (8, 8, Some("x")), false);
+                step(&engine, &request, "body", (8, 8, Some("x")), true);
             }
+            let paragraphs = engine.doc().paragraphs("body").unwrap();
+            let unrelated = &paragraphs.last().unwrap().para_id;
+            let (start, _) = engine
+                .doc()
+                .paragraph_index("body")
+                .unwrap()
+                .para_span(unrelated)
+                .unwrap();
+            step(&engine, &request, "body", (start, start, Some("x")), true);
         }
         let bold = Package::new(&para(
             "10000001",
@@ -7067,7 +7650,7 @@ mod tests {
                     "../tests/fixtures/field-code-paragraphs/body-field-code-paragraphs.docx"
                 )
                 .as_slice(),
-                false,
+                true,
             ),
             (
                 include_bytes!("../tests/fixtures/suppressed-list-markers.docx").as_slice(),
@@ -7075,7 +7658,7 @@ mod tests {
             ),
             (
                 include_bytes!("../tests/fixtures/page-fragments/pages.docx").as_slice(),
-                false,
+                true,
             ),
             (
                 include_bytes!("../tests/fixtures/footnote-anchor.docx").as_slice(),
@@ -7152,13 +7735,23 @@ mod tests {
             for inserted in ["x", "😀"] {
                 let (engine, request) = local_patch_laid_out(&bytes, 9612, true);
                 let patched = !matches!(offset, 3 | 5);
-                step(&engine, &request, "body", (offset, offset, Some(inserted)), patched);
+                step(
+                    &engine,
+                    &request,
+                    "body",
+                    (offset, offset, Some(inserted)),
+                    patched,
+                );
                 if patched {
                     step(
                         &engine,
                         &request,
                         "body",
-                        (offset, offset + inserted.encode_utf16().count() as u32, None),
+                        (
+                            offset,
+                            offset + inserted.encode_utf16().count() as u32,
+                            None,
+                        ),
                         true,
                     );
                 }
@@ -7193,7 +7786,7 @@ mod tests {
         use crate::StoryRange;
 
         let body = format!(
-            "{}{}{}{}",
+            "{}{}{}{}{}",
             para("10000001", &local_patch_mixed_runs()),
             local_patch_list_paragraph("10000002", 1, 0, "", &run("First")),
             local_patch_list_paragraph(
@@ -7203,14 +7796,27 @@ mod tests {
                 r#"<w:rPr><w:b/><w:color w:val="FF0000"/></w:rPr>"#,
                 &run("Middle"),
             ),
-            local_patch_list_paragraph("10000004", 2, 0, "", &run("Last"))
+            local_patch_list_paragraph("10000004", 2, 0, "", &run("Last")),
+            para(
+                "10000005",
+                &format!(
+                    r#"<w:bookmarkStart w:id="0" w:name="mark"/>{}{}{}<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple><w:r><w:footnoteReference w:id="1"/></w:r><w:bookmarkEnd w:id="0"/>"#,
+                    run("Features"),
+                    LOCAL_INLINE_IMAGE,
+                    local_anchored_image(),
+                )
+            ),
         );
-        let bytes = Package::new(&body)
-            .numbering(&local_patch_numbering("decimal", "%1."))
-            .bytes();
+        let bytes = local_note_package(local_image_package(
+            Package::new(&body).numbering(&local_patch_numbering("decimal", "%1.")),
+        ))
+        .bytes();
         docx_layout::clear_measure_fonts();
         let font = docx_layout::register_measure_font(lowering_pages::FONT).unwrap();
-        let request = small_page_request(font);
+        let mut request: serde_json::Value =
+            serde_json::from_str(&small_page_request(font)).unwrap();
+        request["notes"] = json!({"contents": [{"id": 1, "noteKind": "footnote", "height": 0}]});
+        let request = request.to_string();
         let engines = [EngineSession::new(9610), EngineSession::new(9610)];
         for (index, engine) in engines.iter().enumerate() {
             crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();

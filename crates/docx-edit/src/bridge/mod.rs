@@ -374,16 +374,20 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
     };
     let source = doc.source_metadata();
     local.source = source.as_ref().map(Arc::downgrade).unwrap_or_default();
-    local.blocked |= source.as_ref().is_some_and(|source| {
-        source
-            .run_revision_stories()
-            .any(|story| story == "body" || story.starts_with("body:"))
-    });
+    if let Some(source) = &source {
+        for record in &source.read().provenance.inline {
+            if record.pin.story == "body"
+                && matches!(
+                    record.content,
+                    crate::structured::source::InlineSource::Break { .. }
+                )
+            {
+                local.exclude(record.para_id.clone());
+            }
+        }
+    }
     let mut list_state = ListState::new(source.map(|source| source.numbering()));
     let txn = doc.yrs_doc().transact();
-    local.blocked |= txn
-        .get_map(COMMENTS)
-        .is_some_and(|comments| comments.len(&txn) != 0);
     let mut active_stories = BTreeSet::new();
     let mut map = LoweringMap::default();
     let session = txn.get_map(crate::identity::SESSION);
@@ -397,7 +401,6 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
                 .collect()
         })
         .unwrap_or_default();
-    local.blocked |= has_sequence_metadata;
     let (mut blocks, _) = lower_story(
         &txn,
         story_id,
@@ -452,7 +455,12 @@ fn lower_story<T: ReadTxn>(
 
     let result = (|| {
         let story = story_ref(txn, story_id)?;
-        let comments = resolve_comment_intervals(txn, story_id, env)?;
+        let comment_coverage = resolve_comment_intervals(txn, story_id, env)?;
+        let comments: Vec<_> = comment_coverage
+            .iter()
+            .cloned()
+            .filter(|interval| interval.start < interval.end)
+            .collect();
         let mut blocks = Vec::new();
         let mut paragraph_runs = Vec::new();
         let mut paragraph_drawings: Vec<DrawingMarker> = Vec::new();
@@ -505,9 +513,13 @@ fn lower_story<T: ReadTxn>(
                             blocks.len(),
                             map.paragraphs.len() as u32,
                         ),
-                        story_index + 1 == story.len(txn),
+                        &comment_coverage,
+                        story_index,
                     );
                     let para_id = value_string(values.get("paraId")).unwrap_or_default();
+                    if hidden_field_blocks.contains(&para_id) {
+                        local.exclude(para_id.clone());
+                    }
                     let code_join = pending_code_join.take();
                     let sectioned =
                         values.contains_key("sectPr") || values.contains_key("sectionBreakType");
@@ -784,6 +796,18 @@ fn lower_story<T: ReadTxn>(
                     let hidden = env.revision_hidden(attributes);
                     if kind == "pageBreak"
                         && !hidden
+                        && let Some(LayoutBlock::Paragraph(paragraph)) = blocks.last()
+                        && paragraph.pm_end == Some(pm_cursor as f64)
+                        && paragraph
+                            .attrs
+                            .as_ref()
+                            .is_some_and(|attrs| attrs.list_marker.is_some())
+                        && let BlockId::Str(id) = &paragraph.id
+                    {
+                        local.exclude(id.clone());
+                    }
+                    if kind == "pageBreak"
+                        && !hidden
                         && let Some(LayoutBlock::Paragraph(paragraph)) = blocks.last_mut()
                         && paragraph.runs.is_empty()
                         && paragraph.pm_end == Some(pm_cursor as f64)
@@ -859,6 +883,7 @@ fn lower_story<T: ReadTxn>(
                         });
                     };
                     let group = lower_sdt_group(&block_sdt, txn, pm_cursor as i64);
+                    local.position_id(group.id.clone(), "sdt@", pm_cursor);
                     let previewed_out = env.revision_hidden(attributes);
                     let mut unnumbered = previewed_out.then(|| list_state.clone());
                     let (mut child_blocks, content_size) = lower_story(
@@ -949,8 +974,11 @@ fn lower_story<T: ReadTxn>(
                         .as_deref()
                         .is_some_and(super::seed::numeric_field_instruction);
                     if hidden && !env.revision_hidden(attributes) {
-                        pending_hidden_field_blocks
-                            .append(&mut hidden_field_result_blocks(&field, txn));
+                        let dependencies = hidden_field_result_blocks(&field, txn);
+                        for id in &dependencies {
+                            local.exclude(id.clone());
+                        }
+                        pending_hidden_field_blocks.extend(dependencies);
                     }
                     if joins_field_code_paragraphs(story_id)
                         && let Some(join) = field_code_join(&field, txn)
@@ -1157,6 +1185,13 @@ fn lower_story<T: ReadTxn>(
                             index: story_index,
                         });
                     };
+                    if let BlockId::Str(id) = &block.id {
+                        local.position_id(
+                            id.clone(),
+                            "shape:",
+                            paragraph_pm_start + 1 + u64::from(pm_offset),
+                        );
+                    }
                     let formatting = lower_run_formatting(attributes, env);
                     if shapes::inline_native_shape(&block) {
                         let image = ImageRun {
@@ -1242,6 +1277,13 @@ fn lower_story<T: ReadTxn>(
                             index: story_index,
                         });
                     };
+                    if let BlockId::Str(id) = &block.id {
+                        local.position_id(
+                            id.clone(),
+                            "chart:",
+                            paragraph_pm_start + 1 + u64::from(pm_offset),
+                        );
+                    }
                     paragraph_drawings.push(DrawingMarker {
                         pm_offset,
                         story_index,
@@ -1557,9 +1599,12 @@ fn lower_table<T: ReadTxn>(
         })
         .filter_map(any_map)
         .find_map(|cell| map_string(cell, "story"));
-    local.blocked |= table_identity.is_none();
+    let positional = table_identity.is_none();
     let table_identity = table_identity.unwrap_or_else(|| story_index.to_string());
     let table_id = format!("{parent_story}:table:{table_identity}");
+    if positional {
+        local.table_id(table_id.clone(), parent_story, story_index, pm_start);
+    }
 
     let table_margins = tbl_pr.get("cellMargins").and_then(any_map);
     let mut rows = Vec::with_capacity(row_values.len());
@@ -2823,13 +2868,11 @@ fn resolve_comment_intervals<T: ReadTxn>(
                 .end
                 .get_offset(txn)
                 .ok_or_else(|| EditError::InvalidComment("end anchor no longer resolves".into()))?;
-            if start.index < end.index {
-                intervals.push(CommentInterval {
-                    start: start.index,
-                    end: end.index,
-                    id: numeric_id(comment_id, env),
-                });
-            }
+            intervals.push(CommentInterval {
+                start: start.index,
+                end: end.index,
+                id: numeric_id(comment_id, env),
+            });
         }
     }
 
