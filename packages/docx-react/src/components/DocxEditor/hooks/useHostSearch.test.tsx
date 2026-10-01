@@ -1,19 +1,24 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import { createYrsSession, type YrsSession } from '@betteroffice/docx/yrs';
+import { createYrsSession, type ResidentProposalReply, type YrsSession } from '@betteroffice/docx/yrs';
+import { readResidentSearch } from '@betteroffice/docx/yrs/residentSearch';
+import type { ResidentDocumentRead } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
+import type { WorkerOpenedDocument } from './useDisplayList';
 import type { PagedEditorRef } from '../PagedEditor';
 import { createYrsPositionProjection } from '../internals/yrsPositionProjection';
 import { stampSourceVersion } from '../internals/layoutProvenance';
+import { beginWorkerProposalHandover, registerWorkerProposalAuthority, workerProposalAuthority } from '../internals/workerProposalAuthority';
+import { deferWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
 import { yrsCellStory } from '../yrsCommands';
 import { topPageInView, useHostSearch, type DocxSearchState } from './useHostSearch';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, renderHook } = await import('@testing-library/react');
+const { act, cleanup, renderHook, waitFor } = await import('@testing-library/react');
 const sessions: YrsSession[] = [];
 
 beforeAll(() =>
@@ -142,6 +147,186 @@ async function mount(page = 1, repeat = false) {
     stamp: (version: number, sourceVersion: string) => stampSourceVersion(queries(version), sourceVersion),
   };
 }
+
+async function workerSearch(h: Awaited<ReturnType<typeof mount>>) {
+  const session = await createYrsSession();
+  sessions.push(session);
+  session.loadState(h.session.encodeState());
+  const snapshot = (): ResidentProposalReply => ({
+    mirror: { version: session.version(), proposals: { previewVersion: 0, entries: [] } },
+    geometry: { version: session.version(), previewVersion: 0, proposals: '[]', targets: {}, hidden: [] },
+    changedStories: [], updates: [], stateVector: new Uint8Array(),
+  });
+  let blocked: Promise<void> | null = null;
+  const reads: ResidentDocumentRead[] = [];
+  const worker = {
+    proposal: async () => snapshot(),
+    documentRead: async (read: ResidentDocumentRead) => {
+      if (read.kind !== 'searchText') throw new Error('unexpected read');
+      reads.push(read);
+      const waiting = blocked;
+      blocked = null;
+      const value = readResidentSearch(session, read.query, read.caseSensitive, read.carry);
+      const version = session.version();
+      await waiting;
+      return { version, value };
+    },
+    handOver: async () => ({
+      state: session.encodeState(), version: session.version(), proposals: snapshot().mirror.proposals,
+    }),
+  };
+  registerWorkerProposalAuthority(h.session, worker as unknown as WorkerOpenedDocument, {
+    relayout: () => {}, current: () => h.pagedEditorRef.current?.getYrsSession() === h.session,
+    laidOut: async () => {}, adopted: () => {}, handedOver: () => {}, contentChanged: () => {},
+  });
+  deferWorkerOpenReplica(h.session, async () => {
+    const handover = await beginWorkerProposalHandover(h.session)!;
+    return () => { h.session.loadState(handover.state); handover.complete(); };
+  }, () => { throw new Error('unexpected main fallback'); }, () => {});
+  return {
+    session,
+    reads,
+    mirror: () => h.session.mirrorWorkerDocument(snapshot().mirror),
+    holdRead: () => {
+      let release!: () => void;
+      blocked = new Promise<void>((resolve) => { release = resolve; });
+      return release;
+    },
+  };
+}
+
+test('worker search starts in view and navigates cached body and table ranges', async () => {
+  const h = await mount(2);
+  const worker = await workerSearch(h);
+  const mainReads = [
+    spyOn(h.session, 'searchText'), spyOn(h.session, 'encodeStickyPosition'),
+    spyOn(h.session, 'resolveStickyPosition'), spyOn(h.pagedEditorRef.current!, 'yrsLocToDisplayPosition'),
+    spyOn(h.pagedEditorRef.current!, 'flushPendingInput'),
+  ];
+  try {
+    const api = h.hook.result.current.api;
+    await act(async () => {
+      expect(await api.search('the')).toMatchObject({ total: 5, current: 2 });
+    });
+    expect(h.hook.result.current.highlight!.matches.map(({ displayFrom, displayTo }) => ({
+      displayFrom, displayTo,
+    }))).toEqual(readResidentSearch(worker.session, 'the', false).matches.map(({ displayFrom, displayTo }) => ({
+      displayFrom, displayTo,
+    })));
+    act(() => {
+      expect(api.searchGoTo(4)?.current).toBe(4);
+      expect(api.searchNext()?.current).toBe(0);
+      expect(api.searchPrevious()?.current).toBe(4);
+    });
+    expect(worker.reads).toHaveLength(1);
+    for (const read of mainReads) expect(read).not.toHaveBeenCalled();
+  } finally {
+    for (const read of mainReads) read.mockRestore();
+  }
+});
+
+test('worker refresh coalesces reads, follows the latest navigation and retries stale versions', async () => {
+  const h = await mount();
+  const worker = await workerSearch(h);
+  const api = h.hook.result.current.api;
+  await act(async () => { await api.search('the'); });
+  h.layOut(() => false);
+  act(() => api.searchGoTo(3));
+  worker.session.insertText({ story: 'body', paraId: h.first, offset: 0 }, 'the ');
+  worker.mirror();
+  const release = worker.holdRead();
+  act(() => {
+    expect(api.getSearchState()).toMatchObject({ total: 5, current: 3 });
+    api.getSearchState();
+    api.searchGoTo(4);
+  });
+  h.stamp(1, worker.session.version());
+  h.hook.rerender({ version: 1 });
+  await waitFor(() => expect(worker.reads).toHaveLength(2));
+  expect(h.hook.result.current.highlight?.matches).toHaveLength(5);
+  const published = h.events.length;
+  worker.session.insertText({ story: 'body', paraId: h.first, offset: 0 }, 'the ');
+  worker.mirror();
+  h.stamp(2, worker.session.version());
+  h.hook.rerender({ version: 2 });
+  expect(worker.reads).toHaveLength(2);
+  await act(async () => { release(); });
+  await waitFor(() => expect(h.hook.result.current.highlight?.matches).toHaveLength(7));
+  expect(api.getSearchState()).toMatchObject({ total: 7, current: 6 });
+  expect(worker.reads).toHaveLength(3);
+  expect(h.events.slice(published).map((state) => state?.total)).toEqual([7]);
+  expect(h.reveals.at(-1)).toBe(h.hook.result.current.highlight!.matches[6].displayFrom);
+});
+
+test('a newer search and clear discard in-flight worker refreshes', async () => {
+  const h = await mount();
+  const worker = await workerSearch(h);
+  const api = h.hook.result.current.api;
+  await act(async () => { await api.search('the'); });
+  worker.session.insertText({ story: 'body', paraId: h.first, offset: 0 }, 'the ');
+  worker.mirror();
+  const release = worker.holdRead();
+  act(() => { api.getSearchState(); });
+  await waitFor(() => expect(worker.reads).toHaveLength(2));
+  let searched!: Promise<DocxSearchState>;
+  act(() => { searched = api.search('dog'); });
+  await act(async () => { release(); await searched; });
+  expect(api.getSearchState()).toMatchObject({ query: 'dog', total: 1, current: 0 });
+  worker.session.insertText({ story: 'body', paraId: h.first, offset: 0 }, 'dog ');
+  worker.mirror();
+  const clearRelease = worker.holdRead();
+  act(() => { api.getSearchState(); });
+  await waitFor(() => expect(worker.reads).toHaveLength(4));
+  act(() => api.clearSearch());
+  const events = h.events.length;
+  await act(async () => { clearRelease(); });
+  expect(api.getSearchState()).toBeNull();
+  expect(h.hook.result.current.highlight).toBeNull();
+  expect(h.events).toHaveLength(events);
+});
+
+test('initial worker search retries a version change and clearing cancels a pending search', async () => {
+  const h = await mount();
+  const worker = await workerSearch(h);
+  const api = h.hook.result.current.api;
+  const release = worker.holdRead();
+  let searched!: Promise<DocxSearchState>;
+  act(() => { searched = api.search('the'); });
+  await waitFor(() => expect(worker.reads).toHaveLength(1));
+  worker.session.insertText({ story: 'body', paraId: h.first, offset: 0 }, 'the ');
+  worker.mirror();
+  await act(async () => { release(); await searched; });
+  expect(worker.reads).toHaveLength(2);
+  expect(api.getSearchState()).toMatchObject({ total: 6, current: 0 });
+  const clearRelease = worker.holdRead();
+  act(() => { searched = api.search('dog'); });
+  await waitFor(() => expect(worker.reads).toHaveLength(3));
+  act(() => api.clearSearch());
+  await act(async () => { clearRelease(); await searched; });
+  expect(api.getSearchState()).toBeNull();
+  const replacedRelease = worker.holdRead();
+  act(() => { searched = api.search('the'); });
+  await waitFor(() => expect(worker.reads).toHaveLength(4));
+  h.pagedEditorRef.current = { ...h.pagedEditorRef.current! };
+  await act(async () => { replacedRelease(); await searched; });
+  expect(h.hook.result.current.highlight).toBeNull();
+});
+
+test('worker search carries portable anchors through hand-over and subsequent main edits', async () => {
+  const h = await mount();
+  const worker = await workerSearch(h);
+  const api = h.hook.result.current.api;
+  await act(async () => { await api.search('the'); });
+  act(() => api.searchGoTo(3));
+  const before = h.hook.result.current.highlight!.matches[3].displayFrom;
+  await act(async () => { await requestWorkerOpenReplica(h.session); });
+  expect(workerProposalAuthority(h.session)).toBeNull();
+  h.session.insertText({ story: 'body', paraId: h.first, offset: 0 }, 'the ');
+  h.hook.rerender({ version: 1 });
+  expect(api.getSearchState()).toMatchObject({ total: 6, current: 4 });
+  expect(h.hook.result.current.highlight!.matches[4].displayFrom).toBe(before + 4);
+  expect(worker.reads).toHaveLength(1);
+});
 
 test('finds every body and table match in reading order and walks them', async () => {
   const { hook, reveals, events } = await mount();

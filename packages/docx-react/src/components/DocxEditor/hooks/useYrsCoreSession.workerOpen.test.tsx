@@ -3,13 +3,15 @@ import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:t
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
-import { createRef, useCallback, useEffect, useRef, useState } from 'react';
+import { createRef, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
   createYrsSession,
   preloadResidentEngineWorker,
   ResidentWorkerOutOfMemoryError,
   proposalRevisionPreview,
+  createYrsPositionProjection,
+  yrsLocToProjectedDisplayPosition,
   type YrsDocxHost,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
@@ -22,7 +24,7 @@ import { LayoutSelectionGate } from '@betteroffice/docx/layout';
 import { decodeFrameDelta } from '@betteroffice/docx/layout/render';
 import { useCanvasRenderer, type OpenInWorker } from './useDisplayList';
 import { useLayoutPipeline } from './useLayoutPipeline';
-import type { DocxHostSearch } from './useHostSearch';
+import { useHostSearch, type DocxSearchState } from './useHostSearch';
 import { useYrsCoreSession } from './useYrsCoreSession';
 import type { DocxEditorCollaborationOptions } from '../types';
 import { awaitWorkerOpenReplica, ensureWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
@@ -377,13 +379,28 @@ function useHarness(props: HarnessProps) {
     if (props.readOnly && core.session) relayout.current?.();
   }, [props.readOnly, core.session]);
   const pagedEditorRef = useRef<PagedEditorRef | null>(null);
-  pagedEditorRef.current = core.session ? {
-    getYrsSession: () => core.session,
-    getDocument: core.documentFromYrs,
+  const coreRef = useRef(core);
+  coreRef.current = core;
+  const searchReveals = useRef<number[]>([]);
+  pagedEditorRef.current = useMemo(() => core.session ? {
+    getYrsSession: () => coreRef.current.session,
+    getDocument: () => coreRef.current.documentFromYrs(),
+    hasPendingInput: () => false,
     flushPendingInput: async () => {},
+    yrsLocToDisplayPosition: (loc: Parameters<PagedEditorRef['yrsLocToDisplayPosition']>[0]) => {
+      const session = coreRef.current.session!;
+      const projection = createYrsPositionProjection(session, 'body');
+      return yrsLocToProjectedDisplayPosition(session, () => projection, loc);
+    },
+    revealDisplayPosition: (position: number) => { searchReveals.current.push(position); return 'scrolled'; },
     syncYrsInputState: () => true,
     refreshWorkerLayout: () => workerRelayout.current?.(),
-  } as unknown as PagedEditorRef : null;
+  } as unknown as PagedEditorRef : null, [core.session]);
+  const hostSearch = useHostSearch({
+    pagedEditorRef,
+    displayListQueries: renderer.queries,
+    canvasHostRef: element,
+  });
   const ref = useRef<DocxEditorRef>(null);
   useDocxEditorRefApi({
     experimentalWorkerOpen: props.experimentalWorkerOpen,
@@ -408,7 +425,7 @@ function useHarness(props: HarnessProps) {
     commands: UNAVAILABLE_DOCX_COMMANDS,
     modeRef: { current: 'viewing' },
     allowHostProposalsRef: { current: props.allowHostProposals === true },
-    hostSearch: {} as DocxHostSearch,
+    hostSearch: hostSearch.api,
     settledDisplayList: renderer.settledDisplayList,
   });
   const loaded = useRef(new WeakSet<YrsSession>());
@@ -443,7 +460,9 @@ function useHarness(props: HarnessProps) {
     scrollToPositionImpl: () => {},
   });
   return {
-    core, renderer, pipeline, host, ref, bridgeRef,
+    core, renderer, pipeline, host, ref, bridgeRef, pagedEditorRef,
+    searchHighlight: hostSearch.highlight,
+    searchReveals: searchReveals.current,
     openCommentsSidebar: () => setCommentsSidebarOpen(true),
     presentFrame: () => core.notifyFramePresented(renderer.presentedEngine),
     loadChecks: loadChecks.current, mainOpens: mainOpens.current, errors: errors.current,
@@ -2211,6 +2230,129 @@ async function openWorkerProposals(props: HarnessProps = workerProposalProps) {
   });
   return harness;
 }
+
+test('host search reads and navigates the resident worker without starting the main replica', async () => {
+  const { workers, posted } = installWorker();
+  const { result, unmount } = await openWorkerProposals();
+  const session = result.current.core.session!;
+  const editor = result.current.pagedEditorRef.current!;
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const spies = [
+    spyOn(replicaHelpers, 'awaitWorkerOpenReplica'),
+    spyOn(replicaHelpers, 'ensureWorkerOpenReplica'),
+    spyOn(replicaHelpers, 'requestWorkerOpenReplica'),
+    spyOn(replicaHelpers, 'requestOnDemandWorkerOpenReplica'),
+    spyOn(session, 'openDocx'),
+    spyOn(session, 'loadState'),
+    spyOn(session, 'searchText'),
+    spyOn(session, 'encodeStickyPosition'),
+    spyOn(session, 'resolveStickyPosition'),
+    spyOn(editor, 'yrsLocToDisplayPosition'),
+    spyOn(editor, 'flushPendingInput'),
+    spyOn(workers[0], 'terminate'),
+  ];
+  try {
+    const api = result.current.ref.current!;
+    const events: Array<DocxSearchState | null> = [];
+    const unsubscribe = api.onSearchChange((state) => events.push(state));
+    await act(async () => {
+      expect(await api.search('paragraph')).toEqual({
+        query: 'paragraph', options: { caseSensitive: false }, total: 205, current: 0,
+      });
+    });
+    let position = 1;
+    const ranges = Array.from({ length: 205 }, (_, index) => {
+      const text = index === 0 ? 'First paragraph' : index === 204 ? 'Tail paragraph' : `Paragraph ${index}`;
+      const displayFrom = position + text.toLowerCase().indexOf('paragraph');
+      position += text.length + 2;
+      return { displayFrom, displayTo: displayFrom + 9 };
+    });
+    expect(result.current.searchHighlight?.matches.map(({ displayFrom, displayTo }) => ({
+      displayFrom, displayTo,
+    }))).toEqual(ranges);
+    act(() => {
+      expect(api.searchPrevious()?.current).toBe(204);
+      expect(api.searchNext()?.current).toBe(0);
+      expect(api.searchNext()?.current).toBe(1);
+      expect(api.searchPrevious()?.current).toBe(0);
+      expect(api.searchGoTo(206)?.current).toBe(1);
+    });
+    expect(api.getSearchState()).toMatchObject({ total: 205, current: 1 });
+    expect(result.current.searchReveals).toEqual([
+      ranges[0].displayFrom, ranges[204].displayFrom, ranges[0].displayFrom,
+      ranges[1].displayFrom, ranges[0].displayFrom, ranges[1].displayFrom,
+    ]);
+    await act(async () => {
+      expect(await api.search('paragraph', { caseSensitive: true })).toMatchObject({ total: 2, current: 0 });
+    });
+    act(() => api.clearSearch());
+    expect(api.getSearchState()).toBeNull();
+    expect(result.current.searchHighlight).toBeNull();
+    expect(events.at(-1)).toBeNull();
+    unsubscribe();
+    expect(workerProposalAuthority(session)).not.toBeNull();
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(posted.some(({ type }) => type === 'encodeState')).toBe(false);
+    expect(posted.filter((request) => request.type === 'documentRead' && request.read.kind === 'searchText')).toHaveLength(2);
+    for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    expect(warning.mock.calls.some(([message]) =>
+      String(message).includes('needed the main-thread document')
+    )).toBe(false);
+  } finally {
+    for (const spy of spies) spy.mockRestore();
+    warning.mockRestore();
+    unmount();
+  }
+}, 15_000);
+
+test('host search refreshes through the worker and carries its current match after a proposal', async () => {
+  const { workers, posted } = installWorker();
+  const { result, unmount } = await openWorkerProposals();
+  const termination = spyOn(workers[0], 'terminate');
+  const session = result.current.core.session!;
+  const spies = [
+    spyOn(session, 'searchText'), spyOn(session, 'encodeStickyPosition'),
+    spyOn(session, 'resolveStickyPosition'), spyOn(result.current.pagedEditorRef.current!, 'yrsLocToDisplayPosition'),
+  ];
+  try {
+    const api = result.current.ref.current!;
+    const events: Array<DocxSearchState | null> = [];
+    api.onSearchChange((state) => events.push(state));
+    await act(async () => { await api.search('paragraph'); });
+    act(() => api.searchGoTo(1));
+    const before = result.current.searchHighlight!.matches[1].displayFrom;
+    const identities = await api.getParagraphIdentities();
+    const paragraph = identities.paragraphs.find(({ session }) => session?.story === 'body')!.session!;
+    const initial = await api.getProposals();
+    await act(async () => {
+      expect(await api.proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'search-edit', paragraph,
+          suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'paragraph ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    await waitFor(() => expect(result.current.searchHighlight?.matches).toHaveLength(206));
+    expect(api.getSearchState()).toMatchObject({ total: 206, current: 2 });
+    expect(result.current.searchHighlight!.matches[2].displayFrom).toBe(before + 10);
+    expect(events.at(-1)).toMatchObject({ total: 206, current: 2 });
+    const refreshes = posted.filter((request) => request.type === 'documentRead' && request.read.kind === 'searchText');
+    expect(refreshes.length).toBeGreaterThan(1);
+    expect(refreshes.at(-1)).toMatchObject({ read: { carry: { story: 'body' } } });
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(posted.some(({ type }) => type === 'encodeState')).toBe(false);
+    expect(termination).not.toHaveBeenCalled();
+    for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+  } finally {
+    for (const spy of spies) spy.mockRestore();
+    termination.mockRestore();
+    unmount();
+  }
+}, 15_000);
 
 test('ASCII proposals skip font preflight and Unicode proposals request it before syncing', async () => {
   const { posted } = installWorker();

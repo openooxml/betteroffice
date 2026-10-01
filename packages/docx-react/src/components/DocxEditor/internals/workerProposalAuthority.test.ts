@@ -679,6 +679,37 @@ test('anchor and navigation reads retain the worker version and input order', as
   expect(h.events).toEqual(['snapshot', 'resolveParagraphAnchors', 'navigationTarget']);
 });
 
+test('search reads retain the worker version and queue behind other document reads', async () => {
+  const h = harness();
+  const waiting = deferred<void>();
+  const posted = deferred<void>();
+  const carry = { story: 'body', encoded: Uint8Array.of(1) };
+  const value = { matches: [{
+    story: 'body', paraId: 'p1', start: 2, displayFrom: 3, displayTo: 7, anchor: carry,
+  }], carried: 0 };
+  h.worker.documentRead.mockImplementation(async (read) => {
+    h.events.push(read.kind);
+    if (read.kind === 'readParagraphs') {
+      posted.resolve();
+      await waiting.promise;
+    }
+    return { version: 'worker-3', value } as never;
+  });
+  const first = h.authority.readParagraphs({ view: 'accepted' }, unusedMain);
+  await posted.promise;
+  const search = h.authority.searchText('term', true, carry, () => { throw new Error('unexpected main call'); });
+  const navigation = h.authority.navigationTarget('body', 'missing', () => 'unsupported');
+  expect(h.events).toEqual(['snapshot', 'readParagraphs']);
+  waiting.resolve();
+  await first;
+  expect(await search).toEqual({ version: 'worker-3', value });
+  await navigation;
+  expect(h.worker.documentRead.mock.calls[1]![0]).toEqual<{
+    kind: 'searchText'; query: string; caseSensitive: boolean; carry: typeof carry;
+  }>({ kind: 'searchText', query: 'term', caseSensitive: true, carry });
+  expect(h.events).toEqual(['snapshot', 'readParagraphs', 'searchText', 'navigationTarget']);
+});
+
 
 test('a rejected worker call restores the visible version and leaves the queue usable', async () => {
   const h = harness();

@@ -5,6 +5,9 @@ import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/p
 import { applyFrameDeltaOwned, decodeFrameDelta } from '../layout/render/frameDelta';
 import { createResidentEngineSession } from './residentEngineSession';
 import { proposalRevisionPreview } from './proposals';
+import { createYrsSession } from './index';
+import { readResidentSearch } from './residentSearch';
+import { createYrsPositionProjection, yrsLocToProjectedDisplayPosition } from './yrsPositionProjection';
 import { preloadEditWasm } from './wasm/index';
 import type { DecodedFrameDelta, FramePageOperation } from '../layout/render/frameDelta';
 import type { DisplayPage } from '../layout/render/displayList';
@@ -1839,7 +1842,7 @@ describe('worker proposals during sliced completion', () => {
     import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
   )))));
 
-  async function proposalWorker() {
+  async function proposalWorker(extraBody = '') {
     const parts: PartsMap = new Map();
     parts.set('[Content_Types].xml', toBytes(
       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
@@ -1848,7 +1851,7 @@ describe('worker proposals during sliced completion', () => {
       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'
     ));
     const body = Array.from({ length: 40 }, (_, index) =>
-      `<w:p w14:paraId="${(index + 1).toString(16).padStart(8, '0')}"><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>Paragraph ${index + 1}</w:t></w:r></w:p>`
+      `<w:p w14:paraId="${(index + 1).toString(16).padStart(8, '0')}"><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>Paragraph ${index + 1}</w:t></w:r></w:p>${index === 0 ? extraBody : ''}`
     ).join('');
     parts.set('word/document.xml', toBytes(
       `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>${body}<w:sectPr/></w:body></w:document>`
@@ -2203,6 +2206,98 @@ describe('worker proposals during sliced completion', () => {
       expect(calls.filter((call) => call === 'begin')).toHaveLength(1);
       await expectFullLayout(completed);
     } finally {
+      engine.destroy();
+    }
+  });
+
+  test('search reads match main display ranges and carry anchors without restarting background layout', async () => {
+    const extraBody = '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr>' +
+      '<w:tc><w:tcPr/><w:p w14:paraId="00000100"><w:r><w:t>Paragraph cell</w:t></w:r></w:p></w:tc>' +
+      '<w:tc><w:tcPr/><w:p w14:paraId="00000101"><w:r><w:t>PARAGRAPH cell</w:t></w:r></w:p></w:tc>' +
+      '</w:tr></w:tbl><w:sdt><w:sdtPr><w:id w:val="100"/></w:sdtPr><w:sdtContent>' +
+      '<w:p w14:paraId="00000102"><w:r><w:t>Paragraph boxed</w:t></w:r></w:p>' +
+      '</w:sdtContent></w:sdt>';
+    const { w, engine, calls, onResume, complete, expectFullLayout } = await proposalWorker(extraBody);
+    const main = await createYrsSession();
+    try {
+      main.loadState(engine.encodeState());
+      const projection = createYrsPositionProjection(main, 'body');
+      const expected = main.searchText('paragraph').filter((hit) =>
+        hit.story === 'body' || hit.story.startsWith('body:')
+      ).map((hit) => ({
+        story: hit.story, paraId: hit.paraId, start: hit.start,
+        displayFrom: yrsLocToProjectedDisplayPosition(main, () => projection, {
+          story: hit.story, paraId: hit.paraId, offset: hit.start,
+        })!,
+        displayTo: yrsLocToProjectedDisplayPosition(main, () => projection, {
+          story: hit.story, paraId: hit.paraId, offset: hit.end,
+        })!,
+      })).sort((a, b) => a.displayFrom! - b.displayFrom!);
+      const read = { kind: 'searchText', query: 'paragraph', caseSensitive: false } as const;
+      let pending!: Promise<ResidentEngineWorkerResponse>;
+      const order: string[] = [];
+      onResume.push(() => {
+        pending = w.send({ type: 'documentRead', read }).then((reply) => {
+          order.push('search');
+          return reply;
+        });
+      });
+      const completed = await complete().then((reply) => { order.push('complete'); return reply; });
+      const reply = await pending;
+      expect(reply.ok).toBe(true);
+      if (!reply.ok || !reply.read) throw new Error('expected search read');
+      const value = reply.read.value as ReturnType<typeof readResidentSearch>;
+      expect(value).toEqual(readResidentSearch({ ...engine.geometryReader, ...engine }, 'paragraph', false));
+      expect(value.matches.map(({ anchor: _anchor, ...match }) => match)).toEqual(expected);
+      expect(value.matches).toHaveLength(43);
+      expect(value.matches.slice(0, 5).map(({ paraId }) => paraId)).toEqual([
+        '00000001', '00000100', '00000101', '00000102', '00000002',
+      ]);
+      expect(value.matches.every(({ anchor }) => anchor !== null)).toBe(true);
+      expect(value.carried).toBe(0);
+      expect(reply.read.version).toBe(engine.proposalEngine.version());
+      expect(order).toEqual(['search', 'complete']);
+      expect(calls.filter((call) => call === 'begin')).toHaveLength(1);
+      await expectFullLayout(completed);
+      const search = async (caseSensitive: boolean, carry = value.matches[2].anchor) => {
+        const answer = await w.send({ type: 'documentRead', read: {
+          ...read, query: 'Paragraph', caseSensitive, carry,
+        } });
+        expect(answer.ok).toBe(true);
+        if (!answer.ok || !answer.read) throw new Error('expected search read');
+        return answer.read.value as ReturnType<typeof readResidentSearch>;
+      };
+      expect((await search(false)).carried).toBe(2);
+      const sensitive = await search(true);
+      expect(sensitive.matches).toHaveLength(42);
+      expect(sensitive.matches.some(({ paraId }) => paraId === '00000101')).toBe(false);
+      expect(sensitive.carried).toBe(2);
+      expect(engine.proposalEngine.applyEdits({
+        expectVersion: engine.proposalEngine.version(),
+        steps: [{
+          op: 'replaceText', target: { kind: 'paragraph', story: 'body', paraId: '00000001' },
+          text: 'Changed 1',
+        }],
+      }).ok).toBe(true);
+      const after = await search(false, value.matches[0].anchor);
+      expect(after.matches).toHaveLength(42);
+      expect(after.carried).toBe(0);
+      expect(after.matches[after.carried].paraId).toBe('00000100');
+      expect((await search(false, value.matches.at(-1)!.anchor)).carried).toBe(41);
+      expect(engine.proposalEngine.applyEdits({
+        expectVersion: engine.proposalEngine.version(),
+        steps: [{
+          op: 'replaceText', target: { kind: 'paragraph', story: 'body', paraId: '00000028' },
+          text: 'Changed tail',
+        }],
+      }).ok).toBe(true);
+      const last = await search(false, value.matches.at(-1)!.anchor);
+      expect(last.matches).toHaveLength(41);
+      expect(last.carried).toBe(40);
+      const empty = await w.send({ type: 'documentRead', read: { ...read, query: '' } });
+      expect(empty).toMatchObject({ ok: true, read: { value: { matches: [], carried: -1 } } });
+    } finally {
+      main.destroy();
       engine.destroy();
     }
   });

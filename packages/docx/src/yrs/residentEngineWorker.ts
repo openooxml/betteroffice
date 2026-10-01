@@ -15,6 +15,7 @@ import {
   type DocxProposalResult,
 } from './proposals';
 import { computeProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
+import { readResidentSearch } from './residentSearch';
 import { hasCachedYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import {
   presentOffscreenPageBackBuffer,
@@ -459,6 +460,19 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           session.geometryReader,
           request.read.story,
           request.read.paraId
+        );
+        break;
+      case 'searchText':
+        value = readResidentSearch(
+          {
+            ...session.geometryReader,
+            searchText: session.searchText,
+            encodeStickyPosition: session.encodeStickyPosition,
+            resolveStickyPosition: session.resolveStickyPosition,
+          },
+          request.read.query,
+          request.read.caseSensitive,
+          request.read.carry
         );
         break;
     }

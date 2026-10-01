@@ -11,7 +11,9 @@ import type {
   DocxReadParagraphsResult,
   ProposalGeometryMirror,
   ResidentProposalReply,
+  ResidentEngineWorkerClient,
   YrsSession,
+  YrsStickyPosition,
   resolveNavigationTarget,
 } from '@betteroffice/docx/yrs';
 import type { WorkerOpenedDocument } from '../hooks/useDisplayList';
@@ -21,6 +23,8 @@ import {
   workerOpenReplicaPending,
   workerOpenReplicaStarted,
 } from './workerOpenReplica';
+
+type SearchRead = Awaited<ReturnType<typeof ResidentEngineWorkerClient.prototype.documentRead<'searchText'>>>;
 
 export interface WorkerProposalAuthority {
   /** The session mirrors the worker registry and version. */
@@ -54,6 +58,12 @@ export interface WorkerProposalAuthority {
   paragraphIdentities(
     main: () => Promise<DocxParagraphIdentitySnapshot>
   ): Promise<DocxParagraphIdentitySnapshot>;
+  searchText(
+    query: string,
+    caseSensitive: boolean,
+    carry: YrsStickyPosition | null,
+    main: () => SearchRead['value']
+  ): Promise<SearchRead>;
   resolveParagraphAnchors(
     anchors: readonly DocxParagraphAnchor[],
     main: (anchors: readonly DocxParagraphAnchor[]) => Promise<{
@@ -263,6 +273,11 @@ export function registerWorkerProposalAuthority(
       assertCurrent();
       return read.value;
     }, main),
+    searchText: (query, caseSensitive, carry, main) => route(async () => {
+      const read = await worker.documentRead({ kind: 'searchText', query, caseSensitive, carry });
+      assertCurrent();
+      return read;
+    }, () => ({ version: session.version(), value: main() })),
     resolveParagraphAnchors: (anchors, main) => route(async () => {
       const read = await worker.documentRead({ kind: 'resolveParagraphAnchors', anchors: [...anchors] });
       assertCurrent();
