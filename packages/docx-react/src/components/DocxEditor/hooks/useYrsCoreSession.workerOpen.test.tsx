@@ -93,6 +93,8 @@ function installWorker(options: {
   failState?: boolean;
   failProposal?: boolean;
   crashProposalOnce?: boolean;
+  /** Fails the replacement worker's first snapshot once this settles. */
+  failReplacementSnapshot?: Promise<void>;
   holdState?: boolean;
   holdOpen?: boolean;
   oomStage?: 'open' | 'fontRequirements' | 'bootstrap' | 'encodeState' | 'proposal' |
@@ -112,6 +114,7 @@ function installWorker(options: {
   const received = new Set<ResidentEngineWorkerRequest>();
   const replyWaiters = new Set<() => void>();
   let proposalCrashed = false;
+  let snapshotFailed = false;
   globalThis.Worker = class {
     constructor() {
       const worker = startWorker();
@@ -150,6 +153,12 @@ function installWorker(options: {
           proposalCrashed = true;
           queueMicrotask(() => worker.onmessage?.({
             data: { id: request.id, ok: false, error: 'proposal crashed', terminal: true },
+          } as MessageEvent));
+        } else if (options.failReplacementSnapshot && !snapshotFailed && workers.indexOf(worker) > 0 &&
+            request.type === 'proposal' && request.operation.kind === 'snapshot') {
+          snapshotFailed = true;
+          void options.failReplacementSnapshot.then(() => worker.onmessage?.({
+            data: { id: request.id, ok: false, error: 'snapshot failed' },
           } as MessageEvent));
         } else if ((options.failOpen && request.type === 'open') ||
             (options.failState && request.type === 'encodeState')) {
@@ -2618,6 +2627,76 @@ test('a hand-over while a call waits for the replacement worker\'s layout settle
     });
     expect(outcome).not.toBe('hung');
     expect((outcome as [unknown])[0]).toMatchObject({ proposals: [] });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    const current = await api().getProposals();
+    const target = await bodyParagraph();
+    await act(async () => {
+      expect(await api().proposeChanges({
+        expectVersion: current.version,
+        proposals: [{
+          id: 'after-handover', paragraph: target,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Recovered ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    expect((await api().getProposals()).proposals.map(({ id }) => id)).toEqual(['after-handover']);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
+test('a hand-over queued behind a recovery snapshot that fails still hydrates the calls behind it', async () => {
+  let failSnapshot!: () => void;
+  const { workers, posted } = installWorker({
+    crashProposalOnce: true,
+    failReplacementSnapshot: new Promise<void>((resolve) => { failSnapshot = resolve; }),
+  });
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const api = () => result.current.ref.current!;
+    const session = result.current.core.session!;
+    const bodyParagraph = async () => (await api().getParagraphIdentities()).paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    const initial = await api().getProposals();
+    const paragraph = await bodyParagraph();
+    let first!: Promise<unknown>;
+    let initializing!: Promise<unknown>;
+    let queued!: Promise<unknown>;
+    await act(async () => {
+      first = api().proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'failed-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Failed ',
+        }],
+      }).catch((error: Error) => error);
+      initializing = api().getProposals().catch((error: Error) => error);
+      queued = api().getProposals().catch((error: Error) => error);
+      expect(await first).toBeInstanceOf(Error);
+    });
+    await waitFor(() => expect(posted.filter((request) =>
+      request.type === 'proposal' && request.operation.kind === 'snapshot'
+    )).toHaveLength(2));
+    expect(workers).toHaveLength(2);
+    let outcome: unknown;
+    await act(async () => {
+      const replica = requestWorkerOpenReplica(session)!;
+      failSnapshot();
+      outcome = await Promise.race([
+        Promise.all([initializing, queued, replica]),
+        new Promise((resolve) => setTimeout(() => resolve('hung'), 5000)),
+      ]);
+    });
+    expect(outcome).not.toBe('hung');
+    const [initialized, answered] = outcome as [unknown, unknown];
+    expect(initialized).toBeInstanceOf(Error);
+    expect((initialized as Error).message).toBe('snapshot failed');
+    expect(answered).toMatchObject({ proposals: [] });
     await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
     const current = await api().getProposals();
     const target = await bodyParagraph();
