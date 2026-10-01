@@ -10,7 +10,7 @@ use docx_edit::{
     ParaSelector, ParagraphIdOrigin, ParagraphIdentity, ParagraphInput, ParagraphOrigin,
     ParagraphRef, ParagraphTarget, Position, RawOp, ReadParagraphsRequest, SearchScope,
     SegmentContent, StoryRange, TargetEdge, TextPosition, TextRange, TextTarget, UndoCaptureMode,
-    UndoSession, seed_from_docx,
+    UndoSession, seed_from_docx, seed_from_docx_with_generation,
 };
 use yrs::{Any, Map, MapPrelim, ReadTxn, Text, TextRef, Transact};
 
@@ -2271,7 +2271,15 @@ fn settling_keeps_another_paragraphs_format_revision_undoable() {
 
 /// Two replicas of one package under one client id; the second prepares its staging base.
 fn prepared_pair(replica: bool) -> (EditingDoc, EditingDoc) {
-    let (plain, prepared) = (basic(), basic());
+    let bytes = docx(&basic_body());
+    let (plain, prepared) = (EditingDoc::new(7001), EditingDoc::new(7001));
+    for doc in [&plain, &prepared] {
+        seed_from_docx_with_generation(doc, &bytes, "staging-pair").unwrap();
+    }
+    assert_eq!(
+        plain.encode_state_as_update_v1(),
+        prepared.encode_state_as_update_v1()
+    );
     let version = prepared.version();
     assert!(prepared.prepare_staging_base_bytes(usize::MAX));
     if replica {
@@ -2348,6 +2356,16 @@ fn assert_same_batches(plain: &EditingDoc, prepared: &EditingDoc, steps: fn() ->
         next_minted_id(plain, "probe"),
         next_minted_id(prepared, "probe")
     );
+}
+
+#[test]
+fn oversized_staging_bytes_leave_nothing_prepared() {
+    let doc = basic();
+    let state = doc.encode_state_as_update_v1();
+    assert!(!doc.prepare_staging_base_bytes(state.len() - 1));
+    assert!(!doc.staging_base_ready());
+    assert!(!doc.prepare_staging_base_replica().unwrap());
+    assert_eq!(doc.encode_state_as_update_v1(), state);
 }
 
 #[test]

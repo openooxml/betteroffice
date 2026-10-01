@@ -141,6 +141,7 @@ const BACKGROUND_SLICE_PAGES = 4;
  * here prepares its first proposal batch's base once a page is presented.
  */
 let stagingBaseOwner: ResidentEngineSession | null = null;
+let proposalCommitted = false;
 
 // The request being handled, and the requests answered with a trap.
 let handlingId = 0;
@@ -371,6 +372,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       }
       committed = request.operation.kind !== 'snapshot';
       if (committed) {
+        proposalCommitted = true;
         stagingBaseOwner = session;
         if (openedDocument) session.clearStagingBase();
       }
@@ -1165,6 +1167,7 @@ function destroySession(keepSurfaces = false): void {
   lastProposalMirrorVersion = null;
   session = null;
   stagingBaseOwner = null;
+  proposalCommitted = false;
   openedDocument = null;
   previewing = false;
   previewFinalPages = null;
@@ -1402,7 +1405,7 @@ function scheduleStagingBase(): void {
 /** One synchronous step per turn, so requests that arrive meanwhile run between them. */
 function stagingBaseStep(owner: ResidentEngineSession, step: 'bytes' | 'replica'): void {
   nextTurn(() => {
-    if (session !== owner) return;
+    if (session !== owner || proposalCommitted || trap) return;
     enqueue(
       () => {
         let held: boolean;
@@ -1415,7 +1418,7 @@ function stagingBaseStep(owner: ResidentEngineSession, step: 'bytes' | 'replica'
         if (held && step === 'bytes') stagingBaseStep(owner, 'replica');
       },
       0,
-      () => session === owner && !trap
+      () => session === owner && !proposalCommitted && !trap
     );
   });
 }

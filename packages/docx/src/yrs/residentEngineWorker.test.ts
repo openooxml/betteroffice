@@ -576,8 +576,12 @@ describe('resident worker staging base', () => {
   function stagingWorker() {
     const w = worker();
     const calls: string[] = [];
+    const engine = { version: () => 'staging' };
     Object.assign(w.harness.session, {
       openDocx: () => '{"host":1}',
+      proposalEngine: engine,
+      geometryReader: engine,
+      storiesChangedSince: () => ({ revision: 0, stories: [] }),
       encodeState: () => {
         calls.push('state');
         return new Uint8Array([1]);
@@ -606,7 +610,7 @@ describe('resident worker staging base', () => {
     expect((await w.attach([1])).ok).toBe(true);
     const queued = w.send({ type: 'encodeState' });
     expect(calls).toEqual([]);
-    expect((await queued).ok).toBe(true);
+    expect(await queued).toMatchObject({ ok: true, version: 'staging' });
     await prepared(3);
     expect(calls).toEqual(['state', 'bytes', 'replica']);
     expect((await w.attach([1, 2])).ok).toBe(true);
@@ -620,6 +624,24 @@ describe('resident worker staging base', () => {
     expect((await w.attach([1, 2])).ok).toBe(true);
     await prepared(1);
     expect(calls).toEqual([]);
+  });
+
+  test('a proposal committed before the queued bytes step cancels preparation', async () => {
+    const { w, calls, prepared } = stagingWorker();
+    expect((await w.send({ type: 'open', bytes: new Uint8Array([1]).buffer })).ok).toBe(true);
+    expect((await w.bootstrap(3, { opened: true })).ok).toBe(true);
+    expect((await w.attach([1])).ok).toBe(true);
+    expect(calls).toEqual([]);
+    const committed = await w.send({
+      type: 'proposal',
+      operation: { kind: 'propose', request: { expectVersion: 'staging', proposals: [] } },
+    });
+    expect(committed).toMatchObject({ ok: true, proposal: { result: { ok: true } } });
+    await prepared(2);
+    expect(calls).toEqual(['clear']);
+    expect((await w.attach([1, 2])).ok).toBe(true);
+    await prepared(2);
+    expect(calls).toEqual(['clear']);
   });
 
   test('a step that holds nothing ends the preparation', async () => {

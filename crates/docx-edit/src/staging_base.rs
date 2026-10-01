@@ -137,3 +137,25 @@ impl EditingDoc {
         base.replica.map(|replica| *replica)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::EditingDoc;
+
+    #[test]
+    fn version_rotation_retires_the_prepared_staging_base() {
+        let doc = EditingDoc::new(7001);
+        doc.create_story("body", "text", "Normal", "left").unwrap();
+        assert!(doc.prepare_staging_base_bytes(usize::MAX));
+        assert!(doc.prepare_staging_base_replica().unwrap());
+        assert!(doc.staging_base_ready());
+        let version = doc.version();
+        let state = doc.encode_state_as_update_v1();
+        doc.rotate_version(0);
+        assert_ne!(doc.version(), version);
+        assert!(doc.staging_base.lock().unwrap().is_none());
+        assert!(!doc.staging_base_ready());
+        assert!(!doc.prepare_staging_base_replica().unwrap());
+        assert_eq!(doc.encode_state_as_update_v1(), state);
+    }
+}

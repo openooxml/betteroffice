@@ -3967,18 +3967,21 @@ impl EditSession {
     /// encodes the committed state, then `"replica"` decodes it for the batch's rehearsal.
     /// Returns whether the step's result is held for the current state. Opt-in: it stays
     /// resident until a batch uses it, the document changes, or `clear_staging_base`. The
-    /// replica is skipped while a heap limit leaves less than twice the live bytes free.
+    /// steps are skipped while a heap limit leaves less than twice the live bytes free.
     pub fn prepare_staging_base(&self, step: &str) -> Result<bool, JsValue> {
         let doc = self.engine.doc();
         match step {
-            "bytes" => Ok(doc.prepare_staging_base_bytes(crate::batch::MAX_STAGING_BYTES)),
-            "replica" => {
+            "bytes" | "replica" => {
                 if !crate::wasm_memory::has_room_for(
                     (crate::wasm_memory::wasm_live_bytes() as usize).saturating_mul(2),
                 ) {
                     return Ok(false);
                 }
-                doc.prepare_staging_base_replica().map_err(js_err)
+                if step == "bytes" {
+                    Ok(doc.prepare_staging_base_bytes(crate::batch::MAX_STAGING_BYTES))
+                } else {
+                    doc.prepare_staging_base_replica().map_err(js_err)
+                }
             }
             _ => Err(JsValue::from_str("unknown staging base step")),
         }
