@@ -128,6 +128,10 @@ impl LocalLowering {
     }
 
     pub(super) fn finish(&mut self, blocks: &[LayoutBlock], map: &LoweringMap) {
+        if self.blocked {
+            self.seeds.clear();
+            return;
+        }
         let mut identities = BTreeSet::new();
         self.blocked |= map.paragraphs.iter().any(|(_, id)| !identities.insert(id));
         self.blocked |= !blocks.iter().all(shiftable);
