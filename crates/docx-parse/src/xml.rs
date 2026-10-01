@@ -997,7 +997,7 @@ fn malformed(reader: &Reader<&[u8]>, part: &str, error: impl ToString) -> ParseE
     }
 }
 
-fn escape_stray_ampersands(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+pub(crate) fn escape_stray_ampersands(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     // Stray ampersands are repaired only in UTF-8 or ASCII input.
     let mut output: Option<Vec<u8>> = None;
     let mut index = 0;
