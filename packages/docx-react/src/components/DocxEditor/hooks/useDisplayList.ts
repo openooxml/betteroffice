@@ -312,11 +312,20 @@ type PageBuildInFlight =
   | { kind: 'release' }
   | { kind: 'build'; background: boolean; cancel(): void; promote(): void };
 
+function isPageBuildTask(scheduled: PageBuildTimer): scheduled is PageBuildTask {
+  return typeof scheduled === 'object' && 'cancel' in scheduled;
+}
+
+/** A page build queued on a timer, which runs sooner than an idle-time build. */
+function pageBuildTimerQueued(scheduled: PageBuildTimer | null): boolean {
+  return scheduled !== null && !isPageBuildTask(scheduled);
+}
+
 function cancelPageBuilds(timer: { current: PageBuildTimer | null }): void {
   const scheduled = timer.current;
   timer.current = null;
   if (scheduled === null) return;
-  if (typeof scheduled === 'object' && 'cancel' in scheduled) scheduled.cancel();
+  if (isPageBuildTask(scheduled)) scheduled.cancel();
   else clearTimeout(scheduled);
 }
 
@@ -1640,12 +1649,15 @@ export function useRustDisplayList(
       let batch = unbuilt.filter((index) => index >= start && index < end);
       const background = batch.length === 0 && release.length === 0;
       const inFlight = pageBuildInFlightRef.current;
+      // Pages the worker has built for a background request come back as a
+      // whole-document frame to a request based on the display's older frame.
       const supersedingBackground =
+        workerOpenEnabledRef.current &&
         !background && release.length === 0 && inFlight?.kind === 'build' && inFlight.background;
       if (inFlight) {
         if (inFlight.kind === 'release') return;
-        if (settling) inFlight.promote();
-        if (background || release.length > 0 || !inFlight.background) return;
+        if (settling || (!background && !supersedingBackground)) inFlight.promote();
+        if (!supersedingBackground) return;
         inFlight.cancel();
         pageBuildInFlightRef.current = null;
       }
@@ -1692,7 +1704,10 @@ export function useRustDisplayList(
         );
       }
       let attachment: PageBuildTask | null = null;
-      let promote = (): void => {};
+      let promoted = false;
+      let promote = (): void => {
+        promoted = true;
+      };
       const build: PageBuildInFlight = release.length > 0
         ? { kind: 'release' }
         : { kind: 'build', background, cancel: () => attachment?.cancel(), promote: () => promote() };
@@ -1711,7 +1726,11 @@ export function useRustDisplayList(
       const finish = (): void => {
         if (pageBuildInFlightRef.current !== build) return;
         pageBuildInFlightRef.current = null;
-        schedulePageBuildsWhenIdleRef.current();
+        const keepTimer =
+          !workerOpenEnabledRef.current &&
+          settleWaitersRef.current.size === 0 &&
+          pageBuildTimerQueued(pageBuildTimerRef.current);
+        if (!keepTimer) schedulePageBuildsWhenIdleRef.current();
       };
       const line = sourceLine(worker.engine);
       const paintToken = paintedCaretMachine.token();
@@ -1840,10 +1859,11 @@ export function useRustDisplayList(
           };
           let urgent = false;
           const attachDecode = (): void => {
-            urgent = settleWaitersRef.current.size > 0;
+            urgent = promoted || settleWaitersRef.current.size > 0;
             attachment = scheduleIdlePageBuild(decode, urgent);
           };
           promote = () => {
+            promoted = true;
             if (urgent || !attachment) return;
             attachment.cancel();
             attachDecode();

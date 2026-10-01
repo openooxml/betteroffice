@@ -450,6 +450,76 @@ pub fn grow_content_sized_columns(
     }
 }
 
+/// Whether the table's columns widen to fit their widest words, as Word's
+/// autofit layout does: not under `w:tblLayout w:type="fixed"`, and only on
+/// the legacy grid algorithm.
+pub(crate) fn fits_columns_to_words(table_block: &TableBlock) -> bool {
+    table_block.layout_mode.as_deref() != Some("fixed")
+        && table_block
+            .width_algorithm
+            .as_deref()
+            .or(table_block.layout_mode.as_deref())
+            .unwrap_or("legacy")
+            == "legacy"
+}
+
+/// Raises each column narrower than `minimums[column]`, the widest word one of
+/// its cells holds, and takes the room from the other columns in equal shares
+/// that never cut one below its own minimum, so the table keeps its width. A
+/// non-finite minimum pins its column: it neither grows nor gives. Returns
+/// `false` and leaves `widths` alone when nothing needs room or the other
+/// columns cannot spare it.
+pub(crate) fn widen_columns_to_minimums(widths: &mut [f64], minimums: &[f64]) -> bool {
+    let minimum = |column: usize| {
+        minimums
+            .get(column)
+            .copied()
+            .filter(|value| value.is_finite())
+    };
+    let needed: f64 = (0..widths.len())
+        .filter_map(|column| Some((minimum(column)? - widths[column]).max(0.0)))
+        .sum();
+    if !(needed > WIDEN_TOLERANCE_PX) {
+        return false;
+    }
+    let mut spare: Vec<f64> = (0..widths.len())
+        .map(|column| match minimum(column) {
+            Some(minimum) if minimum > widths[column] => 0.0,
+            Some(minimum) => widths[column] - minimum,
+            None => 0.0,
+        })
+        .collect();
+    if spare.iter().sum::<f64>() < needed {
+        return false;
+    }
+    for (column, width) in widths.iter_mut().enumerate() {
+        if let Some(minimum) = minimum(column) {
+            *width = width.max(minimum);
+        }
+    }
+    let mut remaining = needed;
+    while remaining > 1e-9 {
+        let donors = spare.iter().filter(|room| **room > 1e-9).count();
+        if donors == 0 {
+            break;
+        }
+        let share = remaining / donors as f64;
+        for (column, room) in spare.iter_mut().enumerate() {
+            if *room > 1e-9 {
+                let take = share.min(*room);
+                widths[column] -= take;
+                *room -= take;
+                remaining -= take;
+            }
+        }
+    }
+    true
+}
+
+/// Shortfall below which a column is not widened: the line filler's own
+/// rounding slack, not a word that fails to fit.
+const WIDEN_TOLERANCE_PX: f64 = 0.001;
+
 /// Resolves per-column pixel widths from the table's grid metadata and width
 /// budget, per the module's three algorithms. Measures no cell content.
 pub fn resolve_table_column_widths(table_block: &TableBlock, content_width: f64) -> Vec<f64> {
@@ -765,6 +835,41 @@ mod tests {
         assert_close_to(widths[0], 145.0, 6);
         assert_close_to(widths[1], 115.0, 6);
         assert_close_to(widths[0] + widths[1], 260.0, 6);
+    }
+
+    #[test]
+    fn a_column_short_of_its_longest_word_takes_equal_shares_from_the_others() {
+        let mut widths = vec![50.0, 100.0, 100.0, 100.0];
+        assert!(widen_columns_to_minimums(
+            &mut widths,
+            &[80.0, 20.0, 20.0, 20.0]
+        ));
+        assert_eq!(widths, vec![80.0, 90.0, 90.0, 90.0]);
+    }
+
+    #[test]
+    fn a_donor_column_stops_at_its_own_longest_word() {
+        let mut widths = vec![50.0, 60.0, 100.0];
+        assert!(widen_columns_to_minimums(&mut widths, &[80.0, 55.0, 20.0]));
+        assert_eq!(widths, vec![80.0, 55.0, 75.0]);
+    }
+
+    #[test]
+    fn a_pinned_column_neither_grows_nor_gives() {
+        let mut widths = vec![50.0, 100.0, 100.0];
+        assert!(widen_columns_to_minimums(
+            &mut widths,
+            &[80.0, f64::NAN, 20.0]
+        ));
+        assert_eq!(widths, vec![80.0, 100.0, 70.0]);
+    }
+
+    #[test]
+    fn columns_stay_put_when_every_word_fits_or_the_others_cannot_spare_the_room() {
+        let mut widths = vec![50.0, 60.0];
+        assert!(!widen_columns_to_minimums(&mut widths, &[50.0, 20.0]));
+        assert!(!widen_columns_to_minimums(&mut widths, &[80.0, 55.0]));
+        assert_eq!(widths, vec![50.0, 60.0]);
     }
 
     #[test]
