@@ -58,6 +58,42 @@ pub(crate) fn measure_paragraph(
     Some(extent_from_out(extent))
 }
 
+pub(crate) fn intrinsic_widths(
+    paragraph: &ParagraphBlock,
+    content_width: f64,
+    config: &MeasurementConfig,
+) -> Option<(f64, f64)> {
+    if paragraph.runs.iter().any(|run| {
+        let fmt = match run {
+            Run::Text(text) => &text.fmt,
+            Run::Tab(tab) => &tab.fmt,
+            Run::Field(field) => &field.fmt,
+            _ => return false,
+        };
+        fmt.letter_spacing.is_some_and(|spacing| spacing < 0.0)
+            || fmt.horizontal_scale.is_some_and(|scale| scale < 100.0)
+    }) {
+        return None;
+    }
+    let block = block_in(paragraph, content_width)?;
+    let defaults = defaults_in(&config.defaults)?;
+    let request = MeasureRequest {
+        block: &block,
+        max_width: content_width as f32,
+        font_chains: FontChains::BTree(&config.font_chains),
+        defaults: &defaults,
+        compat: compat_in(&config.compat)?,
+        floating_zones: None,
+        paragraph_y_offset: None,
+        authoritative_shaping: config.authoritative_shaping,
+    };
+    crate::with_measure_fonts(|store| {
+        ooxml_text::measure::measure_intrinsic_widths(&store.borrow(), &request)
+            .ok()
+            .map(|(minimum, maximum)| (f64::from(minimum), f64::from(maximum)))
+    })
+}
+
 fn block_in(paragraph: &ParagraphBlock, content_width: f64) -> Option<BlockIn> {
     let attrs = paragraph.attrs.as_ref();
     let indent = attrs.and_then(|attrs| attrs.indent.as_ref());

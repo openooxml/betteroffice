@@ -1120,7 +1120,7 @@ fn utf16_at(t: &PreparedText, i: usize) -> u32 {
     t.chars.get(i).map_or(t.utf16_len, |c| c.utf16_offset)
 }
 
-fn visible_span_width(chars: &[CharAdv], letter_spacing: f32) -> f32 {
+pub(super) fn visible_span_width(chars: &[CharAdv], letter_spacing: f32) -> f32 {
     let end = chars
         .iter()
         .rposition(|cluster| !cluster.is_fit_space)
@@ -1131,7 +1131,7 @@ fn visible_span_width(chars: &[CharAdv], letter_spacing: f32) -> f32 {
 /// Shaped advance sum plus tracking between complete clusters. This is the
 /// authoritative path for paint/hit geometry: no gap may land inside a
 /// ligature, surrogate pair, or combining sequence.
-fn span_width(chars: &[CharAdv], letter_spacing: f32) -> f32 {
+pub(super) fn span_width(chars: &[CharAdv], letter_spacing: f32) -> f32 {
     let advance: f32 = chars.iter().map(|c| c.advance).sum();
     if letter_spacing != 0.0 && chars.len() > 1 {
         advance + letter_spacing * (chars.len() - 1) as f32
