@@ -33,6 +33,9 @@ function source(): Uint8Array {
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
+const round = (value: number) => Math.round(value * 1000) / 1000;
+const px = (twips: number) => round(twips / 15);
+
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
 
 test('table cell margins resolve each side through direct, table style and default table style', async () => {
@@ -48,8 +51,13 @@ test('table cell margins resolve each side through direct, table style and defau
       const tables = (session.yrsBlocksForStory('body', {}) as LayoutBlock[]).filter(
         (block): block is TableBlock => block.kind === 'table'
       );
-      const padding = tables.map((block) => block.rows[0].cells.map((cell) => cell.padding));
-      const px = (twips: number) => twips / 15;
+      const padding = tables.map((block) =>
+        block.rows[0].cells.map((cell) =>
+          Object.fromEntries(
+            Object.entries(cell.padding ?? {}).map(([side, value]) => [side, round(value)])
+          )
+        )
+      );
       expect(padding).toEqual([
         Array(2).fill({ top: px(57), right: px(108), bottom: px(57), left: px(108) }),
         Array(2).fill({ top: px(57), right: px(54), bottom: 0, left: px(54) }),
