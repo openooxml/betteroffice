@@ -1913,6 +1913,7 @@ export function useRustDisplayList(
           // surfaces are attached: the worker answers in order, so asking
           // sooner would hold back the first paint until it is done.
           const provisionalEpoch = result.caret.frameEpoch;
+          const provisionalDocEpoch = decodeFrameDelta(result.frame).docEpoch;
           const isCurrentPass = (): boolean =>
             isCurrentWorker(hostEngine, owner) &&
             hostEngine.residentWorkerProbe()?.layoutRevision === adoptedRevision;
@@ -1933,7 +1934,7 @@ export function useRustDisplayList(
                 if (!isCurrentPass()) return null;
                 if (completed) {
                   const base = frameBase(hostEngine);
-                  return adopt(completed, base);
+                  return adopt(completed, base?.docEpoch === provisionalDocEpoch ? base : undefined);
                 }
                 if (!holdsWorkerProposals(hostEngine)) return null;
               }
