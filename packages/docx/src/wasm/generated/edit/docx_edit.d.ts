@@ -784,6 +784,10 @@ export class EditSession {
      */
     reject_change(target_json: string): string;
     /**
+     * Release display pages; an empty result means the request was superseded.
+     */
+    release_display_pages_frame(pages: Uint32Array, expected_frame_epoch: number): Uint8Array;
+    /**
      * Replaces `[start, end)` with `text` in one transaction. The inserted
      * text adopts the first replaced unit's formatting; in suggesting mode
      * the deletion and the insertion share one revision id. Receipt:
@@ -1602,6 +1606,7 @@ export interface InitOutput {
     readonly editsession_register_measure_font: (a: number, b: number, c: number) => [number, number, number];
     readonly editsession_register_substitute_measure_font: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly editsession_reject_change: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_release_display_pages_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_replace_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
     readonly editsession_reset_frame_base: (a: number) => void;
     readonly editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];
