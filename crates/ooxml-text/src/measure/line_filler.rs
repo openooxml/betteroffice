@@ -66,6 +66,8 @@ pub(super) struct FillParams<'a> {
     pub justify: bool,
     pub store: &'a crate::font_store::FontStore,
     pub prepared: &'a [PreparedRun],
+    /// The paragraph's runs, index-aligned with `prepared`.
+    pub runs: &'a [RunIn],
     pub spacing: Option<&'a SpacingIn>,
     /// Content width for every line after the first (indents applied).
     pub body_width: f32,
@@ -156,6 +158,9 @@ struct Filler<'a> {
     cumulative_height: f32,
     /// Float skip attached to the next finalized line.
     pending_float_skip: f32,
+    /// Per prepared run, the width of the text after it that continues the
+    /// word it ends in; see [`word_continuations`].
+    continuations: Vec<f32>,
 }
 
 /// Paragraph space-before in px, floored at zero.
@@ -270,6 +275,7 @@ pub(super) fn fill(p: FillParams) -> Result<ParagraphExtentOut, MeasureError> {
         lines: Vec::new(),
         cumulative_height,
         pending_float_skip,
+        continuations: word_continuations(p.prepared, p.runs),
     };
     filler.run()?;
 
@@ -579,6 +585,16 @@ impl Filler<'_> {
             let word = &t.chars[char_idx..next_break];
             let word_width = span_width(word, t.letter_spacing);
             let fitting_width = visible_span_width(word, t.letter_spacing);
+            let joined_width = if next_break == t.chars.len() {
+                fitting_width + self.continuations.get(ri as usize).copied().unwrap_or(0.0)
+            } else {
+                fitting_width
+            };
+            let wrap_width = if joined_width <= self.p.body_width + WRAP_SLACK_PX {
+                joined_width
+            } else {
+                fitting_width
+            };
 
             if fitting_width > self.cur.available + WRAP_SLACK_PX {
                 // Overlong unbreakable word: fill the remaining space on the
@@ -617,7 +633,7 @@ impl Filler<'_> {
 
             if self.cur.width > 0.0
                 && fitting_width > 0.0
-                && self.cur.width + fitting_width
+                && self.cur.width + wrap_width
                     - if self.p.justify {
                         self.cur.space_width * 0.25
                     } else {
@@ -1186,6 +1202,39 @@ pub(super) fn unbreakable_spans(prepared: &[PreparedRun], runs: &[RunIn]) -> (f3
     (widest, first.unwrap_or(0.0))
 }
 
+/// Per prepared run, the visible width of the text after it that continues
+/// the word it ends in, up to the next break opportunity, so a word split
+/// across runs wraps whole. Empty, hidden and floating-image runs pass
+/// through; any other run ends the word.
+fn word_continuations(prepared: &[PreparedRun], runs: &[RunIn]) -> Vec<f32> {
+    let mut continuations = vec![0.0; prepared.len()];
+    let mut next: Option<(usize, f32)> = None;
+    for (index, run) in prepared.iter().enumerate().rev() {
+        match run {
+            PreparedRun::Text(t) if !t.chars.is_empty() => {
+                if let Some((after, width)) = next
+                    && runs_join(runs, index, after)
+                {
+                    continuations[index] = width;
+                }
+                let end = t.breaks.first().copied().unwrap_or(t.chars.len());
+                let lead = visible_span_width(&t.chars[..end], t.letter_spacing);
+                let carried = if end == t.chars.len() {
+                    continuations[index]
+                } else {
+                    0.0
+                };
+                next = Some((index, lead + carried));
+            }
+            PreparedRun::Text(_)
+            | PreparedRun::Hidden { .. }
+            | PreparedRun::SkippedImage { .. } => {}
+            _ => next = None,
+        }
+    }
+    continuations
+}
+
 /// Whether text run `after` continues the word text run `before` ends in.
 fn runs_join(runs: &[RunIn], before: usize, after: usize) -> bool {
     let last = runs
@@ -1379,6 +1428,7 @@ mod tests {
                 s
             },
             prepared,
+            runs: &[],
             spacing: None,
             body_width: width,
             first_line_width: width,
