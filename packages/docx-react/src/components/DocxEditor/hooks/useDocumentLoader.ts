@@ -44,6 +44,7 @@ export function useDocumentLoader({
   commentIdAllocator,
   setDocumentFonts,
   fontScope,
+  fontsFromFullDocument = false,
 }: {
   documentBuffer: DocxInput | null | undefined;
   initialDocument: Document | null | undefined;
@@ -68,6 +69,8 @@ export function useDocumentLoader({
   setDocumentFonts: (fonts: FontOption[]) => void;
   /** The editor instance's font loads, see `useFontLoadScope`. */
   fontScope: FontLoadScope;
+  /** The picker's document fonts come from the full document: a preview offers none. */
+  fontsFromFullDocument?: boolean;
 }) {
   // The live history document changes after every edit, but yrs must only be
   // reseeded when a new source document is loaded. Keep that load boundary
@@ -164,14 +167,18 @@ export function useDocumentLoader({
       previewDocumentRef.current = options?.preview ? doc : null;
       history.reset(doc);
       setLoadingState({ isLoading: false, parseError: null });
-      const embeddedFamilies = getEmbeddedFontFamilies(doc.package.fontTable);
-      const documentFonts = [
-        ...getRenderableDocumentFonts(doc, { embeddedFamilies }),
-        ...selectRenderableFonts(host.referencedFonts, { embeddedFamilies }),
-      ];
-      setDocumentFonts(
-        [...new Map(documentFonts.map((font) => [font.name.toLowerCase(), font])).values()]
-      );
+      if (options?.preview && fontsFromFullDocument) {
+        setDocumentFonts(NO_DOCUMENT_FONTS);
+      } else {
+        const embeddedFamilies = getEmbeddedFontFamilies(doc.package.fontTable);
+        const documentFonts = [
+          ...getRenderableDocumentFonts(doc, { embeddedFamilies }),
+          ...selectRenderableFonts(host.referencedFonts, { embeddedFamilies }),
+        ];
+        setDocumentFonts(
+          [...new Map(documentFonts.map((font) => [font.name.toLowerCase(), font])).values()]
+        );
+      }
       // A preview's font loads stop once the full document is accepted.
       const isCurrent = () =>
         loadGeneration.isCurrent(generation) && hostDocumentsRef.current === accepted;
@@ -212,7 +219,7 @@ export function useDocumentLoader({
         }
       );
     },
-    [loadGeneration, history, setDocumentFonts, setLoadingState, fontScope]
+    [loadGeneration, history, setDocumentFonts, setLoadingState, fontScope, fontsFromFullDocument]
   );
 
   const failHostDocument = useCallback(
@@ -327,6 +334,7 @@ export function useDocumentLoader({
 }
 
 const NO_FONT_ALIASES: ReadonlyMap<string, string> = new Map();
+const NO_DOCUMENT_FONTS: FontOption[] = [];
 
 const fontKey = (family: string): string => family.trim().toLowerCase();
 
