@@ -959,7 +959,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         }
       }
 
-      if (e.detail === 2 && !partEdit && onHeaderFooterDoubleClick) {
+      if (e.detail === 2 && !readOnly && !partEdit && onHeaderFooterDoubleClick) {
         const region = point?.hit?.region;
         if (region === 'header' || region === 'footer') {
           clearPendingGesture();
