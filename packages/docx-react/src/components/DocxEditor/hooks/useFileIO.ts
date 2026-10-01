@@ -132,7 +132,8 @@ async function writeEditorDocument(
     source.buffer,
     {},
     patches,
-    true
+    true,
+    () => true
   );
   const saved = bytes.buffer as ArrayBuffer;
   editorSaves.set(session, saved);

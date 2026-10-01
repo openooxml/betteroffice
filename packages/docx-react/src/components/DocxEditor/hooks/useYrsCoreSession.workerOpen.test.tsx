@@ -1355,6 +1355,74 @@ test('a preview the worker opens lays out there, and the full open queues right 
   }
 });
 
+test('a preview font preflight answered after the full open took its worker over reports no error', async () => {
+  const fullOpen = (request: ResidentEngineWorkerRequest) =>
+    request.type === 'open' && request.previewBlocks === undefined;
+  let holdRequirements = false;
+  const held: ResidentEngineWorkerRequest[] = [];
+  const { posted, reply } = installWorker({
+    holdReply: (request) => {
+      if (!holdRequirements || request.type !== 'fontRequirements') return false;
+      held.push(request);
+      return true;
+    },
+  });
+  let openFull!: () => void;
+  const fullOpenGate = new Promise<void>((resolve) => { openFull = resolve; });
+  const frames = holdFrames();
+  try {
+    const openInWorker: OpenInWorker = async (...args) => {
+      await fullOpenGate;
+      return result.current.renderer.openInWorker(...args);
+    };
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: {
+        ...initialProps,
+        previewFirstPage: true,
+        workerPreview: true,
+        source: longBytes,
+        openInWorker,
+      },
+    });
+    await waitFor(() => expect(result.current.core.previewing).toBe(true));
+    const preview = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(preview));
+    const shownLayout = result.current.pipeline.layout;
+    expect(posted.filter(fullOpen)).toHaveLength(0);
+
+    holdRequirements = true;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(held).toHaveLength(1));
+    holdRequirements = false;
+    openFull();
+    await waitFor(() => expect(posted.filter(fullOpen)).toHaveLength(1));
+    expect(posted.indexOf(held[0]!)).toBeLessThan(posted.findIndex(fullOpen));
+    await act(async () => {
+      reply(held[0]!);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(result.current.errors).toEqual([]);
+    expect(result.current.pipeline.layout).toBe(shownLayout);
+
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await waitFor(() => expect(result.current.core.previewing).toBe(false));
+    const full = result.current.core.session!;
+    expect(full).not.toBe(preview);
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(full));
+    expect(result.current.renderer.displayList?.pages.length).toBeGreaterThan(0);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
+
 test('a worker preview loaded here before its first layout stops using the worker', async () => {
   const { workers, posted } = installWorker();
   const frames = holdFrames();

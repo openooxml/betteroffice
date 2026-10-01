@@ -120,7 +120,7 @@ pub use identity::{
     AnchorResolution, AnchorUnsupported, ParagraphAnchor, ParagraphIdAssignment,
     ParagraphIdDiagnostic, ParagraphIdOrigin, ParagraphIdRefusal, ParagraphIdentities,
     ParagraphIdentity, ParagraphOrigin, ParagraphRef, ParagraphSavePlan, PersistedParagraphIds,
-    SourceParagraphRef, SourceStory, SourceStoryKind,
+    SourceParagraphRef, SourceStory, SourceStoryKind, SplicedPart,
 };
 pub use op::{Loc, LocRange, OpError, OpResult, Receipt, SplitReceipt};
 pub use ops::paragraph::{
