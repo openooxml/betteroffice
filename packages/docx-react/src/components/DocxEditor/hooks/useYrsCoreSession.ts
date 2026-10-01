@@ -826,6 +826,34 @@ export function useYrsCoreSession(
   const hasOwnWorkerFrame = workerOpen?.renderedFrame != null &&
     workerOpen.renderedFrame !== inheritedFrameRef.current;
   useEffect(() => {
+    if (
+      !openInWorker ||
+      !session ||
+      session !== sessionRef.current ||
+      !hasOwnWorkerFrame ||
+      !pendingReplicaRef.current?.pending ||
+      !startReplicaRef.current ||
+      previewing ||
+      (handoffFrom && options?.shownEngine !== session)
+    ) return;
+    workerLaidOutRef.current?.();
+    const authority = registeredWorkerProposalAuthority(session);
+    if (authority) {
+      void authority.initialize().catch((error) => {
+        console.error('[yrs] failed to initialize worker proposals', error);
+      });
+    }
+  }, [
+    openInWorker,
+    session,
+    hasOwnWorkerFrame,
+    workerOpen?.renderedFrame,
+    previewing,
+    handoffFrom,
+    options?.shownEngine,
+  ]);
+
+  useEffect(() => {
     if (!openInWorker) return;
     const pending = pendingReplicaRef.current;
     const start = startReplicaRef.current;
@@ -837,13 +865,6 @@ export function useYrsCoreSession(
       !start
     ) return;
     if (previewing || (handoffFrom && options?.shownEngine !== session)) return;
-    workerLaidOutRef.current?.();
-    const authority = registeredWorkerProposalAuthority(session);
-    if (authority) {
-      void authority.initialize().catch((error) => {
-        console.error('[yrs] failed to initialize worker proposals', error);
-      });
-    }
     // The replica blocks this thread: it loads once the worker is laying out the rest.
     if (workerOpen?.pendingCompletion === session) return;
     armReplicaGate(REPLICA_FRAME_WAIT_MS);
