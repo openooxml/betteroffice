@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::paragraph_spacing::{get_spacing_after, get_spacing_before};
-use crate::table_row_break::{build_table_row_break_info, first_table_fragment_height};
+use crate::table_row_break::{RowBreaks, first_table_fragment_height};
 use crate::types::{
     BlockExtent, LayoutBlock, MeasuredBlock, ParagraphBlock, ParagraphExtent, TableBlock,
     TableExtent,
@@ -67,8 +67,10 @@ fn is_bound_paragraph(block: &LayoutBlock) -> bool {
 ///
 /// A run grows while the next block is another keep-with-next paragraph; it
 /// ends at a break block, a non-paragraph block, a paragraph without keepNext,
-/// or the end of the list. When the terminator is a plain paragraph it becomes
-/// the run's follower, since the run must land on the follower's page.
+/// a paragraph that starts a new page, or the end of the list. When the
+/// terminator is a plain paragraph it becomes the run's follower, since the run
+/// must land on the follower's page. A paragraph that starts a new page is
+/// never a follower: Word lets the page break win over keepNext.
 pub fn analyze_keep_with_next(measured: &[MeasuredBlock]) -> KeepWithNextScan {
     let mut groups_by_head: BTreeMap<usize, KeepWithNextGroup> = BTreeMap::new();
     let mut interior_members: BTreeSet<usize> = BTreeSet::new();
@@ -83,7 +85,10 @@ pub fn analyze_keep_with_next(measured: &[MeasuredBlock]) -> KeepWithNextScan {
         let mut members: Vec<usize> = vec![cursor];
         let mut tail_index = cursor;
         let mut probe = cursor + 1;
-        while probe < measured.len() && is_bound_paragraph(&measured[probe].block) {
+        while probe < measured.len()
+            && is_bound_paragraph(&measured[probe].block)
+            && !paragraph_breaks_before(&measured[probe].block)
+        {
             members.push(probe);
             tail_index = probe;
             probe += 1;
@@ -93,6 +98,7 @@ pub fn analyze_keep_with_next(measured: &[MeasuredBlock]) -> KeepWithNextScan {
         // supported flow object. Forced/section breaks terminate it.
         let after_tail = tail_index + 1;
         let follower = if after_tail < measured.len()
+            && !paragraph_breaks_before(&measured[after_tail].block)
             && matches!(
                 measured[after_tail].block,
                 LayoutBlock::Paragraph(_)
@@ -195,6 +201,20 @@ pub fn measure_keep_with_next_group_at(
     deferred: f64,
     capacity: f64,
 ) -> f64 {
+    measure_keep_with_next_group_witnessing(group, measured, leading, deferred, capacity, true)
+}
+
+/// [`measure_keep_with_next_group_at`], where a headerless table follower
+/// witnesses its whole first row unless `split_first_row` (and the row is not
+/// taller than `capacity`).
+pub(crate) fn measure_keep_with_next_group_witnessing(
+    group: &KeepWithNextGroup,
+    measured: &[MeasuredBlock],
+    leading: impl Fn(f64) -> f64,
+    deferred: f64,
+    capacity: f64,
+    split_first_row: bool,
+) -> f64 {
     let mut budget = 0.0;
     let mut owed = deferred;
     for (position, &index) in group.members.iter().enumerate() {
@@ -227,7 +247,9 @@ pub fn measure_keep_with_next_group_at(
             }
         }
         Some(BlockExtent::Table(table)) => match follower.map(|mb| &mb.block) {
-            Some(LayoutBlock::Table(block)) => table_leading_slice(block, table, capacity),
+            Some(LayoutBlock::Table(block)) => {
+                table_leading_slice(block, table, capacity, split_first_row)
+            }
             _ => 0.0,
         },
         Some(BlockExtent::Image(image)) => image.height,
@@ -245,29 +267,65 @@ pub fn measure_keep_with_next_group_at(
 }
 
 /// Height (px) of the shortest first fragment placement gives a table: its
-/// header band and first body slice, extended to the end of any
-/// keep-with-next row chain starting in them that fits `capacity` along with
-/// the rows above it. A floating table keeps its flow slice, as it is not
+/// header band and first body slice (its first line when the paragraph rules
+/// leave that row no break in the room under the band), or the smallest slice
+/// of a headerless table's first row (the whole row when it cannot split, or
+/// unless `split_first_row` and the row fits `capacity`), extended to the end
+/// of any keep-with-next row chain starting in them that fits `capacity` along
+/// with the rows above it. A floating table keeps its line slice, as it is not
 /// placed in the flow.
-fn table_leading_slice(block: &TableBlock, measure: &TableExtent, capacity: f64) -> f64 {
-    let first =
-        first_table_fragment_height(block, measure, &build_table_row_break_info(block, measure));
+fn table_leading_slice(
+    block: &TableBlock,
+    measure: &TableExtent,
+    capacity: f64,
+    split_first_row: bool,
+) -> f64 {
+    let breaks = RowBreaks::new(block, measure);
     if block.floating.is_some() {
-        return first;
+        return first_table_fragment_height(block, measure, breaks.lines());
     }
+    let mut first = first_table_fragment_height(block, measure, &breaks.kept);
     let headers = block
         .rows
         .iter()
         .take_while(|row| row.is_header.unwrap_or(false))
         .count();
+    let oversized_first_row = measure
+        .rows
+        .first()
+        .is_some_and(|row| row.height > capacity)
+        && !block
+            .rows
+            .first()
+            .is_some_and(|row| row.cant_split.unwrap_or(false) || row.is_exact_height());
+    if headers == 0 && !measure.rows.is_empty() && (split_first_row || oversized_first_row) {
+        first = breaks.fresh_slice(0, 0.0, capacity);
+    } else if headers > 0
+        && headers < measure.rows.len()
+        && !block
+            .rows
+            .get(headers)
+            .is_some_and(|row| row.cant_split.unwrap_or(false))
+    {
+        let band: f64 = measure.rows[..headers].iter().map(|row| row.height).sum();
+        let body = if band <= capacity {
+            capacity - band
+        } else {
+            capacity
+        };
+        if breaks.kept_oversized(headers, 0.0, body) {
+            first = band + breaks.fresh_slice(headers, 0.0, body);
+        }
+    }
     let mut top = 0.0;
     let mut slice = first;
     for (row, keep) in measure
         .rows
         .iter()
-        .zip(crate::hooks::row_keep_heights(block, measure))
+        .zip(crate::hooks::row_keep_chains(block, measure))
         .take(headers + 1)
     {
+        let keep = crate::hooks::row_keep_height(keep, block, measure, &breaks, capacity);
         if keep > 0.0 && top + keep <= capacity {
             slice = slice.max(top + keep);
         }
@@ -395,6 +453,55 @@ mod tests {
             .zip(measures)
             .map(|(block, measure)| MeasuredBlock { block, measure })
             .collect()
+    }
+
+    #[test]
+    fn a_paragraph_that_starts_a_new_page_ends_a_keep_with_next_run() {
+        let page_break_before = |text: &str, keep_next: bool| {
+            paragraph(
+                vec![text_run(text)],
+                Some(ParagraphAttrs {
+                    keep_next: keep_next.then_some(true),
+                    page_break_before: Some(true),
+                    ..Default::default()
+                }),
+            )
+        };
+        let line = || make_paragraph_measure(vec![make_line(20.0)]);
+        let measured = to_measured_blocks(
+            vec![
+                make_paragraph_block("Heading", true),
+                page_break_before("Chapter", true),
+                make_paragraph_block("Body", false),
+                make_paragraph_block("Heading", true),
+                page_break_before("Chapter", false),
+                make_paragraph_block("Heading", true),
+                paragraph(
+                    vec![text_run("Chapter")],
+                    Some(ParagraphAttrs {
+                        page_break_before_run: Some(true),
+                        ..Default::default()
+                    }),
+                ),
+            ],
+            vec![line(), line(), line(), line(), line(), line(), line()],
+        );
+
+        let scan = analyze_keep_with_next(&measured);
+        let groups: Vec<(Vec<usize>, Option<usize>)> = scan
+            .groups_by_head
+            .values()
+            .map(|group| (group.members.clone(), group.follower))
+            .collect();
+        assert_eq!(
+            groups,
+            vec![
+                (vec![0], None),
+                (vec![1], Some(2)),
+                (vec![3], None),
+                (vec![5], None)
+            ]
+        );
     }
 
     #[test]

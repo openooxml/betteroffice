@@ -34,6 +34,10 @@ export async function flushEditorInput(
     };
   }
   try {
+    await editor.flushPendingInput();
+    if (pagedEditorRef.current?.getYrsSession() !== session) {
+      throw new Error('The document changed while flushing input');
+    }
     const ready = experimentalWorkerOpen ? awaitWorkerOpenReplica(session) : undefined;
     if (ready) {
       await ready;
@@ -41,7 +45,6 @@ export async function flushEditorInput(
         throw new Error('The document changed while opening the replica');
       }
     }
-    await editor.flushPendingInput();
   } catch (error) {
     return {
       ok: false,
@@ -161,7 +164,7 @@ export async function applyEditBatch<Refusal = never>(
   const result = commit(() => session.applyEdits(request));
   if (result.ok && result.applied) {
     try {
-      flushed.editor.syncYrsInputState(true, result.changedStories);
+      flushed.editor.syncYrsInputState(true, result.changedStories, { inWorker: true });
     } catch (error) {
       console.error('[DocxEditor] refreshing after an applied edit batch failed', error);
     }
@@ -213,7 +216,7 @@ export async function applyProposalCall(
   ]);
   if (stories.size > 0) {
     try {
-      flushed.editor.syncYrsInputState(true, [...stories]);
+      flushed.editor.syncYrsInputState(true, [...stories], { inWorker: true });
     } catch (error) {
       console.error('[DocxEditor] refreshing after applied proposals failed', error);
     }

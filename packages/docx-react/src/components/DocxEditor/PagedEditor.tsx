@@ -66,7 +66,7 @@ import type {
 } from '@betteroffice/docx/types/document';
 import type { WrapType } from '@betteroffice/docx/docx/wrapTypes';
 import {
-  yrsLocToDisplayPosition as yrsLocToLocalDisplayPosition,
+  yrsLocToProjectedDisplayPosition,
   type YrsInlineFormatDelta,
   type YrsLoc,
   type YrsRenderEnv,
@@ -137,7 +137,7 @@ import {
   type YrsPositionProjection,
 } from './internals/yrsPositionProjection';
 import { SidebarRevisionReads } from './internals/sidebarRevisionReads';
-import { YrsStorySegmentCache } from './internals/yrsStorySegmentCache';
+import { storySegmentSource, YrsStorySegmentCache } from './internals/yrsStorySegmentCache';
 import { partEditStory, type NoteEdit, type PartEdit } from './partEdit';
 import type { DocxEditorCollaborationOptions, DocxPointPosition } from './types';
 import { positionAtClientPoint } from './internals/pointPosition';
@@ -405,9 +405,16 @@ export interface PagedEditorRef {
   yrsLocToDisplayPosition(loc: YrsLoc): number | null;
   /**
    * Publish a yrs selection/mutation through the direct-input refresh path. `dirtyStories`
-   * names every story a mutation changed; the live selection's story by default.
+   * names every story a mutation changed; the live selection's story by default. `inWorker`
+   * lets the resident worker lay out a host batch, which no caret waits on.
    */
-  syncYrsInputState(docChanged: boolean, dirtyStories?: readonly string[]): boolean;
+  syncYrsInputState(
+    docChanged: boolean,
+    dirtyStories?: readonly string[],
+    options?: { inWorker?: boolean }
+  ): boolean;
+  /** Schedules layout of the resident worker document. */
+  refreshWorkerLayout(): void;
   /** Apply a body-toolbar command through yrs. */
   applyYrsFormatting(action: FormattingAction): boolean;
   /** Apply a non-toolbar body command through yrs. */
@@ -608,16 +615,17 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     );
     const yrsLocToDisplayPosition = useCallback(
       (loc: YrsLoc): number | null => {
-        const map = yrsCore.inputPositionMap(loc.story);
-        if (!map) return null;
-        const rootStory =
-          loc.story === 'body' || loc.story.startsWith('body:') ? 'body' : activeYrsRootStory;
-        return (
-          getYrsPositionProjectionRef.current(rootStory)?.positionForLoc(loc) ??
-          (loc.story === rootStory ? yrsLocToLocalDisplayPosition(map, loc) : null)
+        const session = yrsCore.session;
+        if (!session) return null;
+        return yrsLocToProjectedDisplayPosition(
+          session,
+          getYrsPositionProjectionRef.current,
+          loc,
+          activeYrsRootStory,
+          yrsCore.inputPositionMap
         );
       },
-      [activeYrsRootStory, yrsCore.inputPositionMap]
+      [activeYrsRootStory, yrsCore.session, yrsCore.inputPositionMap]
     );
     const displayPositionToViewportLoc = useCallback(
       (position: number): YrsLoc | null => {
@@ -813,13 +821,18 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       []
     );
     const refreshYrsLayout = useCallback(
-      (origin: LayoutUpdateOrigin): void => {
+      (origin: LayoutUpdateOrigin, inWorker?: boolean): void => {
         yrsProjectionVersionRef.current += 1;
         syncCoordinator.incrementStateSeq();
         syncCoordinator.requestRender();
-        scheduleLayout(origin);
+        scheduleLayout(origin, inWorker);
       },
       [scheduleLayout, syncCoordinator]
+    );
+
+    const refreshWorkerLayout = useCallback(
+      () => refreshYrsLayout('remote', true),
+      [refreshYrsLayout]
     );
 
     /**
@@ -831,7 +844,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         docChanged: boolean,
         residentLayoutReady = false,
         residentCaretReady = false,
-        updateOrigin: LayoutUpdateOrigin = 'local'
+        updateOrigin: LayoutUpdateOrigin = 'local',
+        inWorker?: boolean
       ): void => {
         const session = yrsCore.session;
         if (session) {
@@ -903,7 +917,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         // later from a projection rebuild.
         if (!residentCaretReady) updateSelectionOverlay();
         if (docChanged && !residentLayoutReady) {
-          refreshYrsLayout(updateOrigin);
+          refreshYrsLayout(updateOrigin, inWorker);
         }
         if (docChanged) {
           // Compatibility callbacks stay off the synchronous input path.
@@ -949,14 +963,15 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       (
         docChanged: boolean,
         origin: LayoutUpdateOrigin = 'local',
-        dirtyStory?: string | readonly string[]
+        dirtyStory?: string | readonly string[],
+        inWorker?: boolean
       ): boolean => {
         if (!yrsCore.session) return false;
         const displaySelection = yrsInputRef.current?.displaySelection() ?? { anchor: 0, head: 0 };
         if (docChanged) {
           yrsCore.publishDirectInput(dirtyStory);
         }
-        handleYrsStateChange(displaySelection, docChanged, false, false, origin);
+        handleYrsStateChange(displaySelection, docChanged, false, false, origin, inWorker);
         return true;
       },
       [handleYrsStateChange, yrsCore.publishDirectInput, yrsCore.session]
@@ -1398,7 +1413,22 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     } | null>(null);
     // Rebuilding a projection re-reads only the paragraphs that changed.
     const yrsStorySegmentsRef = useRef<YrsStorySegmentCache | null>(null);
-    useEffect(() => () => yrsStorySegmentsRef.current?.dispose(), []);
+    useEffect(
+      () => () => {
+        yrsStorySegmentsRef.current?.dispose();
+        yrsStorySegmentsRef.current = null;
+      },
+      []
+    );
+    const currentStorySegments = useCallback((session: YrsSession): YrsStorySegmentCache => {
+      let segments = yrsStorySegmentsRef.current;
+      if (segments?.session !== session) {
+        segments?.dispose();
+        segments = yrsStorySegmentsRef.current = new YrsStorySegmentCache(session);
+      }
+      segments.refresh();
+      return segments;
+    }, []);
     const getYrsPositionProjection = useCallback(
       (rootStory: string): YrsPositionProjection | null => {
         const session = yrsCore.session;
@@ -1418,12 +1448,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         ) {
           return cached.projection;
         }
-        let segments = yrsStorySegmentsRef.current;
-        if (segments?.session !== session) {
-          segments?.dispose();
-          segments = yrsStorySegmentsRef.current = new YrsStorySegmentCache(session);
-        }
-        segments.refresh();
+        const segments = currentStorySegments(session);
         const projection = createYrsPositionProjection(session, rootStory, segments);
         segments.scheduleDigests();
         if (!projection) return null;
@@ -1435,7 +1460,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         };
         return projection;
       },
-      [yrsCore.session]
+      [currentStorySegments, yrsCore.session]
     );
     getYrsPositionProjectionRef.current = getYrsPositionProjection;
     const resolveYrsDisplayTarget = useCallback(
@@ -1454,6 +1479,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // header/footer double-clicks, word/paragraph multi-click, and
     // right-click → host context-menu.
     const {
+      applyPendingSelection,
+      bumpInputEpoch,
+      handleEditorKeyDown,
+      inputEpoch,
       handlePagesContextMenu,
       handleTableInsertClick,
       tableInsertButton,
@@ -1469,6 +1498,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       applyYrsCommand,
       syncYrsInputState,
       readOnly,
+      replicaPending: () =>
+        !!yrsCore.experimentalWorkerOpen && !(yrsCore.replicaReadyRef?.current ?? yrsCore.replicaReady),
+      replicaReady: yrsCore.replicaReady,
+      requestReplica: yrsCore.requestReplica,
       partEdit,
       displayListQueries,
       canvasHostRef,
@@ -1551,6 +1584,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
      */
     const handleKeyDown = useCallback(
       (e: React.KeyboardEvent) => {
+        handleEditorKeyDown(e);
         if (readOnly) return;
         // The hidden textarea owns every keyboard/IME event for both body and
         // header/footer roots. Do not re-interpret its bubbled events.
@@ -1586,7 +1620,13 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           if (sc) sc.scrollTop = sc.scrollHeight;
         }
       },
-      [cancelPendingScrollRestore, readOnly, getScrollContainer, focusBodyInput]
+      [
+        handleEditorKeyDown,
+        cancelPendingScrollRestore,
+        readOnly,
+        getScrollContainer,
+        focusBodyInput,
+      ]
     );
 
     /**
@@ -1691,7 +1731,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           }
           return;
         }
-        const { tracked, projection } = sidebarReads.tracked(session);
+        const { tracked, projection } = sidebarReads.tracked(
+          session,
+          storySegmentSource(session, currentStorySegments(session))
+        );
         sidebarReads.deliver(onYrsTrackedChangesChange, tracked, session, version);
         const hfRegions = new Map<string, 'header' | 'footer'>();
         for (const rId of document?.package?.headers?.keys() ?? []) {
@@ -1719,7 +1762,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         onAnchorPositionsChange(positions);
       };
       const scheduleEmit = (): void => {
-        if (anchorEmitTimerRef.current !== null) return;
+        // A superseded run's whenReady() may resolve late; its timer would block the live emit.
+        if (cancelled || anchorEmitTimerRef.current !== null) return;
         if (performance.now() - lastAnchorEmitAtRef.current >= SIDEBAR_ANCHOR_STALE_MS) {
           lastAnchorEmitAtRef.current = performance.now();
           emit();
@@ -1744,6 +1788,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     }, [
       canvasHostRef,
       canvasOverlayTarget,
+      currentStorySegments,
       displayListQueries,
       document,
       onAnchorPositionsChange,
@@ -1762,7 +1807,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // source. The mirror speaks the same data-doc-* semantics
     // contract, so third-party plugins keep resolving geometry unchanged.
     useEffect(() => {
-      if (!yrsCore.replicaReady || !displayListQueries || !onRenderedDomContextReady) return;
+      if (
+        (!yrsCore.replicaReady && !yrsCore.workerProposalsReady) ||
+        !displayListQueries ||
+        !onRenderedDomContextReady
+      ) return;
       let cancelled = false;
       let hostRaf: number | null = null;
       const emit = (): void => {
@@ -1785,7 +1834,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         cancelled = true;
         if (hostRaf !== null) cancelAnimationFrame(hostRaf);
       };
-    }, [displayListQueries, onRenderedDomContextReady, canvasHostRef, zoom, yrsCore.replicaReady]);
+    }, [
+      displayListQueries, onRenderedDomContextReady, canvasHostRef, zoom,
+      yrsCore.replicaReady, yrsCore.workerProposalsReady,
+    ]);
 
     // Re-layout triggers: web-font load complete + header/footer content + render-env changes.
     useLayoutTriggers({
@@ -1805,6 +1857,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
 
     // Imperative-handle setup — exposes PagedEditorRef + mirrors via onReady.
     usePagedEditorRefApi({
+      bumpInputEpoch,
+      inputEpoch,
+      readerSurface: getScrollContainer,
       ref,
       yrsInputRef,
       layout,
@@ -1819,10 +1874,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       documentFromYrs: yrsCore.documentFromYrs,
       yrsSession: yrsCore.session,
       replicaReady: yrsCore.replicaReady,
+      refreshWorkerLayout,
       experimentalWorkerOpen: yrsCore.experimentalWorkerOpen,
       yrsLocToDisplayPosition,
-      syncYrsInputState: (docChanged, dirtyStory) =>
-        syncYrsInputState(docChanged, 'local', dirtyStory),
+      syncYrsInputState: (docChanged, dirtyStory, options) =>
+        syncYrsInputState(docChanged, 'local', dirtyStory, options?.inWorker),
       applyYrsFormatting,
       applyYrsCommand,
       getYrsPositionProjection: () => getYrsPositionProjection('body'),
@@ -1843,8 +1899,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     });
 
     usePagedEditorCommandBridge({
+      bumpInputEpoch,
       bridgeRef: commandBridgeRef,
       experimentalWorkerOpen: yrsCore.experimentalWorkerOpen,
+      hydrateOnDemand: yrsCore.hydrateOnDemand,
       yrsInputRef,
       session: yrsCore.session,
       rootStory: activeYrsRootStory,
@@ -1908,6 +1966,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           enabled
           readOnly={readOnly || (!!partEdit && activeYrsRootStory === 'body')}
           replicaReadyRef={yrsCore.experimentalWorkerOpen ? yrsCore.replicaReadyRef : undefined}
+          requestReplica={yrsCore.experimentalWorkerOpen ? yrsCore.requestReplica : undefined}
+          inputEpoch={inputEpoch}
+          applyPendingSelection={applyPendingSelection}
+          seedSelection={!yrsCore.hydrateOnDemand}
           session={yrsCore.session}
           story={activeYrsRootStory}
           isSuggesting={isSuggesting}

@@ -4,13 +4,15 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { LayoutSelectionGate, type ResidentMeasurementConfig } from '@betteroffice/docx/layout';
-import { loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
+import { decodeFrameDelta, loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
   preloadDocxEngine,
+  proposalSetIdentity,
   ResidentEngineWorkerClient,
   takePreloadedResidentEngineWorker,
   type ResidentEngineWorkerFrame,
+  type ResidentProposalReply,
   type YrsRenderEnv,
   type YrsSelection,
   type YrsSession,
@@ -19,6 +21,8 @@ import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
+import { markSupersededLayout } from '../internals/layoutProvenance';
+import { registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import { useRustDisplayList, type ResidentFrameApplyResult } from './useDisplayList';
 import { useLayoutPipeline, type UseLayoutPipelineOptions } from './useLayoutPipeline';
 
@@ -79,7 +83,9 @@ class FakeWorker {
 
 function setup(clientId = 9301, text = 'Owned layout', request = REQUEST) {
   const native = createEditSession(clientId);
-  native.create_story('body', text, 'Normal', 'left');
+  const { paraId } = JSON.parse(native.create_story('body', text, 'Normal', 'left')) as {
+    paraId: string;
+  };
   const layoutJson = native.layout_document_with_regions_retained_json(request);
   const frame = native.build_display_list_frame(JSON.stringify({}), 0);
   const adopted: string[] = [];
@@ -103,7 +109,7 @@ function setup(clientId = 9301, text = 'Owned layout', request = REQUEST) {
     applyUpdate: () => null,
   } as unknown as YrsSession;
   globalThis.Worker = FakeWorker as unknown as typeof Worker;
-  return { native, layoutJson, frame, engine, adopted };
+  return { native, paraId, layoutJson, frame, engine, adopted };
 }
 
 function setupLayoutPipeline() {
@@ -504,6 +510,10 @@ test('a worker-opened document reuses its worker for the first layout', async ()
     await waitFor(() => expect(worker.posted[2]?.type).toBe('encodeState'));
     worker.reply({ id: worker.posted[2].id, ok: true, state: Uint8Array.of(4, 5).buffer });
     expect(await encoded).toEqual(Uint8Array.of(4, 5));
+    const count = opened!.revisionCount();
+    await waitFor(() => expect(worker.posted[3]?.type).toBe('revisionCount'));
+    worker.reply({ id: worker.posted[3].id, ok: true, revisionCount: 1 });
+    expect(await count).toBe(1);
     unmount();
   } finally {
     native.free();
@@ -1343,6 +1353,151 @@ test('a failed worker input replays on the host and rejoins its query line', asy
   }
 });
 
+/** Lays out the session's current state, then builds its frame on `base`. */
+function laidOut(native: ReturnType<typeof createEditSession>, base: number) {
+  const layoutJson = native.layout_document_with_regions_retained_json(REQUEST);
+  return { frame: native.build_display_list_frame(JSON.stringify({}), base), layoutJson };
+}
+
+test('after a worker layout the host dropped, the next one paints the current text', async () => {
+  const { native, paraId, layoutJson, frame, engine } = setup();
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) => useRustDisplayList(layout, undefined, undefined, undefined, source),
+      { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+    );
+    const worker = () => FakeWorker.last!;
+    const pass = async (built: { frame: Uint8Array; layoutJson: string }) => {
+      const pending = result.current.layoutInWorker(engine, REQUEST)!;
+      const request = worker().posted.at(-1)!;
+      const epoch = decodeFrameDelta(built.frame.slice().buffer).frameEpoch;
+      worker().reply({
+        id: request.id,
+        ok: true,
+        frame: built.frame.slice().buffer,
+        caret: { frameEpoch: epoch, caretRect: null },
+        selection: null,
+        layoutRevision: 1,
+        layoutJson: built.layoutJson,
+      });
+      return { request, computation: (await pending)! };
+    };
+    const opened = await pass({ frame, layoutJson });
+    await act(async () => {
+      rerender({ layout: opened.computation.layout, source: engine });
+    });
+    await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(1));
+
+    native.insert_text('body', paraId, 0, 'Dropped ');
+    const dropped = await pass(laidOut(native, 1));
+    expect(dropped.request).toMatchObject({ type: 'sync', expectedFrameEpoch: 1 });
+
+    native.insert_text('body', paraId, 0, 'Shown ');
+    const shown = await pass(laidOut(native, 1));
+    expect(shown.request).toMatchObject({ type: 'sync', expectedFrameEpoch: 1 });
+    await act(async () => {
+      rerender({ layout: shown.computation.layout, source: engine });
+    });
+    await waitFor(() => {
+      if (result.current.error) throw result.current.error;
+      expect(result.current.frame?.frameEpoch).toBeGreaterThan(1);
+    });
+    const text = result.current
+      .frame!.displayList.pages.flatMap((page) => page.primitives)
+      .map((primitive) =>
+        primitive.kind === 'glyphRun' || primitive.kind === 'text' ? primitive.text : ''
+      )
+      .join('');
+    expect(text).toContain('Shown Dropped Owned layout');
+    expect(worker().posted).toHaveLength(3);
+    unmount();
+  } finally {
+    native.free();
+  }
+});
+
+test.each([[false, false], [true, false], [true, true]])(
+  'a stale sync reply keeps the host path with worker-open=%s unless proposals are held=%s',
+  async (experimentalWorkerOpen, holding) => {
+    const { native, engine, layoutJson, frame } = setup();
+    const hook = renderHook(() => useRustDisplayList(
+      null, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      experimentalWorkerOpen
+    ));
+    try {
+      const first = hook.result.current.layoutInWorker(engine, REQUEST)!;
+      const worker = FakeWorker.last!;
+      worker.reply({
+        id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+        caret: { frameEpoch: 1, caretRect: null }, selection: null,
+        layoutRevision: 1, layoutJson,
+      });
+      expect(await first).not.toBeNull();
+      if (holding) {
+        const snapshot = { version: '1', previewVersion: 0, proposals: [] };
+        Object.assign(engine, { getProposals: () => snapshot, mirrorWorkerDocument: () => {} });
+        const reply: ResidentProposalReply = {
+          mirror: { version: snapshot.version, proposals: { previewVersion: 0, entries: [] } },
+          result: { ok: true, snapshot }, changedStories: [],
+          geometry: {
+            version: snapshot.version, previewVersion: 0,
+            proposals: proposalSetIdentity(snapshot), targets: {}, hidden: [],
+          },
+          updates: [], stateVector: new Uint8Array(),
+        };
+        const authority = registerWorkerProposalAuthority(engine, {
+          proposal: async () => reply,
+          documentRead: async () => { throw new Error('unexpected document read'); },
+          handOver: async () => { throw new Error('unexpected handover'); },
+        }, {
+          relayout: () => {}, current: () => true, laidOut: async () => {},
+          adopted: () => {}, handedOver: () => {}, contentChanged: () => {},
+        });
+        await authority.initialize();
+        await authority.setStates({
+          expectVersion: snapshot.version, expectPreviewVersion: 0, changes: [],
+        }, async () => { throw new Error('unexpected main-thread toggle'); });
+        expect(authority.holdsWorkerState()).toBe(true);
+      }
+      const older = hook.result.current.layoutInWorker(engine, REQUEST)!;
+      const olderRequest = worker.posted.at(-1)!;
+      const olderFrame = native.build_display_list_frame('{}', 0);
+      const newer = hook.result.current.layoutInWorker(engine, REQUEST)!;
+      const newerRequest = worker.posted.at(-1)!;
+      const newerFrame = native.build_display_list_frame('{}', 0);
+      expect(olderRequest.type).toBe('sync');
+      expect(newerRequest.type).toBe('sync');
+      worker.reply({
+        id: newerRequest.id, ok: true, frame: newerFrame.slice().buffer,
+        caret: { frameEpoch: 3, caretRect: null }, selection: null,
+        layoutRevision: 3, layoutJson,
+      });
+      const current = await newer;
+      expect(current?.layout.pages.length).toBeGreaterThan(0);
+      let stale!: Awaited<typeof older>;
+      await act(async () => {
+        worker.reply({
+          id: olderRequest.id, ok: true, frame: olderFrame.slice().buffer,
+          caret: { frameEpoch: 2, caretRect: null }, selection: null,
+          layoutRevision: 2, layoutJson, layoutProvisional: true,
+        });
+        stale = await older;
+      });
+      if (holding) expect(stale).toBeNull();
+      else {
+        expect(stale?.layout.pages.length).toBeGreaterThan(0);
+        expect(stale?.complete).toBeDefined();
+      }
+      expect(worker.posted.some((request) => request.type === 'completeLayout')).toBe(false);
+      expect(hook.result.current.error).toBeNull();
+      expect(worker.terminated).toBe(false);
+    } finally {
+      hook.unmount();
+      native.free();
+    }
+  }
+);
+
 test('a failed worker layout hands the pass back to the main thread', async () => {
   const { native, engine } = setup();
   const errors = spyOn(console, 'error').mockImplementation(() => {});
@@ -1502,6 +1657,186 @@ test('a provisional layout paints first and settles only once the full layout fo
   }
 });
 
+test('with worker open, a provisional layout names its engine until the rest is asked of the worker', async () => {
+  const { native, layoutJson, frame, engine } = setup();
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) =>
+        useRustDisplayList(
+          layout,
+          undefined,
+          undefined,
+          undefined,
+          source,
+          undefined,
+          undefined,
+          undefined,
+          true
+        ),
+      { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+    );
+    expect(result.current.pendingCompletion).toBeNull();
+    const pending = result.current.layoutInWorker(engine, REQUEST);
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.posted[0].id,
+      ok: true,
+      frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null },
+      selection: null,
+      layoutRevision: 1,
+      layoutJson,
+      layoutProvisional: true,
+    });
+    const provisional = await act(() => pending!);
+    await act(async () => {
+      rerender({ layout: provisional!.layout, source: engine });
+    });
+    await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(1));
+    expect(result.current.pendingCompletion).toBe(engine);
+    expect(worker.posted).toHaveLength(1);
+    await act(async () => {
+      void result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
+    });
+    worker.reply({ id: worker.posted[1].id, ok: true });
+    await waitFor(() => expect(worker.posted).toHaveLength(3));
+    expect(worker.posted[2]).toMatchObject({ type: 'completeLayout' });
+    expect(result.current.pendingCompletion).toBeNull();
+    unmount();
+  } finally {
+    native.free();
+  }
+});
+
+test('an older surface timeout cannot supersede the newer provisional completion', async () => {
+  const { native, layoutJson, frame, engine, adopted } = setup();
+  const snapshot = engine.residentWorkerSnapshot.bind(engine);
+  engine.residentWorkerSnapshot = (options) => ({
+    ...snapshot(options)!, workerAuthoritative: true,
+  });
+  const surfaceTimers: Array<() => void> = [];
+  const schedule = globalThis.setTimeout;
+  const timers = spyOn(globalThis, 'setTimeout').mockImplementation(
+    ((...input: Parameters<typeof setTimeout>) => {
+      const [callback, delay, ...args] = input;
+      if (delay === 250 && typeof callback === 'function') {
+        surfaceTimers.push(() => callback(...args));
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      }
+      return schedule(callback, delay, ...args);
+    }) as typeof setTimeout
+  );
+  const hook = renderHook(() => useRustDisplayList(
+    null, undefined, undefined, undefined, null, undefined, undefined, undefined, true
+  ));
+  try {
+    const first = hook.result.current.layoutInWorker(engine, REQUEST)!;
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null }, selection: null,
+      layoutRevision: 1, layoutJson, layoutProvisional: true,
+    });
+    const older = (await act(() => first))!;
+    expect(surfaceTimers).toHaveLength(1);
+
+    const second = hook.result.current.layoutInWorker(engine, REQUEST)!;
+    const nextFrame = native.build_display_list_frame('{}', 1);
+    expect(worker.posted[1]).toMatchObject({ type: 'sync', snapshot: { layoutRevision: 2 } });
+    worker.reply({
+      id: worker.posted[1].id, ok: true, frame: nextFrame.slice().buffer,
+      caret: { frameEpoch: 2, caretRect: null }, selection: null,
+      layoutRevision: 2, layoutJson, layoutProvisional: true,
+    });
+    const current = (await act(() => second))!;
+    expect(surfaceTimers).toHaveLength(2);
+    expect(hook.result.current.pendingCompletion).toBe(engine);
+    await act(async () => {
+      const attaching = hook.result.current.attachOffscreenCanvases(
+        [], [], 1, 1, { color: '#000', width: 2 }
+      );
+      worker.reply({ id: worker.posted[2].id, ok: true });
+      expect(await attaching).toBe(true);
+    });
+    expect(worker.posted[3]).toMatchObject({
+      type: 'completeLayout', expectedFrameEpoch: 2, sliceBlocks: 64,
+    });
+
+    await act(async () => surfaceTimers[0]!());
+    expect(worker.posted.filter((request): boolean => request.type === 'completeLayout')).toEqual([
+      worker.posted[3]!,
+    ]);
+    expect(await older.complete).toBeNull();
+    const fullFrame = native.build_display_list_frame('{}', 2);
+    worker.reply({
+      id: worker.posted[3].id, ok: true, frame: fullFrame.slice().buffer,
+      caret: { frameEpoch: 3, caretRect: null }, selection: null,
+      layoutRevision: 2, layoutJson,
+    });
+    expect((await current.complete)?.layout.pages.length).toBeGreaterThan(0);
+    await act(async () => surfaceTimers[1]!());
+    expect(worker.posted).toHaveLength(4);
+    expect(adopted).toEqual([REQUEST, REQUEST]);
+    expect(hook.result.current.pendingCompletion).toBeNull();
+    expect(hook.result.current.error).toBeNull();
+    expect(worker.terminated).toBe(false);
+  } finally {
+    hook.unmount();
+    timers.mockRestore();
+    native.free();
+  }
+});
+
+test('a worker-authoritative relayout covers the visible prefix and completes it separately', async () => {
+  const { native, layoutJson, frame, engine } = setup();
+  const snapshot = engine.residentWorkerSnapshot.bind(engine);
+  engine.residentWorkerSnapshot = (options) => ({
+    ...snapshot(options)!, workerAuthoritative: true,
+  });
+  try {
+    const { result, unmount } = renderHook(() => useRustDisplayList(null));
+    const first = result.current.layoutInWorker(engine, REQUEST);
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null }, selection: null,
+      layoutRevision: 1, layoutJson,
+    });
+    await first!;
+    act(() => result.current.setDisplayWindow(4, 6));
+    const next = result.current.layoutInWorker(engine, REQUEST);
+    expect(worker.posted[1]).toMatchObject({
+      type: 'sync', provisionalPages: 6, displayWindow: [4, 6],
+      snapshot: { workerAuthoritative: true },
+    });
+    const nextFrame = native.build_display_list_frame('{}', 1);
+    worker.reply({
+      id: worker.posted[1].id, ok: true, frame: nextFrame.slice().buffer,
+      caret: { frameEpoch: 2, caretRect: null }, selection: null,
+      layoutRevision: 2, layoutJson, layoutProvisional: true,
+    });
+    const prefix = await act(() => next!);
+    expect(prefix!.complete).toBeInstanceOf(Promise);
+    await act(async () => {
+      void result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
+    });
+    worker.reply({ id: worker.posted[2].id, ok: true });
+    await waitFor(() => expect(worker.posted[3]).toMatchObject({
+      type: 'completeLayout', expectedFrameEpoch: 2, sliceBlocks: 64,
+    }));
+    const completedFrame = native.build_display_list_frame('{}', 2);
+    worker.reply({
+      id: worker.posted[3].id, ok: true, frame: completedFrame.slice().buffer,
+      caret: { frameEpoch: 3, caretRect: null }, selection: null,
+      layoutRevision: 2, layoutJson,
+    });
+    expect(await prefix!.complete).not.toBeNull();
+    unmount();
+  } finally {
+    native.free();
+  }
+});
+
 function settleHarness() {
   const displayList = { pages: [] };
   const overrides = {
@@ -1550,6 +1885,27 @@ test('a layout of part of the document never settles, even after a full one did'
     rerender({ layout: layout(false) });
   });
   await waitFor(() => expect(partial.settled).toBe(true));
+});
+
+test('a layout the document moved past paints but settles no wait', async () => {
+  const { result, rerender, layout, settle, overrides } = settleHarness();
+  const first = settle();
+  await waitFor(() => expect(first.settled).toBe(true));
+  const behind = layout(false);
+  const behindList = { pages: [] };
+  markSupersededLayout(behind);
+  overrides.build = async () => behindList;
+  await act(async () => {
+    rerender({ layout: behind });
+  });
+  await waitFor(() => expect(result.current.displayList).toBe(behindList));
+  const waiting = settle();
+  await act(async () => {});
+  expect(waiting.settled).toBe(false);
+  await act(async () => {
+    rerender({ layout: layout(false) });
+  });
+  await waitFor(() => expect(waiting.settled).toBe(true));
 });
 
 test('a reset waits for the next layout and a failure rejects', async () => {
@@ -1616,7 +1972,7 @@ test('a rejected completion after reload preserves the new session frame, querie
       layoutJson,
       layoutProvisional: true,
     });
-    const provisional = (await layout)!;
+    const provisional = (await act(() => layout))!;
     await act(async () => { rerender({ layout: provisional.layout, source: engine }); });
     await waitFor(() => expect(result.current.frame).not.toBeNull());
     await act(async () => {

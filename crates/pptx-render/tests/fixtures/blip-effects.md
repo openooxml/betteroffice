@@ -25,5 +25,5 @@ white edges intact. See [MS-OI29500, §2.1.1287](https://officeprotocoldoc.z19.w
 
 Review: [PR #312](https://github.com/openooxml/betteroffice/pull/312).
 
-The display-list comparison has eight images, seven with
-effects added and one unchanged control. No other primitive fields change.
+The display list has eight images: seven with effects and one control
+without effects.

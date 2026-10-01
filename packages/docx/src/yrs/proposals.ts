@@ -9,6 +9,7 @@
 import type {
   DocxEditFailure,
   DocxEditFailureCode,
+  DocxEditReceipt,
   DocxEditRequest,
   DocxEditResult,
   DocxEditStep,
@@ -74,6 +75,16 @@ export interface DocxProposalSnapshot {
   proposals: readonly DocxProposalRecord[];
 }
 
+/** @internal */
+export interface DocxProposalRegistryState {
+  previewVersion: number;
+  entries: {
+    record: DocxProposalRecord;
+    key: string;
+    suggest: { author: string; date: string };
+  }[];
+}
+
 export type DocxProposalFailure = Omit<DocxEditFailure, 'code'> & {
   code: DocxEditFailureCode | 'stale-preview' | 'unknown-proposal' | 'proposal-id-conflict';
   proposalId?: string;
@@ -106,6 +117,7 @@ export interface DocxProposalSession {
   readParagraphs(request: DocxReadParagraphsRequest): DocxReadParagraphsResult;
   applyEdits(request: DocxEditRequest): DocxEditResult;
   listRevisions(): readonly { revisionId: string; kind: string }[];
+  revisionStamps?(ids: readonly string[]): Record<string, readonly { author: string; date: string }[]>;
   /** Accepts and rejects revisions for good, outside undo history; unknown ids are skipped. */
   settleRevisions(accept: readonly string[], reject: readonly string[]): void;
   /** Runs `read` with story projections shared across its reads; omitted, reads run unshared. */
@@ -118,6 +130,10 @@ export interface DocxProposalRegistry {
   setStates(request: DocxProposalStateRequest): DocxProposalResult;
   withdraw(request: DocxProposalWithdrawRequest): DocxProposalResult;
   snapshot(): DocxProposalSnapshot;
+  /** @internal */
+  exportState(): DocxProposalRegistryState;
+  /** @internal */
+  mirror(mirror: { version: string; proposals: DocxProposalRegistryState } | null): void;
   subscribe(listener: (snapshot: DocxProposalSnapshot) => void): () => void;
   /** Forgets every proposal, as when the session opens another document. */
   reset(): void;
@@ -234,58 +250,47 @@ type Located = { anchor: DocxSessionParagraphAnchor } | { failure: DocxProposalF
 
 type Planned = { steps: DocxEditStep[] } | { failure: DocxProposalFailure };
 
-/** The session holds update notifications until `propose` returns, so they see the round. */
-export function createProposalRegistry(session: DocxProposalSession): DocxProposalRegistry {
-  const records = new Map<string, { record: DocxProposalRecord; key: string }>();
-  const listeners = new Set<(snapshot: DocxProposalSnapshot) => void>();
-  let previewVersion = 0;
-  let notifying = false;
-  let renotify = false;
+/** @internal */
+export type ProposalRoundOutcome =
+  | { ok: false; failure: DocxProposalFailure; version?: string }
+  | {
+      ok: true;
+      planned: Array<{ anchor: DocxSessionParagraphAnchor; first: number; count: number }>;
+      receipts: DocxEditReceipt[];
+      changedStories: string[];
+    };
 
-  const snapshot = (): DocxProposalSnapshot => ({
-    version: session.version(),
-    previewVersion,
-    proposals: [...records.values()].map(({ record }) => ({
-      ...record,
-      paragraph: { ...record.paragraph },
-      revisionIds: [...record.revisionIds],
-    })),
-  });
+/** @internal */
+export interface ProposalWithdrawal {
+  owned: readonly string[];
+  accept: readonly string[];
+  reject: readonly string[];
+  proposalIds?: Readonly<Record<string, string>>;
+  /** Per owned revision, the stamp its proposal suggested; a revision holding another is refused. */
+  suggested: Readonly<Record<string, { author: string; date: string }>>;
+  /** Refuses as `stale-version` when the document is no longer at this version. */
+  expectVersion?: string;
+}
 
-  /** Delivers the latest snapshot; a change made by a listener restarts delivery with a newer one. */
-  const notify = (): void => {
-    renotify = true;
-    if (notifying) return;
-    notifying = true;
-    try {
-      while (renotify) {
-        renotify = false;
-        if (listeners.size === 0) return;
-        const current = snapshot();
-        for (const listener of [...listeners]) {
-          try {
-            listener(current);
-          } catch (error) {
-            console.error('[yrs] a proposal listener threw', error);
-          }
-          if (renotify) break;
-        }
-      }
-    } finally {
-      notifying = false;
-      renotify = false;
-    }
-  };
+/** @internal */
+export type ProposalWithdrawalOutcome = { ok: true } | { ok: false; failure: DocxProposalFailure };
 
+/** Runs within the caller's shared-read scope. @internal */
+export function executeProposalRound(
+  session: DocxProposalSession,
+  fresh: readonly DocxProposalInput[],
+  expectVersion: string
+): ProposalRoundOutcome {
   const refuse = (
     failure: DocxProposalFailure,
     version = session.version()
-  ): DocxProposalResult => ({
-    ok: false,
-    version,
-    failure,
-  });
-
+  ): ProposalRoundOutcome => ({ ok: false, failure, version });
+  if (expectVersion !== session.version()) {
+    return refuse({
+      code: 'stale-version',
+      message: 'the document changed since the expected version was read',
+    });
+  }
   const locate = (input: DocxProposalInput): Located => {
     const failure = (code: DocxProposalFailure['code'], message: string): Located => ({
       failure: { code, message, proposalId: input.id },
@@ -445,7 +450,182 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     };
   };
 
+  const steps: DocxEditStep[] = [];
+  const owners: number[] = [];
+  const inert: boolean[] = [];
+  const planned: Array<{ anchor: DocxSessionParagraphAnchor; first: number; count: number }> = [];
+  for (const [index, input] of fresh.entries()) {
+    const located = locate(input);
+    if ('failure' in located) return refuse(located.failure);
+    const built = plan(input, located.anchor);
+    if ('failure' in built) return refuse(built.failure);
+    planned.push({ anchor: located.anchor, first: steps.length, count: built.steps.length });
+    for (const step of built.steps) {
+      steps.push(step);
+      owners.push(index);
+      inert.push(input.op === 'replaceText' && input.replaceWith === input.search);
+    }
+  }
+  const touching = adjoining(steps, owners, inert);
+  if (touching) {
+    const [earlier, later] = touching.map((step) => fresh[owners[step]!]!.id);
+    return refuse({
+      code: 'overlapping-steps',
+      message: `proposal ${later} adjoins proposal ${earlier}; adjacent suggestions would share one revision`,
+      proposalId: later,
+    });
+  }
+  const result = session.applyEdits({
+    expectVersion,
+    history: 'none',
+    steps,
+  });
+  if (!result.ok) {
+    const { stepIndex, conflictingStepIndex, ...failure } = result.failure;
+    const owner = stepIndex === undefined ? undefined : fresh[owners[stepIndex]!]?.id;
+    const other =
+      conflictingStepIndex === undefined
+        ? undefined
+        : fresh[owners[conflictingStepIndex]!]?.id;
+    return refuse(
+      {
+        ...failure,
+        ...(other !== undefined && other !== owner
+          ? { message: `proposal ${owner} overlaps proposal ${other}` }
+          : owner !== undefined
+          ? { message: `proposal ${owner}: ${failure.message}` }
+          : {}),
+        ...(owner !== undefined ? { proposalId: owner } : {}),
+      },
+      result.version
+    );
+  }
+  return { ok: true, planned, receipts: result.receipts, changedStories: result.changedStories };
+}
+
+/** @internal */
+export function executeProposalWithdrawal(
+  session: DocxProposalSession,
+  { owned, accept, reject, proposalIds, suggested, expectVersion }: ProposalWithdrawal
+): ProposalWithdrawalOutcome {
+  if (expectVersion !== undefined && expectVersion !== session.version()) {
+    return {
+      ok: false,
+      failure: {
+        code: 'stale-version',
+        message: 'the document changed since the expected version was read',
+      },
+    };
+  }
+  const owners = new Set(owned);
+  const foreign = session
+    .listRevisions()
+    .find(
+      ({ revisionId, kind }) =>
+        owners.has(revisionId) && kind !== 'insertion' && kind !== 'deletion'
+    );
+  if (foreign) {
+    const id = proposalIds?.[foreign.revisionId];
+    return {
+      ok: false,
+      failure: {
+        code: 'tracked-revision-conflict',
+        message:
+          id === undefined
+            ? `revision ${foreign.revisionId} also marks a ${foreign.kind} change made outside the proposals`
+            : `proposal ${id} shares revision ${foreign.revisionId} with a ${foreign.kind} change made outside the proposals`,
+        ...(id === undefined ? {} : { proposalId: id }),
+      },
+    };
+  }
+  if (session.revisionStamps) {
+    const stamps = session.revisionStamps(owned);
+    for (const revisionId of owned) {
+      const suggest = suggested[revisionId];
+      if (
+        suggest &&
+        stamps[revisionId]?.some(
+          ({ author, date }) => author !== suggest.author || date !== suggest.date
+        )
+      ) {
+        const id = proposalIds?.[revisionId];
+        return {
+          ok: false,
+          failure: {
+            code: 'tracked-revision-conflict',
+            message:
+              id === undefined
+                ? `revision ${revisionId} holds changes made outside the proposals`
+                : `proposal ${id} shares revision ${revisionId} with changes made outside the proposals`,
+            ...(id === undefined ? {} : { proposalId: id }),
+          },
+        };
+      }
+    }
+  }
+  if (accept.length > 0 || reject.length > 0) session.settleRevisions(accept, reject);
+  return { ok: true };
+}
+
+/** The session holds update notifications until `propose` returns, so they see the round. */
+export function createProposalRegistry(session: DocxProposalSession): DocxProposalRegistry {
+  const records = new Map<string, DocxProposalRegistryState['entries'][number]>();
+  const listeners = new Set<(snapshot: DocxProposalSnapshot) => void>();
+  let previewVersion = 0;
+  let mirrored: { version: string; proposals: DocxProposalRegistryState } | null = null;
+  let notifying = false;
+  let renotify = false;
+
+  const snapshot = (): DocxProposalSnapshot => ({
+    version: mirrored?.version ?? session.version(),
+    previewVersion: mirrored?.proposals.previewVersion ?? previewVersion,
+    proposals: (mirrored?.proposals.entries ?? [...records.values()]).map(({ record }) => ({
+      ...record,
+      paragraph: { ...record.paragraph },
+      revisionIds: [...record.revisionIds],
+    })),
+  });
+
+  /** Delivers the latest snapshot; a change made by a listener restarts delivery with a newer one. */
+  const notify = (): void => {
+    renotify = true;
+    if (notifying) return;
+    notifying = true;
+    try {
+      while (renotify) {
+        renotify = false;
+        if (listeners.size === 0) return;
+        const current = snapshot();
+        for (const listener of [...listeners]) {
+          try {
+            listener(current);
+          } catch (error) {
+            console.error('[yrs] a proposal listener threw', error);
+          }
+          if (renotify) break;
+        }
+      }
+    } finally {
+      notifying = false;
+      renotify = false;
+    }
+  };
+
+  const refuse = (
+    failure: DocxProposalFailure,
+    version = session.version()
+  ): DocxProposalResult => ({
+    ok: false,
+    version,
+    failure,
+  });
+
+  const ensureOwned = (): void => {
+    if (mirrored) throw new Error('proposals are held by the resident worker');
+  };
+
   const propose = (request: DocxProposalRequest): DocxProposalResult => {
+    ensureOwned();
     if (!request || typeof request !== 'object' || !Array.isArray(request.proposals)) {
       throw new TypeError('a proposal request needs a proposals array');
     }
@@ -480,61 +660,18 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
         message: 'the document changed since the expected version was read',
       });
     }
-    const steps: DocxEditStep[] = [];
-    const owners: number[] = [];
-    const inert: boolean[] = [];
-    const planned: Array<{ anchor: DocxSessionParagraphAnchor; first: number; count: number }> = [];
-    for (const [index, { input }] of fresh.entries()) {
-      const located = locate(input);
-      if ('failure' in located) return refuse(located.failure);
-      const built = plan(input, located.anchor);
-      if ('failure' in built) return refuse(built.failure);
-      planned.push({ anchor: located.anchor, first: steps.length, count: built.steps.length });
-      for (const step of built.steps) {
-        steps.push(step);
-        owners.push(index);
-        inert.push(input.op === 'replaceText' && input.replaceWith === input.search);
-      }
-    }
-    const touching = adjoining(steps, owners, inert);
-    if (touching) {
-      const [earlier, later] = touching.map((step) => fresh[owners[step]!]!.input.id);
-      return refuse({
-        code: 'overlapping-steps',
-        message: `proposal ${later} adjoins proposal ${earlier}; adjacent suggestions would share one revision`,
-        proposalId: later,
-      });
-    }
-    const result = session.applyEdits({
-      expectVersion: request.expectVersion,
-      history: 'none',
-      steps,
-    });
-    if (!result.ok) {
-      const { stepIndex, conflictingStepIndex, ...failure } = result.failure;
-      const owner = stepIndex === undefined ? undefined : fresh[owners[stepIndex]!]?.input.id;
-      const other =
-        conflictingStepIndex === undefined
-          ? undefined
-          : fresh[owners[conflictingStepIndex]!]?.input.id;
-      return refuse(
-        {
-          ...failure,
-          ...(other !== undefined && other !== owner
-            ? { message: `proposal ${owner} overlaps proposal ${other}` }
-            : owner !== undefined
-            ? { message: `proposal ${owner}: ${failure.message}` }
-            : {}),
-          ...(owner !== undefined ? { proposalId: owner } : {}),
-        },
-        result.version
-      );
-    }
+    const result = executeProposalRound(
+      session,
+      fresh.map(({ input }) => input),
+      request.expectVersion
+    );
+    if (!result.ok) return refuse(result.failure, result.version);
     for (const [index, { input, key }] of fresh.entries()) {
-      const { anchor, first, count } = planned[index]!;
+      const { anchor, first, count } = result.planned[index]!;
       const receipts = result.receipts.slice(first, first + count);
       records.set(input.id, {
         key,
+        suggest: { author: input.suggest.author, date: input.suggest.date },
         record: {
           id: input.id,
           state: 'proposed',
@@ -554,6 +691,7 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
   };
 
   const setStates = (request: DocxProposalStateRequest): DocxProposalResult => {
+    ensureOwned();
     if (!request || typeof request !== 'object' || !Array.isArray(request.changes)) {
       throw new TypeError('a proposal state request needs a changes array');
     }
@@ -620,6 +758,7 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
    * preview did: accepted revisions apply, rejected and undecided ones are removed.
    */
   const withdraw = (request: DocxProposalWithdrawRequest): DocxProposalResult => {
+    ensureOwned();
     if (!request || typeof request !== 'object' || !Array.isArray(request.ids)) {
       throw new TypeError('a withdrawal request needs an ids array');
     }
@@ -659,21 +798,16 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     const settling = [...owners.keys()];
     const accept = settling.filter((revisionId) => shown[revisionId] === 'accepted');
     const reject = settling.filter((revisionId) => shown[revisionId] !== 'accepted');
-    const foreign = session
-      .listRevisions()
-      .find(
-        ({ revisionId, kind }) =>
-          owners.has(revisionId) && kind !== 'insertion' && kind !== 'deletion'
-      );
-    if (foreign) {
-      const id = owners.get(foreign.revisionId)!;
-      return refuse({
-        code: 'tracked-revision-conflict',
-        message: `proposal ${id} shares revision ${foreign.revisionId} with a ${foreign.kind} change made outside the proposals`,
-        proposalId: id,
-      });
-    }
-    if (accept.length > 0 || reject.length > 0) session.settleRevisions(accept, reject);
+    const result = executeProposalWithdrawal(session, {
+      owned: settling,
+      accept,
+      reject,
+      proposalIds: Object.fromEntries(owners),
+      suggested: Object.fromEntries(
+        [...owners].map(([revisionId, id]) => [revisionId, records.get(id)!.suggest])
+      ),
+    });
+    if (!result.ok) return refuse(result.failure);
     let decided = false;
     for (const id of withdrawn) {
       decided ||= records.get(id)!.record.state !== 'proposed';
@@ -692,6 +826,30 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     setStates,
     withdraw,
     snapshot,
+    exportState() {
+      return structuredClone(
+        mirrored?.proposals ?? { previewVersion, entries: [...records.values()] }
+      );
+    },
+    mirror(mirror) {
+      // A new mirrored version alone, such as a pending-change marker, notifies no one; ending the
+      // mirror notifies when the session's own version differs from the mirrored one.
+      const ending = mirror === null;
+      const visible = () => {
+        const { version, ...rest } = snapshot();
+        return JSON.stringify(canonical(ending ? { version, ...rest } : rest));
+      };
+      const before = visible();
+      if (mirror) {
+        mirrored = structuredClone(mirror);
+      } else if (mirrored) {
+        records.clear();
+        for (const entry of mirrored.proposals.entries) records.set(entry.record.id, entry);
+        previewVersion = mirrored.proposals.previewVersion;
+        mirrored = null;
+      }
+      if (visible() !== before) notify();
+    },
     subscribe(listener) {
       if (typeof listener !== 'function')
         throw new TypeError('proposal listener must be a function');
@@ -701,13 +859,14 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
       };
     },
     reset() {
-      if (records.size === 0) return;
+      if (mirrored || records.size === 0) return;
       if ([...records.values()].some(({ record }) => record.state !== 'proposed'))
         previewVersion += 1;
       records.clear();
       notify();
     },
     destroy() {
+      mirrored = null;
       records.clear();
       listeners.clear();
     },

@@ -2,10 +2,11 @@ import { beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
+import { createYrsSidebarProjection } from '@betteroffice/docx/layout/render';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { createYrsSession, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
 import { createYrsPositionProjection } from './yrsPositionProjection';
-import { YrsStorySegmentCache } from './yrsStorySegmentCache';
+import { storySegmentSource, YrsStorySegmentCache } from './yrsStorySegmentCache';
 
 const WASM = resolve(
   import.meta.dir,
@@ -120,6 +121,79 @@ test('a cached projection re-reads only the paragraphs an edit changed', async (
     expectSameProjection(session, cache, storySegments);
     expect(reads.digests).toEqual([]);
     expect(reads.whole).toEqual([]);
+  } finally {
+    session.destroy();
+  }
+});
+
+test('refreshing an unchanged revision keeps stale paragraphs available for digest reads', async () => {
+  const session = await createYrsSession({ clientId: 77002 });
+  try {
+    session.seedFromDocx(docx());
+    const cache = new YrsStorySegmentCache(session);
+    const { reads, clear, storySegments } = counted(session);
+    cache.refresh();
+    cache.segments('body');
+    cache.completeDigests();
+
+    const [, second] = session.paragraphs('body');
+    session.insertText({ story: 'body', paraId: second!.paraId, offset: 3 }, 'xyz');
+    clear();
+    cache.refresh();
+    cache.refresh();
+    expect(cache.segments('body')).toEqual(storySegments('body'));
+    expect(reads.digests).toEqual(['body']);
+    expect(reads.units).toEqual([[1]]);
+    expect(reads.whole).toEqual([]);
+  } finally {
+    session.destroy();
+  }
+});
+
+test('a sidebar projection read through the cache re-reads only the edited paragraph', async () => {
+  const session = await createYrsSession({ clientId: 77003 });
+  try {
+    session.seedFromDocx(docx());
+    const direct = Object.create(session) as YrsSession;
+    direct.storySegments = session.storySegments.bind(session);
+    const cache = new YrsStorySegmentCache(session);
+    const { reads, clear } = counted(session);
+    const paragraphs = session.paragraphs('body');
+    const locations = paragraphs.map(({ paraId }) => ({ story: 'body', paraId, offset: 1 }));
+    const first = createYrsSidebarProjection(session, storySegmentSource(session, cache));
+    const firstDirect = createYrsSidebarProjection(direct);
+    for (const loc of locations) {
+      expect(first.locToDisplayPoint(loc)).toEqual(firstDirect.locToDisplayPoint(loc));
+    }
+    cache.completeDigests();
+
+    session.insertText({ story: 'body', paraId: paragraphs[1]!.paraId, offset: 3 }, 'xyz');
+    clear();
+    const edited = createYrsSidebarProjection(session);
+    const editedDirect = createYrsSidebarProjection(direct);
+    for (const loc of locations) {
+      expect(edited.locToDisplayPoint(loc)).toEqual(editedDirect.locToDisplayPoint(loc));
+    }
+    expect(edited).not.toBe(first);
+    expect(reads.whole).toEqual([]);
+    expect(reads.units).toEqual([[1]]);
+  } finally {
+    session.destroy();
+  }
+});
+
+test('a source whose cache was disposed reads the session directly and holds no segments', async () => {
+  const session = await createYrsSession({ clientId: 77004 });
+  try {
+    session.seedFromDocx(docx());
+    const cache = new YrsStorySegmentCache(session);
+    const source = storySegmentSource(session, cache);
+    source.segments('body');
+    cache.dispose();
+    const { reads } = counted(session);
+    expect(source.segments('body')).toEqual(session.storySegments('body'));
+    expect(reads.whole).toEqual(['body', 'body']);
+    expect(reads.digests).toEqual([]);
   } finally {
     session.destroy();
   }

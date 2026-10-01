@@ -9,5 +9,3 @@ The integration tests exercise the parsed slide/snapshot path, every caret of th
 The insets remain tied to the [shape's bounding rectangle](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.bodyproperties.leftinset). Their permutation for vertical text follows the same mapping as [LibreOffice's text-distance handling](https://github.com/LibreOffice/core/blob/master/oox/source/drawingml/textbodyproperties.cxx).
 
 Review: [PR #308](https://github.com/openooxml/betteroffice/pull/308).
-
-All 62 slides in the 22 pre-existing tracked PPTX fixtures serialize to byte-identical display lists. In this repro only slides 1 and 2 differ, exclusively in text transforms, text boxes, and their layout; slide 3 is byte-identical. All 23 deck snapshots match between revisions and deserialize in both directions; no-edit saves preserve every OPC part byte-for-byte.

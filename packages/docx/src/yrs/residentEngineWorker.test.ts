@@ -1,12 +1,26 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
+import { applyFrameDeltaOwned, decodeFrameDelta } from '../layout/render/frameDelta';
+import { createResidentEngineSession } from './residentEngineSession';
+import { proposalRevisionPreview } from './proposals';
+import { preloadEditWasm } from './wasm/index';
 import type { DecodedFrameDelta, FramePageOperation } from '../layout/render/frameDelta';
 import type { DisplayPage } from '../layout/render/displayList';
-import type { YrsResidentCaretRect } from './index';
+import type {
+  DocxEditRequest,
+  DocxParagraphAnchor,
+  DocxProposalInput,
+  YrsResidentCaretRect,
+  YrsResidentWorkerSnapshot,
+} from './index';
 import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerRequestWithoutId,
   ResidentEngineWorkerResponse,
+  ResidentDocumentRead,
+  ResidentProposalOperation,
 } from './residentEngineWorkerProtocol';
 
 let startWorker: (scope: unknown, canvas: unknown, harness: unknown) => void;
@@ -33,6 +47,7 @@ beforeAll(async () => {
       export const rasterizeDisplayPageToBackBuffer = (...args) => testHarness.rasterize(...args);
       export const presentOffscreenPageBackBuffer = (...args) => testHarness.present(...args);
       export const presentOffscreenPageBackBufferWithCaret = (...args) => testHarness.presentCaret(...args);
+      export const releaseOffscreenPageCanvas = (...args) => testHarness.release(...args);
     `,
   };
   const result = await Bun.build({
@@ -108,6 +123,9 @@ function worker() {
     retainBuiltPages: [] as boolean[],
     windowedIncrementalBuilds: [] as boolean[],
     rasterized: [] as number[],
+    buffers: [] as Surface[],
+    releaseCalls: [] as Array<{ pages: number[]; expectedFrameEpoch: number }>,
+    releaseSuperseded: false,
     presented: [] as number[],
     failRaster: null as number | null,
     failPresent: null as number | null,
@@ -137,6 +155,19 @@ function worker() {
       buildDisplayListFrame() {
         return new Uint8Array([frameEpoch]);
       },
+      buildDisplayPagesFrame(pages: number[], _expectedFrameEpoch: number) {
+        delta(pages.map((index) => index + 1));
+        return new Uint8Array([frameEpoch]);
+      },
+      releaseDisplayPagesFrame(pages: number[], expectedFrameEpoch: number): Uint8Array | null {
+        harness.releaseCalls.push({ pages, expectedFrameEpoch });
+        if (harness.releaseSuperseded || expectedFrameEpoch !== frameEpoch) return null;
+        delta(pages.map((index) => index + 1), false, 100, 3, pages);
+        return new Uint8Array([frameEpoch]);
+      },
+      applyUpdate(_update: Uint8Array) {
+        harness.releaseSuperseded = true;
+      },
       setSelection() {},
       applyInput() {
         delta([1]);
@@ -158,6 +189,9 @@ function worker() {
       encodeStateVector() {
         return new Uint8Array([1]);
       },
+      revisionCount(_excluding?: ReadonlySet<string>) {
+        return 0;
+      },
       destroy() {},
     },
     async rasterize(
@@ -169,6 +203,7 @@ function worker() {
     ) {
       const id = page.pageIndex + 1;
       harness.rasterized.push(id);
+      harness.buffers.push(buffer);
       if (harness.failRaster === id) {
         harness.failRaster = null;
         throw new Error('raster failed');
@@ -190,6 +225,11 @@ function worker() {
       canvas.height = buffer.height;
       buffer.pixels = null;
     },
+    release(canvas: Surface) {
+      canvas.width = 1;
+      canvas.height = 1;
+      canvas.pixels = null;
+    },
     presentCaret(canvas: Surface, buffer: Surface, _stage: Surface, caret: { color: string }) {
       if (!buffer.pixels) throw new Error('caret used a detached buffer');
       harness.presented.push(Number(buffer.pixels.split(':')[0]));
@@ -208,7 +248,13 @@ function worker() {
       });
     });
   }
-  function delta(upserts: number[], full = false, width = 100, pageCount = 3) {
+  function delta(
+    upserts: number[],
+    full = false,
+    width = 100,
+    pageCount = 3,
+    unbuilt: number[] = []
+  ) {
     const baseFrameEpoch = frameEpoch++;
     const operations: FramePageOperation[] = upserts.map((id) => ({
       kind: 'upsert',
@@ -216,7 +262,15 @@ function worker() {
       pageIndex: id - 1,
       fingerprint: BigInt(frameEpoch),
       primitiveIds: new BigUint64Array(),
-      page: { pageIndex: id - 1, width, height: 100, primitives: [] },
+      page: {
+        pageIndex: id - 1,
+        width,
+        height: 100,
+        primitives: [],
+        ...(unbuilt.includes(id - 1)
+          ? { unbuilt: true, positionSpan: [id, id + 1] as [number, number] }
+          : {}),
+      },
     }));
     harness.delta = {
       protocolVersion: 1,
@@ -316,6 +370,150 @@ function deferred() {
   });
   return { promise, resolve };
 }
+
+describe('resident display page release', () => {
+  test('answers build, release, then input in FIFO order', async () => {
+    const w = worker();
+    await w.bootstrap();
+    w.harness.caret = caret(1);
+    const order: string[] = [];
+    const build = w
+      .send({ type: 'buildPages', pages: [2], expectedFrameEpoch: 1, paintCaret: false })
+      .then((reply) => {
+        order.push('build');
+        return reply;
+      });
+    const release = w
+      .send({
+        type: 'releasePages',
+        pages: [{ index: 2, pageId: '3' }],
+        expectedFrameEpoch: 2,
+        paintCaret: false,
+      })
+      .then((reply) => {
+        order.push('release');
+        return reply;
+      });
+    const loc = { story: 'body', paraId: 'p1', offset: 0 };
+    const input = w
+      .send({
+        type: 'applyInput',
+        text: 'x',
+        selection: { anchor: loc, head: loc },
+        expectedFrameEpoch: 3,
+        profile: false,
+        paintCaret: false,
+      })
+      .then((reply) => {
+        order.push('input');
+        return reply;
+      });
+    const replies = await Promise.all([build, release, input]);
+    expect(order).toEqual(['build', 'release', 'input']);
+    expect(w.answered).toEqual([1, 2, 3, 4]);
+    for (const [index, reply] of replies.entries()) {
+      expect(reply).toMatchObject({ ok: true, caret: { frameEpoch: index + 2 }, selection: null });
+      expect(reply).toHaveProperty('frame');
+    }
+    expect(w.harness.releaseCalls).toEqual([{ pages: [2], expectedFrameEpoch: 2 }]);
+  });
+
+  test('stale epochs and mismatched page identities supersede without calling the engine', async () => {
+    const w = worker();
+    await w.bootstrap();
+    await w.attach([3]);
+    w.resetCalls();
+    const before = w.harness.delta;
+    for (const request of [
+      { pages: [{ index: 2, pageId: '3' }], expectedFrameEpoch: 0 },
+      { pages: [{ index: 2, pageId: '2' }], expectedFrameEpoch: 1 },
+      { pages: [{ index: 8, pageId: '3' }], expectedFrameEpoch: 1 },
+    ]) {
+      const reply = await w.send({ type: 'releasePages', ...request, paintCaret: false });
+      expect(reply).toMatchObject({ ok: true, superseded: true });
+      expect(reply).not.toHaveProperty('frame');
+    }
+    expect(w.harness.releaseCalls).toEqual([]);
+    expect(w.harness.delta).toBe(before);
+    expect(w.harness.rasterized).toEqual([]);
+    expect(w.surfaces.get('3')?.pixels).toBe('3:100');
+    expect(
+      await w.send({
+        type: 'releasePages',
+        pages: [{ index: 2, pageId: '3' }],
+        expectedFrameEpoch: 1,
+        paintCaret: false,
+      })
+    ).toHaveProperty('frame');
+  });
+
+  test('an engine superseded release after an update emits no frame and preserves surfaces', async () => {
+    const w = worker();
+    await w.bootstrap();
+    await w.attach([3]);
+    w.resetCalls();
+    const before = w.harness.delta;
+    void w.send({ type: 'applyUpdate', update: new Uint8Array([1]), selection: null });
+    const reply = await w.send({
+      type: 'releasePages',
+      pages: [{ index: 2, pageId: '3' }],
+      expectedFrameEpoch: 1,
+      paintCaret: false,
+    });
+    expect(reply).toMatchObject({ ok: true, superseded: true });
+    expect(reply).not.toHaveProperty('frame');
+    expect(w.harness.delta).toBe(before);
+    expect(w.harness.rasterized).toEqual([]);
+    expect(w.surfaces.get('3')?.pixels).toBe('3:100');
+  });
+
+  test('a released page keeps its transferred canvas without pixels and paints into it once rebuilt', async () => {
+    const w = worker();
+    await w.bootstrap();
+    await w.build([], 100, caret(3));
+    await w.attach([3]);
+    const canvas = w.surfaces.get('3')!;
+    expect(canvas.pixels).toStartWith('3:100');
+    const oldBuffer = w.harness.buffers.at(-1)!;
+    w.resetCalls();
+    const reply = await w.send({
+      type: 'releasePages',
+      pages: [{ index: 2, pageId: '3' }],
+      expectedFrameEpoch: 2,
+      paintCaret: false,
+    });
+    expect(reply).toMatchObject({ ok: true, replayedPages: 0, caretPainted: false });
+    expect(w.harness.rasterized).toEqual([]);
+    expect([canvas.pixels, canvas.width, canvas.height]).toEqual([null, 1, 1]);
+    await w.attach([3]);
+    expect(w.harness.rasterized).toEqual([]);
+    expect(canvas.pixels).toBeNull();
+    await w.send({ type: 'buildPages', pages: [2], expectedFrameEpoch: 3, paintCaret: false });
+    expect(w.harness.rasterized).toEqual([3]);
+    expect(w.surfaces.get('3')).toBe(canvas);
+    expect(canvas.pixels).toBe('3:100');
+    expect(w.harness.buffers.at(-1)).not.toBe(oldBuffer);
+  });
+
+  test('a canvas attached while its page is unbuilt is painted once the page builds', async () => {
+    const w = worker();
+    await w.bootstrap();
+    await w.send({
+      type: 'releasePages',
+      pages: [{ index: 2, pageId: '3' }],
+      expectedFrameEpoch: 1,
+      paintCaret: false,
+    });
+    w.resetCalls();
+    await w.attach([3]);
+    const canvas = w.surfaces.get('3')!;
+    expect(w.harness.rasterized).toEqual([]);
+    expect(canvas.pixels).toBeNull();
+    await w.send({ type: 'buildPages', pages: [2], expectedFrameEpoch: 2, paintCaret: false });
+    expect(w.harness.rasterized).toEqual([3]);
+    expect(canvas.pixels).toBe('3:100');
+  });
+});
 
 describe('resident worker warmup', () => {
   test('initializes wasm without creating a session, then bootstraps a frame', async () => {
@@ -446,7 +644,7 @@ describe('resident worker page damage', () => {
     w.resetCalls();
     expect((await w.attach([2, 3])).ok).toBe(true);
     expect(w.harness.rasterized).toEqual([3]);
-    expect(w.surfaces.get('1')!.width).toBe(0);
+    expect(w.surfaces.get('1')!.pixels).toBeNull();
     w.resetCalls();
     await w.attach([2, 3]);
     expect(w.harness.rasterized).toEqual([]);
@@ -834,6 +1032,220 @@ describe('resident worker layout ownership', () => {
     expect(afterEdit.ok && afterEdit.frame).toBeUndefined();
     expect(afterEdit.ok && afterEdit.layoutJson).toBeUndefined();
     expect(extras).toHaveLength(framesBefore);
+  });
+});
+
+describe('resident worker revision counts', () => {
+  test('revisionCount excludes revisions created by worker proposals', async () => {
+    const w = worker();
+    let version = 'proposal-1';
+    const revisions = ['document-1', 'document-2'];
+    const excluded: ReadonlySet<string>[] = [];
+    const engine = {
+      version: () => version,
+      resolveParagraphAnchor: (anchor: DocxParagraphAnchor) => ({ status: 'found', anchor }),
+      applyEdits: (request: DocxEditRequest) => {
+        version = 'proposal-2';
+        return {
+          ok: true,
+          version,
+          source: 'host',
+          changedStories: ['body'],
+          receipts: request.steps.map((_step, stepIndex) => {
+            const revisionId = `worker-${stepIndex + 1}`;
+            revisions.push(revisionId);
+            return {
+              stepIndex, changed: true, revisionIds: [revisionId],
+              newParagraphs: [], removedParagraphs: [],
+            };
+          }),
+        };
+      },
+    };
+    Object.assign(w.harness.session, {
+      proposalEngine: engine,
+      geometryReader: {
+        version: engine.version,
+        listRevisions: () => [],
+        resolveParagraphAnchor: () => ({ status: 'missing' }),
+        hasStory: () => false,
+      },
+      storiesChangedSince: () => ({ revision: 0, stories: [] }),
+    });
+    w.harness.session.revisionCount = (excluding) => {
+      expect(excluding).toBeInstanceOf(Set);
+      excluded.push(excluding!);
+      return revisions.filter((id) => !excluding!.has(id)).length;
+    };
+    expect((await w.bootstrap()).ok).toBe(true);
+    const proposed = await w.send({
+      type: 'proposal',
+      operation: {
+        kind: 'propose',
+        request: {
+          expectVersion: 'proposal-1',
+          proposals: [1, 2].map<DocxProposalInput>((index) => ({
+            id: `host-${index}`,
+            paragraph: {
+              kind: 'session', sessionId: 'session', story: 'body', paraId: `p${index}`,
+            },
+            suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+            op: 'insertText',
+            at: 'end',
+            text: '!',
+          })),
+        },
+      },
+    });
+    expect(proposed.ok && proposed.proposal?.result?.ok).toBe(true);
+    expect(proposed.ok && proposed.proposal?.mirror.proposals.entries.map(
+      ({ record }) => ({ id: record.id, revisionIds: record.revisionIds })
+    )).toEqual([
+      { id: 'host-1', revisionIds: ['worker-1'] },
+      { id: 'host-2', revisionIds: ['worker-2'] },
+    ]);
+    expect(revisions).toEqual(['document-1', 'document-2', 'worker-1', 'worker-2']);
+
+    const counted = await w.send({ type: 'revisionCount' });
+    expect(counted.ok && counted.revisionCount).toBe(2);
+    expect(excluded).toEqual([new Set(['worker-1', 'worker-2'])]);
+  });
+
+  test('revisionCount passes an empty exclusion set without a proposal registry', async () => {
+    const w = worker();
+    const revisions = ['document-1', 'document-2'];
+    const excluded: ReadonlySet<string>[] = [];
+    w.harness.session.revisionCount = (excluding) => {
+      expect(excluding).toBeInstanceOf(Set);
+      excluded.push(excluding!);
+      return revisions.filter((id) => !excluding!.has(id)).length;
+    };
+    expect((await w.bootstrap()).ok).toBe(true);
+    const counted = await w.send({ type: 'revisionCount' });
+    expect(counted.ok && counted.revisionCount).toBe(2);
+    expect(excluded).toEqual([new Set<string>()]);
+  });
+});
+
+describe('resident worker proposal failures', () => {
+  const operations: ResidentProposalOperation[] = [
+    { kind: 'propose', request: { expectVersion: 'proposal', proposals: [] } },
+    {
+      kind: 'setStates',
+      request: { expectVersion: 'proposal', expectPreviewVersion: 0, changes: [] },
+    },
+    { kind: 'withdraw', request: { expectVersion: 'proposal', ids: [] } },
+  ];
+
+  function proposalWorker() {
+    const w = worker();
+    const engine = { version: () => 'proposal' };
+    Object.assign(w.harness.session, {
+      proposalEngine: engine,
+      geometryReader: engine,
+      storiesChangedSince: () => ({ revision: 0, stories: [] }),
+    });
+    return { w, engine };
+  }
+
+  for (const operation of operations) {
+    test(
+      `a reply failure after ${operation.kind} returns is terminal without document updates`,
+      async () => {
+        const { w } = proposalWorker();
+        expect((await w.bootstrap()).ok).toBe(true);
+        w.harness.session.encodeStateVector = () => {
+          throw new Error('state vector failed');
+        };
+        const failed = await w.send({ type: 'proposal', operation });
+        expect(failed).toMatchObject({
+          ok: false,
+          terminal: true,
+          error: 'state vector failed',
+        });
+        expect(w.answered.filter((id) => id === failed.id)).toHaveLength(1);
+      }
+    );
+  }
+
+  test('a reply failure after a proposal snapshot is not terminal', async () => {
+    const { w } = proposalWorker();
+    expect((await w.bootstrap()).ok).toBe(true);
+    const encodeStateVector = w.harness.session.encodeStateVector;
+    w.harness.session.encodeStateVector = () => {
+      throw new Error('state vector failed');
+    };
+    const failed = await w.send({ type: 'proposal', operation: { kind: 'snapshot' } });
+    expect(failed).toMatchObject({ ok: false, error: 'state vector failed' });
+    expect(!failed.ok && failed.terminal).toBeUndefined();
+    w.harness.session.encodeStateVector = encodeStateVector;
+    const snapshot = await w.send({ type: 'proposal', operation: { kind: 'snapshot' } });
+    expect(snapshot.ok && snapshot.proposal?.mirror.proposals).toEqual({
+      previewVersion: 0,
+      entries: [],
+    });
+  });
+
+  test('a proposal failure before the registry operation commits is not terminal', async () => {
+    const { w } = proposalWorker();
+    expect((await w.bootstrap()).ok).toBe(true);
+    const failed = await w.send({
+      type: 'proposal',
+      operation: {
+        kind: 'propose',
+        request: { expectVersion: 'proposal', proposals: null },
+      } as never,
+    });
+    expect(failed).toMatchObject({
+      ok: false,
+      error: 'a proposal request needs a proposals array',
+    });
+    expect(!failed.ok && failed.terminal).toBeUndefined();
+    const snapshot = await w.send({ type: 'proposal', operation: { kind: 'snapshot' } });
+    expect(snapshot.ok && snapshot.proposal?.mirror.proposals.entries).toEqual([]);
+  });
+
+  test('a proposal failure with updates is terminal before the registry returns', async () => {
+    const { w, engine } = proposalWorker();
+    let onUpdate: ((update: Uint8Array) => void) | undefined;
+    Object.assign(w.harness.session, {
+      onUpdate: (listener: (update: Uint8Array) => void) => {
+        onUpdate = listener;
+        return () => {
+          onUpdate = undefined;
+        };
+      },
+    });
+    expect((await w.bootstrap()).ok).toBe(true);
+    engine.version = () => {
+      onUpdate!(new Uint8Array([1]));
+      throw new Error('registry failed after update');
+    };
+    const failed = await w.send({ type: 'proposal', operation: operations[0]! });
+    expect(failed).toMatchObject({
+      ok: false,
+      terminal: true,
+      error: 'registry failed after update',
+    });
+    expect(w.answered.filter((id) => id === failed.id)).toHaveLength(1);
+  });
+
+  test('a proposal trap after the registry returns refuses queued requests', async () => {
+    const { w } = proposalWorker();
+    expect((await w.bootstrap()).ok).toBe(true);
+    w.harness.session.encodeStateVector = () => {
+      throw new WebAssembly.RuntimeError('unreachable');
+    };
+    const failed = w.send({ type: 'proposal', operation: operations[0]! });
+    const queued = w.send({ type: 'proposal', operation: { kind: 'snapshot' } });
+    for (const reply of await Promise.all([failed, queued])) {
+      expect(reply).toMatchObject({
+        ok: false,
+        terminal: true,
+        error: 'Resident engine worker trapped: unreachable',
+      });
+      expect(w.answered.filter((id) => id === reply.id)).toHaveLength(1);
+    }
   });
 });
 
@@ -1259,6 +1671,23 @@ describe('sliced layout completion', () => {
     expect(calls).toEqual(['begin', 'resume:2']);
   });
 
+  test('a measurement failure answers the completion once without a synchronous retry', async () => {
+    const { w, calls, onResume, bootstrap } = steppedWorker();
+    await bootstrap();
+    onResume.push(() => {
+      Object.assign(w.harness.session, {
+        resumeRegionLayout: () => { throw new Error('measurement failed'); },
+      });
+    });
+    const failed = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 1,
+    });
+    expect(failed).toMatchObject({ ok: false, error: 'measurement failed' });
+    expect((await w.send({ type: 'revisionCount' })).ok).toBe(true);
+    expect(new Set(w.answered).size).toBe(w.answered.length);
+    expect(calls).not.toContain('whole');
+  });
+
   test('without a slice size the rest is laid out in one step', async () => {
     const { w, calls, bootstrap } = steppedWorker();
     await bootstrap();
@@ -1266,6 +1695,416 @@ describe('sliced layout completion', () => {
     expect(completed.ok && completed.layoutJson).toBe(full);
     expect(calls).toEqual(['whole']);
   });
+});
+
+describe('worker proposals during sliced completion', () => {
+  const layoutInput = JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Liberation Sans' } },
+    renderEnv: {},
+  });
+
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(
+    import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
+  )))));
+
+  async function proposalWorker() {
+    const parts: PartsMap = new Map();
+    parts.set('[Content_Types].xml', toBytes(
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
+    ));
+    parts.set('_rels/.rels', toBytes(
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'
+    ));
+    const body = Array.from({ length: 40 }, (_, index) =>
+      `<w:p w14:paraId="${(index + 1).toString(16).padStart(8, '0')}"><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>Paragraph ${index + 1}</w:t></w:r></w:p>`
+    ).join('');
+    parts.set('word/document.xml', toBytes(
+      `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>${body}<w:sectPr/></w:body></w:document>`
+    ));
+    const engine = await createResidentEngineSession();
+    engine.openDocx(new Uint8Array(rezipPartsToArrayBuffer(parts)));
+    const w = worker();
+    const calls: string[] = [];
+    const onResume: Array<() => void> = [];
+    Object.assign(w.harness.session, engine, {
+      layoutDocumentWithRegionsPrefixRetainedJson: (input: string, pages: number) => {
+        calls.push(`prefix:${pages}`);
+        return engine.layoutDocumentWithRegionsPrefixRetainedJson(input, pages);
+      },
+      layoutDocumentWithRegionsRetainedJson: (input: string) => {
+        calls.push('whole');
+        return engine.layoutDocumentWithRegionsRetainedJson(input);
+      },
+      beginRegionLayout: (input: string) => {
+        calls.push('begin');
+        return engine.beginRegionLayout(input);
+      },
+      resumeRegionLayout: (blocks: number) => {
+        calls.push('resume');
+        const progress = engine.resumeRegionLayout(Math.min(blocks, 1));
+        onResume.shift()?.();
+        return progress;
+      },
+      buildDisplayListFrame: (extras: string, epoch: number) => {
+        const frame = engine.buildDisplayListFrame(extras, epoch);
+        w.harness.delta = decodeFrameDelta(frame);
+        return frame;
+      },
+      buildDisplayPagesFrame: (pages: number[], epoch: number) => {
+        const frame = engine.buildDisplayPagesFrame(pages, epoch);
+        w.harness.delta = decodeFrameDelta(frame);
+        return frame;
+      },
+    });
+    const snapshot: YrsResidentWorkerSnapshot = {
+      workerAuthoritative: true,
+      clientId: 1,
+      state: new Uint8Array(),
+      fontsRevision: 0,
+      fonts: [new Uint8Array(readFileSync(resolve(
+        import.meta.dir, '../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
+      )))],
+      renderInputs: [],
+      measureInputs: [],
+      layoutInput,
+      layoutWithRegions: true,
+      layoutRevision: 1,
+      selection: null,
+    };
+    const booted = await w.send({
+      type: 'bootstrap', snapshot, extras: '', layoutExtras: '{}',
+      provisionalPages: 1, displayWindow: [0, 1], expectedFrameEpoch: 0,
+    });
+    expect(booted.ok && booted.layoutProvisional).toBe(true);
+    const proposal = (index = 1): Extract<DocxProposalInput, { op: 'replaceText' }> => ({
+      id: `p${index}`,
+      paragraph: {
+        kind: 'persisted',
+        story: { kind: 'body', partUri: '/word/document.xml' },
+        paraId: index.toString(16).padStart(8, '0'),
+      },
+      suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+      op: 'replaceText', search: `Paragraph ${index}`, replaceWith: `Changed ${index}`,
+    });
+    const complete = () => w.send({
+      type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 1,
+    });
+    const expectFullLayout = async (reply: ResidentEngineWorkerResponse, input = layoutInput) => {
+      const fresh = await createResidentEngineSession();
+      try {
+        fresh.loadState(engine.encodeState());
+        expect(reply.ok && reply.layoutJson).toBe(
+          fresh.layoutDocumentWithRegionsRetainedJson(input)
+        );
+      } finally {
+        fresh.destroy();
+      }
+      expect(calls).not.toContain('whole');
+    };
+    return { w, engine, calls, onResume, snapshot, booted, proposal, complete, expectFullLayout };
+  }
+
+  test('proposal mirrors retain the same navigation target as repeated worker reads', async () => {
+    const { w, engine, proposal } = await proposalWorker();
+    try {
+      let projectionReads = 0;
+      const storyIds = engine.geometryReader.storyIds;
+      engine.geometryReader.storyIds = () => { projectionReads += 1; return storyIds(); };
+      const snapshot = await w.send({ type: 'proposal', operation: { kind: 'snapshot' } });
+      expect(snapshot.ok).toBe(true);
+      expect(projectionReads).toBe(0);
+      const applied = await w.send({
+        type: 'proposal', operation: {
+          kind: 'propose', request: { expectVersion: engine.proposalEngine.version(), proposals: [proposal()] },
+        },
+      });
+      expect(applied.ok).toBe(true);
+      if (!applied.ok || !applied.proposal?.result?.ok) throw new Error('expected a proposal');
+      expect(applied.proposal.changedStories).toEqual(['body']);
+      expect(applied.proposal.geometry.navigationTargets).toBeUndefined();
+      expect(projectionReads).toBe(0);
+      const paragraph = applied.proposal.result.snapshot.proposals[0]!.paragraph;
+      const read = { kind: 'navigationTarget', story: paragraph.story, paraId: paragraph.paraId } as const;
+      const toggled = await w.send({
+        type: 'proposal', operation: {
+          kind: 'setStates', request: {
+            expectVersion: applied.proposal.mirror.version,
+            expectPreviewVersion: applied.proposal.mirror.proposals.previewVersion,
+            changes: [{ id: 'p1', state: 'rejected' }],
+          },
+        },
+      });
+      expect(toggled.ok).toBe(true);
+      if (!toggled.ok || !toggled.proposal?.result?.ok) throw new Error('expected a toggle');
+      expect(toggled.proposal.mirror.version).toBe(applied.proposal.mirror.version);
+      expect(toggled.proposal.geometry.previewVersion).toBe(applied.proposal.geometry.previewVersion + 1);
+      expect(toggled.proposal.changedStories).toEqual([]);
+      expect(projectionReads).toBe(1);
+      const first = await w.send({ type: 'documentRead', read });
+      const second = await w.send({ type: 'documentRead', read });
+      expect(first.ok).toBe(true);
+      expect(second.ok).toBe(true);
+      if (!first.ok || !second.ok) throw new Error('expected navigation reads');
+      expect(first.read).toEqual(second.read);
+      expect(first.read).toEqual({
+        version: applied.proposal.mirror.version,
+        value: toggled.proposal.geometry.navigationTargets?.p1,
+      });
+      expect(projectionReads).toBe(1);
+    } finally {
+      engine.destroy();
+    }
+  });
+
+  test('cached navigation targets populate the first mirror and changed versions defer rebuilding', async () => {
+    const { w, engine, proposal } = await proposalWorker();
+    try {
+      let projectionReads = 0;
+      const storyIds = engine.geometryReader.storyIds;
+      engine.geometryReader.storyIds = () => { projectionReads += 1; return storyIds(); };
+      const read = { kind: 'navigationTarget', story: 'body', paraId: '00000001' } as const;
+      const initial = await w.send({ type: 'documentRead', read });
+      expect(initial.ok).toBe(true);
+      expect(projectionReads).toBe(1);
+      const unchanged = await w.send({
+        type: 'proposal', operation: {
+          kind: 'propose', request: {
+            expectVersion: engine.proposalEngine.version(),
+            proposals: [{ ...proposal(), replaceWith: 'Paragraph 1' }],
+          },
+        },
+      });
+      expect(unchanged.ok).toBe(true);
+      if (!initial.ok || !unchanged.ok || !unchanged.proposal?.result?.ok) {
+        throw new Error('expected unchanged proposal and navigation');
+      }
+      expect(unchanged.proposal.changedStories).toEqual([]);
+      expect(initial.read).toEqual({
+        version: unchanged.proposal.mirror.version,
+        value: unchanged.proposal.geometry.navigationTargets?.p1,
+      });
+      expect(unchanged.proposal.geometry.navigationTargets?.p1).toMatchObject({
+        loc: { story: read.story, paraId: read.paraId, offset: 0 }, position: 1,
+      });
+      expect(projectionReads).toBe(1);
+
+      const changed = await w.send({
+        type: 'proposal', operation: {
+          kind: 'propose', request: { expectVersion: engine.proposalEngine.version(), proposals: [proposal(2)] },
+        },
+      });
+      expect(changed.ok).toBe(true);
+      if (!changed.ok || !changed.proposal?.result?.ok) throw new Error('expected changed proposal');
+      expect(changed.proposal.changedStories).toEqual(['body']);
+      expect(changed.proposal.mirror.version).not.toBe(unchanged.proposal.mirror.version);
+      expect(changed.proposal.geometry.navigationTargets).toBeUndefined();
+      expect(projectionReads).toBe(1);
+      const snapshot = await w.send({ type: 'proposal', operation: { kind: 'snapshot' } });
+      expect(snapshot.ok).toBe(true);
+      if (!snapshot.ok || !snapshot.proposal) throw new Error('expected snapshot');
+      expect(projectionReads).toBe(2);
+      const navigation = await w.send({ type: 'documentRead', read });
+      expect(navigation.ok).toBe(true);
+      expect(navigation.ok && navigation.read).toEqual({
+        version: snapshot.proposal.mirror.version,
+        value: snapshot.proposal.geometry.navigationTargets?.p1,
+      });
+      expect(projectionReads).toBe(2);
+      const withdrawn = await w.send({
+        type: 'proposal', operation: {
+          kind: 'withdraw', request: { expectVersion: snapshot.proposal.mirror.version, ids: ['p2'] },
+        },
+      });
+      expect(withdrawn.ok).toBe(true);
+      if (!withdrawn.ok || !withdrawn.proposal?.result?.ok) throw new Error('expected withdrawal');
+      expect(withdrawn.proposal.changedStories).toEqual(['body']);
+      expect(withdrawn.proposal.geometry.navigationTargets).toBeUndefined();
+      expect(projectionReads).toBe(2);
+      const first = await w.send({ type: 'documentRead', read });
+      expect(first.ok).toBe(true);
+      expect(projectionReads).toBe(3);
+      const warmed = await w.send({ type: 'proposal', operation: { kind: 'snapshot' } });
+      expect(warmed.ok).toBe(true);
+      if (!warmed.ok || !warmed.proposal) throw new Error('expected warmed snapshot');
+      expect(first.ok && first.read).toEqual({
+        version: warmed.proposal.mirror.version,
+        value: warmed.proposal.geometry.navigationTargets?.p1,
+      });
+      expect(projectionReads).toBe(3);
+    } finally {
+      engine.destroy();
+    }
+  });
+
+  test('snapshot and document reads answer before the background layout without restarting it', async () => {
+    const { w, engine, calls, onResume, proposal, complete, expectFullLayout } = await proposalWorker();
+    try {
+      const order: string[] = [];
+      let snapshot: Promise<ResidentEngineWorkerResponse> | undefined;
+      const reads: Array<Promise<ResidentEngineWorkerResponse>> = [];
+      const tail = engine.paragraphIdentities().paragraphs.at(-1)!.session!;
+      const requests: ResidentDocumentRead[] = [
+        { kind: 'paragraphIdentities' },
+        { kind: 'resolveParagraphAnchors', anchors: [proposal().paragraph] },
+        { kind: 'readParagraphs', request: { view: 'accepted' } },
+        { kind: 'navigationTarget', story: tail.story, paraId: tail.paraId },
+      ];
+      onResume.push(() => {
+        snapshot = w.send({ type: 'proposal', operation: { kind: 'snapshot' } }).then((reply) => {
+          order.push('snapshot');
+          return reply;
+        });
+        for (const read of requests) {
+          reads.push(w.send({ type: 'documentRead', read }).then((reply) => {
+            order.push(read.kind);
+            return reply;
+          }));
+        }
+      });
+      const completed = await complete().then((reply) => {
+        order.push('complete');
+        return reply;
+      });
+      expect((await snapshot!).ok).toBe(true);
+      const replies = await Promise.all(reads);
+      for (const reply of replies) expect(reply.ok).toBe(true);
+      expect(replies.at(-1)).toMatchObject({
+        ok: true, read: { value: { loc: { story: tail.story, paraId: tail.paraId, offset: 0 } } },
+      });
+      expect(order).toEqual(['snapshot', ...requests.map((read) => read.kind), 'complete']);
+      expect(calls.filter((call) => call === 'begin')).toHaveLength(1);
+      await expectFullLayout(completed);
+    } finally {
+      engine.destroy();
+    }
+  });
+
+  test('repeated proposals restart the background layout without switching to synchronous completion', async () => {
+    const { w, engine, calls, onResume, proposal, complete, expectFullLayout } = await proposalWorker();
+    try {
+      const order: string[] = [];
+      const proposed: Array<Promise<ResidentEngineWorkerResponse>> = [];
+      for (let index = 1; index <= 6; index += 1) {
+        onResume.push(() => {
+          proposed.push(w.send({
+            type: 'proposal',
+            operation: {
+              kind: 'propose',
+              request: { expectVersion: engine.proposalEngine.version(), proposals: [proposal(index)] },
+            },
+          }).then((reply) => {
+            order.push(`proposal:${index}`);
+            return reply;
+          }));
+        });
+      }
+      const completed = await complete().then((reply) => {
+        order.push('complete');
+        return reply;
+      });
+      expect(order).toEqual([
+        'proposal:1', 'proposal:2', 'proposal:3', 'proposal:4', 'proposal:5', 'proposal:6', 'complete',
+      ]);
+      for (const reply of await Promise.all(proposed)) {
+        expect(reply.ok && reply.proposal?.result?.ok).toBe(true);
+        expect(reply.ok && reply.proposal?.changedStories).toEqual(['body']);
+      }
+      expect(calls.filter((call) => call === 'begin')).toHaveLength(7);
+      await expectFullLayout(completed);
+    } finally {
+      engine.destroy();
+    }
+  });
+
+  test.each(['propose', 'setStates', 'withdraw'] as const)(
+    '%s replies during completion and its relayout paints the visible prefix before completing',
+    async (kind) => {
+      const { w, engine, calls, onResume, snapshot, booted, proposal, complete, expectFullLayout } =
+        await proposalWorker();
+      try {
+        if (kind !== 'propose') {
+          const seeded = await w.send({
+            type: 'proposal',
+            operation: {
+              kind: 'propose',
+              request: { expectVersion: engine.proposalEngine.version(), proposals: [proposal()] },
+            },
+          });
+          expect(seeded.ok && seeded.proposal?.result?.ok).toBe(true);
+        }
+        const order: string[] = [];
+        let operation: Promise<ResidentEngineWorkerResponse> | undefined;
+        let relayout: Promise<ResidentEngineWorkerResponse> | undefined;
+        let input = layoutInput;
+        onResume.push(() => {
+          const expectVersion = engine.proposalEngine.version();
+          operation = w.send({
+            type: 'proposal',
+            operation: kind === 'propose'
+              ? { kind, request: { expectVersion, proposals: [proposal()] } }
+              : kind === 'setStates'
+                ? { kind, request: { expectVersion, expectPreviewVersion: 0, changes: [{ id: 'p1', state: 'rejected' }] } }
+                : { kind, request: { expectVersion, ids: ['p1'] } },
+          }).then((reply) => {
+            order.push(kind);
+            expect(reply.ok && reply.proposal?.result?.ok).toBe(true);
+            if (!reply.ok || !reply.proposal?.result?.ok) throw new Error('proposal failed');
+            if (kind === 'withdraw') expect(reply.proposal.geometry.targets.p1).toBeUndefined();
+            else expect(reply.proposal.geometry.targets.p1?.ok).toBe(true);
+            input = JSON.stringify({
+              ...JSON.parse(layoutInput),
+              renderEnv: { revisionPreview: proposalRevisionPreview(reply.proposal.result.snapshot) },
+            });
+            relayout = w.send({
+              type: 'sync',
+              snapshot: { ...snapshot, fonts: [], layoutInput: input, layoutRevision: 2 },
+              extras: '', layoutExtras: '{}', provisionalPages: 1, displayWindow: [0, 1],
+              expectedFrameEpoch: 1, paintCaret: false,
+            }).then((frame) => {
+              order.push('prefix');
+              return frame;
+            });
+            return reply;
+          });
+        });
+        const superseded = await complete();
+        expect(superseded.ok && superseded.frame).toBeUndefined();
+        await operation!;
+        const prefix = await relayout!;
+        expect(prefix.ok && prefix.layoutProvisional).toBe(true);
+        expect(order).toEqual([kind, 'prefix']);
+        expect(calls.filter((call) => call === 'prefix:1')).toHaveLength(2);
+        if (!booted.ok || !booted.frame || !prefix.ok || !prefix.frame) throw new Error('frame missing');
+        const visible = applyFrameDeltaOwned(
+          applyFrameDeltaOwned(null, decodeFrameDelta(new Uint8Array(booted.frame))),
+          decodeFrameDelta(new Uint8Array(prefix.frame))
+        );
+        const pageText = visible.displayList.pages.flatMap((page) => page.primitives.map((primitive) =>
+          primitive.kind === 'glyphRun' || primitive.kind === 'text' ? primitive.text : ''
+        )).join('');
+        expect(pageText).toContain(kind === 'propose' ? 'Changed 1' : 'Paragraph 1');
+        let framed: Promise<ResidentEngineWorkerResponse> | undefined;
+        onResume.push(() => {
+          framed = w.send({ type: 'buildFrame', extras: '{}', expectedFrameEpoch: 2, paintCaret: false })
+            .then((frame) => {
+              order.push('frame');
+              return frame;
+            });
+        });
+        const completed = await complete().then((reply) => {
+          order.push('complete');
+          return reply;
+        });
+        expect((await framed!).ok).toBe(true);
+        expect(order).toEqual([kind, 'prefix', 'frame', 'complete']);
+        await expectFullLayout(completed, input);
+      } finally {
+        engine.destroy();
+      }
+    }
+  );
 });
 
 describe('resident worker opening', () => {
@@ -1339,6 +2178,7 @@ describe('resident worker opening', () => {
         calls.push('state');
         return new Uint8Array([7, 8]);
       },
+      proposalEngine: { version: () => 'opened' },
     });
     return { w, calls };
   }
@@ -1381,6 +2221,8 @@ describe('resident worker opening', () => {
 
     const state = await w.send({ type: 'encodeState' });
     expect(state.ok && [...new Uint8Array(state.state!)]).toEqual([7, 8]);
+    expect(state.ok && state.version).toBe('opened');
+    expect(state.ok && state.proposals).toEqual({ previewVersion: 0, entries: [] });
     expect(state.memory).toEqual(w.harness.memories);
     expect(calls[calls.length - 1]).toBe('state');
 
@@ -1393,6 +2235,55 @@ describe('resident worker opening', () => {
     expect(completed.ok && completed.layoutJson).toBe(full);
     expect(completed.ok && completed.layoutProvisional).toBeUndefined();
     expect(calls.slice(-3)).toEqual(['begin:{"request":1}', 'resume:2', 'frame:1']);
+  });
+
+  test('proposal requests between open and bootstrap leave the worker registry empty', async () => {
+    const { w } = openingWorker();
+    expect((await w.send({ type: 'open', bytes: new Uint8Array([4]).buffer })).ok).toBe(true);
+    const operations: ResidentProposalOperation[] = [
+      {
+        kind: 'propose',
+        request: {
+          expectVersion: 'opened',
+          proposals: [
+            {
+              id: 'too-early',
+              paragraph: { kind: 'session', sessionId: 'opened', story: 'body', paraId: 'p1' },
+              suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+              op: 'insertText',
+              at: 'end',
+              text: '!',
+            },
+          ],
+        },
+      },
+      { kind: 'snapshot' },
+    ];
+    for (const operation of operations) {
+      const refused = await w.send({ type: 'proposal', operation });
+      expect(refused).toMatchObject({
+        ok: false,
+        error: 'Resident engine worker has not laid out its document',
+      });
+      expect(!refused.ok && refused.terminal).toBeUndefined();
+    }
+    Object.assign(w.harness.session, {
+      storiesChangedSince: () => ({ revision: 0, stories: [] }),
+      geometryReader: { version: () => 'opened' },
+    });
+    const bootstrapped = await w.send({
+      type: 'bootstrap',
+      opened: true,
+      snapshot,
+      extras: '',
+      expectedFrameEpoch: 0,
+    });
+    expect(bootstrapped.ok).toBe(true);
+    const empty = await w.send({ type: 'proposal', operation: { kind: 'snapshot' } });
+    expect(empty.ok && empty.proposal?.mirror).toEqual({
+      version: 'opened',
+      proposals: { previewVersion: 0, entries: [] },
+    });
   });
 
   test('a snapshot bootstrap lays out the same provisional prefix after loading state', async () => {
@@ -1410,7 +2301,27 @@ describe('resident worker opening', () => {
     expect(calls).toEqual(['loadState', 'font', 'prefix:{"request":1}:3', 'frame:0']);
   });
 
-  for (const type of ['open', 'fontRequirements', 'encodeState'] as const) {
+  for (const count of [0, 2]) {
+    test(`reports ${count} revisions from the opened session`, async () => {
+      const { w } = openingWorker();
+      w.harness.session.revisionCount = () => count;
+      await w.send({ type: 'open', bytes: new Uint8Array([1]).buffer });
+      const response = await w.send({ type: 'revisionCount' });
+      expect(response.ok && response.revisionCount).toBe(count);
+      expect(response.memory).toEqual(w.harness.memories);
+    });
+  }
+
+  test('revision count requires an initialized session', async () => {
+    const { w } = openingWorker();
+    const response = await w.send({ type: 'revisionCount' });
+    expect(response).toMatchObject({
+      ok: false,
+      error: 'Resident engine worker is not initialized',
+    });
+  });
+
+  for (const type of ['open', 'fontRequirements', 'encodeState', 'revisionCount'] as const) {
     test(`${type} attributes an OOM trap and refuses queued requests`, async () => {
       const { w, calls } = openingWorker();
       if (type !== 'open') {
@@ -1422,6 +2333,7 @@ describe('resident worker opening', () => {
         open: 'openDocx',
         fontRequirements: 'layoutFontRequirementsJson',
         encodeState: 'encodeState',
+        revisionCount: 'revisionCount',
       }[type];
       Object.assign(w.harness.session, {
         [method]: () => {

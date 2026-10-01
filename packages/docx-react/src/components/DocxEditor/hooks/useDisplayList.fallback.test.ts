@@ -118,6 +118,67 @@ test('continues the frame epochs after a worker with a higher epoch fails', asyn
   }
 });
 
+test('a layout published with a session that has not laid out yet waits for the session to lay out', async () => {
+  const request = JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Calibri' } },
+    renderEnv: {},
+  });
+  const previous = createEditSession(9401);
+  previous.create_story('body', 'Document A', 'Normal', 'left');
+  const layoutA = JSON.parse(previous.layout_document_with_regions_json(request));
+  const native = createEditSession(9402);
+  native.create_story('body', 'Document B', 'Normal', 'left');
+  let laidOut = false;
+  const engine = {
+    buildDisplayListJson: (input: string) => native.build_display_list_json(input),
+    resetFrameBase: () => native.reset_frame_base(),
+    buildDisplayListFrame: (input: string, epoch: number) =>
+      native.build_display_list_frame(input, epoch),
+    residentWorkerProbe: () => (laidOut ? { layoutRevision: 1 } : null),
+    residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    encodeStateVector: () => new Uint8Array(),
+    onUpdate: () => () => {},
+    selection: () => null,
+    applyUpdate: () => null,
+  } as unknown as YrsSession;
+  globalThis.Worker = undefined as unknown as typeof Worker;
+  let inputs = layoutA;
+  const overrides = { getInputs: () => inputs };
+  let layoutRequests = 0;
+  const requestLayout = () => {
+    layoutRequests += 1;
+  };
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const { result, unmount } = renderHook(
+      ({ layout }) =>
+        useRustDisplayList(layout, overrides, undefined, undefined, engine, requestLayout),
+      { initialProps: { layout: layoutA.layout as Layout } }
+    );
+    await waitFor(() => expect(layoutRequests).toBe(1));
+    expect(result.current.error).toBeNull();
+    expect(result.current.frame).toBeNull();
+
+    // The session lays out, but its layout is not published: the display tries again on its own.
+    inputs = JSON.parse(native.layout_document_with_regions_json(request));
+    laidOut = true;
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    expect(result.current.error).toBeNull();
+    expect(result.current.loading).toBe(false);
+    expect(layoutRequests).toBe(1);
+    expect(
+      errors.mock.calls.some(([message]) => String(message).includes('Rust display-list build failed'))
+    ).toBe(false);
+    unmount();
+  } finally {
+    errors.mockRestore();
+    previous.free();
+    native.free();
+  }
+});
+
 test('recovers from a worker whose frame number the host engine already used', async () => {
   const native = createEditSession(9101);
   native.create_story('body', 'Fallback text', 'Normal', 'left');

@@ -1874,6 +1874,28 @@ fn inline_image_grows_the_line_box() {
 }
 
 #[test]
+fn a_multiple_rule_adds_its_room_below_an_image_alone_on_its_line() {
+    for multiple in [1.0, 1.5, 2.0] {
+        let measured = measure_with(
+            json!({
+                "kind": "paragraph",
+                "runs": [{ "kind": "image", "width": 50.0, "height": 100.0 }],
+                "attrs": { "spacing": { "line": multiple, "lineUnit": "multiplier", "lineRule": "auto" } }
+            }),
+            200.0,
+        )
+        .unwrap();
+        let line = &measured["lines"][0];
+        approx(line["ascent"].as_f64().unwrap(), 100.0, "image at the top");
+        approx(
+            line["lineHeight"].as_f64().unwrap(),
+            100.0 + (multiple - 1.0) * LH,
+            &format!("{multiple}x: image plus the rule's added room"),
+        );
+    }
+}
+
+#[test]
 fn inline_images_keep_the_same_top_with_or_without_text() {
     let image = json!({ "kind": "image", "width": 50.0, "height": 100.0 });
     for runs in [
@@ -3025,6 +3047,38 @@ fn east_asia_hint_moves_only_ambiguous_characters() {
         measure_hinted("א", "eastAsia"),
         "complex script stays in the CS slot"
     );
+}
+
+/// A script slot whose family has no chain, because its text arrived after
+/// the fonts were collected, measures with the run's own family.
+#[test]
+fn script_slot_without_a_chain_measures_with_the_run_family() {
+    let mut store = FontStore::new();
+    store.register(FIXTURE.to_vec()).expect("base registers");
+    let measure = |text: &str, slots: Value, complex_script: bool, chains: Value| {
+        let input = json!({
+            "block": { "kind": "paragraph", "runs": [{
+                "kind": "text", "text": text, "fontSlots": slots,
+                "complexScript": complex_script, "bold": true, "boldCs": false, "italicCs": true
+            }] },
+            "maxWidth": 500.0,
+            "fontChains": chains,
+            "defaults": { "fontSize": 12.0, "fontFamily": "base" }
+        });
+        measure_paragraph_json(&store, &input.to_string()).expect("measures")
+    };
+    let named = json!({ "hAnsi": "base", "eastAsia": "SimSun", "cs": "Traditional Arabic" });
+    let plain = json!({ "hAnsi": "base" });
+    // Only the run's own style was collected, as for a tab-formatted run.
+    let collected = json!({ "base|1|0": [0] });
+    let all = json!({ "base|0|0": [0], "base|1|0": [0], "base|0|1": [0], "base|1|1": [0] });
+    for (text, complex_script) in [("日", false), ("א", false), ("A", true)] {
+        assert_eq!(
+            measure(text, named.clone(), complex_script, collected.clone()),
+            measure(text, plain.clone(), complex_script, all.clone()),
+            "{text:?}"
+        );
+    }
 }
 
 /// A chain longer than a run keeps resolved is rebuilt per character; it must

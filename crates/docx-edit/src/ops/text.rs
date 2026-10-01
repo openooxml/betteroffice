@@ -10,7 +10,8 @@ use crate::format::{FormatPolicy, HYPERLINK, PROTECTED_ATTRS};
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
 use crate::ops::{
     Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
-    capture_pilcrow, last_pilcrow, snapshot_range, utf16_len,
+    block_embed_at, capture_pilcrow, last_pilcrow, paragraph_content_before, snapshot_range,
+    utf16_len,
 };
 use crate::{
     BREAK_KIND, DEL, EditCtx, EditingDoc, INS, KIND_KEY, Position, StoryRange, check_position,
@@ -142,18 +143,20 @@ fn boundary_chunks<T: yrs::ReadTxn>(story: &TextRef, txn: &T, index: u32) -> Vec
 /// after the text it strikes out, as Word places it, and at most before the
 /// story's final unit. None in plain mode, and where that unit is a block embed,
 /// which only a paragraph boundary may precede: the text then goes at the start.
+/// `chunks` cover `range` and the unit after it.
 fn after_struck_text(
     story: &TextRef,
     txn: &TransactionMut<'_>,
     ctx: &EditCtx,
     range: &StoryRange,
     len: u32,
+    chunks: &[Chunk],
 ) -> Option<u32> {
     if !ctx.is_suggesting() || len == 0 {
         return None;
     }
     let at = range.end.min(story.len(txn) - 1);
-    let block = snapshot_range(story, txn, at, at + 1).iter().any(|chunk| {
+    let block = chunks.iter().any(|chunk| {
         chunk.start == at
             && matches!(&chunk.kind, ChunkKind::Embed(Some(map))
                 if crate::map_string(map, txn, KIND_KEY)
@@ -172,7 +175,14 @@ pub(crate) fn suggest_delete(
     end: u32,
     chunks: &[Chunk],
 ) -> DeleteOutcome {
-    let final_pilcrow = last_pilcrow(story, txn).map(|(index, _)| index);
+    let final_pilcrow = chunks
+        .iter()
+        .any(|chunk| {
+            matches!(chunk.kind, ChunkKind::Pilcrow(_))
+                && chunk.end().min(end) > chunk.start.max(start)
+        })
+        .then(|| last_pilcrow(story, txn).map(|(index, _)| index))
+        .flatten();
     let mut removed = 0;
     for chunk in chunks.iter().rev() {
         let overlap_start = chunk.start.max(start);
@@ -223,6 +233,7 @@ pub(crate) fn plain_delete(
     start: u32,
     end: u32,
     chunks: &[Chunk],
+    replacement_has_content: bool,
 ) -> DeleteOutcome {
     let pilcrows_in_range: Vec<(u32, yrs::MapRef)> = chunks
         .iter()
@@ -233,24 +244,40 @@ pub(crate) fn plain_delete(
             _ => None,
         })
         .collect();
-    let final_pilcrow = last_pilcrow(story, txn);
+    let final_pilcrow = if pilcrows_in_range.is_empty() {
+        None
+    } else {
+        last_pilcrow(story, txn)
+    };
     let donor = pilcrows_in_range
         .first()
         .map(|(_, map)| capture_pilcrow(map, txn));
 
-    let final_in_range = final_pilcrow
+    let protected_pilcrow = final_pilcrow
         .as_ref()
         .filter(|(index, _)| *index >= start && *index < end)
-        .cloned();
-    let (removed, survivor) = if let Some((final_index, final_map)) = final_in_range {
-        // Keep the final pilcrow alive: remove around it.
-        if end > final_index + 1 {
-            story.remove_range(txn, final_index + 1, end - final_index - 1);
+        .cloned()
+        .or_else(|| {
+            pilcrows_in_range
+                .last()
+                .filter(|_| {
+                    block_embed_at(story, txn, end)
+                        && (replacement_has_content || paragraph_content_before(story, txn, start))
+                        && snapshot_range(story, txn, end, end.saturating_add(1))
+                            .first()
+                            .and_then(|chunk| chunk.block_revisions(txn))
+                            .is_none_or(|revisions| revisions.iter().all(Option::is_none))
+                })
+                .cloned()
+        });
+    let (removed, survivor) = if let Some((index, map)) = protected_pilcrow {
+        if end > index + 1 {
+            story.remove_range(txn, index + 1, end - index - 1);
         }
-        if final_index > start {
-            story.remove_range(txn, start, final_index - start);
+        if index > start {
+            story.remove_range(txn, start, index - start);
         }
-        ((end - start) - 1, Some(final_map))
+        ((end - start) - 1, Some(map))
     } else {
         story.remove_range(txn, start, end - start);
         let survivor = if pilcrows_in_range.is_empty() {
@@ -346,7 +373,7 @@ impl EditingDoc {
             );
             range.end - outcome.removed
         } else {
-            plain_delete(&mut txn, &story, range.start, range.end, &chunks);
+            plain_delete(&mut txn, &story, range.start, range.end, &chunks, false);
             range.start
         };
         let loc_range = loc_range_in_txn(&range.story, &story, &txn, range.start, result_end)?;
@@ -383,18 +410,17 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
-        let after = after_struck_text(&story, &txn, ctx, &range, len);
-        let mut at = after.unwrap_or(range.start);
-        if !text.is_empty() {
-            crate::identity::promote_at(self, &mut txn, &range.story, &story, at);
-        }
-
         let chunks = snapshot_range(
             &story,
             &txn,
             range.start.saturating_sub(1),
             range.end.saturating_add(1),
         );
+        let after = after_struck_text(&story, &txn, ctx, &range, len, &chunks);
+        let mut at = after.unwrap_or(range.start);
+        if !text.is_empty() {
+            crate::identity::promote_at(self, &mut txn, &range.story, &story, at);
+        }
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, range.start, INS, &ctx.author)
                 .or_else(|| adjacent_revision_id(&chunks, range.start, DEL, &ctx.author))
@@ -439,7 +465,14 @@ impl EditingDoc {
                     at -= outcome.removed;
                 }
             } else {
-                plain_delete(&mut txn, &story, range.start, range.end, &chunks);
+                plain_delete(
+                    &mut txn,
+                    &story,
+                    range.start,
+                    range.end,
+                    &chunks,
+                    !text.is_empty(),
+                );
             }
         }
         if !text.is_empty() {
@@ -488,17 +521,17 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
-        let after = after_struck_text(&story, &txn, ctx, &range, len);
-        let mut at = after.unwrap_or(range.start);
-        if total > 0 {
-            crate::identity::promote_at(self, &mut txn, &range.story, &story, at);
-        }
         let chunks = snapshot_range(
             &story,
             &txn,
             range.start.saturating_sub(1),
             range.end.saturating_add(1),
         );
+        let after = after_struck_text(&story, &txn, ctx, &range, len, &chunks);
+        let mut at = after.unwrap_or(range.start);
+        if total > 0 {
+            crate::identity::promote_at(self, &mut txn, &range.story, &story, at);
+        }
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, range.start, INS, &ctx.author)
                 .or_else(|| adjacent_revision_id(&chunks, range.start, DEL, &ctx.author))
@@ -524,7 +557,14 @@ impl EditingDoc {
                     at -= outcome.removed;
                 }
             } else {
-                plain_delete(&mut txn, &story, range.start, range.end, &chunks);
+                plain_delete(
+                    &mut txn,
+                    &story,
+                    range.start,
+                    range.end,
+                    &chunks,
+                    runs.iter().any(|run| !run.text.is_empty()),
+                );
             }
         }
         let mut cursor = at;

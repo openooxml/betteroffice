@@ -5,9 +5,12 @@ import { buildInteractiveOverlayPage, interactiveOverlayHasTabStops } from './in
 import {
   buildMirrorPage,
   buildMirrorPageLinks,
+  buildMirrorPageText,
   displayPageHoldsMirrorId,
   mirrorPageHasHeaderCells,
   mirrorPageHasTabStops,
+  reduceMirrorToLinks,
+  reduceMirrorToText,
 } from './mirrorDom';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -171,8 +174,13 @@ test("a page's links-only mirror holds the full mirror's links and ids, in order
   for (const page of pages) {
     const full = buildMirrorPage(page);
     const linksOnly = buildMirrorPageLinks(page);
+    const textOnly = buildMirrorPageText(page);
     expect(links(linksOnly)).toEqual(links(full));
     expect(ids(linksOnly)).toEqual(ids(full));
+    const kept = (root: HTMLElement) =>
+      Array.from(root.querySelectorAll('a, .layout-note'), (element) => element.outerHTML);
+    expect(kept(textOnly)).toEqual(kept(linksOnly));
+    expect(ids(textOnly)).toEqual(ids(linksOnly));
   }
 });
 
@@ -222,11 +230,16 @@ test("a links-only mirror keeps the full mirror's nesting order and header label
   };
   const full = buildMirrorPage(page);
   const linksOnly = buildMirrorPageLinks(page);
+  const textOnly = buildMirrorPageText(page);
   const hrefs = (root: HTMLElement) =>
     Array.from(root.querySelectorAll('a'), (a) => a.getAttribute('href'));
   expect(full.querySelector('[data-table-id="t1"] [data-table-id="t2"]')).not.toBeNull();
   expect(hrefs(linksOnly)).toEqual(hrefs(full));
   expect(linksOnly.textContent).not.toContain('words');
+  expect(textOnly.textContent).toContain('words');
+  const keptCells = (root: HTMLElement) =>
+    Array.from(root.querySelectorAll('.layout-table-cell'), (cell) => cell.outerHTML);
+  expect(keptCells(textOnly)).toEqual(keptCells(linksOnly));
   // A kept cell keeps the text that names it.
   const cellText = (root: HTMLElement) =>
     Array.from(root.querySelectorAll('[role="cell"]'), (cell) => cell.textContent);
@@ -261,6 +274,173 @@ test("a page's header cells stay in its links-only mirror, with their whole text
     expect(mirrorPageHasHeaderCells(page)).toBe(true);
     const cell = (root: HTMLElement) => root.querySelector('[id="account"]')?.textContent;
     expect(cell(buildMirrorPageLinks(page))).toBe(cell(buildMirrorPage(page)));
+    expect(buildMirrorPageText(page).querySelector('[id="account"]')?.outerHTML).toBe(
+      buildMirrorPageLinks(page).querySelector('[id="account"]')?.outerHTML
+    );
   }
   expect(mirrorPageHasHeaderCells(pages[2]!)).toBe(false);
+});
+
+test('a text-only mirror reads every paragraph in order without run elements or painter data', () => {
+  const page: DisplayPage = {
+    pageIndex: 0,
+    width: 200,
+    height: 200,
+    primitives: [
+      text({ blockKey: 'first', paraId: 'first', text: 'First ', docStart: 1, docEnd: 7 }),
+      text({ blockKey: 'first', paraId: 'first', text: 'paragraph', docStart: 7, docEnd: 16 }),
+      text({ blockKey: 'second', text: '1. ', listMarker: true }),
+      text({ blockKey: 'second', text: 'Second paragraph', docStart: 20, docEnd: 36 }),
+      text({
+        blockKey: 'third', text: 'Third paragraph', docStart: 40, docEnd: 55,
+        sdt: { groupId: 'control', sdtType: 'text', alias: 'Content control' },
+      }),
+    ],
+    header: {
+      rId: 'header',
+      kind: 'header',
+      y: 0,
+      height: 20,
+      primitives: [text({ blockKey: 'header', text: 'Header' })],
+    },
+    footer: {
+      rId: 'footer',
+      kind: 'footer',
+      y: 180,
+      height: 20,
+      primitives: [text({ blockKey: 'footer', text: 'Footer' })],
+    },
+  };
+  const mirror = buildMirrorPage(page, {
+    labels: { page: 'Page', header: 'Header', footer: 'Footer' },
+  });
+  for (const element of [mirror, ...mirror.querySelectorAll('.layout-paragraph')]) {
+    element.id = 'unused';
+  }
+  expect(reduceMirrorToText(mirror)).toBe(mirror);
+  expect(Array.from(mirror.querySelectorAll('[role="paragraph"]'), (block) => block.textContent)).toEqual([
+    'First paragraph',
+    'Second paragraph',
+    'Third paragraph',
+    'Header',
+    'Footer',
+  ]);
+  const paragraphs = mirror.querySelectorAll('[role="paragraph"]');
+  for (const paragraph of paragraphs) {
+    expect(paragraph.children).toHaveLength(0);
+    expect(paragraph.childNodes).toHaveLength(1);
+    expect(paragraph.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+  }
+  expect(mirror.querySelector('.layout-run')).toBeNull();
+  expect(
+    [mirror, ...mirror.querySelectorAll('*')].flatMap((element) =>
+      Array.from(element.attributes, (attribute) => attribute.name).filter((name) =>
+        name === 'id' || name.startsWith('data-')
+      )
+    )
+  ).toEqual([]);
+  expect(mirror.getAttribute('role')).toBe('document');
+  expect(mirror.getAttribute('aria-label')).toBe('Page');
+  expect(mirror.querySelectorAll('[role="region"]')).toHaveLength(2);
+  expect(mirror.querySelector('.layout-block-sdt')?.getAttribute('aria-label')).toBe('Content control');
+  expect(mirror.style.contentVisibility).toBe('auto');
+});
+
+test('a text-only mirror keeps language changes and drops runs the full mirror hides', () => {
+  const page: DisplayPage = {
+    pageIndex: 0,
+    width: 200,
+    height: 200,
+    primitives: [
+      text({ blockKey: 'mixed', text: 'Hello ', lang: 'en-US' }),
+      text({ blockKey: 'mixed', text: 'שלום', lang: 'he-IL', bidiLevel: 1 }),
+      text({ blockKey: 'mixed', text: ' again', lang: 'en-US' }),
+      text({ blockKey: 'covered', text: 'Visible' }),
+      text({ blockKey: 'covered', text: ' covered' }),
+    ],
+  };
+  const mirror = buildMirrorPage(page);
+  const covered = Array.from(mirror.querySelectorAll('.layout-run')).find(
+    (run) => run.textContent === ' covered'
+  )!;
+  covered.setAttribute('aria-hidden', 'true');
+  reduceMirrorToText(mirror);
+  const [mixed, visible] = Array.from(mirror.querySelectorAll('[role="paragraph"]'));
+  expect(mixed!.textContent).toBe('Hello שלום again');
+  expect(
+    Array.from(mixed!.children, (child) => [child.getAttribute('lang'), child.textContent])
+  ).toEqual([['he-IL', 'שלום']]);
+  expect(visible!.textContent).toBe('Visible');
+  expect(mirror.querySelector('.layout-run')).toBeNull();
+});
+
+test('a text-only mirror keeps image names and table semantics and removes visual leaves', () => {
+  const page: DisplayPage = {
+    pageIndex: 0,
+    width: 100,
+    height: 100,
+    primitives: [
+      text({
+        blockKey: 'table',
+        text: 'Cell',
+        docStart: 1,
+        docEnd: 5,
+        table: { tableId: 'table' },
+        cell: { row: 0, col: 0, rowSpan: 1, colSpan: 1 },
+      }),
+      {
+        kind: 'image', relId: 'picture', x: 0, y: 0, w: 10, h: 10,
+        altText: 'A picture', docStart: 6, docEnd: 7,
+      },
+      { kind: 'image', relId: 'decoration', x: 0, y: 0, w: 10, h: 10, decorative: true },
+      { kind: 'rect', x: 0, y: 0, w: 10, h: 10, fill: '#fff' },
+      { kind: 'line', x1: 0, y1: 0, x2: 10, y2: 10, strokeWidth: 1, color: '#000' },
+      { kind: 'line', x1: 0, y1: 0, x2: 10, y2: 10, strokeWidth: 1, color: '#000', role: 'table-cut' },
+      { kind: 'decoration', deco: 'underline', x: 0, y: 0, w: 10, h: 10, color: '#000' },
+      text({
+        text: '¶',
+        structuralRevision: { scope: 'pmark', kind: 'ins', author: 'Author', revisionId: 'revision' },
+      }),
+      text({ text: '' }),
+    ],
+    pageBorders: [{ kind: 'pageBorder', x: 0, y: 0, w: 100, h: 100 }],
+  };
+  const mirror = buildMirrorPageText(page);
+  expect(mirror.textContent).toBe('Cell');
+  const image = mirror.querySelector('[role="img"]')!;
+  expect(image.getAttribute('aria-label')).toBe('A picture');
+  expect(image.hasAttribute('data-doc-start')).toBe(false);
+  expect(mirror.querySelectorAll('.layout-run-image')).toHaveLength(1);
+  expect(mirror.querySelector('[role="table"] [role="row"] [role="cell"]')?.textContent).toBe('Cell');
+  expect(mirror.querySelector('[data-doc-start], [data-table-id]')).toBeNull();
+  expect(mirror.querySelector([
+    '.layout-decoration', '.layout-mirror-rect', '.layout-mirror-line',
+    '.layout-table-cut-border', '.layout-page-border', '.layout-revision-pmark-glyph',
+  ].join(', '))).toBeNull();
+});
+
+test('a text-only mirror keeps labels and attributes of ancestors of retained content', () => {
+  const full = buildMirrorPage({
+    pageIndex: 0,
+    width: 100,
+    height: 100,
+    primitives: [
+      text({ blockKey: 'label', text: 'Link description' }),
+      text({ blockKey: 'link', href: '#target', text: 'Link', docStart: 10, docEnd: 14 }),
+      text({ blockKey: 'other', text: 'Other text', docStart: 20, docEnd: 30 }),
+    ],
+  });
+  const label = full.querySelector('.layout-paragraph')!;
+  label.id = 'label';
+  full.querySelector('a')!.parentElement!.setAttribute('aria-describedby', 'label');
+  const linksOnly = reduceMirrorToLinks(full.cloneNode(true) as HTMLElement);
+  const textOnly = reduceMirrorToText(full);
+  for (const selector of ['#label', 'a', '[aria-describedby]']) {
+    expect(textOnly.querySelector(selector)?.outerHTML).toBe(linksOnly.querySelector(selector)?.outerHTML);
+  }
+  expect(textOnly.dataset.pageIndex).toBe(linksOnly.dataset.pageIndex);
+  expect(textOnly.querySelectorAll('[data-doc-start]')).toHaveLength(
+    linksOnly.querySelectorAll('[data-doc-start]').length
+  );
+  expect(textOnly.textContent).toBe('Link descriptionLinkOther text');
 });

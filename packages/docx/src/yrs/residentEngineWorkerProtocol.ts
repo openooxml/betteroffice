@@ -6,6 +6,52 @@ import type {
 } from './index';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
+import type {
+  DocxProposalRegistryState,
+  DocxProposalRequest,
+  DocxProposalResult,
+  DocxProposalStateRequest,
+  DocxProposalWithdrawRequest,
+} from './proposals';
+import type {
+  DocxParagraphAnchor,
+  DocxParagraphAnchorResult,
+  DocxParagraphIdentitySnapshot,
+} from './paragraphIdentity';
+import type { DocxReadParagraphsRequest, DocxReadParagraphsResult } from './edits';
+import type { ProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
+
+/** @internal */
+export type ResidentProposalOperation =
+  | { kind: 'propose'; request: DocxProposalRequest }
+  | { kind: 'setStates'; request: DocxProposalStateRequest }
+  | { kind: 'withdraw'; request: DocxProposalWithdrawRequest }
+  | { kind: 'snapshot' };
+
+/** @internal */
+export interface ResidentProposalResponse {
+  result?: DocxProposalResult;
+  mirror: { version: string; proposals: DocxProposalRegistryState };
+  changedStories: string[];
+  updates: ArrayBuffer[];
+  stateVector: ArrayBuffer;
+  geometry: ProposalGeometryMirror;
+}
+
+/** @internal */
+export type ResidentDocumentRead =
+  | { kind: 'paragraphIdentities' }
+  | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
+  | { kind: 'readParagraphs'; request: DocxReadParagraphsRequest }
+  | { kind: 'navigationTarget'; story: string; paraId: string };
+
+/** @internal */
+export interface ResidentDocumentReadValues {
+  paragraphIdentities: DocxParagraphIdentitySnapshot;
+  resolveParagraphAnchors: { results: DocxParagraphAnchorResult[] };
+  readParagraphs: DocxReadParagraphsResult;
+  navigationTarget: ReturnType<typeof resolveNavigationTarget>;
+}
 
 export type ResidentEngineWorkerRequest =
   | { id: number; type: 'warm' }
@@ -47,6 +93,9 @@ export type ResidentEngineWorkerRequest =
     }
   | { id: number; type: 'fontRequirements'; layoutInput: string }
   | { id: number; type: 'encodeState' }
+  | { id: number; type: 'revisionCount' }
+  | { id: number; type: 'proposal'; operation: ResidentProposalOperation }
+  | { id: number; type: 'documentRead'; read: ResidentDocumentRead }
   | {
       id: number;
       type: 'sync';
@@ -62,11 +111,19 @@ export type ResidentEngineWorkerRequest =
       layoutExtras?: string;
       displayWindow?: [number, number];
       retainBuiltPages?: boolean;
+      provisionalPages?: number;
     }
   | {
       id: number;
       type: 'buildPages';
       pages: number[];
+      expectedFrameEpoch: number;
+      paintCaret: boolean;
+    }
+  | {
+      id: number;
+      type: 'releasePages';
+      pages: Array<{ index: number; pageId: string }>;
       expectedFrameEpoch: number;
       paintCaret: boolean;
     }
@@ -142,6 +199,7 @@ export type ResidentEngineWorkerResponse = (
       id: number;
       ok: true;
       frame?: ArrayBuffer;
+      superseded?: true;
       updates?: ArrayBuffer[];
       engineMs?: number;
       workerTotalMs?: number;
@@ -168,6 +226,15 @@ export type ResidentEngineWorkerResponse = (
       requirementsJson?: string;
       /** An `encodeState` reply: the document state as one yrs v1 update. */
       state?: ArrayBuffer;
+      revisionCount?: number;
+      /** @internal */
+      proposals?: DocxProposalRegistryState;
+      /** @internal */
+      version?: string;
+      /** @internal */
+      proposal?: ResidentProposalResponse;
+      /** @internal */
+      read?: { version: string; value: unknown };
     }
   | {
       id: number;

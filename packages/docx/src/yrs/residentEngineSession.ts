@@ -1,14 +1,26 @@
 import type {
   YrsEngineApplyProfile,
+  YrsParagraph,
+  YrsParagraphLength,
+  YrsParagraphSpan,
   YrsRegionLayoutProgress,
   YrsResidentCaretSnapshot,
+  YrsRevisionInfo,
   YrsSelection,
   YrsSession,
+  YrsStorySegment,
 } from './index';
 import type {
   CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
+import type { DocxEditResult, DocxFindTextResult, DocxReadParagraphsResult } from './edits';
+import type {
+  DocxParagraphAnchorResult,
+  DocxParagraphIdentitySnapshot,
+} from './paragraphIdentity';
+import type { ProposalGeometryReader } from './proposalGeometry';
+import type { DocxProposalSession } from './proposals';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
 
@@ -22,6 +34,7 @@ export type ResidentEngineSession = Pick<
   | 'beginRegionLayout'
   | 'buildDisplayListFrame'
   | 'buildDisplayPagesFrame'
+  | 'releaseDisplayPagesFrame'
   | 'clearFonts'
   | 'destroy'
   | 'encodeStateVector'
@@ -43,8 +56,15 @@ export type ResidentEngineSession = Pick<
   | 'setDisplayRetainBuiltPages'
   | 'setDisplayWindow'
   | 'setSelection'
+  | 'storiesChangedSince'
   | 'yrsBlocksForStory'
 > & {
+  /** @internal */
+  proposalEngine: DocxProposalSession;
+  /** @internal */
+  geometryReader: ProposalGeometryReader;
+  /** @internal */
+  paragraphIdentities(): DocxParagraphIdentitySnapshot;
   /** The region layout of only as much of the body as fills `pages` pages. */
   layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
   /** Limit incremental rebuilds to the display window and caret pages. Off by default. */
@@ -53,6 +73,8 @@ export type ResidentEngineSession = Pick<
   openDocx(bytes: Uint8Array, digest?: string, generation?: string): string;
   /** The whole document state as one yrs v1 update. */
   encodeState(): Uint8Array;
+  /** Tracked changes in the document, leaving out the revisions in `excluding`. */
+  revisionCount(excluding?: ReadonlySet<string>): number;
   /** The retained region layout pass without serializing its reply. */
   layoutDocumentWithRegionsRetained(input: string): void;
   /** The retained region layout's `headersFooters` JSON, when it has any. */
@@ -89,13 +111,74 @@ export async function createResidentEngineSession(
     observing = true;
   };
 
+  const proposalEngine: DocxProposalSession = {
+    version: () => session.version(),
+    resolveParagraphAnchor: (anchor) =>
+      JSON.parse(
+        session.resolve_paragraph_anchor(JSON.stringify(anchor))
+      ) as DocxParagraphAnchorResult,
+    findText: (request) =>
+      JSON.parse(session.find_text_json(JSON.stringify(request))) as DocxFindTextResult,
+    readParagraphs: (request) =>
+      JSON.parse(session.read_paragraphs_json(JSON.stringify(request))) as DocxReadParagraphsResult,
+    applyEdits: (request) =>
+      JSON.parse(session.apply_edits_json(JSON.stringify(request))) as DocxEditResult,
+    listRevisions: () =>
+      JSON.parse(session.list_revisions()) as ReturnType<DocxProposalSession['listRevisions']>,
+    revisionStamps: (ids) =>
+      JSON.parse(session.revision_stamps_json(JSON.stringify(ids))) as ReturnType<
+        NonNullable<DocxProposalSession['revisionStamps']>
+      >,
+    settleRevisions: (accept, reject) => {
+      session.settle_revisions_json(JSON.stringify({ accept, reject }));
+    },
+    ...(typeof session.begin_shared_reads === 'function' &&
+    typeof session.end_shared_reads === 'function'
+      ? {
+          sharedReads: <R>(read: () => R): R => {
+            session.begin_shared_reads();
+            try {
+              return read();
+            } finally {
+              session.end_shared_reads();
+            }
+          },
+        }
+      : {}),
+  };
+
+  const geometryReader: ProposalGeometryReader = {
+    version: () => session.version(),
+    hasStory: (story) => !LONE_SURROGATE.test(story) && session.has_story(story),
+    storyIds: () => session.story_ids(),
+    paragraphs: (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],
+    paragraphIdCount: (story, paraId) => session.paragraph_id_count(story, paraId),
+    paragraphSpans: (story) => JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[],
+    storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
+    locateParagraph: (story, paraId) =>
+      JSON.parse(session.locate_paragraph(story, paraId)) as YrsParagraphSpan,
+    listRevisions: () => JSON.parse(session.list_revisions()) as YrsRevisionInfo[],
+    resolveParagraphAnchor: proposalEngine.resolveParagraphAnchor,
+    findText: proposalEngine.findText,
+  };
+
   return {
+    proposalEngine,
+    geometryReader,
+    paragraphIdentities: () =>
+      JSON.parse(session.paragraph_identities()) as DocxParagraphIdentitySnapshot,
+    storiesChangedSince: (since) =>
+      JSON.parse(session.stories_changed_since(since)) as { revision: number; stories: string[] },
     openDocx: (bytes, digest, generation) =>
       resolveHostJsonCommentMedia(
         session.open_docx(bytes, true, generation, digest),
         (token) => (token.startsWith('media:') ? (session.media_data_url(token) ?? null) : null)
       ),
     encodeState: () => session.encode_state(),
+    revisionCount: (excluding) =>
+      (JSON.parse(session.list_revisions()) as { revisionId: string }[]).filter(
+        (revision) => !excluding?.has(revision.revisionId)
+      ).length,
     registerFont: (bytes) => session.register_measure_font(bytes),
     registerSubstituteFont: (base, family) =>
       session.register_substitute_measure_font(base, family),
@@ -123,6 +206,10 @@ export async function createResidentEngineSession(
     setWindowedIncrementalBuilds: (enabled) => session.set_windowed_incremental_builds(enabled),
     buildDisplayPagesFrame: (pages, expectedFrameEpoch) =>
       session.build_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch),
+    releaseDisplayPagesFrame: (pages, expectedFrameEpoch) => {
+      const frame = session.release_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch);
+      return frame.length === 0 ? null : frame;
+    },
     residentCaretSnapshot: () =>
       JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
     selection: () => JSON.parse(session.selection()) as YrsSelection | null,
@@ -174,6 +261,8 @@ export async function createResidentEngineSession(
     },
   };
 }
+
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 function randomClientId(): number {
   if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {

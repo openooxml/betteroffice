@@ -34,7 +34,9 @@
 
 use crate::LayoutError;
 use crate::hooks;
-use crate::keep_together::{paragraph_is_unbreakable, paragraph_widow_control};
+use crate::keep_together::{
+    measure_keep_with_next_group_witnessing, paragraph_is_unbreakable, paragraph_widow_control,
+};
 use crate::page_flow::{PageFlowGeometry, Paginator};
 use crate::paragraph_spacing::{
     apply_contextual_spacing_measured, get_spacing_after, get_spacing_before,
@@ -228,6 +230,8 @@ fn checkpoint_order(checkpoint: &LayoutCheckpoint) -> (usize, usize) {
 /// block that opened a page may now start on the one before it (a removed page
 /// break, a paragraph that now fits), and one inside or right after a
 /// keep-with-next run can move that run's head, so resume strictly before either.
+/// Right after a run counts even when the dirty block is no longer its
+/// follower: a page break it gained releases the run from it.
 fn restart_index(
     keep_with_next: &crate::keep_together::KeepWithNextScan,
     dirty_index: usize,
@@ -238,7 +242,7 @@ fn restart_index(
         .rev()
         .take(2)
         .filter(|(_, group)| {
-            group.members.contains(&dirty_index) || group.follower == Some(dirty_index)
+            group.members.contains(&dirty_index) || group.tail_index + 1 == dirty_index
         })
         .map(|(&head, _)| head)
         .min()
@@ -356,6 +360,8 @@ fn origin_paginator(
         options.footnote_reserved_heights.clone(),
     )?;
     paginator.set_section_page_margins(options.section_page_margins.clone().unwrap_or_default());
+    paginator
+        .set_section_page_float_bands(options.section_page_float_bands.clone().unwrap_or_default());
     if let Some(Some(restart)) = plan.section_page_restarts.first() {
         paginator.restart_page_numbering(restart.start);
     }
@@ -595,6 +601,9 @@ pub fn layout_document_incremental_ranges(
                 )?;
                 paginator.set_section_page_margins(
                     options.section_page_margins.clone().unwrap_or_default(),
+                );
+                paginator.set_section_page_float_bands(
+                    options.section_page_float_bands.clone().unwrap_or_default(),
                 );
                 (
                     start.block_index,
@@ -852,20 +861,25 @@ fn place(
             let page_content_height =
                 paginator.state(state_idx).content_limit - paginator.state(state_idx).content_top;
             let page_has_content = paginator.page_fragment_count(state_idx) > 0;
-            let group_height = hooks::measure_keep_with_next_group_at(
+            // between float bands a table row's first slice may not share a gap
+            // with the run, so a table follower keeps its whole first row there
+            let split_first_row = !paginator.has_float_bands();
+            let group_height = measure_keep_with_next_group_witnessing(
                 group,
                 measured,
                 |before| paginator.leading_spacing(before),
                 paginator.state(state_idx).deferred_spacing,
                 page_content_height,
-            )?;
-            let fresh_page_height = hooks::measure_keep_with_next_group_at(
+                split_first_row,
+            );
+            let fresh_page_height = measure_keep_with_next_group_witnessing(
                 group,
                 measured,
                 |_| 0.0,
                 0.0,
                 page_content_height,
-            )?;
+                split_first_row,
+            );
             let must_advance = hooks::keep_with_next_group_must_advance_from(
                 group_height,
                 fresh_page_height,
@@ -874,13 +888,17 @@ fn place(
                 page_has_content,
             )?;
             if must_advance {
-                // advance until a column holds the run or a fresh page opens
-                loop {
-                    let idx = paginator.advance_for_overflow();
-                    if paginator.state(idx).column_index == 0
-                        || fresh_page_height <= paginator.get_available_height()
-                    {
-                        break;
+                if paginator.has_float_bands() {
+                    paginator.ensure_fits(group_height);
+                } else {
+                    // advance until a column holds the run or a fresh page opens
+                    loop {
+                        let idx = paginator.advance_for_overflow();
+                        if paginator.state(idx).column_index == 0
+                            || fresh_page_height <= paginator.get_available_height()
+                        {
+                            break;
+                        }
                     }
                 }
             }
@@ -1183,6 +1201,10 @@ fn build_resolved_lines(
     resolved
 }
 
+fn paragraph_fragment_height(before: f64, lines_height: f64) -> f64 {
+    before + lines_height
+}
+
 /// Places a paragraph's measured lines, splitting into carried fragments
 /// whenever the page or column runs out of room.
 ///
@@ -1252,11 +1274,11 @@ fn layout_paragraph(
     if paragraph_is_unbreakable(block, measure) {
         let state_idx = paginator.get_current();
         let state = paginator.state(state_idx);
-        let capacity = state.content_limit - state.content_top;
         let required = paginator
             .leading_spacing(space_before)
             .max(state.deferred_spacing)
             + paragraph_height;
+        let capacity = paginator.get_column_capacity();
         if paragraph_height <= capacity && required > paginator.get_available_height() {
             paginator.ensure_fits(required);
         }
@@ -1265,6 +1287,21 @@ fn layout_paragraph(
     let mut current_line_index = 0usize;
 
     while current_line_index < lines.len() {
+        if paginator.has_float_bands() {
+            let state_idx = paginator.get_current();
+            let before = if current_line_index == 0 {
+                paginator
+                    .leading_spacing(space_before)
+                    .max(paginator.state(state_idx).deferred_spacing)
+            } else {
+                0.0
+            };
+            paginator.ensure_fits(paragraph_fragment_height(
+                before,
+                lines[current_line_index].line_height
+                    + lines[current_line_index].float_skip_before.unwrap_or(0.0),
+            ));
+        }
         let state_idx = paginator.get_current();
         let deferred_spacing = paginator.state(state_idx).deferred_spacing;
         let column_index = paginator.state(state_idx).column_index;
@@ -1277,7 +1314,13 @@ fn layout_paragraph(
         } else {
             0.0
         };
-        let available_for_lines = paginator.get_available_height() - reserved_before;
+        let available_height = paginator.get_available_height();
+        let has_float_bands = paginator.has_float_bands();
+        let (fit_before, available_for_lines) = if has_float_bands {
+            (reserved_before, available_height)
+        } else {
+            (0.0, available_height - reserved_before)
+        };
 
         // greedy fit; a fragment always takes at least one line
         let mut lines_height = 0.0f64;
@@ -1289,7 +1332,9 @@ fn layout_paragraph(
             let line_height = line.line_height + line.float_skip_before.unwrap_or(0.0);
             let total_with_line = lines_height + line_height;
 
-            if total_with_line <= available_for_lines || fitting_lines == 0 {
+            if paragraph_fragment_height(fit_before, total_with_line) <= available_for_lines
+                || fitting_lines == 0
+            {
                 lines_height = total_with_line;
                 fitting_lines += 1;
             } else {
@@ -1298,20 +1343,45 @@ fn layout_paragraph(
         }
 
         let remaining_after = lines.len() - (current_line_index + fitting_lines);
+        let mut pushed_widow = false;
         if widow_control && remaining_after > 0 {
             if current_line_index == 0 && fitting_lines == 1 {
-                let capacity = paginator.state(state_idx).content_limit
-                    - paginator.state(state_idx).content_top;
+                let capacity = paginator.get_column_capacity();
                 let first_two_height = lines.iter().take(2).fold(0.0, |sum, line| {
-                    sum + line.line_height + line.float_skip_before.unwrap_or(0.0)
+                    if has_float_bands {
+                        sum + (line.line_height + line.float_skip_before.unwrap_or(0.0))
+                    } else {
+                        sum + line.line_height + line.float_skip_before.unwrap_or(0.0)
+                    }
                 });
-                if reserved_before + first_two_height <= capacity {
-                    paginator.advance_for_overflow();
-                    continue;
+                let required = paragraph_fragment_height(reserved_before, first_two_height);
+                if required <= capacity {
+                    let pen_y = paginator.state(state_idx).pen_y;
+                    let next_idx = if has_float_bands {
+                        paginator.ensure_fits(required)
+                    } else {
+                        paginator.advance_for_overflow()
+                    };
+                    let next = paginator.state(next_idx);
+                    if next_idx != state_idx
+                        || next.column_index != column_index
+                        || next.pen_y > pen_y
+                    {
+                        continue;
+                    }
                 }
             }
             if remaining_after == 1 && fitting_lines > 2 {
                 fitting_lines -= 1;
+                // at a float band the space below it still takes the line, and
+                // balancing chose its column depth with the line kept here
+                let tail: f64 = lines[current_line_index + fitting_lines..]
+                    .iter()
+                    .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
+                    .sum();
+                pushed_widow = !has_float_bands
+                    && !paginator.balances_region()
+                    && tail <= paginator.get_column_capacity();
                 let removed = &lines[current_line_index + fitting_lines];
                 lines_height -= removed.line_height + removed.float_skip_before.unwrap_or(0.0);
             }
@@ -1357,8 +1427,11 @@ fn layout_paragraph(
 
         current_line_index += fitting_lines;
 
-        // leftover lines: move the pen to a column/page with room for the next
-        if current_line_index < lines.len() {
+        // leftover lines: move the pen to a column/page with room for the next;
+        // a line widow control pushed down still fits here, so break anyway
+        if pushed_widow {
+            paginator.advance_for_overflow();
+        } else if current_line_index < lines.len() {
             paginator.ensure_fits(lines[current_line_index].line_height);
         }
     }
@@ -1482,6 +1555,7 @@ fn resolve_object_position(
     let state_idx = paginator.get_current();
     let state = paginator.state(state_idx);
     let page = &paginator.pages[state.page_index];
+    let margins = page.body_anchor_margins.as_ref().unwrap_or(&page.margins);
     let column_x = paginator.get_column_x(state.column_index);
     crate::anchor::resolve_position(
         position,
@@ -1490,10 +1564,10 @@ fn resolve_object_position(
         &crate::anchor::AnchorFrame {
             page_width: page.size.w,
             page_height: page.size.h,
-            margin_left: page.margins.left,
-            margin_right: page.margins.right,
-            margin_top: page.margins.top,
-            margin_bottom: page.margins.bottom,
+            margin_left: margins.left,
+            margin_right: margins.right,
+            margin_top: margins.top,
+            margin_bottom: margins.bottom,
             flow_x: column_x,
             flow_y: state.pen_y,
             flow_width: paginator.column_width(),
@@ -1669,6 +1743,470 @@ mod pagination_rule_tests {
             },
         }))
         .unwrap()
+    }
+
+    fn widow_rounding_input(
+        page_height: f64,
+        top: f64,
+        bottom: f64,
+        before: f64,
+        heights: &[f64],
+    ) -> Input {
+        let mut measured = paragraph(
+            1,
+            heights.len(),
+            heights[0],
+            json!({
+                "spacing": {"before": before},
+            }),
+        );
+        measured["measure"]["lines"] = json!(heights.iter().copied().map(line).collect::<Vec<_>>());
+        serde_json::from_value(json!({
+            "measured": [measured],
+            "options": {
+                "pageSize": {"w": 500, "h": page_height},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "sectionPageFloatBands": [{"default": [{"top": top, "bottom": bottom}]}],
+            },
+        }))
+        .unwrap()
+    }
+
+    fn assert_all_paragraph_lines(value: &mut Input, count: usize) -> Layout {
+        let result = layout_document(value).unwrap();
+        let mut next_line = 0;
+        for fragment in result.pages.iter().flat_map(|page| &page.fragments) {
+            let Fragment::Paragraph(fragment) = fragment else {
+                panic!("paragraph expected");
+            };
+            assert_eq!(fragment.from_line, next_line);
+            assert!(fragment.to_line > fragment.from_line);
+            next_line = fragment.to_line;
+        }
+        assert_eq!(next_line, count);
+        result
+    }
+
+    #[test]
+    fn widow_control_terminates_when_fractional_spacing_rounds_two_lines_to_the_gap() {
+        let mut value = widow_rounding_input(300.0, 176.0, 200.0, 57.7, &[11.15; 4]);
+        let result = assert_all_paragraph_lines(&mut value, 4);
+        let Fragment::Paragraph(first) = &result.pages[0].fragments[0] else {
+            panic!("paragraph expected");
+        };
+        assert_eq!(first.to_line, 2);
+        value.options.section_page_float_bands = None;
+        assert_eq!(assert_all_paragraph_lines(&mut value, 4).pages.len(), 1);
+    }
+
+    #[test]
+    fn widow_control_terminates_when_line_rounding_matches_the_gap_with_spacing() {
+        let mut value =
+            widow_rounding_input(500.0, 200.0, 220.0, 64.0, &[20.0, 20.000000000000007]);
+        let result = assert_all_paragraph_lines(&mut value, 2);
+        assert_eq!(result.pages.len(), 1);
+        assert_eq!(result.pages[0].fragments.len(), 1);
+        value.options.section_page_float_bands = None;
+        assert_eq!(assert_all_paragraph_lines(&mut value, 2).pages.len(), 1);
+    }
+
+    #[test]
+    fn a_kept_row_pair_terminates_when_rounding_fits_it_at_the_cursor() {
+        let heights = [20.0, 20.000000000000007];
+        let cell = |row: usize| {
+            json!({ "id": 30 + row, "blocks": [{
+                "kind": "paragraph", "id": 40 + row,
+                "runs": [{ "kind": "text", "text": "x", "fmt": {} }],
+                "attrs": { "keepNext": row == 0 },
+            }] })
+        };
+        let extent = |row: usize| {
+            json!({ "height": heights[row], "cells": [{ "width": 100, "height": heights[row],
+                "blocks": [{ "kind": "paragraph", "lines": [line(heights[row])],
+                             "totalHeight": heights[row] }] }] })
+        };
+        let table = json!({
+            "block": {
+                "kind": "table", "id": 2,
+                "rows": [{ "id": 20, "cells": [cell(0)] }, { "id": 21, "cells": [cell(1)] }],
+                "columnWidths": [100],
+            },
+            "measure": {
+                "kind": "table", "columnWidths": [100],
+                "totalWidth": 100, "totalHeight": heights[0] + heights[1],
+                "rows": [extent(0), extent(1)],
+            },
+        });
+        let mut value: Input = serde_json::from_value(json!({
+            "measured": [paragraph(1, 1, 20.0, json!({"spacing": {"after": 64}})), table],
+            "options": {
+                "pageSize": {"w": 500, "h": 500},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "sectionPageFloatBands": [{"default": [{"top": 220, "bottom": 240}]}],
+            },
+        }))
+        .unwrap();
+        let result = layout_document(&mut value).unwrap();
+        let last_row_end = result
+            .pages
+            .iter()
+            .flat_map(|page| &page.fragments)
+            .filter_map(|fragment| match fragment {
+                Fragment::Table(table) => Some(table.row_end),
+                _ => None,
+            })
+            .next_back();
+        assert_eq!(last_row_end, Some(2));
+    }
+
+    #[test]
+    fn a_table_row_taller_than_the_room_above_a_float_band_moves_below_it() {
+        let table = |height: f64| {
+            json!({
+                "block": {
+                    "kind": "table", "id": 2,
+                    "rows": [{ "id": 20, "cells": [{ "id": 30, "blocks": [{
+                        "kind": "paragraph", "id": 40,
+                        "runs": [{ "kind": "text", "text": "x", "fmt": {} }],
+                    }] }] }],
+                    "columnWidths": [100],
+                },
+                "measure": {
+                    "kind": "table", "columnWidths": [100],
+                    "totalWidth": 100, "totalHeight": height,
+                    "rows": [{ "height": height, "cells": [{ "width": 100, "height": height,
+                        "blocks": [{ "kind": "paragraph", "lines": [line(height)],
+                                     "totalHeight": height }] }] }],
+                },
+            })
+        };
+        for (height, y) in [(40.0, Some(200.0)), (250.0, None)] {
+            let mut value: Input = serde_json::from_value(json!({
+                "measured": [table(height)],
+                "options": {
+                    "pageSize": {"w": 500, "h": 500},
+                    "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                    "sectionPageFloatBands": [{"default": [{"top": 120, "bottom": 200}]}],
+                },
+            }))
+            .unwrap();
+            let result = layout_document(&mut value).unwrap();
+            let fragments: Vec<_> = result
+                .pages
+                .iter()
+                .flat_map(|page| &page.fragments)
+                .collect();
+            let [Fragment::Table(fragment)] = fragments.as_slice() else {
+                panic!("one table fragment expected");
+            };
+            assert_eq!(fragment.row_end, 1, "{height}");
+            if let Some(y) = y {
+                assert_eq!((result.pages.len(), fragment.y), (1, y));
+            }
+        }
+    }
+
+    #[test]
+    fn a_repeated_header_row_below_a_float_band_terminates_when_rounding_fits_the_slice() {
+        let rows = [
+            (true, vec![64.0]),
+            (false, vec![20.0; 8]),
+            (false, vec![40.000000000000007, 40.0]),
+        ];
+        let block_rows: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .map(|(index, (header, _))| {
+                json!({ "id": 20 + index, "isHeader": header, "cells": [{ "id": 30 + index,
+                    "padding": {"top": 0, "right": 0, "bottom": 0, "left": 0},
+                    "blocks": [{ "kind": "paragraph", "id": 40 + index,
+                        "runs": [{ "kind": "text", "text": "x", "fmt": {} }],
+                        "attrs": { "widowControl": false } }] }] })
+            })
+            .collect();
+        let extents: Vec<_> = rows
+            .iter()
+            .map(|(_, lines)| {
+                let height: f64 = lines.iter().sum();
+                json!({ "height": height, "cells": [{ "width": 100, "height": height,
+                    "blocks": [{ "kind": "paragraph",
+                        "lines": lines.iter().copied().map(line).collect::<Vec<_>>(),
+                        "totalHeight": height }] }] })
+            })
+            .collect();
+        let total: f64 = rows.iter().flat_map(|(_, lines)| lines).sum();
+        let mut value: Input = serde_json::from_value(json!({
+            "measured": [{
+                "block": { "kind": "table", "id": 2, "rows": block_rows, "columnWidths": [100] },
+                "measure": { "kind": "table", "columnWidths": [100], "totalWidth": 100,
+                             "totalHeight": total, "rows": extents },
+            }],
+            "options": {
+                "pageSize": {"w": 500, "h": 580},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "sectionPageFloatBands": [{"default": [{"top": 200, "bottom": 300}]}],
+            },
+        }))
+        .unwrap();
+        let result = layout_document(&mut value).unwrap();
+        let last_row_end = result
+            .pages
+            .iter()
+            .flat_map(|page| &page.fragments)
+            .filter_map(|fragment| match fragment {
+                Fragment::Table(table) => Some(table.row_end),
+                _ => None,
+            })
+            .next_back();
+        assert_eq!(last_row_end, Some(3));
+        assert!(result.pages.len() <= 4);
+    }
+
+    #[test]
+    fn a_carried_row_slice_that_rounding_fits_between_bands_is_placed() {
+        let paragraphs = [
+            (vec![10.3], false),
+            (vec![10.1, 25.0], true),
+            (vec![20.0], false),
+        ];
+        let blocks: Vec<_> = paragraphs
+            .iter()
+            .enumerate()
+            .map(|(index, (_, keep))| {
+                json!({ "kind": "paragraph", "id": 40 + index,
+                    "runs": [{ "kind": "text", "text": "x", "fmt": {} }],
+                    "attrs": { "keepLines": keep, "widowControl": false } })
+            })
+            .collect();
+        let extents: Vec<_> = paragraphs
+            .iter()
+            .map(|(lines, _)| {
+                json!({ "kind": "paragraph",
+                    "lines": lines.iter().copied().map(line).collect::<Vec<_>>(),
+                    "totalHeight": lines.iter().sum::<f64>() })
+            })
+            .collect();
+        let height: f64 = paragraphs.iter().flat_map(|(lines, _)| lines).sum();
+        let mut value: Input = serde_json::from_value(json!({
+            "measured": [{
+                "block": { "kind": "table", "id": 2, "columnWidths": [100], "rows": [
+                    { "id": 20, "cells": [{ "id": 30, "blocks": blocks,
+                        "padding": {"top": 0, "right": 0, "bottom": 0, "left": 0} }] }] },
+                "measure": { "kind": "table", "columnWidths": [100], "totalWidth": 100,
+                    "totalHeight": height, "rows": [{ "height": height, "cells": [
+                        { "width": 100, "height": height, "blocks": extents }] }] },
+            }],
+            "options": {
+                "pageSize": {"w": 500, "h": 650},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "sectionPageFloatBands": [{"default": [
+                    {"top": 116, "bottom": 200}, {"top": 235.1, "bottom": 300}]}],
+            },
+        }))
+        .unwrap();
+        let result = layout_document(&mut value).unwrap();
+        let fragments: Vec<_> = result
+            .pages
+            .iter()
+            .flat_map(|page| &page.fragments)
+            .filter_map(|fragment| match fragment {
+                Fragment::Table(table) => Some(table),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fragments.last().map(|table| table.row_end), Some(1));
+        assert!(result.pages.len() <= 2);
+    }
+
+    #[test]
+    fn a_paragraph_split_across_columns_paints_its_float_in_each_column() {
+        let floating = |height: f64, lines: usize| {
+            json!({
+                "block": {"kind": "paragraph", "id": format!("p{lines}"), "runs": [
+                    {"kind": "text", "text": "abcdefghij"},
+                    {"kind": "image", "src": "float", "width": 20, "height": 20,
+                     "displayMode": "float", "wrapType": "square",
+                     "position": {"vertical": {"relativeTo": "paragraph", "posOffset": 0}}},
+                ], "attrs": {"widowControl": false}},
+                "measure": {"kind": "paragraph", "totalHeight": height * lines as f64,
+                            "lines": (0..lines).map(|index| json!({
+                                "headRun": 0, "headChar": index, "tailRun": 0,
+                                "tailChar": index + 1, "width": 10, "ascent": 15,
+                                "descent": 5, "lineHeight": height,
+                            })).collect::<Vec<_>>()},
+            })
+        };
+        let mut value: Input = serde_json::from_value(json!({
+            "measured": [paragraph(1, 5, 20.0, json!({})), floating(20.0, 15)],
+            "options": {
+                "pageSize": {"w": 500, "h": 492},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "columns": {"count": 2, "gap": 20},
+            },
+        }))
+        .unwrap();
+        let result = layout_document(&mut value).unwrap();
+        let split: Vec<_> = result.pages[0]
+            .fragments
+            .iter()
+            .filter_map(|fragment| match fragment {
+                Fragment::Paragraph(fragment)
+                    if matches!(&fragment.block_id, crate::types::BlockId::Str(id) if id == "p15") =>
+                {
+                    Some(fragment)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(split.len(), 2);
+        let display: serde_json::Value = serde_json::from_str(
+            &crate::display_list::build_display_list_json(
+                &json!({"measured": value.measured, "options": value.options, "layout": result})
+                    .to_string(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let images = display["pages"][0]["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|primitive| primitive["kind"] == "image")
+            .count();
+        assert_eq!(images, 2);
+    }
+
+    #[test]
+    fn a_paragraph_crosses_two_thousand_disjoint_float_bands_on_one_page() {
+        let count = 2_000;
+        let bands: Vec<_> = (0..count)
+            .map(|index| {
+                let top = 97 + index * 2;
+                json!({"top": top, "bottom": top + 1})
+            })
+            .collect();
+        let mut value: Input = serde_json::from_value(json!({
+            "measured": [paragraph(1, count + 1, 1.0, json!({"widowControl": false}))],
+            "options": {
+                "pageSize": {"w": 500, "h": 2 * count + 193},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "sectionPageFloatBands": [{"default": bands}],
+            },
+        }))
+        .unwrap();
+        let result = assert_all_paragraph_lines(&mut value, count + 1);
+        assert_eq!(result.pages.len(), 1);
+        assert_eq!(result.pages[0].fragments.len(), count + 1);
+        for (index, fragment) in result.pages[0].fragments.iter().enumerate() {
+            let Fragment::Paragraph(fragment) = fragment else {
+                panic!("paragraph expected");
+            };
+            assert_eq!(fragment.y, (96 + index * 2) as f64);
+            assert_eq!(fragment.height, 1.0);
+        }
+    }
+
+    #[test]
+    fn internal_float_bands_emit_paragraph_images_once_per_page_in_both_passes() {
+        for wrap in ["square", "behind"] {
+            let mut value: Input = serde_json::from_value(json!({
+                "measured": [{
+                    "block": {"kind": "paragraph", "id": "body", "runs": [
+                        {"kind": "text", "text": "abcdefghij"},
+                        {"kind": "image", "src": "float", "width": 20, "height": 20,
+                         "displayMode": "float", "wrapType": wrap,
+                         "position": {"vertical": {"relativeTo": "paragraph", "posOffset": 0}}},
+                    ]},
+                    "measure": {"kind": "paragraph", "totalHeight": 200,
+                                "lines": (0..10).map(|index| json!({
+                                    "headRun": 0, "headChar": index, "tailRun": 0,
+                                    "tailChar": index + 1, "width": 10, "ascent": 15,
+                                    "descent": 5, "lineHeight": 20,
+                                })).collect::<Vec<_>>()},
+                }],
+                "options": {
+                    "pageSize": {"w": 500, "h": 500},
+                    "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                    "sectionPageFloatBands": [{"default": [{"top": 200, "bottom": 240}]}],
+                },
+            }))
+            .unwrap();
+            let result = layout_document(&mut value).unwrap();
+            assert_eq!(result.pages.len(), 1);
+            let fragments = &result.pages[0].fragments;
+            assert_eq!(fragments.len(), 2);
+            for (fragment, expected_y) in fragments.iter().zip([96.0, 240.0]) {
+                let Fragment::Paragraph(fragment) = fragment else {
+                    panic!("paragraph expected");
+                };
+                assert_eq!(fragment.y, expected_y);
+            }
+            let display: serde_json::Value = serde_json::from_str(
+                &crate::display_list::build_display_list_json(
+                    &json!({"measured": value.measured, "options": value.options,
+                            "layout": result})
+                    .to_string(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+            let images: Vec<_> = primitives
+                .iter()
+                .enumerate()
+                .filter(|(_, primitive)| primitive["kind"] == "image")
+                .collect();
+            assert_eq!(images.len(), 1);
+            assert_eq!(images[0].1["y"], 96);
+            for (index, primitive) in primitives.iter().enumerate() {
+                if primitive["kind"] == "text" {
+                    assert_eq!(images[0].0 < index, wrap == "behind");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn balanced_columns_with_an_internal_float_band_stay_on_one_page() {
+        let mut value = input(vec![paragraph(1, 16, 20.0, json!({}))]);
+        value.options.page_size = Some(crate::types::Size { w: 500.0, h: 300.0 });
+        value.options.columns = Some(
+            serde_json::from_value(json!({
+                "count": 2, "gap": 20,
+            }))
+            .unwrap(),
+        );
+        value.options.section_page_float_bands = Some(
+            serde_json::from_value(json!([{
+                "default": [{"top": 70, "bottom": 110}],
+            }]))
+            .unwrap(),
+        );
+
+        let result = layout_document(&mut value).unwrap();
+
+        assert_eq!(result.pages.len(), 1);
+        let fragments: Vec<_> = result.pages[0]
+            .fragments
+            .iter()
+            .filter_map(|fragment| match fragment {
+                Fragment::Paragraph(paragraph) => Some(paragraph),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            fragments
+                .iter()
+                .map(|p| p.to_line - p.from_line)
+                .sum::<usize>(),
+            16
+        );
+        assert!(fragments.iter().any(|p| p.x != fragments[0].x));
+        assert!(
+            fragments
+                .iter()
+                .all(|p| p.y + p.height <= 70.0 || p.y >= 110.0)
+        );
     }
 
     #[test]
@@ -2032,6 +2570,36 @@ mod pagination_rule_tests {
 
     /// Lays `previous` out in full, then `next` incrementally with the blocks
     /// `dirty` changed, and checks it against a full pass over `next`.
+    #[test]
+    fn a_page_break_a_keep_with_next_follower_gains_relays_out_the_run_head() {
+        let blocks = |page_break_before: bool| {
+            vec![
+                paragraph(0, 1, 90.0, json!({})),
+                paragraph(1, 1, 10.0, json!({ "keepNext": true })),
+                paragraph(2, 1, 10.0, json!({ "pageBreakBefore": page_break_before })),
+            ]
+        };
+        let layout = assert_incremental_matches_full(blocks(false), blocks(true), &[2]);
+        assert_eq!(layout.layout.pages.len(), 2);
+        assert_incremental_matches_full(blocks(true), blocks(false), &[2]);
+
+        let interior = |page_break_before: bool| {
+            vec![
+                paragraph(0, 1, 80.0, json!({})),
+                paragraph(1, 1, 10.0, json!({ "keepNext": true })),
+                paragraph(
+                    2,
+                    1,
+                    10.0,
+                    json!({ "keepNext": true, "pageBreakBefore": page_break_before }),
+                ),
+                paragraph(3, 1, 10.0, json!({})),
+            ]
+        };
+        assert_incremental_matches_full(interior(false), interior(true), &[2]);
+        assert_incremental_matches_full(interior(true), interior(false), &[2]);
+    }
+
     fn assert_incremental_matches_full(
         previous: Vec<serde_json::Value>,
         next: Vec<serde_json::Value>,
@@ -2108,7 +2676,7 @@ mod pagination_rule_tests {
         let table = json!({
             "block": {
                 "kind": "table", "id": 90,
-                "rows": [{ "id": 91, "cells": [{ "id": 92, "blocks": [paragraph(93, lines, 20.0, json!({}))["block"]] }] }],
+                "rows": [{ "id": 91, "cells": [{ "id": 92, "blocks": [paragraph(93, lines, 20.0, json!({ "keepLines": true }))["block"]] }] }],
                 "columnWidths": [180],
             },
             "measure": {
@@ -2116,7 +2684,7 @@ mod pagination_rule_tests {
                 "totalWidth": 180, "totalHeight": lines as f64 * 20.0,
                 "rows": [{ "height": lines as f64 * 20.0, "cells": [{
                     "width": 180, "height": lines as f64 * 20.0,
-                    "blocks": [paragraph(93, lines, 20.0, json!({}))["measure"]],
+                    "blocks": [paragraph(93, lines, 20.0, json!({ "keepLines": true }))["measure"]],
                 }] }],
             },
         });
@@ -2323,6 +2891,43 @@ mod pagination_rule_tests {
         );
     }
 
+    #[test]
+    fn a_heading_above_a_table_on_a_page_with_float_bands_keeps_the_whole_row_witness() {
+        let cell_paragraph = json!({
+            "kind": "paragraph", "id": 10,
+            "runs": [{ "kind": "text", "text": "x", "fmt": {} }],
+        });
+        let lines: Vec<_> = [25.0, 25.0, 20.0, 20.0].into_iter().map(line).collect();
+        let table = json!({
+            "block": {
+                "kind": "table", "id": 3,
+                "rows": [{ "id": 20, "cells": [{ "id": 30, "blocks": [cell_paragraph] }] }],
+                "columnWidths": [100],
+            },
+            "measure": {
+                "kind": "table", "columnWidths": [100], "totalWidth": 100, "totalHeight": 90,
+                "rows": [{ "height": 90, "cells": [{ "width": 100, "height": 90, "blocks": [
+                    { "kind": "paragraph", "lines": lines, "totalHeight": 90 }
+                ] }] }],
+            },
+        });
+        let mut value = input(vec![
+            paragraph(1, 1, 5.0, json!({})),
+            paragraph(2, 1, 15.0, json!({ "keepNext": true })),
+            table,
+        ]);
+        value.options.section_page_float_bands = Some(
+            serde_json::from_value(json!([{"default": [{"top": 60, "bottom": 65}]}])).unwrap(),
+        );
+        let result = layout_document(&mut value).unwrap();
+        assert_eq!(result.pages.len(), 2);
+        assert!(result.pages[0].fragments.iter().any(|fragment| matches!(
+            fragment,
+            Fragment::Paragraph(p)
+                if matches!(p.block_id, crate::types::BlockId::Num(value) if value == 2.0)
+        )));
+    }
+
     fn oversized_cant_split_table() -> serde_json::Value {
         let paragraph_block = json!({
             "kind": "paragraph", "id": 10,
@@ -2420,6 +3025,54 @@ mod pagination_rule_tests {
             })
             .collect();
         assert_eq!(second_page_lines, vec![(0, 4)]);
+    }
+
+    #[test]
+    fn widow_control_carries_the_pushed_line_to_the_next_page() {
+        for (preceding_height, lines, expected) in [
+            (40.0, 4, vec![(0, 0, 2), (1, 2, 4)]),
+            (20.0, 5, vec![(0, 0, 3), (1, 3, 5)]),
+        ] {
+            let result = layout(vec![
+                paragraph(1, 1, preceding_height, json!({})),
+                paragraph(2, lines, 20.0, json!({})),
+            ]);
+            assert_eq!(paragraph_slices(&result, 2.0), expected);
+        }
+    }
+
+    #[test]
+    fn widow_control_keeps_the_pushed_line_when_the_last_two_cannot_share_a_page() {
+        let mut block = paragraph(1, 4, 20.0, json!({}));
+        block["measure"]["lines"][3]["lineHeight"] = json!(90.0);
+        let result = layout(vec![block]);
+        assert_eq!(result.pages.len(), 2);
+    }
+
+    #[test]
+    fn widow_control_keeps_the_pushed_line_above_a_float_band_on_its_page() {
+        let mut value = input(vec![paragraph(1, 4, 20.0, json!({}))]);
+        value.options.page_size = Some(crate::types::Size { w: 200.0, h: 220.0 });
+        value.options.section_page_float_bands = Some(
+            serde_json::from_value(json!([{"default": [{"top": 70, "bottom": 90}]}])).unwrap(),
+        );
+        let result = layout_document(&mut value).unwrap();
+        assert_eq!(result.pages.len(), 1);
+    }
+
+    #[test]
+    fn widow_control_in_balanced_columns_keeps_the_section_on_one_page() {
+        let mut value = input(vec![
+            paragraph(1, 4, 20.0, json!({})),
+            paragraph(2, 5, 20.0, json!({})),
+            paragraph(3, 4, 20.0, json!({})),
+            paragraph(4, 5, 20.0, json!({})),
+        ]);
+        value.options.page_size = Some(crate::types::Size { w: 500.0, h: 320.0 });
+        value.options.columns =
+            Some(serde_json::from_value(json!({"count": 3, "gap": 20})).unwrap());
+        let result = layout_document(&mut value).unwrap();
+        assert_eq!(result.pages.len(), 1);
     }
 
     fn paragraph_slices(layout: &Layout, id: f64) -> Vec<(usize, usize, usize)> {

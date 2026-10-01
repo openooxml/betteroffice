@@ -19,6 +19,7 @@ import type { Document } from '../types/document';
 import type { CompatibilityFlags } from '../docx/settingsParser';
 import { resolveCommentMedia } from './hostMedia';
 import { registerSessionInternals } from './sessionInternals';
+import { editorSaveKeys } from './editorSaveKeys';
 import { noteYrsStoriesDirty } from './yrsToDocument';
 import type {
   DocxParagraphAnchor,
@@ -48,6 +49,7 @@ import type {
 import type { DocxParagraphHeading } from './readTypes';
 import {
   createProposalRegistry,
+  type DocxProposalRegistryState,
   type DocxProposalRequest,
   type DocxProposalResult,
   type DocxProposalSnapshot,
@@ -90,6 +92,7 @@ export {
   type ResidentEngineWorkerApplyResult,
   type ResidentEngineWorkerFrame,
   type ResidentEngineWorkerOpened,
+  type ResidentProposalReply,
   type ResidentEngineOffscreenPage,
 } from './residentEngineWorkerClient';
 export { preloadDocxEngine } from './preloadDocxEngine';
@@ -113,6 +116,7 @@ export {
   type DocxProposalFailure,
   type DocxProposalInput,
   type DocxProposalRecord,
+  type DocxProposalRegistryState,
   type DocxProposalRequest,
   type DocxProposalResult,
   type DocxProposalSnapshot,
@@ -128,6 +132,10 @@ export {
   type DocxSavedParagraph,
   type DocxSessionSave,
 } from './saveYrsDocx';
+export { sessionSourcePackage } from './sessionInternals';
+export { editorSaveKeys } from './editorSaveKeys';
+export * from './yrsPositionProjection';
+export * from './proposalGeometry';
 
 export interface YrsDocxHost {
   document: Document;
@@ -654,6 +662,8 @@ export type YrsResidentFontRegistration =
   | { substituteOf: number; family: string };
 
 export interface YrsResidentWorkerSnapshot {
+  /** @internal */
+  workerAuthoritative?: true;
   clientId: number;
   /** Full document state, or a state-vector diff when the caller supplied
    * the worker's known vector — both apply through the same merge path. */
@@ -871,6 +881,12 @@ export interface YrsMediaSource {
   mimeType: string;
 }
 
+/** @internal */
+export interface YrsWorkerDocumentMirror {
+  version: string;
+  proposals: DocxProposalRegistryState;
+}
+
 export interface YrsSession extends CollaborationReplica {
   /** The yrs client id this replica writes with. */
   readonly clientId: number;
@@ -931,6 +947,8 @@ export interface YrsSession extends CollaborationReplica {
   setDisplayRetainBuiltPages(retain: boolean): void;
   /** Build the listed unbuilt pages into a FrameDelta v1. @internal */
   buildDisplayPagesFrame(pages: readonly number[], expectedFrameEpoch: number): Uint8Array;
+  /** Release built pages; null means the request was superseded. @internal */
+  releaseDisplayPagesFrame(pages: number[], expectedFrameEpoch: number): Uint8Array | null;
   /** Make the next frame a full one, for a host taking over from another engine; no-op once destroyed. */
   resetFrameBase(): void;
   /** Caret geometry from the current resident display frame. */
@@ -1053,6 +1071,8 @@ export interface YrsSession extends CollaborationReplica {
   applyUpdate(update: Uint8Array): CollaborationTextInsertion | null;
   /** Apply a same-user worker update under the local undo origin. @internal */
   applyLocalUpdate(update: Uint8Array): void;
+  /** Adopt another replica's host batch outside undo history. @internal */
+  applyHostUpdate(update: Uint8Array, stories?: readonly string[]): void;
   /**
    * Subscribes to every committed transaction's v1 update (local AND
    * applied-remote). Returns an unsubscribe function.
@@ -1205,7 +1225,10 @@ export interface YrsSession extends CollaborationReplica {
    * promotes an editor-only paragraph they author into.
    */
   applyRawOps(story: string, ops: readonly YrsRawOp[]): void;
-  /** Applies seed raw operations with deterministic item ordering. */
+  /**
+   * Applies seed raw operations with deterministic item ordering. A
+   * `setComment` for a comment already seeded adds its ranges to it.
+   */
   applySeedRawOps(story: string, ops: readonly YrsRawOp[]): void;
   /** Sets one paragraph property (any JSON value). `paraId` is reserved. */
   setParagraphAttr(paraId: string, key: string, value: unknown): void;
@@ -1281,6 +1304,8 @@ export interface YrsSession extends CollaborationReplica {
   tablePayload(story: string, tableIndex: number): Record<string, unknown> | null;
   /** A paragraph's story span (start unit, pilcrow index). */
   locateParagraph(story: string, paraId: string): YrsParagraphSpan;
+  /** How many paragraphs of `story` carry `paraId`: 0, 1, or 2 for two or more. */
+  paragraphIdCount(story: string, paraId: string): number;
 
   // -- paragraph identity --
 
@@ -1367,6 +1392,10 @@ export interface YrsSession extends CollaborationReplica {
   withdrawProposals(request: DocxProposalWithdrawRequest): DocxProposalResult;
   /** The proposals in the order they were made. */
   getProposals(): DocxProposalSnapshot;
+  /** @internal */
+  mirrorWorkerDocument(mirror: YrsWorkerDocumentMirror | null): void;
+  /** @internal */
+  workerDocumentMirrored(): boolean;
   /** Listens for new proposals, decisions and a forgotten registry. Returns the unsubscribe. */
   onProposalChange(listener: (snapshot: DocxProposalSnapshot) => void): () => void;
 
@@ -1577,6 +1606,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   };
   let residentFontsRevision = 0;
   let docxSource: Uint8Array | null = null;
+  let docxSourceKeys: ReturnType<typeof editorSaveKeys> | null = null;
 
   const invalidateReadCaches = (): void => {
     cachedSelection = undefined;
@@ -1706,6 +1736,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     });
     const host = withHostMedia(decodeDocxHost(json, source));
     docxSource = source;
+    docxSourceKeys = editorSaveKeys(host.document);
     partialDocument = false;
     return host;
   };
@@ -1725,13 +1756,15 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     return host;
   };
 
+  let workerDocumentVersion: string | null = null;
   const proposals = createProposalRegistry({
-    version: () => facade.version(),
+    version: () => session.version(),
     resolveParagraphAnchor: (anchor) => facade.resolveParagraphAnchor(anchor),
     findText: (request) => facade.findText(request),
     readParagraphs: (request) => facade.readParagraphs(request),
     applyEdits: (request) => facade.applyEdits(request),
     listRevisions: () => facade.listRevisions(),
+    revisionStamps: (ids) => JSON.parse(session.revision_stamps_json(JSON.stringify(ids))),
     settleRevisions: (accept, reject) => {
       const since = facade.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
       session.settle_revisions_json(JSON.stringify({ accept, reject }));
@@ -1865,6 +1898,10 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     setDisplayRetainBuiltPages: (retain) => session.set_display_retain_built_pages(retain),
     buildDisplayPagesFrame: (pages, expectedFrameEpoch) =>
       session.build_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch),
+    releaseDisplayPagesFrame: (pages, expectedFrameEpoch) => {
+      const frame = session.release_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch);
+      return frame.length === 0 ? null : frame;
+    },
     residentCaretSnapshot: () =>
       JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
     applyInput: (text, expectedFrameEpoch) => {
@@ -1897,11 +1934,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     residentWorkerSnapshot: (options) => {
       if (!residentLayoutInput) return null;
       if (!residentLayoutWithRegions && residentRenderInputs.size === 0) return null;
-      const selectionJson = session.selection();
-      const mediaSources = session.media_sources_json();
+      const mirrored = workerDocumentVersion !== null;
+      const selectionJson = mirrored ? 'null' : session.selection();
+      const mediaSources = mirrored ? undefined : session.media_sources_json();
       const fontsCurrent = options?.knownFontsRevision === residentFontsRevision;
       let state: Uint8Array | null = null;
-      if (options?.knownStateVector) {
+      if (!mirrored && options?.knownStateVector) {
         try {
           state = session.encode_diff(options.knownStateVector.slice());
         } catch {
@@ -1910,7 +1948,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       }
       return {
         clientId,
-        state: state ?? session.encode_state(),
+        ...(mirrored ? { workerAuthoritative: true as const } : {}),
+        state: mirrored ? new Uint8Array(0) : (state ?? session.encode_state()),
         selection: JSON.parse(selectionJson) as YrsSelection | null,
         fonts: fontsCurrent
           ? []
@@ -2003,6 +2042,10 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       ensureUndo();
       markDirty('all');
       mutate(() => session.apply_local_update(update));
+    },
+    applyHostUpdate: (update, stories) => {
+      markDirty(stories ?? 'all');
+      mutate(() => session.apply_host_update(update));
     },
     onUpdate: (listener) => {
       if (destroyed) throw new Error('yrs session is destroyed');
@@ -2562,6 +2605,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
     locateParagraph: (story, paraId) =>
       JSON.parse(session.locate_paragraph(story, paraId)) as YrsParagraphSpan,
+    paragraphIdCount: (story, paraId) => session.paragraph_id_count(story, paraId),
 
     paragraphIdentities: () =>
       JSON.parse(session.paragraph_identities()) as DocxParagraphIdentitySnapshot,
@@ -2624,7 +2668,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         session.find_content_controls_json(JSON.stringify(query), JSON.stringify(options))
       ) as DocxContentControlsResult,
 
-    version: () => session.version(),
+    version: () => workerDocumentVersion ?? session.version(),
     readParagraphs: (request) =>
       JSON.parse(session.read_paragraphs_json(JSON.stringify(request))) as DocxReadParagraphsResult,
     findText: (request) =>
@@ -2643,6 +2687,11 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     setProposalStates: (request) => proposals.setStates(request),
     withdrawProposals: (request) => mutate(() => proposals.withdraw(request)),
     getProposals: () => proposals.snapshot(),
+    mirrorWorkerDocument: (mirror) => {
+      workerDocumentVersion = mirror?.version ?? null;
+      proposals.mirror(mirror);
+    },
+    workerDocumentMirrored: () => workerDocumentVersion !== null,
     onProposalChange: (listener) => {
       if (destroyed) throw new Error('yrs session is destroyed');
       return proposals.subscribe(listener);
@@ -2692,6 +2741,10 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   };
 
   registerSessionInternals(facade, {
+    sourcePackage: () =>
+      docxSource && docxSourceKeys
+        ? { buffer: docxSourceBuffer(docxSource), keys: docxSourceKeys }
+        : null,
     compareDocx: (original, revised, options) => {
       markDirty('all');
       const json = mutate(() => {
@@ -2700,6 +2753,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         return compared;
       });
       docxSource = original.slice();
+      docxSourceKeys = null;
       return json;
     },
     finishComparedDocx: (bytes) => session.finish_compared_docx_json(bytes),

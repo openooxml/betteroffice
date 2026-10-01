@@ -65,7 +65,7 @@ impl MediaTable {
         let total = scan
             .parts
             .iter()
-            .filter(|part| part.transcode)
+            .filter(|part| part.transcode && !part.metafile)
             .fold(scan.images, |total, part| total.saturating_add(part.size));
         if total > MAX_TOTAL_UNCOMPRESSED_BYTES {
             return Err(budget_exceeded());
@@ -73,7 +73,7 @@ impl MediaTable {
         let mut parts = scan
             .parts
             .iter()
-            .filter(|part| part.transcode)
+            .filter(|part| part.transcode && !part.metafile)
             .map(|part| {
                 scan.package
                     .read(part.position)
@@ -197,6 +197,7 @@ struct ScannedPart {
     size: u64,
     image: bool,
     transcode: bool,
+    metafile: bool,
 }
 
 impl MediaScan {
@@ -209,10 +210,16 @@ impl MediaScan {
             if !is_media_path(path) {
                 continue;
             }
-            let prefix = package.read_prefix(position, SNIFFED_BYTES)?;
-            let image = is_image(&prefix);
-            let transcode = transcodes(&prefix, media_mime_type(path));
-            if image && !transcode {
+            let mime_type = media_mime_type(path);
+            let prefix = match package.read_prefix(position, SNIFFED_BYTES) {
+                Ok(prefix) => prefix,
+                Err(_) if metafile_transcode(&[], mime_type) => Vec::new(),
+                Err(error) => return Err(error),
+            };
+            let metafile = metafile_transcode(&prefix, mime_type);
+            let image = is_image(&prefix) || metafile;
+            let transcode = transcodes(&prefix, mime_type);
+            if image && (!transcode || metafile) {
                 images = images.saturating_add(size);
                 if images > budget {
                     return Err(format!("inflated size exceeds {budget} bytes"));
@@ -224,6 +231,7 @@ impl MediaScan {
                 size,
                 image,
                 transcode,
+                metafile,
             });
         }
         Ok(Self {
@@ -238,7 +246,7 @@ impl MediaScan {
     pub(crate) fn keeps_compressed(&self, path: &str) -> bool {
         self.parts
             .iter()
-            .any(|part| part.image && !part.transcode && part.path == path)
+            .any(|part| part.image && (!part.transcode || part.metafile) && part.path == path)
     }
 
     /// What the images left compressed leave of the budget.
@@ -253,18 +261,35 @@ impl MediaScan {
     ) -> Result<MediaTable, String> {
         let package = self.package;
         let mut warnings = Vec::new();
+        let mut budget = DisplayBudget::default();
         let parts = self
             .parts
             .into_iter()
             .map(|part| {
                 let mime_type = media_mime_type(&part.path);
-                let (mime_type, display) = if part.transcode {
+                let data = if part.metafile {
+                    match package.read(part.position) {
+                        Ok(data) => Some(data),
+                        Err(error) => {
+                            warnings.push(format!(
+                                "Metafile image {} could not be read for display: {error}",
+                                part.path
+                            ));
+                            None
+                        }
+                    }
+                } else if part.transcode {
                     let index = inflated
                         .iter()
                         .position(|(path, _)| path == &part.path)
                         .ok_or_else(|| format!("missing inflated media part {}", part.path))?;
-                    let data = inflated.remove(index).1;
-                    let (display, mime_type, warning) = display_form(&data, mime_type, &part.path);
+                    Some(inflated.remove(index).1)
+                } else {
+                    None
+                };
+                let (mime_type, display) = if let Some(data) = data {
+                    let (display, mime_type, warning) =
+                        display_form(&data, mime_type, &part.path, &mut budget);
                     warnings.extend(warning);
                     let display = match display {
                         Cow::Owned(display) => display,
@@ -346,12 +371,14 @@ pub fn build_media_map(parts: &[(String, Vec<u8>)]) -> MediaMap {
 pub fn build_media_map_with_warnings(parts: &[(String, Vec<u8>)]) -> (MediaMap, Vec<String>) {
     let mut media = MediaMap::new();
     let mut warnings = Vec::new();
+    let mut budget = DisplayBudget::default();
     for (path, data) in parts {
         if !is_media_path(path) {
             continue;
         }
         let filename = path.rsplit('/').next().unwrap_or(path).to_owned();
-        let (data, mime_type, warning) = display_form(data, media_mime_type(path), path);
+        let (data, mime_type, warning) =
+            display_form(data, media_mime_type(path), path, &mut budget);
         warnings.extend(warning);
         let mime_type = mime_type.to_owned();
         let base64 = base64::engine::general_purpose::STANDARD.encode(&data);
@@ -414,28 +441,87 @@ pub fn resolve_image_data(
 }
 
 /// Whether [`display_form`] replaces a part whose bytes start with `prefix`.
-fn transcodes(prefix: &[u8], _mime_type: &str) -> bool {
+fn transcodes(prefix: &[u8], mime_type: &str) -> bool {
     #[cfg(feature = "tiff")]
     if is_tiff(prefix) {
         return true;
     }
-    let _ = prefix;
+    metafile_transcode(prefix, mime_type)
+}
+
+fn metafile_transcode(prefix: &[u8], mime_type: &str) -> bool {
+    #[cfg(feature = "tiff")]
+    if is_tiff(prefix) {
+        return false;
+    }
+    #[cfg(feature = "metafile")]
+    if ooxml_metafile::is_metafile(prefix)
+        || (matches!(mime_type, "image/x-emf" | "image/x-wmf") && !is_browser_image(prefix))
+    {
+        return true;
+    }
+    let _ = (prefix, mime_type);
     false
 }
 
-/// Browsers have no TIFF decoder, so the display copy carries a PNG transcode.
-/// Save reads the untouched package part, so the original bytes still round-trip.
-/// An encoding the decoder does not support keeps the TIFF source — decoders that
-/// do handle it still render — and reports why the transcode was skipped.
-#[cfg(feature = "tiff")]
+/// The copy of a media part the renderer paints: formats browsers cannot
+/// decode get a transcode, with a warning when that fails. Save reads the
+/// untouched package part, so the original bytes still round-trip.
 fn display_form<'a>(
     data: &'a [u8],
     mime_type: &'static str,
     path: &str,
+    budget: &mut DisplayBudget,
 ) -> (Cow<'a, [u8]>, &'static str, Option<String>) {
-    if !is_tiff(data) {
-        return (Cow::Borrowed(data), mime_type, None);
+    #[cfg(feature = "tiff")]
+    if is_tiff(data) {
+        return tiff_display_form(data, mime_type, path);
     }
+    #[cfg(feature = "metafile")]
+    if ooxml_metafile::is_metafile(data)
+        || (matches!(mime_type, "image/x-emf" | "image/x-wmf") && !is_browser_image(data))
+    {
+        return metafile_display_form(data, mime_type, path, budget);
+    }
+    let _ = (path, &budget);
+    (Cow::Borrowed(data), mime_type, None)
+}
+
+/// One document's cumulative metafile display allowances.
+#[derive(Debug)]
+#[cfg_attr(not(feature = "metafile"), allow(dead_code))]
+struct DisplayBudget {
+    metafile_bytes: usize,
+    svg_bytes: usize,
+    #[cfg(feature = "metafile")]
+    replay: ooxml_metafile::ReplayBudget,
+}
+
+impl Default for DisplayBudget {
+    fn default() -> Self {
+        Self {
+            metafile_bytes: 64 * 1024 * 1024,
+            svg_bytes: 64 * 1024 * 1024,
+            #[cfg(feature = "metafile")]
+            replay: {
+                let picture = ooxml_metafile::ReplayBudget::default();
+                ooxml_metafile::ReplayBudget {
+                    work: 4 * picture.work,
+                    pixels: 4 * picture.pixels,
+                }
+            },
+        }
+    }
+}
+
+/// An encoding the decoder does not support keeps the TIFF source, so
+/// decoders that do handle it still render, and reports why.
+#[cfg(feature = "tiff")]
+fn tiff_display_form<'a>(
+    data: &'a [u8],
+    mime_type: &'static str,
+    path: &str,
+) -> (Cow<'a, [u8]>, &'static str, Option<String>) {
     match ooxml_drawingml::media::decode_tiff_png(data) {
         Ok(png) => (Cow::Owned(png), "image/png", None),
         Err(error) => (
@@ -448,13 +534,84 @@ fn display_form<'a>(
     }
 }
 
-#[cfg(not(feature = "tiff"))]
-fn display_form<'a>(
+/// Largest metafile part transcoded for display.
+#[cfg(feature = "metafile")]
+const MAX_METAFILE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Browsers have no EMF or WMF decoder, so the display copy is an SVG replay.
+/// A metafile the replay refuses shows a neutral placeholder instead of
+/// nothing, and ink it drew without is reported.
+#[cfg(feature = "metafile")]
+fn metafile_display_form<'a>(
     data: &'a [u8],
-    mime_type: &'static str,
-    _path: &str,
+    mime_type: &str,
+    path: &str,
+    budget: &mut DisplayBudget,
 ) -> (Cow<'a, [u8]>, &'static str, Option<String>) {
-    (Cow::Borrowed(data), mime_type, None)
+    let kind = if ooxml_metafile::is_wmf(data)
+        || (!ooxml_metafile::is_metafile(data) && mime_type == "image/x-wmf")
+    {
+        "WMF"
+    } else {
+        "EMF"
+    };
+    let placeholder = |why: String| {
+        let (width, height) = ooxml_metafile::picture_size(data).unwrap_or((96.0, 96.0));
+        (
+            Cow::Owned(ooxml_metafile::placeholder_svg(width, height).into_bytes()),
+            "image/svg+xml",
+            Some(format!(
+                "{kind} image {path} could not be converted for display: {why}"
+            )),
+        )
+    };
+    if data.len() > MAX_METAFILE_BYTES {
+        return placeholder("it exceeds the display size limit".to_owned());
+    }
+    if data.len() > budget.metafile_bytes {
+        return placeholder("the document's pictures exceed the display size limit".to_owned());
+    }
+    if budget.svg_bytes == 0 {
+        return placeholder("the document's pictures exceed the display size limit".to_owned());
+    }
+    if budget.replay.work == 0 {
+        return placeholder("the document's pictures exceed the replay limits".to_owned());
+    }
+    budget.metafile_bytes -= data.len();
+    match ooxml_metafile::to_svg_with_limits(data, &mut budget.replay, &mut budget.svg_bytes) {
+        Ok(svg) => {
+            let warning = (!svg.omissions.is_empty()).then(|| {
+                let omitted: Vec<String> = svg
+                    .omissions
+                    .iter()
+                    .map(|omission| format!("{} ({})", omission.what, omission.count))
+                    .collect();
+                format!(
+                    "{kind} image {path} is displayed without {}",
+                    omitted.join(", ")
+                )
+            });
+            (
+                Cow::Owned(svg.markup.into_bytes()),
+                "image/svg+xml",
+                warning,
+            )
+        }
+        Err(refusal) => placeholder(refusal.to_string()),
+    }
+}
+
+/// Whether `data` starts like a raster format or markup (SVG) browsers
+/// decode, whatever its part name says.
+#[cfg(feature = "metafile")]
+fn is_browser_image(data: &[u8]) -> bool {
+    let text = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(data);
+    text.trim_ascii_start().starts_with(b"<")
+        || data.starts_with(b"\x89PNG")
+        || data.starts_with(&[0xFF, 0xD8, 0xFF])
+        || data.starts_with(b"GIF8")
+        || data.starts_with(b"BM")
+        || (data.starts_with(b"RIFF") && data.get(8..12) == Some(b"WEBP"))
 }
 
 #[cfg(feature = "tiff")]
@@ -539,6 +696,232 @@ mod tests {
             &media["word/media/a.png"],
             &media["media/a.png"]
         ));
+    }
+
+    #[cfg(any(feature = "metafile", feature = "tiff"))]
+    fn corrupt_image_package(path: &str, prefix: &[u8], broken_deflate: bool) -> (Arc<[u8]>, u64) {
+        let mut image = vec![0u8; 128];
+        image[..prefix.len()].copy_from_slice(prefix);
+        let document = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:v="urn:schemas-microsoft-com:vml"><w:body><w:p><w:r><w:pict><v:shape id="Picture 1" style="width:10pt;height:10pt"><v:imagedata r:id="rId1"/></v:shape></w:pict></w:r></w:p></w:body></w:document>"#.to_vec();
+        let relationships = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{}"/></Relationships>"#,
+            path.strip_prefix("word/").unwrap()
+        ).into_bytes();
+        let total = (image.len() + document.len() + relationships.len()) as u64;
+        let mut bytes = ooxml_opc::rezip_parts(&[
+            ("word/document.xml".to_owned(), document),
+            ("word/_rels/document.xml.rels".to_owned(), relationships),
+            (path.to_owned(), image),
+        ])
+        .unwrap();
+        let central = bytes
+            .windows(4)
+            .enumerate()
+            .find_map(|(at, signature)| {
+                (signature == b"PK\x01\x02"
+                    && bytes.get(at + 46..at + 46 + path.len()) == Some(path.as_bytes()))
+                .then_some(at)
+            })
+            .unwrap();
+        let local =
+            u32::from_le_bytes(bytes[central + 42..central + 46].try_into().unwrap()) as usize;
+        if broken_deflate {
+            let name =
+                u16::from_le_bytes(bytes[local + 26..local + 28].try_into().unwrap()) as usize;
+            let extra =
+                u16::from_le_bytes(bytes[local + 28..local + 30].try_into().unwrap()) as usize;
+            bytes[local + 30 + name + extra] = 0x07;
+        } else {
+            bytes[central + 16] ^= 1;
+            bytes[local + 14] ^= 1;
+        }
+        (bytes.into(), total)
+    }
+
+    #[cfg(feature = "metafile")]
+    #[test]
+    fn corrupt_metafile_entries_open_with_lazy_broken_pictures_and_warnings() {
+        use crate::s9::{
+            S9ParseOptions, media_table_parts_within, parse_docx_s9_wire_with_media_table,
+        };
+
+        let mut emf_prefix = vec![0u8; 44];
+        emf_prefix[..4].copy_from_slice(&1u32.to_le_bytes());
+        emf_prefix[40..44].copy_from_slice(b" EMF");
+        for (path, prefix) in [
+            ("word/media/image1.emf", emf_prefix.as_slice()),
+            ("word/media/image1.wmf", &[0xd7, 0xcd, 0xc6, 0x9a][..]),
+        ] {
+            for broken_deflate in [false, true] {
+                let (bytes, total) = corrupt_image_package(path, prefix, broken_deflate);
+                let package = RetainedPackage::new(Arc::clone(&bytes)).unwrap();
+                let table = MediaTable::new(package).unwrap();
+                assert_eq!(table.len(), 1);
+                assert_eq!(table.path(0), Some(path));
+                assert_eq!(table.mime_type(0), Some(media_mime_type(path)));
+                assert!(table.parts[0].display.is_none());
+                assert!(table.keeps_compressed(path));
+                assert!(table.bytes(0).is_err());
+                assert_eq!(table.resolve("media:0"), None);
+                assert_eq!(table.warnings().len(), 1);
+                assert!(table.warnings()[0].contains(path));
+                assert!(
+                    table
+                        .check_budget(MAX_TOTAL_UNCOMPRESSED_BYTES - 128)
+                        .is_ok()
+                );
+                assert!(
+                    table
+                        .check_budget(MAX_TOTAL_UNCOMPRESSED_BYTES - 127)
+                        .is_err()
+                );
+                let (parts, bounded) = media_table_parts_within(&bytes, total).unwrap();
+                assert_eq!(parts.len(), 2);
+                assert_eq!(bounded.warnings(), table.warnings());
+                assert!(media_table_parts_within(&bytes, total - 1).is_err());
+                let (wire, _, parsed) = parse_docx_s9_wire_with_media_table(
+                    bytes,
+                    S9ParseOptions::default(),
+                    &crate::ParseLimits::default(),
+                )
+                .unwrap();
+                assert_eq!(wire.document.warnings.as_deref(), Some(parsed.warnings()));
+                let json = serde_json::to_string(&wire).unwrap();
+                assert!(json.contains(r#""type":"image""#));
+                assert!(json.contains(r#""src":"media:0""#));
+                assert!(parsed.bytes(0).is_err());
+            }
+        }
+    }
+
+    #[cfg(feature = "tiff")]
+    #[test]
+    fn corrupt_tiff_entries_still_fail_extraction() {
+        for path in ["word/media/image1.tif", "word/media/image1.emf"] {
+            let (bytes, _) = corrupt_image_package(path, b"II\x2a\x00", false);
+            let package = RetainedPackage::new(Arc::clone(&bytes)).unwrap();
+            assert!(MediaTable::new(package).is_err());
+            assert!(crate::s9::media_table_parts(&bytes).is_err());
+        }
+    }
+
+    #[cfg(feature = "metafile")]
+    #[test]
+    fn metafile_output_exhaustion_skips_later_pictures() {
+        let mut data = vec![0u8; 88];
+        for (at, value) in [
+            (0, 1u32),
+            (4, 88),
+            (16, 100),
+            (20, 100),
+            (32, 2540),
+            (36, 2540),
+            (40, 0x464D_4520),
+            (44, 0x0001_0000),
+            (48, 132),
+            (52, 3),
+            (56, 1),
+            (72, 96),
+            (76, 96),
+            (80, 25),
+            (84, 25),
+        ] {
+            data[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        data.extend(
+            [43u32, 24, 0, 0, 100, 100, 14, 20, 0, 16, 20]
+                .into_iter()
+                .flat_map(u32::to_le_bytes),
+        );
+        let expected = ooxml_metafile::to_svg(&data).unwrap();
+        let mut budget = DisplayBudget {
+            svg_bytes: expected.markup.len() + expected.markup.len() / 2,
+            ..DisplayBudget::default()
+        };
+        let (display, mime, warning) =
+            display_form(&data, "image/x-emf", "word/media/first.emf", &mut budget);
+        assert_eq!(mime, "image/svg+xml");
+        assert_eq!(std::str::from_utf8(&display).unwrap(), expected.markup);
+        assert!(warning.is_none());
+        assert_eq!(budget.svg_bytes, expected.markup.len() / 2);
+        let before = budget.replay;
+        let (display, _, warning) =
+            display_form(&data, "image/x-emf", "word/media/second.emf", &mut budget);
+        assert!(warning.unwrap().contains("display size limit"));
+        assert!(
+            std::str::from_utf8(&display)
+                .unwrap()
+                .contains(r##"fill="#f1f3f4""##)
+        );
+        assert!(budget.replay.work < before.work);
+        assert_eq!(budget.svg_bytes, 0);
+        let before = (budget.replay, budget.metafile_bytes);
+        for _ in 0..4 {
+            let (display, _, warning) =
+                display_form(&data, "image/x-emf", "word/media/later.emf", &mut budget);
+            assert!(warning.unwrap().contains("document's pictures"));
+            assert!(
+                std::str::from_utf8(&display)
+                    .unwrap()
+                    .contains(r##"fill="#f1f3f4""##)
+            );
+            assert_eq!((budget.replay, budget.metafile_bytes), before);
+        }
+    }
+
+    #[cfg(feature = "metafile")]
+    #[test]
+    fn metafile_parts_share_the_document_work_budget() {
+        let data = include_bytes!("../../ooxml-metafile/tests/fixtures/shapes.emf");
+        let mut replay = ooxml_metafile::ReplayBudget::default();
+        let before = replay.work;
+        ooxml_metafile::to_svg_with_budget(data, &mut replay).unwrap();
+        let mut budget = DisplayBudget::default();
+        budget.replay.work = 2 * (before - replay.work);
+        for index in 0..3 {
+            let (display, mime, warning) = display_form(
+                data,
+                "image/x-emf",
+                &format!("word/media/image{index}.emf"),
+                &mut budget,
+            );
+            assert_eq!(mime, "image/svg+xml");
+            let svg = std::str::from_utf8(&display).unwrap();
+            if index < 2 {
+                assert!(warning.is_none());
+                assert!(!svg.contains(r##"fill="#f1f3f4""##));
+            } else {
+                assert!(warning.unwrap().contains("replay limits"));
+                assert!(svg.contains(r##"fill="#f1f3f4""##));
+            }
+        }
+    }
+
+    #[cfg(feature = "metafile")]
+    #[test]
+    fn vector_metafiles_render_after_the_document_pixel_budget_is_spent() {
+        let bitmap = include_bytes!("../../ooxml-metafile/tests/fixtures/clip-bitmap.emf");
+        let vector = include_bytes!("../../ooxml-metafile/tests/fixtures/shapes.emf");
+        let mut replay = ooxml_metafile::ReplayBudget::default();
+        let before = replay.pixels;
+        let expected = ooxml_metafile::to_svg_with_budget(bitmap, &mut replay).unwrap();
+        let mut budget = DisplayBudget::default();
+        budget.replay.pixels = before - replay.pixels;
+        assert!(budget.replay.pixels > 0);
+        let (display, mime, _) =
+            display_form(bitmap, "image/x-emf", "word/media/bitmap.emf", &mut budget);
+        assert_eq!(mime, "image/svg+xml");
+        assert_eq!(std::str::from_utf8(&display).unwrap(), expected.markup);
+        assert_eq!(budget.replay.pixels, 0);
+        assert!(budget.replay.work > 0);
+        let (display, mime, warning) =
+            display_form(vector, "image/x-emf", "word/media/vector.emf", &mut budget);
+        assert_eq!(mime, "image/svg+xml");
+        assert!(warning.is_none());
+        let svg = std::str::from_utf8(&display).unwrap();
+        assert!(svg.contains("<path"));
+        assert!(!svg.contains(r##"fill="#f1f3f4""##));
+        assert_eq!(budget.replay.pixels, 0);
     }
 
     #[test]

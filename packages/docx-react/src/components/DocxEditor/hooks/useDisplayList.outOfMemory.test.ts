@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { StrictMode } from 'react';
@@ -8,12 +8,18 @@ import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit
 import {
   ResidentEngineWorkerClient,
   ResidentWorkerOutOfMemoryError,
+  proposalSetIdentity,
+  type DocxProposalSnapshot,
+  type ResidentProposalReply,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
+import { deferWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
+import * as workerProposals from '../internals/workerProposalAuthority';
+import { EngineWorker, lazyFixture } from './__fixtures__/lazyPages';
 import { useRustDisplayList } from './useDisplayList';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -133,6 +139,441 @@ function setup() {
   } as unknown as YrsSession;
   return { native, inputs, frame, engine, mainThreadBuilds, layoutJson };
 }
+
+function proposalAuthority(engine: YrsSession) {
+  let mirror: ResidentProposalReply['mirror'] | null = null;
+  const snapshot: DocxProposalSnapshot = { version: 'worker-1', previewVersion: 0, proposals: [] };
+  const reply: ResidentProposalReply = {
+    mirror: { version: 'worker-1', proposals: { previewVersion: 0, entries: [] } },
+    result: { ok: true, snapshot },
+    geometry: { version: 'worker-1', previewVersion: 0, proposals: proposalSetIdentity(snapshot), targets: {}, hidden: [] },
+    changedStories: [], updates: [], stateVector: new Uint8Array(),
+  };
+  Object.assign(engine, {
+    version: () => mirror?.version ?? 'main-1',
+    mirrorWorkerDocument: (next: typeof mirror) => { mirror = next; },
+    getProposals: () => ({ ...snapshot, version: engine.version() }),
+  });
+  const worker = {
+    proposal: mock(async () => reply),
+    documentRead: mock(async () => { throw new Error('unexpected worker read'); }),
+    handOver: mock(async () => ({
+      state: Uint8Array.of(1), version: 'worker-1', proposals: reply.mirror.proposals,
+    })),
+  };
+  const authority = workerProposals.registerWorkerProposalAuthority(engine, worker, {
+    relayout: () => {}, current: () => true, laidOut: () => Promise.resolve(),
+    adopted: () => {}, handedOver: () => {}, contentChanged: () => {},
+  });
+  const hold = async () => {
+    await authority.setStates({ expectVersion: 'worker-1', expectPreviewVersion: 0, changes: [] }, async () => {
+      throw new Error('unexpected main call');
+    });
+    expect(authority.holdsWorkerState()).toBe(true);
+  };
+  return { authority, worker, hold };
+}
+
+for (const stage of ['fontRequirements', 'bootstrap'] as const) {
+  test(`worker-held proposals reject ${stage} OOM without reopening or hydrating`, async () => {
+    const { native, engine, mainThreadBuilds } = setup();
+    const { authority, hold } = proposalAuthority(engine);
+    const fallback = spyOn(console, 'error').mockImplementation(() => {});
+    let mainOpens = 0;
+    const replica = deferWorkerOpenReplica(engine, () => new Promise(() => {}), () => {
+      mainOpens += 1;
+    }, () => {});
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(null, undefined, undefined, undefined, engine, undefined, undefined, undefined, true)
+    );
+    try {
+      const opening = result.current.openInWorker(engine, Uint8Array.of(1));
+      const worker = FakeWorker.spawned[0]!;
+      worker.onmessage?.({ data: {
+        id: worker.last().id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0),
+      } } as MessageEvent<ResidentEngineWorkerResponse>);
+      const opened = await opening;
+      expect(opened).not.toBeNull();
+      await hold();
+      const ready = replica.ready.catch((error: unknown) => error);
+      const settled = result.current.settledDisplayList(null, null).catch((error: unknown) => error);
+      let pending!: Promise<unknown>;
+      await act(async () => {
+        pending = stage === 'fontRequirements'
+          ? result.current.fontRequirementsInWorker(engine, REQUEST)!
+          : result.current.layoutInWorker(engine, REQUEST)!;
+      });
+      expect(worker.last().type).toBe(stage);
+      const rejected = pending.catch((error: unknown) => error);
+      await act(async () => {
+        worker.outOfMemory();
+        expect(await rejected).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+      });
+      expect(FakeWorker.spawned).toHaveLength(1);
+      expect(worker.posted.filter((request) => request.type === 'open')).toHaveLength(1);
+      expect(worker.posted.some((request) => request.type === 'encodeState')).toBe(false);
+      expect(mainThreadBuilds).toEqual([]);
+      expect(mainOpens).toBe(0);
+      const failure = await ready;
+      expect(failure).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+      expect((failure as Error).message).toBe('Resident engine worker ran out of memory allocating 65536 bytes: unreachable');
+      expect(replica.pending).toBe(false);
+      expect(replica.started).toBe(true);
+      expect(await settled).toBe(failure);
+      expect(result.current.error).toBe(failure as Error);
+      await expect(pending).rejects.toBe(failure);
+      await expect(authority.getProposals(async () => engine.getProposals())).rejects.toBe(failure);
+      await expect(workerProposals.beginWorkerProposalHandover(engine)!).rejects.toBe(failure);
+      await expect(opened!.revisionCount()).rejects.toBe(failure);
+      expect(FakeWorker.spawned).toHaveLength(1);
+    } finally {
+      unmount();
+      fallback.mockRestore();
+      native.free();
+    }
+  });
+}
+
+test('a page-build failure with worker-held proposals fails the document and settles waits', async () => {
+  const { engine, inputs, host } = lazyFixture();
+  const { authority, hold } = proposalAuthority(host);
+  const replica = deferWorkerOpenReplica(host, () => new Promise(() => {}), () => {
+    throw new Error('unexpected hydration');
+  }, () => {});
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  const unhandled = mock(() => {});
+  process.on('unhandledRejection', unhandled);
+  const relayout = mock(() => {});
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, rerender, unmount } = renderHook(({ layout }) =>
+      useRustDisplayList(layout, overrides, undefined, undefined, host, relayout),
+      { initialProps: { layout: inputs.layout as Layout } }
+    );
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    expect(result.current.displayList!.pages.some((page) => page.unbuilt)).toBe(true);
+    await hold();
+    EngineWorker.failPageBuilds = true;
+    const ready = replica.ready.catch((error: unknown) => error);
+    let failure: unknown;
+    await act(async () => {
+      failure = await result.current.settledDisplayList(null, null).catch((error: unknown) => error);
+    });
+    await waitFor(() => expect(result.current.error).toBe(failure as Error));
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe('page build failed');
+    expect(await ready).toBe(failure);
+    expect(replica.pending).toBe(false);
+    await expect(authority.getProposals(async () => host.getProposals())).rejects.toBe(failure);
+    await expect(workerProposals.beginWorkerProposalHandover(host)!).rejects.toBe(failure);
+    expect(EngineWorker.last!.terminated).toBe(true);
+    expect(EngineWorker.spawned).toBe(1);
+    expect(result.current.loading).toBe(false);
+    await act(async () => rerender({ layout: { ...inputs.layout } as Layout }));
+    expect(result.current.error).toBe(failure as Error);
+    await expect(result.current.settledDisplayList(null, null)).rejects.toBe(failure);
+    expect(EngineWorker.spawned).toBe(1);
+    expect(errors).toHaveBeenCalledTimes(1);
+    expect(relayout).not.toHaveBeenCalled();
+    expect(unhandled).not.toHaveBeenCalled();
+    unmount();
+  } finally {
+    cleanup();
+    process.off('unhandledRejection', unhandled);
+    errors.mockRestore();
+    engine.free();
+  }
+});
+
+test('a terminal failure with worker-held proposals rejects concurrent calls after layout settles', async () => {
+  const { native, inputs, frame, engine, mainThreadBuilds } = setup();
+  const { authority, hold, worker: transport } = proposalAuthority(engine);
+  let mainOpens = 0;
+  const replica = deferWorkerOpenReplica(engine, () => new Promise(() => {}), () => {
+    mainOpens += 1;
+  }, () => {});
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, rerender, unmount } = renderHook(
+      ({ layout }) =>
+        useRustDisplayList(layout, overrides, undefined, undefined, engine, undefined, undefined, undefined, true),
+      { initialProps: { layout: null as Layout | null } }
+    );
+    const opening = result.current.openInWorker(engine, Uint8Array.of(1));
+    const worker = FakeWorker.spawned[0]!;
+    worker.onmessage?.({ data: {
+      id: worker.last().id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0),
+    } } as MessageEvent<ResidentEngineWorkerResponse>);
+    const opened = await opening;
+    expect(opened).not.toBeNull();
+    await act(async () => rerender({ layout: inputs.layout as Layout }));
+    expect(worker.last()).toMatchObject({ type: 'bootstrap', opened: true });
+    await act(async () => worker.replyFrame(frame(1), 1));
+    await hold();
+    await act(async () => { await result.current.settledDisplayList(null, null); });
+    expect(result.current.error).toBeNull();
+    const ready = replica.ready.catch((error: unknown) => error);
+    let pending!: Promise<ResidentProposalReply>;
+    await act(async () => {
+      pending = opened!.proposal({
+        kind: 'setStates',
+        request: { expectVersion: 'worker-1', expectPreviewVersion: 0, changes: [] },
+      });
+    });
+    expect(worker.last()).toMatchObject({ type: 'proposal', operation: { kind: 'setStates' } });
+    const rejected = pending.catch((error: unknown) => error);
+    let revisionCount!: Promise<unknown>;
+    let requirements!: Promise<unknown>;
+    let handover!: Promise<unknown>;
+    let proposals!: Promise<unknown>;
+    transport.handOver.mockImplementation(() => new Promise(() => {}));
+    await act(async () => {
+      revisionCount = opened!.revisionCount().catch((error: unknown) => error);
+      requirements = result.current.fontRequirementsInWorker(engine, REQUEST)!.catch((error: unknown) => error);
+      handover = workerProposals.beginWorkerProposalHandover(engine)!.catch((error: unknown) => error);
+      proposals = authority.getProposals(async () => engine.getProposals()).catch((error: unknown) => error);
+    });
+    expect(worker.posted.some((request) => request.type === 'fontRequirements')).toBe(true);
+    expect(transport.handOver).toHaveBeenCalledTimes(1);
+    let failure: unknown;
+    await act(async () => {
+      worker.trapped();
+      failure = await rejected;
+    });
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    expect((failure as Error).message).toBe('Resident engine worker trapped: unreachable');
+    await expect(pending).rejects.toBe(failure);
+    expect(await revisionCount).toBe(failure);
+    expect(await requirements).toBe(failure);
+    expect(await handover).toBe(failure);
+    expect(await proposals).toBe(failure);
+    await expect(workerProposals.beginWorkerProposalHandover(engine)!).rejects.toBe(failure);
+    await expect(authority.getProposals(async () => engine.getProposals())).rejects.toBe(failure);
+    await expect(authority.readParagraphs({ view: 'accepted' }, async () => {
+      throw new Error('unexpected main read');
+    })).rejects.toBe(failure);
+    expect(await ready).toBe(failure);
+    expect(replica.pending).toBe(false);
+    await expect(result.current.settledDisplayList(null, null)).rejects.toBe(failure);
+    expect(result.current.error).toBe(failure as Error);
+    expect(result.current.loading).toBe(false);
+    expect(errors).toHaveBeenCalledTimes(1);
+    expect(worker.terminated).toBe(true);
+    expect(FakeWorker.spawned).toHaveLength(1);
+    expect(worker.posted.filter((request) => request.type === 'open')).toHaveLength(1);
+    expect(worker.posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(mainOpens).toBe(0);
+    expect(mainThreadBuilds).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    errors.mockRestore();
+    native.free();
+  }
+});
+
+test('a provisional completion failure with worker-held proposals fails the document and settles waits', async () => {
+  const { native, frame, engine, layoutJson, mainThreadBuilds } = setup();
+  const { authority, hold } = proposalAuthority(engine);
+  const replica = deferWorkerOpenReplica(engine, () => new Promise(() => {}), () => {
+    throw new Error('unexpected hydration');
+  }, () => {});
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(null, undefined, undefined, undefined, engine)
+    );
+    const pending = result.current.layoutInWorker(engine, REQUEST)!;
+    const worker = FakeWorker.spawned[0]!;
+    await act(async () => worker.replyFrame(frame(1), 1, { layoutJson, layoutProvisional: true }));
+    const provisional = (await pending) as { complete?: Promise<unknown> };
+    expect(provisional.complete).toBeDefined();
+    await hold();
+    const completed = provisional.complete!.catch((error: unknown) => error);
+    const ready = replica.ready.catch((error: unknown) => error);
+    const settled = result.current.settledDisplayList(null, null).catch((error: unknown) => error);
+    await act(async () => {
+      const attached = result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
+      expect(worker.last()).toMatchObject({ type: 'attachCanvases' });
+      worker.onmessage?.({ data: { id: worker.last().id, ok: true } } as MessageEvent<ResidentEngineWorkerResponse>);
+      expect(await attached).toBe(true);
+    });
+    expect(worker.last()).toMatchObject({ type: 'completeLayout' });
+    await act(async () => {
+      worker.trapped();
+      await completed;
+    });
+    const failure = await completed;
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe('Resident engine worker trapped: unreachable');
+    expect(await ready).toBe(failure);
+    expect(await settled).toBe(failure);
+    expect(result.current.error).toBe(failure as Error);
+    expect(result.current.loading).toBe(false);
+    expect(replica.pending).toBe(false);
+    await expect(authority.getProposals(async () => engine.getProposals())).rejects.toBe(failure);
+    expect(worker.terminated).toBe(true);
+    expect(FakeWorker.spawned).toHaveLength(1);
+    expect(mainThreadBuilds).toEqual([]);
+    expect(errors).toHaveBeenCalledTimes(1);
+    unmount();
+  } finally {
+    cleanup();
+    errors.mockRestore();
+    native.free();
+  }
+});
+
+test('a current superseded completion retries while the worker holds proposals', async () => {
+  const { native, frame, engine, layoutJson, mainThreadBuilds } = setup();
+  const { authority, hold } = proposalAuthority(engine);
+  const hydrate = mock(() => new Promise<() => void>(() => {}));
+  const fallback = mock(() => { throw new Error('unexpected hydration'); });
+  const replica = deferWorkerOpenReplica(engine, hydrate, fallback, () => {});
+  const hook = renderHook(() => useRustDisplayList(
+    null, undefined, undefined, undefined, engine, undefined, undefined, undefined, true
+  ));
+  try {
+    const pending = hook.result.current.layoutInWorker(engine, REQUEST)!;
+    const worker = FakeWorker.spawned[0]!;
+    await act(async () => worker.replyFrame(frame(1), 1, { layoutJson, layoutProvisional: true }));
+    const provisional = (await pending)!;
+    await hold();
+    await act(async () => {
+      const attaching = hook.result.current.attachOffscreenCanvases(
+        [], [], 1, 1, { color: '#000', width: 2 }
+      );
+      worker.onmessage?.({ data: { id: worker.last().id, ok: true } } as MessageEvent<ResidentEngineWorkerResponse>);
+      expect(await attaching).toBe(true);
+    });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const completion = worker.last();
+      expect(completion).toMatchObject({
+        type: 'completeLayout', expectedFrameEpoch: 1, sliceBlocks: 64,
+      });
+      await act(async () => worker.onmessage?.({
+        data: { id: completion.id, ok: true },
+      } as MessageEvent<ResidentEngineWorkerResponse>));
+      expect(worker.last()).toMatchObject({
+        type: 'completeLayout', expectedFrameEpoch: 1, sliceBlocks: 64,
+      });
+      expect(worker.last().id).not.toBe(completion.id);
+    }
+    await act(async () => worker.replyFrame(frame(2), 2, { layoutJson }));
+    expect((await provisional.complete)?.layout.pages.length).toBeGreaterThan(0);
+    expect(worker.posted.map((request) => request.type)).toEqual([
+      'bootstrap', 'attachCanvases', 'completeLayout', 'completeLayout', 'completeLayout',
+    ]);
+    expect(authority.holdsWorkerState()).toBe(true);
+    expect(replica.pending).toBe(true);
+    expect(hydrate).not.toHaveBeenCalled();
+    expect(fallback).not.toHaveBeenCalled();
+    expect(mainThreadBuilds).toEqual([]);
+    expect(hook.result.current.error).toBeNull();
+    expect(worker.terminated).toBe(false);
+    expect(FakeWorker.spawned).toHaveLength(1);
+  } finally {
+    hook.unmount();
+    native.free();
+  }
+});
+
+test('a stale superseded completion never retries over the newer proposal layout', async () => {
+  const { native, frame, engine, layoutJson, mainThreadBuilds } = setup();
+  const { host, adopted } = revisedHost(engine);
+  const { authority, hold } = proposalAuthority(host);
+  const hook = renderHook(() => useRustDisplayList(null));
+  try {
+    const pending = hook.result.current.layoutInWorker(host, REQUEST)!;
+    const worker = FakeWorker.spawned[0]!;
+    await act(async () => worker.replyFrame(frame(1), 1, { layoutJson, layoutProvisional: true }));
+    const provisional = (await pending)!;
+    await hold();
+    await act(async () => {
+      const attaching = hook.result.current.attachOffscreenCanvases(
+        [], [], 1, 1, { color: '#000', width: 2 }
+      );
+      worker.onmessage?.({ data: { id: worker.last().id, ok: true } } as MessageEvent<ResidentEngineWorkerResponse>);
+      expect(await attaching).toBe(true);
+    });
+    const completion = worker.last();
+    expect(completion.type).toBe('completeLayout');
+    const next = hook.result.current.layoutInWorker(host, REQUEST)!;
+    const sync = worker.last();
+    expect(sync.type).toBe('sync');
+    await act(async () => worker.onmessage?.({
+      data: { id: completion.id, ok: true },
+    } as MessageEvent<ResidentEngineWorkerResponse>));
+    expect(await provisional.complete).toBeNull();
+    expect(worker.last()).toBe(sync);
+    await act(async () => worker.replyFrame(frame(2), 2, { layoutJson, layoutRevision: 2 }));
+    expect((await next)?.layout.pages.length).toBeGreaterThan(0);
+    expect(worker.posted.map((request) => request.type)).toEqual([
+      'bootstrap', 'attachCanvases', 'completeLayout', 'sync',
+    ]);
+    expect(adopted).toEqual([REQUEST, REQUEST]);
+    expect(authority.holdsWorkerState()).toBe(true);
+    expect(mainThreadBuilds).toEqual([]);
+    expect(hook.result.current.error).toBeNull();
+    expect(worker.terminated).toBe(false);
+  } finally {
+    hook.unmount();
+    native.free();
+  }
+});
+
+test('a completed proposal hand-over allows worker OOM replacement and main-thread fallback', async () => {
+  const { native, inputs, frame, engine, mainThreadBuilds } = setup();
+  const { authority, hold } = proposalAuthority(engine);
+  const replica = deferWorkerOpenReplica(engine, async () => {
+    const handover = await workerProposals.beginWorkerProposalHandover(engine)!;
+    return () => handover.complete();
+  }, () => { throw new Error('unexpected hydration fallback'); }, () => {});
+  const warnings = spyOn(console, 'warn').mockImplementation(() => {});
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, rerender, unmount } = renderHook(
+      ({ layout }) => useRustDisplayList(layout, overrides, undefined, undefined, engine),
+      { initialProps: { layout: inputs.layout as Layout } }
+    );
+    const first = FakeWorker.spawned[0]!;
+    await act(async () => first.replyFrame(frame(1), 1));
+    await hold();
+    await act(async () => { await requestWorkerOpenReplica(engine); });
+    expect(replica.pending).toBe(false);
+    expect(authority.holdsWorkerState()).toBe(false);
+    expect(workerProposals.registeredWorkerProposalAuthority(engine)).toBe(authority);
+
+    await act(async () => rerender({ layout: { ...inputs.layout } }));
+    await act(async () => first.outOfMemory());
+    expect(first.terminated).toBe(true);
+    expect(FakeWorker.spawned).toHaveLength(2);
+    const second = FakeWorker.spawned[1]!;
+    expect(second.last()).toMatchObject({ type: 'bootstrap' });
+    await act(async () => second.replyFrame(frame(2), 2));
+    expect(result.current.error).toBeNull();
+    expect(mainThreadBuilds).toEqual([]);
+
+    await act(async () => rerender({ layout: { ...inputs.layout } }));
+    expect(second.last()).toMatchObject({ type: 'buildFrame' });
+    await act(async () => second.trapped());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(second.terminated).toBe(true);
+    expect(result.current.error).toBeNull();
+    expect(result.current.workerSurfacesActive).toBe(false);
+    expect(mainThreadBuilds).toHaveLength(1);
+    expect(FakeWorker.spawned).toHaveLength(2);
+    unmount();
+  } finally {
+    cleanup();
+    warnings.mockRestore();
+    errors.mockRestore();
+    native.free();
+  }
+});
 
 test('a worker that runs out of memory is replaced once, never by the main thread', async () => {
   const { native, inputs, frame, engine, mainThreadBuilds } = setup();
@@ -526,8 +967,15 @@ test('a provisional layout that a host layout replaced does not run again once i
       first!.replyFrame(frame(1), 1, { layoutJson, layoutProvisional: true })
     );
     const provisional = (await pending) as { complete?: Promise<unknown> };
+    await act(async () => {
+      const attaching = result.current.attachOffscreenCanvases(
+        [], [], 1, 1, { color: '#000', width: 2 }
+      );
+      first!.onmessage?.({ data: { id: first!.last().id, ok: true } } as MessageEvent<ResidentEngineWorkerResponse>);
+      expect(await attaching).toBe(true);
+    });
+    expect(first!.last()).toMatchObject({ type: 'completeLayout' });
     layOutHere();
-    await waitFor(() => expect(first!.last()).toMatchObject({ type: 'completeLayout' }));
     await act(async () => first!.outOfMemory());
     await act(async () => expect(await provisional.complete).toBeNull());
     expect(FakeWorker.spawned).toHaveLength(1);

@@ -25,6 +25,7 @@ const STUBS: Record<string, string> = {
     export const rasterizeDisplayPageToBackBuffer = async () => {};
     export const presentOffscreenPageBackBuffer = () => {};
     export const presentOffscreenPageBackBufferWithCaret = () => {};
+    export const releaseOffscreenPageCanvas = () => {};
   `,
 };
 

@@ -145,7 +145,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
-    readonly clear_measure_fonts: () => void;
+    readonly clear_measure_fonts: () => [number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly hit_test_regions_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

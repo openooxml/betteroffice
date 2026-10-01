@@ -112,6 +112,18 @@ export function presentOffscreenPageBackBuffer(
 }
 
 /**
+ * Release a worker-owned transferred canvas's bitmap and keep the canvas usable.
+ * Chromium never shows a canvas's later frames once it is resized to 0x0 while a
+ * presented frame is in flight, so it shrinks to one pixel and presents an empty bitmap.
+ */
+export function releaseOffscreenPageCanvas(canvas: OffscreenCanvas): void {
+  if (canvas.width === 1 && canvas.height === 1) return;
+  canvas.width = 1;
+  canvas.height = 1;
+  canvas.getContext('bitmaprenderer')?.transferFromImageBitmap(null);
+}
+
+/**
  * Present a page buffer with a caret line composited at present time. The
  * stroke goes through `stage`, so `buffer` keeps its clean raster and the
  * line can later be dropped by re-presenting `buffer` without re-rastering.

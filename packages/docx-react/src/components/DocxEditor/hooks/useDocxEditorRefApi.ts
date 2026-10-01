@@ -7,6 +7,7 @@ import type {
   DocxLayoutMap,
   DocxPageExportOptions,
   DocxPagedStructuredContent,
+  DocxProposalResult,
   DocxTextTarget,
   YrsInlineFormatDelta,
   YrsLoc,
@@ -29,7 +30,18 @@ import type { SelectionState } from '../types';
 import { readMemoryStats } from '../memoryStats';
 import { documentPageCount } from './documentPageCount';
 import type { DocxHostSearch } from './useHostSearch';
-import { awaitWorkerOpenReplica, ensureWorkerOpenReplica } from '../internals/workerOpenReplica';
+import {
+  awaitWorkerOpenReplica,
+  ensureWorkerOpenReplica,
+  requestOnDemandWorkerOpenReplica,
+  requestWorkerOpenReplica,
+  workerOpenReplicaOnDemand,
+} from '../internals/workerOpenReplica';
+import {
+  handedOverRequest,
+  workerProposalAuthority,
+  type WorkerProposalAuthority,
+} from '../internals/workerProposalAuthority';
 
 export const DOCX_REF_REPLICA_ACCESS = {
   commands: 'commands',
@@ -51,6 +63,8 @@ export const DOCX_REF_REPLICA_ACCESS = {
   loadDocument: 'independent',
   loadDocumentBuffer: 'independent',
   readParagraphs: 'await',
+  getParagraphIdentities: 'await',
+  resolveParagraphAnchors: 'await',
   listContentControls: 'await',
   findContentControls: 'await',
   findText: 'await',
@@ -88,6 +102,38 @@ export const DOCX_REF_REPLICA_ACCESS = {
   onSelectionChange: 'independent',
 } as const satisfies Record<keyof DocxEditorRef, 'await' | 'sync' | 'independent' | 'commands'>;
 
+/**
+ * Synchronous APIs that an on-demand replica still loading answers without loading it at once:
+ * `direct` needs no replica (the display list, print, focus, or a call that waits for the replica
+ * itself), `unselected` has nothing selected before the replica, and `request` answers as unready
+ * and asks for the replica.
+ */
+const ON_DEMAND_SYNC_ACCESS: Partial<Record<keyof DocxEditorRef, 'direct' | 'unselected' | 'request'>> = {
+  focus: 'direct',
+  scrollToPosition: 'direct',
+  openPrintPreview: 'direct',
+  print: 'direct',
+  highlightRange: 'direct',
+  getSelectionInfo: 'unselected',
+  getPositionAtPoint: 'request',
+};
+
+/**
+ * Thrown by a synchronous editor ref member that needs the document on the main thread while a
+ * read-only `experimentalWorkerOpen` editor still holds it, with host proposals, in its worker. The
+ * document starts loading; await `flushPendingInput()` (or the member's async counterpart) and call
+ * it again.
+ */
+export class DocxReplicaNotReadyError extends Error {
+  constructor(readonly member: string) {
+    super(
+      `${member} needs the document on the main thread, which is still loading; ` +
+        'await flushPendingInput() and call it again'
+    );
+    this.name = 'DocxReplicaNotReadyError';
+  }
+}
+
 function withDeadline(ready: Promise<void>, timeoutMs: number | undefined): Promise<void> {
   if (timeoutMs === undefined) return ready;
   return new Promise<void>((resolve, reject) => {
@@ -108,6 +154,11 @@ function withDeadline(ready: Promise<void>, timeoutMs: number | undefined): Prom
   });
 }
 
+const WORKER_PROPOSAL_ACCESS: ReadonlySet<keyof DocxEditorRef> = new Set([
+  'proposeChanges', 'setProposalStates', 'withdrawProposals', 'getProposals',
+  'readParagraphs', 'getParagraphIdentities', 'resolveParagraphAnchors',
+]);
+
 function gateReplicaAccess(
   api: DocxEditorRef,
   pagedEditorRef: React.RefObject<PagedEditorRef | null>,
@@ -123,8 +174,26 @@ function gateReplicaAccess(
       value: (...args: unknown[]) => {
         const session = pagedEditorRef.current?.getYrsSession();
         if (session) {
-          if (access === 'sync') ensureWorkerOpenReplica(session);
-          else {
+          if (WORKER_PROPOSAL_ACCESS.has(key) && workerProposalAuthority(session)) {
+            return Reflect.apply(call, api, args);
+          }
+          if (access === 'sync') {
+            const onDemand = workerOpenReplicaOnDemand(session) ? ON_DEMAND_SYNC_ACCESS[key] : undefined;
+            if (onDemand === 'unselected') return null;
+            if (onDemand === 'request') {
+              requestOnDemandWorkerOpenReplica(session);
+              return null;
+            }
+            // Proposals only the worker holds cannot be rebuilt here: the replica takes them over.
+            if (onDemand === undefined && workerProposalAuthority(session)?.holdsWorkerState()) {
+              void requestWorkerOpenReplica(session)?.catch(() => {});
+              throw new DocxReplicaNotReadyError(key);
+            }
+            if (onDemand === undefined) ensureWorkerOpenReplica(session);
+          } else {
+            if (key === 'whenLayoutComplete' && workerOpenReplicaOnDemand(session)) {
+              return Reflect.apply(call, api, args);
+            }
             const ready = awaitWorkerOpenReplica(session);
             if (ready) {
               const timeoutMs =
@@ -234,9 +303,22 @@ async function exportWithPages(
     }
     return session.exportStructuredWithPagesFor(options, request);
   };
+  // A pass that changes only the revision preview lays out in the resident worker, so the
+  // session's retained layout can still preview decisions the editor no longer shows.
+  const showsMarkup = (): boolean => {
+    const request = editor().getLayoutRequest();
+    if (request === null) return false;
+    const preview = (JSON.parse(request) as { renderEnv?: { revisionPreview?: object } })
+      .renderEnv?.revisionPreview;
+    return !preview || Object.keys(preview).length === 0;
+  };
   let result = attempt();
   if (options.expectLayoutVersion !== undefined) return result;
-  if (!result.ok && LAYOUT_REFUSALS.has(result.failure.code)) {
+  if (
+    !result.ok &&
+    (LAYOUT_REFUSALS.has(result.failure.code) ||
+      (result.failure.code === 'unsupported-revision-layout' && showsMarkup()))
+  ) {
     editor().relayout({ onHost: true });
     result = attempt();
   }
@@ -357,7 +439,11 @@ export function useDocxEditorRefApi({
   /** The resident worker's wasm memories as of its latest reply. */
   workerMemory?: () => WasmModuleMemory[] | null;
   /** The renderer's display list once it shows the whole current document. */
-  settledDisplayList?: (relayout: null, timeoutMs: number | null) => Promise<DisplayList>;
+  settledDisplayList?: (
+    relayout: null,
+    timeoutMs: number | null,
+    scope?: 'document' | 'window'
+  ) => Promise<DisplayList>;
   /** Whether a document load has not yet produced its first layout. */
   awaitingDocument?: () => boolean;
   experimentalWorkerOpen?: boolean;
@@ -374,6 +460,37 @@ export function useDocxEditorRefApi({
   );
   const hostProposalsAllowed = () =>
     modeRef.current !== 'viewing' || allowHostProposalsRef.current === true;
+  const proposalAuthority = () => {
+    const session = pagedEditorRef.current?.getYrsSession();
+    return experimentalWorkerOpen && session ? workerProposalAuthority(session) : null;
+  };
+  /** A proposal call on the worker's registry while it holds them, else on the main session. */
+  const routedProposalCall = <R extends { expectVersion: string }>(
+    request: R,
+    onWorker: (
+      authority: WorkerProposalAuthority,
+      main: (request: R) => Promise<DocxProposalResult>
+    ) => Promise<DocxProposalResult>,
+    call: (session: YrsSession, request: R) => DocxProposalResult
+  ): Promise<DocxProposalResult> => {
+    const main = (input: R) =>
+      applyProposalCall(
+        pagedEditorRef,
+        hostProposalsAllowed,
+        (session) => call(session, handedOverRequest(session, input)),
+        experimentalWorkerOpen
+      );
+    const authority = proposalAuthority();
+    if (!authority) return main(request);
+    if (!hostProposalsAllowed()) {
+      return Promise.resolve({
+        ok: false,
+        version: pagedEditorRef.current!.getYrsSession()!.version(),
+        failure: { code: 'read-only', message: 'The editor is read-only' },
+      });
+    }
+    return onWorker(authority, main);
+  };
   useImperativeHandle(
     ref,
     () => gateReplicaAccess({
@@ -395,7 +512,9 @@ export function useDocxEditorRefApi({
         awaitingDocument?.() ? 0 : documentPageCount(hostEditorRef.current?.getLayout()),
       whenLayoutComplete: async (options) => {
         if (!settledDisplayList) throw new Error('This editor paints no display list');
-        return (await settledDisplayList(null, options?.timeoutMs ?? null)).pages.length;
+        return (await settledDisplayList(
+          null, options?.timeoutMs ?? null, experimentalWorkerOpen ? 'window' : 'document'
+        )).pages.length;
       },
       getMemoryStats: () => readMemoryStats(workerMemory),
       scrollToPage: (pageNumber) => pagedEditorRef.current?.scrollToPage(pageNumber),
@@ -406,7 +525,25 @@ export function useDocxEditorRefApi({
       loadDocument: loadParsedDocument,
       loadDocumentBuffer: loadBuffer,
 
-      readParagraphs: async (request) => (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.readParagraphs(request),
+      readParagraphs: (request) => {
+        const main = async (input: typeof request) =>
+          (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.readParagraphs(input);
+        const authority = proposalAuthority();
+        return authority ? authority.readParagraphs(request, main) : main(request);
+      },
+      getParagraphIdentities: () => {
+        const main = async () =>
+          (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.paragraphIdentities();
+        return proposalAuthority()?.paragraphIdentities(main) ?? main();
+      },
+      resolveParagraphAnchors: (anchors) => {
+        const main = async (input: typeof anchors) => {
+          const { session } = await flushedSession(pagedEditorRef, experimentalWorkerOpen);
+          return { version: session.version(), results: input.map((anchor) => session.resolveParagraphAnchor(anchor)) };
+        };
+        const authority = proposalAuthority();
+        return authority ? authority.resolveParagraphAnchors(anchors, main) : main(anchors);
+      },
       listContentControls: async (options) =>
         (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.listContentControls(options),
       findContentControls: async (query, options) =>
@@ -425,21 +562,22 @@ export function useDocxEditorRefApi({
       },
 
       proposeChanges: (request) =>
-        applyProposalCall(
-          pagedEditorRef, hostProposalsAllowed, (session) => session.proposeChanges(request),
-          experimentalWorkerOpen
+        routedProposalCall(request, (authority, main) => authority.propose(request, main), (session, input) =>
+          session.proposeChanges(input)
         ),
       setProposalStates: (request) =>
-        applyProposalCall(
-          pagedEditorRef, hostProposalsAllowed, (session) => session.setProposalStates(request),
-          experimentalWorkerOpen
+        routedProposalCall(request, (authority, main) => authority.setStates(request, main), (session, input) =>
+          session.setProposalStates(input)
         ),
       withdrawProposals: (request) =>
-        applyProposalCall(
-          pagedEditorRef, hostProposalsAllowed, (session) => session.withdrawProposals(request),
-          experimentalWorkerOpen
+        routedProposalCall(request, (authority, main) => authority.withdraw(request, main), (session, input) =>
+          session.withdrawProposals(input)
         ),
-      getProposals: async () => (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.getProposals(),
+      getProposals: () => {
+        const main = async () =>
+          (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.getProposals();
+        return proposalAuthority()?.getProposals(main) ?? main();
+      },
 
       exportStructuredWithPages: (options) => exportWithPages(pagedEditorRef, options, experimentalWorkerOpen),
       getPositionAtPoint: (clientX, clientY) =>
@@ -510,7 +648,9 @@ export function useDocxEditorRefApi({
           steps: [step],
         });
         if (!result.ok) return false;
-        if (result.applied) editor.syncYrsInputState(true, result.changedStories);
+        if (result.applied) {
+          editor.syncYrsInputState(true, result.changedStories, { inWorker: true });
+        }
         setShowCommentsSidebar(true);
         return true;
       },

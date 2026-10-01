@@ -186,7 +186,9 @@ shows toolbar contributions with
 `useDocxCommand` and `useDocxCommandState` accept contributed ids.
 
 **Coordinates.** `context.geometry` exists only while a rendered layout shows
-the current version. `geometry.dom` (a `RenderedDomContext`) answers in
+the current version. An overlay may render during a pending layout with that and
+`context.snapshot.layout` null, its `geometry` prop then being the previous
+layout's. `geometry.dom` (a `RenderedDomContext`) answers in
 pages-container units divided by zoom, and `geometry.toOverlayRect(rect)`
 converts such a rectangle into pixels of the unscaled overlay layer, or returns
 `null` once that layout is no longer rendered. `geometry.getPositionAtPoint`
@@ -996,6 +998,9 @@ keep none until the host calls `session.persistParagraphIds()`, which covers eve
 part, comments and note separators included, and refuses rather than guess at an
 ambiguous comment reference. Results are `found`, `missing`, `ambiguous`, or
 `unsupported`; table, cell, and content-control identities are not persisted.
+The React editor's ref offers `getParagraphIdentities()` and
+`resolveParagraphAnchors(anchors)`, which returns the results in input order with
+the version they were resolved at.
 
 ## Package reference
 

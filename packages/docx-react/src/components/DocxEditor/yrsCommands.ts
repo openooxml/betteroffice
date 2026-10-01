@@ -14,6 +14,9 @@ import { computeSplitDialogDefaults, pixelsToEmu } from '@betteroffice/docx/util
 import type { ImageLayoutTarget, SetImageWrapTypeOptions } from '@betteroffice/docx/docx';
 import type { TableContextInfo } from './types';
 
+const MAX_TABLE_COLUMNS = 16_384;
+const PLAIN_TEXT_SLOT_LIMIT = 1 << 20;
+
 /** Non-toolbar writes that become yrs-authoritative with `?yrsInput=1`. */
 export type YrsEditorCommand =
   | { type: 'imageGeometry'; pmPos: number; patch: Readonly<Record<string, unknown>> }
@@ -268,18 +271,37 @@ function cellPlainText(session: YrsSession, story: string): string {
   return /[\t\n"]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
-/** One tab-separated line per grid row; merged-over slots stay empty. */
+/** Tab-separated rows, without grid padding for oversized blocks. */
 function tablePlainText(
   session: YrsSession,
   payload: TablePayload,
   range?: { top: number; bottom: number; left: number; right: number }
 ): string[] {
   const { anchors, columns } = tableAnchors(payload);
-  const byGrid = new Map(anchors.map((cell) => [`${cell.row}:${cell.column}`, cell.story]));
+  const top = range?.top ?? 0;
+  const bottom = range?.bottom ?? payload.rows.length - 1;
+  const left = range?.left ?? 0;
+  const right = range?.right ?? columns - 1;
   const lines: string[] = [];
-  for (let row = range?.top ?? 0; row <= (range?.bottom ?? payload.rows.length - 1); row += 1) {
+  if ((bottom - top + 1) * (right - left + 1) > PLAIN_TEXT_SLOT_LIMIT) {
+    let index = 0;
+    for (let row = top; row <= bottom; row += 1) {
+      const texts: string[] = [];
+      while (index < anchors.length && anchors[index].row < row) index += 1;
+      while (index < anchors.length && anchors[index].row === row) {
+        const cell = anchors[index++];
+        if (cell.column >= left && cell.column <= right) {
+          texts.push(cell.story ? cellPlainText(session, cell.story) : '');
+        }
+      }
+      lines.push(texts.join('\t'));
+    }
+    return lines;
+  }
+  const byGrid = new Map(anchors.map((cell) => [`${cell.row}:${cell.column}`, cell.story]));
+  for (let row = top; row <= bottom; row += 1) {
     const texts: string[] = [];
-    for (let column = range?.left ?? 0; column <= (range?.right ?? columns - 1); column += 1) {
+    for (let column = left; column <= right; column += 1) {
       const story = byGrid.get(`${row}:${column}`);
       texts.push(story ? cellPlainText(session, story) : '');
     }
@@ -356,6 +378,12 @@ interface TableCellAnchor {
   story: string;
 }
 
+interface TableVerticalMerge {
+  start: number;
+  end: number;
+  lastRow: number;
+}
+
 function positiveSpan(value: unknown): number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : 1;
 }
@@ -384,27 +412,38 @@ export function currentYrsTableProperties(
 }
 
 function tableAnchors(payload: TablePayload): { anchors: TableCellAnchor[]; columns: number } {
-  const occupied: boolean[][] = Array.from({ length: payload.rows.length }, () => []);
+  let activeMerges: TableVerticalMerge[] = [];
   const anchors: TableCellAnchor[] = [];
-  let columns = payload.grid?.length ?? 0;
+  let columns = Math.min(payload.grid?.length ?? 0, MAX_TABLE_COLUMNS);
 
   payload.rows.forEach((row, rowIndex) => {
+    activeMerges = activeMerges.filter((merge) => merge.lastRow >= rowIndex);
+    const nextMerges: TableVerticalMerge[] = [];
+    let mergeIndex = 0;
     let column = 0;
     for (const cell of row.cells ?? []) {
-      while (occupied[rowIndex]?.[column]) column += 1;
-      const rowspan = positiveSpan(cell.tcPr?.rowspan);
-      const colspan = positiveSpan(cell.tcPr?.colspan);
+      while (mergeIndex < activeMerges.length && activeMerges[mergeIndex].start <= column) {
+        const merge = activeMerges[mergeIndex++];
+        column = Math.max(column, merge.end);
+        nextMerges.push(merge);
+      }
+      const rowspan = Math.max(
+        1,
+        Math.min(positiveSpan(cell.tcPr?.rowspan), payload.rows.length - rowIndex)
+      );
+      const colspan = Math.max(
+        1,
+        Math.min(positiveSpan(cell.tcPr?.colspan), MAX_TABLE_COLUMNS - column)
+      );
       anchors.push({ row: rowIndex, column, rowspan, colspan, story: cell.story });
-      for (let targetRow = rowIndex; targetRow < rowIndex + rowspan; targetRow += 1) {
-        const slots = occupied[targetRow] ?? [];
-        occupied[targetRow] = slots;
-        for (let targetColumn = column; targetColumn < column + colspan; targetColumn += 1) {
-          slots[targetColumn] = true;
-        }
+      if (rowspan > 1) {
+        nextMerges.push({ start: column, end: column + colspan, lastRow: rowIndex + rowspan - 1 });
       }
       column += colspan;
       columns = Math.max(columns, column);
     }
+    while (mergeIndex < activeMerges.length) nextMerges.push(activeMerges[mergeIndex++]);
+    activeMerges = nextMerges;
   });
 
   return { anchors, columns };

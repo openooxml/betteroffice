@@ -137,7 +137,7 @@ pub(crate) fn apply_update_with_typing_inference(
         None
     };
 
-    doc.integrate_update(update, false)
+    doc.integrate_update(update, crate::UpdateOrigin::Remote)
         .map_err(|error| error.to_string())?;
     drop(subscription);
     let Some(client_id) = client_id else {

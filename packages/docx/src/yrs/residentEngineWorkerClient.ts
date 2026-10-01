@@ -6,11 +6,23 @@ import type {
 } from './index';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type {
+  ResidentDocumentRead,
+  ResidentDocumentReadValues,
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerRequestWithoutId,
   ResidentEngineWorkerResponse,
+  ResidentProposalOperation,
+  ResidentProposalResponse,
 } from './residentEngineWorkerProtocol';
+import type { DocxProposalRegistryState } from './proposals';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
+
+/** @internal */
+export interface ResidentProposalReply
+  extends Omit<ResidentProposalResponse, 'updates' | 'stateVector'> {
+  updates: Uint8Array[];
+  stateVector: Uint8Array;
+}
 
 export interface ResidentEngineWorkerFrame {
   frame: Uint8Array;
@@ -39,7 +51,7 @@ export interface ResidentEngineWorkerLayoutOptions {
   layoutExtras?: string;
   /** The host state vector the snapshot brings the worker to. */
   stateVector?: Uint8Array;
-  /** Bootstrap only: lay out just the body's first pages before replying. */
+  /** Lay out just the body's first pages before replying. */
   provisionalPages?: number;
   /** Bootstrap only: lay out the document {@link ResidentEngineWorkerClient.open} opened. */
   opened?: boolean;
@@ -80,6 +92,7 @@ const FRAME_REQUESTS = new Set<AwaitedRequest['type']>([
   'bootstrap',
   'sync',
   'buildFrame',
+  'releasePages',
   'applyInput',
   'applyDelete',
 ]);
@@ -146,8 +159,9 @@ export class ResidentEngineWorkerClient {
       if (response.ok && response.caret) {
         this.answeredFrameEpoch = Math.max(this.answeredFrameEpoch, response.caret.frameEpoch);
       }
-      if (response.ok && response.stateVector && response.id >= this.lastSnapshotId) {
-        this.remoteVector = new Uint8Array(response.stateVector);
+      if (response.ok && response.id >= this.lastSnapshotId) {
+        const stateVector = response.proposal?.stateVector ?? response.stateVector;
+        if (stateVector) this.remoteVector = new Uint8Array(stateVector);
       }
       if (!response.ok && response.terminal) {
         this.fail(
@@ -287,6 +301,50 @@ export class ResidentEngineWorkerClient {
     return response.requirementsJson;
   }
 
+  /** @internal */
+  async proposal(operation: ResidentProposalOperation): Promise<ResidentProposalReply> {
+    if (!this.bootstrapped) {
+      throw new ResidentWorkerFailureError('Resident engine worker has not laid out its document');
+    }
+    const response = await this.request({ type: 'proposal', operation });
+    if (!response.proposal) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted the proposal result');
+    }
+    return {
+      ...response.proposal,
+      updates: response.proposal.updates.map((update) => new Uint8Array(update)),
+      stateVector: new Uint8Array(response.proposal.stateVector),
+    };
+  }
+
+  /** @internal */
+  async documentRead<K extends ResidentDocumentRead['kind']>(
+    read: ResidentDocumentRead & { kind: K }
+  ): Promise<{ version: string; value: ResidentDocumentReadValues[K] }> {
+    const response = await this.request({ type: 'documentRead', read });
+    if (!response.read) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted the document read');
+    }
+    return response.read as { version: string; value: ResidentDocumentReadValues[K] };
+  }
+
+  /** @internal */
+  async handOver(): Promise<{
+    state: Uint8Array;
+    version: string;
+    proposals: DocxProposalRegistryState;
+  }> {
+    const response = await this.request({ type: 'encodeState' });
+    if (!response.state || response.version === undefined || !response.proposals) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted its document handoff');
+    }
+    return {
+      state: new Uint8Array(response.state),
+      version: response.version,
+      proposals: response.proposals,
+    };
+  }
+
   /** The worker's whole document state as one yrs v1 update. */
   async encodeState(): Promise<Uint8Array> {
     const response = await this.request({ type: 'encodeState' });
@@ -294,6 +352,18 @@ export class ResidentEngineWorkerClient {
       throw new ResidentWorkerFailureError('Resident engine worker omitted its state');
     }
     return new Uint8Array(response.state);
+  }
+
+  async revisionCount(): Promise<number> {
+    const response = await this.request({ type: 'revisionCount' });
+    if (
+      typeof response.revisionCount !== 'number' ||
+      !Number.isInteger(response.revisionCount) ||
+      response.revisionCount < 0
+    ) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted a valid revision count');
+    }
+    return response.revisionCount;
   }
 
   async warm(): Promise<void> {
@@ -380,6 +450,9 @@ export class ResidentEngineWorkerClient {
         expectedFrameEpoch,
         paintCaret,
         ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
+        ...(options.provisionalPages !== undefined
+          ? { provisionalPages: options.provisionalPages }
+          : {}),
         ...(options.displayWindow
           ? {
               displayWindow: options.displayWindow,
@@ -445,6 +518,20 @@ export class ResidentEngineWorkerClient {
     return frameResult(
       await this.request({ type: 'buildPages', pages, expectedFrameEpoch, paintCaret })
     );
+  }
+
+  async releasePages(
+    pages: Array<{ index: number; pageId: string }>,
+    expectedFrameEpoch: number,
+    paintCaret = false
+  ): Promise<ResidentEngineWorkerFrame | { superseded: true }> {
+    const response = await this.request({
+      type: 'releasePages',
+      pages,
+      expectedFrameEpoch,
+      paintCaret,
+    });
+    return response.superseded ? { superseded: true } : frameResult(response);
   }
 
   async applyInput(

@@ -95,6 +95,16 @@ struct ApplyInputProfile {
     encode_ms: f64,
 }
 
+fn validate_frame_epoch(epoch: f64) -> Result<u64, JsValue> {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    if !(epoch.is_finite() && epoch >= 0.0 && epoch.fract() == 0.0 && epoch <= MAX_SAFE_INTEGER) {
+        return Err(js_err(
+            "expected_frame_epoch must be a non-negative safe integer",
+        ));
+    }
+    Ok(epoch as u64)
+}
+
 fn js_err(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
 }
@@ -1352,21 +1362,17 @@ impl EditSession {
             self.engine.doc().install_media(media);
             fonts
         } else {
-            let fonts =
-                crate::seed::referenced_fonts(&envelope).map_err(|error| error.to_string())?;
-            let parts = crate::structured::source::SourceParts::new(parts);
-            let mut metadata = crate::seed::source_metadata(&envelope, Some(&parts))
-                .map_err(|error| error.to_string())?;
+            let (mut metadata, index, fonts) =
+                crate::seed::replica_source(envelope, parts, Arc::clone(&source), digest.clone())?;
             metadata.watch_comments(self.engine.doc());
             self.engine.doc().install_source(metadata, js_entropy());
             self.engine
                 .doc()
-                .retain_source_docx_with_digest(Arc::clone(&source), digest.clone());
+                .retain_source(crate::identity::SourcePackage::Ready(Arc::new(index)));
             self.engine.doc().install_media(media);
             self.engine
                 .doc()
                 .set_media_sources(crate::media::MediaSources::default());
-            drop(envelope);
             crate::seed::SeededFonts {
                 referenced: fonts,
                 unused_script: Vec::new(),
@@ -1778,19 +1784,10 @@ impl EditSession {
         input: &str,
         expected_frame_epoch: f64,
     ) -> Result<Vec<u8>, JsValue> {
-        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
         let _fonts = self.fonts.enter();
-        if !(expected_frame_epoch.is_finite()
-            && expected_frame_epoch >= 0.0
-            && expected_frame_epoch.fract() == 0.0
-            && expected_frame_epoch <= MAX_SAFE_INTEGER)
-        {
-            return Err(js_err(
-                "expected_frame_epoch must be a non-negative safe integer",
-            ));
-        }
+        let epoch = validate_frame_epoch(expected_frame_epoch)?;
         self.engine
-            .build_display_list_frame(input, expected_frame_epoch as u64)
+            .build_display_list_frame(input, epoch)
             .map_err(|error| JsValue::from_str(&error))
     }
 
@@ -1823,21 +1820,26 @@ impl EditSession {
         pages: Vec<u32>,
         expected_frame_epoch: f64,
     ) -> Result<Vec<u8>, JsValue> {
-        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
         let _fonts = self.fonts.enter();
-        if !(expected_frame_epoch.is_finite()
-            && expected_frame_epoch >= 0.0
-            && expected_frame_epoch.fract() == 0.0
-            && expected_frame_epoch <= MAX_SAFE_INTEGER)
-        {
-            return Err(js_err(
-                "expected_frame_epoch must be a non-negative safe integer",
-            ));
-        }
+        let epoch = validate_frame_epoch(expected_frame_epoch)?;
         let pages: Vec<usize> = pages.into_iter().map(|page| page as usize).collect();
         self.engine
-            .build_display_pages_frame(&pages, expected_frame_epoch as u64)
+            .build_display_pages_frame(&pages, epoch)
             .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Release display pages; an empty result means the request was superseded.
+    pub fn release_display_pages_frame(
+        &self,
+        pages: Vec<u32>,
+        expected_frame_epoch: f64,
+    ) -> Result<Vec<u8>, JsValue> {
+        let _fonts = self.fonts.enter();
+        let epoch = validate_frame_epoch(expected_frame_epoch)?;
+        let pages: Vec<usize> = pages.into_iter().map(|page| page as usize).collect();
+        self.engine
+            .release_display_pages_frame(&pages, epoch)
+            .map_err(js_err)
     }
 
     /// `{"frameEpoch", "caretRect": {…}|null}` for the session's own collapsed
@@ -2489,6 +2491,19 @@ impl EditSession {
             .doc()
             .apply_local_update_v1(update)
             .map_err(js_err)
+    }
+
+    /// Applies an update another replica of this document committed for a host batch.
+    /// It commits outside undo history and notifies as a local change.
+    pub fn apply_host_update(&self, update: &[u8]) -> Result<(), JsValue> {
+        self.undo.add_undo_barrier();
+        let result = self
+            .engine
+            .doc()
+            .apply_host_update_v1(update)
+            .map_err(js_err);
+        self.undo.add_undo_barrier();
+        result
     }
 
     /// Subscribes `callback(update: Uint8Array, isRemote: 0|1)` to every
@@ -4307,6 +4322,23 @@ impl EditSession {
         serde_json::to_string(&items).map_err(js_err)
     }
 
+    /// Author and date stamps for the requested revision ids.
+    pub fn revision_stamps_json(&self, ids_json: &str) -> Result<String, JsValue> {
+        let ids: Vec<String> = serde_json::from_str(ids_json).map_err(js_err)?;
+        let stamps = self.engine.doc().revision_stamps(&ids).map_err(js_err)?;
+        let items: serde_json::Map<String, Value> = stamps
+            .into_iter()
+            .map(|(id, stamps)| {
+                let stamps: Vec<Value> = stamps
+                    .into_iter()
+                    .map(|(author, date)| json!({ "author": author, "date": date }))
+                    .collect();
+                (id, Value::Array(stamps))
+            })
+            .collect();
+        serde_json::to_string(&items).map_err(js_err)
+    }
+
     pub fn search_text(
         &self,
         query: &str,
@@ -4504,6 +4536,17 @@ impl EditSession {
     pub fn locate_paragraph(&self, story: &str, para_id: &str) -> Result<String, JsValue> {
         let span = find_para_span(self.engine.doc(), story, para_id)?;
         Ok(json!({ "start": span.start, "end": span.pilcrow }).to_string())
+    }
+
+    /// How many paragraphs of `story` carry `para_id`: 0, 1, or 2 for two or
+    /// more. Errors on an unknown story.
+    pub fn paragraph_id_count(&self, story: &str, para_id: &str) -> Result<u32, JsValue> {
+        Ok(self
+            .engine
+            .doc()
+            .segment_index(story)
+            .map_err(js_err)?
+            .para_id_count(para_id))
     }
 
     /// Every comment the session holds, sorted by id:
@@ -5694,6 +5737,27 @@ mod tests {
         let preview = EditSession::new(79.0).unwrap();
         preview.open_preview(&bytes, 1).unwrap().unwrap();
         assert!(preview.materialize_docx().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_replica_indexes_its_package_as_it_opens() {
+        let bytes = batch_docx();
+        let origin = EditSession::new(83.0).unwrap();
+        origin.open_docx(&bytes, true, None, None).unwrap();
+        let replica = EditSession::new(84.0).unwrap();
+        replica.open_docx(&bytes, false, None, None).unwrap();
+        assert!(replica.engine.doc().source_indexed());
+        replica.load(&origin.encode_state()).unwrap();
+        let paragraphs = |session: &EditSession| {
+            envelope(
+                &session
+                    .read_paragraphs_json(r#"{"story":"body","view":"accepted"}"#)
+                    .unwrap(),
+            )["paragraphs"]
+                .clone()
+        };
+        assert_eq!(paragraphs(&replica), paragraphs(&origin));
+        assert!(replica.materialize_docx().unwrap().is_some());
     }
 
     #[test]
