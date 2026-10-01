@@ -1623,6 +1623,85 @@ test('with worker open, a provisional layout names its engine until the rest is 
   }
 });
 
+test('an older surface timeout cannot supersede the newer provisional completion', async () => {
+  const { native, layoutJson, frame, engine, adopted } = setup();
+  const snapshot = engine.residentWorkerSnapshot.bind(engine);
+  engine.residentWorkerSnapshot = (options) => ({
+    ...snapshot(options)!, workerAuthoritative: true,
+  });
+  const surfaceTimers: Array<() => void> = [];
+  const schedule = globalThis.setTimeout;
+  const timers = spyOn(globalThis, 'setTimeout').mockImplementation(
+    ((...input: Parameters<typeof setTimeout>) => {
+      const [callback, delay, ...args] = input;
+      if (delay === 250 && typeof callback === 'function') {
+        surfaceTimers.push(() => callback(...args));
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      }
+      return schedule(callback, delay, ...args);
+    }) as typeof setTimeout
+  );
+  const hook = renderHook(() => useRustDisplayList(
+    null, undefined, undefined, undefined, null, undefined, undefined, undefined, true
+  ));
+  try {
+    const first = hook.result.current.layoutInWorker(engine, REQUEST)!;
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null }, selection: null,
+      layoutRevision: 1, layoutJson, layoutProvisional: true,
+    });
+    const older = (await act(() => first))!;
+    expect(surfaceTimers).toHaveLength(1);
+
+    const second = hook.result.current.layoutInWorker(engine, REQUEST)!;
+    const nextFrame = native.build_display_list_frame('{}', 1);
+    expect(worker.posted[1]).toMatchObject({ type: 'sync', snapshot: { layoutRevision: 2 } });
+    worker.reply({
+      id: worker.posted[1].id, ok: true, frame: nextFrame.slice().buffer,
+      caret: { frameEpoch: 2, caretRect: null }, selection: null,
+      layoutRevision: 2, layoutJson, layoutProvisional: true,
+    });
+    const current = (await act(() => second))!;
+    expect(surfaceTimers).toHaveLength(2);
+    expect(hook.result.current.pendingCompletion).toBe(engine);
+    await act(async () => {
+      const attaching = hook.result.current.attachOffscreenCanvases(
+        [], [], 1, 1, { color: '#000', width: 2 }
+      );
+      worker.reply({ id: worker.posted[2].id, ok: true });
+      expect(await attaching).toBe(true);
+    });
+    expect(worker.posted[3]).toMatchObject({
+      type: 'completeLayout', expectedFrameEpoch: 2, sliceBlocks: 64,
+    });
+
+    await act(async () => surfaceTimers[0]!());
+    expect(worker.posted.filter((request): boolean => request.type === 'completeLayout')).toEqual([
+      worker.posted[3]!,
+    ]);
+    expect(await older.complete).toBeNull();
+    const fullFrame = native.build_display_list_frame('{}', 2);
+    worker.reply({
+      id: worker.posted[3].id, ok: true, frame: fullFrame.slice().buffer,
+      caret: { frameEpoch: 3, caretRect: null }, selection: null,
+      layoutRevision: 2, layoutJson,
+    });
+    expect((await current.complete)?.layout.pages.length).toBeGreaterThan(0);
+    await act(async () => surfaceTimers[1]!());
+    expect(worker.posted).toHaveLength(4);
+    expect(adopted).toEqual([REQUEST, REQUEST]);
+    expect(hook.result.current.pendingCompletion).toBeNull();
+    expect(hook.result.current.error).toBeNull();
+    expect(worker.terminated).toBe(false);
+  } finally {
+    hook.unmount();
+    timers.mockRestore();
+    native.free();
+  }
+});
+
 test('a worker-authoritative relayout covers the visible prefix and completes it separately', async () => {
   const { native, layoutJson, frame, engine } = setup();
   const snapshot = engine.residentWorkerSnapshot.bind(engine);

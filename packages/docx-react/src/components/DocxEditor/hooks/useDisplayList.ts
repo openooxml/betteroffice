@@ -1774,6 +1774,9 @@ export function useRustDisplayList(
           // surfaces are attached: the worker answers in order, so asking
           // sooner would hold back the first paint until it is done.
           const provisionalEpoch = result.caret.frameEpoch;
+          const isCurrentPass = (): boolean =>
+            isCurrentWorker(hostEngine, owner) &&
+            hostEngine.residentWorkerProbe()?.layoutRevision === adoptedRevision;
           const gate = { engine: hostEngine };
           if (workerOpenEnabledRef.current) setPendingCompletion(gate);
           const surfaced = new Promise<void>((resolve) => {
@@ -1782,16 +1785,20 @@ export function useRustDisplayList(
           });
           const complete = surfaced
             // A worker handed to another session lays out that session now.
-            .then(() => {
+            .then(async () => {
               setPendingCompletion((current) => (current === gate ? null : current));
-              return workerRef.current?.engine === hostEngine
-                ? worker.completeLayout(provisionalEpoch, false, COMPLETION_SLICE_BLOCKS)
-                : null;
-            })
-            .then((completed) => {
-              if (!completed) return null;
-              const base = frameBase(hostEngine);
-              return adopt(completed, base?.frameEpoch === provisionalEpoch ? base : undefined);
+              while (isCurrentPass()) {
+                const completed = await worker.completeLayout(
+                  provisionalEpoch, false, COMPLETION_SLICE_BLOCKS
+                );
+                if (!isCurrentPass()) return null;
+                if (completed) {
+                  const base = frameBase(hostEngine);
+                  return adopt(completed, base?.frameEpoch === provisionalEpoch ? base : undefined);
+                }
+                if (!holdsWorkerProposals(hostEngine)) return null;
+              }
+              return null;
             })
             .catch(async (cause: unknown): Promise<LayoutComputation | null> => {
               const retried = await unavailable(cause);

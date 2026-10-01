@@ -426,6 +426,104 @@ test('a provisional completion failure with worker-held proposals fails the docu
   }
 });
 
+test('a current superseded completion retries while the worker holds proposals', async () => {
+  const { native, frame, engine, layoutJson, mainThreadBuilds } = setup();
+  const { authority, hold } = proposalAuthority(engine);
+  const hydrate = mock(() => new Promise<() => void>(() => {}));
+  const fallback = mock(() => { throw new Error('unexpected hydration'); });
+  const replica = deferWorkerOpenReplica(engine, hydrate, fallback, () => {});
+  const hook = renderHook(() => useRustDisplayList(
+    null, undefined, undefined, undefined, engine, undefined, undefined, undefined, true
+  ));
+  try {
+    const pending = hook.result.current.layoutInWorker(engine, REQUEST)!;
+    const worker = FakeWorker.spawned[0]!;
+    await act(async () => worker.replyFrame(frame(1), 1, { layoutJson, layoutProvisional: true }));
+    const provisional = (await pending)!;
+    await hold();
+    await act(async () => {
+      const attaching = hook.result.current.attachOffscreenCanvases(
+        [], [], 1, 1, { color: '#000', width: 2 }
+      );
+      worker.onmessage?.({ data: { id: worker.last().id, ok: true } } as MessageEvent<ResidentEngineWorkerResponse>);
+      expect(await attaching).toBe(true);
+    });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const completion = worker.last();
+      expect(completion).toMatchObject({
+        type: 'completeLayout', expectedFrameEpoch: 1, sliceBlocks: 64,
+      });
+      await act(async () => worker.onmessage?.({
+        data: { id: completion.id, ok: true },
+      } as MessageEvent<ResidentEngineWorkerResponse>));
+      expect(worker.last()).toMatchObject({
+        type: 'completeLayout', expectedFrameEpoch: 1, sliceBlocks: 64,
+      });
+      expect(worker.last().id).not.toBe(completion.id);
+    }
+    await act(async () => worker.replyFrame(frame(2), 2, { layoutJson }));
+    expect((await provisional.complete)?.layout.pages.length).toBeGreaterThan(0);
+    expect(worker.posted.map((request) => request.type)).toEqual([
+      'bootstrap', 'attachCanvases', 'completeLayout', 'completeLayout', 'completeLayout',
+    ]);
+    expect(authority.holdsWorkerState()).toBe(true);
+    expect(replica.pending).toBe(true);
+    expect(hydrate).not.toHaveBeenCalled();
+    expect(fallback).not.toHaveBeenCalled();
+    expect(mainThreadBuilds).toEqual([]);
+    expect(hook.result.current.error).toBeNull();
+    expect(worker.terminated).toBe(false);
+    expect(FakeWorker.spawned).toHaveLength(1);
+  } finally {
+    hook.unmount();
+    native.free();
+  }
+});
+
+test('a stale superseded completion never retries over the newer proposal layout', async () => {
+  const { native, frame, engine, layoutJson, mainThreadBuilds } = setup();
+  const { host, adopted } = revisedHost(engine);
+  const { authority, hold } = proposalAuthority(host);
+  const hook = renderHook(() => useRustDisplayList(null));
+  try {
+    const pending = hook.result.current.layoutInWorker(host, REQUEST)!;
+    const worker = FakeWorker.spawned[0]!;
+    await act(async () => worker.replyFrame(frame(1), 1, { layoutJson, layoutProvisional: true }));
+    const provisional = (await pending)!;
+    await hold();
+    await act(async () => {
+      const attaching = hook.result.current.attachOffscreenCanvases(
+        [], [], 1, 1, { color: '#000', width: 2 }
+      );
+      worker.onmessage?.({ data: { id: worker.last().id, ok: true } } as MessageEvent<ResidentEngineWorkerResponse>);
+      expect(await attaching).toBe(true);
+    });
+    const completion = worker.last();
+    expect(completion.type).toBe('completeLayout');
+    const next = hook.result.current.layoutInWorker(host, REQUEST)!;
+    const sync = worker.last();
+    expect(sync.type).toBe('sync');
+    await act(async () => worker.onmessage?.({
+      data: { id: completion.id, ok: true },
+    } as MessageEvent<ResidentEngineWorkerResponse>));
+    expect(await provisional.complete).toBeNull();
+    expect(worker.last()).toBe(sync);
+    await act(async () => worker.replyFrame(frame(2), 2, { layoutJson, layoutRevision: 2 }));
+    expect((await next)?.layout.pages.length).toBeGreaterThan(0);
+    expect(worker.posted.map((request) => request.type)).toEqual([
+      'bootstrap', 'attachCanvases', 'completeLayout', 'sync',
+    ]);
+    expect(adopted).toEqual([REQUEST, REQUEST]);
+    expect(authority.holdsWorkerState()).toBe(true);
+    expect(mainThreadBuilds).toEqual([]);
+    expect(hook.result.current.error).toBeNull();
+    expect(worker.terminated).toBe(false);
+  } finally {
+    hook.unmount();
+    native.free();
+  }
+});
+
 test('a completed proposal hand-over allows worker OOM replacement and main-thread fallback', async () => {
   const { native, inputs, frame, engine, mainThreadBuilds } = setup();
   const { authority, hold } = proposalAuthority(engine);
@@ -869,8 +967,15 @@ test('a provisional layout that a host layout replaced does not run again once i
       first!.replyFrame(frame(1), 1, { layoutJson, layoutProvisional: true })
     );
     const provisional = (await pending) as { complete?: Promise<unknown> };
+    await act(async () => {
+      const attaching = result.current.attachOffscreenCanvases(
+        [], [], 1, 1, { color: '#000', width: 2 }
+      );
+      first!.onmessage?.({ data: { id: first!.last().id, ok: true } } as MessageEvent<ResidentEngineWorkerResponse>);
+      expect(await attaching).toBe(true);
+    });
+    expect(first!.last()).toMatchObject({ type: 'completeLayout' });
     layOutHere();
-    await waitFor(() => expect(first!.last()).toMatchObject({ type: 'completeLayout' }));
     await act(async () => first!.outOfMemory());
     await act(async () => expect(await provisional.complete).toBeNull());
     expect(FakeWorker.spawned).toHaveLength(1);
