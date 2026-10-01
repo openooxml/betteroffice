@@ -1441,7 +1441,11 @@ export function useRustDisplayList(
           bootstrapPosted: client.whenBootstrapSent(),
           release: () => {
             if (unmountedRef.current || handedOverEnginesRef.current.has(hostEngine)) return;
-            dropWorker(hostEngine);
+            if (!dropWorker(hostEngine)) return;
+            const load = documentLoadsRef.current;
+            setTimeout(() => {
+              if (!unmountedRef.current && load === documentLoadsRef.current) requestLayoutRef.current?.();
+            }, 0);
           },
         };
       } catch (error) {
