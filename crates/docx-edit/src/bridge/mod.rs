@@ -46,6 +46,7 @@ use docx_layout::types::{
     ShapeBlock, Size, SpacingExplicit, TabRun, TabStop, TableBlock, TableCell, TableRow, TextRun,
     UnderlineSpec,
 };
+use docx_parse::{drawingml::resolve_color_value_to_hex, scalars::ColorValue};
 use serde_json::{Map as JsonMap, Value};
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
@@ -1810,6 +1811,44 @@ fn image_transform_metrics(
     )
 }
 
+fn image_outline(
+    values: &std::collections::HashMap<String, Any>,
+    env: &RenderEnv,
+) -> Option<CellBorderSpec> {
+    let color = values
+        .get("borderColorValue")
+        .and_then(any_json)
+        .and_then(|value| serde_json::from_value::<ColorValue>(value).ok())
+        .and_then(|mut color| {
+            color.rgb = color.rgb.take().or_else(|| {
+                color
+                    .theme_color
+                    .as_deref()
+                    .and_then(|slot| theme_color(slot, env))
+            });
+            color.theme_color = None;
+            resolve_color_value_to_hex(Some(&color))
+        })
+        .or_else(|| {
+            map_string(values, "borderColor")
+                .map(|color| css_hex(&color))
+                .filter(|hex| {
+                    hex.len() == 7 && hex[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+        })?;
+    Some(CellBorderSpec {
+        width: Some(map_number(values, "borderWidth").unwrap_or(1.0)),
+        color: Some(color),
+        style: Some(
+            match map_string(values, "borderStyle").as_deref() {
+                Some(style @ ("dotted" | "dashed")) => style,
+                _ => "solid",
+            }
+            .to_owned(),
+        ),
+    })
+}
+
 fn lower_image_values(
     values: &std::collections::HashMap<String, Any>,
     formatting: &RunFormatting,
@@ -1881,7 +1920,7 @@ fn lower_image_values(
         layout_in_cell: None,
         effect_extent: None,
         effects: None,
-        outline: None,
+        outline: image_outline(values, env),
         decorative: None,
         hyperlink: None,
         inline_shape: None,
@@ -6191,5 +6230,29 @@ mod tests {
         assert!(!formatting_equal(&finite, &pos_inf));
         assert!(formatting_equal(&nan_comments, &nan_comments2));
         assert!(!formatting_equal(&nan_comments, &nan_in_field));
+    }
+
+    #[test]
+    fn edited_image_borders_paint_the_edited_values() {
+        let values = HashMap::from([
+            ("borderWidth".to_owned(), Any::Number(2.0)),
+            ("borderColor".to_owned(), Any::String("#0000FF".into())),
+            ("borderColorValue".to_owned(), Any::Null),
+            ("borderStyle".to_owned(), Any::String("double".into())),
+        ]);
+        let outline = image_outline(&values, &RenderEnv::default()).unwrap();
+        assert_eq!(outline.width, Some(2.0));
+        assert_eq!(outline.color.as_deref(), Some("#0000FF"));
+        assert_eq!(outline.style.as_deref(), Some("solid"));
+        let values = HashMap::from([("borderColorValue".to_owned(), Any::Null)]);
+        assert!(image_outline(&values, &RenderEnv::default()).is_none());
+        let values = HashMap::from([
+            ("borderWidth".to_owned(), Any::Number(2.0)),
+            (
+                "borderColor".to_owned(),
+                Any::String("rgb(0, 0, 255)".into()),
+            ),
+        ]);
+        assert!(image_outline(&values, &RenderEnv::default()).is_none());
     }
 }

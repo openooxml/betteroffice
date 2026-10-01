@@ -2834,6 +2834,69 @@ mod pagination_rule_tests {
     }
 
     #[test]
+    fn a_split_side_wrapped_float_and_its_anchor_match_incremental_layout() {
+        let blocks = |height: f64, offset: f64, anchor_before: f64| {
+            let floating = json!({
+                "block": {
+                    "kind": "table", "id": 90, "columnWidths": [60],
+                    "rows": [
+                        {"id": 91, "height": 30, "heightRule": "exact", "cells": []},
+                        {"id": 92, "height": 30, "heightRule": "exact", "cells": []}
+                    ],
+                    "floating": {
+                        "horzAnchor": "text", "vertAnchor": "text",
+                        "tblpXSpec": "right", "tblpY": offset,
+                        "leftFromText": 10, "rightFromText": 10
+                    }
+                },
+                "measure": {
+                    "kind": "table", "columnWidths": [60], "totalWidth": 60, "totalHeight": 60,
+                    "rows": [{"height": 30, "cells": []}, {"height": 30, "cells": []}]
+                }
+            });
+            let mut anchor = paragraph(2, 3, 10.0, json!({"spacing": {"before": anchor_before}}));
+            for line in anchor["measure"]["lines"].as_array_mut().unwrap() {
+                line["rightOffset"] = json!(70);
+            }
+            vec![
+                paragraph(0, 1, 10.0, json!({})),
+                paragraph(
+                    1,
+                    1,
+                    height,
+                    json!({"pageBreakBefore": true, "spacing": {"after": 12}}),
+                ),
+                floating,
+                anchor,
+            ]
+        };
+        let split = blocks(40.0, 10.0, 0.0);
+        let spaced = blocks(40.0, 10.0, 12.0);
+        assert_incremental_matches_full(split.clone(), spaced.clone(), &[3]);
+        let retained = assert_incremental_matches_full(spaced, split.clone(), &[3]);
+        assert_eq!(retained.layout.pages.len(), 3);
+        let Some(Fragment::Table(first)) = retained.layout.pages[1].fragments.last() else {
+            panic!("first table fragment expected");
+        };
+        assert_eq!((first.y, first.row_start, first.row_end), (60.0, 0, 1));
+        assert_eq!(first.carried_to_next, Some(true));
+        let [Fragment::Table(table), Fragment::Paragraph(anchor)] =
+            retained.layout.pages[2].fragments.as_slice()
+        else {
+            panic!("table and anchor expected");
+        };
+        assert_eq!(
+            (table.x, table.y, table.row_start, table.row_end),
+            (130.0, 10.0, 1, 2)
+        );
+        assert_eq!((anchor.y, anchor.from_line), (10.0, 0));
+        let fitting = blocks(10.0, 10.0, 0.0);
+        assert_incremental_matches_full(split.clone(), fitting.clone(), &[1]);
+        assert_incremental_matches_full(fitting, split.clone(), &[1]);
+        assert_incremental_matches_full(split, blocks(40.0, 45.0, 0.0), &[2]);
+    }
+
+    #[test]
     fn placement_does_not_resume_at_a_floating_table_that_opened_its_page() {
         let blocks = |page_break: bool| {
             vec![
