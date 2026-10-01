@@ -1054,6 +1054,8 @@ function asciiProposalFontsUnchanged(
 function destroySession(keepSurfaces = false): void {
   supersedeBackgroundPageBuild();
   fontRequirements = null;
+  requirementsCache = null;
+  requestedRequirements = null;
   unsubscribe?.();
   unsubscribe = null;
   proposals?.destroy();
