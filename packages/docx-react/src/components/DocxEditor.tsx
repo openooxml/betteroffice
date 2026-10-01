@@ -1292,6 +1292,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         const generation = firstPageGenerationRef.current;
         const fire = () => {
           if (generation !== firstPageGenerationRef.current) return;
+          performance.mark('bo:firstPagePainted');
           try {
             callback?.();
           } catch (error) {

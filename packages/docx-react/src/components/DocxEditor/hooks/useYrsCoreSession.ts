@@ -198,8 +198,10 @@ async function openPreview(
   clientId: number | undefined
 ): Promise<{ session: YrsSession; host: YrsDocxHost } | null> {
   const session = await yrs.createYrsSession({ clientId });
+  performance.mark('bo:preview:session');
   try {
     const host = session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS);
+    performance.mark('bo:preview:opened');
     if (host) return { session, host };
     session.destroy();
     return null;
@@ -479,8 +481,10 @@ export function useYrsCoreSession(
       return true;
     };
 
+    performance.mark('bo:core:start');
     void import('@betteroffice/docx/yrs')
       .then(async (yrs) => {
+        performance.mark('bo:core:facade');
         // A copy hashed with Web Crypto keeps the package's hash off this
         // thread; it hashes while the preview opens.
         const prepared = seedBytes ? yrs.prepareDocxBytes(seedBytes) : Promise.resolve(null);
@@ -493,8 +497,10 @@ export function useYrsCoreSession(
           host: YrsDocxHost | null;
         } | null> => {
           const bytes = await prepared;
+          performance.mark('bo:full:digest');
           if (stale()) return null;
           const next = await yrs.createYrsSession({ clientId: collaborationClientId });
+          performance.mark('bo:full:session');
           if (stale()) {
             next.destroy();
             return null;
@@ -509,8 +515,10 @@ export function useYrsCoreSession(
                 yrs.preparedDocxDigest(bytes),
                 seedGeneration
               );
+              performance.mark('bo:full:workerOpened');
               if (!stale()) {
                 host = openedWorker ? yrs.decodeDocxHostJson(openedWorker.hostJson, bytes) : null;
+                performance.mark('bo:full:hostDecoded');
               }
             } catch (error) {
               openedWorker?.destroy();
@@ -573,6 +581,7 @@ export function useYrsCoreSession(
             preview: true,
           });
           await painted;
+          performance.mark('bo:preview:painted');
           if (paintWaitRef.current?.session === opened.session) paintWaitRef.current = null;
           // Two frames: a worker canvas's commit can reach the screen a frame
           // after the presentation, and a main-thread full open blocks this thread.
@@ -599,7 +608,9 @@ export function useYrsCoreSession(
             fail(new Error('The document did not finish opening in time'));
           }, fullOpenTimeoutRef.current);
         }
+        performance.mark('bo:full:await');
         const full = await (early ?? openFull());
+        performance.mark('bo:full:opened');
         earlyTaken = true;
         if (!full) return;
         if (stale()) {
@@ -689,6 +700,7 @@ export function useYrsCoreSession(
               initialUpdate: collaborationInitialUpdate,
               mediaTokens: mediaTokensRef.current,
             });
+            performance.mark('bo:full:seeded');
           }
         } catch (error) {
           openedWorker?.destroy();

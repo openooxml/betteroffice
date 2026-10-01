@@ -103,7 +103,16 @@ let handlingId = 0;
 const trappedIds = new Set<number>();
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
-  enqueue(() => handle(event.data), event.data.id);
+  const kind = event.data.type;
+  performance.mark(`bo:w:recv:${kind}`);
+  enqueue(async () => {
+    performance.mark(`bo:w:start:${kind}`);
+    try {
+      await handle(event.data);
+    } finally {
+      performance.mark(`bo:w:end:${kind}`);
+    }
+  }, event.data.id);
 };
 
 /** `current` drops an operation whose request was answered while it waited. */
@@ -179,9 +188,11 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       throw new Error('Resident engine worker already holds a document');
     }
     const opening = await createResidentEngineSession(request.heapLimitBytes);
+    performance.mark('bo:w:open:session');
     let hostJson: string;
     try {
       hostJson = opening.openDocx(new Uint8Array(request.bytes), request.digest, request.generation);
+      performance.mark('bo:w:open:parsed');
     } catch (error) {
       if (!(error instanceof WebAssembly.RuntimeError)) opening.destroy();
       throw error;
@@ -227,11 +238,13 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       };
     }
     subscribe();
+    performance.mark('bo:w:boot:laidOut');
     const started = performance.now();
     const frame = session.buildDisplayListFrame(
       frameExtras(request.extras, request.layoutExtras, layoutJson),
       request.expectedFrameEpoch
     );
+    performance.mark('bo:w:boot:frame');
     await replyFrame(
       request.id,
       frame,
