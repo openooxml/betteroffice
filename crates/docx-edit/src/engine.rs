@@ -5389,7 +5389,10 @@ mod tests {
                 let path = entry.path();
                 if entry.file_type().unwrap().is_dir() {
                     collect_docx(&path, paths);
-                } else if path.extension().is_some_and(|extension| extension == "docx") {
+                } else if path
+                    .extension()
+                    .is_some_and(|extension| extension == "docx")
+                {
                     paths.push(path);
                 }
             }
@@ -5435,10 +5438,9 @@ mod tests {
                 "regions": {"sections": sections, "settings": package.settings},
                 "notes": {"contents": contents},
             });
-            let requirements: Vec<Value> = serde_json::from_str(
-                &engine.layout_font_requirements_json(&request.to_string())?,
-            )
-            .map_err(|error| error.to_string())?;
+            let requirements: Vec<Value> =
+                serde_json::from_str(&engine.layout_font_requirements_json(&request.to_string())?)
+                    .map_err(|error| error.to_string())?;
             let chains: serde_json::Map<String, Value> = requirements
                 .iter()
                 .map(|requirement| {
