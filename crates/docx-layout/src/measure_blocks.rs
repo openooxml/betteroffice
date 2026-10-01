@@ -2507,12 +2507,7 @@ fn cell_content_minimum(
         .rows
         .get(entry.row_index)
         .and_then(|row| row.cells.get(entry.cell_index))?;
-    let padding = cell
-        .padding
-        .as_ref()
-        .map_or(2.0 * DEFAULT_CELL_PADDING_X, |padding| {
-            padding.left + padding.right
-        });
+    let padding = cell_horizontal_padding(cell);
     let content = if is_rotated(cell) {
         rows.get(entry.row_index)
             .and_then(|row| row.cells.get(entry.cell_index))
@@ -2531,40 +2526,67 @@ fn cell_content_minimum(
     Some(content.map(|content| content + padding))
 }
 
-/// Whether a paragraph of a cell spanning several columns breaks a line
-/// inside a word in `after` where it did not in `before`.
+/// Whether a cell spanning several columns breaks a line inside a word in
+/// `after` where it did not in `before`, or, rotated, no longer holds its
+/// stacked lines.
 fn spanning_cell_newly_breaks_a_word(
     table: &TableBlock,
     grid: &[ResolvedGridCell],
-    before: &[TableRowExtent],
-    after: &[TableRowExtent],
+    before: (&[f64], &[TableRowExtent]),
+    after: (&[f64], &[TableRowExtent]),
 ) -> bool {
-    let measured = |rows: &[TableRowExtent], entry: &ResolvedGridCell, index: usize| {
+    fn measured<'a>(
+        rows: &'a [TableRowExtent],
+        entry: &ResolvedGridCell,
+    ) -> Option<&'a TableCellExtent> {
         rows.get(entry.row_index)
             .and_then(|row| row.cells.get(entry.cell_index))
-            .and_then(|cell| cell.blocks.get(index))
-            .cloned()
-    };
+    }
     grid.iter().filter(|entry| entry.col_span > 1).any(|entry| {
         let Some(cell) = table
             .rows
             .get(entry.row_index)
             .and_then(|row| row.cells.get(entry.cell_index))
-            .filter(|cell| !is_rotated(cell))
         else {
             return false;
         };
+        if is_rotated(cell) {
+            let overflows = |(widths, rows): (&[f64], &[TableRowExtent])| {
+                let span: f64 = widths
+                    .iter()
+                    .skip(entry.column_index)
+                    .take(entry.col_span)
+                    .sum();
+                measured(rows, entry).is_some_and(|extent| {
+                    extent.blocks.iter().map(extent_height).sum::<f64>()
+                        + cell_horizontal_padding(cell)
+                        > span
+                })
+            };
+            return overflows(after) && !overflows(before);
+        }
         cell.blocks.iter().enumerate().any(|(index, block)| {
             let LayoutBlock::Paragraph(paragraph) = block else {
                 return false;
             };
-            let breaks = |extent: Option<BlockExtent>| {
-                matches!(extent, Some(BlockExtent::Paragraph(extent))
-                        if starts_a_line_inside_a_word(paragraph, &extent))
+            let breaks = |rows: &[TableRowExtent]| {
+                matches!(
+                    measured(rows, entry).and_then(|extent| extent.blocks.get(index)),
+                    Some(BlockExtent::Paragraph(extent))
+                        if starts_a_line_inside_a_word(paragraph, extent)
+                )
             };
-            breaks(measured(after, entry, index)) && !breaks(measured(before, entry, index))
+            breaks(after.1) && !breaks(before.1)
         })
     })
+}
+
+fn cell_horizontal_padding(cell: &crate::types::TableCell) -> f64 {
+    cell.padding
+        .as_ref()
+        .map_or(2.0 * DEFAULT_CELL_PADDING_X, |padding| {
+            padding.left + padding.right
+        })
 }
 
 /// Per column, the narrowest width that holds the widest word of every cell
@@ -2643,7 +2665,12 @@ fn measure_table(
                 target_width,
                 config,
             )?;
-            if spanning_cell_newly_breaks_a_word(table, &grid, &rows, &widened) {
+            if spanning_cell_newly_breaks_a_word(
+                table,
+                &grid,
+                (&before, &rows),
+                (&column_widths, &widened),
+            ) {
                 column_widths = before;
             } else {
                 rows = widened;
