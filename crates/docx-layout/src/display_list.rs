@@ -2665,6 +2665,9 @@ pub(crate) struct LineIn {
     right_offset: Option<f64>,
     #[serde(default)]
     float_skip_before: Option<f64>,
+    /// Extra first-line px after a marker overruns its hanging indent.
+    #[serde(default)]
+    marker_tab_offset: Option<f64>,
     #[serde(default)]
     run_advances: Vec<TypesetRunAdvanceIn>,
     #[serde(default)]
@@ -5965,13 +5968,23 @@ fn emit_line(
     // The first line carries the hanging or first-line shift.
     let has_hanging = geom.hanging > 0.0;
     let has_first_line = geom.first_line > 0.0;
+    let overrun = if geom.is_first_line
+        && geom.has_list_marker
+        && geom.indent_left > 0.0
+        && has_hanging
+        && !geom.is_rtl
+    {
+        line.marker_tab_offset.unwrap_or(0.0)
+    } else {
+        0.0
+    };
     let mut pad_left = geom.indent_left;
     let mut text_indent = 0.0;
     if geom.is_first_line {
         if geom.indent_left > 0.0 && has_hanging {
             text_indent = if geom.has_list_marker {
                 // The marker consumes the hanging width before body text.
-                (geom.hanging - geom.indent_left).max(0.0)
+                (geom.hanging - geom.indent_left).max(0.0) + overrun
             } else {
                 -geom.hanging
             };
@@ -6095,7 +6108,7 @@ fn emit_line(
         });
         marker_format.font_size =
             attrs.and_then(|attrs| attrs.list_marker_font_size.or(attrs.default_font_size));
-        let slot_width = geom.hanging.max(font_px_of(&marker_format));
+        let slot_width = (geom.hanging + overrun).max(font_px_of(&marker_format));
         let marker_x = if geom.is_rtl {
             pen_x + effective_line_width
         } else {
@@ -11974,6 +11987,92 @@ mod tests {
             .find(|primitive| primitive["listMarker"] == true)
             .unwrap();
         assert_eq!(marker["color"], "#FF0000");
+    }
+
+    /// Marker overrun extends its slot and shifts only the first line's text.
+    #[test]
+    fn list_marker_tab_overrun_extends_the_first_line_marker_slot() {
+        let input = json!({
+            "contractVersion": 1,
+            "measured": [{
+                "block": {
+                    "kind": "paragraph",
+                    "id": "list-item",
+                    "runs": [{ "kind": "text", "text": "firstsecond" }],
+                    "attrs": {
+                        "listMarker": "1.2.3.4.5.6.7.8.9",
+                        "listMarkerFontFamily": "Aptos",
+                        "listMarkerFontSize": 12,
+                        "indent": { "left": 113, "hanging": 113 }
+                    }
+                },
+                "measure": {
+                    "kind": "paragraph",
+                    "totalHeight": 40,
+                    "lines": [
+                        {
+                            "headRun": 0,
+                            "headChar": 0,
+                            "tailRun": 0,
+                            "tailChar": 5,
+                            "width": 28,
+                            "ascent": 14,
+                            "descent": 4,
+                            "lineHeight": 20,
+                            "markerTabOffset": 30
+                        },
+                        {
+                            "headRun": 0,
+                            "headChar": 5,
+                            "tailRun": 0,
+                            "tailChar": 11,
+                            "width": 36,
+                            "ascent": 14,
+                            "descent": 4,
+                            "lineHeight": 20
+                        }
+                    ]
+                }
+            }],
+            "options": {},
+            "layout": {
+                "pages": [{
+                    "number": 1,
+                    "size": { "w": 400, "h": 400 },
+                    "margins": { "top": 20, "right": 20, "bottom": 20, "left": 20 },
+                    "fragments": [{
+                        "kind": "paragraph",
+                        "blockId": "list-item",
+                        "x": 20,
+                        "y": 20,
+                        "width": 360,
+                        "height": 40,
+                        "fromLine": 0,
+                        "toLine": 2
+                    }]
+                }]
+            }
+        });
+        let output: Value =
+            serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap()).unwrap();
+        let primitives = output["pages"][0]["primitives"].as_array().unwrap();
+        let markers: Vec<_> = primitives
+            .iter()
+            .filter(|primitive| primitive["listMarker"] == true)
+            .collect();
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0]["x"], 20.0);
+        assert_eq!(markers[0]["width"], 143.0);
+        let first = primitives
+            .iter()
+            .find(|primitive| primitive["text"] == "first")
+            .unwrap();
+        let second = primitives
+            .iter()
+            .find(|primitive| primitive["text"] == "second")
+            .unwrap();
+        assert_eq!(first["x"], 20.0 + 143.0);
+        assert_eq!(second["x"], 20.0 + 113.0);
     }
 
     #[test]
