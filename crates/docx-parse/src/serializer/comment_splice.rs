@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::comments::Comment;
 use crate::paragraph::HexIdAllocator;
-use crate::paragraph_identity::{attribute, tags, unescaped};
+use crate::paragraph_identity::{attribute, parse_paragraph_id, tags, unescaped};
 use crate::relationships::parse_relationships;
 use crate::s8::{find_part, parse_comment_part};
 use crate::styles::StyleMap;
@@ -27,6 +27,9 @@ pub(super) fn splice_comments(
     serialized: &str,
     infos: &mut Vec<CommentParaInfo>,
 ) -> Result<String, ParseError> {
+    if !crate::xml::reads_as_written(source) {
+        return Err(error_xml("source requires whole-part writing"));
+    }
     let source = std::str::from_utf8(source).map_err(|error| error_xml(error.to_string()))?;
     let source = expand_empty_root(source)?;
     let original = source_comments(parts, seed)?;
@@ -122,7 +125,14 @@ fn source_metadata_changed(source: &Comment, written: &Comment) -> bool {
 }
 
 fn can_replay(source: &Comment, written: &Comment, fragment: &str) -> Result<bool, ParseError> {
-    if !unchanged(source, written)? {
+    if source
+        .para_id
+        .as_deref()
+        .is_some_and(|id| parse_paragraph_id(id).is_none())
+        || (source.para_id.is_none()
+            && (source.durable_id != written.durable_id || source.date_utc != written.date_utc))
+        || !unchanged(source, written)?
+    {
         return Ok(false);
     }
     let limits = ParseLimits::default();

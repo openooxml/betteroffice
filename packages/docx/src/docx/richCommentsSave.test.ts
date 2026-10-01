@@ -15,7 +15,7 @@ const NS = `xmlns:w="${W}" xmlns:r="${R}" xmlns:w14="${W14}"`;
 const RICH = '<w:comment w:author="Rich reviewer" w:id="0" w:initials="R">\n' +
   '<w:p w14:paraId="10000001"><w:hyperlink r:id="link"><w:r><w:t>Linked</w:t></w:r></w:hyperlink>' +
   '<w:r><w:rPr><w:color w:val="CC0000"/><w:u w:val="single"/><w:sz w:val="28"/>' +
-  '<w:highlight w:val="yellow"/></w:rPr><w:t> colorful</w:t></w:r></w:p>\n' +
+  '<w:highlight w:val="yellow"/></w:rPr><w:t xml:space="preserve"> colorful</w:t></w:r></w:p>\n' +
   '<w:p w14:paraId="10000002"><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>Second</w:t></w:r></w:p>\n' +
   '<w:tbl><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc>' +
   '<w:p w14:paraId="10000003"><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>\n' +

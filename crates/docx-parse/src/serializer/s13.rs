@@ -967,7 +967,9 @@ fn ensure_comment_parts(package: &mut Package) {
     if let Some(mut content_types) = package.text("[Content_Types].xml") {
         let mut changed = false;
         for (part_name, content_type, _, _) in parts {
-            if content_types.contains(part_name) {
+            if !package.contains(part_name.trim_start_matches('/'))
+                || content_types.contains(part_name)
+            {
                 continue;
             }
             let entry =
@@ -987,8 +989,10 @@ fn ensure_comment_parts(package: &mut Package) {
         return;
     };
     let mut relationships = RelationshipsIndex::parse(relationships_xml);
-    for (_, _, target, relationship_type) in parts {
-        if relationships.xml_contains(target) {
+    for (part_name, _, target, relationship_type) in parts {
+        if !package.contains(part_name.trim_start_matches('/'))
+            || relationships.xml_contains(target)
+        {
             continue;
         }
         let relationship_id = relationships.next_id();

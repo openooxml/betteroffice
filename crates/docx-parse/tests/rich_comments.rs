@@ -1,10 +1,14 @@
 use docx_parse::document::DocumentBody;
-use docx_parse::paragraph_identity::paragraph_ids_by_part;
+use docx_parse::paragraph_identity::{paragraph_ids_by_part, parse_paragraph_id};
+use docx_parse::relationships::{
+    RelationshipTarget, parse_relationships, resolve_relationship_target,
+};
 use docx_parse::s9::{S9ParseOptions, parse_docx_s9_wire};
 use docx_parse::serializer::{
     S13SaveOptions, S13SaveRequest, SerializerContext, SerializerDeterminism,
     serialize_comments_part, write_docx_s13,
 };
+use docx_parse::xml::{ParseBudget, ParseLimits, parse_xml};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -12,7 +16,7 @@ const RICH_COMMENT: &str = concat!(
     "<w:comment w:author='Rich reviewer' w:id=\"0\" w:initials=\"R\">\n",
     "  <w:p w14:paraId=\"10000001\"><w:hyperlink r:id=\"link\"><w:r><w:t>Linked</w:t></w:r></w:hyperlink>",
     "<w:r><w:rPr><w:color w:val=\"CC0000\"/><w:u w:val=\"single\"/><w:sz w:val=\"28\"/>",
-    "<w:highlight w:val=\"yellow\"/></w:rPr><w:t> colorful</w:t></w:r></w:p>\n",
+    "<w:highlight w:val=\"yellow\"/></w:rPr><w:t xml:space=\"preserve\"> colorful</w:t></w:r></w:p>\n",
     "  <w:p w14:paraId=\"10000002\"><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:t>Second</w:t></w:r></w:p>\n",
     "  <w:tbl><w:tblGrid><w:gridCol w:w=\"2400\"/></w:tblGrid><w:tr><w:tc>",
     "<w:p w14:paraId=\"10000003\"><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>\n",
@@ -499,14 +503,162 @@ fn deleting_the_only_comment_with_source_ids_rewrites_existing_companions() {
 }
 
 #[test]
-fn malformed_comment_text_uses_the_writer_fragment() {
+fn malformed_comment_text_uses_the_writer_part() {
     let malformed = PLAIN_COMMENT.replace("<w:t>Plain</w:t>", "<w:t>A & B</w:t>");
     let source = fixture_with_comment_parts(&format!("{RICH_COMMENT}\n{malformed}"), &[]);
-    let saved = write_docx_s13(save_request(&source), &source).unwrap();
-    assert_rich_comment(&saved);
+    let request = save_request(&source);
+    let expected = serialize_comments_part(
+        request.document.comments.as_ref().unwrap(),
+        &mut SerializerContext::new(&request.determinism).unwrap(),
+    );
+    let saved = write_docx_s13(request, &source).unwrap();
+    assert_eq!(part(&saved, "word/comments.xml"), expected.as_bytes());
     let xml = String::from_utf8(part(&saved, "word/comments.xml")).unwrap();
     assert!(xml.contains("<w:t>A &amp; B</w:t>"));
     assert!(!xml.contains("<w:t>A & B</w:t>"));
+}
+
+#[test]
+fn non_utf8_comment_declaration_uses_the_writer_part() {
+    let mut parts =
+        ooxml_opc::unzip_parts(&fixture_with_comment_parts(PLAIN_COMMENT, &[])).unwrap();
+    let (_, bytes) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "word/comments.xml")
+        .unwrap();
+    *bytes = std::str::from_utf8(bytes)
+        .unwrap()
+        .replace("encoding='UTF-8'", "encoding='windows-1252'")
+        .into_bytes();
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut request = save_request(&source);
+    request.document.comments.as_mut().unwrap().push(
+        serde_json::from_value(json!({
+            "id": 2, "author": "New reviewer", "content": [{
+                "type": "paragraph", "content": [{
+                    "type": "run", "content": [{ "type": "text", "text": "café" }]
+                }]
+            }]
+        }))
+        .unwrap(),
+    );
+    let expected = serialize_comments_part(
+        request.document.comments.as_ref().unwrap(),
+        &mut SerializerContext::new(&request.determinism).unwrap(),
+    );
+    let saved = write_docx_s13(request, &source).unwrap();
+    assert_eq!(part(&saved, "word/comments.xml"), expected.as_bytes());
+    let comments = save_request(&saved).document.comments.unwrap();
+    let added = comments.iter().find(|comment| comment.id == 2.0).unwrap();
+    assert_eq!(
+        serde_json::to_value(&added.content).unwrap()[0]["content"][0]["content"][0]["text"],
+        "café"
+    );
+}
+
+#[test]
+fn invalid_source_comment_paragraph_id_uses_the_writer_fragment() {
+    let invalid = PLAIN_COMMENT.replace("10000004", "1000000&quot;");
+    let source = fixture_with_comment_parts(&invalid, &[]);
+    let saved = write_docx_s13(save_request(&source), &source).unwrap();
+    let limits = ParseLimits::default();
+    for path in ["word/commentsExtended.xml", "word/commentsIds.xml"] {
+        let document =
+            parse_xml(&part(&saved, path), path, &mut ParseBudget::new(&limits)).unwrap();
+        let root = document.root().unwrap();
+        assert!(root.child_elements().next().is_some());
+        for child in root.child_elements() {
+            let id = child
+                .attribute_any(&["w15:paraId", "w16cid:paraId"])
+                .unwrap();
+            assert!(parse_paragraph_id(id).is_some());
+        }
+    }
+    let comments = save_request(&saved).document.comments.unwrap();
+    assert!(parse_paragraph_id(comments[0].para_id.as_deref().unwrap()).is_some());
+}
+
+#[test]
+fn comments_without_source_ids_register_only_existing_parts() {
+    let comment = PLAIN_COMMENT.replace(" w14:paraId=\"10000004\"", "");
+    let source = fixture_with_comment_parts(&comment, &[]);
+    let saved = write_docx_s13(save_request(&source), &source).unwrap();
+    assert_eq!(
+        part(&saved, "word/comments.xml"),
+        part(&source, "word/comments.xml")
+    );
+    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    let limits = ParseLimits::default();
+    for (path, bytes) in parts.iter().filter(|(path, _)| path.ends_with(".rels")) {
+        let relationships =
+            parse_relationships(bytes, path, &mut ParseBudget::new(&limits)).unwrap();
+        for relationship in relationships.values() {
+            if let RelationshipTarget::Internal(target) =
+                resolve_relationship_target(path, relationship).unwrap()
+            {
+                assert!(parts.iter().any(|(path, _)| path == &target), "{target}");
+            }
+        }
+    }
+    let content_types = parse_xml(
+        &part(&saved, "[Content_Types].xml"),
+        "[Content_Types].xml",
+        &mut ParseBudget::new(&limits),
+    )
+    .unwrap();
+    for entry in content_types
+        .root()
+        .unwrap()
+        .children_by_local_name("Override")
+    {
+        let target = entry.attribute(None, "PartName").unwrap();
+        assert!(
+            parts
+                .iter()
+                .any(|(path, _)| path == target.trim_start_matches('/')),
+            "{target}"
+        );
+    }
+}
+
+#[test]
+fn malformed_comment_root_attribute_uses_the_writer_part() {
+    let mut parts =
+        ooxml_opc::unzip_parts(&fixture_with_comment_parts(PLAIN_COMMENT, &[])).unwrap();
+    let (_, bytes) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "word/comments.xml")
+        .unwrap();
+    *bytes = std::str::from_utf8(bytes)
+        .unwrap()
+        .replace("<w:comments ", "<w:comments xmlns:synthetic=\"urn:A & B\" ")
+        .into_bytes();
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    let request = save_request(&source);
+    let expected = serialize_comments_part(
+        request.document.comments.as_ref().unwrap(),
+        &mut SerializerContext::new(&request.determinism).unwrap(),
+    );
+    let saved = write_docx_s13(request, &source).unwrap();
+    let xml = part(&saved, "word/comments.xml");
+    assert_eq!(xml, expected.as_bytes());
+    assert!(docx_parse::xml::reads_as_written(&xml));
+}
+
+#[test]
+fn setting_durable_id_without_source_paragraph_ids_writes_the_companion() {
+    let source = fixture_without_rich_paragraph_ids();
+    let mut request = save_request(&source);
+    request.document.comments.as_mut().unwrap()[0].durable_id = Some("20000001".to_owned());
+    let saved = write_docx_s13(request, &source).unwrap();
+    let ids = String::from_utf8(part(&saved, "word/commentsIds.xml")).unwrap();
+    assert!(ids.contains("w16cid:durableId=\"20000001\""));
+    assert_eq!(
+        save_request(&saved).document.comments.unwrap()[0]
+            .durable_id
+            .as_deref(),
+        Some("20000001")
+    );
 }
 
 #[test]

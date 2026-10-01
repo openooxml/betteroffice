@@ -164,7 +164,7 @@ function commentedFixture(options: FixtureOptions = {}): Fixture {
 const RICH_COMMENT = '<w:comment w:author="Rich reviewer" w:id="0" w:initials="R">\n' +
   '<w:p w14:paraId="10000010"><w:hyperlink r:id="commentLink">' + run('Linked') + '</w:hyperlink>' +
   '<w:r><w:rPr><w:color w:val="CC0000"/><w:u w:val="single"/><w:sz w:val="28"/>' +
-  '<w:highlight w:val="yellow"/></w:rPr><w:t> colorful</w:t></w:r></w:p>\n' +
+  '<w:highlight w:val="yellow"/></w:rPr><w:t xml:space="preserve"> colorful</w:t></w:r></w:p>\n' +
   '<w:p w14:paraId="10000011"><w:pPr><w:jc w:val="center"/></w:pPr>' + run('Second') + '</w:p>\n' +
   '<w:tbl><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc>' +
   paragraph('10000012', run('Cell')) + '</w:tc></w:tr></w:tbl>\n' +
