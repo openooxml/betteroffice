@@ -78,13 +78,30 @@ fn fitting_full_width_floats_retain_their_anchor() {
     assert_eq!(output["pages"][0]["fragments"][2]["y"], 95);
 }
 
+/// Word paginates a side-wrapping text-relative table that crosses the body
+/// bottom like any table, and the text after it starts beside its last
+/// fragment.
 #[test]
-fn overflowing_narrow_floats_move_and_page_relative_floats_keep_their_placement() {
+fn overflowing_narrow_floats_split_and_page_relative_floats_keep_their_placement() {
     let narrow = layout(50, table(60, 10));
     assert_eq!(narrow["pages"].as_array().unwrap().len(), 2);
-    assert_eq!(narrow["pages"][0]["fragments"].as_array().unwrap().len(), 1);
-    assert_eq!(narrow["pages"][1]["fragments"][0]["y"], 20);
-    assert_eq!(narrow["pages"][1]["fragments"][0]["height"], 60);
+    assert_eq!(narrow["pages"][0]["fragments"].as_array().unwrap().len(), 2);
+    let first = &narrow["pages"][0]["fragments"][1];
+    let next = &narrow["pages"][1]["fragments"][0];
+    assert_eq!(first["rowStart"], 0);
+    assert_eq!(first["rowEnd"], 2);
+    assert_eq!(first["y"], 70);
+    assert_eq!(first["height"], 40);
+    assert_eq!(first["carriedToNext"], true);
+    assert_eq!(next["rowStart"], 2);
+    assert_eq!(next["rowEnd"], 3);
+    assert_eq!(next["y"], 10);
+    assert_eq!(next["height"], 20);
+    assert_eq!(next["carriedFromPrev"], true);
+    assert_eq!(first["x"], 13);
+    assert_eq!(next["x"], 13);
+    assert_eq!(next["isFloating"], true);
+    assert_eq!(narrow["pages"][1]["fragments"][1]["blockId"], "after");
     assert_eq!(narrow["pages"][1]["fragments"][1]["y"], 10);
     let mut table = table(180, 10);
     table["block"]["floating"]["vertAnchor"] = json!("page");
@@ -93,10 +110,25 @@ fn overflowing_narrow_floats_move_and_page_relative_floats_keep_their_placement(
     assert_eq!(page_relative["pages"][0]["fragments"][1]["rowEnd"], 3);
 }
 
-/// Word moves a side-wrapping text-relative table with its anchor paragraph
-/// when its rows cross the body bottom and a fresh body can hold the table.
+/// When not even its first row fits below its position, the table moves whole
+/// and its anchor paragraph starts the next page beside it.
 #[test]
-fn a_narrow_float_moves_with_its_measured_multiline_anchor() {
+fn a_narrow_float_whose_first_row_does_not_fit_moves_with_its_anchor() {
+    let output = layout(85, table(60, 10));
+    assert_eq!(output["pages"].as_array().unwrap().len(), 2);
+    assert_eq!(output["pages"][0]["fragments"].as_array().unwrap().len(), 1);
+    let moved = &output["pages"][1]["fragments"][0];
+    assert_eq!(moved["kind"], "table");
+    assert_eq!(moved["rowStart"], 0);
+    assert_eq!(moved["rowEnd"], 3);
+    assert_eq!(moved["y"], 10);
+    assert_eq!(moved["x"], 13);
+    assert_eq!(output["pages"][1]["fragments"][1]["blockId"], "after");
+    assert_eq!(output["pages"][1]["fragments"][1]["y"], 10);
+}
+
+#[test]
+fn a_split_narrow_float_wraps_its_measured_anchor_beside_the_last_fragment() {
     use docx_layout::measure_blocks::{MeasurementConfig, measure_blocks_with_floats};
     use docx_layout::types::{BlockExtent, Fragment, Input, LayoutBlock, MeasuredBlock};
 
@@ -147,79 +179,30 @@ fn a_narrow_float_moves_with_its_measured_multiline_anchor() {
     );
     let output = docx_layout::compute_layout_input(&mut input).unwrap();
     assert_eq!(output.pages.len(), 2);
-    assert!(
-        output.pages[0]
-            .fragments
-            .iter()
-            .all(|fragment| !matches!(fragment, Fragment::Table(_)))
+    let Some(Fragment::Table(first)) = output.pages[0].fragments.last() else {
+        panic!("first table fragment expected on page 1");
+    };
+    assert_eq!(
+        (first.x, first.y, first.row_start, first.row_end),
+        (130.0, 85.0, 0, 1)
     );
-    let [Fragment::Table(table), Fragment::Paragraph(anchor)] =
-        output.pages[1].fragments.as_slice()
+    assert_eq!(first.carried_to_next, Some(true));
+    let [Fragment::Table(last), Fragment::Paragraph(anchor)] = output.pages[1].fragments.as_slice()
     else {
         panic!("table and anchor expected on page 2");
     };
     assert_eq!(
-        (table.x, table.y, table.row_start, table.row_end),
-        (130.0, 15.0, 0, 2)
+        (last.x, last.y, last.row_start, last.row_end),
+        (130.0, 10.0, 1, 2)
     );
     assert_eq!((anchor.y, anchor.from_line), (10.0, 0));
-    assert_eq!(table.y - anchor.y, 5.0);
-    assert!(table.y + table.height <= output.pages[1].size.h - output.pages[1].margins.bottom);
-}
-
-#[test]
-fn narrow_floats_that_cannot_fit_at_the_body_top_do_not_retry() {
-    for (prefix, offset, page_index, y) in [(0, 50, 0, 60), (50, 80, 1, 90)] {
-        let output = layout(prefix, table(60, offset));
-        assert_eq!(output["pages"].as_array().unwrap().len(), page_index + 1);
-        let fragment = output["pages"][page_index]["fragments"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|fragment| fragment["kind"] == "table")
-            .unwrap();
-        assert_eq!(fragment["y"], y);
-        assert_eq!(fragment["rowEnd"], 3);
-        assert!(fragment["carriedToNext"].is_null());
-        assert!(fragment["y"].as_f64().unwrap() + fragment["height"].as_f64().unwrap() > 110.0);
+    for page in &output.pages {
+        for fragment in &page.fragments {
+            if let Fragment::Table(table) = fragment {
+                assert!(table.y + table.height <= page.size.h - page.margins.bottom);
+            }
+        }
     }
-}
-
-#[test]
-fn a_narrow_float_stays_when_the_next_body_cannot_hold_its_rows() {
-    let input = json!({
-        "measured":[paragraph("before",50),table(60,10),paragraph("after",10)],
-        "options":{"pageSize":{"w":200,"h":120},
-            "margins":{"top":10,"right":10,"bottom":10,"left":10},
-            "footnoteReservedHeights":{"2":45}}
-    });
-    let output: Value =
-        serde_json::from_str(&docx_layout::layout_to_canonical_json(&input.to_string()).unwrap())
-            .unwrap();
-    assert_eq!(output["pages"].as_array().unwrap().len(), 1);
-    assert_eq!(output["pages"][0]["fragments"][1]["y"], 70);
-    assert_eq!(output["pages"][0]["fragments"][1]["rowEnd"], 3);
-    assert_eq!(output["pages"][0]["fragments"][2]["y"], 60);
-}
-
-#[test]
-fn an_overflowing_narrow_float_moves_to_the_next_column() {
-    let mut floating = table(40, 10);
-    floating["block"]["floating"]["horzAnchor"] = json!("text");
-    let input = json!({
-        "measured":[paragraph("before",50),floating,paragraph("after",10)],
-        "options":{"pageSize":{"w":200,"h":120},
-            "margins":{"top":10,"right":10,"bottom":10,"left":10},
-            "columns":{"count":2,"gap":20}}
-    });
-    let output: Value =
-        serde_json::from_str(&docx_layout::layout_to_canonical_json(&input.to_string()).unwrap())
-            .unwrap();
-    assert_eq!(output["pages"].as_array().unwrap().len(), 1);
-    assert_eq!(output["pages"][0]["fragments"][1]["x"], 113);
-    assert_eq!(output["pages"][0]["fragments"][1]["y"], 20);
-    assert_eq!(output["pages"][0]["fragments"][2]["x"], 110);
-    assert_eq!(output["pages"][0]["fragments"][2]["y"], 10);
 }
 
 #[test]

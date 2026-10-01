@@ -559,13 +559,49 @@ fn layout_table_with_position(
     Ok(())
 }
 
-fn floating_table_position(
+/// Places a `w:tblpPr` table as an overlay that normally leaves the pen alone.
+///
+/// A table taller than one column cannot float and falls back to
+/// [`layout_table`]. Otherwise `w:horzAnchor` / `w:vertAnchor` pick the
+/// page, margin or text band, an explicit `w:tblpX` / `w:tblpY` offsets from
+/// that band's start, and an alignment spec resolves against it — `inside` and
+/// `outside` flip with page parity. Only when the wrap gutters on both sides of
+/// the table fall below the minimum wrap segment (24px) does the pen advance
+/// past the table plus its `w:bottomFromText` distance, since no line could
+/// wrap beside it. In a single column, text-anchored tables that cross the
+/// bottom boundary use row fragmentation and retain their X position; text
+/// after a side-wrapped one resumes beside its last fragment.
+/// Page-relative full-width tables advance when inline collisions cannot reflow.
+pub fn layout_floating_table(
     block: &TableBlock,
     measure: &TableExtent,
-    paginator: &Paginator,
-    state_idx: usize,
-) -> (f64, f64, bool) {
-    let floating = block.floating.as_ref().unwrap();
+    paginator: &mut Paginator,
+    content_width: f64,
+) -> Result<(), LayoutError> {
+    if block.rows.is_empty() || measure.rows.is_empty() {
+        return Err(unsupported("floating table without measurable rows"));
+    }
+    let initial_state = paginator.get_current();
+    let column_capacity =
+        paginator.state(initial_state).content_limit - paginator.state(initial_state).content_top;
+    if measure.total_height > column_capacity {
+        return layout_table(block, measure, paginator);
+    }
+
+    let floating = block
+        .floating
+        .as_ref()
+        .expect("floating table hook requires tblpPr");
+    let has_explicit_y = floating.tblp_y.is_some()
+        || floating
+            .tblp_y_spec
+            .as_deref()
+            .is_some_and(|spec| spec != "inline");
+    if !has_explicit_y {
+        paginator.ensure_fits(measure.total_height);
+    }
+
+    let state_idx = paginator.get_current();
     let state = paginator.state(state_idx);
     let page = &paginator.pages[state.page_index];
     let margins = page.body_anchor_margins.as_ref().unwrap_or(&page.margins);
@@ -637,70 +673,6 @@ fn floating_table_position(
     let left_space = exclusion_left - column_x;
     let right_space = column_x + column_width - exclusion_right;
     let full_width = left_space < 24.0 && right_space < 24.0;
-    (x, y, full_width)
-}
-
-/// Places a `w:tblpPr` table as an overlay that normally leaves the pen alone.
-///
-/// A table taller than one column cannot float and falls back to
-/// [`layout_table`]. Otherwise `w:horzAnchor` / `w:vertAnchor` pick the
-/// page, margin or text band, an explicit `w:tblpX` / `w:tblpY` offsets from
-/// that band's start, and an alignment spec resolves against it — `inside` and
-/// `outside` flip with page parity. Only when the wrap gutters on both sides of
-/// the table fall below the minimum wrap segment (24px) does the pen advance
-/// past the table plus its `w:bottomFromText` distance, since no line could
-/// wrap beside it. In a single column, text-anchored full-width tables that
-/// cross the bottom boundary use row fragmentation and retain their X position.
-/// Page-relative full-width tables advance when inline collisions cannot reflow.
-pub fn layout_floating_table(
-    block: &TableBlock,
-    measure: &TableExtent,
-    paginator: &mut Paginator,
-    mut content_width: f64,
-) -> Result<(), LayoutError> {
-    if block.rows.is_empty() || measure.rows.is_empty() {
-        return Err(unsupported("floating table without measurable rows"));
-    }
-    let initial_state = paginator.get_current();
-    let column_capacity =
-        paginator.state(initial_state).content_limit - paginator.state(initial_state).content_top;
-    if measure.total_height > column_capacity {
-        return layout_table(block, measure, paginator);
-    }
-
-    let floating = block
-        .floating
-        .as_ref()
-        .expect("floating table hook requires tblpPr");
-    let has_explicit_y = floating.tblp_y.is_some()
-        || floating
-            .tblp_y_spec
-            .as_deref()
-            .is_some_and(|spec| spec != "inline");
-    if !has_explicit_y {
-        paginator.ensure_fits(measure.total_height);
-    }
-
-    let mut state_idx = paginator.get_current();
-    let vertical = floating.vert_anchor.as_deref().unwrap_or("text");
-    let (mut x, mut y, mut full_width) =
-        floating_table_position(block, measure, paginator, state_idx);
-    if !full_width
-        && has_explicit_y
-        && vertical == "text"
-        && y + measure.total_height > paginator.state(state_idx).content_limit
-        && paginator.state(state_idx).pen_y > paginator.state(state_idx).content_top
-        && measure.total_height <= paginator.next_column_body_height()?
-    {
-        state_idx = paginator.advance_for_overflow();
-        (x, y, full_width) = floating_table_position(block, measure, paginator, state_idx);
-        content_width = paginator.get_content_width();
-    }
-
-    let state = paginator.state(state_idx);
-    let page = &paginator.pages[state.page_index];
-    let column_width = paginator.column_width();
-    let finite = |value: Option<f64>| value.filter(|v| v.is_finite()).unwrap_or(0.0);
     let bottom = y + measure.total_height;
     if full_width
         && vertical == "page"
@@ -730,18 +702,33 @@ pub fn layout_floating_table(
         let next_content_width = paginator.get_content_width();
         return layout_floating_table(block, measure, paginator, next_content_width);
     }
-    if full_width
-        && (content_width - column_width).abs() < f64::EPSILON
+    if (content_width - column_width).abs() < f64::EPSILON
         && vertical == "text"
         && !matches!(floating.tblp_x_spec.as_deref(), Some("inside" | "outside"))
         && y >= state.pen_y
         && y + measure.total_height > state.content_limit
     {
+        let pen_y = state.pen_y;
         paginator.set_pen_y(state_idx, y);
         layout_table_with_position(block, measure, paginator, Some(x))?;
         let last_state = paginator.get_current();
-        let bottom = paginator.state(last_state).pen_y + finite(floating.bottom_from_text).max(0.0);
-        paginator.set_pen_y(last_state, bottom);
+        let resume = if full_width {
+            paginator.state(last_state).pen_y + finite(floating.bottom_from_text).max(0.0)
+        } else if last_state == state_idx {
+            pen_y
+        } else {
+            let last = paginator.state(last_state);
+            paginator.pages[last.page_index]
+                .fragments
+                .iter()
+                .rev()
+                .find_map(|fragment| match fragment {
+                    Fragment::Table(table) if table.block_id == block.id => Some(table.y),
+                    _ => None,
+                })
+                .unwrap_or(last.content_top)
+        };
+        paginator.set_pen_y(last_state, resume);
         return Ok(());
     }
 

@@ -2834,14 +2834,14 @@ mod pagination_rule_tests {
     }
 
     #[test]
-    fn a_moved_explicit_y_narrow_float_and_its_anchor_match_incremental_layout() {
+    fn a_split_side_wrapped_float_and_its_anchor_match_incremental_layout() {
         let blocks = |height: f64, offset: f64, anchor_before: f64| {
             let floating = json!({
                 "block": {
                     "kind": "table", "id": 90, "columnWidths": [60],
                     "rows": [
-                        {"id": 91, "cells": []},
-                        {"id": 92, "cells": []}
+                        {"id": 91, "height": 30, "heightRule": "exact", "cells": []},
+                        {"id": 92, "height": 30, "heightRule": "exact", "cells": []}
                     ],
                     "floating": {
                         "horzAnchor": "text", "vertAnchor": "text",
@@ -2870,34 +2870,29 @@ mod pagination_rule_tests {
                 anchor,
             ]
         };
-        let moved = blocks(50.0, 10.0, 20.0);
+        let split = blocks(40.0, 10.0, 0.0);
         let retained =
-            assert_incremental_matches_full(moved.clone(), blocks(50.0, 10.0, 30.0), &[3]);
+            assert_incremental_matches_full(split.clone(), blocks(40.0, 10.0, 12.0), &[3]);
         assert_eq!(retained.layout.pages.len(), 3);
+        let Some(Fragment::Table(first)) = retained.layout.pages[1].fragments.last() else {
+            panic!("first table fragment expected");
+        };
+        assert_eq!((first.row_start, first.row_end), (0, 1));
+        assert_eq!(first.carried_to_next, Some(true));
         let [Fragment::Table(table), Fragment::Paragraph(anchor)] =
             retained.layout.pages[2].fragments.as_slice()
         else {
             panic!("table and anchor expected");
         };
         assert_eq!(
-            (table.x, table.y, anchor.y, anchor.from_line),
-            (130.0, 20.0, 10.0, 0)
+            (table.x, table.y, table.row_start, table.row_end),
+            (130.0, 10.0, 1, 2)
         );
-        let checkpoint = retained
-            .checkpoints
-            .iter()
-            .find(|checkpoint| checkpoint.block_index == 2)
-            .unwrap();
-        assert_eq!(checkpoint.flow.leading_spacing_spent, f64::INFINITY);
-        assert!(!resumable(
-            checkpoint,
-            &input(moved.clone()).measured,
-            &retained.layout.pages
-        ));
-        let fitting = blocks(10.0, 10.0, 20.0);
-        assert_incremental_matches_full(moved.clone(), fitting.clone(), &[1]);
-        assert_incremental_matches_full(fitting, moved.clone(), &[1]);
-        assert_incremental_matches_full(moved, blocks(50.0, -15.0, 20.0), &[2]);
+        assert_eq!((anchor.y, anchor.from_line), (10.0, 0));
+        let fitting = blocks(10.0, 10.0, 0.0);
+        assert_incremental_matches_full(split.clone(), fitting.clone(), &[1]);
+        assert_incremental_matches_full(fitting, split.clone(), &[1]);
+        assert_incremental_matches_full(split, blocks(40.0, 45.0, 0.0), &[2]);
     }
 
     #[test]
