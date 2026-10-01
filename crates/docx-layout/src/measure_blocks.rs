@@ -2378,7 +2378,10 @@ fn measure_table(
                     .padding
                     .as_ref()
                     .map_or(0.0, |padding| padding.top + padding.bottom);
-                row.height.unwrap_or(content_width) - padding
+                row.height
+                    .filter(|_| row.is_exact_height())
+                    .unwrap_or(content_width)
+                    - padding
             } else {
                 cell_width - left - right
             };
@@ -3797,6 +3800,31 @@ mod tests {
                     .and_then(serde_json::Number::as_f64),
                 Some(rotation)
             );
+        }
+    }
+
+    #[test]
+    fn vertical_labels_in_minimum_height_rows_stay_on_one_line_and_grow_the_row() {
+        for height in [Some(20.0), None] {
+            let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([{
+                "kind":"table","id":"table","columnWidths":[30],"rows":[{
+                    "id":"row","height":height,"heightRule":height.map(|_| "atLeast"),"cells":[{
+                        "id":"cell","textDirection":"btLr","padding":{"left":0,"right":0,"top":4,"bottom":4},
+                        "blocks":[{"kind":"paragraph","id":"label","runs":[{"kind":"text","text":"Vertical label","fontSize":12}]}]
+                    }]
+                }]
+            }])).unwrap();
+            let measured =
+                measure_blocks(&mut blocks, 200.0, &MeasurementConfig::default()).unwrap();
+            let BlockExtent::Table(table) = &measured[0] else {
+                panic!()
+            };
+            let BlockExtent::Paragraph(label) = &table.rows[0].cells[0].blocks[0] else {
+                panic!()
+            };
+            assert_eq!(label.lines.len(), 1, "{height:?}");
+            assert!(label.lines[0].width > 20.0, "{height:?}");
+            assert_eq!(table.total_height, label.lines[0].width + 8.0, "{height:?}");
         }
     }
 
