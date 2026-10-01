@@ -159,6 +159,71 @@ test('pages away from the viewport build in batches while the main thread idles'
   }
 });
 
+test('worker-open idle builds stop after the viewport margin', async () => {
+  const { engine, inputs, host } = lazyFixture();
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(
+        inputs.layout as Layout, overrides, undefined, undefined, host,
+        undefined, undefined, undefined, true
+      )
+    );
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    const pages = () => result.current.frame!.displayList.pages;
+    expect(pages().length).toBeGreaterThan(7);
+    expect(pages().slice(0, 5).every((page) => !page.unbuilt)).toBe(true);
+    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    await act(async () => runIdleCallbacks());
+    await waitFor(() => expect(pages().slice(0, 7).every((page) => !page.unbuilt)).toBe(true));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      runIdleCallbacks();
+    });
+    expect(idleCallbacks.size).toBe(0);
+    expect(pages().slice(7).every((page) => page.unbuilt)).toBe(true);
+    expect(
+      EngineWorker.last!.posted.filter((request) => request.type === 'buildPages')
+    ).toEqual([expect.objectContaining({ pages: [5, 6] })]);
+    unmount();
+  } finally {
+    engine.free();
+  }
+});
+
+test('worker-open window settling leaves far pages unbuilt while document settling builds them', async () => {
+  const { engine, inputs, host } = lazyFixture();
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(
+        inputs.layout as Layout, overrides, undefined, undefined, host,
+        undefined, undefined, undefined, true
+      )
+    );
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    const pageCount = result.current.frame!.displayList.pages.length;
+    expect(pageCount).toBeGreaterThan(7);
+    await act(async () => {
+      const settled = await result.current.settledDisplayList(null, null, 'window');
+      expect(settled.pages).toHaveLength(pageCount);
+      expect(settled.pages.slice(0, 7).every((page) => !page.unbuilt)).toBe(true);
+      expect(settled.pages.slice(7).every((page) => page.unbuilt)).toBe(true);
+    });
+    expect(
+      EngineWorker.last!.posted.filter((request) => request.type === 'buildPages')
+    ).toEqual([expect.objectContaining({ pages: [5, 6] })]);
+    await act(async () => {
+      const settled = await result.current.settledDisplayList(null, null);
+      expect(settled.pages).toHaveLength(pageCount);
+      expect(settled.pages.every((page) => !page.unbuilt)).toBe(true);
+    });
+    unmount();
+  } finally {
+    engine.free();
+  }
+});
+
 test('a full worker rebuild retains built pages until released and rebuilds evicted pages on demand', async () => {
   const { engine, inputs, host } = lazyFixture();
   try {
