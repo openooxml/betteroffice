@@ -96,6 +96,8 @@ export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
 
 const holdsWorkerProposals = (session: YrsSession): boolean =>
   registeredWorkerProposalAuthority(session)?.holdsWorkerState() === true;
+const holdsCommittedWorkerProposals = (session: YrsSession): boolean =>
+  registeredWorkerProposalAuthority(session)?.holdsCommittedWorkerState() === true;
 
 export type OpenInWorker = (
   session: YrsSession,
@@ -692,7 +694,7 @@ export function useRustDisplayList(
       if (current?.engine === hostEngine) return current;
       const failure = workerFailureRef.current.get(hostEngine);
       if (failure) throw failure;
-      if (holdsWorkerProposals(hostEngine)) {
+      if (holdsCommittedWorkerProposals(hostEngine)) {
         throw failWorkerDocument(
           hostEngine, new Error('The resident worker holding this document is gone')
         );
@@ -867,7 +869,7 @@ export function useRustDisplayList(
       workerRef.current = null;
       setWorkerSurfacesActive(false);
       setWorkerPresentationActive(false);
-      if (!previous && !holdsWorkerProposals(hostEngine)) {
+      if (!previous && !holdsCommittedWorkerProposals(hostEngine)) {
         outOfMemoryRef.current.set(hostEngine, null);
         console.warn(
           '[CanvasRenderer] Resident engine worker ran out of memory; starting a fresh worker',
@@ -1221,7 +1223,7 @@ export function useRustDisplayList(
         const outOfMemory = outOfMemoryRef.current.get(hostEngine);
         const failure = workerFailureRef.current.get(hostEngine);
         if (failure) throw failure;
-        if (holdsWorkerProposals(hostEngine) && workerRef.current?.engine !== hostEngine) {
+        if (holdsCommittedWorkerProposals(hostEngine) && workerRef.current?.engine !== hostEngine) {
           throw failWorkerDocument(
             hostEngine, outOfMemory ?? new Error('The resident worker holding this document is gone')
           );
@@ -1278,7 +1280,7 @@ export function useRustDisplayList(
             }
           } else {
             if (!isCurrentWorker(hostEngine, owner)) throw new SupersededPreviewError();
-            if (owner.client.hasFailed() && holdsWorkerProposals(hostEngine)) {
+            if (owner.client.hasFailed() && holdsCommittedWorkerProposals(hostEngine)) {
               throw failWorkerDocument(hostEngine, error);
             }
           }
