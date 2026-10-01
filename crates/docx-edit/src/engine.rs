@@ -2049,6 +2049,9 @@ impl EngineSession {
         lower_locally: bool,
     ) -> crate::OpResult<crate::Receipt> {
         let before = self.doc_epoch();
+        let paragraph_epoch =
+            (self.local_lowering.get() && text.is_some() && range.start == range.end)
+                .then(|| self.doc.committed_epoch());
         let mut attrs = None;
         let ctx = crate::EditCtx::local("", "");
         let receipt = match text {
@@ -2061,6 +2064,15 @@ impl EngineSession {
             )?,
             None => self.doc.delete_range(&ctx, range.clone())?,
         };
+        if let (Some(before), Some(text)) = (paragraph_epoch, text) {
+            self.doc.advance_paragraph_index_after_text_insert(
+                &range.story,
+                before,
+                self.doc.committed_epoch(),
+                range.start,
+                text.encode_utf16().count() as u32,
+            );
+        }
         let mut render = self.render.borrow_mut();
         let eligible = lower_locally
             && self.local_lowering.get()
@@ -4455,8 +4467,8 @@ impl EngineSession {
                             let txn = self.doc.yrs_doc().transact();
                             let index = head.get_offset(&txn)?.index;
                             drop(txn);
-                            let segments = self.doc.segment_index(story).ok()?;
-                            let paragraph = segments.para_at(index)?;
+                            let paragraphs = self.doc.paragraph_index(story).ok()?;
+                            let paragraph = paragraphs.para_at(index)?;
                             let (epoch, map) = pagination.input_lowering.as_ref()?;
                             if *epoch != self.doc_epoch() {
                                 return None;
@@ -6630,6 +6642,64 @@ mod tests {
         for enabled in [false, true] {
             resident_plain_text_patch_matches_cold_full_in(enabled);
         }
+    }
+
+    #[test]
+    fn resident_text_insert_windowed_frames_match_with_local_lowering() {
+        use yrs::{Assoc, IndexedSequence};
+
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(lowering_pages::FONT).unwrap();
+        let request = small_page_request(font);
+        let [(full, full_frame), (local, local_frame)] = [false, true].map(|enabled| {
+            let engine = paragraphs_engine(9608, 24);
+            engine.set_local_lowering(enabled);
+            engine.layout_document_with_regions_json(&request).unwrap();
+            let paragraph = engine.doc().paragraphs("body").unwrap().remove(12);
+            let paragraphs = engine.doc().paragraph_index("body").unwrap();
+            let (start, _) = paragraphs.para_span(&paragraph.para_id).unwrap();
+            let txn = engine.doc().yrs_doc().transact();
+            let story = crate::story_ref(&txn, "body").unwrap();
+            let head = story.sticky_index(&txn, start + 13, Assoc::After).unwrap();
+            drop(txn);
+            engine.set_resident_caret_head(Some(("body".to_owned(), head)));
+            engine.set_display_window(Some(0..1));
+            engine.set_windowed_incremental_builds(true);
+            let frame = engine.build_display_list_frame("{}", 0).unwrap();
+            (engine, frame)
+        });
+        assert_eq!(local_frame, full_frame);
+        for text in ["x", "😀", "y"] {
+            let frames = [&full, &local].map(|engine| {
+                let txn = engine.doc().yrs_doc().transact();
+                let index = engine
+                    .resident_caret_head
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .1
+                    .get_offset(&txn)
+                    .unwrap()
+                    .index;
+                drop(txn);
+                engine
+                    .edit_resident_text(
+                        crate::StoryRange::new("body", index, index),
+                        Some(text),
+                        true,
+                    )
+                    .unwrap();
+                let epoch = engine.display.borrow().binary_frame_epoch;
+                engine.apply_and_layout("body", epoch).unwrap()
+            });
+            assert_eq!(frames[1], frames[0], "insert {text:?}");
+            assert!(
+                local
+                    .with_display_list(|list| list.pages.iter().any(|page| page.unbuilt))
+                    .unwrap()
+            );
+        }
+        docx_layout::clear_measure_fonts();
     }
 
     fn resident_plain_text_patch_matches_cold_full_in(enabled: bool) {

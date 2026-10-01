@@ -173,7 +173,7 @@ struct InsertedContent {
 }
 
 fn index_loc(doc: &EditingDoc, story: &str, index: u32) -> Result<(String, u32), String> {
-    doc.segment_index(story)
+    doc.paragraph_index(story)
         .map_err(|error| error.to_string())?
         .para_at(index)
         .map(|para| (para.para_id.to_string(), index.saturating_sub(para.start)))

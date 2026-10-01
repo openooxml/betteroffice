@@ -161,6 +161,34 @@ function commentedFixture(options: FixtureOptions = {}): Fixture {
   );
 }
 
+const RICH_COMMENT = '<w:comment w:author="Rich reviewer" w:id="0" w:initials="R">\n' +
+  '<w:p w14:paraId="10000010"><w:hyperlink r:id="commentLink">' + run('Linked') + '</w:hyperlink>' +
+  '<w:r><w:rPr><w:color w:val="CC0000"/><w:u w:val="single"/><w:sz w:val="28"/>' +
+  '<w:highlight w:val="yellow"/></w:rPr><w:t xml:space="preserve"> colorful</w:t></w:r></w:p>\n' +
+  '<w:p w14:paraId="10000011"><w:pPr><w:jc w:val="center"/></w:pPr>' + run('Second') + '</w:p>\n' +
+  '<w:tbl><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc>' +
+  paragraph('10000012', run('Cell')) + '</w:tc></w:tr></w:tbl>\n' +
+  paragraph('10000013', run('After')) + '\n</w:comment>';
+
+function richCommentsFixture(): Fixture {
+  const source = fixture((p) =>
+    p('<w:commentRangeStart w:id="0"/>' + run('Rich anchor') + '<w:commentRangeEnd w:id="0"/>' +
+      '<w:r><w:commentReference w:id="0"/></w:r>') +
+    p('<w:commentRangeStart w:id="1"/>' + run('Plain anchor') + '<w:commentRangeEnd w:id="1"/>' +
+      '<w:r><w:commentReference w:id="1"/></w:r>'),
+    { comments: true }
+  );
+  source.parts.set('word/comments.xml', toBytes(DECLARATION + `<w:comments ${NS}>\n${RICH_COMMENT}\n` +
+    `<w:comment w:id="1" w:author="Plain reviewer">${paragraph(COMMENT_PARA_ID, run('Plain'))}</w:comment>\n</w:comments>`));
+  source.parts.set('word/commentsExtended.xml', toBytes(DECLARATION +
+    `<w15:commentsEx xmlns:w15="${W15}"><w15:commentEx w15:paraId="10000011" w15:done="0"/>` +
+    `<w15:commentEx w15:paraId="${COMMENT_PARA_ID}" w15:done="0"/></w15:commentsEx>`));
+  source.parts.set('word/_rels/comments.xml.rels', toBytes(DECLARATION +
+    `<Relationships xmlns="${RELS}">\n  ${relationship('commentLink', 'hyperlink', 'https://example.com/synthetic', true)}\n</Relationships>`));
+  source.bytes = rezipPartsToArrayBuffer(source.parts);
+  return source;
+}
+
 function xmlPart(parts: ReturnType<typeof unzipContainer>, name: string): string {
   const bytes = parts[name];
   if (!bytes) throw new Error(`Missing package part: ${name}`);
@@ -284,6 +312,69 @@ test('no-edit React save preserves rich comments, body, header and footnotes byt
   const parts = unzipContainer(new Uint8Array(saved));
   expect(xmlPart(parts, 'word/comments.xml')).toContain('Important');
   expectUnchanged(source, saved, ['word/comments.xml', 'word/document.xml', 'word/header1.xml', 'word/footnotes.xml']);
+});
+
+test('React saves a plain comment edit and the other comment text', async () => {
+  const source = richCommentsFixture();
+  const editor = await mount(source.bytes);
+  const comments = editor.ref.current!.getComments().map((comment) => comment.id === 1 ? {
+    ...comment,
+    content: [{ type: 'paragraph' as const, paraId: COMMENT_PARA_ID, content: [
+      { type: 'run' as const, content: [{ type: 'text' as const, text: 'Edited plain comment' }] },
+    ] }],
+  } : comment);
+  await act(async () => editor.setComments(comments));
+  const saved = await editor.save();
+  const reopenedComments = (await reopened(saved)).package.document.comments!;
+  expect(getCommentText(reopenedComments.find(({ id }) => id === 1)!.content)).toBe('Edited plain comment');
+  expect(getCommentText(reopenedComments.find(({ id }) => id === 0)!.content)).toContain('colorful');
+});
+
+test('React saves a plain comment deletion and the other comment text', async () => {
+  const source = richCommentsFixture();
+  const editor = await mount(source.bytes);
+  await act(async () => editor.setComments(editor.ref.current!.getComments().filter(({ id }) => id !== 1)));
+  await until(() => editor.ref.current!.getComments().length === 1);
+  const saved = await editor.save();
+  const comments = (await reopened(saved)).package.document.comments!;
+  expect(comments.map(({ id }) => id)).toEqual([0]);
+  expect(getCommentText(comments[0]!.content)).toContain('colorful');
+});
+
+test('React saves an added comment and the existing comment text', async () => {
+  const source = richCommentsFixture();
+  const editor = await mount(source.bytes);
+  const added: Comment = {
+    id: 2,
+    author: 'New reviewer',
+    content: [{ type: 'paragraph', content: [
+      { type: 'run', content: [{ type: 'text', text: 'Added comment' }] },
+    ] }],
+  };
+  await act(async () => editor.setComments([...editor.ref.current!.getComments(), added]));
+  const saved = await editor.save();
+  const comments = (await reopened(saved)).package.document.comments!;
+  expect(getCommentText(comments.find(({ id }) => id === 2)!.content)).toBe('Added comment');
+  expect(getCommentText(comments.find(({ id }) => id === 0)!.content)).toContain('colorful');
+  expect(getCommentText(comments.find(({ id }) => id === 1)!.content)).toBe('Plain');
+});
+
+test('React saves a resolved comment and the other comment text', async () => {
+  const source = richCommentsFixture();
+  const editor = await mount(source.bytes);
+  await act(async () => editor.ref.current!.resolveComment(0));
+  const saved = await editor.save();
+  const comments = (await reopened(saved)).package.document.comments!;
+  expect(comments.find(({ id }) => id === 0)?.done).toBe(true);
+  expect(getCommentText(comments.find(({ id }) => id === 0)!.content)).toContain('colorful');
+  expect(getCommentText(comments.find(({ id }) => id === 1)!.content)).toBe('Plain');
+});
+
+test('React save after only body text changes preserves both comment elements and rels', async () => {
+  const source = richCommentsFixture();
+  const editor = await mount(source.bytes);
+  await typeBody(editor, 'Edited body ');
+  expectUnchanged(source, await editor.save(), ['word/comments.xml', 'word/_rels/comments.xml.rels']);
 });
 
 test('no-edit React save preserves a field nested inside a hyperlink byte-for-byte', async () => {

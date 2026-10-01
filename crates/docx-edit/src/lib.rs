@@ -138,7 +138,7 @@ pub use raw::RawOp;
 pub use read_state::{RevisionInfo, SelectionContextInfo, TriState};
 pub use search::{TextSearchError, TextSearchMatch};
 pub use seed::{seed_docx_preview, seed_from_docx, seed_from_docx_with_generation};
-use segments::SegmentIndex;
+use segments::{ParagraphIndex, SegmentIndex, build_indexes};
 pub use target::{
     AtomKind, EditTextView, FindTextRequest, FindTextResponse, ParagraphTarget, ParagraphText,
     ReadParagraphsRequest, ReadParagraphsResponse, SearchScope, TextAtom, TextMatch, TextPosition,
@@ -503,6 +503,13 @@ impl<T> EpochCache<T> {
         self.entries.get(story_id).cloned()
     }
 
+    fn take(&mut self, story_id: &str, epoch: u64) -> Option<Arc<T>> {
+        if self.epoch != epoch {
+            return None;
+        }
+        self.entries.remove(story_id)
+    }
+
     fn insert(&mut self, story_id: &str, epoch: u64, value: Arc<T>) {
         if epoch < self.epoch {
             return;
@@ -535,6 +542,7 @@ pub struct EditingDoc {
     version_nonce: AtomicU64,
     metadata: Mutex<Option<Arc<seed::SourceMetadata>>>,
     segment_indexes: Mutex<EpochCache<SegmentIndex>>,
+    paragraph_indexes: Mutex<EpochCache<ParagraphIndex>>,
     chunk_snapshots: Mutex<EpochCache<Vec<ops::Chunk>>>,
     shared_read_depth: AtomicU32,
     /// Story projections held only inside a shared-read scope.
@@ -589,6 +597,7 @@ impl EditingDoc {
             version_nonce: AtomicU64::new(batch::mint_nonce(client_id, 0)),
             metadata: Mutex::new(None),
             segment_indexes: Mutex::default(),
+            paragraph_indexes: Mutex::default(),
             chunk_snapshots: Mutex::default(),
             shared_read_depth: AtomicU32::new(0),
             story_views: Mutex::default(),
@@ -636,23 +645,72 @@ impl EditingDoc {
         self.metadata.lock().unwrap().clone()
     }
 
+    pub(crate) fn committed_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Relaxed)
+    }
+
     /// Cached segment geometry for `story_id`, rebuilt when the doc changes.
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
     pub(crate) fn segment_index(&self, story_id: &str) -> EditResult<Arc<SegmentIndex>> {
         // Sampling before the read txn lets a racing commit tag the fresh index
         // stale rather than serve a pre-commit snapshot as current.
-        let epoch = self.epoch.load(Ordering::Relaxed);
+        let epoch = self.committed_epoch();
         if let Some(index) = self.segment_indexes.lock().unwrap().get(story_id, epoch) {
             return Ok(index);
         }
+        self.build_story_indexes(story_id, epoch)
+            .map(|(segments, _)| segments)
+    }
+
+    pub(crate) fn paragraph_index(&self, story_id: &str) -> EditResult<Arc<ParagraphIndex>> {
+        let epoch = self.committed_epoch();
+        if let Some(index) = self.paragraph_indexes.lock().unwrap().get(story_id, epoch) {
+            return Ok(index);
+        }
+        self.build_story_indexes(story_id, epoch)
+            .map(|(_, paragraphs)| paragraphs)
+    }
+
+    fn build_story_indexes(
+        &self,
+        story_id: &str,
+        epoch: u64,
+    ) -> EditResult<(Arc<SegmentIndex>, Arc<ParagraphIndex>)> {
         let txn = self.doc.transact();
         let story = story_ref(&txn, story_id)?;
-        let index = Arc::new(SegmentIndex::build(&story, &txn));
+        let (segments, paragraphs) = build_indexes(&story, &txn);
         drop(txn);
+        let segments = Arc::new(segments);
+        let paragraphs = Arc::new(paragraphs);
         self.segment_indexes
             .lock()
             .unwrap()
-            .insert(story_id, epoch, Arc::clone(&index));
-        Ok(index)
+            .insert(story_id, epoch, Arc::clone(&segments));
+        self.paragraph_indexes
+            .lock()
+            .unwrap()
+            .insert(story_id, epoch, Arc::clone(&paragraphs));
+        Ok((segments, paragraphs))
+    }
+
+    pub(crate) fn advance_paragraph_index_after_text_insert(
+        &self,
+        story_id: &str,
+        before: u64,
+        after: u64,
+        index: u32,
+        units: u32,
+    ) {
+        if before.checked_add(1) != Some(after) {
+            return;
+        }
+        let mut indexes = self.paragraph_indexes.lock().unwrap();
+        let Some(mut paragraphs) = indexes.take(story_id, before) else {
+            return;
+        };
+        if Arc::make_mut(&mut paragraphs).shift_for_text_insert(index, units) {
+            indexes.insert(story_id, after, paragraphs);
+        }
     }
 
     /// Shared `ops::snapshot` for `story_id`, rebuilt per committed epoch.
@@ -1519,6 +1577,18 @@ mod tests {
             "a value built before a commit is not kept"
         );
         assert_eq!(cache.entries.len(), 1);
+    }
+
+    #[test]
+    fn epoch_cache_takes_only_the_current_epoch() {
+        let mut cache = EpochCache::default();
+        cache.insert("body", 1, Arc::new(1));
+        assert_eq!(cache.take("body", 0), None);
+        assert_eq!(cache.take("body", 2), None);
+        assert_eq!(cache.get("body", 1).as_deref(), Some(&1));
+        assert_eq!(cache.take("body", 1).as_deref(), Some(&1));
+        assert_eq!(cache.get("body", 1), None);
+        assert_eq!(cache.take("body", 1), None);
     }
 
     #[test]
