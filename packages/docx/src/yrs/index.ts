@@ -1294,8 +1294,13 @@ export interface YrsSession extends CollaborationReplica {
   /**
    * The current story revision and the sorted ids of the stories created,
    * edited, or deleted after revision `since` (0 lists every story).
+   * Negative `since` also includes per-story revisions.
    */
-  storiesChangedSince(since: number): { revision: number; stories: string[] };
+  storiesChangedSince(since: number): {
+    revision: number;
+    stories: string[];
+    revisions?: Record<string, number>;
+  };
   /**
    * One digest per unit of {@link YrsSession.storySegments}, split after each
    * pilcrow. Equal digests mean equal segments.
@@ -2604,7 +2609,11 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     paragraphSpans: (story) => JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[],
     storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
     storiesChangedSince: (since) =>
-      JSON.parse(session.stories_changed_since(since)) as { revision: number; stories: string[] },
+      JSON.parse(session.stories_changed_since(since)) as {
+        revision: number;
+        stories: string[];
+        revisions?: Record<string, number>;
+      },
     storySegmentUnitDigests: (story) =>
       JSON.parse(session.story_segment_unit_digests(story)) as string[],
     storySegmentUnits: (story, units) =>

@@ -187,11 +187,20 @@ function decodeS9Package(value: unknown): DocxPackage {
   ] as const) {
     const entries = wirePackage[wireName];
     if (entries !== undefined) {
-      pkg[publicName] = decodeMapEntries(
+      const stories = decodeMapEntries(
         entries,
         `wire.document.package.${wireName}`,
         (entry, path) => objectAt(entry, path) as unknown as HeaderFooter
       );
+      const parts = new Map<string, HeaderFooter>();
+      for (const [id, story] of stories) {
+        const part = story.sourceAlias?.part;
+        if (!part) continue;
+        const shared = parts.get(part);
+        if (shared) stories.set(id, shared);
+        else parts.set(part, story);
+      }
+      pkg[publicName] = stories;
     }
   }
   if (wirePackage.footnotes !== undefined) {

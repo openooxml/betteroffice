@@ -68,6 +68,7 @@ type Fixture = { bytes: ArrayBuffer; parts: Map<string, Uint8Array> };
 type FixtureOptions = {
   comments?: boolean;
   header?: boolean;
+  headerAliases?: boolean;
   footnote?: boolean;
   image?: boolean;
   chunk?: boolean;
@@ -114,6 +115,10 @@ function fixture(body: (p: Paragraph) => string, options: FixtureOptions = {}): 
     override('header1.xml', 'header');
     relationships.push(relationship('header', 'header', 'header1.xml'));
     references = '<w:headerReference w:type="default" r:id="header"/>';
+    if (options.headerAliases) {
+      relationships.push(relationship('headerAlias', 'header', './header1.xml'));
+      references += '<w:headerReference w:type="first" r:id="headerAlias"/><w:titlePg/>';
+    }
     add(
       'word/header1.xml',
       `<w:hdr ${NS}>\n  <w:p w14:textId="77777777" w14:paraId="20000001"><w:permStart w:edGrp="everyone" w:id="9"/>${run('Header')}<w:permEnd w:id="9"/></w:p>\n</w:hdr>`
@@ -284,6 +289,35 @@ test('no-edit React save preserves rich comments, body, header and footnotes byt
   const parts = unzipContainer(new Uint8Array(saved));
   expect(xmlPart(parts, 'word/comments.xml')).toContain('Important');
   expectUnchanged(source, saved, ['word/comments.xml', 'word/document.xml', 'word/header1.xml', 'word/footnotes.xml']);
+});
+
+test('React save preserves either header alias and leaves an unedited shared part byte-for-byte', async () => {
+  for (const id of ['header', 'headerAlias']) {
+    const source = fixture((p) => p(run('Body')), { header: true, headerAliases: true });
+    const editor = await mount(source.bytes);
+    expectUnchanged(source, await editor.save(), ['word/header1.xml', 'word/_rels/document.xml.rels']);
+    const paged = editor.ref.current!.getEditorRef()!;
+    const session = paged.getYrsSession()!;
+    const story = `hf:${id}`;
+    await act(async () => {
+      session.insertText({ story, paraId: session.paragraphs(story)[0]!.paraId, offset: 0 }, 'Edited ');
+      paged.syncYrsInputState(true, [story]);
+    });
+    for (let round = 0; round < 2; round += 1) {
+      const saved = await editor.save();
+      const xml = xmlPart(unzipContainer(new Uint8Array(saved)), 'word/header1.xml');
+      const root = new DOMParser().parseFromString(xml, 'application/xml');
+      expect(xmlElements(root, W, 't').map((element) => element.textContent).join('')).toBe('Edited Header');
+      const document = await reopened(saved);
+      for (const part of document.package.headers!.values()) {
+        const paragraph = part.content.find((block) => block.type === 'paragraph');
+        expect(paragraph?.type === 'paragraph' && paragraph.content.some((item) =>
+          item.type === 'run' && item.content.some((content) => content.type === 'text' && content.text.includes('Edited'))
+        )).toBe(true);
+      }
+    }
+    editor.view.unmount();
+  }
 });
 
 test('no-edit React save preserves a field nested inside a hyperlink byte-for-byte', async () => {

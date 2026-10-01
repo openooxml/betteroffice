@@ -132,6 +132,7 @@ function applyRustSaveMutations(
       .filter((id): id is string => !!id && !originalIds.has(id));
     const images = collectNewImages(part.blocks);
     if (images.length > newImageIds.length) {
+      if (part.shared) continue;
       throw new Error(
         `Rust save image mutation mismatch in ${part.relsPath}: ` +
           `${images.length} model images, ${newImageIds.length} relationships`
@@ -167,7 +168,7 @@ function applyRustSaveMutations(
     if (!watermark || watermark.kind !== 'picture') continue;
     const owner = relationships.get(ownerId);
     if (!owner?.target) continue;
-    const filename = headerFooterFilename(owner.target).replace(/^word\//, '');
+    const filename = (header.sourceAlias?.part ?? headerFooterFilename(owner.target)).replace(/^word\//, '');
     const relsPath = `word/_rels/${filename}.rels`;
     const savedRelationships = partText(savedParts[relsPath]) ?? '';
     if (relationshipForId(savedRelationships, watermark.relId)) continue;

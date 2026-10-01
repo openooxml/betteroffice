@@ -756,6 +756,7 @@ mod tests {
                 content: Vec::new(),
                 watermark: None,
                 custom_root_bindings: Vec::new(),
+                source_alias: None,
             },
             &mut context(),
         )

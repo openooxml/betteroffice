@@ -37,6 +37,8 @@ export interface HeaderFooter {
   content: BlockContent[];
   /** Root bindings and attributes retained outside the standard boilerplate. */
   customRootBindings?: { name: string; value: string }[];
+  /** Source identity for a part shared by relationships. @internal */
+  sourceAlias?: { part: string; fingerprint: string; revision?: number };
   /**
    * Watermark stored on this header (MS Word "Design → Watermark"). Lives
    * here, not in `content`, so it stays out of the editable text flow while

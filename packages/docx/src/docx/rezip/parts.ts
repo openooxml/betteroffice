@@ -51,6 +51,7 @@ export interface Part {
   /** Path to the rels file for this part, e.g. `word/_rels/header1.xml.rels` */
   relsPath: string;
   blocks: BlockContent[];
+  shared?: boolean;
 }
 
 const EMPTY_RELS_XML =
@@ -103,9 +104,13 @@ export function collectParts(doc: Document): Part[] {
     for (const [rId, hf] of map.entries()) {
       const rel = rels.get(rId);
       if (!rel || rel.type !== type || !rel.target) continue;
-      const filename = headerFooterFilename(rel.target);
+      const filename = hf.sourceAlias?.part ?? headerFooterFilename(rel.target);
       const basename = filename.replace(/^word\//, '');
-      parts.push({ relsPath: `word/_rels/${basename}.rels`, blocks: hf.content });
+      parts.push({
+        relsPath: `word/_rels/${basename}.rels`,
+        blocks: hf.content,
+        ...(hf.sourceAlias ? { shared: true } : {}),
+      });
     }
   };
 

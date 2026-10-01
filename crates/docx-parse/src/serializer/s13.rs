@@ -209,6 +209,7 @@ pub fn write_docx_s13_parts(
     let paragraph_ids = request.paragraph_ids.take().unwrap_or_default();
     paragraph_ids.validate()?;
     apply_paragraph_id_assignments(&mut request, &paragraph_ids, &relationships, &package)?;
+    select_header_footer_aliases(&mut request, &relationships, &package)?;
     let patched: HashMap<&str, &[(u32, String)]> = paragraph_ids
         .patched_parts
         .iter()
@@ -748,6 +749,71 @@ impl StoryParts<'_> {
     }
 }
 
+fn select_header_footer_aliases(
+    request: &mut S13SaveRequest,
+    relationships: &IndexMap<String, Relationship>,
+    package: &Package,
+) -> Result<(), ParseError> {
+    for (entries, kind) in [
+        (&mut request.header_entries, relationship_types::HEADER),
+        (&mut request.footer_entries, relationship_types::FOOTER),
+    ] {
+        let mut parts: IndexMap<String, Vec<usize>> = IndexMap::new();
+        for (index, (id, _)) in entries.iter().enumerate() {
+            let Some(relationship) = relationships.get(id) else {
+                continue;
+            };
+            if relationship.relationship_type != kind
+                || relationship.target.is_empty()
+                || relationship.target_mode == Some(TargetMode::External)
+            {
+                continue;
+            }
+            let path = resolve_relative_path(&package.document_path, &relationship.target)?;
+            parts
+                .entry(path.to_ascii_lowercase())
+                .or_default()
+                .push(index);
+        }
+        let mut omitted = HashSet::new();
+        for (path, indices) in parts {
+            if indices.len() < 2 {
+                continue;
+            }
+            let mut winner: Option<(u64, usize)> = None;
+            for &index in &indices {
+                let story = &entries[index].1;
+                let unchanged = match &story.source_alias {
+                    Some(alias)
+                        if alias.part.eq_ignore_ascii_case(&path)
+                            && package.original_bytes(&alias.part).is_some() =>
+                    {
+                        crate::header_footer::story_fingerprint(story)? == alias.fingerprint
+                    }
+                    _ => false,
+                };
+                if !unchanged {
+                    let revision = story.source_alias.as_ref().and_then(|alias| alias.revision);
+                    let candidate = (revision.unwrap_or(0), index);
+                    winner = Some(winner.map_or(candidate, |previous| previous.max(candidate)));
+                }
+            }
+            omitted.extend(
+                indices
+                    .into_iter()
+                    .filter(|index| winner.is_none_or(|(_, selected)| *index != selected)),
+            );
+        }
+        let mut index = 0;
+        entries.retain(|_| {
+            let keep = !omitted.contains(&index);
+            index += 1;
+            keep
+        });
+    }
+    Ok(())
+}
+
 fn serialize_header_footer_parts(
     headers: &[(String, HeaderFooter)],
     footers: &[(String, HeaderFooter)],
@@ -771,6 +837,11 @@ fn serialize_header_footer_parts(
                 continue;
             }
             let path = resolve_relative_path(&package.document_path, &relationship.target)?;
+            let path = story
+                .source_alias
+                .as_ref()
+                .filter(|alias| alias.part.eq_ignore_ascii_case(&path))
+                .map_or(path.clone(), |alias| alias.part.clone());
             let xml = stories.write(package, &path, context, |context| {
                 serialize_header_footer_part(story, context)
             })?;
