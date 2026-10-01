@@ -1954,7 +1954,7 @@ impl EngineSession {
             || !lowered.local.matches_source(&self.doc)
             || self.regions.borrow().as_ref().is_some_and(|state| {
                 state.fast_path.as_ref().is_none_or(|fast| {
-                    !fast.notes_clear || fast.regions.sections.len() != 1 || fast.render_env != *env
+                    !fast.notes_clear || fast.regions.sections.is_empty() || fast.render_env != *env
                 })
             })
         {
@@ -2805,6 +2805,11 @@ impl EngineSession {
             body.is_none(),
             "the body is measured before a pass finishes"
         );
+        let body_section_breaks = input
+            .measured
+            .iter()
+            .filter(|measured| matches!(measured.block, LayoutBlock::SectionBreak(_)))
+            .count();
         let revision_preview = parsed_render_env
             .as_ref()
             .map(|env| env.revision_preview.clone())
@@ -2973,7 +2978,7 @@ impl EngineSession {
         // section-relative page labels and the PAGE/NUMPAGES field widths
         // baked into the retained headers/footers payload. With one section,
         // an unchanged page count implies unchanged labels.
-        let single_section = regions.sections.len() <= 1;
+        let single_section = self.lays_out_as_one_section(&regions, body_section_breaks);
         drop(pagination);
         let regional = match (
             resident_body && single_section && !provisional,
@@ -3026,6 +3031,13 @@ impl EngineSession {
             notes_converged,
             provisional,
         })
+    }
+
+    /// Whether a body with `section_breaks` lays out as one section of `regions`. Hosts repeat
+    /// the final section after the parsed ones, which local lowering reads as one section when
+    /// the body has no section break.
+    fn lays_out_as_one_section(&self, regions: &DocumentRegions, section_breaks: usize) -> bool {
+        regions.sections.len() <= 1 || (self.local_lowering.get() && section_breaks == 0)
     }
 
     /// A fingerprint of the header and footer stories `regions` reference, lowered in `env`,
@@ -4102,7 +4114,8 @@ impl EngineSession {
                         )
                     };
                     let default_width = widths.first().copied().unwrap_or(0.0);
-                    if !collect_note_refs(blocks).is_empty()
+                    if !self.lays_out_as_one_section(&regions, section_breaks(blocks))
+                        || !collect_note_refs(blocks).is_empty()
                         || docx_layout::measure_blocks::has_floating_zones(
                             blocks,
                             default_width,
@@ -5988,11 +6001,21 @@ mod tests {
 
     #[test]
     fn resident_region_fast_path_reuses_clean_blocks_and_matches_the_full_pass() {
+        for (repeated_final, local_lowering) in [(false, false), (true, false), (true, true)] {
+            resident_region_fast_path_matches_the_full_pass_in(repeated_final, local_lowering);
+        }
+    }
+
+    fn resident_region_fast_path_matches_the_full_pass_in(
+        repeated_final: bool,
+        local_lowering: bool,
+    ) {
         const FONT: &[u8] =
             include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
         docx_layout::clear_measure_fonts();
         let font_id = docx_layout::register_measure_font(FONT).unwrap();
         let engine = EngineSession::new(138);
+        engine.set_local_lowering(local_lowering);
         engine
             .doc()
             .create_story("body", "AlphaBravo", "Normal", "left")
@@ -6005,29 +6028,26 @@ mod tests {
                 None,
             )
             .unwrap();
-        let request = serde_json::json!({
-            "bodyStory": "body",
-            "regions": {"sections": [{
-                "sectionId": "main",
-                "properties": {
-                    "pageWidth": 4320,
-                    "pageHeight": 2880,
-                    "marginTop": 300,
-                    "marginRight": 300,
-                    "marginBottom": 300,
-                    "marginLeft": 300
-                }
-            }]},
-            "measurement": {
-                "fontChains": {"calibri|0|0": [font_id]},
-                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
-                "authoritativeShaping": true
-            },
-            "renderEnv": {}
-        });
+        let mut request: serde_json::Value =
+            serde_json::from_str(&small_page_request(font_id)).unwrap();
+        if repeated_final {
+            repeat_final_section(&mut request);
+        }
         engine
             .layout_document_with_regions_json(&request.to_string())
             .unwrap();
+        let fast = !repeated_final || local_lowering;
+        let armed = engine
+            .regions
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .fast_path
+            .is_some();
+        assert_eq!(
+            armed, fast,
+            "repeated final {repeated_final}, local lowering {local_lowering}"
+        );
         engine
             .build_display_list_frame(
                 &serde_json::json!({"fontChains": {"calibri|0|0": [font_id]}}).to_string(),
@@ -6045,18 +6065,26 @@ mod tests {
             .unwrap();
 
         let stats_before = engine.stats();
-        engine.apply_and_layout("body", 1).unwrap();
+        let resident = engine
+            .apply_and_layout_regions_resident("body", &mut |_| {})
+            .unwrap();
+        assert_eq!(resident, fast, "the region fast path absorbs the edit");
+        if !resident {
+            engine.apply_and_layout_regions_full().unwrap();
+        }
         let stats_after = engine.stats();
-        assert_eq!(
-            stats_after.resident_measure_calls,
-            stats_before.resident_measure_calls + 1,
-            "only the dirty paragraph re-measures on the region fast path"
-        );
-        assert_eq!(
-            stats_after.resident_reused_blocks,
-            stats_before.resident_reused_blocks + 1,
-            "the clean paragraph reuses its retained extent"
-        );
+        if fast {
+            assert_eq!(
+                stats_after.resident_measure_calls,
+                stats_before.resident_measure_calls + 1,
+                "only the dirty paragraph re-measures on the region fast path"
+            );
+            assert_eq!(
+                stats_after.resident_reused_blocks,
+                stats_before.resident_reused_blocks + 1,
+                "the clean paragraph reuses its retained extent"
+            );
+        }
 
         let fast_json = {
             let pagination = engine.pagination.borrow();
@@ -6109,6 +6137,12 @@ mod tests {
         engine
     }
 
+    /// Appends the final section again, as hosts build region requests.
+    fn repeat_final_section(request: &mut serde_json::Value) {
+        let sections = request["regions"]["sections"].as_array_mut().unwrap();
+        sections.push(sections.last().unwrap().clone());
+    }
+
     fn small_page_request(font_id: u32) -> String {
         serde_json::json!({
             "bodyStory": "body",
@@ -6143,14 +6177,8 @@ mod tests {
     fn resident_plain_text_patch_matches_cold_full_in(enabled: bool) {
         use super::lowering_fixture::{Package, para, run};
         use crate::{Position, StoryRange};
-        let laid_out = |bytes: &[u8], client_id, single_section: bool| {
+        let laid_out = |bytes: &[u8], client_id| {
             let (engine, request) = lowering_pages::laid_out(bytes, client_id);
-            let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
-            let sections = request["regions"]["sections"].as_array_mut().unwrap();
-            if single_section && sections.len() == 2 {
-                sections.truncate(1);
-            }
-            let request = request.to_string();
             engine.set_local_lowering(enabled);
             engine.render.replace(Default::default());
             engine
@@ -6161,7 +6189,9 @@ mod tests {
         };
         docx_layout::clear_measure_fonts();
         let font = docx_layout::register_measure_font(lowering_pages::FONT).unwrap();
-        let request = small_page_request(font);
+        let mut repeated: serde_json::Value =
+            serde_json::from_str(&small_page_request(font)).unwrap();
+        repeat_final_section(&mut repeated);
         let snapshot = |engine: &EngineSession| {
             let render = engine.render.borrow();
             let lowered = &render.stories["body"];
@@ -6211,24 +6241,27 @@ mod tests {
             let oracle = cold!(render measurement pagination regions display capture resumable);
             assert_eq!(incremental, oracle, "{story} [{start}, {end}) {text:?}");
         };
-        let engine = paragraphs_engine(9600, 3);
-        engine.set_local_lowering(enabled);
-        engine.layout_document_with_regions_json(&request).unwrap();
-        engine.build_display_list_frame("{}", 0).unwrap();
-        for (paragraph, offset) in (0..3).flat_map(|p| [0, 13, u32::MAX].map(|at| (p, at))) {
-            let paragraphs = engine.doc().paragraphs("body").unwrap();
-            let width = paragraphs[0].text.encode_utf16().count() as u32;
-            let start = paragraph as u32 * (width + 1);
-            let at = start + offset.min(width);
-            step(&engine, &request, "body", (at, at, Some("😀")), true);
-            step(&engine, &request, "body", (at, at + 2, None), true);
-            step(&engine, &request, "body", (at, at, Some("x")), true);
-            step(&engine, &request, "body", (at, at + 1, None), true);
+        for request in [small_page_request(font), repeated.to_string()] {
+            let engine = paragraphs_engine(9600, 3);
+            engine.set_local_lowering(enabled);
+            engine.layout_document_with_regions_json(&request).unwrap();
+            engine.build_display_list_frame("{}", 0).unwrap();
+            for (paragraph, offset) in (0..3).flat_map(|p| [0, 13, u32::MAX].map(|at| (p, at))) {
+                let paragraphs = engine.doc().paragraphs("body").unwrap();
+                let width = paragraphs[0].text.encode_utf16().count() as u32;
+                let start = paragraph as u32 * (width + 1);
+                let at = start + offset.min(width);
+                step(&engine, &request, "body", (at, at, Some("😀")), true);
+                step(&engine, &request, "body", (at, at + 2, None), true);
+                step(&engine, &request, "body", (at, at, Some("x")), true);
+                step(&engine, &request, "body", (at, at + 1, None), true);
+            }
+            let wrapping = " wrap".repeat(250);
+            step(&engine, &request, "body", (2, 2, Some(&wrapping)), true);
+            step(&engine, &request, "body", (2, 4, None), false);
+            step(&engine, &request, "body", (2, 2, None), false);
         }
-        let wrapping = " wrap".repeat(250);
-        step(&engine, &request, "body", (2, 2, Some(&wrapping)), true);
-        step(&engine, &request, "body", (2, 4, None), false);
-        step(&engine, &request, "body", (2, 2, None), false);
+        let request = repeated.to_string();
         let empty = EngineSession::new(9601);
         empty.set_local_lowering(enabled);
         let doc = empty.doc();
@@ -6263,7 +6296,7 @@ mod tests {
             ("contextual", Package::new(&format!(r#"<w:p w14:paraId="10000001"><w:pPr><w:contextualSpacing/></w:pPr><w:r><w:t>Before</w:t></w:r></w:p>{}"#, para("10000002", &run("After"))))),
         ];
         for (name, package) in packages {
-            let (engine, request) = laid_out(&package.bytes(), 9602, true);
+            let (engine, request) = laid_out(&package.bytes(), 9602);
             let patched = name == "table";
             step(&engine, &request, "body", (0, 0, Some("x")), patched);
             if name == "table" {
@@ -6277,7 +6310,7 @@ mod tests {
             "10000001",
             r#"<w:r><w:rPr><w:b/></w:rPr><w:t>Bold</w:t></w:r>"#,
         ));
-        let (engine, request) = laid_out(&bold.bytes(), 9604, true);
+        let (engine, request) = laid_out(&bold.bytes(), 9604);
         step(&engine, &request, "body", (2, 2, Some("x")), true);
         step(&engine, &request, "body", (0, 1, None), true);
         for bytes in [
@@ -6289,7 +6322,7 @@ mod tests {
             include_bytes!("../tests/fixtures/page-fragments/pages.docx").as_slice(),
             include_bytes!("../tests/fixtures/footnote-anchor.docx").as_slice(),
         ] {
-            let (engine, request) = laid_out(bytes, 9603, false);
+            let (engine, request) = laid_out(bytes, 9603);
             step(&engine, &request, "body", (0, 0, Some("x")), false);
         }
     }
