@@ -3,4 +3,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-With `experimentalWorkerOpen`, typing in long documents responds faster.
+Typing in long documents responds faster.
