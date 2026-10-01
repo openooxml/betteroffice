@@ -7025,7 +7025,10 @@ mod tests {
         let body = format!(
             "{}{}{}",
             para("10000001", &run("ab")),
-            para("10000002", &format!("{}{}", run("ab"), local_anchored_image())),
+            para(
+                "10000002",
+                &format!("{}{}", run("ab"), local_anchored_image())
+            ),
             para(
                 "10000003",
                 &format!("<w:pPr><w:pageBreakBefore/></w:pPr>{}", run("ab")),
