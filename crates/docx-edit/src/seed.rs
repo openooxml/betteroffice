@@ -1662,7 +1662,7 @@ pub(crate) fn hyperlink_sequence_names(hyperlink: &Value) -> Vec<String> {
                     .or_else(|| field(Some(node), "children"));
                 pending.extend(array(children).iter().rev());
             }
-            Some("inlineSdt") => {
+            Some("inlineSdt" | "insertion" | "deletion" | "moveFrom" | "moveTo") => {
                 pending.extend(array(field(Some(node), "content")).iter().rev());
             }
             Some("simpleField" | "complexField") => {
@@ -1958,6 +1958,16 @@ fn hyperlink_to_units(
                     .collect();
                 units.push(embed_unit("math", math_payload(child), &marks, 1));
             }
+            "inlineSdt" => {
+                let marks: Vec<Mark> = extra_marks.iter().cloned()
+                    .chain(std::iter::once(link.clone())).collect();
+                units.push(embed_unit(
+                    "sdt",
+                    sdt_payload(child, style_formatting, styles, source, opaque_sequences),
+                    &marks,
+                    2,
+                ));
+            }
             _ => {}
         }
     }
@@ -2102,10 +2112,8 @@ fn tracked_to_units(
                 std::slice::from_ref(&marker),
                 source,
             ));
-        } else {
-            if string(field(Some(child), "type")) == Some("hyperlink") {
-                opaque_sequences.extend(hyperlink_sequence_names(child));
-            }
+        } else if string(field(Some(child), "type")) == Some("hyperlink") {
+            opaque_sequences.extend(hyperlink_sequence_names(child));
             let linked = hyperlink_to_units(
                 child,
                 style_formatting,
@@ -2115,9 +2123,52 @@ fn tracked_to_units(
                 opaque_sequences,
             );
             units.extend(linked);
+        } else {
+            let inherited = marks_to_attrs(std::slice::from_ref(&marker));
+            for mut unit in inline_container_units(child, style_formatting, styles, source, opaque_sequences) {
+                let mut attrs = inherited.clone();
+                attrs.extend(unit.attrs);
+                unit.attrs = attrs;
+                if !unit.marks.iter().any(|mark| mark.name == marker.name) {
+                    unit.marks.push(marker.clone());
+                }
+                units.push(unit);
+            }
         }
     }
     units
+}
+
+fn inline_container_units(
+    child: &Value,
+    style_formatting: Option<&Value>,
+    styles: &StyleResolver,
+    source: &BTreeMap<String, String>,
+    opaque_sequences: &mut Vec<String>,
+) -> Vec<InlineUnit> {
+    match string(field(Some(child), "type")).unwrap_or_default() {
+        "run" => run_to_units(child, style_formatting, styles, &[], source),
+        "hyperlink" => {
+            opaque_sequences.extend(hyperlink_sequence_names(child));
+            hyperlink_to_units(child, style_formatting, styles, &[], source, opaque_sequences)
+        }
+        "simpleField" | "complexField" => {
+            opaque_sequences.extend(nested_sequence_names(child));
+            let (payload, marks) = field_payload(child, style_formatting, source);
+            vec![embed_unit("field", payload, &marks, 1)]
+        }
+        "inlineSdt" => vec![embed_unit(
+            "sdt",
+            sdt_payload(child, style_formatting, styles, source, opaque_sequences),
+            &[],
+            2,
+        )],
+        "mathEquation" => vec![embed_unit("math", math_payload(child), &[], 1)],
+        "insertion" | "deletion" | "moveFrom" | "moveTo" => {
+            tracked_to_units(child, style_formatting, styles, source, opaque_sequences)
+        }
+        _ => Vec::new(),
+    }
 }
 
 fn sdt_properties_attrs(properties: &Value, source: &BTreeMap<String, String>) -> JsonObject {
@@ -2183,44 +2234,8 @@ fn sdt_payload(
         }
     };
     for child in array(field(Some(sdt), "content")) {
-        match string(field(Some(child), "type")).unwrap_or_default() {
-            "run" => {
-                for unit in run_to_units(child, style_formatting, styles, &[], source) {
-                    append(&mut content, unit);
-                }
-            }
-            "hyperlink" => {
-                opaque_sequences.extend(hyperlink_sequence_names(child));
-                for unit in hyperlink_to_units(
-                    child,
-                    style_formatting,
-                    styles,
-                    &[],
-                    source,
-                    opaque_sequences,
-                ) {
-                    append(&mut content, unit);
-                }
-            }
-            "simpleField" | "complexField" => {
-                opaque_sequences.extend(nested_sequence_names(child));
-                let (payload, marks) = field_payload(child, style_formatting, source);
-                append(&mut content, embed_unit("field", payload, &marks, 1));
-            }
-            "inlineSdt" => append(
-                &mut content,
-                embed_unit(
-                    "sdt",
-                    sdt_payload(child, style_formatting, styles, source, opaque_sequences),
-                    &[],
-                    1,
-                ),
-            ),
-            "mathEquation" => append(
-                &mut content,
-                embed_unit("math", math_payload(child), &[], 1),
-            ),
-            _ => {}
+        for unit in inline_container_units(child, style_formatting, styles, source, opaque_sequences) {
+            append(&mut content, unit);
         }
     }
     let properties = field(Some(sdt), "properties").unwrap_or(&Value::Null);
@@ -2803,7 +2818,16 @@ fn control_break_offsets(
                 offset += 1;
             }
             "insertion" | "deletion" | "moveFrom" | "moveTo" => {
-                offsets.extend(std::iter::repeat_n(vec![offset], below));
+                let (nested, _) = control_break_offsets(child, styles, source);
+                offsets.extend(nested.into_iter().map(|mut path| {
+                    if let Some(first) = path.first_mut() {
+                        *first += offset;
+                    }
+                    path
+                }));
+                offset += units_width(&tracked_to_units(
+                    child, None, styles, source, &mut Vec::new(),
+                ));
             }
             _ => {}
         }
@@ -2896,8 +2920,14 @@ fn content_breaks(
                         output,
                     );
                 } else {
-                    offset +=
-                        hyperlink_to_units(child, None, styles, &[], source, &mut Vec::new()).len();
+                    let first = output.len();
+                    content_breaks(child, start + offset, styles, source, output, positions);
+                    for found in &mut output[first..] {
+                        if found.revision.is_none() {
+                            found.revision = Some(revision.clone());
+                        }
+                    }
+                    offset += inline_container_units(child, None, styles, source, &mut Vec::new()).len();
                 }
             }
         }
@@ -2947,15 +2977,12 @@ fn unmodelled_nodes(content: &Value, output: &mut Vec<String>) {
         "inlineSdt" => {
             for child in children("content") {
                 match string(field(Some(child), "type")).unwrap_or_default() {
-                    "run" | "hyperlink" | "simpleField" | "complexField" | "inlineSdt" => {
+                    "run" | "hyperlink" | "simpleField" | "complexField" | "inlineSdt"
+                    | "insertion" | "deletion" | "moveFrom" | "moveTo" => {
                         unmodelled_nodes(child, output)
                     }
                     "mathEquation" | "bookmarkStart" | "bookmarkEnd" | "commentRangeStart"
                     | "commentRangeEnd" => {}
-                    "insertion" => output.push("w:ins".to_owned()),
-                    "deletion" => output.push("w:del".to_owned()),
-                    "moveFrom" => output.push("w:moveFrom".to_owned()),
-                    "moveTo" => output.push("w:moveTo".to_owned()),
                     "rawXml" => output.push(crate::structured::source::element_name(
                         string(field(Some(child), "xml")).unwrap_or_default(),
                     )),

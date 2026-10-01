@@ -922,7 +922,11 @@ function inlineSdtContent(content: ParagraphContent[]): InlineSdt['content'] {
       child.type === 'simpleField' ||
       child.type === 'complexField' ||
       child.type === 'inlineSdt' ||
-      child.type === 'mathEquation'
+      child.type === 'mathEquation' ||
+      child.type === 'insertion' ||
+      child.type === 'deletion' ||
+      child.type === 'moveFrom' ||
+      child.type === 'moveTo'
   );
 }
 
@@ -999,28 +1003,19 @@ function tabRun(attributes: Attrs): Run {
 }
 
 function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo): ParagraphContent {
-  let run: Run;
-  if (item.kind === 'embed' && item.embedKind === 'image') run = imageRunFromPayload(item.payload);
-  else if (item.kind === 'embed' && item.embedKind === 'tab') run = tabRun(item.attributes);
-  else if (item.kind === 'embed' && item.embedKind === 'horizontalRule')
-    run = horizontalRuleRun(item.payload, item.attributes);
-  else if (item.kind === 'embed' && item.embedKind === 'shape')
-    run = shapeRunFromPayload(item.payload);
-  else if (item.kind === 'embed' && item.embedKind === 'chart')
-    run = chartRunFromPayload(item.payload) ?? { type: 'run', content: [] };
-  else if (item.kind === 'text') run = createTextRun(item.text, item.attributes);
-  else run = { type: 'run', content: [] };
+  const ordinary = ordinaryContentForItem(item);
+  const child = inlineSdtContent(ordinary ? [ordinary] : [])[0] ?? { type: 'run' as const, content: [] };
 
   const raw = asObject(item.attributes.ins) ?? asObject(item.attributes.del);
   const isMovePair = raw?.isMovePair === true;
   if (item.attributes.ins) {
     return isMovePair
-      ? { type: 'moveTo', info, content: [run] }
-      : { type: 'insertion', info, content: [run] };
+      ? { type: 'moveTo', info, content: [child] }
+      : { type: 'insertion', info, content: [child] };
   }
   return isMovePair
-    ? { type: 'moveFrom', info, content: [run] }
-    : { type: 'deletion', info, content: [run] };
+    ? { type: 'moveFrom', info, content: [child] }
+    : { type: 'deletion', info, content: [child] };
 }
 
 /**
@@ -1039,6 +1034,7 @@ function addToHyperlink(hyperlink: Hyperlink, item: InlineItem): void {
     child =
       commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes);
   } else if (item.embedKind === 'math') child = mathFromPayload(item.payload);
+  else if (item.embedKind === 'sdt') child = inlineSdtFromPayload(item.payload);
   if (!child) return;
   if (child.type === 'run') hyperlink.children.push(child);
   if (child.type !== 'run' || hyperlink.structuredChildren) {
@@ -1385,6 +1381,7 @@ function linkChildLength(child: HyperlinkContent): number {
   if (child.type === 'run') return runTextLength(child);
   return child.type === 'simpleField' ||
     child.type === 'complexField' ||
+    child.type === 'inlineSdt' ||
     child.type === 'mathEquation'
     ? 1
     : 0;
@@ -1497,7 +1494,7 @@ function splitContent(content: ParagraphContent, at: number): Split<ParagraphCon
       content.content,
       at,
       paragraphContentLength,
-      (child, offset) => splitContent(child, offset) as Split<Run | Hyperlink> | null
+      (child, offset) => splitContent(child, offset) as Split<TrackedWrapper['content'][number]> | null
     );
     return parts && [
       parts[0].length > 0 ? { ...content, content: parts[0] } : null,

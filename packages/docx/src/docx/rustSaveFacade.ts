@@ -1,6 +1,6 @@
 /** Typed TypeScript boundary for the Rust package writer. */
 
-import type { BlockContent, Document, Hyperlink, Image, Run } from '../types/document';
+import type { BlockContent, Document, Hyperlink, Image, ParagraphContent } from '../types/document';
 import { preloadParseWasm, writeDocxS13Wire } from './parseWasm';
 import { collectParts, headerFooterFilename, partText } from './rezip/parts';
 import { preloadOpcWasm, unzipContainer } from './wasm';
@@ -172,58 +172,52 @@ function applyRustSaveMutations(
   }
 }
 
+function visitInline(nodes: readonly ParagraphContent[], visit: (node: ParagraphContent) => void): void {
+  for (const node of nodes) {
+    visit(node);
+    if (node.type === 'hyperlink') visitInline(node.structuredChildren ?? node.children, visit);
+    else if (node.type === 'simpleField') visitInline(node.content, visit);
+    else if (node.type === 'complexField') {
+      visitInline(node.fieldCode, visit);
+      visitInline(node.structuredResult?.blocks ? node.fieldResult : node.structuredResult?.inline ?? node.fieldResult, visit);
+    } else if (
+      node.type === 'inlineSdt' || node.type === 'insertion' || node.type === 'deletion' ||
+      node.type === 'moveFrom' || node.type === 'moveTo'
+    ) visitInline(node.content, visit);
+  }
+}
+
+function visitBlockInlines(blocks: readonly BlockContent[], visit: (node: ParagraphContent) => void): void {
+  for (const block of blocks) {
+    if (block.type === 'paragraph') visitInline(block.content, visit);
+    else if (block.type === 'table') {
+      for (const row of block.rows) {
+        for (const cell of row.cells) visitBlockInlines(cell.content, visit);
+      }
+    } else if (block.type === 'blockSdt') visitBlockInlines(block.content, visit);
+  }
+}
+
 function collectNewImages(blocks: BlockContent[]): Image[] {
   const images: Image[] = [];
-  const visitRun = (run: Run): void => {
-    for (const content of run.content) {
-      if (
-        content.type === 'drawing' &&
-        content.image.src?.startsWith('data:') &&
-        !content.image.rId
-      ) {
+  visitBlockInlines(blocks, (node) => {
+    if (node.type !== 'run') return;
+    for (const content of node.content) {
+      if (content.type === 'drawing' && content.image.src?.startsWith('data:') && !content.image.rId) {
         images.push(content.image);
       }
     }
-  };
-  for (const block of blocks) {
-    if (block.type === 'paragraph') {
-      for (const content of block.content) {
-        if (content.type === 'run') visitRun(content);
-        else if (
-          content.type === 'insertion' ||
-          content.type === 'deletion' ||
-          content.type === 'moveFrom' ||
-          content.type === 'moveTo'
-        ) {
-          for (const inline of content.content) if (inline.type === 'run') visitRun(inline);
-        }
-      }
-    } else if (block.type === 'table') {
-      for (const row of block.rows) {
-        for (const cell of row.cells) images.push(...collectNewImages(cell.content));
-      }
-    }
-  }
+  });
   return images;
 }
 
 function collectExternalHyperlinks(blocks: BlockContent[]): Hyperlink[] {
   const hyperlinks: Hyperlink[] = [];
-  for (const block of blocks) {
-    if (block.type === 'paragraph') {
-      for (const content of block.content) {
-        if (content.type === 'hyperlink' && (content.href || content.rId) && !content.anchor) {
-          hyperlinks.push(content);
-        }
-      }
-    } else if (block.type === 'table') {
-      for (const row of block.rows) {
-        for (const cell of row.cells) hyperlinks.push(...collectExternalHyperlinks(cell.content));
-      }
-    } else if (block.type === 'blockSdt') {
-      hyperlinks.push(...collectExternalHyperlinks(block.content));
+  visitBlockInlines(blocks, (content) => {
+    if (content.type === 'hyperlink' && (content.href || content.rId) && !content.anchor) {
+      hyperlinks.push(content);
     }
-  }
+  });
   return hyperlinks;
 }
 

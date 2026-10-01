@@ -101,25 +101,35 @@ export function injectTCReplyRangeMarkers(content: BlockContent[], comments: Com
     else replyIdsByRevision.set(r.parentId!, [r.id]);
   }
 
+  function revisionReplies(item: ParagraphContent): number[] {
+    if (
+      item.type === 'insertion' || item.type === 'deletion' ||
+      item.type === 'moveFrom' || item.type === 'moveTo'
+    ) {
+      return [...new Set([
+        ...(replyIdsByRevision.get(item.info.id) ?? []),
+        ...item.content.flatMap(revisionReplies),
+      ])];
+    }
+    if (item.type === 'inlineSdt') return [...new Set(item.content.flatMap(revisionReplies))];
+    if (item.type === 'hyperlink') return (item.structuredChildren ?? item.children).flatMap(revisionReplies);
+    if (item.type === 'simpleField') return (item.structuredResult?.inline ?? item.content).flatMap(revisionReplies);
+    if (item.type === 'complexField') return (item.structuredResult?.inline ?? item.fieldResult).flatMap(revisionReplies);
+    return [];
+  }
+
   function walkBlocks(blocks: BlockContent[]): void {
     for (const block of blocks) {
       if (block.type === 'paragraph') {
-        const hasTC = block.content.some(
-          (item) =>
-            (item.type === 'insertion' || item.type === 'deletion') &&
-            replyIdsByRevision.has(item.info.id)
-        );
+        const hasTC = block.content.some((item) => revisionReplies(item).length > 0);
         if (!hasTC) continue;
 
         const newItems: ParagraphContent[] = [];
         const items = block.content;
         for (let i = 0; i < items.length; i++) {
           const item = items[i];
-          if (
-            (item.type === 'insertion' || item.type === 'deletion') &&
-            replyIdsByRevision.has(item.info.id)
-          ) {
-            const replyIds = replyIdsByRevision.get(item.info.id)!;
+          const replyIds = revisionReplies(item);
+          if (replyIds.length > 0) {
             for (const rid of replyIds) {
               newItems.push({ type: 'commentRangeStart', id: rid });
             }
@@ -130,6 +140,7 @@ export function injectTCReplyRangeMarkers(content: BlockContent[], comments: Com
             const next = items[i + 1];
             if (
               next &&
+              (item.type === 'insertion' || item.type === 'deletion') &&
               (next.type === 'insertion' || next.type === 'deletion') &&
               next.type !== item.type &&
               next.info.author === item.info.author &&

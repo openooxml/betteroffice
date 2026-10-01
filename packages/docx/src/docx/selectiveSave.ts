@@ -1,6 +1,6 @@
 /** Rust-backed selective DOCX save compatibility wrapper. */
 
-import type { BlockContent, Document } from '../types/document';
+import type { BlockContent, Document, ParagraphContent } from '../types/document';
 import { writeDocumentWithRust } from './rustSaveFacade';
 
 export interface SelectiveSaveOptions {
@@ -53,22 +53,27 @@ function hasNewImagesOrHyperlinks(blocks: BlockContent[]): boolean {
         !content.image.rId
     );
 
+  const hasNewInline = (nodes: readonly ParagraphContent[]): boolean => nodes.some((item) => {
+    if (item.type === 'run') return runHasNewImage(item);
+    if (item.type === 'hyperlink') {
+      return Boolean(item.href && !item.rId && !item.anchor) ||
+        hasNewInline(item.structuredChildren ?? item.children);
+    }
+    if (item.type === 'simpleField') return hasNewInline(item.structuredResult?.inline ?? item.content);
+    if (item.type === 'complexField') {
+      return hasNewInline(item.structuredCode?.inline ?? item.fieldCode) ||
+        hasNewInline(item.structuredResult?.inline ?? item.fieldResult);
+    }
+    if (
+      item.type === 'inlineSdt' || item.type === 'insertion' || item.type === 'deletion' ||
+      item.type === 'moveFrom' || item.type === 'moveTo'
+    ) return hasNewInline(item.content);
+    return false;
+  });
+
   for (const block of blocks) {
     if (block.type === 'paragraph') {
-      for (const item of block.content) {
-        if (item.type === 'run' && runHasNewImage(item)) return true;
-        if (item.type === 'hyperlink' && item.href && !item.rId && !item.anchor) return true;
-        if (
-          item.type === 'insertion' ||
-          item.type === 'deletion' ||
-          item.type === 'moveFrom' ||
-          item.type === 'moveTo'
-        ) {
-          for (const child of item.content) {
-            if (child.type === 'run' && runHasNewImage(child)) return true;
-          }
-        }
-      }
+      if (hasNewInline(block.content)) return true;
     } else if (block.type === 'table') {
       for (const row of block.rows) {
         for (const cell of row.cells) {

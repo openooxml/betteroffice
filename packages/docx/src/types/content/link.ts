@@ -8,6 +8,7 @@ import type { TextFormatting } from '../formatting';
 import type { InlineSdt } from './sdt';
 import type { MathEquation } from './math';
 import type { BlockContent } from './section';
+import type { TrackedRunChange } from './trackedChange';
 
 /** Stable document position used by bookmark and field range contracts. */
 export interface ContentPosition {
@@ -174,7 +175,8 @@ export type FieldInlineContent =
   | InlineSdt
   | MathEquation
   | SimpleField
-  | ComplexField;
+  | ComplexField
+  | TrackedRunChange;
 
 /** Versioned structured field node; missing version means legacy v0 fields. */
 export interface StructuredFieldTree {

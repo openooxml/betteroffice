@@ -42,6 +42,10 @@ function plainTextFromValue(value: unknown): string {
       return `${plainTextFromValue(node.content)}\n`;
     case 'run':
     case 'inlineSdt':
+    case 'insertion':
+    case 'deletion':
+    case 'moveFrom':
+    case 'moveTo':
     case 'blockSdt':
       return plainTextFromValue(node.content);
     case 'hyperlink':

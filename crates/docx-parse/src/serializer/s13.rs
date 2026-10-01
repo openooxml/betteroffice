@@ -1325,14 +1325,33 @@ fn run_has_drawing_image(run: &Run) -> bool {
         .any(|content| matches!(content, RunContent::Drawing { .. }))
 }
 
+fn inline_has_drawing_image(node: &InlineNode) -> bool {
+    match node {
+        InlineNode::Run(run) => run_has_drawing_image(run),
+        InlineNode::Hyperlink(link) => link.structured_children.as_ref().unwrap_or(&link.children).iter().any(inline_has_drawing_image),
+        InlineNode::InlineSdt(sdt) => sdt.content.iter().any(inline_has_drawing_image),
+        InlineNode::Tracked(change) => change.content.iter().any(inline_has_drawing_image),
+        InlineNode::SimpleField(field) => field.content.iter().any(run_has_drawing_image),
+        InlineNode::ComplexField(field) => {
+            field.field_code.iter().any(run_has_drawing_image)
+                || field.structured_result.as_ref()
+                    .filter(|result| result.blocks.is_none())
+                    .and_then(|result| result.inline.as_ref())
+                    .map_or_else(
+                        || field.field_result.iter().any(run_has_drawing_image),
+                        |nodes| nodes.iter().any(inline_has_drawing_image),
+                    )
+        }
+        _ => false,
+    }
+}
+
 fn blocks_have_drawing_image(blocks: &[BlockContent]) -> bool {
     blocks.iter().any(|block| match block {
         BlockContent::Paragraph(paragraph) => {
             paragraph.content.iter().any(|content| match content {
-                ParagraphContent::Inline(InlineNode::Run(run)) => run_has_drawing_image(run),
-                ParagraphContent::Tracked(tracked) => tracked.content.iter().any(
-                    |inline| matches!(inline, InlineNode::Run(run) if run_has_drawing_image(run)),
-                ),
+                ParagraphContent::Inline(node) => inline_has_drawing_image(node),
+                ParagraphContent::Tracked(tracked) => tracked.content.iter().any(inline_has_drawing_image),
                 _ => false,
             })
         }
@@ -1341,7 +1360,8 @@ fn blocks_have_drawing_image(blocks: &[BlockContent]) -> bool {
                 .iter()
                 .any(|cell| blocks_have_drawing_image(&cell.content))
         }),
-        BlockContent::BlockSdt(_) | BlockContent::RawXml(_) => false,
+        BlockContent::BlockSdt(sdt) => blocks_have_drawing_image(&sdt.content),
+        BlockContent::RawXml(_) => false,
     })
 }
 
@@ -1357,14 +1377,10 @@ fn visit_new_images(
             BlockContent::Paragraph(paragraph) => {
                 for content in &mut Arc::make_mut(paragraph).content {
                     match content {
-                        ParagraphContent::Inline(InlineNode::Run(run)) => {
-                            visit_run_images(run, visit)?
-                        }
+                        ParagraphContent::Inline(node) => visit_inline_images(node, visit)?,
                         ParagraphContent::Tracked(tracked) => {
                             for inline in &mut tracked.content {
-                                if let InlineNode::Run(run) = inline {
-                                    visit_run_images(run, visit)?;
-                                }
+                                visit_inline_images(inline, visit)?;
                             }
                         }
                         _ => {}
@@ -1378,10 +1394,50 @@ fn visit_new_images(
                     }
                 }
             }
-            // New images inside block SDTs remain on the selective-patch path.
-            BlockContent::BlockSdt(_) => {}
+            BlockContent::BlockSdt(sdt) => visit_new_images(&mut Arc::make_mut(sdt).content, visit)?,
             BlockContent::RawXml(_) => {}
         }
+    }
+    Ok(())
+}
+
+fn visit_inline_images(
+    node: &mut InlineNode,
+    visit: &mut impl FnMut(&mut Image) -> Result<(), ParseError>,
+) -> Result<(), ParseError> {
+    let children = match node {
+        InlineNode::Run(run) => return visit_run_images(run, visit),
+        InlineNode::SimpleField(field) => {
+            for run in &mut field.content {
+                visit_run_images(run, visit)?;
+            }
+            return Ok(());
+        }
+        InlineNode::ComplexField(field) => {
+            for run in &mut field.field_code {
+                visit_run_images(run, visit)?;
+            }
+            if let Some(nodes) = field.structured_result.as_mut()
+                .filter(|result| result.blocks.is_none())
+                .and_then(|result| result.inline.as_mut())
+            {
+                for node in nodes {
+                    visit_inline_images(node, visit)?;
+                }
+            } else {
+                for run in &mut field.field_result {
+                    visit_run_images(run, visit)?;
+                }
+            }
+            return Ok(());
+        }
+        InlineNode::Hyperlink(link) => link.structured_children.as_mut().unwrap_or(&mut link.children),
+        InlineNode::InlineSdt(sdt) => &mut sdt.content,
+        InlineNode::Tracked(change) => &mut change.content,
+        _ => return Ok(()),
+    };
+    for child in children {
+        visit_inline_images(child, visit)?;
     }
     Ok(())
 }
@@ -1755,7 +1811,11 @@ fn block_has_hyperlink(block: &BlockContent) -> bool {
         BlockContent::Paragraph(paragraph) => paragraph
             .content
             .iter()
-            .any(|content| matches!(content, ParagraphContent::Inline(InlineNode::Hyperlink(_)))),
+            .any(|content| match content {
+                ParagraphContent::Inline(node) => inline_has_hyperlink(node),
+                ParagraphContent::Tracked(change) => change.content.iter().any(inline_has_hyperlink),
+                _ => false,
+            }),
         BlockContent::Table(table) => table.rows.iter().any(|row| {
             row.cells
                 .iter()
@@ -1763,6 +1823,41 @@ fn block_has_hyperlink(block: &BlockContent) -> bool {
         }),
         BlockContent::BlockSdt(sdt) => sdt.content.iter().any(block_has_hyperlink),
         BlockContent::RawXml(_) => false,
+    }
+}
+
+fn inline_has_hyperlink(node: &InlineNode) -> bool {
+    match node {
+        InlineNode::Hyperlink(_) => true,
+        InlineNode::InlineSdt(sdt) => sdt.content.iter().any(inline_has_hyperlink),
+        InlineNode::Tracked(change) => change.content.iter().any(inline_has_hyperlink),
+        InlineNode::ComplexField(field) => field.structured_result.as_ref()
+            .filter(|result| result.blocks.is_none())
+            .and_then(|result| result.inline.as_ref())
+            .is_some_and(|nodes| nodes.iter().any(inline_has_hyperlink)),
+        _ => false,
+    }
+}
+
+fn visit_inline_hyperlinks(node: &mut InlineNode, visit: &mut impl FnMut(&mut Hyperlink)) {
+    let children = match node {
+        InlineNode::Hyperlink(link) => {
+            visit(link);
+            link.structured_children.as_mut().unwrap_or(&mut link.children)
+        }
+        InlineNode::InlineSdt(sdt) => &mut sdt.content,
+        InlineNode::Tracked(change) => &mut change.content,
+        InlineNode::ComplexField(field) => {
+            let Some(nodes) = field.structured_result.as_mut()
+                .filter(|result| result.blocks.is_none())
+                .and_then(|result| result.inline.as_mut())
+            else { return };
+            nodes
+        }
+        _ => return,
+    };
+    for child in children {
+        visit_inline_hyperlinks(child, visit);
     }
 }
 
@@ -1774,8 +1869,14 @@ fn visit_hyperlinks(blocks: &mut [BlockContent], visit: &mut impl FnMut(&mut Hyp
         match block {
             BlockContent::Paragraph(paragraph) => {
                 for content in &mut Arc::make_mut(paragraph).content {
-                    if let ParagraphContent::Inline(InlineNode::Hyperlink(hyperlink)) = content {
-                        visit(hyperlink);
+                    match content {
+                        ParagraphContent::Inline(node) => visit_inline_hyperlinks(node, visit),
+                        ParagraphContent::Tracked(change) => {
+                            for node in &mut change.content {
+                                visit_inline_hyperlinks(node, visit);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1953,11 +2054,7 @@ impl<'a> SelectiveParagraphIndex<'a> {
                         "insertion" | "deletion" | "moveFrom" | "moveTo"
                     ) {
                         for item in &change.content {
-                            match item {
-                                InlineNode::Run(run) => self.run(run)?,
-                                InlineNode::Hyperlink(hyperlink) => self.hyperlink(hyperlink)?,
-                                _ => {}
-                            }
+                            self.inline(item)?;
                         }
                     }
                 }
@@ -2009,6 +2106,12 @@ impl<'a> SelectiveParagraphIndex<'a> {
                 }
                 Some(())
             }
+            InlineNode::Tracked(change) => {
+                for item in &change.content {
+                    self.inline(item)?;
+                }
+                Some(())
+            }
             InlineNode::Math(math) => {
                 if !math.omml_xml.is_empty() {
                     validate_math_subtree(&math.omml_xml).ok()?;
@@ -2020,13 +2123,9 @@ impl<'a> SelectiveParagraphIndex<'a> {
         }
     }
 
-    /// Hyperlink serialization only emits Run/BookmarkStart/BookmarkEnd
-    /// children; only runs can carry nested paragraphs or generated ids.
     fn hyperlink(&mut self, hyperlink: &Hyperlink) -> Option<()> {
-        for child in &hyperlink.children {
-            if let InlineNode::Run(run) = child {
-                self.run(run)?;
-            }
+        for child in hyperlink.structured_children.as_ref().unwrap_or(&hyperlink.children) {
+            self.inline(child)?;
         }
         Some(())
     }

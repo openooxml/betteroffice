@@ -129,6 +129,7 @@ impl Matches<'_> {
 
 enum SearchPart {
     Text { offset: u32, text: String },
+    Control { offset: u32, text: String },
     Story(String),
 }
 
@@ -139,6 +140,7 @@ enum SearchTask {
         para_id: String,
         offset: u32,
         text: String,
+        atom: bool,
     },
 }
 
@@ -221,6 +223,14 @@ impl EditingDoc {
                                             para_id: paragraph.para_id.clone(),
                                             offset,
                                             text,
+                                            atom: false,
+                                        },
+                                        SearchPart::Control { offset, text } => SearchTask::Text {
+                                            story: story.clone(),
+                                            para_id: paragraph.para_id.clone(),
+                                            offset,
+                                            text,
+                                            atom: true,
                                         },
                                         SearchPart::Story(story) => SearchTask::Story(story),
                                     });
@@ -232,6 +242,11 @@ impl EditingDoc {
                                     parts.extend(
                                         cell_stories(&payload).into_iter().map(SearchPart::Story),
                                     );
+                                } else if kind == "sdt" && let Some(content) = payload.get("content") {
+                                    parts.push(SearchPart::Control {
+                                        offset,
+                                        text: crate::inline_content::text(content),
+                                    });
                                 }
                                 offset += 1;
                             }
@@ -245,6 +260,7 @@ impl EditingDoc {
                     para_id,
                     offset,
                     text,
+                    atom,
                 } => {
                     let mut byte_offset = 0;
                     let mut position = offset;
@@ -255,8 +271,8 @@ impl EditingDoc {
                         matches.push(TextSearchMatch {
                             story: story.clone(),
                             para_id: para_id.clone(),
-                            start: position,
-                            end,
+                            start: if atom { offset } else { position },
+                            end: if atom { offset + 1 } else { end },
                             text: found.to_owned(),
                         });
                         if matches.len() == limit {

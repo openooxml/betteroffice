@@ -423,7 +423,7 @@ fn parse_paragraph_mark_change(element: &XmlElement) -> Option<TrackedChangeInfo
     })
 }
 
-fn parse_tracked_change_info(element: &XmlElement) -> TrackedChangeInfo {
+pub(crate) fn parse_tracked_change_info(element: &XmlElement) -> TrackedChangeInfo {
     let parsed = element
         .attribute(Some("w"), "id")
         .and_then(parse_javascript_integer_prefix)
@@ -472,17 +472,17 @@ fn parse_paragraph_contents(
     let mut output = Vec::new();
     let mut fields: Vec<OpenComplexField> = Vec::new();
     for child in transparent_children(element, false) {
+        let normalized;
+        let child = if tracked_context == TrackedContext::Deletion {
+            normalized = normalize_deletion_element(child);
+            &normalized
+        } else {
+            child
+        };
         match child.local_name() {
             "r" => {
-                let normalized;
-                let run_element = if tracked_context == TrackedContext::Deletion {
-                    normalized = normalize_deletion_element(child);
-                    &normalized
-                } else {
-                    child
-                };
                 let run = parse_run_composed(
-                    run_element,
+                    child,
                     relationships,
                     theme,
                     styles,
@@ -602,15 +602,7 @@ fn parse_paragraph_contents(
                     depth + 1,
                     is_deletion,
                 )?;
-                let content = content
-                    .into_iter()
-                    .filter_map(|content| match content {
-                        ParagraphContent::Inline(
-                            node @ (InlineNode::Run(_) | InlineNode::Hyperlink(_)),
-                        ) => Some(node),
-                        _ => None,
-                    })
-                    .collect();
+                let content = filter_field_inline(content);
                 let node_type = match child.local_name() {
                     "ins" => "insertion",
                     "del" => "deletion",
@@ -931,12 +923,13 @@ fn filter_field_inline(content: Vec<ParagraphContent>) -> Vec<InlineNode> {
                 | InlineNode::InlineSdt(_)
                 | InlineNode::Math(_)),
             ) => Some(node),
+            ParagraphContent::Tracked(change) => Some(InlineNode::Tracked(Box::new(change))),
             _ => None,
         })
         .collect()
 }
 
-fn normalize_deletion_element(element: &XmlElement) -> XmlElement {
+pub(crate) fn normalize_deletion_element(element: &XmlElement) -> XmlElement {
     let local = element.local_name();
     let mapped = match local {
         "delText" => Some("t"),
@@ -1285,6 +1278,7 @@ fn inline_node_length(node: &InlineNode) -> usize {
             .map(|node| inline_node_length(&node))
             .sum(),
         InlineNode::InlineSdt(sdt) => sdt.content.iter().map(inline_node_length).sum(),
+        InlineNode::Tracked(change) => change.content.iter().map(inline_node_length).sum(),
         InlineNode::Math(math) => math
             .plain_text
             .as_deref()

@@ -319,10 +319,29 @@ fn visit_chunk_revisions<T: ReadTxn>(
             }
         }
     } else {
+        let mut seen = Vec::new();
         for (key, kind) in [(INS, ChangeKind::Insertion), (DEL, ChangeKind::Deletion)] {
             if let Some(stamp) = chunk.attrs.get(key).and_then(revision_parts) {
+                seen.push((kind, stamp.clone()));
                 visit(kind, stamp);
             }
+        }
+        if let ChunkKind::Embed(Some(map)) = &chunk.kind
+            && map_string(map, txn, KIND_KEY).as_deref() == Some("sdt")
+            && let Some(Out::Any(content)) = map.get(txn, "content")
+        {
+            crate::inline_content::visit(&content, &mut |child| {
+                let Some(Any::Map(attrs)) = child.get("attrs") else { return };
+                for (key, kind) in [(INS, ChangeKind::Insertion), (DEL, ChangeKind::Deletion)] {
+                    if let Some(stamp) = attrs.get(key).and_then(revision_parts) {
+                        let entry = (kind, stamp);
+                        if !seen.contains(&entry) {
+                            seen.push(entry.clone());
+                            visit(entry.0, entry.1);
+                        }
+                    }
+                }
+            });
         }
     }
 }
@@ -758,13 +777,9 @@ impl EditingDoc {
             let mut min: Option<u32> = None;
             let mut max: Option<u32> = None;
             for chunk in chunks.iter() {
-                let mut matched = [INS, DEL].iter().any(|key| {
-                    chunk
-                        .attrs
-                        .get(*key)
-                        .and_then(revision_parts)
-                        .map(|(id, ..)| id)
-                        == Some(revision_id.to_owned())
+                let mut matched = false;
+                visit_chunk_revisions(chunk, &txn, |_, (id, ..)| {
+                    matched |= id == revision_id;
                 });
                 if let ChunkKind::Pilcrow(map) = &chunk.kind {
                     matched = matched

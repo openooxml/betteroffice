@@ -563,6 +563,10 @@ function hyperlinkSequenceNames(hyperlink: Hyperlink): string[] {
         push(node.structuredChildren ?? node.children);
         break;
       case 'inlineSdt':
+      case 'insertion':
+      case 'deletion':
+      case 'moveFrom':
+      case 'moveTo':
         push(node.content);
         break;
       case 'simpleField':
@@ -801,6 +805,10 @@ function hyperlinkToUnits(
       units.push(embedUnit('field', field.payload, [...field.marks, ...extraMarks, link]));
     } else if (child.type === 'mathEquation') {
       units.push(embedUnit('math', mathPayload(child), [...extraMarks, link]));
+    } else if (child.type === 'inlineSdt') {
+      units.push(embedUnit(
+        'sdt', sdtPayload(child, styleFormatting, styleResolver, opaqueSequences), [...extraMarks, link], 2
+      ));
     }
   }
   return units;
@@ -838,13 +846,44 @@ function trackedToUnits(
   for (const child of content.content) {
     if (child.type === 'run') {
       units.push(...runToUnits(child, styleFormatting, styleResolver, opaqueSequences, [mark]));
-    } else {
+    } else if (child.type === 'hyperlink') {
       opaqueSequences.push(...hyperlinkSequenceNames(child));
       const linked = hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences, [mark]);
       units.push(...linked);
+    } else {
+      const nested = inlineContainerUnits(child, styleFormatting, styleResolver, opaqueSequences);
+      const attrs = marksToYrsAttrs([mark]);
+      units.push(...nested.map((unit) => ({
+        ...unit,
+        attrs: { ...attrs, ...unit.attrs },
+        marks: unit.marks.some((nested) => nested.name === mark.name) ? unit.marks : [...unit.marks, mark],
+      })));
     }
   }
   return units;
+}
+
+function inlineContainerUnits(
+  child: InlineSdt['content'][number],
+  styleFormatting: TextFormatting | undefined,
+  styleResolver: StyleResolver | null,
+  opaqueSequences: string[]
+): InlineUnit[] {
+  if (child.type === 'run') return runToUnits(child, styleFormatting, styleResolver, opaqueSequences);
+  if (child.type === 'hyperlink') {
+    opaqueSequences.push(...hyperlinkSequenceNames(child));
+    return hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences);
+  }
+  if (child.type === 'simpleField' || child.type === 'complexField') {
+    opaqueSequences.push(...nestedSequenceNames(child));
+    const field = fieldPayload(child, styleFormatting);
+    return [embedUnit('field', field.payload, field.marks)];
+  }
+  if (child.type === 'inlineSdt') {
+    return [embedUnit('sdt', sdtPayload(child, styleFormatting, styleResolver, opaqueSequences), [], 2)];
+  }
+  if (child.type === 'mathEquation') return [embedUnit('math', mathPayload(child))];
+  return trackedToUnits(child, styleFormatting, styleResolver, opaqueSequences);
 }
 
 function sdtPayload(
@@ -881,20 +920,7 @@ function sdtPayload(
   };
 
   for (const child of sdt.content) {
-    if (child.type === 'run') {
-      runToUnits(child, styleFormatting, styleResolver, opaqueSequences).forEach(append);
-    } else if (child.type === 'hyperlink') {
-      opaqueSequences.push(...hyperlinkSequenceNames(child));
-      hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences).forEach(append);
-    } else if (child.type === 'simpleField' || child.type === 'complexField') {
-      opaqueSequences.push(...nestedSequenceNames(child));
-      const field = fieldPayload(child, styleFormatting);
-      append(embedUnit('field', field.payload, field.marks));
-    } else if (child.type === 'inlineSdt') {
-      append(embedUnit('sdt', sdtPayload(child, styleFormatting, styleResolver, opaqueSequences)));
-    } else if (child.type === 'mathEquation') {
-      append(embedUnit('math', mathPayload(child)));
-    }
+    inlineContainerUnits(child, styleFormatting, styleResolver, opaqueSequences).forEach(append);
   }
   return dropNulls({
     ...sdtPropsToAttrs(sdt.properties),

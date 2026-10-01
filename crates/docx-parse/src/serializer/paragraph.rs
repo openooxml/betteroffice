@@ -18,7 +18,7 @@ use super::context::SerializerContext;
 use super::foundation::{BorderSide, write_border};
 use super::raw::{validate_math_subtree, validate_raw_subtree, validate_replayed_fragment};
 use super::run::{
-    append_generated, nonempty, nonempty_trimmed, normalized_tracked_id, serialize_deleted_run,
+    append_generated, nonempty, nonempty_trimmed, normalized_tracked_id,
     serialize_run, serialize_text_formatting, write_shading,
 };
 use super::section::serialize_section_properties;
@@ -125,10 +125,7 @@ fn serialize_paragraph_inner(
             && !generated_comment_references.contains(&marker.id)
             && !paragraph.content.iter().any(|content| match content {
                 ParagraphContent::Inline(node) => has_comment_reference(node, marker.id),
-                ParagraphContent::Tracked(change) => change.content.iter().any(|node| {
-                    matches!(node, InlineNode::Run(_) | InlineNode::Hyperlink(_))
-                        && has_comment_reference(node, marker.id)
-                }),
+                ParagraphContent::Tracked(change) => change.content.iter().any(|node| has_comment_reference(node, marker.id)),
                 _ => false,
             })
         {
@@ -282,6 +279,7 @@ pub(crate) fn serialize_inline_node(
         InlineNode::ComplexField(field) => serialize_complex_field(field, context),
         InlineNode::InlineSdt(sdt) => serialize_inline_sdt(sdt, context),
         InlineNode::Math(math) => serialize_math(math),
+        InlineNode::Tracked(change) => serialize_tracked_change(change, context),
         InlineNode::RawXml(raw) => {
             validate_replayed_fragment(&raw.xml)?;
             Ok(raw.xml.clone())
@@ -319,17 +317,8 @@ fn serialize_hyperlink(
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     let mut children = String::new();
-    for child in &hyperlink.children {
-        match child {
-            InlineNode::Run(run) => children.push_str(&serialize_run(run, context)?),
-            InlineNode::BookmarkStart(bookmark) => {
-                children.push_str(&serialize_bookmark_start(bookmark))
-            }
-            InlineNode::BookmarkEnd(bookmark) => {
-                children.push_str(&serialize_bookmark_end(bookmark))
-            }
-            _ => {}
-        }
+    for child in hyperlink.structured_children.as_ref().unwrap_or(&hyperlink.children) {
+        children.push_str(&serialize_inline_node(child, context)?);
     }
     let has_attributes = nonempty(hyperlink.relationship_id.as_deref()).is_some()
         || nonempty(hyperlink.anchor.as_deref()).is_some()
@@ -579,22 +568,13 @@ fn serialize_tracked_change(
     }
     // Tracked wrappers use explicit start and end tags.
     writer.text("");
-    for item in &change.content {
-        match item {
-            InlineNode::Run(run) => append_generated(
-                &mut writer,
-                &if deletion {
-                    serialize_deleted_run(run, context)?
-                } else {
-                    serialize_run(run, context)?
-                },
-            ),
-            InlineNode::Hyperlink(hyperlink) => {
-                append_generated(&mut writer, &serialize_hyperlink(hyperlink, context)?)
-            }
-            _ => {}
-        };
-    }
+    let previous = std::mem::replace(&mut context.deletion, deletion);
+    let result = change.content.iter().try_for_each(|item| {
+        append_generated(&mut writer, &serialize_inline_node(item, context)?);
+        Ok::<_, ParseError>(())
+    });
+    context.deletion = previous;
+    result?;
     writer.end_element();
     Ok(writer.finish())
 }
@@ -645,6 +625,7 @@ fn has_comment_reference(node: &InlineNode, id: f64) -> bool {
             .content
             .iter()
             .any(|node| has_comment_reference(node, id)),
+        InlineNode::Tracked(change) => change.content.iter().any(|node| has_comment_reference(node, id)),
         InlineNode::SimpleField(field) => field
             .content
             .iter()

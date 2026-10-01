@@ -262,19 +262,21 @@ function extractFontsFromParagraphContent(content: ParagraphContent, fonts: Set<
     extractFontsFromRun(content, fonts);
   } else if (content.type === 'hyperlink') {
     extractFontsFromHyperlink(content, fonts);
-  } else if (content.type === 'simpleField' || content.type === 'complexField') {
-    // Fields may contain runs with fonts
-    if ('content' in content) {
-      for (const item of content.content) {
-        if (item.type === 'run') {
-          extractFontsFromRun(item, fonts);
-        }
-      }
+  } else if (
+    content.type === 'inlineSdt' || content.type === 'insertion' || content.type === 'deletion' ||
+    content.type === 'moveFrom' || content.type === 'moveTo'
+  ) {
+    for (const child of content.content) extractFontsFromParagraphContent(child, fonts);
+  } else if (content.type === 'simpleField') {
+    for (const child of content.structuredResult?.inline ?? content.content) {
+      extractFontsFromParagraphContent(child, fonts);
     }
-    if ('fieldResult' in content) {
-      for (const run of content.fieldResult) {
-        extractFontsFromRun(run, fonts);
-      }
+  } else if (content.type === 'complexField') {
+    for (const child of content.structuredCode?.inline ?? content.fieldCode) {
+      extractFontsFromParagraphContent(child, fonts);
+    }
+    for (const child of content.structuredResult?.inline ?? content.fieldResult) {
+      extractFontsFromParagraphContent(child, fonts);
     }
   }
 }
@@ -292,10 +294,8 @@ function extractFontsFromRun(run: Run, fonts: Set<string>): void {
  * Extract fonts from a hyperlink
  */
 function extractFontsFromHyperlink(hyperlink: Hyperlink, fonts: Set<string>): void {
-  for (const child of hyperlink.children) {
-    if (child.type === 'run') {
-      extractFontsFromRun(child, fonts);
-    }
+  for (const child of hyperlink.structuredChildren ?? hyperlink.children) {
+    extractFontsFromParagraphContent(child, fonts);
   }
 }
 

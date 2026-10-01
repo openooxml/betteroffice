@@ -196,32 +196,49 @@ fn build_sections(
 pub fn get_paragraph_text(paragraph: &Paragraph) -> String {
     let mut text = String::new();
     for content in &paragraph.content {
-        let ParagraphContent::Inline(content) = content else {
-            continue;
-        };
         match content {
-            InlineNode::Run(run) => append_run_text(&run.content, &mut text, true),
-            InlineNode::Hyperlink(link) => {
-                for child in &link.children {
-                    if let InlineNode::Run(run) = child {
-                        append_run_text(&run.content, &mut text, false);
-                    }
-                }
-            }
-            InlineNode::SimpleField(field) => {
-                for run in &field.content {
-                    append_run_text(&run.content, &mut text, false);
-                }
-            }
-            InlineNode::ComplexField(field) => {
-                for run in &field.field_result {
-                    append_run_text(&run.content, &mut text, false);
+            ParagraphContent::Inline(node) => append_inline_text(node, &mut text, true),
+            ParagraphContent::Tracked(change) => {
+                for node in &change.content {
+                    append_inline_text(node, &mut text, true);
                 }
             }
             _ => {}
         }
     }
     text
+}
+
+fn append_inline_text(content: &InlineNode, text: &mut String, separators: bool) {
+    match content {
+        InlineNode::Run(run) => append_run_text(&run.content, text, separators),
+        InlineNode::Hyperlink(link) => {
+            for child in link.structured_children.as_ref().unwrap_or(&link.children) {
+                append_inline_text(child, text, false);
+            }
+        }
+        InlineNode::SimpleField(field) => {
+            for run in &field.content {
+                append_run_text(&run.content, text, false);
+            }
+        }
+        InlineNode::ComplexField(field) => {
+            for run in &field.field_result {
+                append_run_text(&run.content, text, false);
+            }
+        }
+        InlineNode::InlineSdt(sdt) => {
+            for child in &sdt.content {
+                append_inline_text(child, text, separators);
+            }
+        }
+        InlineNode::Tracked(change) => {
+            for child in &change.content {
+                append_inline_text(child, text, separators);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn append_run_text(content: &[RunContent], output: &mut String, include_separators: bool) {

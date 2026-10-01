@@ -80,6 +80,7 @@ mod fingerprint;
 mod format;
 mod heading;
 mod identity;
+mod inline_content;
 mod list_marker;
 pub mod media;
 mod op;
@@ -1143,7 +1144,11 @@ impl EditingDoc {
                         properties: properties.values,
                     });
                 }
-                SegmentContent::OtherEmbed { .. } => {}
+                SegmentContent::OtherEmbed { kind, payload } => {
+                    if kind == "sdt" && let Some(content) = payload.get("content") {
+                        text.push_str(&inline_content::text(content));
+                    }
+                }
             }
         }
         Ok(paragraphs)

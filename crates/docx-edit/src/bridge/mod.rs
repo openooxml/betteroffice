@@ -1096,6 +1096,7 @@ fn lower_story<T: ReadTxn>(
                         None,
                         &mut paragraph_runs,
                     );
+                    inherit_inline_revision(&mut paragraph_runs[first..], attributes, env);
                     if env.revision_hidden(attributes) {
                         hide_runs(&mut paragraph_runs[first..]);
                     }
@@ -2215,6 +2216,29 @@ fn authored_checkbox_value(values: &std::collections::HashMap<String, Any>) -> O
         .flatten()
 }
 
+fn inherit_inline_revision(runs: &mut [RawRun], attrs: Option<&Attrs>, env: &RenderEnv) {
+    let inherited = lower_run_formatting(attrs, env);
+    if inherited.change_revision_id.is_none() {
+        return;
+    }
+    for run in runs {
+        if run.formatting.change_revision_id.is_none() {
+            run.formatting.is_insertion = inherited.is_insertion;
+            run.formatting.is_deletion = inherited.is_deletion;
+            run.formatting.change_revision_id = inherited.change_revision_id;
+            run.formatting.change_author = inherited.change_author.clone();
+            run.formatting.change_date = inherited.change_date.clone();
+            if let RawRunKind::Image(image) = &mut run.kind {
+                image.is_insertion = inherited.is_insertion;
+                image.is_deletion = inherited.is_deletion;
+                image.change_revision_id = inherited.change_revision_id;
+                image.change_author = inherited.change_author.clone();
+                image.change_date = inherited.change_date.clone();
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_inline_sdt<T: ReadTxn>(
     sdt: &MapRef,
@@ -2385,7 +2409,7 @@ fn lower_inline_sdt_values(
                         italic: Some(true),
                         font_family: Some("Cambria Math".to_owned()),
                         logical_order: Some(u64::MAX),
-                        ..RunFormatting::default()
+                        ..formatting
                     },
                     story_start: story_index,
                     story_end: story_index + 1,
@@ -2439,6 +2463,7 @@ fn lower_inline_sdt_values(
                     widget.clone(),
                     runs,
                 );
+                inherit_inline_revision(&mut runs[first..], Some(&attrs), env);
                 if env.revision_hidden(Some(&attrs)) {
                     hide_runs(&mut runs[first..]);
                 }

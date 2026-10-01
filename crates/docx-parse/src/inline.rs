@@ -927,6 +927,7 @@ pub enum InlineNode {
     InlineSdt(Box<InlineSdt>),
     Math(MathEquation),
     RawXml(Box<RawInlineXml>),
+    Tracked(Box<crate::paragraph::TrackedInline>),
 }
 
 impl InlineNode {
@@ -941,6 +942,13 @@ impl InlineNode {
             Self::InlineSdt(_) => "inlineSdt",
             Self::Math(_) => "mathEquation",
             Self::RawXml(_) => "rawXml",
+            Self::Tracked(change) => match change.node_type.as_str() {
+                "insertion" => "insertion",
+                "deletion" => "deletion",
+                "moveFrom" => "moveFrom",
+                "moveTo" => "moveTo",
+                _ => "tracked",
+            },
         }
     }
 }
@@ -1243,6 +1251,21 @@ pub fn parse_hyperlink(
     part: &str,
     budget: &ParseBudget<'_>,
 ) -> Result<Hyperlink, ParseError> {
+    parse_hyperlink_at_depth(element, relationships, theme, styles, doc_defaults, part, budget, 0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_hyperlink_at_depth(
+    element: &XmlElement,
+    relationships: Option<&RelationshipMap>,
+    theme: Option<&Theme>,
+    styles: Option<&StyleMap>,
+    doc_defaults: Option<&DocDefaults>,
+    part: &str,
+    budget: &ParseBudget<'_>,
+    depth: usize,
+) -> Result<Hyperlink, ParseError> {
+    budget.check_nesting_depth(depth, part)?;
     let relationship_id = element.attribute(Some("r"), "id").map(str::to_owned);
     let mut href = relationship_id
         .as_deref()
@@ -1313,6 +1336,7 @@ pub fn parse_hyperlink(
                 doc_defaults,
                 part,
                 budget,
+                depth + 1,
             )?))),
             "oMath" | "oMathPara" => structured.push(InlineNode::Math(parse_hyperlink_math(child))),
             _ => {}
@@ -1819,6 +1843,7 @@ pub enum InlineSdtType {
     InlineSdt,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_hyperlink_inline_sdt(
     element: &XmlElement,
     relationships: Option<&RelationshipMap>,
@@ -1827,6 +1852,7 @@ fn parse_hyperlink_inline_sdt(
     doc_defaults: Option<&DocDefaults>,
     part: &str,
     budget: &ParseBudget<'_>,
+    depth: usize,
 ) -> Result<InlineSdt, ParseError> {
     // SDT run properties omit the theme.
     let properties = parse_sdt_properties(
@@ -1836,27 +1862,10 @@ fn parse_hyperlink_inline_sdt(
     );
     let mut content = Vec::new();
     if let Some(container) = element.child("w", "sdtContent") {
-        for child in container.child_elements().take(MAX_HYPERLINK_CHILDREN) {
-            match child.local_name() {
-                "r" => content.push(InlineNode::Run(
-                    parse_run(child, theme, styles, doc_defaults).run,
-                )),
-                "fldSimple" => content.push(InlineNode::SimpleField(Box::new(parse_simple_field(
-                    child,
-                    theme,
-                    styles,
-                    doc_defaults,
-                    part,
-                    budget,
-                )?))),
-                "oMath" | "oMathPara" => {
-                    content.push(InlineNode::Math(parse_hyperlink_math(child)))
-                }
-                _ => {}
-            }
-        }
+        content = parse_inline_container(
+            container, relationships, theme, styles, doc_defaults, part, budget, depth + 1,
+        )?;
     }
-    let _ = relationships;
     Ok(InlineSdt {
         node_type: InlineSdtType::InlineSdt,
         properties,
@@ -2049,7 +2058,7 @@ pub fn parse_inline_container(
                 }
             }
             "hyperlink" => {
-                let hyperlink = parse_hyperlink(
+                let hyperlink = parse_hyperlink_at_depth(
                     child,
                     relationships,
                     theme,
@@ -2057,6 +2066,7 @@ pub fn parse_inline_container(
                     doc_defaults,
                     part,
                     budget,
+                    depth + 1,
                 )?;
                 if let Some(active) = fields.last_mut() {
                     let runs: Vec<Run> = hyperlink
@@ -2133,6 +2143,7 @@ pub fn parse_inline_container(
                                     | InlineNode::ComplexField(_)
                                     | InlineNode::InlineSdt(_)
                                     | InlineNode::Math(_)
+                                    | InlineNode::Tracked(_)
                             )
                         })
                         .collect();
@@ -2146,6 +2157,29 @@ pub fn parse_inline_container(
                         content: allowed,
                     })));
                 }
+            }
+            "ins" | "del" | "moveFrom" | "moveTo" => {
+                let normalized;
+                let element = if matches!(child.local_name(), "del" | "moveFrom") {
+                    normalized = crate::paragraph::normalize_deletion_element(child);
+                    &normalized
+                } else {
+                    child
+                };
+                let content = parse_inline_container(
+                    element, relationships, theme, styles, doc_defaults, part, budget, depth + 1,
+                )?;
+                let node_type = match child.local_name() {
+                    "ins" => "insertion",
+                    "del" => "deletion",
+                    "moveFrom" => "moveFrom",
+                    _ => "moveTo",
+                };
+                output.push(InlineNode::Tracked(Box::new(crate::paragraph::TrackedInline {
+                    node_type: node_type.to_owned(),
+                    info: crate::paragraph::parse_tracked_change_info(child),
+                    content,
+                })));
             }
             "oMath" | "oMathPara" => output.push(InlineNode::Math(parse_paragraph_math(child))),
             _ => {}
@@ -2199,6 +2233,7 @@ fn parse_rich_simple_field(
                 | InlineNode::ComplexField(_)
                 | InlineNode::InlineSdt(_)
                 | InlineNode::Math(_)
+                | InlineNode::Tracked(_)
         )
     })
     .collect();
@@ -2320,6 +2355,7 @@ fn inline_content_length(node: &InlineNode) -> usize {
             .map(|node| inline_content_length(&node))
             .sum(),
         InlineNode::InlineSdt(sdt) => sdt.content.iter().map(inline_content_length).sum(),
+        InlineNode::Tracked(change) => change.content.iter().map(inline_content_length).sum(),
         InlineNode::Math(math) => math
             .plain_text
             .as_deref()

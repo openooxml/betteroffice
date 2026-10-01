@@ -221,6 +221,7 @@ fn each_reference(paragraph: &Paragraph, found: &mut impl FnMut(f64)) {
                 }
             }
             InlineNode::InlineSdt(sdt) => sdt.content.iter().for_each(|child| node(child, found)),
+            InlineNode::Tracked(change) => change.content.iter().for_each(|child| node(child, found)),
             _ => {}
         }
     }
@@ -290,6 +291,7 @@ impl Remover<'_> {
                 }
             }
             InlineNode::InlineSdt(sdt) => self.nodes(&mut sdt.content),
+            InlineNode::Tracked(change) => self.nodes(&mut change.content),
             _ => {}
         }
         false
