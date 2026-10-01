@@ -110,6 +110,7 @@ struct ResidentRegionState {
 /// per-keystroke handoff clone-free.
 #[derive(Debug)]
 struct RegionFastPathState {
+    cached_page_totals: bool,
     regions: Rc<DocumentRegions>,
     measurement: Rc<docx_layout::measure_blocks::MeasurementConfig>,
     /// `measurement` and the measurement fonts' generation hashed once, so a
@@ -181,6 +182,7 @@ struct PreparedRegionLayout {
     measured_table_wrap_frames: Vec<bool>,
     measured_float_geometry: Option<[f64; 5]>,
     provisional: bool,
+    cached_page_totals: bool,
     /// Body blocks still being measured; `input.measured` is final without them.
     body: Option<BodyMeasure>,
 }
@@ -2493,6 +2495,7 @@ impl EngineSession {
         }
         let request: RegionLayoutInput =
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
+        let cached_page_totals = request.cached_page_totals;
         let (mut input, mut regions, notes, measurement, render_env, body_story) = request.split();
         let request_options = input.options.clone();
         let mut parsed_render_env = if render_env.is_null() {
@@ -2687,6 +2690,7 @@ impl EngineSession {
             measured_table_wrap_frames,
             measured_float_geometry,
             provisional,
+            cached_page_totals,
             body,
         })
     }
@@ -2715,6 +2719,7 @@ impl EngineSession {
             measured_table_wrap_frames,
             measured_float_geometry,
             provisional,
+            cached_page_totals,
             body,
         } = prepared;
         debug_assert!(
@@ -2773,6 +2778,7 @@ impl EngineSession {
                 input,
                 block_fingerprints.clone(),
                 Some((revision_preview_key, &revision_preview, main_body)),
+                cached_page_totals,
             )?;
             let layout = self
                 .pagination
@@ -2846,6 +2852,7 @@ impl EngineSession {
                 final_input,
                 fingerprints,
                 Some((revision_preview_key, &revision_preview, main_body)),
+                cached_page_totals,
             )?;
         } else {
             self.pagination.borrow_mut().layout = Some(stabilized.layout);
@@ -2862,6 +2869,7 @@ impl EngineSession {
             page.note_areas = None;
         }
         layout.partial = provisional || self.partial_document.get();
+        layout.cached_page_totals = cached_page_totals;
         apply_document_regions(layout, &regions);
         let page_note_map = map_notes_to_pages(&layout.pages, &refs, &regions);
         stamp_note_pages(layout, &page_note_map, &regions);
@@ -2903,6 +2911,7 @@ impl EngineSession {
             request_fingerprint,
             headers_footers,
             fast_path: regional.map(|(regional, render_env)| RegionFastPathState {
+                cached_page_totals,
                 regions: Rc::new(regions),
                 measurement: Rc::new(measurement),
                 measurement_fingerprint,
@@ -3176,7 +3185,7 @@ impl EngineSession {
     /// and `apply_input`.
     fn layout_document_value(&self, input: LayoutInput) -> Result<(), String> {
         let block_fingerprints = measured_fingerprints(&input)?;
-        self.layout_document_value_with_fingerprints(input, block_fingerprints, None)
+        self.layout_document_value_with_fingerprints(input, block_fingerprints, None, false)
     }
 
     /// Paginate a resident measured arena whose clean block fingerprints were
@@ -3261,6 +3270,7 @@ impl EngineSession {
         mut input: LayoutInput,
         mut block_fingerprints: Vec<u64>,
         revision_preview: Option<(u64, &BTreeMap<String, RevisionPreview>, bool)>,
+        cached_page_totals: bool,
     ) -> Result<(), String> {
         if block_fingerprints.len() != input.measured.len() {
             return Err("resident pagination fingerprints do not match measured blocks".to_owned());
@@ -3374,6 +3384,7 @@ impl EngineSession {
         let mut layout = run.layout;
         // Every pass over part of a package, the resident edit paths' too.
         layout.partial = self.partial_document.get();
+        layout.cached_page_totals = cached_page_totals;
         pagination.layout = Some(layout);
         pagination.checkpoints = run.checkpoints;
         pagination.block_fingerprints = block_fingerprints;
@@ -3919,6 +3930,7 @@ impl EngineSession {
             resident.input,
             resident.block_fingerprints,
             None,
+            false,
         )?;
         self.pagination.borrow_mut().input_lowering = resident.lowering;
         let extras = self
@@ -3970,12 +3982,20 @@ impl EngineSession {
                             fast.measurement_fingerprint,
                             fast.regional,
                             fast.render_env.clone(),
+                            fast.cached_page_totals,
                         )
                     },
                 )
             })
         };
-        let Some((regions, measurement, measurement_fingerprint, regional, pass_env)) = fast_config
+        let Some((
+            regions,
+            measurement,
+            measurement_fingerprint,
+            regional,
+            pass_env,
+            cached_page_totals,
+        )) = fast_config
         else {
             return Ok(false);
         };
@@ -4068,6 +4088,7 @@ impl EngineSession {
             resident.input,
             resident.block_fingerprints,
             None,
+            cached_page_totals,
         )?;
         let mut pagination = self.pagination.borrow_mut();
         pagination.input_lowering = resident.lowering;
@@ -4181,6 +4202,7 @@ impl EngineSession {
                 resident.input,
                 resident.block_fingerprints,
                 None,
+                false,
             )?;
             self.pagination.borrow_mut().input_lowering = resident.lowering;
             let finished = now();
@@ -6325,7 +6347,21 @@ mod tests {
 
     #[test]
     fn a_provisional_layout_renders_numpages_empty_until_the_full_pass() {
-        let request = float_page_request(serde_json::json!({}));
+        assert_partial_numpages(false);
+    }
+
+    #[test]
+    fn a_provisional_layout_renders_cached_numpages_until_the_full_pass() {
+        assert_partial_numpages(true);
+    }
+
+    fn assert_partial_numpages(cached_page_totals: bool) {
+        let mut request = float_page_request(serde_json::json!({}));
+        if cached_page_totals {
+            let mut value: serde_json::Value = serde_json::from_str(&request).unwrap();
+            value["cachedPageTotals"] = serde_json::json!(true);
+            request = value.to_string();
+        }
         let mut body = String::from(
             r#"<w:p><w:r><w:t>Page count </w:t></w:r><w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>"#,
         );
@@ -6359,10 +6395,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(prefix["provisional"], true);
+        assert_eq!(prefix["layout"]["partial"], true);
+        assert_eq!(
+            prefix["layout"]["cachedPageTotals"],
+            if cached_page_totals {
+                serde_json::json!(true)
+            } else {
+                serde_json::Value::Null
+            }
+        );
         assert_eq!(
             numpages_text(&engine),
-            "",
-            "no count while the layout is partial"
+            if cached_page_totals { "9" } else { "" }
         );
 
         let full: serde_json::Value = serde_json::from_str(
@@ -6374,6 +6418,62 @@ mod tests {
         let pages = full["layout"]["pages"].as_array().unwrap().len();
         assert!(pages > prefix["layout"]["pages"].as_array().unwrap().len());
         assert_eq!(numpages_text(&engine), pages.to_string());
+
+        engine.set_partial_document(true);
+        let cut: serde_json::Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_retained_json(&request)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cut["layout"]["partial"], true);
+        assert_eq!(
+            numpages_text(&engine),
+            if cached_page_totals { "9" } else { "" }
+        );
+
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 2),
+                "x",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        assert!(
+            engine
+                .apply_and_layout_regions_resident("body", &mut |_| {})
+                .unwrap()
+        );
+        assert_eq!(
+            engine
+                .pagination
+                .borrow()
+                .layout
+                .as_ref()
+                .unwrap()
+                .cached_page_totals,
+            cached_page_totals
+        );
+        assert_eq!(
+            numpages_text(&engine),
+            if cached_page_totals { "9" } else { "" }
+        );
+
+        if cached_page_totals {
+            let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+            request.as_object_mut().unwrap().remove("cachedPageTotals");
+            let request = request.to_string();
+            let default: serde_json::Value = serde_json::from_str(
+                &engine
+                    .layout_document_with_regions_retained_json(&request)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(default["layout"].get("cachedPageTotals").is_none());
+            assert_eq!(numpages_text(&engine), "");
+        }
     }
 
     #[test]

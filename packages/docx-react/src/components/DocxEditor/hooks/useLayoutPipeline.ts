@@ -420,6 +420,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         let measurement: ResidentMeasurementConfig | null = null;
         try {
           const request = buildResidentRegionLayoutRequest(document, pageGap, passRenderEnv);
+          if (workerOpenEnabledRef.current) request.cachedPageTotals = true;
           const input = JSON.stringify(request);
           const pendingRequirements =
             (workerOpenEnabledRef.current ||
@@ -495,6 +496,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         const request = {
           ...buildResidentRegionLayoutRequest(document, pageGap, passRenderEnv),
           measurement,
+          ...(workerOpenEnabledRef.current ? { cachedPageTotals: true } : {}),
         };
         const requestWithoutPreview = JSON.stringify(
           { ...request, measurement: undefined },
@@ -900,6 +902,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       pageGap,
       workerProposalRenderEnv(session, renderEnv)
     );
+    if (workerOpenEnabledRef.current) request.cachedPageTotals = true;
     const requirements = JSON.parse(
       session.layoutFontRequirementsJson(JSON.stringify(request))
     ) as ResidentFontRequirement[];

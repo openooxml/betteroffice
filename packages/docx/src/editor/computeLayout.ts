@@ -18,6 +18,8 @@ interface RetainedKernelInputs {
 
 export interface ResidentRegionLayoutRequest {
   bodyStory: 'body';
+  /** @internal Use saved page totals while the layout is partial. */
+  cachedPageTotals?: boolean;
   options: Pick<LayoutOptions, 'contractVersion' | 'pageGap'>;
   regions: {
     sections: Array<{
