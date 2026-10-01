@@ -51,6 +51,15 @@ let fontRequirements: {
   layoutInput: string;
   requirementsJson: string;
 } | null = null;
+/** Font requirements by layout input, for one session at one document version. */
+let requirementsCache: {
+  owner: ResidentEngineSession;
+  version: string;
+  byInput: Map<string, string>;
+} | null = null;
+/** The layout input of the host's last font requirements request. */
+let requestedRequirements: { owner: ResidentEngineSession; layoutInput: string } | null = null;
+const REQUIREMENTS_CACHE_INPUTS = 8;
 /** Set while the session holds the document `open` seeded, with the heap limit it used. */
 let openedDocument: { heapLimitBytes?: number } | null = null;
 let unsubscribe: (() => void) | null = null;
@@ -273,7 +282,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'fontRequirements') {
     if (!session) throw new Error('Resident engine worker is not initialized');
-    const requirementsJson = session.layoutFontRequirementsJson(request.layoutInput);
+    const requirementsJson = layoutFontRequirements(session, request.layoutInput);
+    requestedRequirements = { owner: session, layoutInput: request.layoutInput };
     fontRequirements = {
       version: session.proposalEngine.version(),
       layoutInput: request.layoutInput,
@@ -361,6 +371,22 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           (request.operation.kind === 'snapshot' && fontRequirements.version === snapshot.version))
           ? { ...fontRequirements, version: snapshot.version }
           : null;
+      // A decision changes only the preview: the host's next input is its last one previewing it.
+      const preview = proposalRevisionPreview(snapshot);
+      if (
+        request.operation.kind === 'setStates' &&
+        result?.ok === true &&
+        changedStories.length === 0 &&
+        preview !== undefined &&
+        requestedRequirements?.owner === session
+      ) {
+        fontRequirements = previewFontRequirements(
+          session,
+          requestedRequirements.layoutInput,
+          preview,
+          snapshot.version
+        );
+      }
       reply(
         {
           id: request.id,
@@ -678,6 +704,45 @@ function hydrate(
   layoutRevision = snapshot.layoutRevision;
   pendingUpdates = [];
   return { layoutJson, provisional };
+}
+
+function layoutFontRequirements(engine: ResidentEngineSession, layoutInput: string): string {
+  const version = engine.proposalEngine.version();
+  if (requirementsCache?.owner !== engine || requirementsCache.version !== version) {
+    requirementsCache = { owner: engine, version, byInput: new Map() };
+  }
+  const cached = requirementsCache.byInput.get(layoutInput);
+  if (cached !== undefined) return cached;
+  const requirementsJson = engine.layoutFontRequirementsJson(layoutInput);
+  if (requirementsCache.byInput.size >= REQUIREMENTS_CACHE_INPUTS) {
+    requirementsCache.byInput.delete(requirementsCache.byInput.keys().next().value as string);
+  }
+  requirementsCache.byInput.set(layoutInput, requirementsJson);
+  return requirementsJson;
+}
+
+/**
+ * The font requirements of `layoutInput` previewing `preview`, keyed by the input the host builds
+ * for it (its render environment with `revisionPreview` replaced), or null when they cannot be read.
+ */
+function previewFontRequirements(
+  engine: ResidentEngineSession,
+  layoutInput: string,
+  preview: NonNullable<ReturnType<typeof proposalRevisionPreview>>,
+  version: string
+): NonNullable<typeof fontRequirements> | null {
+  try {
+    const request = JSON.parse(layoutInput) as { renderEnv?: Record<string, unknown> | null };
+    if (!request.renderEnv || typeof request.renderEnv !== 'object') return null;
+    request.renderEnv.revisionPreview = preview;
+    const next = JSON.stringify(request);
+    return { version, layoutInput: next, requirementsJson: layoutFontRequirements(engine, next) };
+  } catch (error) {
+    // The host reads them itself and meets the failure there.
+    if (trap) throw trap;
+    if (error instanceof WebAssembly.RuntimeError) throw error;
+    return null;
+  }
 }
 
 function setFrameDisplayWindow(
