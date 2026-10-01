@@ -140,6 +140,128 @@ function setup() {
   return { native, inputs, frame, engine, mainThreadBuilds, layoutJson };
 }
 
+test('only the current opened live worker owns its document while worker-open is enabled', async () => {
+  const { native, engine } = setup();
+  const { result, rerender, unmount } = renderHook(
+    ({ enabled }) =>
+      useRustDisplayList(null, undefined, undefined, undefined, engine, undefined, undefined, undefined, enabled),
+    { initialProps: { enabled: true } }
+  );
+  try {
+    const ownsDocument = result.current.layoutInWorker.ownsDocument!;
+    expect(ownsDocument(engine)).toBe(false);
+    const opening = result.current.openInWorker(engine, Uint8Array.of(1));
+    const worker = FakeWorker.spawned[0]!;
+    expect(ownsDocument(engine)).toBe(false);
+    worker.onmessage?.({ data: {
+      id: worker.last().id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0),
+    } } as MessageEvent<ResidentEngineWorkerResponse>);
+    expect(await opening).not.toBeNull();
+    expect(ownsDocument(engine)).toBe(true);
+    expect(ownsDocument({ ...engine } as YrsSession)).toBe(false);
+    rerender({ enabled: false });
+    expect(ownsDocument(engine)).toBe(false);
+    rerender({ enabled: true });
+    expect(ownsDocument(engine)).toBe(true);
+    worker.onerror?.({ message: 'worker crashed' } as ErrorEvent);
+    expect(ownsDocument(engine)).toBe(false);
+    unmount();
+    expect(ownsDocument(engine)).toBe(false);
+  } finally {
+    unmount();
+    native.free();
+  }
+});
+
+test.each(['fallback', 'destroy'])('an opened worker stops owning its document after %s', async (ending) => {
+  const { native, engine } = setup();
+  const { result, unmount } = renderHook(() =>
+    useRustDisplayList(null, undefined, undefined, undefined, engine, undefined, undefined, undefined, true)
+  );
+  try {
+    const opening = result.current.openInWorker(engine, Uint8Array.of(1));
+    const worker = FakeWorker.spawned[0]!;
+    worker.onmessage?.({ data: {
+      id: worker.last().id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0),
+    } } as MessageEvent<ResidentEngineWorkerResponse>);
+    const opened = await opening;
+    expect(opened).not.toBeNull();
+    expect(result.current.layoutInWorker.ownsDocument!(engine)).toBe(true);
+    act(() => {
+      if (ending === 'fallback') opened!.fallback();
+      else opened!.destroy();
+    });
+    expect(result.current.layoutInWorker.ownsDocument!(engine)).toBe(false);
+    expect(worker.terminated).toBe(true);
+    if (ending === 'fallback') {
+      expect(result.current.layoutInWorker(engine, REQUEST)).toBeNull();
+      expect(FakeWorker.spawned).toHaveLength(1);
+    }
+  } finally {
+    unmount();
+    native.free();
+  }
+});
+
+test('a worker owns a document supplied by bootstrap and sync', async () => {
+  const { native, engine, frame, layoutJson } = setup();
+  const { result, unmount } = renderHook(() =>
+    useRustDisplayList(null, undefined, undefined, undefined, engine, undefined, undefined, undefined, true)
+  );
+  try {
+    const pending = result.current.layoutInWorker(engine, REQUEST)!;
+    const worker = FakeWorker.spawned[0]!;
+    expect(worker.last().type).toBe('bootstrap');
+    expect(result.current.layoutInWorker.ownsDocument!(engine)).toBe(false);
+    worker.replyFrame(frame(1), 1, { layoutJson });
+    expect(await pending).not.toBeNull();
+    expect(result.current.layoutInWorker.ownsDocument!(engine)).toBe(true);
+    const synced = result.current.layoutInWorker(engine, REQUEST)!;
+    expect(worker.last().type).toBe('sync');
+    worker.replyFrame(frame(2), 2, { layoutJson });
+    expect(await synced).not.toBeNull();
+    expect(result.current.layoutInWorker.ownsDocument!(engine)).toBe(true);
+    unmount();
+    expect(result.current.layoutInWorker.ownsDocument!(engine)).toBe(false);
+  } finally {
+    unmount();
+    native.free();
+  }
+});
+
+test('a worker handed to a successor stops owning the previous session', async () => {
+  const { native, engine, frame, layoutJson } = setup();
+  const successor = { ...engine } as YrsSession;
+  const handoffFrom = { current: null as YrsSession | null };
+  const { result, unmount } = renderHook(() =>
+    useRustDisplayList(null, undefined, undefined, undefined, engine, undefined, undefined, handoffFrom, true)
+  );
+  try {
+    const opening = result.current.openInWorker(engine, Uint8Array.of(1));
+    const worker = FakeWorker.spawned[0]!;
+    worker.onmessage?.({ data: {
+      id: worker.last().id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0),
+    } } as MessageEvent<ResidentEngineWorkerResponse>);
+    expect(await opening).not.toBeNull();
+    expect(result.current.layoutInWorker.ownsDocument!(engine)).toBe(true);
+    handoffFrom.current = engine;
+    const pending = result.current.layoutInWorker(successor, REQUEST)!;
+    expect(FakeWorker.spawned).toHaveLength(1);
+    expect(worker.last().type).toBe('bootstrap');
+    expect(result.current.layoutInWorker.ownsDocument!(engine)).toBe(false);
+    expect(result.current.layoutInWorker.ownsDocument!(successor)).toBe(false);
+    worker.replyFrame(frame(1), 1, { layoutJson });
+    expect(await pending).not.toBeNull();
+    expect(result.current.layoutInWorker.ownsDocument!(successor)).toBe(true);
+    expect(result.current.layoutInWorker.ownsDocument!(engine)).toBe(false);
+    expect(result.current.layoutInWorker(engine, REQUEST)).toBeNull();
+    expect(FakeWorker.spawned).toHaveLength(1);
+  } finally {
+    unmount();
+    native.free();
+  }
+});
+
 function proposalAuthority(engine: YrsSession) {
   let mirror: ResidentProposalReply['mirror'] | null = null;
   const snapshot: DocxProposalSnapshot = { version: 'worker-1', previewVersion: 0, proposals: [] };

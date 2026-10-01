@@ -50,6 +50,7 @@ function fakeDocument() {
     version: 1,
     laidOutHere: [] as number[],
     workerAvailable: true,
+    workerOwnsDocument: false,
     fontsReady: true,
     measurement: MEASUREMENT,
   };
@@ -69,6 +70,7 @@ function fakeDocument() {
 async function opened({
   experimentalWorkerOpen = false,
   pendingReplica = false,
+  ownsDocument = false,
   fontRequirementsInWorker = undefined as FontRequirementsInWorker | undefined,
 } = {}) {
   let nextFrame = 0;
@@ -83,6 +85,7 @@ async function opened({
   });
   restoreFrames.push(() => { requestFrame.mockRestore(); cancelFrame.mockRestore(); });
   const { doc, session } = fakeDocument();
+  doc.workerOwnsDocument = ownsDocument;
   const replica = pendingReplica
     ? deferWorkerOpenReplica(session, () => new Promise(() => {}), () => {}, () => {})
     : null;
@@ -106,7 +109,7 @@ async function opened({
       getScrollContainer: () => null,
       onError: (error) => errors.push(error),
       fontRequirementsInWorker,
-      layoutInWorker: (asked, request) =>
+      layoutInWorker: Object.assign((asked: YrsSession, request: string) =>
         doc.workerAvailable
           ? new Promise<WorkerLayoutComputation | null>((resolve) => {
               worker.push({
@@ -119,7 +122,9 @@ async function opened({
                 fail: () => resolve(null),
               });
             })
-          : null,
+          : null, {
+        ownsDocument: (asked: YrsSession) => asked === session && doc.workerOwnsDocument,
+      }),
     }),
     { initialProps: { session } as HookProps }
   );
@@ -232,6 +237,183 @@ test.each([false, true])('a null completion without held proposals keeps the hos
   expect(h.errors).toEqual([]);
 });
 
+test('a live worker retries a null completion once per source version without a pending replica', async () => {
+  const h = await opened({ experimentalWorkerOpen: true, ownsDocument: true });
+  h.doc.version = 2;
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  let finish!: (computation: LayoutComputation | null) => void;
+  const complete = new Promise<LayoutComputation | null>((resolve) => { finish = resolve; });
+  const firstPages = { pages: [] } as unknown as Layout;
+  await h.answer(1, { layout: firstPages, notesConverged: true, complete });
+  expect(h.hook.result.current.layout).toBe(firstPages);
+  expect(h.shown()).toBe('2');
+  expect(h.replica).toBeNull();
+
+  await act(async () => finish(null));
+  expect(h.hook.result.current.layout).toBe(firstPages);
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(isLayoutQueued(h.session)).toBe(true);
+  await h.frame();
+  expect(h.worker.map((pass) => pass.at)).toEqual([1, 2, 2]);
+  let finishRetry!: (computation: LayoutComputation | null) => void;
+  const retryComplete = new Promise<LayoutComputation | null>((resolve) => { finishRetry = resolve; });
+  const retryPages = { pages: [] } as unknown as Layout;
+  await h.answer(2, { layout: retryPages, notesConverged: true, complete: retryComplete });
+  expect(h.hook.result.current.layout).toBe(retryPages);
+  await act(async () => finishRetry(null));
+  expect(h.doc.laidOutHere).toEqual([2]);
+  expect(h.hook.result.current.layout).not.toBe(retryPages);
+  expect(h.shown()).toBe('2');
+  expect(isLayoutQueued(h.session)).toBe(false);
+  await h.frame();
+  expect(h.worker).toHaveLength(3);
+  expect(h.doc.laidOutHere).toEqual([2]);
+
+  h.doc.version = 3;
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  let finishNext!: (computation: LayoutComputation | null) => void;
+  const nextComplete = new Promise<LayoutComputation | null>((resolve) => { finishNext = resolve; });
+  await h.answer(3, { layout: { pages: [] } as unknown as Layout, notesConverged: true, complete: nextComplete });
+  await act(async () => finishNext(null));
+  expect(h.doc.laidOutHere).toEqual([2]);
+  expect(isLayoutQueued(h.session)).toBe(true);
+  await h.frame();
+  expect(h.worker.map((pass) => pass.at)).toEqual([1, 2, 2, 3, 3]);
+  await h.answer(4);
+  expect(h.shown()).toBe('3');
+  const next = fakeDocument();
+  next.doc.version = 3;
+  h.hook.rerender({ session: next.session });
+  act(() => h.hook.result.current.runLayoutPipeline());
+  let finishSession!: (computation: LayoutComputation | null) => void;
+  const sessionComplete = new Promise<LayoutComputation | null>((resolve) => { finishSession = resolve; });
+  await h.answer(5, { layout: { pages: [] } as unknown as Layout, notesConverged: true, complete: sessionComplete });
+  await act(async () => finishSession(null));
+  expect(next.doc.laidOutHere).toEqual([]);
+  expect(isLayoutQueued(next.session)).toBe(true);
+  await h.frame();
+  expect(h.worker.map((pass) => pass.at)).toEqual([1, 2, 2, 3, 3, 3, 3]);
+  await h.answer(6);
+  expect(isLayoutQueued(next.session)).toBe(false);
+  expect(h.doc.laidOutHere).toEqual([2]);
+  expect(next.doc.laidOutHere).toEqual([]);
+  expect(h.errors).toEqual([]);
+});
+
+test.each(['null', 'stale'])('a worker that loses ownership keeps the host path for a %s completion', async (outcome) => {
+  const h = await opened({ experimentalWorkerOpen: true, ownsDocument: true });
+  h.doc.version = 2;
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  let finish!: (computation: LayoutComputation | null) => void;
+  const complete = new Promise<LayoutComputation | null>((resolve) => { finish = resolve; });
+  const firstPages = { pages: [] } as unknown as Layout;
+  await h.answer(1, { layout: firstPages, notesConverged: true, complete });
+  expect(h.hook.result.current.layout).toBe(firstPages);
+  h.doc.workerOwnsDocument = false;
+  if (outcome === 'stale') h.doc.version = 3;
+  await act(async () => finish(outcome === 'null'
+    ? null
+    : { layout: { pages: [] } as unknown as Layout, notesConverged: true }));
+  expect(h.doc.laidOutHere).toEqual([h.doc.version]);
+  expect(h.shown()).toBe(String(h.doc.version));
+  expect(h.hook.result.current.layout).not.toBe(firstPages);
+  expect(isLayoutQueued(h.session)).toBe(false);
+  await h.frame();
+  expect(h.worker.map((pass) => pass.at)).toEqual([1, 2]);
+  expect(h.errors).toEqual([]);
+});
+
+test('worker ownership keeps the host path for a null first result', async () => {
+  const h = await opened({ experimentalWorkerOpen: true, ownsDocument: true });
+  h.doc.version = 2;
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  await act(async () => h.worker[1]!.fail());
+  expect(h.doc.laidOutHere).toEqual([2]);
+  expect(h.shown()).toBe('2');
+  expect(isLayoutQueued(h.session)).toBe(false);
+  await h.frame();
+  expect(h.worker).toHaveLength(2);
+  expect(h.errors).toEqual([]);
+});
+
+test('worker ownership is ignored for null completions with worker-open off', async () => {
+  const h = await opened({ ownsDocument: true });
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  let finish!: (computation: LayoutComputation | null) => void;
+  const complete = new Promise<LayoutComputation | null>((resolve) => { finish = resolve; });
+  const firstPages = { pages: [] } as unknown as Layout;
+  await h.answer(1, { layout: firstPages, notesConverged: true, complete });
+  expect(h.hook.result.current.layout).toBe(firstPages);
+  await act(async () => finish(null));
+  expect(h.doc.laidOutHere).toEqual([1]);
+  expect(h.hook.result.current.layout).not.toBe(firstPages);
+  expect(isLayoutQueued(h.session)).toBe(false);
+  await h.frame();
+  expect(h.worker).toHaveLength(2);
+  expect(h.errors).toEqual([]);
+});
+
+test.each(['first', 'full'])('a live worker retries a stale %s result without a pending replica', async (stage) => {
+  const h = await opened({ experimentalWorkerOpen: true, ownsDocument: true });
+  h.doc.version = 2;
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  expect(isLayoutQueued(h.session)).toBe(false);
+  let finish!: (computation: LayoutComputation | null) => void;
+  const complete = new Promise<LayoutComputation | null>((resolve) => { finish = resolve; });
+  const firstPages = { pages: [] } as unknown as Layout;
+  if (stage === 'full') {
+    await h.answer(1, { layout: firstPages, notesConverged: true, complete });
+    expect(h.hook.result.current.layout).toBe(firstPages);
+    expect(h.shown()).toBe('2');
+  }
+  h.doc.version = 3;
+  if (stage === 'first') await h.answer(1, { layout: firstPages, notesConverged: true });
+  else await act(async () => finish({ layout: { pages: [] } as unknown as Layout, notesConverged: true }));
+  expect(h.hook.result.current.layout).toBe(firstPages);
+  expect(h.shown()).toBe('2');
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(h.replica).toBeNull();
+  expect(isLayoutQueued(h.session)).toBe(true);
+  await h.frame();
+  expect(h.worker.map((pass) => pass.at)).toEqual([1, 2, 3]);
+  await h.answer(2);
+  expect(h.shown()).toBe('3');
+  expect(isSupersededLayout(h.hook.result.current.layout)).toBe(false);
+  expect(isLayoutQueued(h.session)).toBe(false);
+  await h.frame();
+  expect(h.worker).toHaveLength(3);
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(h.errors).toEqual([]);
+});
+
+test.each(['first', 'full'])('worker ownership is ignored for stale %s results with worker-open off', async (stage) => {
+  const h = await opened({ ownsDocument: true });
+  h.doc.version = 2;
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  let finish!: (computation: LayoutComputation | null) => void;
+  const complete = new Promise<LayoutComputation | null>((resolve) => { finish = resolve; });
+  if (stage === 'full') {
+    await h.answer(1, { layout: { pages: [] } as unknown as Layout, notesConverged: true, complete });
+  }
+  h.doc.version = 3;
+  if (stage === 'first') await h.answer(1);
+  else await act(async () => finish({ layout: { pages: [] } as unknown as Layout, notesConverged: true }));
+  expect(h.doc.laidOutHere).toEqual([3]);
+  expect(h.shown()).toBe('3');
+  expect(isSupersededLayout(h.hook.result.current.layout)).toBe(false);
+  expect(isLayoutQueued(h.session)).toBe(false);
+  await h.frame();
+  expect(h.worker.map((pass) => pass.at)).toEqual([1, 2]);
+  expect(h.errors).toEqual([]);
+});
+
 test('worker proposals override deferred host passes, local changes and unavailable passes', async () => {
   const h = await opened({ experimentalWorkerOpen: true, pendingReplica: true });
   await holdProposals(h.session);
@@ -320,8 +502,8 @@ test('a preview change that only adds font chains lays out in the worker', async
   expect(errors).toEqual([]);
 });
 
-test('a local edit in the same frame as a host batch keeps the pass here', async () => {
-  const { doc, worker, hook, frame, shown } = await opened();
+test.each([false, true])('a local edit in the same frame as a host batch keeps the pass here with worker-open=%s', async (experimentalWorkerOpen) => {
+  const { doc, worker, hook, frame, shown } = await opened({ experimentalWorkerOpen, ownsDocument: true });
   doc.version = 2;
   act(() => {
     hook.result.current.scheduleLayout('local', true);

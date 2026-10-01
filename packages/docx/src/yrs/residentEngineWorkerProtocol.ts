@@ -1,9 +1,12 @@
 import type {
   YrsEngineApplyProfile,
+  YrsLoc,
   YrsResidentCaretSnapshot,
   YrsResidentWorkerSnapshot,
   YrsSelection,
+  YrsStickyPosition,
 } from './index';
+import type { ResidentSearchResult } from './residentSearch';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 import type {
@@ -44,6 +47,8 @@ export type ResidentDocumentRead =
   | { kind: 'paragraphIdentities' }
   | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
   | { kind: 'readParagraphs'; request: DocxReadParagraphsRequest }
+  | { kind: 'searchText'; query: string; caseSensitive: boolean; carry?: YrsStickyPosition | null }
+  | { kind: 'stickyAnchors'; locs: YrsLoc[]; version: string }
   | { kind: 'navigationTarget'; story: string; paraId: string };
 
 /** @internal */
@@ -52,6 +57,8 @@ export interface ResidentDocumentReadValues {
   resolveParagraphAnchors: { results: DocxParagraphAnchorResult[] };
   readParagraphs: DocxReadParagraphsResult;
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
+  searchText: ResidentSearchResult;
+  stickyAnchors: Array<YrsStickyPosition | null>;
 }
 
 export type ResidentEngineWorkerRequest =
