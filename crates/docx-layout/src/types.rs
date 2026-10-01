@@ -1273,6 +1273,20 @@ impl LayoutBlock {
             Self::SectionBreak(_) | Self::Unsupported => None,
         }
     }
+
+    pub fn pm_end(&self) -> Option<f64> {
+        match self {
+            Self::Paragraph(block) => block.pm_end,
+            Self::Table(block) => block.pm_end,
+            Self::Image(block) => block.pm_end,
+            Self::Shape(block) => block.pm_end,
+            Self::Chart(block) => block.pm_end,
+            Self::TextBox(block) => block.pm_end,
+            Self::PageBreak(block) => block.pm_end,
+            Self::ColumnBreak(block) => block.pm_end,
+            Self::SectionBreak(_) | Self::Unsupported => None,
+        }
+    }
 }
 
 impl PartialEq for Run {

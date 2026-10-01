@@ -1738,6 +1738,13 @@ impl EditSession {
         serde_json::to_string(&progress).map_err(|error| JsValue::from_str(&error.to_string()))
     }
 
+    pub fn region_layout_snapshot_json(&self) -> Result<Option<String>, JsError> {
+        let _fonts = self.fonts.enter();
+        self.engine
+            .region_layout_snapshot_json()
+            .map_err(|error| JsError::new(&error))
+    }
+
     /// Retained `{ measured, options }` for the main-thread display-list
     /// fallback after a retained-only region layout.
     pub fn retained_kernel_inputs_json(&self) -> Result<String, JsValue> {

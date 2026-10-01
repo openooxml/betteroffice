@@ -46,6 +46,7 @@ export type ResidentEngineSession = Pick<
   | 'measureParagraphJson'
   | 'onUpdate'
   | 'outlineGlyphJson'
+  | 'regionLayoutSnapshotJson'
   | 'registerFont'
   | 'registerSubstituteFont'
   | 'residentCaretSnapshot'
@@ -308,6 +309,7 @@ export async function createResidentEngineSession(
       JSON.parse(session.begin_region_layout(input)) as YrsRegionLayoutProgress,
     resumeRegionLayout: (blocks) =>
       JSON.parse(session.resume_region_layout(blocks)) as YrsRegionLayoutProgress,
+    regionLayoutSnapshotJson: () => session.region_layout_snapshot_json(),
     setPartialDocument: (partial) => session.set_partial_document(partial),
     layoutDocumentWithRegionsPrefixRetainedJson: (input, pages) =>
       session.layout_document_with_regions_prefix_retained_json(input, pages),

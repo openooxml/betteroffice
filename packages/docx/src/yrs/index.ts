@@ -624,6 +624,7 @@ export function sameYrsSelection(left: YrsSelection | null, right: YrsSelection 
 export interface YrsRegionLayoutProgress {
   measuredBlocks: number;
   bodyBlocks: number;
+  coveredPosition?: number;
   /** The retained region layout reply, once the pass is complete. */
   layoutJson?: string;
 }
@@ -924,6 +925,7 @@ export interface YrsSession extends CollaborationReplica {
    */
   beginRegionLayout(input: string): YrsRegionLayoutProgress;
   resumeRegionLayout(blocks: number): YrsRegionLayoutProgress;
+  regionLayoutSnapshotJson(): string | undefined;
   /** Retained `{ measured, options }` for the main-thread display fallback. */
   retainedKernelInputsJson(expectedLayoutRevision: number): string;
   /**
@@ -1867,6 +1869,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       completedRegionLayout(
         JSON.parse(session.resume_region_layout(blocks)) as YrsRegionLayoutProgress
       ),
+    regionLayoutSnapshotJson: () => session.region_layout_snapshot_json(),
     adoptResidentWorkerLayout: (input) => {
       residentLayoutInput = input;
       residentLayoutWithRegions = true;
