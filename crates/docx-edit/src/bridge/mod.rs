@@ -1828,7 +1828,13 @@ fn image_outline(
             color.theme_color = None;
             resolve_color_value_to_hex(Some(&color))
         })
-        .or_else(|| map_string(values, "borderColor").map(|color| css_hex(&color)))?;
+        .or_else(|| {
+            map_string(values, "borderColor")
+                .map(|color| css_hex(&color))
+                .filter(|hex| {
+                    hex.len() == 7 && hex[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+        })?;
     Some(CellBorderSpec {
         width: Some(map_number(values, "borderWidth").unwrap_or(1.0)),
         color: Some(color),
@@ -6205,6 +6211,14 @@ mod tests {
         assert_eq!(outline.color.as_deref(), Some("#0000FF"));
         assert_eq!(outline.style.as_deref(), Some("solid"));
         let values = HashMap::from([("borderColorValue".to_owned(), Any::Null)]);
+        assert!(image_outline(&values, &RenderEnv::default()).is_none());
+        let values = HashMap::from([
+            ("borderWidth".to_owned(), Any::Number(2.0)),
+            (
+                "borderColor".to_owned(),
+                Any::String("rgb(0, 0, 255)".into()),
+            ),
+        ]);
         assert!(image_outline(&values, &RenderEnv::default()).is_none());
     }
 }
