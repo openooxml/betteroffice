@@ -189,6 +189,16 @@ interface RawPageOp {
  * browser state. Page payloads are typed values, not embedded JSON strings.
  */
 export function decodeFrameDelta(input: Uint8Array | ArrayBuffer): DecodedFrameDelta {
+  const steps = decodeFrameDeltaSteps(input);
+  let step = steps.next();
+  while (!step.done) step = steps.next();
+  return step.value;
+}
+
+/** @internal Decode in resumable slices without publishing partial state. */
+export function* decodeFrameDeltaSteps(
+  input: Uint8Array | ArrayBuffer
+): Generator<void, DecodedFrameDelta> {
   let bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
   // Primitive ids are intentionally 8-byte aligned relative to frame start.
   // wasm-bindgen returns offset-zero Uint8Arrays; normalize unusual subarrays
@@ -244,7 +254,7 @@ export function decodeFrameDelta(input: Uint8Array | ArrayBuffer): DecodedFrameD
   }
   if (dataOffset % 8 !== 0) invalid('data section is not 8-byte aligned');
 
-  const strings = decodeStringTable(reader, stringsOffset, stringsEnd);
+  const strings = yield* decodeStringTable(reader, stringsOffset, stringsEnd);
   const rawOperations: RawPageOp[] = [];
   const pageIds = new Set<bigint>();
   for (let index = 0; index < operationCount; index++) {
@@ -326,13 +336,14 @@ export function decodeFrameDelta(input: Uint8Array | ArrayBuffer): DecodedFrameD
       payloadLength,
       anchorCount,
     });
+    if (index % 32 === 31) yield;
   }
   if (full && rawOperations.some((operation) => operation.opcode !== PAGE_OP_UPSERT)) {
     invalid('full frame may contain only page upserts');
   }
   validateDataRegions(reader, rawOperations, stringsEnd, dataOffset);
 
-  const operations = rawOperations.map((operation): FramePageOperation => {
+  const decodeOperation = (operation: RawPageOp): FramePageOperation => {
     if (operation.opcode === PAGE_OP_REMOVE) {
       return { kind: 'remove', pageIndex: operation.pageIndex, pageId: operation.pageId };
     }
@@ -390,7 +401,12 @@ export function decodeFrameDelta(input: Uint8Array | ArrayBuffer): DecodedFrameD
       primitiveIds,
       page,
     };
-  });
+  };
+  const operations: FramePageOperation[] = [];
+  for (const operation of rawOperations) {
+    operations.push(decodeOperation(operation));
+    yield;
+  }
   if (full && operations.length !== pageCount) invalid('full frame does not define every page');
 
   return {
@@ -510,6 +526,16 @@ function applyFrameDeltaInternal(
           ? shiftDisplayPagePositionsOwned(current.page, operation, operation.pageIndex)
           : shiftDisplayPagePositions(current.page, operation, operation.pageIndex),
       });
+      continue;
+    }
+    const retained = previous?.pages[operation.pageIndex];
+    if (
+      retained?.pageId === operation.pageId &&
+      retained.fingerprint === operation.fingerprint &&
+      retained.primitiveIds.length === operation.primitiveIds.length &&
+      retained.primitiveIds.every((id, index) => id === operation.primitiveIds[index])
+    ) {
+      pages.set(operation.pageId, retained);
       continue;
     }
     pages.set(operation.pageId, {
@@ -741,7 +767,11 @@ function shiftPrimitivePositionsOwned(
   }
 }
 
-function decodeStringTable(reader: BinaryReader, start: number, end: number): string[] {
+function* decodeStringTable(
+  reader: BinaryReader,
+  start: number,
+  end: number
+): Generator<void, string[]> {
   let offset = start;
   if (offset + 4 > end) invalid('truncated string table count');
   const count = reader.u32(offset);
@@ -761,6 +791,7 @@ function decodeStringTable(reader: BinaryReader, start: number, end: number): st
       invalid('string table contains invalid UTF-8');
     }
     offset = next;
+    if (index % 64 === 63) yield;
   }
   if (offset !== end) invalid('string table length/count mismatch');
   return strings;

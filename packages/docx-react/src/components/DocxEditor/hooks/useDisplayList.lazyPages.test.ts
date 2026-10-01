@@ -53,10 +53,24 @@ afterEach(() => {
   globalThis.cancelIdleCallback = originalCancelIdle;
 });
 
-function runIdleCallbacks(): void {
+function runIdleCallbacks(timeRemaining = () => 50): void {
   const pending = [...idleCallbacks.values()];
   idleCallbacks.clear();
-  for (const callback of pending) callback();
+  for (const callback of pending) (callback as IdleRequestCallback)({ didTimeout: false, timeRemaining });
+}
+
+async function settleWithIdle(
+  display: ReturnType<typeof useRustDisplayList>,
+  relayout: (() => void) | null = null
+) {
+  let done = false;
+  const pending = display.settledDisplayList(relayout);
+  void pending.then(() => { done = true; }, () => { done = true; });
+  for (let round = 0; round < 300 && !done; round += 1) {
+    runIdleCallbacks();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return pending;
 }
 
 afterAll(async () => {
@@ -92,7 +106,7 @@ test('a worker frame builds only the pages near the viewport', async () => {
 
     let settled: Awaited<ReturnType<typeof result.current.settledDisplayList>> | undefined;
     await act(async () => {
-      settled = await result.current.settledDisplayList(() => {});
+      settled = await settleWithIdle(result.current, () => {});
     });
     expect(settled!.pages.some((page) => page.unbuilt)).toBe(false);
     const full = JSON.parse(engine.build_display_list_json(JSON.stringify(inputs))) as {
@@ -159,6 +173,34 @@ test('pages away from the viewport build in batches while the main thread idles'
   }
 });
 
+test('background posting waits for idle budget and yields to a pending visible request', async () => {
+  const { engine, inputs, host } = lazyFixture(100);
+  const overrides = { getInputs: () => inputs };
+  const hook = renderHook(() => useRustDisplayList(
+    inputs.layout as Layout, overrides, undefined, undefined, host
+  ));
+  try {
+    await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    const builds = () => worker.posted.filter((entry) => entry.type === 'buildPages');
+    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    await act(async () => runIdleCallbacks(() => 0));
+    expect(builds()).toEqual([]);
+    const last = hook.result.current.displayList!.pages.length - 1;
+    await act(async () => {
+      hook.result.current.setDisplayWindow(last, last + 1);
+      runIdleCallbacks();
+    });
+    await waitFor(() => expect(hook.result.current.displayList!.pages[last]!.unbuilt).toBeFalsy());
+    expect(builds()).toEqual([expect.objectContaining({ pages: [last] })]);
+    expect(hook.result.current.displayList!.pages[5]!.unbuilt).toBe(true);
+    expect(hook.result.current.error).toBeNull();
+  } finally {
+    hook.unmount();
+    engine.free();
+  }
+});
+
 test('worker-open idle builds stop after the viewport margin', async () => {
   const { engine, inputs, host } = lazyFixture();
   try {
@@ -173,9 +215,11 @@ test('worker-open idle builds stop after the viewport margin', async () => {
     const pages = () => result.current.frame!.displayList.pages;
     expect(pages().length).toBeGreaterThan(7);
     expect(pages().slice(0, 5).every((page) => !page.unbuilt)).toBe(true);
-    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
-    await act(async () => runIdleCallbacks());
-    await waitFor(() => expect(pages().slice(0, 7).every((page) => !page.unbuilt)).toBe(true));
+    for (let round = 0; round < 10 && pages().slice(0, 7).some((page) => page.unbuilt); round += 1) {
+      await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+      await act(async () => runIdleCallbacks());
+    }
+    expect(pages().slice(0, 7).every((page) => !page.unbuilt)).toBe(true);
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 75));
       runIdleCallbacks();
@@ -187,6 +231,66 @@ test('worker-open idle builds stop after the viewport margin', async () => {
     ).toEqual([expect.objectContaining({ pages: [5, 6] })]);
     unmount();
   } finally {
+    engine.free();
+  }
+});
+
+test('a visible request supersedes a background reply awaiting idle attachment', async () => {
+  const { engine, inputs, host } = lazyFixture(100);
+  const overrides = { getInputs: () => inputs };
+  const hook = renderHook(() => useRustDisplayList(
+    inputs.layout as Layout, overrides, undefined, undefined, host
+  ));
+  try {
+    await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    const builds = () => worker.posted.filter((entry) => entry.type === 'buildPages');
+    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    const before = hook.result.current.frame!;
+    await act(async () => runIdleCallbacks());
+    expect(builds()).toHaveLength(1);
+    expect(builds()[0]!.pages.length).toBe(16);
+    expect(hook.result.current.frame).toBe(before);
+    const target = before.pages.find((page) =>
+      page.page.unbuilt && !builds()[0]!.pages.includes(page.pageIndex)
+    )!.pageIndex;
+    act(() => hook.result.current.setDisplayWindow(target, target + 1));
+    await waitFor(() => expect(hook.result.current.displayList!.pages[target]!.unbuilt).toBeFalsy());
+    expect(builds()).toHaveLength(2);
+    expect(builds()[1]).toMatchObject({ pages: [target], expectedFrameEpoch: before.frameEpoch });
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.frame!.frameEpoch).toBeGreaterThan(before.frameEpoch);
+  } finally {
+    hook.unmount();
+    engine.free();
+  }
+});
+
+test('a settle wait promotes a background reply awaiting idle attachment', async () => {
+  const { engine, inputs, host } = lazyFixture(100);
+  const overrides = { getInputs: () => inputs };
+  const hook = renderHook(() => useRustDisplayList(
+    inputs.layout as Layout, overrides, undefined, undefined, host
+  ));
+  try {
+    await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    const builds = () => worker.posted.filter((entry) => entry.type === 'buildPages');
+    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    const before = hook.result.current.frame!;
+    await act(async () => runIdleCallbacks());
+    expect(builds()).toHaveLength(1);
+    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    expect(hook.result.current.frame).toBe(before);
+    let built = false;
+    await act(async () => {
+      const settled = await hook.result.current.settledDisplayList(null, null);
+      built = settled.pages.every((page) => !page.unbuilt);
+    });
+    expect(built).toBe(true);
+    expect(hook.result.current.error).toBeNull();
+  } finally {
+    hook.unmount();
     engine.free();
   }
 });
@@ -220,6 +324,41 @@ test('worker-open window settling leaves far pages unbuilt while document settli
     });
     unmount();
   } finally {
+    engine.free();
+  }
+});
+
+test('sliced background frames publish atomically from idle without replacing visible pages', async () => {
+  const { engine, inputs, host } = lazyFixture(100);
+  const overrides = { getInputs: () => inputs };
+  const hook = renderHook(() => useRustDisplayList(
+    inputs.layout as Layout, overrides, undefined, undefined, host
+  ));
+  try {
+    await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    worker.slicePageBuilds = true;
+    const before = hook.result.current.frame!;
+    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    await act(async () => runIdleCallbacks());
+    expect(hook.result.current.frame).toBe(before);
+    let checks = 0;
+    await act(async () => runIdleCallbacks(() => checks++ === 0 ? 50 : 0));
+    expect(hook.result.current.frame).toBe(before);
+    expect(before.displayList.pages.slice(5).every((page) => page.unbuilt)).toBe(true);
+    for (let round = 0; round < 50 && hook.result.current.frame === before; round += 1) {
+      await act(async () => runIdleCallbacks());
+    }
+    const after = hook.result.current.frame!;
+    expect(after.frameEpoch).toBe(before.frameEpoch + 4);
+    expect(after.damagedPageIds.size).toBe(16);
+    for (let index = 0; index < 5; index += 1) {
+      expect(after.displayList.pages[index]).toBe(before.displayList.pages[index]);
+    }
+    expect(worker.posted.filter((entry) => entry.type === 'buildPages')).toHaveLength(1);
+    expect(hook.result.current.error).toBeNull();
+  } finally {
+    hook.unmount();
     engine.free();
   }
 });
@@ -336,7 +475,7 @@ test('an edit schedules idle rebuilds for formerly built pages away from the vie
     );
     await waitFor(() => expect(result.current.frame).not.toBeNull());
     await act(async () => {
-      await result.current.settledDisplayList(null);
+      await settleWithIdle(result.current);
     });
     const pages = () => result.current.frame!.displayList.pages;
     const pageCount = pages().length;
@@ -383,7 +522,7 @@ test('an edit schedules idle rebuilds for formerly built pages away from the vie
     expect(rebuilt.pages.length).toBeLessThanOrEqual(16);
     expect(rebuilt.pages.every((index) => index < last)).toBe(true);
     await act(async () => {
-      const settled = await result.current.settledDisplayList(null);
+      const settled = await settleWithIdle(result.current);
       expect(settled.pages.some((page) => page.unbuilt)).toBe(false);
     });
     unmount();
@@ -472,11 +611,14 @@ test.each([false, true])(
       expect(pageBuilds()).toEqual([]);
       now += 2001;
       await waitFor(async () => {
-        if (!idle) await act(async () => runIdleCallbacks());
+        await act(async () => runIdleCallbacks());
         expect(pageBuilds().length).toBeGreaterThan(0);
       });
       expect(pageBuilds()[0]).toMatchObject({ expectedFrameEpoch: adopted });
-      await waitFor(() => expect(result.current.frame!.displayList.pages[5]!.unbuilt).toBeFalsy());
+      await waitFor(async () => {
+        await act(async () => runIdleCallbacks());
+        expect(result.current.frame!.displayList.pages[5]!.unbuilt).toBeFalsy();
+      });
       expect(result.current.frame!.displayList.pages[5]!.primitives.length).toBeGreaterThan(0);
       expect(result.current.error).toBeNull();
       unmount();

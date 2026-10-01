@@ -122,6 +122,80 @@ function setup() {
   return { worker, client };
 }
 
+test('pending proposal and navigation reads keep background page builds waiting', async () => {
+  const { worker, client } = setup();
+  const bootstrap = client.bootstrap(snapshot, '');
+  worker.reply(frameReply(worker.lastId()));
+  await bootstrap;
+  const proposal = client.proposal({ kind: 'snapshot' });
+  expect(client.frameRequestPending()).toBe(true);
+  worker.reply({ id: worker.lastId(), ok: false, error: 'proposal failed' });
+  await expect(proposal).rejects.toThrow('proposal failed');
+  expect(client.frameRequestPending()).toBe(false);
+  const read = client.documentRead({ kind: 'navigationTarget', story: 'body', paraId: 'p1' });
+  expect(client.frameRequestPending()).toBe(true);
+  worker.reply({ id: worker.lastId(), ok: true, read: { version: 'v1', value: 'missing-target' } });
+  expect(await read).toEqual({ version: 'v1', value: 'missing-target' });
+  expect(client.frameRequestPending()).toBe(false);
+  client.destroy();
+});
+
+test('a superseded background build completes without failing the worker', async () => {
+  const { worker, client } = setup();
+  const pending = client.buildPages([5, 6, 7, 8, 9], 1, false, true);
+  expect(worker.posted.at(-1)).toMatchObject({ type: 'buildPages', background: true });
+  worker.reply({ id: worker.lastId(), ok: true, pageBuildSuperseded: true });
+  expect(await pending).toBeNull();
+  expect(client.hasFailed()).toBe(false);
+  expect(worker.terminated).toBe(false);
+  client.destroy();
+});
+
+test('sliced page replies preserve the ordered frames for idle adoption', async () => {
+  const { worker, client } = setup();
+  const pending = client.buildPages([5, 6, 7, 8, 9], 1, false, true);
+  const first = Uint8Array.of(1).buffer;
+  const last = Uint8Array.of(2).buffer;
+  const reply = frameReply(worker.lastId());
+  worker.reply({ ...reply, ok: true, frame: last, pageFrames: [first, last] });
+  expect((await pending)?.pageFrames).toEqual([Uint8Array.of(1), Uint8Array.of(2)]);
+  client.destroy();
+});
+
+test('identical font requirement reads share one request until another request is posted', async () => {
+  const { worker, client } = setup();
+  const first = client.fontRequirements('{"a":1}');
+  const second = client.fontRequirements('{"a":1}');
+  const other = client.fontRequirements('{"b":2}');
+  const afterOther = client.fontRequirements('{"a":1}');
+  client.eraseCaret();
+  const afterPost = client.fontRequirements('{"a":1}');
+  const reads = worker.posted.flatMap((request) =>
+    request.type === 'fontRequirements' ? [request] : []
+  );
+  expect(reads.map(({ layoutInput }) => layoutInput)).toEqual(['{"a":1}', '{"b":2}', '{"a":1}', '{"a":1}']);
+  for (const [index, { id }] of reads.entries()) {
+    worker.reply({ id, ok: true, requirementsJson: `[${index}]` });
+  }
+  expect(await Promise.all([first, second, other, afterOther, afterPost])).toEqual([
+    '[0]', '[0]', '[1]', '[2]', '[3]',
+  ]);
+  const settled = client.fontRequirements('{"a":1}');
+  expect(worker.posted.at(-1)).toMatchObject({ type: 'fontRequirements', layoutInput: '{"a":1}' });
+  worker.reply({ id: worker.lastId(), ok: true, requirementsJson: '[4]' });
+  expect(await settled).toBe('[4]');
+});
+
+test('a shared font requirement read rejects every caller when the worker fails', async () => {
+  const { worker, client } = setup();
+  const first = client.fontRequirements('{}');
+  const second = client.fontRequirements('{}');
+  expect(worker.posted).toHaveLength(1);
+  worker.reply({ id: worker.lastId(), ok: false, error: 'boom' });
+  await expect(first).rejects.toThrow('boom');
+  await expect(second).rejects.toThrow('boom');
+});
+
 test('release requests carry page identities and return a frame', async () => {
   const { worker, client } = setup();
   const pages = [{ index: 8, pageId: '9007199254740993' }];

@@ -1023,6 +1023,11 @@ export interface YrsSession extends CollaborationReplica {
   /** Opened by {@link openDocxPreview}: its document refuses every change. @internal */
   isDisplayOnly(): boolean;
   /**
+   * Marks this empty session as showing a preview another engine opened: it refuses every
+   * change, and {@link openDocxPreview} can still load the preview here. @internal
+   */
+  markDisplayOnly(): void;
+  /**
    * Marks whether the document is a preview's, as a replica of one is: its
    * layouts render NUMPAGES empty. @internal
    */
@@ -1640,6 +1645,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   let partialDocument = false;
   const mutate = <T>(operation: () => T): T => {
     if (displayOnly) throw new Error('A document preview is display-only');
+    return mutateAlways(operation);
+  };
+  const mutateAlways = <T>(operation: () => T): T => {
     invalidateReadCaches();
     wasmCallDepth += 1;
     try {
@@ -1790,13 +1798,17 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     openDocxPreview: (bytes, blocks) => {
       markDirty('all');
       resetMedia();
-      const json = mutate(() => session.open_docx_preview(bytes, blocks));
+      const json = mutateAlways(() => session.open_docx_preview(bytes, blocks));
       if (json === undefined) return null;
       displayOnly = true;
       partialDocument = true;
       return withHostMedia(decodeDocxHost(json, bytes));
     },
     isDisplayOnly: () => displayOnly,
+    markDisplayOnly: () => {
+      displayOnly = true;
+      partialDocument = true;
+    },
     setPartialDocument: (partial) => {
       partialDocument = partial;
       session.set_partial_document(partial);

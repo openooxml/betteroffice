@@ -1257,6 +1257,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       workerOpen: experimentalWorkerOpen
         ? {
             openInWorker: canvasRenderer.openInWorker,
+            openPreviewInWorker: canvasRenderer.openPreviewInWorker,
             workerProposals,
             refreshWorkerLayout: () => pagedEditorRef.current?.refreshWorkerLayout(),
             renderedFrame: canvasRenderer.status === 'ready' ? canvasRenderer.displayList : null,
