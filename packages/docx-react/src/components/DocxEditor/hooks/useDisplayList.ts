@@ -1228,15 +1228,16 @@ export function useRustDisplayList(
         }
         if (outOfMemory) throw outOfMemory;
         if (
-          !source ||
-          workerOpenSourcesRef.current.get(hostEngine) !== source ||
+          ((!source || workerOpenSourcesRef.current.get(hostEngine) !== source) &&
+            !holdsWorkerProposals(hostEngine)) ||
           unmountedRef.current ||
           load !== documentLoadsRef.current ||
-          workerFallbackEngineRef.current === hostEngine
+          (workerFallbackEngineRef.current === hostEngine && !holdsWorkerProposals(hostEngine))
         ) {
           throw new SupersededPreviewError();
         }
         if (workerRef.current?.engine !== hostEngine) {
+          if (!source) throw new SupersededPreviewError();
           const owner = workerFor(hostEngine);
           owner.opened = true;
           owner.opening = owner.client
@@ -1371,8 +1372,9 @@ export function useRustDisplayList(
 
   const fontRequirementsInWorker = useCallback<FontRequirementsInWorker>(
     (hostEngine, request) => {
-      if (!workerOpenEnabledRef.current || !workerOpenReplicaPending(hostEngine)) return null;
-      if (!workerOpenSourcesRef.current.has(hostEngine)) {
+      if (!holdsWorkerProposals(hostEngine) &&
+        (!workerOpenEnabledRef.current || !workerOpenReplicaPending(hostEngine))) return null;
+      if (!workerOpenSourcesRef.current.has(hostEngine) && !holdsWorkerProposals(hostEngine)) {
         ensureRebuildableReplica(hostEngine);
         return null;
       }
@@ -1719,6 +1721,13 @@ export function useRustDisplayList(
   const layoutInWorker: LayoutInWorker = useCallback<LayoutInWorker>(
     (hostEngine, request) => {
       if (!canLayoutInWorker(hostEngine) || !hostEngine.adoptResidentWorkerLayout) {
+        if (holdsWorkerProposals(hostEngine)) {
+          workerFor(hostEngine);
+          throw failWorkerDocument(
+            hostEngine,
+            new Error('The resident worker holding proposals cannot lay out the document')
+          );
+        }
         if (workerOpenEnabledRef.current) ensureRebuildableReplica(hostEngine);
         return null;
       }
@@ -1759,6 +1768,12 @@ export function useRustDisplayList(
             }
       );
       if (!snapshot) {
+        if (holdsWorkerProposals(hostEngine)) {
+          throw failWorkerDocument(
+            hostEngine,
+            new Error('The resident worker holding proposals cannot lay out the document')
+          );
+        }
         if (workerOpenEnabledRef.current) ensureRebuildableReplica(hostEngine);
         return null;
       }
@@ -1813,11 +1828,17 @@ export function useRustDisplayList(
         }
         const failure = workerFailureRef.current.get(hostEngine);
         if (failure) return rejectedWorkerLayout(failure);
+        if (holdsWorkerProposals(hostEngine) && cause instanceof SupersededPreviewError) return null;
         // A session whose replacement worker ran out of memory too lays out nowhere.
         const outOfMemory = cause instanceof ResidentWorkerOutOfMemoryError;
         if (outOfMemory && outOfMemoryRef.current.get(hostEngine)) return rejectedWorkerLayout(cause);
         // A pass of a session no worker serves any more starts no worker.
-        if (!current) return null;
+        if (!current) {
+          if (holdsWorkerProposals(hostEngine)) {
+            return rejectedWorkerLayout(failWorkerDocument(hostEngine, cause));
+          }
+          return null;
+        }
         if (outOfMemory) {
           // A newer layout, here or in a worker, replaced this pass: the host
           // drops it, and a newer worker request recovers the worker it asks.
@@ -1859,7 +1880,10 @@ export function useRustDisplayList(
         return computation;
       };
       return reply
-        .then((result): WorkerLayoutComputation => {
+        .then((result): WorkerLayoutComputation | null => {
+          if (holdsWorkerProposals(hostEngine) &&
+            (!isCurrentWorker(hostEngine, owner) ||
+              hostEngine.residentWorkerProbe()?.layoutRevision !== adoptedRevision)) return null;
           const computation = adopt(result, previousFrame);
           // A display-only preview is replaced by the full document before
           // anything needs the rest of its pages.
@@ -1908,6 +1932,7 @@ export function useRustDisplayList(
       canLayoutInWorker,
       dropWorker,
       ensureRebuildableReplica,
+      failWorkerDocument,
       frameBase,
       frameExtrasInputs,
       isCurrentWorker,
@@ -2071,9 +2096,12 @@ export function useRustDisplayList(
     const probe = workerEligible ? residentEngine.residentWorkerProbe() : null;
     const buildOnMainThread = () => {
       if (residentEngine && holdsWorkerProposals(residentEngine)) {
-        return Promise.reject(failWorkerDocument(
-          residentEngine, new Error('The resident worker holds proposals the main thread cannot rebuild')
-        ));
+        try {
+          workerFor(residentEngine);
+          return Promise.reject(new MainThreadLayoutPendingError());
+        } catch (error) {
+          return Promise.reject(error);
+        }
       }
       if (residentEngine?.residentLayoutInWorker?.()) {
         return Promise.reject(new MainThreadLayoutPendingError());
@@ -2202,7 +2230,8 @@ export function useRustDisplayList(
         }
         // A successor that failed to construct leaves this build to the host engine.
         if (requested !== workerRef.current) {
-          if (workerOpenEnabledRef.current && workerOpenReplicaPending(hostEngine)) {
+          if (workerOpenEnabledRef.current && workerOpenReplicaPending(hostEngine) &&
+            !holdsWorkerProposals(hostEngine)) {
             ensureRebuildableReplica(hostEngine);
           }
           return buildOnMainThread();
