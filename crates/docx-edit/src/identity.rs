@@ -271,12 +271,28 @@ pub enum ParagraphIdRefusal {
 /// Paragraph IDs a save applies: IDs for source paragraphs outside the
 /// stories, by part and occurrence, and the story parts unchanged since
 /// seeding, which it writes as their source bytes with IDs patched in.
+/// Story parts that still hold the paragraphs they were seeded with, in
+/// order, are spliced: written as their source bytes with only the
+/// paragraphs that changed re-serialized.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ParagraphSavePlan {
     /// `(part path, ordinal, ID)`.
     pub assignments: Vec<(String, u32, String)>,
     /// `(part path, [(ordinal, ID)])`.
     pub patched_parts: Vec<(String, Vec<(u32, String)>)>,
+    pub spliced_parts: Vec<SplicedPart>,
+}
+
+/// A story part whose stories hold the paragraphs seeded from it, in order.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SplicedPart {
+    pub part: String,
+    /// Lowercase hex SHA-256 of the source part.
+    pub sha256: String,
+    /// `(ordinal, session key)` of every paragraph seeded from the part.
+    pub paragraphs: Vec<(u32, String)>,
+    /// The ordinals of those whose segments changed since seeding.
+    pub changed: Vec<u32>,
 }
 
 /// One paragraph as the seeder lowers it, in document order.
@@ -301,6 +317,10 @@ pub(crate) struct SourcePartInput {
 
 struct SourcePart {
     uri: String,
+    /// Lowercase hex SHA-256 of the part's XML.
+    sha256: String,
+    /// Whether the parser reads the part's XML exactly as written, so its bytes can be kept.
+    as_written: bool,
     kind: SourceStoryKind,
     occurrences: Vec<ParagraphOccurrence>,
     /// Occurrence ordinal to the session keys seeded from it: one per root
@@ -371,6 +391,11 @@ impl SourceIndex {
         for input in inputs {
             let part = SourcePart {
                 uri: format!("/{}", input.path),
+                sha256: {
+                    use sha2::{Digest, Sha256};
+                    format!("{:x}", Sha256::digest(input.xml.as_bytes()))
+                },
+                as_written: docx_parse::xml::reads_as_written(input.xml.as_bytes()),
                 kind: input.kind,
                 occurrences: docx_parse::paragraph_identity::paragraph_occurrences(&input.xml)
                     .unwrap_or_default(),
@@ -515,9 +540,24 @@ struct StoryState {
     root: String,
     /// Digest of every segment the projection reads: see [`story_fingerprint`].
     fingerprint: [u8; 32],
+    /// The story's paragraphs, each with the segments up to and including its pilcrow.
+    units: Vec<UnitState>,
     /// Where each comment anchored in the story starts and ends, carets and
     /// ranges over embeds included: the projection's comment markers.
     comments: BTreeMap<String, Vec<(u32, u32)>>,
+}
+
+/// One paragraph's segments in a story, or the segments after its last pilcrow.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UnitState {
+    /// The session key of the pilcrow closing the unit.
+    key: Option<String>,
+    /// Digest of all the unit's segments.
+    digest: [u8; 32],
+    /// Digest of its table and block content control embeds, which open their own blocks.
+    blocks: [u8; 32],
+    /// Whether the unit holds anything besides those embeds and its pilcrow.
+    inline: bool,
 }
 
 fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
@@ -537,21 +577,30 @@ fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
     scan.stories
         .iter()
         .filter_map(|story| {
+            let comments = comments.remove(story).unwrap_or_default();
+            let (fingerprint, units) = story_fingerprint(doc, story, &comments)?;
             Some((
                 story.clone(),
                 StoryState {
                     root: scan.root(story).to_owned(),
-                    fingerprint: story_fingerprint(doc, story)?,
-                    comments: comments.remove(story).unwrap_or_default(),
+                    fingerprint,
+                    units,
+                    comments,
                 },
             ))
         })
         .collect()
 }
 
-/// SHA-256 of save segments, expanding media tokens, sorting map keys and keeping nulls.
+/// Each paragraph's [`UnitState`], hashing its save segments with media tokens expanded, map
+/// keys sorted and nulls kept, and the starts and ends of the `comments` anchored in it relative
+/// to its first segment; and the SHA-256 of those digests in order.
 /// [`EditingDoc::story_segments`] already excludes paragraph identities.
-fn story_fingerprint(doc: &EditingDoc, story: &str) -> Option<[u8; 32]> {
+fn story_fingerprint(
+    doc: &EditingDoc,
+    story: &str,
+    comments: &BTreeMap<String, Vec<(u32, u32)>>,
+) -> Option<([u8; 32], Vec<UnitState>)> {
     use sha2::{Digest, Sha256};
     fn ordered(value: &Any) -> serde_json::Value {
         match value {
@@ -574,7 +623,22 @@ fn story_fingerprint(doc: &EditingDoc, story: &str) -> Option<[u8; 32]> {
     if let Some(media) = doc.media_table() {
         crate::media::write_segment_data_urls(&mut segments, &media).ok()?;
     }
-    let mut hasher = Sha256::new();
+    let mut boundaries: Vec<(u32, &str, bool)> = comments
+        .iter()
+        .flat_map(|(key, anchors)| {
+            anchors.iter().flat_map(move |(start, end)| {
+                [(*start, key.as_str(), false), (*end, key.as_str(), true)]
+            })
+        })
+        .collect();
+    boundaries.sort_unstable();
+    let mut boundaries = boundaries.into_iter().peekable();
+    let mut units = Vec::new();
+    let mut unit = Sha256::new();
+    let mut blocks = Sha256::new();
+    let mut inline = false;
+    let mut start = 0u32;
+    let mut position = 0u32;
     for segment in segments {
         let content = match &segment.content {
             crate::SegmentContent::Text(text) => serde_json::json!({ "text": text }),
@@ -586,10 +650,53 @@ fn story_fingerprint(doc: &EditingDoc, story: &str) -> Option<[u8; 32]> {
             }
         };
         let entry = serde_json::json!([content, ordered_map(segment.attributes.iter())]);
-        hasher.update(serde_json::to_vec(&entry).ok()?);
-        hasher.update(b"\n");
+        let bytes = serde_json::to_vec(&entry).ok()?;
+        unit.update(&bytes);
+        unit.update(b"\n");
+        position += match &segment.content {
+            crate::SegmentContent::Text(text) => u32::try_from(text.encode_utf16().count()).ok()?,
+            _ => 1,
+        };
+        match &segment.content {
+            crate::SegmentContent::Pilcrow(properties) => {
+                while let Some((at, key, end)) = boundaries.next_if(|(at, ..)| *at < position) {
+                    unit.update(serde_json::to_vec(&(at - start, key, end)).ok()?);
+                }
+                start = position;
+                units.push(UnitState {
+                    key: Some(properties.para_id.clone()),
+                    digest: std::mem::take(&mut unit).finalize().into(),
+                    blocks: std::mem::take(&mut blocks).finalize().into(),
+                    inline: std::mem::take(&mut inline),
+                });
+            }
+            crate::SegmentContent::OtherEmbed { kind, .. }
+                if matches!(kind.as_str(), "table" | "blockSdt") =>
+            {
+                blocks.update(&bytes);
+                blocks.update(b"\n");
+            }
+            _ => inline = true,
+        }
     }
-    Some(hasher.finalize().into())
+    for (at, key, end) in boundaries {
+        unit.update(serde_json::to_vec(&(at.saturating_sub(start), key, end)).ok()?);
+    }
+    let trailing = unit.finalize().into();
+    let empty: [u8; 32] = Sha256::new().finalize().into();
+    if trailing != empty {
+        units.push(UnitState {
+            key: None,
+            digest: trailing,
+            blocks: blocks.finalize().into(),
+            inline,
+        });
+    }
+    let mut hasher = Sha256::new();
+    for unit in &units {
+        hasher.update(unit.digest);
+    }
+    Some((hasher.finalize().into(), units))
 }
 
 fn valid(value: Option<String>) -> Option<String> {
@@ -2192,21 +2299,13 @@ impl EditingDoc {
                 })
                 .collect(),
             patched_parts: Vec::new(),
+            spliced_parts: Vec::new(),
         };
         let seeded = source.seed_states();
         let live = story_states(self);
         let stories_of = |states: &HashMap<String, StoryState>, part: &SourcePart| {
-            let prefix = match part.kind {
-                SourceStoryKind::Footnote => Some("fn:"),
-                SourceStoryKind::Endnote => Some("en:"),
-                _ => None,
-            };
-            states
-                .iter()
-                .filter(|(_, state)| {
-                    part.roots.contains(&state.root)
-                        || prefix.is_some_and(|prefix| state.root.starts_with(prefix))
-                })
+            part_stories(states, part)
+                .into_iter()
                 .map(|(story, state)| (story.clone(), (state.fingerprint, state.comments.clone())))
                 .collect::<BTreeMap<_, _>>()
         };
@@ -2215,8 +2314,14 @@ impl EditingDoc {
             .iter()
             .map(|pilcrow| (pilcrow.key.as_str(), pilcrow))
             .collect();
-        'parts: for part in &source.parts {
-            if seeded.is_empty() || stories_of(seeded, part) != stories_of(&live, part) {
+        'parts: for (index, part) in source.parts.iter().enumerate() {
+            if seeded.is_empty() {
+                continue;
+            }
+            if let Some(spliced) = spliced_part(&source, index, seeded, &live, &by_key) {
+                plan.spliced_parts.push(spliced);
+            }
+            if stories_of(seeded, part) != stories_of(&live, part) {
                 continue;
             }
             let mut patches = Vec::new();
@@ -2240,6 +2345,89 @@ impl EditingDoc {
         }
         plan
     }
+}
+
+/// The stories seeded from `part`, cells and content controls nested in them included.
+fn part_stories<'a>(
+    states: &'a HashMap<String, StoryState>,
+    part: &SourcePart,
+) -> BTreeMap<&'a String, &'a StoryState> {
+    let prefix = match part.kind {
+        SourceStoryKind::Footnote => Some("fn:"),
+        SourceStoryKind::Endnote => Some("en:"),
+        _ => None,
+    };
+    states
+        .iter()
+        .filter(|(_, state)| {
+            part.roots.contains(&state.root)
+                || prefix.is_some_and(|prefix| state.root.starts_with(prefix))
+        })
+        .collect()
+}
+
+/// `source.parts[index]` as a part a save can splice: one whose stories still hold, in order
+/// and each with the block embeds it was seeded with, every paragraph seeded from it and no
+/// other but empty editor-only ones, each the only view of its source paragraph.
+fn spliced_part(
+    source: &SourceIndex,
+    index: usize,
+    seeded: &HashMap<String, StoryState>,
+    live: &HashMap<String, StoryState>,
+    by_key: &HashMap<&str, &Pilcrow>,
+) -> Option<SplicedPart> {
+    let part = &source.parts[index];
+    if !part.as_written
+        || part.kind == SourceStoryKind::Comment
+        || part.backed.values().any(|views| views.len() != 1)
+    {
+        return None;
+    }
+    let before = part_stories(seeded, part);
+    let after = part_stories(live, part);
+    if !before.keys().eq(after.keys()) {
+        return None;
+    }
+    let mut paragraphs = Vec::new();
+    let mut changed = Vec::new();
+    for (seed, now) in before.values().zip(after.values()) {
+        if seed.units.len() != now.units.len() {
+            return None;
+        }
+        for (was, is) in seed.units.iter().zip(&now.units) {
+            if was.key != is.key || was.blocks != is.blocks {
+                return None;
+            }
+            let same = was.digest == is.digest;
+            let Some(key) = is.key.as_deref() else {
+                if same && !is.inline {
+                    continue;
+                }
+                return None;
+            };
+            match source.view_of(key) {
+                Some(((part_index, ordinal), 0)) if part_index == index => {
+                    paragraphs.push((ordinal, key.to_owned()));
+                    if !same {
+                        changed.push(ordinal);
+                    }
+                }
+                None if same && by_key.get(key).is_some_and(|pilcrow| pilcrow.synthetic) => {}
+                _ => return None,
+            }
+        }
+    }
+    if paragraphs.len() != part.backed.len() {
+        return None;
+    }
+    paragraphs.sort_unstable();
+    changed.sort_unstable();
+    Some(SplicedPart {
+        part: part.path().to_owned(),
+        sha256: part.sha256.clone(),
+        paragraphs,
+        changed,
+    })
 }
 
 fn holder_ref(scan: &Scan, source: Option<&SourceIndex>, holder: Holder) -> Option<ParagraphRef> {
@@ -2305,19 +2493,31 @@ mod tests {
                 doc
             };
             let default = document(&url);
-            let expected = story_fingerprint(&default, "body").unwrap();
+            let expected = story_fingerprint(&default, "body", &BTreeMap::new()).unwrap();
             let segments = default.story_segments("body").unwrap();
             default.install_media(table.clone());
-            assert_eq!(story_fingerprint(&default, "body"), Some(expected), "{key}");
+            assert_eq!(
+                story_fingerprint(&default, "body", &BTreeMap::new()),
+                Some(expected.clone()),
+                "{key}"
+            );
             let mut normalized = segments.clone();
             crate::media::write_segment_data_urls(&mut normalized, &table).unwrap();
             assert_eq!(normalized, segments, "{key}");
             let tokens = document("media:0");
             tokens.install_media(table.clone());
-            assert_eq!(story_fingerprint(&tokens, "body"), Some(expected), "{key}");
+            assert_eq!(
+                story_fingerprint(&tokens, "body", &BTreeMap::new()),
+                Some(expected.clone()),
+                "{key}"
+            );
             let changed = document("data:image/png;base64,AQIDBQ==");
             changed.install_media(table.clone());
-            assert_ne!(story_fingerprint(&changed, "body"), Some(expected), "{key}");
+            assert_ne!(
+                story_fingerprint(&changed, "body", &BTreeMap::new()),
+                Some(expected),
+                "{key}"
+            );
         }
     }
 
