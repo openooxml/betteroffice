@@ -58,6 +58,8 @@ function renderEnvironment(document: Document): YrsRenderEnv {
 interface Built {
   refused: boolean;
   wholeBody: boolean;
+  provisional: boolean;
+  layoutPages: number;
   pages: DisplayPage[];
 }
 
@@ -65,7 +67,9 @@ async function build(bytes: Uint8Array, preview: boolean): Promise<Built> {
   const session = await createResidentEngineSession();
   try {
     const hostJson = preview ? session.openDocxPreview(bytes, 200) : session.openDocx(bytes);
-    if (hostJson === null) return { refused: true, wholeBody: false, pages: [] };
+    if (hostJson === null) {
+      return { refused: true, wholeBody: false, provisional: false, layoutPages: 0, pages: [] };
+    }
     const host = decodeDocxHostJson(hostJson, bytes);
     const document = host.document;
     const partial = preview && host.wholeBody !== true;
@@ -113,6 +117,8 @@ async function build(bytes: Uint8Array, preview: boolean): Promise<Built> {
     return {
       refused: false,
       wholeBody: host.wholeBody === true,
+      provisional: layout.provisional === true,
+      layoutPages: layout.layout.pages.length,
       pages: applyFrameDelta(null, decodeFrameDelta(frame)).displayList.pages,
     };
   } finally {
@@ -122,7 +128,7 @@ async function build(bytes: Uint8Array, preview: boolean): Promise<Built> {
 
 async function comparePreview(
   bytes: Uint8Array
-): Promise<{ built: DisplayPage[]; wholeBody: boolean; fullPages: number }> {
+): Promise<{ built: DisplayPage[]; wholeBody: boolean; provisional: boolean; fullPages: number }> {
   const preview = await build(bytes, true);
   expect(preview.refused).toBe(false);
   const full = await build(bytes, false);
@@ -133,9 +139,24 @@ async function comparePreview(
     expect(twin?.unbuilt).not.toBe(true);
     expect(page).toEqual(twin);
   }
-  // A cut that holds the whole body shows the window's pages, as the whole document does.
-  if (preview.wholeBody) expect(built).toHaveLength(Math.min(2, full.pages.length));
-  return { built, wholeBody: preview.wholeBody, fullPages: full.pages.length };
+  if (preview.wholeBody) {
+    // A cut that holds the whole body shows the window's pages, as the whole document does.
+    expect(built).toHaveLength(Math.min(2, full.pages.length));
+  } else {
+    const finalPages = finalPreviewPageCount(true, preview.provisional, 3, preview.layoutPages);
+    expect(built).toHaveLength(Math.min(2, finalPages ?? 0));
+    // Only a cut seed that laid out two pages or fewer has no final page.
+    if (built.length === 0) {
+      expect(preview.provisional).toBe(false);
+      expect(preview.layoutPages).toBeLessThanOrEqual(2);
+    }
+  }
+  return {
+    built,
+    wholeBody: preview.wholeBody,
+    provisional: preview.provisional,
+    fullPages: full.pages.length,
+  };
 }
 
 const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
@@ -343,7 +364,8 @@ for (const name of fixtures) {
     if (basename(name) === 'wordprocessingml-comprehensive.docx') {
       expect((await build(bytes, true)).refused).toBe(true);
     } else {
-      await comparePreview(bytes);
+      const { built } = await comparePreview(bytes);
+      expect(built.length).toBeGreaterThan(0);
     }
   });
 }
@@ -351,12 +373,13 @@ for (const name of fixtures) {
 for (const [index, flavour] of FLAVOURS.entries()) {
   for (const size of [4, 10, 12, 22]) {
     test(`worker preview matches full layout: ${flavour} sz${size}`, async () => {
-      const { built, wholeBody, fullPages } = await comparePreview(
+      const { built, wholeBody, provisional, fullPages } = await comparePreview(
         syntheticDocx(flavour, size, index * 100 + size)
       );
       expect(wholeBody).toBe(flavour === 'whole');
       if (flavour === 'whole') {
-        // The whole body counts the document's pages, not the saved result.
+        // A whole body laid out to its end counts the document's pages, not the saved result.
+        expect(provisional).toBe(false);
         const count = built[0]?.footer?.primitives.find(
           (primitive) => 'field' in primitive && primitive.field?.category === 'NUMPAGES'
         );
