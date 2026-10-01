@@ -218,6 +218,7 @@ export function registerWorkerProposalAuthority(
       if (!initialized || holdsState || failure || handingOver || !hooks.current()) return;
       initialized = false;
       initializing = null;
+      snapshotPosted = false;
       hooks.relayout();
       notify();
     },
