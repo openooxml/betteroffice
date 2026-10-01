@@ -2051,6 +2051,13 @@ fn a_part_holding_more_than_plain_xml_does_not_splice() {
     ] {
         let doc = seeded(&paragraphs_package(&format!("{body}{lenient}")));
         assert_eq!(spliced(&doc, "word/document.xml"), None, "{lenient}");
+        doc.split_paragraph(&ctx(), Position::new("body", 0), None)
+            .unwrap();
+        assert_eq!(spliced(&doc, "word/document.xml"), None, "split: {lenient}");
+        let doc = seeded(&paragraphs_package(&format!("{body}{lenient}")));
+        doc.merge_paragraphs(&ctx(), &key_of(&doc, "body", "A"), MergeDirection::Forward)
+            .unwrap();
+        assert_eq!(spliced(&doc, "word/document.xml"), None, "merge: {lenient}");
     }
 }
 

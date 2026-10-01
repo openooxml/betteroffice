@@ -3151,7 +3151,7 @@ mod tests {
         let original_document = concat!(
             "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\"><w:body>",
             "<w:p w14:paraId=\"0000000A\" w:rsidR=\"00AB12CD\"><w:r><w:t>keep</w:t></w:r></w:p>",
-            "<!-- authored gap -->",
+            "\n  ",
             "<w:p w14:paraId=\"0000000B\"><w:r><w:t>old</w:t></w:r></w:p>",
             "</w:body></w:document>"
         );
@@ -3188,7 +3188,7 @@ mod tests {
         assert!(spliced.contains("<w:t>edited</w:t>"));
         assert!(!spliced.contains("old"));
         let stale = save("0".repeat(64));
-        assert!(!stale.contains("authored gap"));
+        assert!(!stale.contains("w:rsidR="));
         assert!(stale.contains("<w:t>edited</w:t>"));
     }
 

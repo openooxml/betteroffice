@@ -219,8 +219,6 @@ fn root_binds(source: &str, serialized: &str, prefixes: &BTreeSet<&str>) -> Opti
 struct Layout<'s> {
     parents: HashMap<u32, &'s str>,
     edges: HashMap<u32, Edges<'s>>,
-    /// The one namespace each prefix in the part is bound to.
-    bound: HashMap<&'s str, &'s str>,
 }
 
 /// The tags around a paragraph, each as `(name, whether it is an end tag)`.
@@ -278,7 +276,6 @@ fn layout<'s>(
     let mut layout = Layout {
         parents: HashMap::new(),
         edges: HashMap::new(),
-        bound: HashMap::new(),
     };
     let mut previous = None;
     for tag in tags(source)? {
@@ -335,8 +332,7 @@ fn layout<'s>(
             stack.push(tag.name);
         }
     }
-    layout.bound = prefixes;
-    (layout.bound.get("w") == Some(&W_NAMESPACE)).then_some(layout)
+    (prefixes.get("w") == Some(&W_NAMESPACE)).then_some(layout)
 }
 
 /// The elements a rewritten paragraph may sit in: story roots and table cells, not content
@@ -487,6 +483,9 @@ pub(crate) fn splice_story_part(
     part: &S13SplicedPart,
     assignments: &BTreeMap<u32, String>,
 ) -> Option<String> {
+    if !crate::xml::reads_as_written(source.as_bytes()) {
+        return None;
+    }
     let written = &recorded.written;
     let removed: BTreeSet<u32> = part.removed.iter().copied().collect();
     if written.len() != part.paragraphs.len()
@@ -636,6 +635,9 @@ pub(crate) fn splice_story_part(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::serializer::{S13SaveRequest, write_docx_s13};
+    use serde_json::json;
+    use sha2::{Digest, Sha256};
 
     const ROOT: &str = "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" mc:Ignorable=\"w14\">";
     const W_ONLY_ROOT: &str =
@@ -662,7 +664,7 @@ mod tests {
         splice_written(source, &written, edit, assignments, (before, after))
     }
 
-    #[derive(Default)]
+    #[derive(Clone, Copy, Default)]
     struct Edit<'a> {
         changed: &'a [u32],
         inserted: &'a [S13SpliceAnchor],
@@ -714,6 +716,185 @@ mod tests {
         format!("{ROOT}<w:body>{paragraphs}</w:body></w:document>")
     }
 
+    fn assert_whole_part_fallback(source: &str, written: &[(Option<u32>, &str)], edit: Edit) {
+        assert_eq!(splice_written(source, written, edit, &[], ("", "")), None);
+        let package = |xml: &str| {
+            ooxml_opc::rezip_parts(&[
+                (
+                    "[Content_Types].xml".to_owned(),
+                    br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+                ),
+                (
+                    "_rels/.rels".to_owned(),
+                    br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+                ),
+                ("word/document.xml".to_owned(), xml.as_bytes().to_vec()),
+            ])
+            .unwrap()
+        };
+        let original = package(source);
+        let target = body(&written.iter().map(|(_, xml)| *xml).collect::<String>());
+        let parsed = crate::parse_docx_s9_wire(&package(&target), Default::default())
+            .unwrap()
+            .document
+            .package;
+        let mut content = serde_json::to_value(&parsed.document.content).unwrap();
+        let paragraphs = content.as_array_mut().unwrap();
+        assert_eq!(paragraphs.len(), written.len());
+        for (paragraph, (ordinal, _)) in paragraphs.iter_mut().zip(written) {
+            if let Some(ordinal) = ordinal {
+                paragraph["sourceOrdinal"] = json!(ordinal);
+            }
+        }
+        let mut request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+            "document": {"content": content},
+            "options": {"updateModifiedDate": false},
+            "paragraphIds": {"splicedParts": [{
+                "part": "word/document.xml",
+                "sha256": format!("{:x}", Sha256::digest(source.as_bytes())),
+                "paragraphs": written.iter().filter_map(|(ordinal, _)| *ordinal).collect::<Vec<_>>(),
+                "changed": edit.changed,
+                "inserted": edit.inserted,
+                "removed": edit.removed,
+            }]},
+        }))
+        .unwrap();
+        let saved = write_docx_s13(request.clone(), &original).unwrap();
+        request
+            .paragraph_ids
+            .as_mut()
+            .unwrap()
+            .spliced_parts
+            .clear();
+        let whole = write_docx_s13(request, &original).unwrap();
+        let document = |bytes: &[u8]| {
+            ooxml_opc::unzip_parts(bytes)
+                .unwrap()
+                .into_iter()
+                .find(|(path, _)| path == "word/document.xml")
+                .unwrap()
+                .1
+        };
+        assert_eq!(document(&saved), document(&whole));
+        assert_ne!(document(&saved), source.as_bytes());
+    }
+
+    #[test]
+    fn structural_edits_inside_a_complex_field_fall_back_to_the_whole_part() {
+        let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText>TOC</w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r></w:p>";
+        let middle = "<w:p><w:r><w:t>Entry</w:t></w:r></w:p>";
+        let closing = "<w:p><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        let new = "<w:p><w:r><w:t>New entry</w:t></w:r></w:p>";
+        let source = body(&format!("{opening}{middle}{closing}"));
+        assert!(crate::xml::reads_as_written(source.as_bytes()));
+        for (written, edit) in [
+            (
+                vec![
+                    (Some(0), opening),
+                    (Some(1), middle),
+                    (None, new),
+                    (Some(2), closing),
+                ],
+                Edit {
+                    inserted: &[S13SpliceAnchor::After(1)],
+                    ..Edit::default()
+                },
+            ),
+            (
+                vec![(Some(0), opening), (Some(2), closing)],
+                Edit {
+                    removed: &[1],
+                    ..Edit::default()
+                },
+            ),
+        ] {
+            assert_whole_part_fallback(&source, &written, edit);
+        }
+    }
+
+    #[test]
+    fn structural_edits_of_xml_not_read_as_written_fall_back_to_the_whole_part() {
+        let first = "<w:p><w:r><w:t>A</w:t></w:r></w:p>";
+        let second = "<w:p><w:r><w:t>B</w:t></w:r></w:p>";
+        let new = "<w:p><w:r><w:t>New</w:t></w:r></w:p>";
+        for source in [
+            body(&format!("{first}{second}<!-- note -->")),
+            body(&format!("{first}{second}<?pi x?>")),
+            body(&format!("{first}{second}")).replace("<w:t>A</w:t>", "<w:t>A & B</w:t>"),
+        ] {
+            assert!(!crate::xml::reads_as_written(source.as_bytes()));
+            assert_whole_part_fallback(
+                &source,
+                &[(Some(0), first), (None, new), (Some(1), second)],
+                Edit {
+                    inserted: &[S13SpliceAnchor::After(0)],
+                    ..Edit::default()
+                },
+            );
+            assert_whole_part_fallback(
+                &source,
+                &[(Some(1), second)],
+                Edit {
+                    removed: &[0],
+                    ..Edit::default()
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn insertions_at_inadmissible_edges_fall_back_to_the_whole_part() {
+        let first = "<w:p><w:r><w:t>A</w:t></w:r></w:p>";
+        let second = "<w:p><w:r><w:t>B</w:t></w:r></w:p>";
+        let new = "<w:p><w:r><w:t>New</w:t></w:r></w:p>";
+        let source = body(&format!(
+            "{first}<w:bookmarkStart w:id=\"1\" w:name=\"mark\"/><w:bookmarkEnd w:id=\"1\"/>{second}"
+        ));
+        assert!(crate::xml::reads_as_written(source.as_bytes()));
+        for anchor in [S13SpliceAnchor::After(0), S13SpliceAnchor::Before(1)] {
+            assert_whole_part_fallback(
+                &source,
+                &[(Some(0), first), (None, new), (Some(1), second)],
+                Edit {
+                    inserted: &[anchor],
+                    ..Edit::default()
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn insertions_with_ambiguous_neighbours_fall_back_to_the_whole_part() {
+        let first = "<w:p><w:r><w:t>A</w:t></w:r></w:p>";
+        let second = "<w:p><w:r><w:t>B</w:t></w:r></w:p>";
+        let new = "<w:p><w:r><w:t>New</w:t></w:r></w:p>";
+        let source = body(&format!("{first}{second}"));
+        for anchor in [S13SpliceAnchor::After(0), S13SpliceAnchor::Before(0)] {
+            assert_whole_part_fallback(
+                &source,
+                &[(Some(0), first), (Some(1), second), (None, new)],
+                Edit {
+                    inserted: &[anchor],
+                    ..Edit::default()
+                },
+            );
+        }
+        assert_whole_part_fallback(
+            &source,
+            &[
+                (Some(0), first),
+                (None, new),
+                (None, new),
+                (Some(1), second),
+            ],
+            Edit {
+                inserted: &[S13SpliceAnchor::After(0), S13SpliceAnchor::Before(1)],
+                ..Edit::default()
+            },
+        );
+    }
+
     #[test]
     fn inserts_new_paragraphs_at_their_anchors_and_drops_removed_ones() {
         let first =
@@ -721,7 +902,7 @@ mod tests {
         let middle = "<w:p w14:paraId=\"0000000B\"><w:r><w:t>removed</w:t></w:r></w:p>";
         let last =
             "<w:p w14:paraId=\"0000000C\" w:rsidR=\"00AB12CD\"><w:r><w:t>kept</w:t></w:r></w:p>";
-        let source = body(&format!("{first}\n{middle}\n<!-- gap -->{last}"));
+        let source = body(&format!("{first}\n{middle}\n  {last}"));
         let split = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>first half</w:t></w:r></w:p>";
         let new = "<w:p w14:paraId=\"0000000D\"><w:r><w:t>second half</w:t></w:r></w:p>";
         let written_last = "<w:p w14:paraId=\"0000000C\"><w:r><w:t>kept</w:t></w:r></w:p>";
@@ -738,7 +919,7 @@ mod tests {
                 &[],
                 ("", "")
             ),
-            Some(body(&format!("{split}{new}\n\n<!-- gap -->{last}")))
+            Some(body(&format!("{split}{new}\n\n  {last}")))
         );
     }
 
@@ -888,7 +1069,7 @@ mod tests {
         let source = concat!(
             "<?xml version=\"1.0\"?>\n<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\"><w:body>",
             "<w:p w14:paraId=\"0000000A\" w:rsidR=\"00AB12CD\"><w:r><w:t>keep</w:t></w:r></w:p>",
-            "<!-- gap -->",
+            "\n  ",
             "<w:p w14:paraId=\"0000000B\"><w:r><w:t>old</w:t></w:r></w:p>",
             "<w:sectPr><w:pgSz w:w=\"11906\"/></w:sectPr></w:body></w:document>"
         );
@@ -1026,11 +1207,11 @@ mod tests {
 
     #[test]
     fn refuses_rewriting_a_paragraph_with_field_characters_however_they_are_spelled() {
-        let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First</w:t></w:r></w:p>";
+        let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First</w:t></w:r></w:p>";
         let closing = "<w:p><w:r><w:t>Second</w:t></w:r><w:r><w:fldChar w:fldCharType=\"e&#110;d\"/></w:r></w:p>";
         let after = "<w:p><w:r><w:t>After</w:t></w:r></w:p>";
         let source = format!("{ROOT}<w:body>{opening}{closing}{after}</w:body></w:document>");
-        let written_opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        let written_opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
         let written_closing = "<w:p><w:r><w:t>Second, edited</w:t></w:r></w:p>";
         assert_eq!(
             splice(
@@ -1060,7 +1241,7 @@ mod tests {
             ),
             None
         );
-        let field = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        let field = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
         let source = format!("{ROOT}<w:body>{field}</w:body></w:document>");
         assert_eq!(splice(&source, &[(0, field)], &[0]), None);
     }
@@ -1209,11 +1390,11 @@ mod tests {
 
     #[test]
     fn a_field_spanning_paragraphs_is_kept_around_an_edit_elsewhere() {
-        let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry</w:t></w:r></w:p>";
+        let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry</w:t></w:r></w:p>";
         let closing = "<w:p><w:r><w:t>Second entry</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
         let outside = "<w:p><w:r><w:t>Outside the field</w:t></w:r></w:p>";
         let source = format!("{ROOT}<w:body>{opening}{closing}{outside}</w:body></w:document>");
-        let written_opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        let written_opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
         let written_closing = "<w:p><w:r><w:t>Second entry</w:t></w:r></w:p>";
         assert_eq!(
             splice(
@@ -1242,8 +1423,9 @@ mod tests {
 
     #[test]
     fn refuses_rewriting_a_paragraph_that_starts_inside_a_field() {
-        let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText> IF 1 = 1 </w:instrText></w:r></w:p>";
-        let code = "<w:p><w:r><w:instrText>\"yes\" </w:instrText></w:r></w:p>";
+        let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> IF 1 = 1 </w:instrText></w:r></w:p>";
+        let code =
+            "<w:p><w:r><w:instrText xml:space=\"preserve\">\"yes\" </w:instrText></w:r></w:p>";
         let closing = "<w:p><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>yes</w:t></w:r><w:r><w:fldChar w:fldCharType=\"e&#110;d\"/></w:r></w:p>";
         let outside = "<w:p><w:r><w:t>Outside</w:t></w:r></w:p>";
         let source =
