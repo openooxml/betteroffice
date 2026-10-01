@@ -42,7 +42,10 @@ export type ProposalGeometryReader = AnchorReader &
     YrsSession,
     'storyIds' | 'paragraphs' | 'paragraphIdCount' | 'locateParagraph' | 'version'
   > & {
-    proposalRevisions?(ids: readonly string[]): readonly ProposalGeometryRevision[];
+    proposalRevisions?(
+      ids: readonly string[],
+      stories?: readonly string[]
+    ): readonly ProposalGeometryRevision[];
   };
 
 /** @internal */
@@ -73,7 +76,7 @@ type AnchorResolution =
 interface VersionReads {
   version: string;
   revisions?: ReturnType<AnchorReader['listRevisions']>;
-  proposalRevisions?: { ids: string; revisions: readonly ProposalGeometryRevision[] };
+  proposalRevisions?: { key: string; revisions: readonly ProposalGeometryRevision[] };
   spans: Map<string, ReturnType<AnchorReader['paragraphSpans']>>;
   segments: Map<string, readonly YrsStorySegment[]>;
   anchors: Map<string, ReturnType<AnchorReader['resolveParagraphAnchor']>>;
@@ -458,12 +461,17 @@ export function computeProposalGeometryMirror(
   let revisions: readonly ProposalGeometryRevision[] | undefined;
   if (reader.proposalRevisions) {
     const ids = [...new Set(snapshot.proposals.flatMap(({ revisionIds }) => revisionIds))].sort();
-    const key = JSON.stringify(ids);
+    const stories = snapshot.proposals.every(({ paragraph }) =>
+      paragraph.kind === 'session' && typeof paragraph.story === 'string' && paragraph.story.length > 0
+    )
+      ? [...new Set(snapshot.proposals.map(({ paragraph }) => paragraph.story))].sort()
+      : undefined;
+    const key = JSON.stringify([ids, stories]);
     const reads = readsAt(reader, version);
-    if (reads.proposalRevisions?.ids !== key) {
+    if (reads.proposalRevisions?.key !== key) {
       reads.proposalRevisions = {
-        ids: key,
-        revisions: ids.length > 0 ? reader.proposalRevisions(ids) : [],
+        key,
+        revisions: ids.length > 0 ? reader.proposalRevisions(ids, stories) : [],
       };
     }
     revisions = reads.proposalRevisions.revisions;

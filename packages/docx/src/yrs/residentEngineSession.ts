@@ -199,12 +199,14 @@ export async function createResidentEngineSession(
     listRevisions: () => JSON.parse(session.list_revisions()) as YrsRevisionInfo[],
     resolveParagraphAnchor: proposalEngine.resolveParagraphAnchor,
     findText: proposalEngine.findText,
-    proposalRevisions: (ids) => {
+    proposalRevisions: (ids, stories) => {
       const owned = new Set(ids);
       const revisions: ProposalGeometryRevision[] = [];
       const fallback = () =>
         geometryReader.listRevisions().filter(({ revisionId }) => owned.has(revisionId));
-      for (const story of session.story_ids().sort()) {
+      const storyIds = stories === undefined ? session.story_ids().sort() : [...new Set(stories)].sort();
+      for (const story of storyIds) {
+        if (stories !== undefined && !geometryReader.hasStory(story)) return fallback();
         let offset = 0;
         const paragraphs = new Set<string>();
         let changes: Array<{
@@ -214,7 +216,7 @@ export async function createResidentEngineSession(
           end: number;
         }> = [];
         const previous = new Map<string, (typeof changes)[number]>();
-        for (const segment of geometryStory(story).segments) {
+        for (const segment of geometryReader.storySegments(story)) {
           if (segment.kind === 'pilcrow') {
             if (hasRevisionProperties(segment.properties) || paragraphs.has(segment.paraId)) {
               return fallback();
@@ -270,6 +272,10 @@ export async function createResidentEngineSession(
           offset += length;
         }
         if (changes.length > 0) return fallback();
+      }
+      if (stories !== undefined) {
+        const found = new Set(revisions.map(({ revisionId }) => revisionId));
+        if (ids.some((id) => !found.has(id))) return fallback();
       }
       return revisions;
     },

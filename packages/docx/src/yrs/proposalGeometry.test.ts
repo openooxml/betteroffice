@@ -19,7 +19,7 @@ const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
 const BODY = { partUri: '/word/document.xml', kind: 'body' } as const;
 const SUGGEST = { author: 'Reviewer', date: '2026-09-29T12:00:00Z' };
 
-function fixture(): Uint8Array {
+function fixture(unrelatedCells = 0): Uint8Array {
   const paragraph = (id: string, text: string) =>
     `<w:p w14:paraId="${id}"><w:r><w:t>${text}</w:t></w:r></w:p>`;
   const body = [
@@ -30,7 +30,11 @@ function fixture(): Uint8Array {
     paragraph('00000005', 'Vanish'),
     '<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc>',
     paragraph('0000C001', 'cell value'),
-    '</w:tc></w:tr></w:tbl>',
+    '</w:tc></w:tr>',
+    ...Array.from({ length: unrelatedCells }, (_, index) =>
+      `<w:tr><w:tc>${paragraph((0xc002 + index).toString(16).toUpperCase().padStart(8, '0'), 'Unrelated cell')}</w:tc></w:tr>`
+    ),
+    '</w:tbl>',
     paragraph('00000006', 'Tail'),
     paragraph('00000007', 'Unchanged'),
   ].join('');
@@ -66,10 +70,10 @@ function replace(id: string, paraId: string, search: string, replaceWith: string
   };
 }
 
-async function proposedDocument(): Promise<YrsSession> {
+async function proposedDocument(unrelatedCells = 0): Promise<YrsSession> {
   const main = await createYrsSession({ clientId: 79101 });
   try {
-    main.openDocx(fixture(), true);
+    main.openDocx(fixture(unrelatedCells), true);
     snapshotOf(
       main.proposeChanges({
         expectVersion: main.version(),
@@ -123,6 +127,132 @@ function duplicated(reader: ProposalGeometryReader): ProposalGeometryReader {
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
 
 describe('proposal geometry readers', () => {
+  test('hinted resident revisions match full reads and scan only sorted unique proposal stories', async () => {
+    const main = await proposedDocument(48);
+    const resident = await createResidentEngineSession();
+    try {
+      resident.loadState(main.encodeState());
+      const reader = resident.geometryReader;
+      const snapshot = main.getProposals();
+      const ids = snapshot.proposals.flatMap(({ revisionIds }) => revisionIds);
+      const fields = ({ revisionId, kind, story, range }: ProposalGeometryRevision) =>
+        ({ revisionId, kind, story, range });
+      const expected = main.listRevisions().filter(({ revisionId }) => ids.includes(revisionId)).map(fields);
+      expect(reader.storyIds().length).toBeGreaterThan(40);
+      expect(snapshot.proposals.find(({ id }) => id === 'insert')!.paragraph.story).toBe('body');
+      expect(snapshot.proposals.find(({ id }) => id === 'cell')!.paragraph.story).toBe('body:t0:r0c0');
+      const segments = spyOn(reader, 'storySegments');
+      const listed = spyOn(reader, 'listRevisions');
+      try {
+        const hinted = reader.proposalRevisions!(ids, ['body:t0:r0c0', 'body', 'body:t0:r0c0']);
+        expect(hinted.map(fields)).toEqual(expected);
+        expect(segments.mock.calls.map(([story]) => story)).toEqual(['body', 'body:t0:r0c0']);
+        expect(listed).not.toHaveBeenCalled();
+        const unhinted = reader.proposalRevisions!(ids);
+        expect(hinted.map(fields)).toEqual(unhinted.map(fields));
+        expect(unhinted.map(fields)).toEqual(
+          reader.listRevisions().filter(({ revisionId }) => ids.includes(revisionId)).map(fields)
+        );
+      } finally {
+        segments.mockRestore();
+        listed.mockRestore();
+      }
+    } finally {
+      resident.destroy();
+      main.destroy();
+    }
+  });
+
+  test('resident revisions fall back when a requested revision is outside the hinted stories', async () => {
+    const main = await proposedDocument(48);
+    const resident = await createResidentEngineSession();
+    try {
+      resident.loadState(main.encodeState());
+      const reader = resident.geometryReader;
+      const ids = main.getProposals().proposals.flatMap(({ revisionIds }) => revisionIds);
+      const expected = reader.listRevisions().filter(({ revisionId }) => ids.includes(revisionId));
+      expect(expected.some(({ story }) => story === 'body:t0:r0c0')).toBe(true);
+      const listed = spyOn(reader, 'listRevisions');
+      try {
+        expect(reader.proposalRevisions!(ids, ['body'])).toEqual(expected);
+        expect(listed).toHaveBeenCalledTimes(1);
+        expect(reader.proposalRevisions!(ids, [])).toEqual(expected);
+        expect(listed).toHaveBeenCalledTimes(2);
+        expect(reader.proposalRevisions!(ids, ['absent'])).toEqual(expected);
+        expect(listed).toHaveBeenCalledTimes(3);
+      } finally {
+        listed.mockRestore();
+      }
+    } finally {
+      resident.destroy();
+      main.destroy();
+    }
+  });
+
+  test('proposal mirrors match readers that ignore story hints', async () => {
+    const main = await proposedDocument(48);
+    const resident = await createResidentEngineSession();
+    try {
+      resident.loadState(main.encodeState());
+      const snapshot = main.getProposals();
+      const reader = resident.geometryReader;
+      const unhinted: ProposalGeometryReader = {
+        ...reader,
+        proposalRevisions: (ids) => reader.proposalRevisions!(ids),
+      };
+      const revisions = spyOn(reader, 'proposalRevisions');
+      try {
+        const hinted = computeProposalGeometryMirror(reader, snapshot);
+        expect(revisions.mock.calls[0]![1]).toEqual(['body', 'body:t0:r0c0']);
+        expect(hinted).toEqual(computeProposalGeometryMirror(unhinted, snapshot));
+        const expected = computeProposalGeometryMirror(main, snapshot);
+        expect({ ...hinted, version: expected.version }).toEqual(expected);
+      } finally {
+        revisions.mockRestore();
+      }
+    } finally {
+      resident.destroy();
+      main.destroy();
+    }
+  });
+
+  test('proposal revision caching includes stories and omits hints when a story is unknown', async () => {
+    const main = await proposedDocument();
+    const resident = await createResidentEngineSession();
+    try {
+      resident.loadState(main.encodeState());
+      const snapshot = main.getProposals();
+      const reader = resident.geometryReader;
+      const unhinted: ProposalGeometryReader = {
+        ...reader,
+        proposalRevisions: (ids) => reader.proposalRevisions!(ids),
+      };
+      const revisions = spyOn(reader, 'proposalRevisions');
+      try {
+        computeProposalGeometryMirror(reader, snapshot);
+        for (const story of ['body', '']) {
+          const changed = {
+            ...snapshot,
+            proposals: snapshot.proposals.map((proposal) => proposal.id === 'cell'
+              ? { ...proposal, paragraph: { ...proposal.paragraph, story } }
+              : proposal
+            ),
+          };
+          revisions.mockClear();
+          const actual = computeProposalGeometryMirror(reader, changed);
+          expect(revisions).toHaveBeenCalledTimes(1);
+          expect(revisions.mock.calls[0]![1]).toEqual(story ? ['body'] : undefined);
+          expect(actual).toEqual(computeProposalGeometryMirror(unhinted, changed));
+        }
+      } finally {
+        revisions.mockRestore();
+      }
+    } finally {
+      resident.destroy();
+      main.destroy();
+    }
+  });
+
   test('can omit navigation targets without reading or building the sidebar projection', async () => {
     const main = await proposedDocument();
     const count = spyOn(main, 'paragraphIdCount');
