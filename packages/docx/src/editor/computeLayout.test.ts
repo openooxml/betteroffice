@@ -261,6 +261,29 @@ describe('computeLayout default style forwarding', () => {
     expect((seen[1] as YrsRenderEnv).defaultParagraphStyleId).toBe('Override');
   });
 
+  test('requests cached page totals only when asked', () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const session = {
+      layoutDocumentWithRegionsRetainedJson: (input: string) => {
+        seen.push(JSON.parse(input));
+        return JSON.stringify({ layout: { pages: [] }, notesConverged: true });
+      },
+      residentWorkerProbe: () => ({ layoutRevision: 1 }),
+      retainedKernelInputsJson: () => JSON.stringify({ measured: [], options: {} }),
+    };
+    const inputs = {
+      document: null,
+      pageGap: 24,
+      session: session as never,
+      renderEnv: {},
+      measurement: { fontChains: {}, defaults: { fontSize: 11, fontFamily: 'Calibri' } } as never,
+    };
+    computeLayout(inputs);
+    computeLayout({ ...inputs, cachedPageTotals: true });
+    expect(seen[0]).not.toHaveProperty('cachedPageTotals');
+    expect(seen[1]!.cachedPageTotals).toBe(true);
+  });
+
   test('legacy empty env without document still succeeds', () => {
     const session = {
       layoutDocumentWithRegionsRetainedJson: () =>

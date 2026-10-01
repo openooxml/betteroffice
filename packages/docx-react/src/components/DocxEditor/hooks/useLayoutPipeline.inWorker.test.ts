@@ -28,6 +28,7 @@ afterAll(async () => {
 interface WorkerPass {
   /** The document version the pass was asked for. */
   at: number;
+  request: string;
   answer(computation?: WorkerLayoutComputation): void;
   fail(): void;
 }
@@ -105,11 +106,12 @@ async function opened({
       getScrollContainer: () => null,
       onError: (error) => errors.push(error),
       fontRequirementsInWorker,
-      layoutInWorker: (asked) =>
+      layoutInWorker: (asked, request) =>
         doc.workerAvailable
           ? new Promise<WorkerLayoutComputation | null>((resolve) => {
               worker.push({
                 at: Number(asked.version()),
+                request,
                 answer: (computation) =>
                   resolve(computation ?? {
                     layout: { pages: [] } as unknown as Layout, notesConverged: true,
@@ -175,6 +177,19 @@ async function holdProposals(session: YrsSession) {
   });
   expect(authority.holdsWorkerState()).toBe(true);
 }
+
+test.each([false, true])('cached page totals are requested only with worker-open=%s', async (experimentalWorkerOpen) => {
+  const h = await opened({ experimentalWorkerOpen });
+  const request = JSON.parse(h.worker[0]!.request);
+  const retainedRequest = JSON.parse(h.hook.result.current.getLayoutRequest()!);
+  if (experimentalWorkerOpen) {
+    expect(request.cachedPageTotals).toBe(true);
+    expect(retainedRequest.cachedPageTotals).toBe(true);
+  } else {
+    expect(request).not.toHaveProperty('cachedPageTotals');
+    expect(retainedRequest).not.toHaveProperty('cachedPageTotals');
+  }
+});
 
 test('a superseded null completion requests the worker while it holds proposals', async () => {
   const h = await opened({ experimentalWorkerOpen: true, pendingReplica: true });
