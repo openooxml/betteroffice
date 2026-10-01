@@ -1,9 +1,10 @@
 //! Heap accounting for the wasm build: live and peak bytes, the size of an
 //! allocation that could not be satisfied, and an optional limit on live bytes.
 //! [`CountingAllocator`] is the global allocator only in a wasm32 build with the
-//! `heap-stats` feature.
+//! `heap-stats` feature, where it allocates from talc instead of the default
+//! dlmalloc.
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use wasm_bindgen::prelude::*;
 
@@ -12,7 +13,12 @@ static PEAK: AtomicUsize = AtomicUsize::new(0);
 static FAILED: AtomicUsize = AtomicUsize::new(0);
 static LIMIT: AtomicUsize = AtomicUsize::new(usize::MAX);
 
-/// [`System`] with byte counters.
+#[cfg(all(target_arch = "wasm32", feature = "heap-stats"))]
+static BACKING: talc::wasm::WasmDynamicTalc = talc::wasm::new_wasm_dynamic_allocator();
+#[cfg(not(all(target_arch = "wasm32", feature = "heap-stats")))]
+static BACKING: std::alloc::System = std::alloc::System;
+
+/// The backing allocator with byte counters.
 pub struct CountingAllocator;
 
 fn grew(bytes: usize) {
@@ -46,25 +52,25 @@ fn counted(pointer: *mut u8, bytes: usize) -> *mut u8 {
     pointer
 }
 
-// SAFETY: every call forwards to `System` unchanged, or returns null without
+// SAFETY: every call forwards to `BACKING` unchanged, or returns null without
 // allocating once the limit is reached, which `GlobalAlloc` permits.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if over_limit(layout.size()) {
             return std::ptr::null_mut();
         }
-        counted(unsafe { System.alloc(layout) }, layout.size())
+        counted(unsafe { BACKING.alloc(layout) }, layout.size())
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         if over_limit(layout.size()) {
             return std::ptr::null_mut();
         }
-        counted(unsafe { System.alloc_zeroed(layout) }, layout.size())
+        counted(unsafe { BACKING.alloc_zeroed(layout) }, layout.size())
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
+        unsafe { BACKING.dealloc(pointer, layout) };
         shrank(layout.size());
     }
 
@@ -73,7 +79,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
             FAILED.store(new_size, Ordering::Relaxed);
             return std::ptr::null_mut();
         }
-        let moved = unsafe { System.realloc(pointer, layout, new_size) };
+        let moved = unsafe { BACKING.realloc(pointer, layout, new_size) };
         if moved.is_null() {
             FAILED.store(new_size, Ordering::Relaxed);
         } else if new_size >= layout.size() {

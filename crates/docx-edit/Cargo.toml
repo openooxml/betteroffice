@@ -25,7 +25,7 @@ wasm = ["dep:wasm-bindgen", "dep:js-sys"]
 # Installs the counting global allocator behind the `wasm_*_bytes` exports in a
 # wasm32 build. Only the package's own wasm build enables it, since a binary
 # can have one global allocator.
-heap-stats = ["wasm"]
+heap-stats = ["wasm", "dep:talc"]
 # The seeded yrs image src is what the renderer paints, so this crate needs the
 # same TIFF transcode the docx-parse wasm build enables.
 tiff = ["docx-parse/tiff"]
@@ -50,3 +50,6 @@ unicode-segmentation = "1.12"
 # builds too), so the `wasm` feature does not re-declare it as `dep:serde_json`.
 wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+talc = { version = "5.1.1", optional = true }
