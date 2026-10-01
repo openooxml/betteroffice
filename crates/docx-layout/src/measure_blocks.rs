@@ -2495,7 +2495,9 @@ fn breaking_space(character: char) -> bool {
 
 /// The narrowest width that holds the widest word of the cell at `entry`,
 /// margins included: `Some(None)` when the cell holds anything but
-/// paragraphs, `None` when the entry names no cell.
+/// paragraphs, `None` when the entry names no cell. A rotated cell's lines
+/// wrap along its row, so it asks for no room: it holds its stacked lines up
+/// to its current width.
 fn cell_content_minimum(
     table: &TableBlock,
     entry: &ResolvedGridCell,
@@ -2508,21 +2510,26 @@ fn cell_content_minimum(
         .get(entry.row_index)
         .and_then(|row| row.cells.get(entry.cell_index))?;
     let padding = cell_horizontal_padding(cell);
-    let content = if is_rotated(cell) {
-        rows.get(entry.row_index)
-            .and_then(|row| row.cells.get(entry.cell_index))
-            .map(|measured| measured.blocks.iter().map(extent_height).sum::<f64>())
-    } else {
-        cell.blocks
-            .iter()
-            .try_fold(0.0_f64, |widest, block| match block {
-                LayoutBlock::Paragraph(paragraph) => {
-                    crate::typed_measure::min_content_width(paragraph, content_width, config)
-                        .map(|width| widest.max(width))
-                }
-                _ => None,
-            })
-    };
+    if is_rotated(cell) {
+        return Some(
+            rows.get(entry.row_index)
+                .and_then(|row| row.cells.get(entry.cell_index))
+                .map(|measured| {
+                    (measured.blocks.iter().map(extent_height).sum::<f64>() + padding)
+                        .min(measured.width)
+                }),
+        );
+    }
+    let content = cell
+        .blocks
+        .iter()
+        .try_fold(0.0_f64, |widest, block| match block {
+            LayoutBlock::Paragraph(paragraph) => {
+                crate::typed_measure::min_content_width(paragraph, content_width, config)
+                    .map(|width| widest.max(width))
+            }
+            _ => None,
+        });
     Some(content.map(|content| content + padding))
 }
 
@@ -2591,7 +2598,7 @@ fn cell_horizontal_padding(cell: &crate::types::TableCell) -> f64 {
 
 /// Per column, the narrowest width that holds the widest word of every cell
 /// sitting in that column alone, margins included; a rotated cell holds its
-/// stacked lines. A column that holds anything but paragraphs, or that only
+/// stacked lines up to its current width. A column that holds anything but paragraphs, or that only
 /// spanning cells cover, is pinned with NaN.
 fn column_content_minimums(
     table: &TableBlock,
@@ -4994,6 +5001,18 @@ mod tests {
         layout: Option<&str>,
         rows: Vec<Vec<serde_json::Value>>,
     ) -> (TableExtent, ParagraphExtent) {
+        word_table_row_objects(
+            layout,
+            rows.into_iter()
+                .map(|cells| json!({"cells":cells}))
+                .collect(),
+        )
+    }
+
+    fn word_table_row_objects(
+        layout: Option<&str>,
+        rows: Vec<serde_json::Value>,
+    ) -> (TableExtent, ParagraphExtent) {
         let font = crate::register_measure_font(include_bytes!(
             "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
         ))
@@ -5006,7 +5025,10 @@ mod tests {
         let rows: Vec<_> = rows
             .into_iter()
             .enumerate()
-            .map(|(index, cells)| json!({"id":format!("row{index}"),"cells":cells}))
+            .map(|(index, mut row)| {
+                row["id"] = json!(format!("row{index}"));
+                row
+            })
             .collect();
         let mut table = json!({
             "kind":"table","id":"words","columnWidths":[60,100,100],"width":3900,"widthType":"dxa",
@@ -5098,5 +5120,26 @@ mod tests {
             panic!()
         };
         assert_eq!(spanning.lines.len(), 1);
+    }
+
+    #[test]
+    fn a_rotated_cell_keeps_its_column_while_another_widens_to_its_longest_word() {
+        let word = 10.0 * 1139.0 / 128.0 + 2.0;
+        let mut rotated = word_cell("0000 0000 0000 0000 0000 0000", 1);
+        rotated["textDirection"] = json!("btLr");
+        rotated["rowSpan"] = json!(2);
+        let first = [word_cell("0000000000", 1), word_cell("00 00", 1), rotated];
+        let second = [word_cell("0", 1), word_cell("0", 1)];
+        let (extent, paragraph) = word_table_row_objects(
+            None,
+            vec![
+                json!({"height":20,"cells":first}),
+                json!({"height":20,"cells":second}),
+            ],
+        );
+        assert_eq!(paragraph.lines.len(), 1);
+        assert!((extent.column_widths[0] - word).abs() < 1e-3);
+        assert!((extent.column_widths[1] - (160.0 - word)).abs() < 1e-3);
+        assert_eq!(extent.column_widths[2], 100.0);
     }
 }
