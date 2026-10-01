@@ -25,12 +25,38 @@ struct Seeds {
 fn seeds() -> &'static Seeds {
     static SEEDS: std::sync::OnceLock<Seeds> = std::sync::OnceLock::new();
     SEEDS.get_or_init(|| {
-        let [a, b] = crate::identity::entropy();
+        let [a, b, c, d] = seed_words();
         Seeds {
             shared: [a, b].map(foldhash::SharedSeed::from_u64),
-            per_hasher: crate::identity::entropy(),
+            per_hasher: [c, d],
         }
     })
+}
+
+#[cfg(not(all(
+    target_family = "wasm",
+    target_os = "unknown",
+    not(all(feature = "wasm", target_arch = "wasm32"))
+)))]
+fn seed_words() -> [u64; 4] {
+    let [a, b] = crate::identity::entropy();
+    let [c, d] = crate::identity::entropy();
+    [a, b, c, d]
+}
+
+/// Without the `wasm` feature, `wasm32-unknown-unknown` has no entropy source.
+#[cfg(all(
+    target_family = "wasm",
+    target_os = "unknown",
+    not(all(feature = "wasm", target_arch = "wasm32"))
+))]
+fn seed_words() -> [u64; 4] {
+    [
+        0x243f_6a88_85a3_08d3,
+        0x1319_8a2e_0370_7344,
+        0xa409_3822_299f_31d0,
+        0x082e_fa98_ec4e_6c89,
+    ]
 }
 
 const POSITION_KEYS: [&str; 4] = ["pmStart", "pmEnd", "docStart", "docEnd"];
