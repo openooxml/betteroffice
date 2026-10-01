@@ -150,7 +150,7 @@ scope.onmessage = (
   const message = event.data;
   if (message.type === 'editModule') {
     // The queued warm waits for this message.
-    resolveHostEditModule(message.module);
+    resolveHostEditModule(message.module instanceof WebAssembly.Module ? message.module : null);
     return;
   }
   enqueue(() => handle(message), message.id);

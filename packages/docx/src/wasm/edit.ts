@@ -50,8 +50,8 @@ export function preloadEditWasm(input?: WasmAsyncInput): Promise<void> {
 }
 
 /** @internal */
-export function editWasmModule(): Promise<WebAssembly.Module> {
-  return state.module();
+export function editWasmModule(): Promise<WebAssembly.Module | null> {
+  return state.sharedModule();
 }
 
 /** @internal */

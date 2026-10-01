@@ -105,6 +105,8 @@ export interface WasmModuleState {
   preload(input?: WasmAsyncInput): Promise<void>;
   /** @internal */
   module(): Promise<WebAssembly.Module>;
+  /** @internal This thread's shared compile, or null when it loaded the engine from another input. */
+  sharedModule(): Promise<WebAssembly.Module | null>;
   /** @internal */
   preloadFrom(source: Promise<WebAssembly.Module | null>): Promise<void>;
   /** Sync guard used by every call site; disk-inits on Node/Bun, throws in a browser before `preload()`. */
@@ -206,6 +208,11 @@ export function createWasmModuleState(options: {
 
   return {
     module,
+    sharedModule(): Promise<WebAssembly.Module | null> {
+      if (compiled) return compiled;
+      if (initialized || pending) return Promise.resolve(null);
+      return module();
+    },
     preload(input?: WasmAsyncInput): Promise<void> {
       if (initialized) return Promise.resolve();
       if (pending) return pending;
