@@ -716,6 +716,8 @@ export function useYrsCoreSession(
             const worker = openedWorker;
             const source = bytes;
             const gate = { reached: false, wanted: false };
+            let recoveredRendering = false;
+            let warnedSyncAccess = false;
             const request = (): void => {
               gate.wanted = true;
               if (gate.reached) startReplicaRef.current?.();
@@ -732,19 +734,34 @@ export function useYrsCoreSession(
                   handedOver?.complete();
                 };
               },
-              () => {
+              (reason) => {
                 if (registeredWorkerProposalAuthority(next)?.holdsWorkerState()) {
                   throw new Error('The resident worker holds proposals the main thread cannot rebuild');
                 }
-                worker.fallback();
+                const recoverRendering = worker.fallback(reason);
+                if (reason !== 'failure' && !warnedSyncAccess) {
+                  warnedSyncAccess = true;
+                  console.warn(
+                    `[DocxEditor] ${reason.syncAccess}() needed the main-thread document before it was ready, ` +
+                    'so the document was opened on the main thread. Use the asynchronous APIs ' +
+                    '(for example getParagraphIdentities) to keep it in the worker.'
+                  );
+                }
                 next.openDocx(source, true);
                 if (registeredWorkerProposalAuthority(next)) next.mirrorWorkerDocument(null);
+                if (recoverRendering) {
+                  recoveredRendering = recoverRendering();
+                }
               },
               () => {
                 if (stale()) return;
                 inputPositionMapsRef.current.clear();
                 replicaReadyRef.current = true;
                 worker.replicaReady();
+                if (recoveredRendering) {
+                  markLayoutQueued(next, true);
+                  workerOpenRef.current?.refreshWorkerLayout?.();
+                }
                 setReplicaReady(true);
               },
               { active: () => hydrateOnDemandRef.current, request }
