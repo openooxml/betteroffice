@@ -231,11 +231,9 @@ pub(crate) fn streaming_body_cut(
                     });
                 }
                 for drawing in &mut drawings {
-                    drawing.used_prefixes.insert(
-                        crate::xml::namespace_prefix(&name)
-                            .unwrap_or("")
-                            .to_owned(),
-                    );
+                    drawing
+                        .used_prefixes
+                        .insert(crate::xml::namespace_prefix(&name).unwrap_or("").to_owned());
                 }
                 let position = stack.last_mut().is_some_and(|parent| {
                     if parent.anchor && !parent.position_seen && local == "positionV" {
@@ -1122,8 +1120,12 @@ mod tests {
             expected
         );
         assert_eq!(
-            parse_xml(xml.as_bytes(), "word/document.xml", &mut ParseBudget::new(&limits))
-                .unwrap_err(),
+            parse_xml(
+                xml.as_bytes(),
+                "word/document.xml",
+                &mut ParseBudget::new(&limits)
+            )
+            .unwrap_err(),
             expected
         );
         let parts = vec![("word/document.xml".to_owned(), xml.into_bytes())];
@@ -1244,16 +1246,16 @@ mod tests {
             assert_eq!(streaming_budget.xml_events(), dom_budget.xml_events());
             if actual.is_ok() {
                 assert_eq!(
-                    streaming_budget.charge_text(
-                        limits.max_xml_text_bytes - text_bytes,
-                        "word/document.xml"
-                    ),
-                    dom_budget.charge_text(
-                        limits.max_xml_text_bytes - text_bytes,
-                        "word/document.xml"
-                    )
+                    streaming_budget
+                        .charge_text(limits.max_xml_text_bytes - text_bytes, "word/document.xml"),
+                    dom_budget
+                        .charge_text(limits.max_xml_text_bytes - text_bytes, "word/document.xml")
                 );
-                assert!(streaming_budget.charge_text(1, "word/document.xml").is_err());
+                assert!(
+                    streaming_budget
+                        .charge_text(1, "word/document.xml")
+                        .is_err()
+                );
             }
         }
     }
