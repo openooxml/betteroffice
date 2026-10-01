@@ -53,6 +53,7 @@ import { CARET_PAINT_IDLE_MS, PaintedCaretMachine } from '../paintedCaret';
 import {
   isLayoutQueued,
   isSupersededLayout,
+  noteProvisionalInputVersion,
   readSessionVersion,
   revisionPreviewKey,
   revisionPreviewKeyOf,
@@ -1041,12 +1042,15 @@ export function useRustDisplayList(
         if (dropped()) return { frameEpoch: null, caretSynchronized: false };
         if (!result.applied) return null;
         const delta = workerDelta ?? decodeFrameDelta(result.frame);
+        const before = result.layoutProvisional ? readSessionVersion(worker.engine) : null;
         suppressWorkerInvalidationRef.current += 1;
         try {
           for (const update of result.updates) worker.engine.applyLocalUpdate(update);
         } finally {
           suppressWorkerInvalidationRef.current -= 1;
         }
+        const after = before === null ? null : readSessionVersion(worker.engine);
+        if (before !== null && after !== null) noteProvisionalInputVersion(worker.engine, before, after);
         if (workerRef.current !== worker) {
           return { frameEpoch: null, caretSynchronized: false, deletedUnits: result.deletedUnits };
         }

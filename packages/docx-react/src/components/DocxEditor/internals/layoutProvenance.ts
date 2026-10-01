@@ -37,6 +37,38 @@ export function isLayoutQueued(session: object | null | undefined): boolean {
   return session ? queuedLayoutSessions.has(session) : false;
 }
 
+const provisionalInputVersions = new WeakMap<object, Map<string, string>>();
+
+/**
+ * Records that input the worker answered while its layout was still provisional
+ * moved `session` from `before` to `after`. The worker answers its waiting
+ * completion after that input, so the completion already shows `after`.
+ */
+export function noteProvisionalInputVersion(session: object, before: string, after: string): void {
+  if (before === after) return;
+  let transitions = provisionalInputVersions.get(session);
+  if (!transitions) provisionalInputVersions.set(session, (transitions = new Map()));
+  transitions.set(before, after);
+}
+
+/** The version a worker completion begun at `version` shows, after the input it answered first. */
+export function provisionalInputVersion(session: object, version: string | null): string | null {
+  const transitions = provisionalInputVersions.get(session);
+  if (!transitions || version === null) return version;
+  const seen = new Set<string>();
+  let mapped = version;
+  while (transitions.has(mapped) && !seen.has(mapped)) {
+    seen.add(mapped);
+    mapped = transitions.get(mapped)!;
+  }
+  return mapped;
+}
+
+/** Forgets the input transitions of `session`'s earlier passes. */
+export function clearProvisionalInputVersions(session: object): void {
+  provisionalInputVersions.delete(session);
+}
+
 const revisionPreviewKeys = new WeakMap<object, string>();
 
 /** A canonical key for a revision preview; '' when nothing is previewed. */

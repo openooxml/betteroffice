@@ -39,9 +39,11 @@ import {
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { viewportMinHeightPx } from '../internals/scrollUtils';
 import {
+  clearProvisionalInputVersions,
   isSupersededLayout,
   markLayoutQueued,
   markSupersededLayout,
+  provisionalInputVersion,
   readSessionVersion,
   revisionPreviewKey,
   revisionPreviewKeyOf,
@@ -644,6 +646,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           return;
         }
         workerPassRef.current = { pass, session, opening: !inWorker && !previewOnly };
+        clearProvisionalInputVersions(session);
         void workerPass
           .then(
             (computation) => {
@@ -673,16 +676,16 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
               void computation.complete?.then(
                 (complete) => {
                   if (pass !== passRef.current || sessionRef.current !== session) return;
-                  if (
-                    complete &&
-                    readSessionVersion(session) ===
-                      (workerOpenEnabledRef.current
-                        ? workerOpenSourceVersion(session, sourceVersion)
-                        : sourceVersion)
-                  ) {
+                  const begun = workerOpenEnabledRef.current
+                    ? workerOpenSourceVersion(session, sourceVersion)
+                    : sourceVersion;
+                  // Input the worker answered first is part of its completion.
+                  const shown = provisionalInputVersion(session, begun);
+                  clearProvisionalInputVersions(session);
+                  if (complete && readSessionVersion(session) === shown) {
                     if (queuedBehindWorkerRef.current) markSupersededLayout(complete.layout);
                     // Nothing the user did changed: keep their viewport.
-                    applyComputation(complete, 'remote');
+                    applyComputation(complete, 'remote', shown === begun ? sourceVersion : shown);
                   } else if (queuedBehindWorkerRef.current) {
                     return;
                   } else if (

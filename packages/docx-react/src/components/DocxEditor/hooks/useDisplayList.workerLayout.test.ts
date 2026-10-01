@@ -21,7 +21,7 @@ import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
-import { markSupersededLayout } from '../internals/layoutProvenance';
+import { markSupersededLayout, provisionalInputVersion } from '../internals/layoutProvenance';
 import { registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import { useRustDisplayList, type ResidentFrameApplyResult } from './useDisplayList';
 import { useLayoutPipeline, type UseLayoutPipelineOptions } from './useLayoutPipeline';
@@ -1660,9 +1660,13 @@ test('a provisional layout paints first and settles only once the full layout fo
 test('a provisional input frame paints without settling the waiting full layout', async () => {
   const { native, paraId, layoutJson, frame, engine } = setup();
   native.set_selection('body', paraId, 0, paraId, 0);
+  let version = 7;
   Object.assign(engine, {
     selection: () => JSON.parse(native.selection()) as YrsSelection,
-    applyLocalUpdate: mock(() => {}),
+    version: () => `v${version}`,
+    applyLocalUpdate: mock(() => {
+      version += 1;
+    }),
   });
   try {
     const { result, rerender, unmount } = renderHook(
@@ -1696,7 +1700,8 @@ test('a provisional input frame paints without settling the waiting full layout'
     const inputFrame = native.apply_input('!', 1);
     await act(async () => {
       worker.reply({
-        id: worker.posted[3].id, ok: true, frame: inputFrame.slice().buffer, updates: [],
+        id: worker.posted[3].id, ok: true, frame: inputFrame.slice().buffer,
+        updates: [new Uint8Array([1]).buffer],
         caret: { frameEpoch: 2, caretRect: null }, selection: engine.selection(),
         layoutRevision: 1, layoutProvisional: true,
       });
@@ -1705,6 +1710,7 @@ test('a provisional input frame paints without settling the waiting full layout'
     await act(async () => {});
     expect(result.current.frame?.frameEpoch).toBe(2);
     expect(settled).toBe(false);
+    expect(provisionalInputVersion(engine, 'v7')).toBe('v8');
 
     const full = laidOut(native, 2);
     worker.reply({
