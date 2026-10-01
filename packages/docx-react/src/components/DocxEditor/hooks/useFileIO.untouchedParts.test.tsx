@@ -69,6 +69,9 @@ type FixtureOptions = {
   comments?: boolean;
   header?: boolean;
   headerAliases?: boolean;
+  footer?: boolean;
+  footerAliases?: boolean;
+  sections?: boolean;
   footnote?: boolean;
   image?: boolean;
   chunk?: boolean;
@@ -95,6 +98,7 @@ function fixture(body: (p: Paragraph) => string, options: FixtureOptions = {}): 
   const override = (name: string, kind: string) =>
     overrides.push(`<Override PartName="/word/${name}" ContentType="${WORD}.${kind}+xml"/>`);
   let references = '';
+  let precedingReferences = '';
   if (options.comments) {
     override('comments.xml', 'comments');
     override('commentsExtended.xml', 'commentsExtended');
@@ -111,17 +115,25 @@ function fixture(body: (p: Paragraph) => string, options: FixtureOptions = {}): 
       `<w15:commentsEx xmlns:w15="${W15}"><w15:commentEx w15:paraId="${COMMENT_PARA_ID}" w15:done="0"/></w15:commentsEx>`
     );
   }
-  if (options.header) {
-    override('header1.xml', 'header');
-    relationships.push(relationship('header', 'header', 'header1.xml'));
-    references = '<w:headerReference w:type="default" r:id="header"/>';
-    if (options.headerAliases) {
-      relationships.push(relationship('headerAlias', 'header', './header1.xml'));
-      references += '<w:headerReference w:type="first" r:id="headerAlias"/><w:titlePg/>';
+  for (const kind of ['header', 'footer'] as const) {
+    if (!options[kind]) continue;
+    override(`${kind}1.xml`, kind);
+    relationships.push(relationship(kind, kind, `${kind}1.xml`));
+    const first = `<w:${kind}Reference w:type="default" r:id="${kind}"/>`;
+    if (options[`${kind}Aliases`]) {
+      relationships.push(relationship(`${kind}Alias`, kind, `./${kind}1.xml`));
+      if (options.sections) precedingReferences += first;
+      else references += first;
+      references += `<w:${kind}Reference w:type="${options.sections ? 'default' : 'first'}" r:id="${kind}Alias"/>`;
+      if (!options.sections) references += '<w:titlePg/>';
+    } else {
+      references += first;
     }
+    const root = kind === 'header' ? 'hdr' : 'ftr';
+    const label = kind === 'header' ? 'Header' : 'Footer';
     add(
-      'word/header1.xml',
-      `<w:hdr ${NS}>\n  <w:p w14:textId="77777777" w14:paraId="20000001"><w:permStart w:edGrp="everyone" w:id="9"/>${run('Header')}<w:permEnd w:id="9"/></w:p>\n</w:hdr>`
+      `word/${kind}1.xml`,
+      `<w:${root} ${NS}>\n  <w:p w14:textId="77777777" w14:paraId="20000001"><w:permStart w:edGrp="everyone" w:id="9"/>${run(label)}<w:permEnd w:id="9"/></w:p>\n</w:${root}>`
     );
   }
   if (options.footnote) {
@@ -150,7 +162,10 @@ function fixture(body: (p: Paragraph) => string, options: FixtureOptions = {}): 
   let ordinal = 0;
   const p: Paragraph = (content, properties) =>
     paragraph((++ordinal).toString(16).padStart(8, '0').toUpperCase(), content, properties);
-  add('word/document.xml', `<w:document ${NS}><w:body>${body(p)}<w:sectPr>${references}${SECTION}</w:sectPr></w:body></w:document>`);
+  const sectionBoundary = precedingReferences
+    ? p(run('Section one'), `<w:pPr><w:sectPr>${precedingReferences}${SECTION}</w:sectPr></w:pPr>`)
+    : '';
+  add('word/document.xml', `<w:document ${NS}><w:body>${sectionBoundary}${body(p)}<w:sectPr>${references}${SECTION}</w:sectPr></w:body></w:document>`);
   return { bytes: rezipPartsToArrayBuffer(parts), parts };
 }
 
@@ -291,34 +306,61 @@ test('no-edit React save preserves rich comments, body, header and footnotes byt
   expectUnchanged(source, saved, ['word/comments.xml', 'word/document.xml', 'word/header1.xml', 'word/footnotes.xml']);
 });
 
-test('React save preserves either header alias and leaves an unedited shared part byte-for-byte', async () => {
-  for (const id of ['header', 'headerAlias']) {
-    const source = fixture((p) => p(run('Body')), { header: true, headerAliases: true });
-    const editor = await mount(source.bytes);
-    expectUnchanged(source, await editor.save(), ['word/header1.xml', 'word/_rels/document.xml.rels']);
-    const paged = editor.ref.current!.getEditorRef()!;
-    const session = paged.getYrsSession()!;
-    const story = `hf:${id}`;
-    await act(async () => {
-      session.insertText({ story, paraId: session.paragraphs(story)[0]!.paraId, offset: 0 }, 'Edited ');
-      paged.syncYrsInputState(true, [story]);
-    });
-    for (let round = 0; round < 2; round += 1) {
-      const saved = await editor.save();
-      const xml = xmlPart(unzipContainer(new Uint8Array(saved)), 'word/header1.xml');
-      const root = new DOMParser().parseFromString(xml, 'application/xml');
-      expect(xmlElements(root, W, 't').map((element) => element.textContent).join('')).toBe('Edited Header');
-      const document = await reopened(saved);
-      for (const part of document.package.headers!.values()) {
-        const paragraph = part.content.find((block) => block.type === 'paragraph');
-        expect(paragraph?.type === 'paragraph' && paragraph.content.some((item) =>
-          item.type === 'run' && item.content.some((content) => content.type === 'text' && content.text.includes('Edited'))
-        )).toBe(true);
+for (const kind of ['header', 'footer'] as const) {
+  for (const sections of [false, true]) {
+    test(`React save preserves either ${kind} alias across ${sections ? 'sections' : 'page types'}`, async () => {
+      for (const id of [kind, `${kind}Alias`]) {
+        const source = fixture((p) => p(run('Body')), { [kind]: true, [`${kind}Aliases`]: true, sections });
+        const partName = `word/${kind}1.xml`;
+        const editor = await mount(source.bytes);
+        expectUnchanged(source, await editor.save(), [partName, 'word/_rels/document.xml.rels']);
+        const paged = editor.ref.current!.getEditorRef()!;
+        const session = paged.getYrsSession()!;
+        const story = `hf:${id}`;
+        await act(async () => {
+          session.insertText({ story, paraId: session.paragraphs(story)[0]!.paraId, offset: 0 }, 'Edited ');
+          paged.syncYrsInputState(true, [story]);
+        });
+        for (let round = 0; round < 2; round += 1) {
+          const saved = await editor.save();
+          const xml = xmlPart(unzipContainer(new Uint8Array(saved)), partName);
+          const root = new DOMParser().parseFromString(xml, 'application/xml');
+          expect(xmlElements(root, W, 't').map((element) => element.textContent).join('')).toBe(
+            `Edited ${kind === 'header' ? 'Header' : 'Footer'}`
+          );
+          const document = await reopened(saved);
+          const parts = kind === 'header' ? document.package.headers : document.package.footers;
+          expect(parts?.size).toBe(2);
+          for (const part of parts!.values()) {
+            const paragraph = part.content.find((block) => block.type === 'paragraph');
+            expect(paragraph?.type === 'paragraph' && paragraph.content.some((item) =>
+              item.type === 'run' && item.content.some((content) => content.type === 'text' && content.text.includes('Edited'))
+            )).toBe(true);
+          }
+          if (round === 0) {
+            const secondEditor = await mount(saved);
+            const second = await secondEditor.save();
+            const savedParts = unzipContainer(new Uint8Array(saved));
+            const secondParts = unzipContainer(new Uint8Array(second));
+            for (const name of [partName, 'word/_rels/document.xml.rels']) {
+              expect(secondParts[name]).toEqual(savedParts[name]);
+            }
+            secondEditor.view.unmount();
+          }
+        }
+        editor.view.unmount();
       }
-    }
-    editor.view.unmount();
+    });
   }
-});
+
+  test(`React body-only save keeps an aliased ${kind} part byte-for-byte`, async () => {
+    const source = fixture((p) => p(run('Body')), { [kind]: true, [`${kind}Aliases`]: true });
+    const editor = await mount(source.bytes);
+    await typeBody(editor, 'Body edit ');
+    expectUnchanged(source, await editor.save(), [`word/${kind}1.xml`, 'word/_rels/document.xml.rels']);
+    editor.view.unmount();
+  });
+}
 
 test('no-edit React save preserves a field nested inside a hyperlink byte-for-byte', async () => {
   const source = fixture((p) =>

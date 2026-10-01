@@ -6,6 +6,7 @@ import { createStyleResolver, type StyleResolver } from '../styles';
 import { hasTrackedControlContent } from '../utils/trackedControlContent';
 import { isRawXml } from '../types/content/rawXml';
 import { pixelsToEmu } from '../utils/units';
+import { headerFooterAliasGroups } from '../docx/headerFooterAliases';
 import {
   applyContentControlValue,
   type ContentControlValue,
@@ -2648,8 +2649,23 @@ function projectStories(
   revisionIds?: RevisionIds
 ): Document {
   const context = new SaveContext(session, base, options.commentIds, revisionIds);
+  const aliasContent = new Map<string, BlockContent[]>();
+  const groups = headerFooterAliasGroups(base.package);
+  if (groups.length > 0 && session.openRevision !== undefined) {
+    const edited = new Set(
+      session.storiesChangedSince(session.openRevision).stories.map((story) =>
+        story.split(':', 2).join(':')
+      )
+    );
+    for (const group of groups) {
+      const winner = [...group].reverse().find(({ rId }) => edited.has(`hf:${rId}`));
+      if (!winner || !context.storyIds.has(`hf:${winner.rId}`)) continue;
+      const content = context.storyToBlocks(`hf:${winner.rId}`);
+      for (const { rId } of group) aliasContent.set(`hf:${rId}`, content);
+    }
+  }
   const shouldProject = (storyId: string): boolean =>
-    options.storyIds === undefined || options.storyIds.has(storyId);
+    options.storyIds === undefined || options.storyIds.has(storyId) || aliasContent.has(storyId);
   const bodyContent = context.storyIds.has('body') && shouldProject('body')
     ? context.storyToBlocks('body')
     : base.package.document.content;
@@ -2664,8 +2680,8 @@ function projectStories(
         const storyId = `hf:${rId}`;
         return [
           rId,
-          context.storyIds.has(storyId) && shouldProject(storyId)
-            ? { ...part, content: context.storyToBlocks(storyId) }
+          aliasContent.has(storyId) || (context.storyIds.has(storyId) && shouldProject(storyId))
+            ? { ...part, content: aliasContent.get(storyId) ?? context.storyToBlocks(storyId) }
             : part,
         ];
       })
@@ -2682,8 +2698,8 @@ function projectStories(
         const storyId = `hf:${rId}`;
         return [
           rId,
-          context.storyIds.has(storyId) && shouldProject(storyId)
-            ? { ...part, content: context.storyToBlocks(storyId) }
+          aliasContent.has(storyId) || (context.storyIds.has(storyId) && shouldProject(storyId))
+            ? { ...part, content: aliasContent.get(storyId) ?? context.storyToBlocks(storyId) }
             : part,
         ];
       })

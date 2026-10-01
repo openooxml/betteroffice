@@ -11,10 +11,7 @@ export function editorSaveKeys(
     return metadata;
   };
   const parts = (map: Document['package']['headers']) =>
-    [...(map ?? [])].map(([id, part]) => {
-      const { sourceAlias, ...metadata } = withoutContent(part);
-      return [id, metadata];
-    });
+    [...(map ?? [])].map(([id, part]) => [id, withoutContent(part)]);
   const notes = (entries: (Footnote | Endnote)[] | undefined) =>
     (entries ?? []).map((note) => {
       const { verbatimXml, sourceOrdinal, ...metadata } = withoutContent(note);

@@ -121,7 +121,6 @@ function applyRustSaveMutations(
   const savedParts = unzipContainer(new Uint8Array(savedBuffer));
 
   for (const part of collectParts(document)) {
-    if (part.shared) continue;
     const originalRelationships = partText(originalParts[part.relsPath]) ?? '';
     const savedRelationships = partText(savedParts[part.relsPath]) ?? '';
     const originalIds = new Set(
@@ -165,7 +164,7 @@ function applyRustSaveMutations(
   if (!headers || !relationships) return;
   for (const [ownerId, header] of headers) {
     const watermark = header.watermark;
-    if (header.sourceAlias || !watermark || watermark.kind !== 'picture') continue;
+    if (!watermark || watermark.kind !== 'picture') continue;
     const owner = relationships.get(ownerId);
     if (!owner?.target) continue;
     const filename = headerFooterFilename(owner.target).replace(/^word\//, '');

@@ -1,10 +1,7 @@
 //! Header/footer story ownership built on the shared block dispatcher.
 
-use std::collections::HashMap;
-
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::block::{BlockContent, StoryParser};
 use crate::chart::ChartPartsMap;
@@ -33,54 +30,6 @@ pub struct HeaderFooter {
     pub custom_root_bindings: Vec<crate::paragraph::RawAttribute>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub watermark: Option<Watermark>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_alias: Option<HeaderFooterAlias>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HeaderFooterAlias {
-    pub part: String,
-    pub fingerprint: String,
-    pub source_sha256: String,
-}
-
-pub(crate) fn story_fingerprint(story: &HeaderFooter) -> Result<String, ParseError> {
-    fn resources(value: &serde_json::Value, output: &mut Vec<(String, serde_json::Value)>) {
-        match value {
-            serde_json::Value::Object(object) => {
-                for (key, value) in object {
-                    if matches!(key.as_str(), "src" | "href" | "hlinkHref" | "dataUrl") {
-                        output.push((key.clone(), value.clone()));
-                    } else {
-                        resources(value, output);
-                    }
-                }
-            }
-            serde_json::Value::Array(array) => {
-                for value in array {
-                    resources(value, output);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut context =
-        crate::serializer::SerializerContext::new(&crate::serializer::SerializerDeterminism {
-            seed: "0".repeat(64),
-            now: "2000-01-01T00:00:00.000Z".to_owned(),
-        })?;
-    let xml = crate::serializer::serialize_header_footer_part(story, &mut context)?;
-    let value =
-        serde_json::to_value(story).map_err(|error| ParseError::Canonical(error.to_string()))?;
-    let mut targets = Vec::new();
-    resources(&value, &mut targets);
-    let targets =
-        serde_json::to_vec(&targets).map_err(|error| ParseError::Canonical(error.to_string()))?;
-    let mut digest = Sha256::new();
-    digest.update(xml.as_bytes());
-    digest.update(targets);
-    Ok(format!("{:x}", digest.finalize()))
 }
 
 /// Parse one `w:hdr` or `w:ftr` root through the same dispatcher used by the
@@ -109,7 +58,6 @@ pub fn parse_header_footer(
         content,
         custom_root_bindings: crate::document::custom_root_bindings(root),
         watermark,
-        source_alias: None,
     })
 }
 
@@ -144,7 +92,6 @@ pub fn parse_related_header_footers(
 > {
     let mut headers = IndexMap::new();
     let mut footers = IndexMap::new();
-    let mut aliases: HashMap<String, Vec<(String, bool, String)>> = HashMap::new();
     let document_path = office_document_path(parts, budget)?;
     for (relationship_id, relationship) in document_relationships {
         let is_header = relationship.relationship_type == relationship_types::HEADER;
@@ -162,11 +109,6 @@ pub fn parse_related_header_footers(
             // available anywhere in this crate.
             continue;
         };
-        aliases.entry(expected_path).or_default().push((
-            relationship_id.clone(),
-            is_header,
-            format!("{:x}", Sha256::digest(xml)),
-        ));
         let relationships_path = relationship_part_path(part_path);
         let part_relationships = find_part_case_insensitive(parts, &relationships_path)
             .map(|(path, xml)| parse_relationships(xml, path, budget))
@@ -196,28 +138,6 @@ pub fn parse_related_header_footers(
             headers.insert(relationship_id.clone(), story);
         } else {
             footers.insert(relationship_id.clone(), story);
-        }
-    }
-    for (part, entries) in aliases {
-        if entries.len() < 2 {
-            continue;
-        }
-        for (id, is_header, source_sha256) in entries {
-            let stories = if is_header {
-                &mut headers
-            } else {
-                &mut footers
-            };
-            if let Some(story) = stories.get_mut(&id) {
-                let Ok(fingerprint) = story_fingerprint(story) else {
-                    continue;
-                };
-                story.source_alias = Some(HeaderFooterAlias {
-                    part: part.clone(),
-                    fingerprint,
-                    source_sha256,
-                });
-            }
         }
     }
     Ok((headers, footers))
@@ -329,7 +249,6 @@ mod tests {
                     content: Vec::new(),
                     watermark: None,
                     custom_root_bindings: Vec::new(),
-                    source_alias: None,
                 },
             );
         }

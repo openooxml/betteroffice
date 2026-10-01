@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseDocx } from '../docx';
+import { headerFooterAliasGroups } from '../docx/headerFooterAliases';
 import { repackDocx } from '../docx/rezip';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { unzipContainer } from '../docx/wasm';
@@ -25,7 +26,11 @@ beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(
   resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')
 ))));
 
-function fixture(kind: 'header' | 'footer', sections = false): ArrayBuffer {
+function fixture(
+  kind: 'header' | 'footer',
+  sections = false,
+  order = ['rId8', 'rId9']
+): ArrayBuffer {
   const reference = (id: string, type: string) => `<w:${kind}Reference w:type="${type}" r:id="${id}"/>`;
   const first = reference('rId8', 'default');
   const second = reference('rId9', sections ? 'default' : 'first');
@@ -36,7 +41,7 @@ function fixture(kind: 'header' | 'footer', sections = false): ArrayBuffer {
   const parts = {
     '[Content_Types].xml': `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${WORD}.document.main+xml"/><Override PartName="/word/${kind}1.xml" ContentType="${WORD}.${kind}+xml"/></Types>`,
     '_rels/.rels': `<Relationships xmlns="${RELS}"><Relationship Id="office" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`,
-    'word/_rels/document.xml.rels': `<Relationships xmlns="${RELS}"><Relationship Id="rId8" Type="${R}/${kind}" Target="${kind}1.xml"/><Relationship Id="rId9" Type="${R}/${kind}" Target="./${kind}1.xml"/></Relationships>`,
+    'word/_rels/document.xml.rels': `<Relationships xmlns="${RELS}">${order.map((id) => `<Relationship Id="${id}" Type="${R}/${kind}" Target="${id === 'rId8' ? '' : './'}${kind}1.xml"/>`).join('')}</Relationships>`,
     'word/document.xml': `<w:document xmlns:w="${W}" xmlns:r="${R}"><w:body>${body}</w:body></w:document>`,
     [`word/${kind}1.xml`]: `<w:${root} xmlns:w="${W}">\n  <w:p><w:r><w:t>Synthetic story</w:t></w:r></w:p>\n</w:${root}>`,
   };
@@ -77,6 +82,48 @@ function insert(session: YrsSession, id: string, value: string): void {
   session.insertText({ story, paraId: session.paragraphs(story)[0]!.paraId, offset: 0 }, value);
 }
 
+const SAVE_PATHS = ['saveYrsDocx', 'writeSessionSave', 'writeSessionSave full'] as const;
+type SavePath = (typeof SAVE_PATHS)[number];
+let nextClientId = 98001;
+
+async function open(source: ArrayBuffer): Promise<YrsSession> {
+  const session = await createYrsSession({ clientId: nextClientId++ });
+  session.openDocx(new Uint8Array(source), true);
+  return session;
+}
+
+async function save(
+  session: YrsSession,
+  path: SavePath,
+  storyIds?: ReadonlySet<string>
+): Promise<ArrayBuffer> {
+  const options = { updateModifiedDate: false };
+  if (path === 'saveYrsDocx') {
+    return Uint8Array.from((await saveYrsDocx(session, options)).bytes).buffer;
+  }
+  const base = session.materializeDocx()!;
+  const capture = captureSessionSave(session);
+  const document = yrsToDocument(session, base, { storyIds });
+  const result = await writeSessionSave(
+    session, document, capture, base.originalBuffer!, options,
+    () => path !== 'writeSessionSave full'
+  );
+  return Uint8Array.from(result.bytes).buffer;
+}
+
+async function assertRoundTrip(saved: ArrayBuffer, kind: 'header' | 'footer', expected: string): Promise<void> {
+  await assertSaved(saved, kind, expected);
+  const session = await open(saved);
+  try {
+    for (const id of ['rId8', 'rId9']) {
+      expect(session.paragraphs(`hf:${id}`)[0]!.text).toBe(expected);
+    }
+    expect(new Uint8Array(await save(session, 'saveYrsDocx'))).toEqual(new Uint8Array(saved));
+  } finally {
+    session.destroy();
+  }
+}
+
 describe('aliased header and footer saves', () => {
   it('repackDocx saves a hyperlink target edit through a shared header', async () => {
     const parts = unzipContainer(new Uint8Array(fixture('header')));
@@ -94,43 +141,30 @@ describe('aliased header and footer saves', () => {
     }
   });
 
-  it('repackDocx writes the last changed entry and leaves shared image bindings untouched', async () => {
-    for (const ids of [['rId8', 'rId9'], ['rId9', 'rId8']]) {
-      const document = await parseDocx(fixture('header'), { preloadFonts: false });
-      const original = document.package.headers!.get('rId8')!;
-      const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
-      const story = (value: string, count: number): HeaderFooter => {
-        const part = structuredClone(original);
-        const run = (part.content[0] as Paragraph).content[0] as Run;
-        run.content = [{ type: 'text', text: value }, ...Array.from({ length: count }, () => ({
-          type: 'drawing' as const,
-          image: { type: 'image' as const, rId: '', src: png, size: { width: 9525, height: 9525 }, wrap: { type: 'inline' as const } },
-        }))];
-        return part;
-      };
-      for (const id of ids) {
-        document.package.headers!.set(id, story(id === 'rId8' ? 'First entry' : 'Last entry', id === 'rId8' ? 2 : 1));
-      }
-      const saved = await repackDocx(document);
-      const parts = unzipContainer(new Uint8Array(saved));
-      expect(Object.keys(parts).filter((path) => path.startsWith('word/media/'))).toHaveLength(1);
-      const xml = new TextDecoder().decode(parts['word/header1.xml']);
-      expect(xml).toContain('Last entry');
-      expect(xml).not.toContain('First entry');
-      for (const part of document.package.headers!.values()) {
-        const images = (part.content[0] as Paragraph).content
-          .flatMap((item) => item.type === 'run' ? item.content : [])
-          .filter((item) => item.type === 'drawing');
-        expect(images.every((item) => item.type === 'drawing' && item.image.rId === '')).toBe(true);
-      }
-      const reopened = await parseDocx(saved, { preloadFonts: false });
-      for (const part of reopened.package.headers!.values()) {
-        const drawing = (part.content[0] as Paragraph).content
-          .flatMap((item) => item.type === 'run' ? item.content : [])
-          .find((item) => item.type === 'drawing');
-        expect(drawing?.type === 'drawing' && drawing.image.src).toBe(png);
-      }
+  it('groups exact resolved paths across headers and footers and excludes inert relationships', async () => {
+    const { package: pkg } = await parseDocx(fixture('header'), { preloadFonts: false });
+    const part = pkg.headers!.get('rId8')!;
+    pkg.footers = new Map([['footerAlias', part]]);
+    pkg.relationships.set('footerAlias', {
+      id: 'footerAlias', type: `${R}/footer`, target: '/word/nested/../header1.xml',
+    });
+    expect(headerFooterAliasGroups(pkg)).toEqual([[
+      { kind: 'headers', rId: 'rId8' },
+      { kind: 'headers', rId: 'rId9' },
+      { kind: 'footers', rId: 'footerAlias' },
+    ]]);
+    const alias = pkg.relationships.get('rId9')!;
+    for (const target of ['Header1.xml', '', '../../header1.xml']) {
+      alias.target = target;
+      expect(headerFooterAliasGroups(pkg)[0]).toHaveLength(2);
     }
+    alias.target = 'header1.xml';
+    alias.targetMode = 'External';
+    expect(headerFooterAliasGroups(pkg)[0]).toHaveLength(2);
+    pkg.relationships.delete('footerAlias');
+    expect(headerFooterAliasGroups(pkg)).toEqual([]);
+    pkg.relationships.set('missing', { id: 'missing', type: `${R}/header`, target: 'header1.xml' });
+    expect(headerFooterAliasGroups(pkg)).toEqual([]);
   });
 
   for (const kind of ['header', 'footer'] as const) {
@@ -140,39 +174,27 @@ describe('aliased header and footer saves', () => {
           const source = fixture(kind, sections);
           const document = await parseDocx(source, { preloadFonts: false });
           const parts = stories(document, kind);
+          expect(parts.get('rId8')).toBe(parts.get('rId9'));
           const paragraph = parts.get(id)!.content[0] as Paragraph;
           const item = (paragraph.content[0] as Run).content[0]!;
           if (item.type !== 'text') throw new Error('text');
           item.text = 'Edited synthetic story';
-          await assertSaved(await repackDocx(document), kind, 'Edited synthetic story');
+          await assertRoundTrip(
+            await repackDocx(document, { updateModifiedDate: false }), kind, 'Edited synthetic story'
+          );
           expect(text(parts.get(id === 'rId8' ? 'rId9' : 'rId8')!)).toBe('Edited synthetic story');
-          const clean = await parseDocx(source, { preloadFonts: false });
-          assertUntouched(source, await repackDocx(clean), kind);
         }
       });
 
-      for (const path of ['saveYrsDocx', 'writeSessionSave', 'writeSessionSave full'] as const) {
+      for (const path of SAVE_PATHS) {
         it(`${path} saves either ${kind} alias across ${sections ? 'sections' : 'page types'}`, async () => {
           for (const id of ['rId8', 'rId9']) {
             const source = fixture(kind, sections);
-            const session = await createYrsSession({ clientId: 98001 });
+            const session = await open(source);
             try {
-              session.openDocx(new Uint8Array(source), true);
-              const save = async (target = session): Promise<ArrayBuffer> => {
-                if (path === 'saveYrsDocx') return (await saveYrsDocx(target)).bytes.slice().buffer as ArrayBuffer;
-                const base = target.materializeDocx()!;
-                return (await writeSessionSave(target, yrsToDocument(target, base), captureSessionSave(target), source, {}, () => path !== 'writeSessionSave full')).bytes.slice().buffer as ArrayBuffer;
-              };
               insert(session, id, 'Edited ');
-              await assertSaved(await save(), kind, 'Edited Synthetic story');
-              await assertSaved(await save(), kind, 'Edited Synthetic story');
-              const clean = await createYrsSession({ clientId: 98003 });
-              try {
-                clean.openDocx(new Uint8Array(source), true);
-                assertUntouched(source, await save(clean), kind);
-              } finally {
-                clean.destroy();
-              }
+              await assertRoundTrip(await save(session, path), kind, 'Edited Synthetic story');
+              await assertSaved(await save(session, path), kind, 'Edited Synthetic story');
             } finally {
               session.destroy();
             }
@@ -181,28 +203,84 @@ describe('aliased header and footer saves', () => {
       }
     }
 
-    it(`saveYrsDocx deterministically saves the last ${kind} relationship in either edit order`, async () => {
-      for (const ids of [['rId8', 'rId9'], ['rId9', 'rId8']]) {
+    for (const path of SAVE_PATHS) {
+      it(`${path} saves the last edited ${kind} relationship in both alias orders`, async () => {
+        for (const order of [['rId8', 'rId9'], ['rId9', 'rId8']]) {
+          for (const edits of [order, [...order].reverse()]) {
+            const session = await open(fixture(kind, false, order));
+            try {
+              for (const id of edits) insert(session, id, `${id} `);
+              await assertRoundTrip(
+                await save(session, path, new Set([`hf:${order[0]}`])),
+                kind, `${order[1]} Synthetic story`
+              );
+            } finally {
+              session.destroy();
+            }
+          }
+        }
+      });
+    }
+
+    it(`a remote replica saves an edit received through either ${kind} alias`, async () => {
+      for (const id of ['rId8', 'rId9']) {
         const source = fixture(kind);
-        const session = await createYrsSession({ clientId: 98002 });
-        const peer = await createYrsSession({ clientId: 98004 });
+        const session = await open(source);
+        const peer = await createYrsSession({ clientId: nextClientId++ });
         try {
-          session.openDocx(new Uint8Array(source), true);
           peer.openDocx(new Uint8Array(source), false);
           peer.loadState(session.encodeState());
-          for (const id of ids) {
-            insert(session, id!, id === 'rId8' ? 'First ' : 'Last ');
-            peer.applyUpdate(session.encodeStateAsUpdate(peer.encodeStateVector()));
-          }
-          for (const replica of [session, peer]) {
-            const saved = (await saveYrsDocx(replica)).bytes.slice().buffer as ArrayBuffer;
-            await assertSaved(saved, kind, 'Last Synthetic story');
-            expect(new TextDecoder().decode(unzipContainer(new Uint8Array(saved))[`word/${kind}1.xml`])).not.toContain('First');
+          insert(session, id, 'Remote ');
+          peer.applyUpdate(session.encodeStateAsUpdate(peer.encodeStateVector()));
+          for (const path of SAVE_PATHS) {
+            await assertRoundTrip(
+              await save(peer, path, new Set(['body'])), kind, 'Remote Synthetic story'
+            );
           }
         } finally {
           session.destroy();
           peer.destroy();
         }
+      }
+    });
+
+    it(`keeps the existing ${kind} projection when the edited-story signal is unavailable`, async () => {
+      const session = await open(fixture(kind));
+      try {
+        insert(session, 'rId8', 'Edited ');
+        const projected = yrsToDocument(
+          { ...session, openRevision: undefined }, session.materializeDocx()!,
+          { storyIds: new Set(['hf:rId8']) }
+        );
+        expect(text(stories(projected, kind).get('rId8')!)).toBe('Edited Synthetic story');
+        expect(text(stories(projected, kind).get('rId9')!)).toBe('Synthetic story');
+      } finally {
+        session.destroy();
+      }
+    });
+
+    for (const path of ['saveYrsDocx', 'writeSessionSave'] as const) {
+      it(`${path} keeps an aliased ${kind} part byte-identical after a body-only edit`, async () => {
+        const source = fixture(kind);
+        const session = await open(source);
+        try {
+          session.insertText({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 0 }, 'Body edit ');
+          const saved = await save(session, path, new Set(['body']));
+          assertUntouched(source, saved, kind);
+          expect(new TextDecoder().decode(unzipContainer(new Uint8Array(saved))['word/document.xml'])).toContain('Body edit ');
+        } finally {
+          session.destroy();
+        }
+      });
+    }
+
+    it(`no-edit saveYrsDocx keeps the shared ${kind} part and its relationships byte-identical`, async () => {
+      const source = fixture(kind);
+      const session = await open(source);
+      try {
+        assertUntouched(source, await save(session, 'saveYrsDocx'), kind);
+      } finally {
+        session.destroy();
       }
     });
   }

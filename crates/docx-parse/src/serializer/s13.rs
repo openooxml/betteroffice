@@ -209,7 +209,6 @@ pub fn write_docx_s13_parts(
     let paragraph_ids = request.paragraph_ids.take().unwrap_or_default();
     paragraph_ids.validate()?;
     apply_paragraph_id_assignments(&mut request, &paragraph_ids, &relationships, &package)?;
-    select_header_footer_aliases(&mut request, &relationships, &package)?;
     let patched: HashMap<&str, &[(u32, String)]> = paragraph_ids
         .patched_parts
         .iter()
@@ -747,80 +746,6 @@ impl StoryParts<'_> {
             })
             .unwrap_or(serialized))
     }
-}
-
-fn select_header_footer_aliases(
-    request: &mut S13SaveRequest,
-    relationships: &IndexMap<String, Relationship>,
-    package: &Package,
-) -> Result<(), ParseError> {
-    let mut parts: IndexMap<String, Vec<(bool, usize)>> = IndexMap::new();
-    for (entries, kind, is_header) in [
-        (&request.header_entries, relationship_types::HEADER, true),
-        (&request.footer_entries, relationship_types::FOOTER, false),
-    ] {
-        for (index, (id, _)) in entries.iter().enumerate() {
-            let Some(relationship) = relationships.get(id) else {
-                continue;
-            };
-            if relationship.relationship_type != kind
-                || relationship.target.is_empty()
-                || relationship.target_mode == Some(TargetMode::External)
-            {
-                continue;
-            }
-            let path = resolve_relative_path(&package.document_path, &relationship.target)?;
-            parts.entry(path).or_default().push((is_header, index));
-        }
-    }
-    let mut omitted = HashSet::new();
-    for (path, indices) in parts {
-        if indices.len() < 2 {
-            continue;
-        }
-        let source_sha256 = package
-            .original_bytes(&path)
-            .map(|bytes| format!("{:x}", Sha256::digest(bytes)));
-        let story = |(is_header, index): (bool, usize)| {
-            if is_header {
-                &request.header_entries[index].1
-            } else {
-                &request.footer_entries[index].1
-            }
-        };
-        let source_changed = indices.iter().any(|&entry| {
-            story(entry).source_alias.as_ref().is_some_and(|alias| {
-                alias.part == path && source_sha256.as_ref() != Some(&alias.source_sha256)
-            })
-        });
-        let mut winner = None;
-        for &entry in &indices {
-            let story = story(entry);
-            let unchanged = !source_changed
-                && story.source_alias.as_ref().is_some_and(|alias| {
-                    alias.part == path
-                        && source_sha256.as_ref() == Some(&alias.source_sha256)
-                        && crate::header_footer::story_fingerprint(story)
-                            .is_ok_and(|fingerprint| fingerprint == alias.fingerprint)
-                });
-            if !unchanged {
-                winner = Some(entry);
-            }
-        }
-        omitted.extend(indices.into_iter().filter(|entry| Some(*entry) != winner));
-    }
-    for (entries, is_header) in [
-        (&mut request.header_entries, true),
-        (&mut request.footer_entries, false),
-    ] {
-        let mut index = 0;
-        entries.retain(|_| {
-            let keep = !omitted.contains(&(is_header, index));
-            index += 1;
-            keep
-        });
-    }
-    Ok(())
 }
 
 fn serialize_header_footer_parts(
@@ -3070,54 +2995,6 @@ mod tests {
             .expect("unzip")
             .into_iter()
             .collect()
-    }
-
-    #[test]
-    fn alias_fingerprint_errors_count_as_changes() {
-        let path = "word/header1.xml";
-        let original = vec![(path.to_owned(), b"synthetic source bytes".to_vec())];
-        let package = Package::new(&original, "word/document.xml".to_owned());
-        let alias = json!({
-            "part": path,
-            "fingerprint": "",
-            "sourceSha256": format!("{:x}", Sha256::digest(&original[0].1)),
-        });
-        let mut story: HeaderFooter = serde_json::from_value(json!({
-            "type": "header",
-            "hdrFtrType": "default",
-            "content": [text_paragraph("Synthetic story", None)],
-            "sourceAlias": alias,
-        }))
-        .unwrap();
-        let fingerprint = crate::header_footer::story_fingerprint(&story).unwrap();
-        story.source_alias.as_mut().unwrap().fingerprint = fingerprint;
-        let mut changed = serde_json::to_value(&story).unwrap();
-        changed["content"][0]["content"] = json!([{
-            "type": "mathEquation",
-            "display": "inline",
-            "ommlXml": "<q:oMath/>",
-        }]);
-        let changed: HeaderFooter = serde_json::from_value(changed).unwrap();
-        assert!(crate::header_footer::story_fingerprint(&changed).is_err());
-        for changed_index in [0, 1] {
-            let mut entries = vec![("first", story.clone()), ("last", story.clone())];
-            entries[changed_index].1 = changed.clone();
-            let mut request: S13SaveRequest = serde_json::from_value(json!({
-                "determinism": determinism(),
-                "document": {"content": []},
-                "headerEntries": entries,
-                "relationshipEntries": entries.iter().map(|(id, _)| json!([id, {
-                    "id": id,
-                    "type": relationship_types::HEADER,
-                    "target": "header1.xml",
-                }])).collect::<Vec<_>>(),
-            }))
-            .unwrap();
-            let relationships = request.relationship_entries.iter().cloned().collect();
-            select_header_footer_aliases(&mut request, &relationships, &package).unwrap();
-            assert_eq!(request.header_entries.len(), 1);
-            assert_eq!(request.header_entries[0].0, entries[changed_index].0);
-        }
     }
 
     #[test]

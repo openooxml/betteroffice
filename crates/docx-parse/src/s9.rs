@@ -649,23 +649,6 @@ fn parse_s9_package_impl(
     if let Some(table) = media_table {
         resolve_host_media(&mut document.package, table)?;
     }
-    for entries in [
-        &mut document.package.header_entries,
-        &mut document.package.footer_entries,
-    ] {
-        for (_, story) in entries.iter_mut().flatten() {
-            if story.source_alias.is_some() {
-                match crate::header_footer::story_fingerprint(story) {
-                    Ok(fingerprint) => {
-                        if let Some(alias) = story.source_alias.as_mut() {
-                            alias.fingerprint = fingerprint;
-                        }
-                    }
-                    Err(_) => story.source_alias = None,
-                }
-            }
-        }
-    }
 
     let (canonical_base64, canonical_sha256) = if options.include_canonical {
         let canonical = canonical_document(&document, data)?;

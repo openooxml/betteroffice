@@ -892,6 +892,8 @@ export interface YrsWorkerDocumentMirror {
 export interface YrsSession extends CollaborationReplica {
   /** The yrs client id this replica writes with. */
   readonly clientId: number;
+  /** Story revision after opening and seeding. @internal */
+  openRevision?: number;
 
   // -- resident layout engine (same wasm instance as EditingDoc) --
 
@@ -1742,6 +1744,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         options.generation,
         preparedDigests.get(bytes)
       );
+      facade.openRevision = seedStories || session.story_ids().length > 0
+        ? facade.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision
+        : undefined;
       proposals.reset();
       return opened;
     });
@@ -2002,6 +2007,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       markDirty('all');
       mutate(() => {
         session.load(update);
+        if (docxSource && facade.openRevision === undefined) {
+          facade.openRevision = facade.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+        }
         proposals.reset();
       });
     },
@@ -2010,6 +2018,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     beginOpening: (generation) => {
       mutate(() => {
         session.begin_opening(generation);
+        facade.openRevision = facade.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
         proposals.reset();
       });
     },

@@ -46,6 +46,7 @@ export type ResidentEngineSession = Pick<
   | 'setPartialDocument'
   | 'measureParagraphJson'
   | 'onUpdate'
+  | 'openRevision'
   | 'outlineGlyphJson'
   | 'registerFont'
   | 'registerSubstituteFont'
@@ -96,6 +97,7 @@ export async function createResidentEngineSession(
   let observing = false;
   let destroyed = false;
   let undoTracked = false;
+  let openRevision: number | undefined;
   const geometryStories = new Map<string, {
     revision: number;
     segments: YrsStorySegment[];
@@ -280,6 +282,9 @@ export async function createResidentEngineSession(
   };
 
   return {
+    get openRevision() {
+      return openRevision;
+    },
     proposalEngine,
     geometryReader,
     paragraphIdentities: () =>
@@ -288,8 +293,12 @@ export async function createResidentEngineSession(
       JSON.parse(session.stories_changed_since(since)) as { revision: number; stories: string[] },
     openDocx: (bytes, digest, generation) => {
       geometryStories.clear();
+      const json = session.open_docx(bytes, true, generation, digest);
+      openRevision = (JSON.parse(session.stories_changed_since(Number.MAX_SAFE_INTEGER)) as {
+        revision: number;
+      }).revision;
       return resolveHostJsonCommentMedia(
-        session.open_docx(bytes, true, generation, digest),
+        json,
         (token) => (token.startsWith('media:') ? (session.media_data_url(token) ?? null) : null)
       );
     },

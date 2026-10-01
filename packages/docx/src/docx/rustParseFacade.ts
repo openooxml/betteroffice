@@ -12,6 +12,7 @@ import type {
 } from '../types/document';
 import { decodeTiffImage, parseDocxS9Wire, parseRelationshipsXmlWire } from './parseWasm';
 import { maybeTranscodeTiffMedia } from './tiffMedia';
+import { headerFooterAliasGroups } from './headerFooterAliases';
 
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
@@ -187,21 +188,17 @@ function decodeS9Package(value: unknown): DocxPackage {
   ] as const) {
     const entries = wirePackage[wireName];
     if (entries !== undefined) {
-      const stories = decodeMapEntries(
+      pkg[publicName] = decodeMapEntries(
         entries,
         `wire.document.package.${wireName}`,
         (entry, path) => objectAt(entry, path) as unknown as HeaderFooter
       );
-      const parts = new Map<string, HeaderFooter>();
-      for (const [id, story] of stories) {
-        const part = story.sourceAlias?.part;
-        if (!part) continue;
-        const shared = parts.get(part);
-        if (shared) stories.set(id, shared);
-        else parts.set(part, story);
-      }
-      pkg[publicName] = stories;
     }
+  }
+  for (const group of headerFooterAliasGroups(pkg)) {
+    const first = group[0]!;
+    const shared = pkg[first.kind]!.get(first.rId)!;
+    for (const { kind, rId } of group) pkg[kind]!.set(rId, shared);
   }
   if (wirePackage.footnotes !== undefined) {
     pkg.footnotes = decodeObjectArray<Footnote>(
