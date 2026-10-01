@@ -29,6 +29,7 @@ import {
   beginWorkerProposalHandover,
   registerWorkerProposalAuthority,
   registeredWorkerProposalAuthority,
+  workerProposalFailure,
 } from '../internals/workerProposalAuthority';
 
 type YrsFacadeModule = typeof import('@betteroffice/docx/yrs');
@@ -897,6 +898,9 @@ export function useYrsCoreSession(
       if (retiringRef.current !== null && (failOpeningRef.current?.(error, session) ?? false)) {
         return true;
       }
+      const owner = session ?? sessionRef.current;
+      if (owner === sessionRef.current && owner &&
+        workerProposalFailure(owner as YrsSession) === error) return false;
       if (session === undefined || session === sessionRef.current) startReplicaRef.current?.();
       return false;
     },

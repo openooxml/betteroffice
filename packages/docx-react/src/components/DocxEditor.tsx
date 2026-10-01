@@ -1005,6 +1005,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // load, which reports it. Each render error is handled once: one the
   // preview left set is not the full session's.
   const failOpeningRef = useRef<(error: Error, session?: unknown) => boolean>(() => false);
+  const notifiedErrorsRef = useRef(new WeakSet<Error>());
+  const notifyError = useCallback((error: Error) => {
+    if (notifiedErrorsRef.current.has(error)) return;
+    notifiedErrorsRef.current.add(error);
+    onError?.(error);
+  }, [onError]);
   const handledRenderErrorRef = useRef<Error | null>(null);
   const renderErrorEngine = canvasRenderer.errorEngine ?? undefined;
   const coreSessionRef = useRef<unknown>(null);
@@ -1022,8 +1028,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     if (!error || error === handledRenderErrorRef.current) return;
     handledRenderErrorRef.current = error;
     if (untakenWorkerSession(renderErrorEngine)) return;
-    if (!failOpeningRef.current(error, renderErrorEngine)) onError?.(error);
-  }, [canvasRenderer.error, renderErrorEngine, onError, untakenWorkerSession]);
+    if (!failOpeningRef.current(error, renderErrorEngine)) notifyError(error);
+  }, [canvasRenderer.error, renderErrorEngine, notifyError, untakenWorkerSession]);
   useMemoryPressure(onMemoryPressure, memoryBudget, canvasRenderer.workerMemory, [
     canvasRenderer.frame,
     canvasRenderer.error,
@@ -1200,7 +1206,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     ),
     setComments,
     setShowCommentsSidebar,
-    onError,
+    onError: notifyError,
     resetForNewDocument,
     commentsLoadedRef,
     commentIdAllocator: commentIdAllocatorRef.current,

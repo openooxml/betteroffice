@@ -3,9 +3,10 @@ import { afterAll, afterEach, expect, spyOn, test } from 'bun:test';
 import type { LayoutComputation } from '@betteroffice/docx/editor';
 import { LayoutSelectionGate, type ResidentMeasurementConfig } from '@betteroffice/docx/layout';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
-import type { YrsRenderEnv, YrsSession } from '@betteroffice/docx/yrs';
+import { proposalSetIdentity, type ResidentProposalReply, type YrsRenderEnv, type YrsSession } from '@betteroffice/docx/yrs';
 import { isLayoutQueued, isSupersededLayout, sourceVersionOf } from '../internals/layoutProvenance';
 import { deferWorkerOpenReplica } from '../internals/workerOpenReplica';
+import { registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { WorkerLayoutComputation } from './useDisplayList';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -134,6 +135,113 @@ async function opened({ experimentalWorkerOpen = false, pendingReplica = false }
     doc, session, worker, errors, hook, frame, answer, shown, replica, ensureReplica,
   };
 }
+
+async function holdProposals(session: YrsSession) {
+  const snapshot = { version: session.version(), previewVersion: 0, proposals: [] };
+  Object.assign(session, {
+    getProposals: () => snapshot,
+    mirrorWorkerDocument: () => {},
+  });
+  const reply: ResidentProposalReply = {
+    mirror: { version: snapshot.version, proposals: { previewVersion: 0, entries: [] } },
+    result: { ok: true, snapshot },
+    changedStories: [],
+    geometry: {
+      version: snapshot.version, previewVersion: 0,
+      proposals: proposalSetIdentity(snapshot), targets: {}, hidden: [],
+    },
+    updates: [],
+    stateVector: new Uint8Array(),
+  };
+  const authority = registerWorkerProposalAuthority(session, {
+    proposal: async () => reply,
+    documentRead: async () => { throw new Error('unexpected document read'); },
+    handOver: async () => { throw new Error('unexpected handover'); },
+  }, {
+    relayout: () => {}, current: () => true, laidOut: async () => {},
+    adopted: () => {}, handedOver: () => {}, contentChanged: () => {},
+  });
+  await authority.initialize();
+  await authority.setStates({
+    expectVersion: snapshot.version, expectPreviewVersion: 0, changes: [],
+  }, async () => {
+    throw new Error('unexpected main-thread toggle');
+  });
+  expect(authority.holdsWorkerState()).toBe(true);
+}
+
+test('a superseded null completion requests the worker while it holds proposals', async () => {
+  const h = await opened({ experimentalWorkerOpen: true, pendingReplica: true });
+  await holdProposals(h.session);
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  let finish!: (computation: LayoutComputation | null) => void;
+  const complete = new Promise<LayoutComputation | null>((resolve) => { finish = resolve; });
+  const firstPages = { pages: [] } as unknown as Layout;
+  await h.answer(1, { layout: firstPages, notesConverged: true, complete });
+  await act(async () => finish(null));
+  expect(h.hook.result.current.layout).toBe(firstPages);
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(h.ensureReplica).not.toHaveBeenCalled();
+  expect(isLayoutQueued(h.session)).toBe(true);
+  await h.frame();
+  expect(h.worker).toHaveLength(3);
+  await h.answer(2);
+  expect(isLayoutQueued(h.session)).toBe(false);
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(h.ensureReplica).not.toHaveBeenCalled();
+  expect(h.errors).toEqual([]);
+});
+
+test.each([false, true])('a null completion without held proposals keeps the host path with worker-open=%s', async (experimentalWorkerOpen) => {
+  const h = await opened({ experimentalWorkerOpen, pendingReplica: true });
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  let finish!: (computation: LayoutComputation | null) => void;
+  const complete = new Promise<LayoutComputation | null>((resolve) => { finish = resolve; });
+  const firstPages = { pages: [] } as unknown as Layout;
+  await h.answer(1, { layout: firstPages, notesConverged: true, complete });
+  await act(async () => finish(null));
+  expect(h.hook.result.current.layout).not.toBe(firstPages);
+  expect(h.doc.laidOutHere).toEqual([1]);
+  expect(h.ensureReplica).toHaveBeenCalledTimes(experimentalWorkerOpen ? 1 : 0);
+  expect(isLayoutQueued(h.session)).toBe(false);
+  await h.frame();
+  expect(h.worker).toHaveLength(2);
+  expect(h.errors).toEqual([]);
+});
+
+test('worker proposals override deferred host passes, local changes and unavailable passes', async () => {
+  const h = await opened({ experimentalWorkerOpen: true, pendingReplica: true });
+  await holdProposals(h.session);
+  h.doc.fontsReady = false;
+  act(() => h.hook.result.current.runLayoutPipeline({ onHost: true }));
+  h.doc.version = 2;
+  h.doc.fontsReady = true;
+  h.doc.workerAvailable = false;
+  act(() => {
+    h.hook.result.current.scheduleLayout('remote');
+    h.hook.result.current.scheduleLayout('local');
+  });
+  await h.frame();
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(h.ensureReplica).not.toHaveBeenCalled();
+  expect(isLayoutQueued(h.session)).toBe(true);
+  h.doc.workerAvailable = true;
+  await h.frame();
+  expect(h.worker.map((pass) => pass.at)).toEqual([1, 2]);
+  act(() => h.hook.result.current.runLayoutPipeline({ onHost: true }));
+  expect(h.worker).toHaveLength(2);
+  await h.answer(1);
+  await h.frame();
+  expect(h.worker.map((pass) => pass.at)).toEqual([1, 2, 2]);
+  await h.answer(2);
+  expect(h.shown()).toBe('2');
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(h.ensureReplica).not.toHaveBeenCalled();
+  expect(h.replica?.pending).toBe(true);
+  expect(h.errors).toEqual([]);
+});
 
 test('host batches and remote updates lay out in the worker, local edits here', async () => {
   const { doc, worker, errors, hook, frame, answer, shown } = await opened();

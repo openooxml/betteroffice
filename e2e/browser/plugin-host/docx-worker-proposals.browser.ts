@@ -165,14 +165,14 @@ async function status(page: Page) {
   });
 }
 
-async function assertReplica(page: Page, readOnly: boolean) {
+async function assertReplica(page: Page, readOnly: boolean, sidebarOpen = false) {
   const current = await status(page);
   expect(current.openedInWorker).toBe(true);
   expect(current.captures).toBe(1);
   expect(current.errors).toEqual([]);
   expect(current.pending).toBe(readOnly);
   expect(current.encodeState).toBe(readOnly ? 0 : 1);
-  expect(current.sidebarOpen).toBe(false);
+  expect(current.sidebarOpen).toBe(sidebarOpen);
   if (readOnly) {
     expect(current.hydratedBeforeSidebar).toBe(false);
     expect(current.layoutComplete).not.toBeNull();
@@ -374,13 +374,13 @@ async function flow(page: Page, readOnly: boolean, options = '') {
     canonical(prepared.resolved),
     canonical(prepared.afterAnchors),
   ];
-  const record = async (name: string, result: DocxProposalResult, serial: number) => {
+  const record = async (name: string, result: DocxProposalResult, serial: number, sidebarOpen = false) => {
     const snapshot = snapshotOf(result);
-    await assertReplica(page, readOnly);
+    await assertReplica(page, readOnly, sidebarOpen);
     const read = await getProposals(page);
     expect(read).toEqual(snapshot);
     const geometry = await overlay(page, read, serial);
-    await assertReplica(page, readOnly);
+    await assertReplica(page, readOnly, sidebarOpen);
     transcript.push({ name, result: canonical(result), read: canonical(read), geometry });
     return read;
   };
@@ -393,7 +393,7 @@ async function flow(page: Page, readOnly: boolean, options = '') {
   expect(snapshot.version).not.toBe(initial.version);
   expect(snapshot.proposals.map(({ id }) => id)).toEqual(IDS);
   expect(snapshot.proposals.every((proposal) => proposal.changed && proposal.state === 'proposed')).toBe(true);
-  expect(snapshot.proposals.map(({ revisionIds }) => revisionIds.length)).toEqual([2, 1, 2, 1, 2, 1, 2, 1, 2, 1]);
+  expect(snapshot.proposals.map(({ revisionIds }) => revisionIds.length)).toEqual([1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
   const setStates = async (name: string, ids: string[], state: DocxProposalState) => {
     const before = snapshot;
     const serial = await eventSerial(page);
@@ -469,12 +469,14 @@ async function flow(page: Page, readOnly: boolean, options = '') {
     (request) => (window as unknown as ProbeWindow).__workerProposalProbe.editor!.withdrawProposals(request),
     { expectVersion: snapshot.version, ids: IDS }
   );
-  const final = await record('withdraw', withdrawn, withdrawalSerial);
+  const sidebarOpenAfterWithdrawal = !readOnly;
+  await expect.poll(async () => (await status(page)).sidebarOpen).toBe(sidebarOpenAfterWithdrawal);
+  const final = await record('withdraw', withdrawn, withdrawalSerial, sidebarOpenAfterWithdrawal);
   expect(final.proposals).toEqual([]);
   expect(final.version).not.toBe(snapshot.version);
   expect((await status(page)).events['proposal-change']).toBeGreaterThanOrEqual(15);
   expect((await status(page)).events['layout-change']).toBeGreaterThan(0);
-  await assertReplica(page, readOnly);
+  await assertReplica(page, readOnly, sidebarOpenAfterWithdrawal);
   expect((await status(page)).unexpectedScrolls).toBe(0);
   return transcript;
 }
@@ -513,7 +515,15 @@ test('opening the built-in sidebar hydrates the worker replica once and preserve
   const after = await getProposals(page);
   expect(after.previewVersion).toBe(before.previewVersion);
   expect(after.proposals).toEqual(before.proposals);
-  await expect(page.locator('.docx-unified-sidebar')).toBeVisible();
+  const sidebar = page.locator('.docx-unified-sidebar');
+  await expect(sidebar).toBeAttached();
+  await expect(sidebar).toHaveCSS('opacity', '1');
+  const cards = sidebar.locator('.docx-tracked-change-card');
+  await expect(cards).toHaveCount(after.proposals.length);
+  for (let index = 0; index < after.proposals.length; index += 1) {
+    await expect(cards.nth(index)).toBeVisible();
+    await expect(cards.nth(index)).toContainText(SUGGEST.author);
+  }
   await overlay(page, after);
   expect(await openSidebar()).toMatchObject({ ok: true });
   await expect.poll(async () => (await status(page)).sidebarOpen).toBe(false);
@@ -556,7 +566,10 @@ test('existing revisions open the sidebar and hydrate once', async ({ page }) =>
   const requests = await page.evaluate(() => (window as unknown as ProbeWindow).__workerRequests);
   expect(requests.indexOf('revisionCount')).toBeGreaterThanOrEqual(0);
   expect(requests.indexOf('encodeState')).toBeGreaterThan(requests.indexOf('revisionCount'));
-  await expect(page.locator('.docx-unified-sidebar')).toBeVisible();
+  const sidebar = page.locator('.docx-unified-sidebar');
+  await expect(sidebar).toBeAttached();
+  await expect(sidebar).toHaveCSS('opacity', '1');
+  await expect(sidebar.locator('.docx-tracked-change-card')).toBeVisible();
   await expect(page.locator('.docx-tracked-change-card')).toHaveCount(1);
   await expect(page.locator('.docx-tracked-change-card')).toContainText('Document reviewer');
   expect((await getProposals(page)).proposals).toEqual([]);

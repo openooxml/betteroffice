@@ -9,6 +9,7 @@ import {
   createYrsSession,
   preloadResidentEngineWorker,
   ResidentWorkerOutOfMemoryError,
+  proposalRevisionPreview,
   type YrsDocxHost,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
@@ -16,7 +17,7 @@ import {
   residentWorkerFactory,
   type InProcessResidentWorker,
 } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
-import type { ResidentEngineWorkerRequest } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
+import type { ResidentEngineWorkerRequest, ResidentEngineWorkerResponse } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { LayoutSelectionGate } from '@betteroffice/docx/layout';
 import { useCanvasRenderer, type OpenInWorker } from './useDisplayList';
 import { useLayoutPipeline } from './useLayoutPipeline';
@@ -24,8 +25,9 @@ import type { DocxHostSearch } from './useHostSearch';
 import { useYrsCoreSession } from './useYrsCoreSession';
 import type { DocxEditorCollaborationOptions } from '../types';
 import { awaitWorkerOpenReplica, ensureWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
-import { isLayoutQueued, sourceVersionOf } from '../internals/layoutProvenance';
+import { isLayoutQueued, revisionPreviewKey, revisionPreviewKeyOf, sourceVersionOf } from '../internals/layoutProvenance';
 import * as replicaHelpers from '../internals/workerOpenReplica';
+import { workerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { DocxEditorRef } from '../../DocxEditor';
 import type { PagedEditorRef } from '../PagedEditor';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
@@ -100,12 +102,31 @@ function installWorker(options: {
   holdBootstrap?: boolean;
   holdSync?: boolean;
   holdCompletion?: boolean;
+  holdReply?: (request: ResidentEngineWorkerRequest) => boolean;
 } = {}) {
   const workers: InProcessResidentWorker[] = [];
   const posted: ResidentEngineWorkerRequest[] = [];
+  const replies = new Map<number, () => void>();
+  const received = new Set<ResidentEngineWorkerRequest>();
+  const replyWaiters = new Set<() => void>();
   globalThis.Worker = class {
     constructor() {
       const worker = startWorker();
+      let onmessage: typeof worker.onmessage = null;
+      if (options.holdReply) Object.defineProperty(worker, 'onmessage', {
+        get: () => {
+          const listener = onmessage;
+          return (event: MessageEvent<ResidentEngineWorkerResponse>) => {
+            const request = posted.find((request) => request.id === event.data.id);
+            const deliver = () => listener?.(event);
+            if (request && options.holdReply?.(request)) replies.set(request.id, deliver);
+            else deliver();
+            if (request) received.add(request);
+            for (const waiter of replyWaiters) waiter();
+          };
+        },
+        set: (listener: typeof worker.onmessage) => { onmessage = listener; },
+      });
       const send = worker.postMessage.bind(worker);
       worker.postMessage = (request, transfer) => {
         posted.push(request);
@@ -139,7 +160,27 @@ function installWorker(options: {
       return worker;
     }
   } as unknown as typeof Worker;
-  return { workers, posted };
+  return {
+    workers, posted, replies,
+    received(type: ResidentEngineWorkerRequest['type'], afterId = 0): Promise<ResidentEngineWorkerRequest> {
+      return new Promise((resolve) => {
+        const check = () => {
+          const request = [...received].find((request) => request.type === type && request.id > afterId);
+          if (!request) return;
+          replyWaiters.delete(check);
+          resolve(request);
+        };
+        replyWaiters.add(check);
+        check();
+      });
+    },
+    reply(request: ResidentEngineWorkerRequest) {
+      const deliver = replies.get(request.id);
+      if (!deliver) throw new Error(`No held reply for ${request.type} ${request.id}`);
+      replies.delete(request.id);
+      deliver();
+    },
+  };
 }
 
 interface HarnessProps {
@@ -156,6 +197,9 @@ interface HarnessProps {
   onWorkerContentChange?: () => void;
   allowHostProposals?: boolean;
   resolvedCommentIds?: ReadonlySet<number>;
+  measurementFont?: Uint8Array;
+  onHostDocument?: (session: YrsSession) => void;
+  onPresented?: (session: unknown) => void;
   /** Asks for the replica as soon as the session exists, as DocxEditor does for plugins, sidebars or the outline. */
   wanted?: boolean;
   /** Passes the renderer's own pending completion, as DocxEditor does. */
@@ -180,6 +224,12 @@ function useHarness(props: HarnessProps) {
   const [host, setHost] = useState<YrsDocxHost | null>(null);
   const mainOpens = useRef<boolean[]>([]);
   const errors = useRef<Error[]>([]);
+  const notifiedErrors = useRef(new WeakSet<Error>());
+  const notifyError = useCallback((error: Error) => {
+    if (notifiedErrors.current.has(error)) return;
+    notifiedErrors.current.add(error);
+    errors.current.push(error);
+  }, []);
   const loadChecks = useRef<number[]>([]);
   const openInWorker = useCallback<OpenInWorker>((session, source, digest, generation) => {
     return (props.openInWorker ?? renderer.openInWorker)(session, source, digest, generation);
@@ -199,8 +249,11 @@ function useHarness(props: HarnessProps) {
           return open(input, seed, options);
         };
       },
-      onHostDocument: setHost,
-      onError: (error) => errors.current.push(error),
+      onHostDocument: (host, _generation, session) => {
+        setHost(host);
+        props.onHostDocument?.(session);
+      },
+      onError: notifyError,
     },
     {
       previewFirstPage: props.previewFirstPage,
@@ -219,6 +272,16 @@ function useHarness(props: HarnessProps) {
       } : undefined,
     }
   );
+  useEffect(() => {
+    const error = renderer.error;
+    const owner = renderer.errorEngine;
+    if (!error || (props.experimentalWorkerOpen && owner && owner !== core.session &&
+      (owner as YrsSession).isDisplayOnly?.() !== true)) return;
+    if (!core.failOpening(error, owner ?? undefined)) notifyError(error);
+  }, [core.failOpening, core.session, notifyError, props.experimentalWorkerOpen, renderer.error, renderer.errorEngine]);
+  useEffect(() => {
+    if (renderer.status === 'ready') props.onPresented?.(renderer.presentedEngine);
+  }, [props.onPresented, renderer.presentedEngine, renderer.status]);
   handoffFromRef.current = core.handoffFrom;
   const replicaPending = Boolean(core.hydrateOnDemand && core.session && !core.replicaReady);
   useEffect(() => {
@@ -226,7 +289,7 @@ function useHarness(props: HarnessProps) {
   }, [core, props.wanted, replicaPending]);
   const syncCoordinator = useRef(new LayoutSelectionGate());
   const element = useRef<HTMLDivElement | null>(null);
-  const registeredFont = useRef<{ session: YrsSession; id: number } | null>(null);
+  const registeredFont = useRef<{ session: YrsSession; bytes: Uint8Array; id: number } | null>(null);
   const pipeline = useLayoutPipeline({
     document: host?.document ?? null,
     session: core.session,
@@ -236,8 +299,9 @@ function useHarness(props: HarnessProps) {
     residentMeasurementConfig: (requirements) => {
       const session = core.session;
       if (!session) return null;
-      if (registeredFont.current?.session !== session) {
-        registeredFont.current = { session, id: session.registerFont(font) };
+      const fontBytes = props.measurementFont ?? font;
+      if (registeredFont.current?.session !== session || registeredFont.current.bytes !== fontBytes) {
+        registeredFont.current = { session, bytes: fontBytes, id: session.registerFont(fontBytes) };
       }
       const id = registeredFont.current.id;
       return {
@@ -257,7 +321,7 @@ function useHarness(props: HarnessProps) {
     experimentalWorkerOpen: props.experimentalWorkerOpen,
     fontRequirementsInWorker: props.experimentalWorkerOpen ? renderer.fontRequirementsInWorker : undefined,
     onError: (error, session) => {
-      if (!core.failOpening(error, session)) errors.current.push(error);
+      if (!core.failOpening(error, session)) notifyError(error);
     },
   });
   relayout.current = pipeline.runLayoutPipeline;
@@ -903,6 +967,66 @@ test('failure of the accepted full session before its frame cancels deferred hyd
   }
 });
 
+test('a terminal worker failure before the accepted full frame tears down opening and notifies once', async () => {
+  const options: Parameters<typeof installWorker>[0] = { holdReply: () => false };
+  const { workers, posted, received } = installWorker(options);
+  const frames = holdFrames();
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  let acceptFull!: (session: YrsSession) => void;
+  const fullAccepted = new Promise<YrsSession>((resolve) => { acceptFull = resolve; });
+  let presentPreview!: () => void;
+  const previewPresented = new Promise<void>((resolve) => { presentPreview = resolve; });
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: {
+      ...initialProps, previewFirstPage: true, source: longBytes,
+      workerProposals: true, hydrateOnDemand: true,
+      onHostDocument: (session) => { if (!session.isDisplayOnly()) acceptFull(session); },
+      onPresented: (session) => { if ((session as YrsSession)?.isDisplayOnly()) presentPreview(); },
+    },
+  });
+  try {
+    await act(async () => { await received('open'); });
+    await act(async () => {});
+    expect(result.current.core.previewing).toBe(true);
+    const preview = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await act(async () => {});
+    await previewPresented;
+    await act(async () => {});
+    expect(result.current.renderer.presentedEngine).toBe(preview);
+    act(() => result.current.presentFrame());
+    await act(async () => frames.run());
+    await act(async () => frames.run());
+    await act(async () => { await fullAccepted; });
+    expect(result.current.core.previewing).toBe(false);
+    const full = result.current.core.session!;
+    expect(result.current.core.handoffFrom).toBe(preview);
+    const pending = awaitWorkerOpenReplica(full)!;
+    const rejected = pending.catch((error: unknown) => error);
+    options.oomStage = 'fontRequirements';
+    await act(async () => {
+      result.current.pipeline.runLayoutPipeline();
+      await received('fontRequirements');
+    });
+    await act(async () => { await rejected; });
+    expect(result.current.core.session).toBeNull();
+    expect(result.current.core.handoffFrom).toBeNull();
+    expect(result.current.core.opening).toBe(false);
+    expect(result.current.errors).toEqual([result.current.renderer.error!]);
+    expect(result.current.errors[0]).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    expect(result.current.errors).toHaveLength(1);
+    expect(workers).toHaveLength(2);
+    for (let frame = 0; frame < 5; frame += 1) await act(async () => frames.run());
+    expect(result.current.errors).toHaveLength(1);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+  } finally {
+    unmount();
+    errorLog.mockRestore();
+    frames.restore();
+  }
+});
+
 test('a preloaded spare worker takes the open that starts alongside the preview', async () => {
   const { workers, posted } = installWorker();
   await preloadResidentEngineWorker();
@@ -1378,6 +1502,341 @@ async function openWorkerProposals(props: HarnessProps = workerProposalProps) {
   return harness;
 }
 
+test.each(['A then B', 'B then A'])('Undo keeps worker proposals through font preflight replies %s', async (order) => {
+  let holdRequirements = false;
+  const { posted, replies, reply, received } = installWorker({
+    holdReply: (request) => holdRequirements && request.type === 'fontRequirements',
+  });
+  const frames = holdFrames();
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  const { result, rerender, unmount } = renderHook(useHarness, {
+    initialProps: { ...workerProposalProps, source: bytes },
+  });
+  let layoutHere: ReturnType<typeof spyOn> | undefined;
+  let ensureReplica: ReturnType<typeof spyOn> | undefined;
+  try {
+    await act(async () => { await received('open'); });
+    await act(async () => { await received('bootstrap'); });
+    await act(async () => { await received('proposal'); });
+    await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+    const api = result.current.ref.current!;
+    const session = result.current.core.session!;
+    layoutHere = spyOn(session, 'layoutDocumentWithRegionsRetainedJson');
+    ensureReplica = spyOn(replicaHelpers, 'ensureWorkerOpenReplica');
+    const identities = await api.getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
+    const initial = await api.getProposals();
+    await act(async () => {
+      expect(await api.proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'font-race-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Added text ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    const settle = async () => {
+      const previous = posted.filter((request) => request.type === 'sync').at(-1)?.id ?? 0;
+      await act(async () => { frames.run(); await received('sync', previous); });
+      await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+      expect(isLayoutQueued(session)).toBe(false);
+    };
+    const setState = async (state: 'accepted' | 'proposed' | 'rejected') => {
+      const snapshot = await api.getProposals();
+      await act(async () => {
+        expect(await api.setProposalStates({
+          expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion,
+          changes: [{ id: 'font-race-proposal', state }],
+        })).toMatchObject({ ok: true });
+      });
+      expect(session.getProposals().proposals[0]!.state).toBe(state);
+    };
+    const assertCurrent = async () => {
+      const preview = revisionPreviewKey(proposalRevisionPreview(session.getProposals()));
+      expect(sourceVersionOf(result.current.pipeline.layout)).toBe(session.version());
+      expect(revisionPreviewKeyOf(result.current.pipeline.layout)).toBe(preview);
+      expect(sourceVersionOf(result.current.renderer.queries)).toBe(session.version());
+      expect(revisionPreviewKeyOf(result.current.renderer.queries)).toBe(preview);
+      const authority = workerProposalAuthority(session)!;
+      expect(authority.holdsWorkerState()).toBe(true);
+      const geometry = authority.geometry()!;
+      expect(geometry.version).toBe(session.version());
+      expect(geometry.previewVersion).toBe(session.getProposals().previewVersion);
+      const geometryTarget = geometry.targets['font-race-proposal']!;
+      expect(geometryTarget).toMatchObject({ ok: true });
+      if (!geometryTarget.ok) throw new Error('proposal geometry unavailable');
+      expect(geometryTarget.ranges.length).toBeGreaterThan(0);
+      const queries = result.current.renderer.queries!;
+      const rects = geometryTarget.ranges.flatMap(({ from, to }) => queries.rangeRects(from, to));
+      expect(rects.length).toBeGreaterThan(0);
+      for (const rect of rects) {
+        expect(rect.width).toBeGreaterThan(0);
+        expect(rect.height).toBeGreaterThan(0);
+      }
+      const target = await authority.navigationTarget(paragraph.story, paragraph.paraId, () => {
+        throw new Error('unexpected main-thread navigation');
+      });
+      expect(target.version).toBe(session.version());
+      expect(target.target).toMatchObject({ loc: { story: paragraph.story, paraId: paragraph.paraId } });
+      if (!target.target || typeof target.target === 'string') throw new Error('proposal navigation unavailable');
+      expect(target.target.position).toBeGreaterThan(0);
+      expect(queries.caretRect(target.target.position)?.height).toBeGreaterThan(0);
+      expect(layoutHere).not.toHaveBeenCalled();
+      expect(ensureReplica).not.toHaveBeenCalled();
+      expect(result.current.renderer.error).toBeNull();
+      expect(result.current.errors).toEqual([]);
+      expect(errorLog).not.toHaveBeenCalled();
+      expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+      expect(result.current.mainOpens).toEqual([]);
+    };
+    await settle();
+    await setState('accepted');
+    await settle();
+    holdRequirements = true;
+    const previous = posted.filter((request) => request.type === 'fontRequirements').at(-1)!.id;
+    await setState('proposed');
+    let passA!: ResidentEngineWorkerRequest;
+    await act(async () => { frames.run(); passA = await received('fontRequirements', previous); });
+    expect(replies.has(passA.id)).toBe(true);
+    const loadedFont = new Uint8Array(readFileSync(resolve(
+      import.meta.dir, '../../../../../../crates/docx-raster/tests/assets/Carlito-Regular.ttf'
+    )));
+    rerender({ ...workerProposalProps, source: bytes, measurementFont: loadedFont });
+    let passB!: ResidentEngineWorkerRequest;
+    await act(async () => {
+      result.current.pipeline.runLayoutPipeline();
+      passB = await received('fontRequirements', passA.id);
+    });
+    expect(replies.has(passB.id)).toBe(true);
+    expect(passB.id).not.toBe(passA.id);
+    holdRequirements = false;
+    const previousSync = posted.filter((request) => request.type === 'sync').at(-1)!.id;
+    await act(async () => {
+      for (const pass of order === 'A then B' ? [passA, passB] : [passB, passA]) reply(pass);
+    });
+    expect(layoutHere).not.toHaveBeenCalled();
+    expect(ensureReplica).not.toHaveBeenCalled();
+    expect(result.current.errors).toEqual([]);
+    expect(errorLog).not.toHaveBeenCalled();
+    await act(async () => { await received('sync', previousSync); });
+    await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+    expect(isLayoutQueued(session)).toBe(false);
+    await assertCurrent();
+    await setState('rejected');
+    await settle();
+    await setState('proposed');
+    await settle();
+    await assertCurrent();
+  } finally {
+    layoutHere?.mockRestore();
+    ensureReplica?.mockRestore();
+    unmount();
+    errorLog.mockRestore();
+    frames.restore();
+  }
+});
+
+test.each(['unavailable', 'no adoption', 'no snapshot'])('a holding session with %s worker layout fails once without a frame loop', async (path) => {
+  const { posted, received } = installWorker({ holdReply: () => false });
+  const frames = holdFrames();
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...workerProposalProps, source: bytes },
+  });
+  try {
+    await act(async () => { await received('open'); });
+    await act(async () => { await received('bootstrap'); });
+    await act(async () => { await received('proposal'); });
+    await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+    const session = result.current.core.session!;
+    const api = result.current.ref.current!;
+    const snapshot = await api.getProposals();
+    await act(async () => {
+      expect(await api.setProposalStates({
+        expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion, changes: [],
+      })).toMatchObject({ ok: true });
+    });
+    expect(workerProposalAuthority(session)?.holdsWorkerState()).toBe(true);
+    const layoutHere = spyOn(session, 'layoutDocumentWithRegionsRetainedJson');
+    const ensureReplica = spyOn(replicaHelpers, 'ensureWorkerOpenReplica');
+    const requestFrame = spyOn(globalThis, 'requestAnimationFrame');
+    const requirements = posted.filter((request) => request.type === 'fontRequirements');
+    const invalid = path === 'no snapshot'
+      ? spyOn(session, 'residentWorkerSnapshot').mockReturnValue(null)
+      : path === 'unavailable'
+        ? spyOn(session, 'isDisplayOnly').mockReturnValue(true)
+        : null;
+    const adopt = session.adoptResidentWorkerLayout;
+    if (path === 'no adoption') session.adoptResidentWorkerLayout = undefined as never;
+    try {
+      act(() => result.current.pipeline.scheduleLayout('remote'));
+      await act(async () => {
+        frames.run();
+        await received('fontRequirements', requirements.at(-1)!.id);
+      });
+      const failure = result.current.renderer.error;
+      expect(failure?.message).toBe('The resident worker holding proposals cannot lay out the document');
+      expect(result.current.errors).toEqual([failure!]);
+      const requests = posted.length;
+      const frameRequests = requestFrame.mock.calls.length;
+      for (let frame = 0; frame < 8; frame += 1) await act(async () => frames.run());
+      expect(requestFrame.mock.calls.length).toBe(frameRequests);
+      expect(posted).toHaveLength(requests);
+      expect(posted.filter((request) => request.type === 'fontRequirements')).toHaveLength(requirements.length + 1);
+      expect(result.current.errors).toEqual([failure!]);
+      expect(errorLog).toHaveBeenCalledTimes(1);
+      expect(layoutHere).not.toHaveBeenCalled();
+      expect(ensureReplica).not.toHaveBeenCalled();
+      expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    } finally {
+      session.adoptResidentWorkerLayout = adopt;
+      invalid?.mockRestore();
+      layoutHere.mockRestore();
+      ensureReplica.mockRestore();
+      requestFrame.mockRestore();
+    }
+  } finally {
+    unmount();
+    errorLog.mockRestore();
+    frames.restore();
+  }
+});
+
+test('a toggle and local refresh wait for an older worker sync without rebuilding proposals', async () => {
+  const options = { holdReply: (request: ResidentEngineWorkerRequest) => request.type === 'sync' };
+  const { workers, posted, replies, reply, received } = installWorker(options);
+  const frames = holdFrames();
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...workerProposalProps, source: bytes },
+  });
+  try {
+    await act(async () => { await received('open'); });
+    await act(async () => { await received('bootstrap'); });
+    await act(async () => { await received('proposal'); });
+    expect(result.current.core.workerProposalsReady).toBe(true);
+    const api = result.current.ref.current!;
+    const session = result.current.core.session!;
+    const layoutHere = spyOn(session, 'layoutDocumentWithRegionsRetainedJson');
+    const ensureReplica = spyOn(replicaHelpers, 'ensureWorkerOpenReplica');
+    try {
+      const identities = await api.getParagraphIdentities();
+      const paragraph = identities.paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
+      const initial = await api.getProposals();
+      await act(async () => {
+        expect(await api.proposeChanges({
+          expectVersion: initial.version,
+          proposals: [{
+            id: 'racing-proposal', paragraph,
+            suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+            op: 'insertText', at: 'start', text: 'Added text ',
+          }],
+        })).toMatchObject({ ok: true });
+      });
+      await act(async () => {
+        frames.run();
+        await received('sync');
+      });
+      const sync = posted.filter((request) => request.type === 'sync').at(-1)!;
+      expect(sync).toBeDefined();
+      expect(replies.has(sync.id)).toBe(true);
+      const beforeToggle = await api.getProposals();
+      await act(async () => {
+        expect(await api.setProposalStates({
+          expectVersion: beforeToggle.version,
+          expectPreviewVersion: beforeToggle.previewVersion,
+          changes: [{ id: 'racing-proposal', state: 'accepted' }],
+        })).toMatchObject({ ok: true });
+      });
+      expect(session.getProposals().proposals[0]!.state).toBe('accepted');
+      expect(workerProposalAuthority(session)?.holdsWorkerState()).toBe(true);
+      act(() => result.current.pipeline.scheduleLayout('local'));
+      await act(async () => frames.run());
+      expect(result.current.errors).toEqual([]);
+      expect(errorLog).not.toHaveBeenCalled();
+      expect(layoutHere).not.toHaveBeenCalled();
+      expect(ensureReplica).not.toHaveBeenCalled();
+      expect(result.current.mainOpens).toEqual([]);
+      expect(posted.filter((request) => request.type === 'sync')).toHaveLength(1);
+
+      await act(async () => reply(sync));
+      await act(async () => frames.run());
+      const latest = posted.filter((request) => request.type === 'sync').at(-1)!;
+      expect(latest.id).not.toBe(sync.id);
+      expect(replies.has(latest.id)).toBe(true);
+      await act(async () => reply(latest));
+      await act(async () => {});
+      await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+      expect(isLayoutQueued(session)).toBe(false);
+      expect(revisionPreviewKeyOf(result.current.pipeline.layout)).toBe(
+        revisionPreviewKey(proposalRevisionPreview(session.getProposals()))
+      );
+      expect(sourceVersionOf(result.current.renderer.queries)).toBe(session.version());
+      expect(workerProposalAuthority(session)?.geometry()?.targets['racing-proposal']).toMatchObject({ ok: true });
+      expect(result.current.renderer.error).toBeNull();
+      expect(result.current.errors).toEqual([]);
+      expect(errorLog).not.toHaveBeenCalled();
+      expect(layoutHere).not.toHaveBeenCalled();
+      expect(ensureReplica).not.toHaveBeenCalled();
+      expect(result.current.mainOpens).toEqual([]);
+      expect(result.current.core.replicaReady).toBe(false);
+      expect(workerProposalAuthority(session)?.holdsWorkerState()).toBe(true);
+      expect(workers).toHaveLength(1);
+      expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    } finally {
+      layoutHere.mockRestore();
+      ensureReplica.mockRestore();
+    }
+  } finally {
+    unmount();
+    errorLog.mockRestore();
+    frames.restore();
+  }
+});
+
+test('a lost worker during proposal sync fails the document once without rebuilding', async () => {
+  const { workers, posted, received } = installWorker({ holdReply: (request) => request.type === 'sync' });
+  const frames = holdFrames();
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...workerProposalProps, source: bytes },
+  });
+  try {
+    await act(async () => { await received('open'); });
+    await act(async () => { await received('bootstrap'); });
+    await act(async () => { await received('proposal'); });
+    const api = result.current.ref.current!;
+    const session = result.current.core.session!;
+    const snapshot = await api.getProposals();
+    await act(async () => {
+      expect(await api.setProposalStates({
+        expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion, changes: [],
+      })).toMatchObject({ ok: true });
+    });
+    expect(workerProposalAuthority(session)?.holdsWorkerState()).toBe(true);
+    act(() => result.current.pipeline.scheduleLayout('remote'));
+    await act(async () => { frames.run(); await received('sync'); });
+    const waiting = result.current.renderer.settledDisplayList(null, null);
+    void waiting.catch(() => {});
+    await act(async () => {
+      workers[0].onerror?.({ message: 'resident worker lost' } as ErrorEvent);
+    });
+    const failure = result.current.renderer.error;
+    expect(failure?.message).toContain('resident worker lost');
+    await expect(waiting).rejects.toBe(failure);
+    expect(result.current.errors).toEqual([failure!]);
+    expect(errorLog).toHaveBeenCalledTimes(1);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+  } finally {
+    unmount();
+    errorLog.mockRestore();
+    frames.restore();
+  }
+});
+
 test('worker-held proposals fail the document on proposal OOM without reopening source bytes', async () => {
   const options: Parameters<typeof installWorker>[0] = {};
   const { workers, posted } = installWorker(options);
@@ -1825,11 +2284,12 @@ test('a failed hand-over refuses to reseed worker proposals', async () => {
 });
 
 test('a failed empty hand-over releases the mirror before using the main replica', async () => {
-  installWorker({ failState: true });
+  const { received } = installWorker({ failState: true, holdReply: () => false });
   const { result } = renderHook(useHarness, {
     initialProps: workerProposalProps,
   });
   await waitFor(() => expect(result.current.host).not.toBeNull());
+  await act(async () => { await received('bootstrap'); });
   const session = result.current.core.session!;
   await act(async () => { await result.current.ref.current!.getProposals(); });
   expect(session.workerDocumentMirrored()).toBe(true);

@@ -73,6 +73,7 @@ type RegisteredAuthority = WorkerProposalAuthority & {
   beginHandover(): Promise<Handover>;
   draining(): boolean;
   fail(error: unknown): void;
+  failure(): unknown;
   handedOverRequest<T extends { expectVersion: string }>(request: T): T;
 };
 const authorities = new WeakMap<YrsSession, RegisteredAuthority>();
@@ -209,6 +210,7 @@ export function registerWorkerProposalAuthority(
     },
     geometry: () => geometry,
     holdsWorkerState: () => holdsState,
+    failure: () => failure?.error,
     draining: () => handingOver && queued > 0,
     fail: (error) => {
       if (failure) return;
@@ -298,6 +300,10 @@ export function workerProposalAuthority(session: YrsSession): WorkerProposalAuth
 
 export function registeredWorkerProposalAuthority(session: YrsSession): WorkerProposalAuthority | null {
   return authorities.get(session) ?? null;
+}
+
+export function workerProposalFailure(session: YrsSession): unknown {
+  return authorities.get(session)?.failure();
 }
 
 /**
