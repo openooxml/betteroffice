@@ -80,6 +80,7 @@ mod fingerprint;
 mod format;
 mod heading;
 mod identity;
+mod inline_content;
 mod list_marker;
 pub mod media;
 mod op;
@@ -119,7 +120,7 @@ pub use identity::{
     AnchorResolution, AnchorUnsupported, ParagraphAnchor, ParagraphIdAssignment,
     ParagraphIdDiagnostic, ParagraphIdOrigin, ParagraphIdRefusal, ParagraphIdentities,
     ParagraphIdentity, ParagraphOrigin, ParagraphRef, ParagraphSavePlan, PersistedParagraphIds,
-    SourceParagraphRef, SourceStory, SourceStoryKind,
+    SourceParagraphRef, SourceStory, SourceStoryKind, SplicedPart,
 };
 pub use op::{Loc, LocRange, OpError, OpResult, Receipt, SplitReceipt};
 pub use ops::paragraph::{
@@ -685,6 +686,7 @@ impl EditingDoc {
     /// Ends a shared-read scope, dropping shared story projections when the last scope ends.
     pub fn end_shared_reads(&self) {
         let mut views = self.story_views.lock().unwrap();
+        #[allow(deprecated)]
         let previous =
             self.shared_read_depth
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |depth| {

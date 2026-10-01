@@ -6,24 +6,27 @@ import type {
 } from './index';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type {
+  ResidentDocumentRead,
+  ResidentDocumentReadValues,
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerRequestWithoutId,
   ResidentEngineWorkerResponse,
   ResidentProposalOperation,
-  ResidentProposalOutcome,
+  ResidentProposalResponse,
 } from './residentEngineWorkerProtocol';
+import type { DocxProposalRegistryState } from './proposals';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 
 /** @internal */
-export interface ResidentProposalReply {
-  outcome: ResidentProposalOutcome;
-  version: string;
+export interface ResidentProposalReply
+  extends Omit<ResidentProposalResponse, 'updates' | 'stateVector'> {
   updates: Uint8Array[];
-  changedStories: string[];
+  stateVector: Uint8Array;
 }
 
 export interface ResidentEngineWorkerFrame {
   frame: Uint8Array;
+  pageFrames?: Uint8Array[];
   updates: Uint8Array[];
   engineMs: number;
   workerTotalMs: number;
@@ -49,7 +52,7 @@ export interface ResidentEngineWorkerLayoutOptions {
   layoutExtras?: string;
   /** The host state vector the snapshot brings the worker to. */
   stateVector?: Uint8Array;
-  /** Bootstrap only: lay out just the body's first pages before replying. */
+  /** Lay out just the body's first pages before replying. */
   provisionalPages?: number;
   /** Bootstrap only: lay out the document {@link ResidentEngineWorkerClient.open} opened. */
   opened?: boolean;
@@ -90,8 +93,11 @@ const FRAME_REQUESTS = new Set<AwaitedRequest['type']>([
   'bootstrap',
   'sync',
   'buildFrame',
+  'releasePages',
   'applyInput',
   'applyDelete',
+  'proposal',
+  'documentRead',
 ]);
 
 type PendingRequest = {
@@ -141,10 +147,13 @@ export class ResidentEngineWorkerClient {
   /** Set once `open` is sent, with the heap limit it opened under. */
   private openedHeapLimit: { bytes?: number } | null = null;
   private bootstraps = 0;
+  /** The font-requirements read still in flight, shared while nothing was posted after it. */
+  private fontRead: { layoutInput: string; id: number; reply: Promise<string> } | null = null;
   /** Id of the last snapshot request sent; replies to earlier requests must
    * not replace the state it recorded. */
   private lastSnapshotId = 0;
   private keepSurfaces = false;
+  private bootstrapWaiters: Array<() => void> = [];
   private lastMemory: WasmModuleMemory[] | null = null;
   private answeredFrameEpoch = 0;
   private retainBuiltPages = false;
@@ -156,8 +165,9 @@ export class ResidentEngineWorkerClient {
       if (response.ok && response.caret) {
         this.answeredFrameEpoch = Math.max(this.answeredFrameEpoch, response.caret.frameEpoch);
       }
-      if (response.ok && response.stateVector && response.id >= this.lastSnapshotId) {
-        this.remoteVector = new Uint8Array(response.stateVector);
+      if (response.ok && response.id >= this.lastSnapshotId) {
+        const stateVector = response.proposal?.stateVector ?? response.stateVector;
+        if (stateVector) this.remoteVector = new Uint8Array(stateVector);
       }
       if (!response.ok && response.terminal) {
         this.fail(
@@ -211,7 +221,7 @@ export class ResidentEngineWorkerClient {
     this.retainBuiltPages = retain;
   }
 
-  /** @internal Whether a frame request other than `buildPages` awaits its reply. */
+  /** @internal Whether foreground document or frame work awaits its reply. */
   frameRequestPending(): boolean {
     for (const { type } of this.pending.values()) {
       if (FRAME_REQUESTS.has(type)) return true;
@@ -232,6 +242,12 @@ export class ResidentEngineWorkerClient {
   /** A bootstrap was sent; later snapshots go as syncs queued behind it. */
   bootstrapSent(): boolean {
     return this.bootstrapped;
+  }
+
+  /** Resolves once a bootstrap is sent, at once when one was. */
+  whenBootstrapSent(): Promise<void> {
+    if (this.bootstrapped) return Promise.resolve();
+    return new Promise((resolve) => this.bootstrapWaiters.push(resolve));
   }
 
   /**
@@ -288,34 +304,110 @@ export class ResidentEngineWorkerClient {
     return { hostJson: response.hostJson, stateVector: new Uint8Array(response.stateVector) };
   }
 
-  /** The font requirements of a region layout request, read from the opened document. */
-  async fontRequirements(layoutInput: string): Promise<string> {
-    const response = await this.request({ type: 'fontRequirements', layoutInput });
-    if (response.requirementsJson === undefined) {
-      throw new ResidentWorkerFailureError('Resident engine worker omitted the font requirements');
+  /**
+   * Opens a display-only preview of the first `blocks` body blocks of a DOCX in the worker, or
+   * resolves null when the package cannot open as a preview. Its first layout is a bootstrap
+   * with `opened`; {@link rebootstrap} then lets {@link open} replace it with the whole document.
+   * A copy of `bytes` is transferred.
+   */
+  async openPreview(
+    bytes: Uint8Array,
+    blocks: number,
+    options: { heapLimitBytes?: number } = {}
+  ): Promise<ResidentEngineWorkerOpened | null> {
+    if (this.openedHeapLimit || this.bootstrapped) {
+      throw new ResidentWorkerFailureError('Resident engine worker already holds a document');
     }
-    return response.requirementsJson;
+    const reservation = { bytes: options.heapLimitBytes };
+    this.openedHeapLimit = reservation;
+    let response: ResidentEngineWorkerResponse & { ok: true };
+    try {
+      const copy = new Uint8Array(bytes);
+      response = await this.request(
+        {
+          type: 'open',
+          bytes: copy.buffer,
+          previewBlocks: blocks,
+          ...(options.heapLimitBytes !== undefined ? { heapLimitBytes: options.heapLimitBytes } : {}),
+        },
+        [copy.buffer]
+      );
+    } catch (error) {
+      if (this.openedHeapLimit === reservation) this.openedHeapLimit = null;
+      throw error;
+    }
+    if (response.previewRefused) {
+      if (this.openedHeapLimit === reservation) this.openedHeapLimit = null;
+      return null;
+    }
+    if (response.hostJson === undefined || !response.stateVector) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted the opened preview');
+    }
+    return { hostJson: response.hostJson, stateVector: new Uint8Array(response.stateVector) };
+  }
+
+  /** The font requirements of a region layout request, read from the opened document. */
+  fontRequirements(layoutInput: string): Promise<string> {
+    const shared = this.fontRead;
+    if (shared && shared.layoutInput === layoutInput && shared.id === this.nextId - 1) {
+      return shared.reply;
+    }
+    const reply = this.request({ type: 'fontRequirements', layoutInput }).then((response) => {
+      if (response.requirementsJson === undefined) {
+        throw new ResidentWorkerFailureError('Resident engine worker omitted the font requirements');
+      }
+      return response.requirementsJson;
+    });
+    const read = { layoutInput, id: this.nextId - 1, reply };
+    this.fontRead = read;
+    const settle = () => {
+      if (this.fontRead === read) this.fontRead = null;
+    };
+    reply.then(settle, settle);
+    return reply;
   }
 
   /** @internal */
-  async executeProposal(operation: ResidentProposalOperation): Promise<ResidentProposalReply> {
+  async proposal(operation: ResidentProposalOperation): Promise<ResidentProposalReply> {
     if (!this.bootstrapped) {
       throw new ResidentWorkerFailureError('Resident engine worker has not laid out its document');
     }
-    const response = await this.request({ type: 'executeProposal', operation });
-    if (
-      response.outcome === undefined ||
-      response.version === undefined ||
-      response.updates === undefined ||
-      response.changedStories === undefined
-    ) {
+    const response = await this.request({ type: 'proposal', operation });
+    if (!response.proposal) {
       throw new ResidentWorkerFailureError('Resident engine worker omitted the proposal result');
     }
     return {
-      outcome: response.outcome,
+      ...response.proposal,
+      updates: response.proposal.updates.map((update) => new Uint8Array(update)),
+      stateVector: new Uint8Array(response.proposal.stateVector),
+    };
+  }
+
+  /** @internal */
+  async documentRead<K extends ResidentDocumentRead['kind']>(
+    read: ResidentDocumentRead & { kind: K }
+  ): Promise<{ version: string; value: ResidentDocumentReadValues[K] }> {
+    const response = await this.request({ type: 'documentRead', read });
+    if (!response.read) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted the document read');
+    }
+    return response.read as { version: string; value: ResidentDocumentReadValues[K] };
+  }
+
+  /** @internal */
+  async handOver(): Promise<{
+    state: Uint8Array;
+    version: string;
+    proposals: DocxProposalRegistryState;
+  }> {
+    const response = await this.request({ type: 'encodeState' });
+    if (!response.state || response.version === undefined || !response.proposals) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted its document handoff');
+    }
+    return {
+      state: new Uint8Array(response.state),
       version: response.version,
-      updates: response.updates.map((update) => new Uint8Array(update)),
-      changedStories: response.changedStories,
+      proposals: response.proposals,
     };
   }
 
@@ -326,6 +418,18 @@ export class ResidentEngineWorkerClient {
       throw new ResidentWorkerFailureError('Resident engine worker omitted its state');
     }
     return new Uint8Array(response.state);
+  }
+
+  async revisionCount(): Promise<number> {
+    const response = await this.request({ type: 'revisionCount' });
+    if (
+      typeof response.revisionCount !== 'number' ||
+      !Number.isInteger(response.revisionCount) ||
+      response.revisionCount < 0
+    ) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted a valid revision count');
+    }
+    return response.revisionCount;
   }
 
   async warm(): Promise<void> {
@@ -351,6 +455,7 @@ export class ResidentEngineWorkerClient {
     }
     const fontsRevision = snapshot.fontsRevision;
     this.bootstrapped = true;
+    for (const resolve of this.bootstrapWaiters.splice(0)) resolve();
     const keepSurfaces = this.keepSurfaces;
     this.keepSurfaces = false;
     const generation = ++this.bootstraps;
@@ -412,6 +517,9 @@ export class ResidentEngineWorkerClient {
         expectedFrameEpoch,
         paintCaret,
         ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
+        ...(options.provisionalPages !== undefined
+          ? { provisionalPages: options.provisionalPages }
+          : {}),
         ...(options.displayWindow
           ? {
               displayWindow: options.displayWindow,
@@ -469,14 +577,38 @@ export class ResidentEngineWorkerClient {
   }
 
   /** Build unbuilt display pages; the reply frame carries them. */
+  buildPages(
+    pages: number[], expectedFrameEpoch: number, paintCaret?: boolean
+  ): Promise<ResidentEngineWorkerFrame>;
+  /** @internal */
+  buildPages(
+    pages: number[], expectedFrameEpoch: number, paintCaret: boolean, background: boolean
+  ): Promise<ResidentEngineWorkerFrame | null>;
   async buildPages(
     pages: number[],
     expectedFrameEpoch: number,
+    paintCaret = false,
+    background = false
+  ): Promise<ResidentEngineWorkerFrame | null> {
+    const response = await this.request({
+      type: 'buildPages', pages, expectedFrameEpoch, paintCaret,
+      ...(background ? { background: true } : {}),
+    });
+    return background && response.pageBuildSuperseded ? null : frameResult(response);
+  }
+
+  async releasePages(
+    pages: Array<{ index: number; pageId: string }>,
+    expectedFrameEpoch: number,
     paintCaret = false
-  ): Promise<ResidentEngineWorkerFrame> {
-    return frameResult(
-      await this.request({ type: 'buildPages', pages, expectedFrameEpoch, paintCaret })
-    );
+  ): Promise<ResidentEngineWorkerFrame | { superseded: true }> {
+    const response = await this.request({
+      type: 'releasePages',
+      pages,
+      expectedFrameEpoch,
+      paintCaret,
+    });
+    return response.superseded ? { superseded: true } : frameResult(response);
   }
 
   async applyInput(
@@ -647,6 +779,7 @@ export class ResidentEngineWorkerClient {
     this.worker.terminate();
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
+    for (const resolve of this.bootstrapWaiters.splice(0)) resolve();
   }
 }
 
@@ -697,6 +830,7 @@ function frameResult(
   }
   return {
     frame: new Uint8Array(response.frame),
+    ...(response.pageFrames ? { pageFrames: response.pageFrames.map((frame) => new Uint8Array(frame)) } : {}),
     updates: (response.updates ?? []).map((update) => new Uint8Array(update)),
     engineMs: response.engineMs ?? 0,
     workerTotalMs: response.workerTotalMs ?? 0,

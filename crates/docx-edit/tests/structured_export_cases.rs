@@ -1972,6 +1972,50 @@ fn numbers_a_format_cannot_write_are_diagnosed() {
 }
 
 #[test]
+fn comments_in_cells_and_block_controls_are_anchored() {
+    let commented = |id: u32, text: &str| {
+        format!(
+            r#"<w:commentRangeStart w:id="{id}"/>{}<w:commentRangeEnd w:id="{id}"/><w:r><w:commentReference w:id="{id}"/></w:r>"#,
+            run(text)
+        )
+    };
+    let xml = format!(
+        r#"{}<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl><w:sdt><w:sdtPr><w:id w:val="6"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>{}"#,
+        para("0F600000", &commented(1, "Body")),
+        para("0F600001", &commented(1, "Cell")),
+        para("0F600002", &commented(2, "Controlled")),
+        para("0F600003", &run("Tail"))
+    );
+    let comments = format!(
+        r#"<w:comments {}>{}</w:comments>"#,
+        fixture::namespaces(),
+        [1, 2]
+            .map(|id| format!(
+                r#"<w:comment w:id="{id}" w:author="Ann">{}</w:comment>"#,
+                para(&format!("0F60001{id}"), &run("Remark"))
+            ))
+            .concat()
+    );
+    let doc = open(
+        &Package::new(&xml)
+            .part("comments.xml", "rIdComments", COMMENTS, COMMENTS, &comments)
+            .bytes(),
+    );
+    let spans = |id: &str| {
+        doc.resolve_comment(id)
+            .unwrap()
+            .into_iter()
+            .map(|anchor| (anchor.story, anchor.start, anchor.end))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        spans("1"),
+        [("body".to_owned(), 0, 4), ("body:t0:r0c0".to_owned(), 0, 4)]
+    );
+    assert_eq!(spans("2"), [("body:sdt0".to_owned(), 0, 10)]);
+}
+
+#[test]
 fn shared_ids_leave_cell_and_comment_anchors_without_a_location() {
     let xml = format!(
         r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{}{}</w:tc></w:tr></w:tbl>{}"#,

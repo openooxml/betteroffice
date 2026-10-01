@@ -95,6 +95,16 @@ struct ApplyInputProfile {
     encode_ms: f64,
 }
 
+fn validate_frame_epoch(epoch: f64) -> Result<u64, JsValue> {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    if !(epoch.is_finite() && epoch >= 0.0 && epoch.fract() == 0.0 && epoch <= MAX_SAFE_INTEGER) {
+        return Err(js_err(
+            "expected_frame_epoch must be a non-negative safe integer",
+        ));
+    }
+    Ok(epoch as u64)
+}
+
 fn js_err(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
 }
@@ -1212,6 +1222,9 @@ struct DocxHostWire {
     /// Empty unless the stories were seeded from the package (a preview's
     /// from its cut).
     unused_script_fonts: Vec<String>,
+    /// A preview whose cut holds the whole body.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    whole_body: bool,
 }
 
 fn thin_header_footer(
@@ -1372,6 +1385,7 @@ impl EditSession {
             envelope: host_envelope,
             referenced_fonts: fonts.referenced,
             unused_script_fonts: fonts.unused_script,
+            whole_body: false,
         };
         let json = serde_json::to_string(&host).map_err(|error| error.to_string())?;
         self.docx_source.replace(Some(source));
@@ -1392,6 +1406,8 @@ impl EditSession {
             return Ok(None);
         };
         let host_envelope = thin_docx_envelope(&envelope);
+        // The cut stops only once it holds `blocks` blocks.
+        let whole_body = envelope.document.package.document.content.len() < blocks;
         let fonts = crate::seed::seed_preview_envelope(self.engine.doc(), envelope, media)?;
         self.engine.set_partial_document(true);
         self.engine.doc().rotate_version(js_entropy());
@@ -1399,6 +1415,7 @@ impl EditSession {
             envelope: host_envelope,
             referenced_fonts: fonts.referenced,
             unused_script_fonts: fonts.unused_script,
+            whole_body,
         })
         .map(Some)
         .map_err(|error| error.to_string())
@@ -1774,19 +1791,10 @@ impl EditSession {
         input: &str,
         expected_frame_epoch: f64,
     ) -> Result<Vec<u8>, JsValue> {
-        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
         let _fonts = self.fonts.enter();
-        if !(expected_frame_epoch.is_finite()
-            && expected_frame_epoch >= 0.0
-            && expected_frame_epoch.fract() == 0.0
-            && expected_frame_epoch <= MAX_SAFE_INTEGER)
-        {
-            return Err(js_err(
-                "expected_frame_epoch must be a non-negative safe integer",
-            ));
-        }
+        let epoch = validate_frame_epoch(expected_frame_epoch)?;
         self.engine
-            .build_display_list_frame(input, expected_frame_epoch as u64)
+            .build_display_list_frame(input, epoch)
             .map_err(|error| JsValue::from_str(&error))
     }
 
@@ -1819,21 +1827,26 @@ impl EditSession {
         pages: Vec<u32>,
         expected_frame_epoch: f64,
     ) -> Result<Vec<u8>, JsValue> {
-        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
         let _fonts = self.fonts.enter();
-        if !(expected_frame_epoch.is_finite()
-            && expected_frame_epoch >= 0.0
-            && expected_frame_epoch.fract() == 0.0
-            && expected_frame_epoch <= MAX_SAFE_INTEGER)
-        {
-            return Err(js_err(
-                "expected_frame_epoch must be a non-negative safe integer",
-            ));
-        }
+        let epoch = validate_frame_epoch(expected_frame_epoch)?;
         let pages: Vec<usize> = pages.into_iter().map(|page| page as usize).collect();
         self.engine
-            .build_display_pages_frame(&pages, expected_frame_epoch as u64)
+            .build_display_pages_frame(&pages, epoch)
             .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Release display pages; an empty result means the request was superseded.
+    pub fn release_display_pages_frame(
+        &self,
+        pages: Vec<u32>,
+        expected_frame_epoch: f64,
+    ) -> Result<Vec<u8>, JsValue> {
+        let _fonts = self.fonts.enter();
+        let epoch = validate_frame_epoch(expected_frame_epoch)?;
+        let pages: Vec<usize> = pages.into_iter().map(|page| page as usize).collect();
+        self.engine
+            .release_display_pages_frame(&pages, epoch)
+            .map_err(js_err)
     }
 
     /// `{"frameEpoch", "caretRect": {…}|null}` for the session's own collapsed
@@ -4696,7 +4709,10 @@ impl EditSession {
 
     /// The paragraph IDs a save applies, as the package writer's
     /// `paragraphIds` request field: `{"assignments":[{"part","ordinal",
-    /// "paraId"}],"patchedParts":[{"part","paraIds":[[ordinal,"ID"]]}]}`.
+    /// "paraId"}],"patchedParts":[{"part","paraIds":[[ordinal,"ID"]]}]}`,
+    /// plus `"splicedParts":[{"part","sha256","paragraphs":[[ordinal,"key"]],
+    /// "changed":[ordinal]}]`, whose session keys the caller resolves to the
+    /// model paragraphs it marks with their ordinals.
     pub fn paragraph_save_plan(&self) -> Result<String, JsValue> {
         let plan = self.engine.doc().paragraph_save_plan();
         serde_json::to_string(&json!({
@@ -4711,6 +4727,18 @@ impl EditSession {
                 .patched_parts
                 .iter()
                 .map(|(part, para_ids)| json!({ "part": part, "paraIds": para_ids }))
+                .collect::<Vec<_>>(),
+            "splicedParts": plan
+                .spliced_parts
+                .iter()
+                .map(|part| {
+                    json!({
+                        "part": part.part,
+                        "sha256": part.sha256,
+                        "paragraphs": part.paragraphs,
+                        "changed": part.changed,
+                    })
+                })
                 .collect::<Vec<_>>(),
         }))
         .map_err(js_err)
@@ -5689,6 +5717,33 @@ mod tests {
         preview.delete_story("body").unwrap();
         preview.open_docx(&bytes, true, None, None).unwrap();
         assert_eq!(numpages(&preview), (pages.to_string(), pages));
+    }
+
+    #[test]
+    fn a_preview_reports_whether_its_cut_holds_the_whole_body() {
+        let body = (0..30)
+            .map(|index| format!("<w:p><w:r><w:t>Paragraph {index}</w:t></w:r></w:p>"))
+            .collect::<String>();
+        let document = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#
+        );
+        let bytes = ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/document.xml".to_owned(), document.into_bytes()),
+        ])
+        .unwrap();
+        for (blocks, whole) in [(10, false), (30, false), (31, true), (200, true)] {
+            let preview = EditSession::new(83.0).unwrap();
+            let host: Value =
+                serde_json::from_str(&preview.open_preview(&bytes, blocks).unwrap().unwrap())
+                    .unwrap();
+            assert_eq!(host.get("wholeBody").is_some(), whole, "{blocks} blocks");
+        }
+        let full = EditSession::new(84.0).unwrap();
+        let host: Value =
+            serde_json::from_str(&full.open_docx(&bytes, true, None, None).unwrap()).unwrap();
+        assert!(host.get("wholeBody").is_none());
     }
 
     #[test]

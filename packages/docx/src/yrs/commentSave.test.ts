@@ -223,16 +223,16 @@ describe('a reanchored comment', () => {
       first.applyUpdate(second.encodeStateAsUpdate(first.encodeStateVector()));
       const expected = anchored(source, '1');
       expect(['Closing', 'After']).toContain(expected);
-      const written: string[] = [];
+      const written = new Map<string, Set<string>>();
       for (const replica of [source, peer]) {
         expect(anchored(replica, '1')).toBe(expected);
         for (const [path, bytes] of await saves(replica)) {
           expect([path, markers(bytes, 1)]).toEqual([path, ['RangeStart', 'RangeEnd', 'Reference']]);
           expect(anchored(await open(bytes, 91032), '1')).toBe(expected);
-          written.push(documentXml(bytes));
+          written.set(path, (written.get(path) ?? new Set()).add(documentXml(bytes)));
         }
       }
-      expect(new Set(written).size).toBe(1);
+      for (const [path, xml] of written) expect([path, xml.size]).toEqual([path, 1]);
     }
   });
 
@@ -253,16 +253,16 @@ describe('a reanchored comment', () => {
         first.applyUpdate(second.encodeStateAsUpdate(first.encodeStateVector()));
         const expected = anchored(source, '1');
         expect(['tro', 'Closing']).toContain(expected);
-        const written: string[] = [];
+        const written = new Map<string, Set<string>>();
         for (const replica of [source, peer]) {
           expect(anchored(replica, '1')).toBe(expected);
           for (const [path, bytes] of await saves(replica)) {
             expect([path, markers(bytes, 1)]).toEqual([path, ['RangeStart', 'RangeEnd', 'Reference']]);
             expect(anchored(await open(bytes, 91042), '1')).toBe(expected);
-            written.push(documentXml(bytes));
+            written.set(path, (written.get(path) ?? new Set()).add(documentXml(bytes)));
           }
         }
-        expect(new Set(written).size).toBe(1);
+        for (const [path, xml] of written) expect([path, xml.size]).toEqual([path, 1]);
       }
     }
   });
@@ -463,4 +463,118 @@ it('keeps a commented document byte-identical on a no-op save', async () => {
   const bytes = docx();
   const saved = unzipContainer((await saveYrsDocx(await open(bytes, 91020))).bytes);
   expect(saved).toEqual(unzipContainer(bytes));
+});
+
+it('keeps the ranges of comments inside a table cell and a content control after an edit elsewhere', async () => {
+  const commented = (id: number, text: string) =>
+    `<w:commentRangeStart w:id="${id}"/>${t(text)}<w:commentRangeEnd w:id="${id}"/>` +
+    `<w:r><w:commentReference w:id="${id}"/></w:r>`;
+  const body = BODY.replace(t('Cell'), commented(2, 'Cell')).replace(
+    '<w:p w14:paraId="0C000005">',
+    '<w:sdt><w:sdtPr><w:id w:val="6"/></w:sdtPr><w:sdtContent>' +
+      `<w:p w14:paraId="0C000007">${commented(3, 'Controlled')}</w:p></w:sdtContent></w:sdt>` +
+      '<w:p w14:paraId="0C000005">'
+  );
+  const session = await open(docx(body, [1, 2, 3]), 91080);
+  const { paraId } = session.paragraphs('body')[2]!;
+  session.insertText({ story: 'body', paraId, offset: 0 }, 'QA ');
+  for (const [path, saved] of await saves(session)) {
+    for (const [id, text] of [[1, 'Intro'], [2, 'Cell'], [3, 'Controlled']] as const) {
+      expect([path, id, markers(saved, id)]).toEqual([path, id, ['RangeStart', 'RangeEnd', 'Reference']]);
+      for (const reopened of [await open(saved, 91081), await seeded(saved, 91082)]) {
+        expect(anchored(reopened, String(id))).toBe(text);
+      }
+    }
+  }
+});
+
+it('keeps every range of a comment anchored in the body and a table cell across save and reopen', async () => {
+  const session = await open(docx(), 91083);
+  const cell = session.storyIds().find((story) => story !== 'body' && story.startsWith('body'))!;
+  const { paraId } = session.paragraphs(cell)[0]!;
+  session.setCommentRanges('1', [
+    range(session, 2, 0, 7),
+    { story: cell, start: { paraId, offset: 0 }, end: { paraId, offset: 4 } },
+  ]);
+  const ranges = session.resolveComment('1');
+  expect(ranges.map(({ story }) => story)).toEqual(['body', cell]);
+  let bytes = (await saveYrsDocx(session)).bytes;
+  for (let cycle = 0; cycle < 2; cycle += 1) {
+    const reopened = await open(bytes, 91084 + cycle);
+    expect(reopened.resolveComment('1')).toEqual(ranges);
+    const { paraId: after } = reopened.paragraphs('body')[3]!;
+    reopened.insertText({ story: 'body', paraId: after, offset: 0 }, '!');
+    bytes = (await saveYrsDocx(reopened)).bytes;
+  }
+});
+
+it('keeps overlapping, enclosed, multi-paragraph and embed-only comment ranges after an unrelated edit', async () => {
+  const start = (id: number) => `<w:commentRangeStart w:id="${id}"/>`;
+  const end = (id: number) => `<w:commentRangeEnd w:id="${id}"/>`;
+  const refs = (...ids: number[]) =>
+    ids.map((id) => `<w:r><w:commentReference w:id="${id}"/></w:r>`).join('');
+  const body =
+    `<w:p w14:paraId="0F000001">${start(3)}${t('A')}${start(4)}${t('B')}${end(3)}${t('C')}` +
+    `${start(6)}${t('D')}${end(6)}${end(4)}${refs(3, 4, 6)}</w:p>` +
+    `<w:p w14:paraId="0F000002">${t('Before ')}${start(5)}${t('first')}</w:p>` +
+    `<w:p w14:paraId="0F000003">${t('second')}${end(5)}${start(7)}` +
+    `<w:fldSimple w:instr=" PAGE ">${t('1')}</w:fldSimple>${end(7)}${refs(5, 7)}${t(' after')}${start(8)}</w:p>` +
+    '<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc>' +
+    `<w:p w14:paraId="0F00000A">${t('Cell')}</w:p></w:tc></w:tr></w:tbl>` +
+    `<w:p w14:paraId="0F000004">${t('Past')}${end(8)}${refs(8)}${start(9)}</w:p>` +
+    `<w:p w14:paraId="0F000005">${end(9)}${refs(9)}${t('Mark')}</w:p>` +
+    `<w:p w14:paraId="0F000006">${t('Later')}</w:p>`;
+  const ids = [3, 4, 6, 5, 7, 8, 9];
+  const anchors = (session: YrsSession) => ids.map((id) => session.resolveComment(String(id)));
+  const source = docx(body, ids);
+  const session = await open(source, 91090);
+  const expected = anchors(session);
+  expect(ids.map((id) => anchored(session, String(id)))).toEqual(
+    ['AB', 'BCD', 'D', 'firstsecond', '', 'Past', '']
+  );
+  expect(anchors(await seeded(source, 91093))).toEqual(expected);
+  const later = session.paragraphs('body').at(-1)!;
+  session.insertText({ story: 'body', paraId: later.paraId, offset: 0 }, 'QA ');
+  for (const [path, bytes] of await saves(session)) {
+    for (const id of ids) {
+      expect([path, id, markers(bytes, id)]).toEqual([path, id, ['RangeStart', 'RangeEnd', 'Reference']]);
+    }
+    for (const reopened of [await open(bytes, 91091), await seeded(bytes, 91092)]) {
+      expect([path, anchors(reopened)]).toEqual([path, expected]);
+    }
+    for (const [id, from, to] of [
+      [5, '0F000002', '0F000003'],
+      [8, '0F000003', '0F000004'],
+      [9, '0F000004', '0F000005'],
+    ] as const) {
+      const spans = [paragraphXml(bytes, from).includes(start(id)), paragraphXml(bytes, to).includes(end(id))];
+      expect([path, id, spans]).toEqual([path, id, [true, true]]);
+    }
+  }
+});
+
+it('keeps the body and table-cell ranges of a generated document after an edit to its title', async () => {
+  const parts = unzipContainer(
+    new Uint8Array(readFileSync(resolve(import.meta.dir, '__fixtures__/comment-ranges/structure.docx')))
+  );
+  for (const name of ['word/document.xml', 'word/comments.xml']) {
+    parts[name] = toBytes(new TextDecoder().decode(parts[name]).replaceAll('w:id="0"', 'w:id="2"'));
+  }
+  const session = await open(
+    new Uint8Array(rezipPartsToArrayBuffer(new Map(Object.entries(parts)))),
+    91100
+  );
+  const [title] = session.paragraphs('body');
+  session.insertText({ story: 'body', paraId: title!.paraId, offset: 0 }, 'QA ');
+  for (const [path, saved] of await saves(session)) {
+    for (const [id, text] of [
+      [2, 'Achado QA preservado. '],
+      [1, 'Preservar comentário na célula'],
+    ] as const) {
+      expect([path, id, markers(saved, id)]).toEqual([path, id, ['RangeStart', 'RangeEnd', 'Reference']]);
+      for (const reopened of [await open(saved, 91101), await seeded(saved, 91102)]) {
+        expect(anchored(reopened, String(id))).toBe(text);
+      }
+    }
+  }
 });

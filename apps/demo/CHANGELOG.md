@@ -1,5 +1,57 @@
 # @betteroffice/demo
 
+## 0.0.13
+
+### Patch Changes
+
+- Updated dependencies [66d0d66]
+- Updated dependencies [ff24d4d]
+- Updated dependencies [9d8c52e]
+- Updated dependencies [2624099]
+- Updated dependencies [37a8ff8]
+- Updated dependencies [36ab3fe]
+- Updated dependencies [55d0103]
+- Updated dependencies [dab1fb3]
+- Updated dependencies [4f2fcca]
+- Updated dependencies [d83c2fd]
+- Updated dependencies [81f0e0a]
+- Updated dependencies [74322c9]
+- Updated dependencies [dd21fb2]
+- Updated dependencies [c58aebc]
+- Updated dependencies [ece75fd]
+- Updated dependencies [c3ebdd0]
+- Updated dependencies [fd3f7d4]
+- Updated dependencies [2e160a2]
+- Updated dependencies [90033fe]
+- Updated dependencies [e8fb199]
+- Updated dependencies [fbeac94]
+- Updated dependencies [85a0488]
+- Updated dependencies [ddf51ae]
+- Updated dependencies [397bb00]
+- Updated dependencies [e436875]
+- Updated dependencies [59ee81b]
+- Updated dependencies [7460f7f]
+- Updated dependencies [78a6325]
+- Updated dependencies [a4c31e1]
+- Updated dependencies [9b7cbd5]
+- Updated dependencies [db1a4b1]
+- Updated dependencies [334b31f]
+- Updated dependencies [8231427]
+- Updated dependencies [980b07b]
+- Updated dependencies [a135ac1]
+- Updated dependencies [540af05]
+- Updated dependencies [eeffc30]
+- Updated dependencies [7ab1ed4]
+- Updated dependencies [28eaa43]
+- Updated dependencies [ff04916]
+- Updated dependencies [2988780]
+- Updated dependencies [c407a61]
+- Updated dependencies [570f8bf]
+- Updated dependencies [ae7ffb2]
+- Updated dependencies [7eeada9]
+  - @betteroffice/docx@0.4.1
+  - @betteroffice/docx-react@0.4.1
+
 ## 0.0.12
 
 ### Patch Changes

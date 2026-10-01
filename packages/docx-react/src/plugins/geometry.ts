@@ -5,7 +5,11 @@ import {
 } from '@betteroffice/docx/layout/render';
 import type { PointPosition, RenderedDomContext } from '@betteroffice/docx/plugin-api';
 import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
-import type { YrsSession } from '@betteroffice/docx/yrs';
+import {
+  proposalSetIdentity,
+  type ProposalGeometryMirror,
+  type YrsSession,
+} from '@betteroffice/docx/yrs';
 import { sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
 import { displayWindowOf } from '../components/DocxEditor/internals/displayWindow';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
@@ -83,6 +87,8 @@ export function toOverlayRect(
 
 export interface AnchorGeometryAccess {
   session: YrsSession;
+  /** @internal */
+  proposalGeometry?: ProposalGeometryMirror;
   editor: Pick<PagedEditorRef, 'yrsLocToDisplayPosition' | 'hasPendingInput'>;
   /** Whether the pages show this layout's pixels. */
   presented: boolean;
@@ -243,13 +249,31 @@ export function createPluginGeometry(
       if (session.version() !== layout.version) {
         return anchorFailure('stale-version', 'The document changed after that version');
       }
+      const snapshot = proposalSnapshot(session);
       if (
-        (proposalSnapshot(session)?.previewVersion ?? 0) !== layout.previewVersion ||
+        (snapshot?.previewVersion ?? 0) !== layout.previewVersion ||
         currentPreviewKey(session) !== renderedPreviewKey(queries)
       )
         return unavailable();
-      const resolved = resolveAnchorTarget(session, target, layout.version);
-      if (!resolved.ok) return resolved;
+      const mirror = live.proposalGeometry;
+      if (
+        mirror &&
+        (target.kind !== 'proposal' ||
+          mirror.version !== layout.version ||
+          mirror.previewVersion !== layout.previewVersion ||
+          !snapshot ||
+          mirror.proposals !== proposalSetIdentity(snapshot))
+      )
+        return unavailable();
+      const mirrored =
+        mirror && target.kind === 'proposal'
+          ? Object.hasOwn(mirror.targets, target.id)
+            ? mirror.targets[target.id]
+            : anchorFailure('unknown-proposal', 'The proposal is not registered in this document')
+          : null;
+      if (mirrored && !mirrored.ok) return mirrored;
+      const resolved = mirror ? null : resolveAnchorTarget(session, target, layout.version);
+      if (resolved && !resolved.ok) return resolved;
       const window = displayWindowOf(queries)?.read();
       const pendingPage = (pageIndex: number): boolean =>
         !!window &&
@@ -261,8 +285,8 @@ export function createPluginGeometry(
         const to = editor.yrsLocToDisplayPosition(range.end);
         return from === null || to === null ? null : { from, to };
       };
-      const ranges: Interval[] = [];
-      for (const range of resolved.ranges) {
+      const ranges: Interval[] = mirrored?.ok ? [...mirrored.ranges] : [];
+      for (const range of resolved?.ok ? resolved.ranges : []) {
         const mapped = display(range);
         if (!mapped) return anchorFailure('unsupported', 'The target has no body display position');
         ranges.push(mapped);
@@ -278,9 +302,11 @@ export function createPluginGeometry(
         )
       )
         return unavailable();
-      const hidden = hiddenRanges(session, layout.version)
-        .map(display)
-        .filter((range): range is Interval => range !== null);
+      const hidden =
+        mirror?.hidden ??
+        hiddenRanges(session, layout.version)
+          .map(display)
+          .filter((range): range is Interval => range !== null);
       const union: Interval[] = [];
       for (const range of subtract(ranges, hidden)) {
         const previous = union.at(-1);
@@ -304,7 +330,11 @@ export function createPluginGeometry(
       }
       const last = ranges.at(-1);
       const gap = last && widen(last, hidden);
-      const paragraph = editor.yrsLocToDisplayPosition(resolved.paragraph);
+      const paragraph = mirrored?.ok
+        ? mirrored.paragraph
+        : resolved?.ok
+          ? editor.yrsLocToDisplayPosition(resolved.paragraph)
+          : null;
       const end =
         tail !== null
           ? (endOf(tail) ?? lastInReadingOrder(drawn))

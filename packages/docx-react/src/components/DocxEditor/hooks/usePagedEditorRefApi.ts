@@ -22,7 +22,11 @@ import {
 } from '../yrsToolbar';
 import { DocxCommandAdmissionError } from '../../../commands/createDocxCommandStore';
 import type { RevealPositionOutcome } from './usePagedScrollApi';
-import { awaitWorkerOpenReplica, workerOpenReplicaPending } from '../internals/workerOpenReplica';
+import {
+  awaitWorkerOpenReplica,
+  workerOpenReplicaOnDemand,
+  workerOpenReplicaPending,
+} from '../internals/workerOpenReplica';
 
 /** The image under a one-unit selection. */
 export interface PagedEditorSelectedImage {
@@ -63,6 +67,9 @@ export interface PagedEditorCommandBridge {
 }
 
 interface RefApiInputs {
+  bumpInputEpochRef: React.RefObject<(() => void) | undefined>;
+  inputEpochRef: React.RefObject<(() => number) | undefined>;
+  readerSurfaceRef: React.RefObject<(() => HTMLElement | null) | undefined>;
   workerOpenEnabledRef: React.RefObject<boolean>;
   yrsInputRef: React.RefObject<YrsInputRef | null>;
   layout: Layout | null;
@@ -76,6 +83,7 @@ interface RefApiInputs {
   documentFromYrsRef: React.MutableRefObject<() => Document | null>;
   yrsSessionRef: React.MutableRefObject<YrsSession | null>;
   yrsLocToDisplayPositionRef: React.MutableRefObject<(loc: YrsLoc) => number | null>;
+  refreshWorkerLayoutRef: React.MutableRefObject<() => void>;
   syncYrsInputStateRef: React.MutableRefObject<
     (
       docChanged: boolean,
@@ -108,8 +116,13 @@ function storyOffsetToLoc(session: YrsSession, story: string, offset: number): Y
   return { story, paraId: last.paraId, offset: span.end - span.start };
 }
 
+const READER_INPUT = ['wheel', 'touchmove', 'pointerdown', 'keydown'] as const;
+
 function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
   const {
+    bumpInputEpochRef,
+    inputEpochRef,
+    readerSurfaceRef,
     yrsInputRef,
     workerOpenEnabledRef,
     layout,
@@ -124,6 +137,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     yrsSessionRef,
     yrsLocToDisplayPositionRef,
     syncYrsInputStateRef,
+    refreshWorkerLayoutRef,
     applyYrsFormattingRef,
     applyYrsCommandRef,
     getYrsPositionProjectionRef,
@@ -167,6 +181,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     },
     isFocused: () => yrsInputRef.current?.isFocused() ?? false,
     undo: () => {
+      bumpInputEpochRef.current?.();
       const session = yrsSessionRef.current;
       const result = session
         ? performYrsHistoryAction(session, false)
@@ -175,6 +190,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
       return result.changed;
     },
     redo: () => {
+      bumpInputEpochRef.current?.();
       const session = yrsSessionRef.current;
       const result = session
         ? performYrsHistoryAction(session, true)
@@ -184,10 +200,22 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     },
     canUndo: () => yrsSessionRef.current?.canUndo() ?? false,
     canRedo: () => yrsSessionRef.current?.canRedo() ?? false,
-    setSelection: setDisplaySelection,
-    insertText: (text) => yrsInputRef.current?.insertText(text),
-    deleteSelection: () => yrsInputRef.current?.deleteSelection(),
-    selectAll: () => yrsInputRef.current?.selectAll(),
+    setSelection: (anchor, head) => {
+      bumpInputEpochRef.current?.();
+      setDisplaySelection(anchor, head);
+    },
+    insertText: (text) => {
+      bumpInputEpochRef.current?.();
+      yrsInputRef.current?.insertText(text);
+    },
+    deleteSelection: () => {
+      bumpInputEpochRef.current?.();
+      yrsInputRef.current?.deleteSelection();
+    },
+    selectAll: () => {
+      bumpInputEpochRef.current?.();
+      yrsInputRef.current?.selectAll();
+    },
     getSelectionRange: () => {
       const selection = yrsInputRef.current?.displaySelection();
       return selection
@@ -202,14 +230,12 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     getYrsSession: () => yrsSessionRef.current,
     flushPendingInput: async () => {
       const session = yrsSessionRef.current;
-      const ready = workerOpenEnabledRef.current && session ? awaitWorkerOpenReplica(session) : undefined;
-      if (ready) await ready;
       const input = yrsInputRef.current;
       if (!input || !session) throw new Error('The editor input is unavailable');
-      // The input rejects its own flush when it unmounts or changes session; its handle object
-      // is rebuilt whenever a new frame changes its callbacks, so only the session is compared.
-      await input.flushPendingInput();
-      if (session !== yrsSessionRef.current) {
+      const pending = input.flushPendingInput();
+      const ready = workerOpenEnabledRef.current ? awaitWorkerOpenReplica(session) : undefined;
+      await (ready ? Promise.all([pending, ready]) : pending);
+      if (session !== yrsSessionRef.current || !yrsInputRef.current) {
         throw new Error('The document changed while flushing input');
       }
     },
@@ -223,20 +249,64 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     getLayout: () => layout,
     getLayoutRequest,
     relayout: runLayoutPipeline,
-    scrollToPosition: scrollToPositionImpl,
-    revealDisplayPosition: revealPositionImpl,
-    scrollToParaId: scrollToParaIdImpl,
-    scrollToPage: scrollToPageImpl,
+    refreshWorkerLayout: () => refreshWorkerLayoutRef.current(),
+    scrollToPosition: (position) => {
+      bumpInputEpochRef.current?.();
+      scrollToPositionImpl(position);
+    },
+    revealDisplayPosition: (position, signal) => {
+      bumpInputEpochRef.current?.();
+      return revealPositionImpl(position, signal);
+    },
+    scrollToParaId: (paraId, options) => {
+      bumpInputEpochRef.current?.();
+      return scrollToParaIdImpl(paraId, options);
+    },
+    scrollToPage: (pageNumber) => {
+      bumpInputEpochRef.current?.();
+      scrollToPageImpl(pageNumber);
+    },
     highlightRange: (from, to) => {
-      const projection = getYrsPositionProjectionRef.current();
-      if (!projection || !Number.isFinite(from) || !Number.isFinite(to) || from < 0 || from > to)
+      bumpInputEpochRef.current?.();
+      const highlight = (): void => {
+        const projection = getYrsPositionProjectionRef.current();
+        if (!projection || !Number.isFinite(from) || !Number.isFinite(to) || from < 0 || from > to)
+          return;
+        const end = Math.min(to, projection.size);
+        if (from > projection.size) return;
+        setDisplaySelection(from, end);
+        scrollToPositionImpl(from, true);
+      };
+      const session = yrsSessionRef.current;
+      if (!session || !workerOpenReplicaOnDemand(session)) {
+        highlight();
         return;
-      const end = Math.min(to, projection.size);
-      if (from > projection.size) return;
-      setDisplaySelection(from, end);
-      scrollToPositionImpl(from, true);
+      }
+      // Runs once the replica has loaded, unless newer input or the reader's own navigation came first.
+      const epoch = inputEpochRef.current?.();
+      let navigated = false;
+      const onReaderInput = (): void => {
+        navigated = true;
+      };
+      const surface = readerSurfaceRef.current?.() ?? null;
+      for (const type of READER_INPUT) {
+        surface?.addEventListener(type, onReaderInput, { capture: true, passive: true });
+      }
+      const stop = (): void => {
+        for (const type of READER_INPUT) surface?.removeEventListener(type, onReaderInput, true);
+      };
+      void awaitWorkerOpenReplica(session)?.then(
+        () => {
+          stop();
+          if (!navigated && yrsSessionRef.current === session && inputEpochRef.current?.() === epoch) {
+            highlight();
+          }
+        },
+        stop
+      );
     },
     scrollToCommentId: (commentId) => {
+      bumpInputEpochRef.current?.();
       const session = yrsSessionRef.current;
       if (!session) return false;
       try {
@@ -250,6 +320,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
       }
     },
     scrollToChangeId: (revisionId) => {
+      bumpInputEpochRef.current?.();
       const revision = yrsSessionRef.current
         ?.listRevisions()
         .find((candidate) => candidate.revisionId === String(revisionId));
@@ -264,6 +335,10 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
 }
 
 export interface UsePagedEditorRefApiOptions {
+  bumpInputEpoch?: () => void;
+  inputEpoch?: () => number;
+  /** The pages' scroll container, where the reader's own navigation happens. */
+  readerSurface?: () => HTMLElement | null;
   ref: React.Ref<PagedEditorRef>;
   yrsInputRef: React.RefObject<YrsInputRef | null>;
   layout: Layout | null;
@@ -278,6 +353,7 @@ export interface UsePagedEditorRefApiOptions {
   documentFromYrs: () => Document | null;
   yrsSession: YrsSession | null;
   replicaReady?: boolean;
+  refreshWorkerLayout?: () => void;
   experimentalWorkerOpen?: boolean;
   yrsLocToDisplayPosition: (loc: YrsLoc) => number | null;
   syncYrsInputState: (
@@ -294,6 +370,9 @@ export interface UsePagedEditorRefApiOptions {
 
 export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   const {
+    bumpInputEpoch,
+    inputEpoch,
+    readerSurface,
     ref,
     yrsInputRef,
     layout,
@@ -308,6 +387,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     documentFromYrs,
     yrsSession,
     replicaReady = true,
+    refreshWorkerLayout = runLayoutPipeline,
     experimentalWorkerOpen = false,
     yrsLocToDisplayPosition,
     syncYrsInputState,
@@ -317,12 +397,19 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     displayPositionToYrsLoc,
     getPositionAtPoint,
   } = opts;
+  const bumpInputEpochRef = useRef(bumpInputEpoch);
+  bumpInputEpochRef.current = bumpInputEpoch;
+  const inputEpochRef = useRef(inputEpoch);
+  inputEpochRef.current = inputEpoch;
+  const readerSurfaceRef = useRef(readerSurface);
+  readerSurfaceRef.current = readerSurface;
   const workerOpenEnabledRef = useRef(experimentalWorkerOpen);
   workerOpenEnabledRef.current = experimentalWorkerOpen;
   const documentFromYrsRef = useRef(documentFromYrs);
   const yrsSessionRef = useRef(yrsSession);
   const yrsLocToDisplayPositionRef = useRef(yrsLocToDisplayPosition);
   const syncYrsInputStateRef = useRef(syncYrsInputState);
+  const refreshWorkerLayoutRef = useRef(refreshWorkerLayout);
   const applyYrsFormattingRef = useRef(applyYrsFormatting);
   const applyYrsCommandRef = useRef(applyYrsCommand);
   const getYrsPositionProjectionRef = useRef(getYrsPositionProjection);
@@ -332,6 +419,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   yrsSessionRef.current = yrsSession;
   yrsLocToDisplayPositionRef.current = yrsLocToDisplayPosition;
   syncYrsInputStateRef.current = syncYrsInputState;
+  refreshWorkerLayoutRef.current = refreshWorkerLayout;
   applyYrsFormattingRef.current = applyYrsFormatting;
   applyYrsCommandRef.current = applyYrsCommand;
   getYrsPositionProjectionRef.current = getYrsPositionProjection;
@@ -339,6 +427,9 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   getPositionAtPointRef.current = getPositionAtPoint;
 
   const inputs = {
+    bumpInputEpochRef,
+    inputEpochRef,
+    readerSurfaceRef,
     workerOpenEnabledRef,
     yrsInputRef,
     layout,
@@ -353,6 +444,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     yrsSessionRef,
     yrsLocToDisplayPositionRef,
     syncYrsInputStateRef,
+    refreshWorkerLayoutRef,
     applyYrsFormattingRef,
     applyYrsCommandRef,
     getYrsPositionProjectionRef,
@@ -376,7 +468,9 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
 }
 
 export interface UsePagedEditorCommandBridgeOptions {
+  bumpInputEpoch?: () => void;
   experimentalWorkerOpen?: boolean;
+  hydrateOnDemand?: boolean;
   bridgeRef: React.MutableRefObject<PagedEditorCommandBridge | null> | undefined;
   yrsInputRef: React.RefObject<YrsInputRef | null>;
   session: YrsSession | null;
@@ -402,18 +496,39 @@ export function usePagedEditorCommandBridge(options: UsePagedEditorCommandBridge
     bridge.current = {
       runAfterPendingInput(operation) {
         const session = latest.current.session;
-        const ready = latest.current.experimentalWorkerOpen && session ? awaitWorkerOpenReplica(session) : undefined;
-        if (ready) {
-          return ready.then(() => {
-            if (latest.current.session !== session) throw new DocxCommandAdmissionError('editor-unavailable');
-            const input = latest.current.yrsInputRef.current;
-            if (!input) throw new DocxCommandAdmissionError('editor-unavailable');
-            return input.runAfterPendingInput(operation);
-          });
+        if (!latest.current.experimentalWorkerOpen || !session || latest.current.hydrateOnDemand) {
+          latest.current.bumpInputEpoch?.();
+          const ready = latest.current.experimentalWorkerOpen && session ? awaitWorkerOpenReplica(session) : undefined;
+          if (ready) {
+            return ready.then(() => {
+              if (latest.current.session !== session) throw new DocxCommandAdmissionError('editor-unavailable');
+              const input = latest.current.yrsInputRef.current;
+              if (!input) throw new DocxCommandAdmissionError('editor-unavailable');
+              return input.runAfterPendingInput(operation);
+            });
+          }
+          const input = latest.current.yrsInputRef.current;
+          if (!input) return Promise.reject(new DocxCommandAdmissionError('editor-unavailable'));
+          return input.runAfterPendingInput(operation);
         }
         const input = latest.current.yrsInputRef.current;
         if (!input) return Promise.reject(new DocxCommandAdmissionError('editor-unavailable'));
-        return input.runAfterPendingInput(operation);
+        const deferEpoch = input.hasPendingInput();
+        if (!deferEpoch) latest.current.bumpInputEpoch?.();
+        const ready = awaitWorkerOpenReplica(session) ?? Promise.resolve();
+        const queued = input.runAfterPendingInput(async () => {
+          const assertCurrent = () => {
+            if (latest.current.session !== session || !latest.current.yrsInputRef.current) {
+              throw new DocxCommandAdmissionError('editor-unavailable');
+            }
+          };
+          assertCurrent();
+          await ready;
+          assertCurrent();
+          if (deferEpoch) latest.current.bumpInputEpoch?.();
+          return operation();
+        });
+        return Promise.all([queued, ready]).then(([result]) => result);
       },
       hasPendingInput: () =>
         (latest.current.experimentalWorkerOpen && latest.current.session !== null && workerOpenReplicaPending(latest.current.session)) ||
@@ -474,10 +589,17 @@ export function usePagedEditorCommandBridge(options: UsePagedEditorCommandBridge
         const node = pos == null ? null : current.getPositionProjection()?.nodeAt(pos);
         return node?.kind === 'image' ? node.start : null;
       },
-      format: (action) => latest.current.format(action),
-      command: (command) => latest.current.command(command),
+      format: (action) => {
+        latest.current.bumpInputEpoch?.();
+        return latest.current.format(action);
+      },
+      command: (command) => {
+        latest.current.bumpInputEpoch?.();
+        return latest.current.command(command);
+      },
       history(redo) {
         const current = latest.current;
+        current.bumpInputEpoch?.();
         const session = current.session;
         if (!session) return false;
         const result = performYrsHistoryAction(session, redo);
@@ -486,6 +608,7 @@ export function usePagedEditorCommandBridge(options: UsePagedEditorCommandBridge
       },
       select(start, end) {
         const current = latest.current;
+        current.bumpInputEpoch?.();
         const session = current.session;
         if (!session || start.story !== end.story) return false;
         session.setSelection(start, end);

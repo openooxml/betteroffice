@@ -66,7 +66,7 @@ import type {
 } from '@betteroffice/docx/types/document';
 import type { WrapType } from '@betteroffice/docx/docx/wrapTypes';
 import {
-  yrsLocToDisplayPosition as yrsLocToLocalDisplayPosition,
+  yrsLocToProjectedDisplayPosition,
   type YrsInlineFormatDelta,
   type YrsLoc,
   type YrsRenderEnv,
@@ -413,6 +413,8 @@ export interface PagedEditorRef {
     dirtyStories?: readonly string[],
     options?: { inWorker?: boolean }
   ): boolean;
+  /** Schedules layout of the resident worker document. */
+  refreshWorkerLayout(): void;
   /** Apply a body-toolbar command through yrs. */
   applyYrsFormatting(action: FormattingAction): boolean;
   /** Apply a non-toolbar body command through yrs. */
@@ -613,16 +615,17 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     );
     const yrsLocToDisplayPosition = useCallback(
       (loc: YrsLoc): number | null => {
-        const map = yrsCore.inputPositionMap(loc.story);
-        if (!map) return null;
-        const rootStory =
-          loc.story === 'body' || loc.story.startsWith('body:') ? 'body' : activeYrsRootStory;
-        return (
-          getYrsPositionProjectionRef.current(rootStory)?.positionForLoc(loc) ??
-          (loc.story === rootStory ? yrsLocToLocalDisplayPosition(map, loc) : null)
+        const session = yrsCore.session;
+        if (!session) return null;
+        return yrsLocToProjectedDisplayPosition(
+          session,
+          getYrsPositionProjectionRef.current,
+          loc,
+          activeYrsRootStory,
+          yrsCore.inputPositionMap
         );
       },
-      [activeYrsRootStory, yrsCore.inputPositionMap]
+      [activeYrsRootStory, yrsCore.session, yrsCore.inputPositionMap]
     );
     const displayPositionToViewportLoc = useCallback(
       (position: number): YrsLoc | null => {
@@ -825,6 +828,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         scheduleLayout(origin, inWorker);
       },
       [scheduleLayout, syncCoordinator]
+    );
+
+    const refreshWorkerLayout = useCallback(
+      () => refreshYrsLayout('remote', true),
+      [refreshYrsLayout]
     );
 
     /**
@@ -1471,6 +1479,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // header/footer double-clicks, word/paragraph multi-click, and
     // right-click → host context-menu.
     const {
+      applyPendingSelection,
+      bumpInputEpoch,
+      handleEditorKeyDown,
+      inputEpoch,
       handlePagesContextMenu,
       handleTableInsertClick,
       tableInsertButton,
@@ -1486,6 +1498,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       applyYrsCommand,
       syncYrsInputState,
       readOnly,
+      replicaPending: () =>
+        !!yrsCore.experimentalWorkerOpen && !(yrsCore.replicaReadyRef?.current ?? yrsCore.replicaReady),
+      replicaReady: yrsCore.replicaReady,
+      requestReplica: yrsCore.requestReplica,
       partEdit,
       displayListQueries,
       canvasHostRef,
@@ -1568,6 +1584,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
      */
     const handleKeyDown = useCallback(
       (e: React.KeyboardEvent) => {
+        handleEditorKeyDown(e);
         if (readOnly) return;
         // The hidden textarea owns every keyboard/IME event for both body and
         // header/footer roots. Do not re-interpret its bubbled events.
@@ -1603,7 +1620,13 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           if (sc) sc.scrollTop = sc.scrollHeight;
         }
       },
-      [cancelPendingScrollRestore, readOnly, getScrollContainer, focusBodyInput]
+      [
+        handleEditorKeyDown,
+        cancelPendingScrollRestore,
+        readOnly,
+        getScrollContainer,
+        focusBodyInput,
+      ]
     );
 
     /**
@@ -1784,7 +1807,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // source. The mirror speaks the same data-doc-* semantics
     // contract, so third-party plugins keep resolving geometry unchanged.
     useEffect(() => {
-      if (!yrsCore.replicaReady || !displayListQueries || !onRenderedDomContextReady) return;
+      if (
+        (!yrsCore.replicaReady && !yrsCore.workerProposalsReady) ||
+        !displayListQueries ||
+        !onRenderedDomContextReady
+      ) return;
       let cancelled = false;
       let hostRaf: number | null = null;
       const emit = (): void => {
@@ -1807,7 +1834,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         cancelled = true;
         if (hostRaf !== null) cancelAnimationFrame(hostRaf);
       };
-    }, [displayListQueries, onRenderedDomContextReady, canvasHostRef, zoom, yrsCore.replicaReady]);
+    }, [
+      displayListQueries, onRenderedDomContextReady, canvasHostRef, zoom,
+      yrsCore.replicaReady, yrsCore.workerProposalsReady,
+    ]);
 
     // Re-layout triggers: web-font load complete + header/footer content + render-env changes.
     useLayoutTriggers({
@@ -1827,6 +1857,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
 
     // Imperative-handle setup — exposes PagedEditorRef + mirrors via onReady.
     usePagedEditorRefApi({
+      bumpInputEpoch,
+      inputEpoch,
+      readerSurface: getScrollContainer,
       ref,
       yrsInputRef,
       layout,
@@ -1841,6 +1874,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       documentFromYrs: yrsCore.documentFromYrs,
       yrsSession: yrsCore.session,
       replicaReady: yrsCore.replicaReady,
+      refreshWorkerLayout,
       experimentalWorkerOpen: yrsCore.experimentalWorkerOpen,
       yrsLocToDisplayPosition,
       syncYrsInputState: (docChanged, dirtyStory, options) =>
@@ -1865,8 +1899,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     });
 
     usePagedEditorCommandBridge({
+      bumpInputEpoch,
       bridgeRef: commandBridgeRef,
       experimentalWorkerOpen: yrsCore.experimentalWorkerOpen,
+      hydrateOnDemand: yrsCore.hydrateOnDemand,
       yrsInputRef,
       session: yrsCore.session,
       rootStory: activeYrsRootStory,
@@ -1930,6 +1966,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           enabled
           readOnly={readOnly || (!!partEdit && activeYrsRootStory === 'body')}
           replicaReadyRef={yrsCore.experimentalWorkerOpen ? yrsCore.replicaReadyRef : undefined}
+          requestReplica={yrsCore.experimentalWorkerOpen ? yrsCore.requestReplica : undefined}
+          inputEpoch={inputEpoch}
+          applyPendingSelection={applyPendingSelection}
+          seedSelection={!yrsCore.hydrateOnDemand}
           session={yrsCore.session}
           story={activeYrsRootStory}
           isSuggesting={isSuggesting}

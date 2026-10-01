@@ -1528,6 +1528,7 @@ fn synthetic_row(
         descent,
         line_height,
         synthetic_fallback: Some(true),
+        marker_tab_offset: None,
         ..TypesetRow::default()
     }
 }
@@ -2371,7 +2372,7 @@ fn measure_table(
                 .padding
                 .as_ref()
                 .map_or(DEFAULT_CELL_PADDING_X, |padding| padding.right);
-            let rotated = matches!(cell.text_direction.as_deref(), Some("btLr" | "tbRl"));
+            let rotated = is_rotated(cell);
             let measure_width = if rotated {
                 let padding = cell
                     .padding
@@ -2454,24 +2455,8 @@ fn measure_table(
                 content_height += previous_after.max(before) + visual - before - after;
                 previous_after = after;
             }
-            if matches!(source_cell.text_direction.as_deref(), Some("btLr" | "tbRl")) {
-                content_height = measured_cell
-                    .blocks
-                    .iter()
-                    .filter_map(|measure| {
-                        if let BlockExtent::Paragraph(paragraph) = measure {
-                            Some(
-                                paragraph
-                                    .lines
-                                    .iter()
-                                    .map(|line| line.width)
-                                    .fold(0.0, f64::max),
-                            )
-                        } else {
-                            None
-                        }
-                    })
-                    .fold(0.0, f64::max);
+            if is_rotated(source_cell) {
+                content_height = longest_line_width(&measured_cell.blocks);
                 previous_after = 0.0;
             }
             let padding_height = source_cell
@@ -2530,6 +2515,79 @@ fn measure_table(
         }
     }
 
+    for row_index in 0..rows.len() {
+        if table.rows[row_index].height.is_none() {
+            continue;
+        }
+        for cell_index in 0..table.rows[row_index].cells.len() {
+            let cell = &mut table.rows[row_index].cells[cell_index];
+            let row_span = cell.row_span.unwrap_or(1.0).max(1.0) as usize;
+            if !is_rotated(cell) || row_span <= 1 {
+                continue;
+            }
+            let last = (row_index + row_span - 1).min(rows.len() - 1);
+            let spanned = rows[row_index..=last]
+                .iter()
+                .map(|row| row.height)
+                .sum::<f64>();
+            let padding = cell
+                .padding
+                .as_ref()
+                .map_or(0.0, |padding| padding.top + padding.bottom);
+            let length = (spanned - padding).max(1.0);
+            let has_table_floats = cell.blocks.iter().any(|block| {
+                matches!(block, LayoutBlock::Table(table)
+                    if nested_table_float_offset(table.floating.as_ref()).is_some())
+            });
+            let measured = &mut rows[row_index].cells[cell_index];
+            measured.blocks = if has_table_floats {
+                measure_cell_blocks_with_table_floats(&mut cell.blocks, length, config)?
+            } else {
+                measure_blocks(&mut cell.blocks, length, config)?
+            };
+            measured.height = longest_line_width(&measured.blocks) + padding;
+            let deficit = measured.height + cell_border_height(cell) - spanned;
+            let mut target = last;
+            while target > row_index && exact[target] {
+                target -= 1;
+            }
+            if deficit > 0.0 && !exact[target] {
+                rows[target].height += deficit;
+            }
+        }
+    }
+
+    let outer_width = |border: &crate::types::CellBorderSpec| {
+        if matches!(border.style.as_deref(), Some("none" | "nil")) {
+            0.0
+        } else {
+            border.width.unwrap_or(0.0)
+        }
+    };
+    let mut top_border = 0.0_f64;
+    let mut bottom_border = 0.0_f64;
+    for cell in &grid {
+        let Some(borders) = &table.rows[cell.row_index].cells[cell.cell_index].borders else {
+            continue;
+        };
+        if cell.row_index == 0 {
+            top_border = top_border.max(borders.top.as_ref().map_or(0.0, outer_width));
+        }
+        if cell.row_index + cell.row_span >= rows.len() {
+            bottom_border = bottom_border.max(borders.bottom.as_ref().map_or(0.0, outer_width));
+        }
+    }
+    if let Some(row) = rows.first_mut().filter(|_| !exact[0]) {
+        row.height += top_border / 2.0;
+    }
+    if let Some(row) = rows.last_mut() {
+        row.height += if exact[exact.len() - 1] {
+            bottom_border
+        } else {
+            bottom_border / 2.0
+        };
+    }
+
     let total_height = rows.iter().map(|row| row.height).sum();
     let resolved_total = column_widths.iter().sum::<f64>();
     Ok(TableExtent {
@@ -2542,6 +2600,26 @@ fn measure_table(
         },
         total_height,
     })
+}
+
+fn longest_line_width(blocks: &[BlockExtent]) -> f64 {
+    blocks
+        .iter()
+        .filter_map(|measure| match measure {
+            BlockExtent::Paragraph(paragraph) => Some(
+                paragraph
+                    .lines
+                    .iter()
+                    .map(|line| line.width)
+                    .fold(0.0, f64::max),
+            ),
+            _ => None,
+        })
+        .fold(0.0, f64::max)
+}
+
+fn is_rotated(cell: &crate::types::TableCell) -> bool {
+    matches!(cell.text_direction.as_deref(), Some("btLr" | "tbRl"))
 }
 
 fn table_cell_block_height(block: &LayoutBlock, measure: &BlockExtent) -> f64 {
@@ -3769,11 +3847,77 @@ mod tests {
     }
 
     #[test]
+    fn vertical_labels_wrap_at_the_height_of_the_rows_they_span() {
+        let font_id = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font_id])]),
+            defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
+            ..MeasurementConfig::default()
+        };
+        let pad = json!({"left":0,"right":0,"top":4,"bottom":4});
+        let label = |text: &str, span: u32| {
+            json!({"id":"label","textDirection":"btLr","rowSpan":span,"padding":pad,
+            "blocks":[{"kind":"paragraph","id":"l","runs":[{"kind":"text","text":text,"fontSize":12}]}]})
+        };
+        let text = |id: &str, lines: usize| {
+            json!({"id":id,"padding":pad,"blocks":(0..lines)
+            .map(|line| json!({"kind":"paragraph","id":format!("{id}{line}"),"runs":[{"kind":"text","text":"Row","fontSize":12}]}))
+            .collect::<Vec<_>>()})
+        };
+        let measure = |rows: serde_json::Value| {
+            let mut blocks: Vec<LayoutBlock> = serde_json::from_value(
+                json!([{"kind":"table","id":"table","columnWidths":[30, 100],"rows":rows}]),
+            )
+            .unwrap();
+            let BlockExtent::Table(table) = measure_blocks(&mut blocks, 200.0, &config)
+                .unwrap()
+                .remove(0)
+            else {
+                panic!()
+            };
+            table
+        };
+        let lines = |table: &TableExtent| {
+            let BlockExtent::Paragraph(label) = &table.rows[0].cells[0].blocks[0] else {
+                panic!()
+            };
+            label.lines.clone()
+        };
+
+        let single = measure(json!([{"id":"r0","height":40,"heightRule":"atLeast",
+            "cells":[label("Vertical label", 1), text("a", 1)]}]));
+        let longest = lines(&single)
+            .iter()
+            .map(|line| line.width)
+            .fold(0.0, f64::max);
+        assert!(lines(&single).len() > 1);
+        assert_eq!(single.rows[0].height, (longest + 8.0).max(48.0));
+
+        let spanned = measure(json!([
+            {"id":"r0","height":20,"heightRule":"atLeast","cells":[label("Vertical label", 2), text("a", 5)]},
+            {"id":"r1","height":20,"heightRule":"atLeast","cells":[text("b", 1)]}
+        ]));
+        let rows_height = spanned.rows[0].height + spanned.rows[1].height;
+        assert_eq!(lines(&spanned).len(), 1);
+        assert!(lines(&spanned)[0].width <= rows_height - 8.0);
+        assert_eq!(spanned.rows[1].height, 28.0);
+
+        let tall = measure(json!([{"id":"r0","height":500,"heightRule":"atLeast",
+            "cells":[label("A vertical label longer than the table is wide", 1), text("a", 1)]}]));
+        assert_eq!(lines(&tall).len(), 1);
+        assert!(lines(&tall)[0].width > 200.0);
+        assert_eq!(tall.rows[0].height, 508.0);
+    }
+
+    #[test]
     fn collapsed_borders_expand_minimum_and_auto_rows_but_not_exact_rows() {
         for (height, rule, expected) in [
-            (Some(40.0), "atLeast", 41.0),
-            (Some(40.0), "exact", 40.0),
-            (None, "auto", 17.0),
+            (Some(40.0), "atLeast", 42.0),
+            (Some(40.0), "exact", 41.0),
+            (None, "auto", 18.0),
         ] {
             let mut table: TableBlock = serde_json::from_value(json!({
                 "kind":"table", "id":"table", "columnWidths":[100],
@@ -3788,6 +3932,71 @@ mod tests {
             assert_eq!(measured.rows[0].height, expected);
             assert_eq!(measured.total_height, expected);
         }
+    }
+
+    #[test]
+    fn outer_borders_expand_only_the_real_non_exact_outer_rows() {
+        for (exact_rows, expected) in [
+            ([false, false, false], [19.0, 18.0, 19.0]),
+            ([true, false, false], [40.0, 18.0, 19.0]),
+            ([false, true, false], [19.0, 40.0, 19.0]),
+            ([false, false, true], [19.0, 18.0, 42.0]),
+        ] {
+            let rows: Vec<_> = exact_rows
+                .into_iter()
+                .enumerate()
+                .map(|(index, exact)| {
+                    json!({
+                        "id": index, "height": if exact { Some(40) } else { None },
+                        "heightRule": if exact { "exact" } else { "auto" },
+                        "cells": [{
+                            "id": index + 3,
+                            "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0},
+                            "borders": {"top": {"width": 2}, "bottom": {"width": 2}},
+                            "blocks": [{"kind": "image", "id": index + 6,
+                                "src": "", "width": 10, "height": 16}]
+                        }]
+                    })
+                })
+                .collect();
+            let mut table: TableBlock = serde_json::from_value(json!({
+                "id": "table", "columnWidths": [100], "rows": rows
+            }))
+            .unwrap();
+            let measured = measure_table(&mut table, 100.0, &MeasurementConfig::default()).unwrap();
+            let heights: Vec<_> = measured.rows.iter().map(|row| row.height).collect();
+            assert_eq!(heights, expected);
+            assert_eq!(measured.total_height, expected.iter().sum::<f64>());
+            let breaks = crate::table_row_break::build_table_row_break_info(&table, &measured);
+            assert_eq!(
+                breaks.row_tops,
+                vec![
+                    0.0,
+                    expected[0],
+                    expected[0] + expected[1],
+                    measured.total_height
+                ]
+            );
+            assert_eq!(
+                crate::table_row_break::first_table_fragment_height(&table, &measured, &breaks),
+                expected[0]
+            );
+        }
+    }
+
+    #[test]
+    fn invisible_outer_borders_reserve_no_band() {
+        let mut table: TableBlock = serde_json::from_value(json!({
+            "id":"table", "columnWidths":[100],
+            "rows":[{"id":"row", "height":40, "heightRule":"exact", "cells":[{
+                "id":"cell", "padding":{"top":0,"bottom":0,"left":0,"right":0},
+                "borders":{"top":{"width":6,"style":"nil"},"bottom":{"width":6,"style":"none"}},
+                "blocks":[{"kind":"image","id":"image","src":"","width":10,"height":16}]
+            }]}]
+        }))
+        .unwrap();
+        let measured = measure_table(&mut table, 100.0, &MeasurementConfig::default()).unwrap();
+        assert_eq!(measured.total_height, 40.0);
     }
 
     #[test]
@@ -3902,7 +4111,7 @@ mod tests {
 
     #[test]
     fn minimum_row_height_reserves_cell_margins_outside_the_content_minimum() {
-        for (minimum, content, expected) in [(40, 16, 56.0), (80, 16, 96.0), (40, 60, 76.0)] {
+        for (minimum, content, expected) in [(40, 16, 57.0), (80, 16, 97.0), (40, 60, 77.0)] {
             let mut table: TableBlock = serde_json::from_value(json!({
                 "id":"table", "columnWidths":[100],
                 "rows":[{"id":"row", "height":minimum, "heightRule":"atLeast", "cells":[{
