@@ -2530,14 +2530,15 @@ test('a call queued behind a first proposal that crashes runs on the replacement
   const { result, unmount } = await openWorkerProposals();
   try {
     const api = () => result.current.ref.current!;
-    const paragraph = (await api().getParagraphIdentities()).paragraphs.find((entry) =>
+    const bodyParagraph = async () => (await api().getParagraphIdentities()).paragraphs.find((entry) =>
       entry.session?.story === 'body'
     )!.session!;
+    const paragraph = await bodyParagraph();
     const initial = await api().getProposals();
-    const request = (id: string, expectVersion: string) => ({
+    const request = (id: string, expectVersion: string, target = paragraph) => ({
       expectVersion,
       proposals: [{
-        id, paragraph,
+        id, paragraph: target,
         suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
         op: 'insertText' as const, at: 'start' as const, text: 'Queued ',
       }],
@@ -2561,11 +2562,76 @@ test('a call queued behind a first proposal that crashes runs on the replacement
     await act(async () => { await api().whenLayoutComplete({ timeoutMs: 5000 }); });
     const current = await api().getProposals();
     if (!current.proposals.some(({ id }) => id === 'queued-proposal')) {
+      const target = await bodyParagraph();
       await act(async () => {
-        expect(await api().proposeChanges(request('queued-proposal', current.version))).toMatchObject({ ok: true });
+        expect(await api().proposeChanges(request('queued-proposal', current.version, target)))
+          .toMatchObject({ ok: true });
       });
     }
     expect((await api().getProposals()).proposals.map(({ id }) => id)).toEqual(['queued-proposal']);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
+test('a hand-over while a call waits for the replacement worker\'s layout settles both', async () => {
+  const options: Parameters<typeof installWorker>[0] = { crashProposalOnce: true };
+  const { workers, posted } = installWorker(options);
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const api = () => result.current.ref.current!;
+    const session = result.current.core.session!;
+    const bodyParagraph = async () => (await api().getParagraphIdentities()).paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    const initial = await api().getProposals();
+    const paragraph = await bodyParagraph();
+    options.holdBootstrap = true;
+    let first!: Promise<unknown>;
+    let queued!: Promise<unknown>;
+    await act(async () => {
+      first = api().proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'failed-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Failed ',
+        }],
+      }).catch((error: Error) => error);
+      queued = api().getProposals().catch((error: Error) => error);
+      expect(await first).toBeInstanceOf(Error);
+    });
+    await waitFor(() => expect(posted.filter((request) => request.type === 'bootstrap')).toHaveLength(2));
+    expect(workers).toHaveLength(2);
+    await act(async () => {});
+    let replica!: Promise<unknown>;
+    let outcome: unknown;
+    await act(async () => {
+      replica = requestWorkerOpenReplica(session)!;
+      workers[1]!.release();
+      outcome = await Promise.race([
+        Promise.all([queued, replica]),
+        new Promise((resolve) => setTimeout(() => resolve('hung'), 5000)),
+      ]);
+    });
+    expect(outcome).not.toBe('hung');
+    expect((outcome as [unknown])[0]).toMatchObject({ proposals: [] });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    const current = await api().getProposals();
+    const target = await bodyParagraph();
+    await act(async () => {
+      expect(await api().proposeChanges({
+        expectVersion: current.version,
+        proposals: [{
+          id: 'after-handover', paragraph: target,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Recovered ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    expect((await api().getProposals()).proposals.map(({ id }) => id)).toEqual(['after-handover']);
     expect(result.current.renderer.error ?? null).toBeNull();
     expect(result.current.errors).toEqual([]);
   } finally {

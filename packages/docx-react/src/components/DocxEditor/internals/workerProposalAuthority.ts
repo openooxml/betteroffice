@@ -294,7 +294,7 @@ export function registerWorkerProposalAuthority(
             completed = true;
             hooks.handedOver(handedOver.version);
             geometry = null;
-            if (initialized) {
+            if (mirror) {
               session.mirrorWorkerDocument({ version: handedOver.version, proposals: handedOver.proposals });
               session.mirrorWorkerDocument(null);
               versionRewrite = { worker: handedOver.version, main: session.version() };
