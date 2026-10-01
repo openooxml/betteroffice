@@ -29,8 +29,10 @@ export interface WorkerProposalAuthority {
   initialize(): Promise<void>;
   /** Mirrored geometry until hand-over. */
   geometry(): ProposalGeometryMirror | null;
-  /** Reseeding would lose worker changes. */
+  /** Reseeding would lose worker changes, including those of a state change still in flight. */
   holdsWorkerState(): boolean;
+  /** Reseeding would lose worker changes the main thread has already observed. */
+  holdsCommittedWorkerState(): boolean;
   propose(
     request: DocxProposalRequest,
     main: (request: DocxProposalRequest) => Promise<DocxProposalResult>
@@ -109,6 +111,7 @@ export function registerWorkerProposalAuthority(
   let mirror: ResidentProposalReply['mirror'] | null = null;
   let geometry: ProposalGeometryMirror | null = null;
   let holdsState = false;
+  let mutating = 0;
   let handingOver = false;
   let handover: Promise<Handover> | null = null;
   let versionRewrite: { worker: string; main: string } | null = null;
@@ -168,11 +171,16 @@ export function registerWorkerProposalAuthority(
     const pending = op.kind === 'propose' || op.kind === 'withdraw';
     if (pending) session.mirrorWorkerDocument({ ...previous, version: previous.version + '~' });
     let reply: ResidentProposalReply;
+    mutating += 1;
     try {
       reply = await worker.proposal(op);
     } catch (error) {
-      if (hooks.current() && pending) session.mirrorWorkerDocument(previous);
+      if (hooks.current() && pending && workerOpenReplicaPending(session)) {
+        session.mirrorWorkerDocument(previous);
+      }
       throw error;
+    } finally {
+      mutating -= 1;
     }
     assertCurrent();
     if (
@@ -209,7 +217,8 @@ export function registerWorkerProposalAuthority(
       return initializing;
     },
     geometry: () => geometry,
-    holdsWorkerState: () => holdsState,
+    holdsWorkerState: () => holdsState || mutating > 0,
+    holdsCommittedWorkerState: () => holdsState,
     failure: () => failure?.error,
     draining: () => handingOver && queued > 0,
     fail: (error) => {
