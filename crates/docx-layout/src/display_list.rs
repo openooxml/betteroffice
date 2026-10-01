@@ -2769,6 +2769,8 @@ struct LayoutIn {
     /// See `Layout::partial`.
     #[serde(default)]
     partial: bool,
+    #[serde(default)]
+    cached_page_totals: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -4152,6 +4154,7 @@ pub(crate) struct RenderCtx<'a> {
     /// Distinct from `page_label`, which restarts per section.
     pub(crate) page_index: usize,
     pub(crate) total_pages: u64,
+    pub(crate) cached_page_totals: bool,
     /// Shaping fonts for glyph-run emission.
     pub(crate) shape: Option<&'a ShapeFonts<'a>>,
     /// Per-page PAGE/NUMPAGES widths for header/footer field lines.
@@ -4751,6 +4754,7 @@ fn recompose_hf_region(
     page: &PageIn,
     page_index: usize,
     total_pages: u64,
+    cached_page_totals: bool,
     shape: Option<&ShapeFonts<'_>>,
 ) {
     let Some(variant) = hf
@@ -4779,6 +4783,7 @@ fn recompose_hf_region(
         page_label: page.page_label.clone(),
         page_index,
         total_pages,
+        cached_page_totals,
         shape,
         field_widths: (!field_widths.is_empty()).then_some(&field_widths),
     };
@@ -4995,7 +5000,6 @@ fn build_display_list_selected(
         by_id.entry(key).or_insert(mb);
     }
 
-    // 0 while the layout covers part of the document: NUMPAGES renders empty.
     let total_pages = if input.layout.partial {
         0
     } else {
@@ -5013,6 +5017,7 @@ fn build_display_list_selected(
             page_label: page.page_label.clone(),
             page_index,
             total_pages,
+            cached_page_totals: input.layout.cached_page_totals,
             shape: shape_fonts.as_ref(),
             field_widths: None,
         };
@@ -5258,6 +5263,7 @@ fn build_display_list_selected(
                 page,
                 page_index,
                 total_pages,
+                input.layout.cached_page_totals,
                 shape_fonts.as_ref(),
             ),
             None => (None, None),
@@ -5270,6 +5276,7 @@ fn build_display_list_selected(
                     page,
                     page_index,
                     total_pages,
+                    input.layout.cached_page_totals,
                     shape_fonts.as_ref(),
                 );
             }
@@ -5280,6 +5287,7 @@ fn build_display_list_selected(
                     page,
                     page_index,
                     total_pages,
+                    input.layout.cached_page_totals,
                     shape_fonts.as_ref(),
                 );
             }
@@ -7355,7 +7363,16 @@ fn field_text(f: &FieldRunIn, ctx: &RenderCtx<'_>) -> String {
         Some("PAGE") => {
             crate::regions::page_field_text(ctx.page_label.as_deref(), ctx.page_number).into_owned()
         }
-        Some("NUMPAGES") if ctx.total_pages == 0 => String::new(),
+        Some("NUMPAGES") if ctx.total_pages == 0 => {
+            if ctx.cached_page_totals {
+                f.fallback
+                    .clone()
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            }
+        }
         Some("NUMPAGES") => ctx.total_pages.to_string(),
         _ => f.fallback.clone().unwrap_or_default(),
     }

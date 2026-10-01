@@ -430,6 +430,8 @@ fn deserialize_page_start<'de, D: serde::Deserializer<'de>>(
 #[serde(rename_all = "camelCase")]
 pub struct RegionLayoutInput {
     #[serde(default)]
+    pub cached_page_totals: bool,
+    #[serde(default)]
     pub measured: Vec<crate::types::MeasuredBlock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_story: Option<String>,
@@ -872,6 +874,7 @@ mod tests {
             footers: None,
             page_gap: Some(20.0),
             partial: false,
+            cached_page_totals: false,
         };
         let regions = DocumentRegions {
             sections: vec![
@@ -935,6 +938,7 @@ mod tests {
             footers: None,
             page_gap: None,
             partial: false,
+            cached_page_totals: false,
         };
         let regions = DocumentRegions {
             sections: vec![RegionSection::default(), RegionSection::default()],
@@ -960,6 +964,7 @@ mod tests {
             footers: None,
             page_gap: None,
             partial: false,
+            cached_page_totals: false,
         };
         let restarted = DocumentRegions {
             sections: vec![
@@ -1003,6 +1008,7 @@ mod tests {
             footers: None,
             page_gap: Some(20.0),
             partial: false,
+            cached_page_totals: false,
         };
         let regions = DocumentRegions {
             sections: vec![

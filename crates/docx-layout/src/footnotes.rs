@@ -933,6 +933,7 @@ mod tests {
             footers: None,
             page_gap: None,
             partial: false,
+            cached_page_totals: false,
         }
     }
 

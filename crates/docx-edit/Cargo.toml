@@ -37,6 +37,7 @@ metafile = ["docx-parse/metafile"]
 # policy; there is no Cargo deny/release-age policy, and the existing lockfile already pins it.
 docx-layout.workspace = true
 docx-parse.workspace = true
+foldhash = { version = "0.2", default-features = false }
 ooxml-diff.workspace = true
 ooxml-opc.workspace = true
 ooxml-text.workspace = true

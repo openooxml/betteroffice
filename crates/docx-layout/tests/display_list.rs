@@ -2459,6 +2459,63 @@ fn page_fields_paint_section_labels() {
     }
 }
 
+#[test]
+fn partial_numpages_uses_saved_text_only_when_enabled() {
+    for fallback in [
+        serde_json::json!("9"),
+        serde_json::json!(""),
+        serde_json::Value::Null,
+    ] {
+        let measured = serde_json::json!({
+            "block": {"kind": "paragraph", "id": 1, "pmStart": 0, "pmEnd": 3,
+                "runs": [{"kind": "field", "fieldType": "NUMPAGES",
+                          "fallback": fallback, "pmStart": 1, "pmEnd": 2}]},
+            "measure": {"kind": "paragraph", "totalHeight": 20, "lines": [{
+                "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 1,
+                "width": 10, "ascent": 12, "descent": 4, "lineHeight": 20
+            }]}
+        });
+        for (partial, cached_page_totals) in [(true, false), (true, true), (false, true)] {
+            let expected = if !partial {
+                "1"
+            } else if cached_page_totals {
+                fallback.as_str().unwrap_or("")
+            } else {
+                ""
+            };
+            let input = serde_json::json!({
+                "measured": [measured], "options": {},
+                "layout": {"partial": partial, "cachedPageTotals": cached_page_totals,
+                    "pages": [{
+                        "size": {"w": 200, "h": 300},
+                        "margins": {"left": 0, "right": 0, "footer": 20},
+                        "fragments": [{
+                            "kind": "paragraph", "blockId": 1, "x": 0, "y": 50,
+                            "width": 200, "height": 20, "fromLine": 0, "toLine": 1,
+                            "pmStart": 0, "pmEnd": 3
+                        }]
+                    }]},
+                "headersFooters": {"variants": [{
+                    "rId": "rId9", "kind": "footer", "type": "default", "height": 20,
+                    "measured": [measured],
+                    "fieldWidths": [{"pmStart": 1, "fallbackWidth": 10,
+                                     "perPage": [if expected.is_empty() { 0 } else { 10 }]}]
+                }]}
+            });
+            let dl = build_dl(&input.to_string());
+            let text = |primitives: &[Primitive]| {
+                text_prims(primitives)
+                    .into_iter()
+                    .map(|primitive| primitive.0)
+                    .collect::<String>()
+            };
+            assert_eq!(text(&dl.pages[0].primitives), expected);
+            let footer = dl.pages[0].footer.as_ref().expect("footer region");
+            assert_eq!(text(&footer.primitives), expected);
+        }
+    }
+}
+
 /// A `w:fmt="lowerRoman"` section paints roman labels across its pages.
 #[test]
 fn page_fields_paint_roman_section_labels() {

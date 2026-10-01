@@ -330,9 +330,13 @@ pub fn resolve_header_footer_field_widths(
                                 u64::from(page.number),
                             )
                         };
-                        // A partial layout's NUMPAGES renders empty.
                         if layout.partial && field.field_type == "NUMPAGES" {
-                            Ok(0.0)
+                            match field.fallback.as_deref().filter(|value| !value.is_empty()) {
+                                Some(text) if layout.cached_page_totals => {
+                                    measure_field_text(field, text, config)
+                                }
+                                _ => Ok(0.0),
+                            }
                         } else {
                             measure_field_text(field, &text, config)
                         }
@@ -1821,5 +1825,23 @@ mod tests {
         let mut partial = payload();
         resolve_header_footer_field_widths(&mut partial, &layout, &config).unwrap();
         assert_eq!(partial.variants[0].field_widths[0].per_page[0], 0.0);
+
+        layout.cached_page_totals = true;
+        let mut cached = payload();
+        resolve_header_footer_field_widths(&mut cached, &layout, &config).unwrap();
+        let widths = &cached.variants[0].field_widths[0];
+        assert!(widths.per_page[0] > 0.0);
+        assert_eq!(widths.per_page[0], widths.fallback_width);
+
+        for fallback in [None, Some(String::new())] {
+            if let LayoutBlock::Paragraph(paragraph) = &mut cached.variants[0].measured[0].block {
+                let Run::Field(field) = &mut paragraph.runs[0] else {
+                    panic!("expected a field");
+                };
+                field.fallback = fallback;
+            }
+            resolve_header_footer_field_widths(&mut cached, &layout, &config).unwrap();
+            assert_eq!(cached.variants[0].field_widths[0].per_page[0], 0.0);
+        }
     }
 }
