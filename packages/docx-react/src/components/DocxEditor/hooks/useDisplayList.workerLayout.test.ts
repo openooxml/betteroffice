@@ -8,9 +8,11 @@ import { decodeFrameDelta, loadRustDisplayListQueryEngine } from '@betteroffice/
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
   preloadDocxEngine,
+  proposalSetIdentity,
   ResidentEngineWorkerClient,
   takePreloadedResidentEngineWorker,
   type ResidentEngineWorkerFrame,
+  type ResidentProposalReply,
   type YrsRenderEnv,
   type YrsSelection,
   type YrsSession,
@@ -20,6 +22,7 @@ import type {
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { markSupersededLayout } from '../internals/layoutProvenance';
+import { registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import { useRustDisplayList, type ResidentFrameApplyResult } from './useDisplayList';
 import { useLayoutPipeline, type UseLayoutPipelineOptions } from './useLayoutPipeline';
 
@@ -1412,6 +1415,88 @@ test('after a worker layout the host dropped, the next one paints the current te
     native.free();
   }
 });
+
+test.each([[false, false], [true, false], [true, true]])(
+  'a stale sync reply keeps the host path with worker-open=%s unless proposals are held=%s',
+  async (experimentalWorkerOpen, holding) => {
+    const { native, engine, layoutJson, frame } = setup();
+    const hook = renderHook(() => useRustDisplayList(
+      null, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      experimentalWorkerOpen
+    ));
+    try {
+      const first = hook.result.current.layoutInWorker(engine, REQUEST)!;
+      const worker = FakeWorker.last!;
+      worker.reply({
+        id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+        caret: { frameEpoch: 1, caretRect: null }, selection: null,
+        layoutRevision: 1, layoutJson,
+      });
+      expect(await first).not.toBeNull();
+      if (holding) {
+        const snapshot = { version: '1', previewVersion: 0, proposals: [] };
+        Object.assign(engine, { getProposals: () => snapshot, mirrorWorkerDocument: () => {} });
+        const reply: ResidentProposalReply = {
+          mirror: { version: snapshot.version, proposals: { previewVersion: 0, entries: [] } },
+          result: { ok: true, snapshot }, changedStories: [],
+          geometry: {
+            version: snapshot.version, previewVersion: 0,
+            proposals: proposalSetIdentity(snapshot), targets: {}, hidden: [],
+          },
+          updates: [], stateVector: new Uint8Array(),
+        };
+        const authority = registerWorkerProposalAuthority(engine, {
+          proposal: async () => reply,
+          documentRead: async () => { throw new Error('unexpected document read'); },
+          handOver: async () => { throw new Error('unexpected handover'); },
+        }, {
+          relayout: () => {}, current: () => true, laidOut: async () => {},
+          adopted: () => {}, handedOver: () => {}, contentChanged: () => {},
+        });
+        await authority.initialize();
+        await authority.setStates({
+          expectVersion: snapshot.version, expectPreviewVersion: 0, changes: [],
+        }, async () => { throw new Error('unexpected main-thread toggle'); });
+        expect(authority.holdsWorkerState()).toBe(true);
+      }
+      const older = hook.result.current.layoutInWorker(engine, REQUEST)!;
+      const olderRequest = worker.posted.at(-1)!;
+      const olderFrame = native.build_display_list_frame('{}', 0);
+      const newer = hook.result.current.layoutInWorker(engine, REQUEST)!;
+      const newerRequest = worker.posted.at(-1)!;
+      const newerFrame = native.build_display_list_frame('{}', 0);
+      expect(olderRequest.type).toBe('sync');
+      expect(newerRequest.type).toBe('sync');
+      worker.reply({
+        id: newerRequest.id, ok: true, frame: newerFrame.slice().buffer,
+        caret: { frameEpoch: 3, caretRect: null }, selection: null,
+        layoutRevision: 3, layoutJson,
+      });
+      const current = await newer;
+      expect(current?.layout.pages.length).toBeGreaterThan(0);
+      let stale!: Awaited<typeof older>;
+      await act(async () => {
+        worker.reply({
+          id: olderRequest.id, ok: true, frame: olderFrame.slice().buffer,
+          caret: { frameEpoch: 2, caretRect: null }, selection: null,
+          layoutRevision: 2, layoutJson, layoutProvisional: true,
+        });
+        stale = await older;
+      });
+      if (holding) expect(stale).toBeNull();
+      else {
+        expect(stale?.layout.pages.length).toBeGreaterThan(0);
+        expect(stale?.complete).toBeDefined();
+      }
+      expect(worker.posted.some((request) => request.type === 'completeLayout')).toBe(false);
+      expect(hook.result.current.error).toBeNull();
+      expect(worker.terminated).toBe(false);
+    } finally {
+      hook.unmount();
+      native.free();
+    }
+  }
+);
 
 test('a failed worker layout hands the pass back to the main thread', async () => {
   const { native, engine } = setup();
