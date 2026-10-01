@@ -1,0 +1,334 @@
+use docx_parse::document::DocumentBody;
+use docx_parse::s9::{S9ParseOptions, parse_docx_s9_wire};
+use docx_parse::serializer::{
+    S13SaveOptions, S13SaveRequest, SerializerContext, SerializerDeterminism, serialize_comments_part,
+    write_docx_s13,
+};
+use serde_json::json;
+use sha2::{Digest, Sha256};
+
+const RICH_COMMENT: &str = concat!(
+    "<w:comment w:author='Rich reviewer' w:id=\"0\" w:initials=\"R\">\n",
+    "  <w:p w14:paraId=\"10000001\"><w:hyperlink r:id=\"link\"><w:r><w:t>Linked</w:t></w:r></w:hyperlink>",
+    "<w:r><w:rPr><w:color w:val=\"CC0000\"/><w:u w:val=\"single\"/><w:sz w:val=\"28\"/>",
+    "<w:highlight w:val=\"yellow\"/></w:rPr><w:t> colorful</w:t></w:r></w:p>\n",
+    "  <w:p w14:paraId=\"10000002\"><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:t>Second</w:t></w:r></w:p>\n",
+    "  <w:tbl><w:tblGrid><w:gridCol w:w=\"2400\"/></w:tblGrid><w:tr><w:tc>",
+    "<w:p w14:paraId=\"10000003\"><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>\n",
+    "  <w:sdt><w:sdtPr><w:id w:val=\"7\"/></w:sdtPr><w:sdtContent>",
+    "<w:p w14:paraId=\"10000005\"><w:fldSimple w:instr=\" PAGE \"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>",
+    "</w:sdtContent></w:sdt>\n",
+    "  <w:p w14:paraId=\"10000006\"><w:r><w:pict xmlns:v=\"urn:schemas-microsoft-com:vml\">",
+    "<v:shape id=\"syntheticPicture\" style=\"width:1pt;height:1pt\"><v:imagedata r:id=\"picture\"/></v:shape>",
+    "</w:pict></w:r></w:p>\n",
+    "</w:comment>"
+);
+const PLAIN_COMMENT: &str = "<w:comment w:id=\"1\" w:author=\"Plain reviewer\"><w:p w14:paraId=\"10000004\"><w:r><w:t>Plain</w:t></w:r></w:p></w:comment>";
+const COMMENT_RELS: &str = concat!(
+    "<?xml version='1.0' encoding='UTF-8'?>\n",
+    "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\n",
+    "  <Relationship TargetMode='External' Target='https://example.com/synthetic' Id='link' ",
+    "Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink'/>\n",
+    "  <Relationship Id='picture' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/image' Target='media/pixel.png'/>\n",
+    "</Relationships>"
+);
+
+fn fixture() -> Vec<u8> {
+    let comments = format!(
+        "<?xml version='1.0' encoding='UTF-8'?>\n<w:comments xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\">\n{RICH_COMMENT}\n{PLAIN_COMMENT}\n</w:comments>"
+    );
+    ooxml_opc::rezip_parts(&[
+        (
+            "[Content_Types].xml".to_owned(),
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>"#.to_vec(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="office" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+        ),
+        (
+            "word/_rels/document.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="comments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/></Relationships>"#.to_vec(),
+        ),
+        (
+            "word/document.xml".to_owned(),
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="00000001"><w:r><w:t>Synthetic body</w:t></w:r></w:p><w:sectPr/></w:body></w:document>"#.to_vec(),
+        ),
+        ("word/comments.xml".to_owned(), comments.into_bytes()),
+        ("word/_rels/comments.xml.rels".to_owned(), COMMENT_RELS.as_bytes().to_vec()),
+        (
+            "word/media/pixel.png".to_owned(),
+            base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+            )
+            .unwrap(),
+        ),
+    ])
+    .unwrap()
+}
+
+fn save_request(bytes: &[u8]) -> S13SaveRequest {
+    let package = parse_docx_s9_wire(bytes, S9ParseOptions::default())
+        .unwrap()
+        .document
+        .package;
+    let body = package.document;
+    S13SaveRequest {
+        determinism: SerializerDeterminism {
+            seed: format!("{:x}", Sha256::digest(bytes)),
+            now: "2026-01-01T00:00:00.000Z".to_owned(),
+        },
+        document: DocumentBody {
+            content: body.content,
+            sections: None,
+            final_section_properties: body.final_section_properties,
+            custom_root_bindings: body.custom_root_bindings,
+            comments: body.comments,
+        },
+        header_entries: Vec::new(),
+        footer_entries: Vec::new(),
+        footnotes: Vec::new(),
+        endnotes: Vec::new(),
+        footnote_separators: Vec::new(),
+        endnote_separators: Vec::new(),
+        relationship_entries: package.relationship_entries,
+        numbering: None,
+        options: S13SaveOptions {
+            update_modified_date: false,
+            modified_by: None,
+        },
+        selective: None,
+        paragraph_ids: None,
+    }
+}
+
+fn part(bytes: &[u8], name: &str) -> Vec<u8> {
+    ooxml_opc::unzip_parts(bytes)
+        .unwrap()
+        .into_iter()
+        .find(|(path, _)| path == name)
+        .unwrap()
+        .1
+}
+
+fn assert_rich_comment(bytes: &[u8]) {
+    let xml = String::from_utf8(part(bytes, "word/comments.xml")).unwrap();
+    let start = xml.find("<w:comment w:author='Rich reviewer'").unwrap();
+    let end = start + xml[start..].find("</w:comment>").unwrap() + "</w:comment>".len();
+    assert_eq!(&xml.as_bytes()[start..end], RICH_COMMENT.as_bytes());
+    assert_eq!(
+        part(bytes, "word/_rels/comments.xml.rels"),
+        COMMENT_RELS.as_bytes()
+    );
+}
+
+fn assert_plain_comment(bytes: &[u8]) {
+    let xml = String::from_utf8(part(bytes, "word/comments.xml")).unwrap();
+    let start = xml.find("<w:comment w:id=\"1\"").unwrap();
+    let end = start + xml[start..].find("</w:comment>").unwrap() + "</w:comment>".len();
+    assert_eq!(&xml.as_bytes()[start..end], PLAIN_COMMENT.as_bytes());
+}
+
+#[test]
+fn parse_serialize_preserves_rich_comment_xml_and_relationship_bytes() {
+    let source = fixture();
+    let saved = write_docx_s13(save_request(&source), &source).unwrap();
+    assert_rich_comment(&saved);
+    assert_eq!(
+        part(&saved, "word/comments.xml"),
+        part(&source, "word/comments.xml")
+    );
+    assert_eq!(
+        part(&saved, "word/media/pixel.png"),
+        part(&source, "word/media/pixel.png")
+    );
+}
+
+#[test]
+fn editing_a_plain_comment_preserves_the_other_comments_xml() {
+    let source = fixture();
+    let mut request = save_request(&source);
+    let comment = &mut request.document.comments.as_mut().unwrap()[1];
+    comment.content[0].content = vec![
+        serde_json::from_value(json!({
+            "type": "run", "content": [{ "type": "text", "text": "Edited plain comment" }]
+        }))
+        .unwrap(),
+    ];
+    let saved = write_docx_s13(request, &source).unwrap();
+    assert_rich_comment(&saved);
+    let xml = String::from_utf8(part(&saved, "word/comments.xml")).unwrap();
+    assert!(xml.contains("<w:t>Edited plain comment</w:t>"));
+    assert!(!xml.contains("<w:t>Plain</w:t>"));
+}
+
+#[test]
+fn deleting_a_plain_comment_preserves_the_other_comments_xml() {
+    let source = fixture();
+    let mut request = save_request(&source);
+    request.document.comments.as_mut().unwrap().remove(1);
+    let saved = write_docx_s13(request, &source).unwrap();
+    assert_rich_comment(&saved);
+    assert!(
+        !String::from_utf8(part(&saved, "word/comments.xml"))
+            .unwrap()
+            .contains("w:id=\"1\"")
+    );
+}
+
+#[test]
+fn resolving_a_rich_comment_preserves_its_xml() {
+    let source = fixture();
+    let mut request = save_request(&source);
+    request.document.comments.as_mut().unwrap()[0].done = Some(true);
+    let saved = write_docx_s13(request, &source).unwrap();
+    assert_rich_comment(&saved);
+    assert_eq!(save_request(&saved).document.comments.unwrap()[0].done, Some(true));
+}
+
+#[test]
+fn adding_a_comment_preserves_both_source_comments() {
+    let source = fixture();
+    let mut request = save_request(&source);
+    request.document.comments.as_mut().unwrap().push(
+        serde_json::from_value(json!({
+            "id": 2, "author": "New reviewer", "content": [{
+                "type": "paragraph", "content": [{
+                    "type": "run", "content": [{ "type": "text", "text": "Added comment" }]
+                }]
+            }]
+        }))
+        .unwrap(),
+    );
+    let saved = write_docx_s13(request, &source).unwrap();
+    assert_rich_comment(&saved);
+    let xml = String::from_utf8(part(&saved, "word/comments.xml")).unwrap();
+    assert!(xml.contains(PLAIN_COMMENT));
+    assert!(xml.contains("<w:t>Added comment</w:t>"));
+}
+
+fn without_rich_paragraph_ids(xml: &str) -> String {
+    let mut xml = xml.to_owned();
+    for id in ["10000001", "10000002", "10000003", "10000005", "10000006"] {
+        xml = xml.replace(&format!(" w14:paraId=\"{id}\""), "");
+    }
+    xml
+}
+
+fn fixture_without_rich_paragraph_ids() -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&fixture()).unwrap();
+    let (_, bytes) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "word/comments.xml")
+        .unwrap();
+    *bytes = without_rich_paragraph_ids(std::str::from_utf8(bytes).unwrap()).into_bytes();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn comments_without_paragraph_ids_keep_their_source_bytes() {
+    let source = fixture_without_rich_paragraph_ids();
+    let saved = write_docx_s13(save_request(&source), &source).unwrap();
+    assert_eq!(
+        part(&saved, "word/comments.xml"),
+        part(&source, "word/comments.xml")
+    );
+}
+
+#[test]
+fn resolving_a_comment_without_source_ids_preserves_the_other_comments_xml() {
+    let source = fixture_without_rich_paragraph_ids();
+    let mut request = save_request(&source);
+    let comment = &mut request.document.comments.as_mut().unwrap()[0];
+    comment.done = Some(true);
+    comment.parent_id = Some(1.0);
+    let saved = write_docx_s13(request, &source).unwrap();
+    assert_plain_comment(&saved);
+    let comments = save_request(&saved).document.comments.unwrap();
+    let comment = comments.iter().find(|comment| comment.id == 0.0).unwrap();
+    assert_eq!(comment.done, Some(true));
+    assert_eq!(comment.parent_id, Some(1.0));
+    let extended = String::from_utf8(part(&saved, "word/commentsExtended.xml")).unwrap();
+    assert!(extended.contains(&format!(
+        "<w15:commentEx w15:paraId=\"{}\" w15:done=\"1\" w15:paraIdParent=\"10000004\" />",
+        comment.para_id.as_deref().unwrap()
+    )));
+}
+
+#[test]
+fn resolving_a_plain_comment_without_source_ids_keeps_legacy_behavior() {
+    let mut parts = ooxml_opc::unzip_parts(&fixture_without_rich_paragraph_ids()).unwrap();
+    let (_, bytes) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "word/comments.xml")
+        .unwrap();
+    *bytes = std::str::from_utf8(bytes)
+        .unwrap()
+        .replace(" w14:paraId=\"10000004\"", "")
+        .into_bytes();
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut request = save_request(&source);
+    request.document.comments.as_mut().unwrap()[1].done = Some(true);
+    let saved = write_docx_s13(request, &source).unwrap();
+    let xml = String::from_utf8(part(&saved, "word/comments.xml")).unwrap();
+    assert!(xml.contains(&without_rich_paragraph_ids(RICH_COMMENT)));
+    assert_eq!(save_request(&saved).document.comments.unwrap()[1].done, Some(true));
+}
+
+#[test]
+fn conflicting_inline_metadata_preserves_the_other_comments_xml() {
+    let mut parts = ooxml_opc::unzip_parts(&fixture()).unwrap();
+    let (_, bytes) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "word/comments.xml")
+        .unwrap();
+    *bytes = std::str::from_utf8(bytes)
+        .unwrap()
+        .replace(
+            "<w:comment w:author='Rich reviewer'",
+            "<w:comment w:done='1' w:parentId='1' w:author='Rich reviewer'",
+        )
+        .into_bytes();
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut request = save_request(&source);
+    let comment = &mut request.document.comments.as_mut().unwrap()[0];
+    comment.done = Some(false);
+    comment.parent_id = None;
+    let saved = write_docx_s13(request, &source).unwrap();
+    assert_plain_comment(&saved);
+    let xml = String::from_utf8(part(&saved, "word/comments.xml")).unwrap();
+    assert!(!xml.contains("w:done="));
+    assert!(!xml.contains("w:parentId="));
+    let comments = save_request(&saved).document.comments.unwrap();
+    let comment = comments.iter().find(|comment| comment.id == 0.0).unwrap();
+    assert_ne!(comment.done, Some(true));
+    assert_eq!(comment.parent_id, None);
+    let extended = String::from_utf8(part(&saved, "word/commentsExtended.xml")).unwrap();
+    assert!(extended.contains(&format!(
+        "<w15:commentEx w15:paraId=\"{}\" w15:done=\"0\" />",
+        comment.para_id.as_deref().unwrap()
+    )));
+}
+
+#[test]
+fn duplicate_source_comment_ids_fall_back_to_the_plain_writer() {
+    let source = fixture();
+    let request = save_request(&source);
+    let expected = serialize_comments_part(
+        request.document.comments.as_ref().unwrap(),
+        &mut SerializerContext::new(&request.determinism).unwrap(),
+    );
+    let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+    let (_, bytes) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "word/comments.xml")
+        .unwrap();
+    *bytes = std::str::from_utf8(bytes)
+        .unwrap()
+        .replace(PLAIN_COMMENT, &PLAIN_COMMENT.replace("w:id=\"1\"", "w:id=\"0\""))
+        .into_bytes();
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    let saved = write_docx_s13(request, &source).unwrap();
+    assert_eq!(part(&saved, "word/comments.xml"), expected.as_bytes());
+}

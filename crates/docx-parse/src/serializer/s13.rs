@@ -387,7 +387,12 @@ pub fn write_docx_s13_parts(
             }
             context.reserve_paragraph_ids(reserved);
         }
-        serialize_comment_parts(&request.document, &mut package, &mut context);
+        serialize_comment_parts(
+            &request.document,
+            &mut package,
+            &mut context,
+            &request.determinism.seed,
+        );
     }
 
     if request.selective.is_none() {
@@ -884,6 +889,7 @@ fn serialize_comment_parts(
     document: &DocumentBody,
     package: &mut Package,
     context: &mut SerializerContext,
+    seed: &str,
 ) {
     let Some(comments) = document
         .comments
@@ -892,7 +898,21 @@ fn serialize_comment_parts(
     else {
         return;
     };
-    let (comments_xml, infos) = serialize_comments_with_info(comments, context);
+    let (mut comments_xml, mut infos) = serialize_comments_with_info(comments, context);
+    if let Some(source) = package.original_bytes(COMMENTS_PART) {
+        let original_infos = infos.clone();
+        match super::comment_splice::splice_comments(
+            source,
+            package.original,
+            seed,
+            comments,
+            &comments_xml,
+            &mut infos,
+        ) {
+            Ok(spliced) => comments_xml = spliced,
+            Err(_) => infos = original_infos,
+        }
+    }
     package.set_text("word/comments.xml", comments_xml);
 
     let companions = [
