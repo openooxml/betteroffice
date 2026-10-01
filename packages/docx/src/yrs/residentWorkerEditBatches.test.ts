@@ -130,6 +130,41 @@ test('host batches drain worker input, invalidate the worker once and never adop
   expect((stale as FrameDeltaError).code).toBe('stale-frame');
 });
 
+test('a worker update reports the version it produced, before an update listener edits', async () => {
+  const main = await createYrsSession({ clientId: 5113 });
+  sessions.push(main);
+  const { paraId } = main.createStory('body', 'Seed');
+  main.registerFont(new Uint8Array(readFileSync(FONT)));
+  main.layoutDocumentWithRegionsJson(LAYOUT);
+  main.setSelection({ story: 'body', paraId, offset: 4 });
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  const booted = await client.bootstrap(main.residentWorkerSnapshot()!, '{}');
+  const epoch = decodeFrameDelta(booted.frame).frameEpoch;
+  const typed = await client.applyInput('!', main.selection()!, epoch);
+  if (!typed.applied) throw new Error('the worker refused resident input');
+  expect(typed.updates).toHaveLength(1);
+
+  let seen: string | null = null;
+  const stop = main.onUpdate(() => {
+    if (seen !== null) return;
+    seen = main.version();
+    expect(main.applyEdits({
+      expectVersion: seen,
+      steps: [{
+        op: 'replaceText',
+        target: { kind: 'search', text: 'Seed', within: { kind: 'paragraph', story: 'body', paraId }, view: 'accepted' },
+        text: 'Edited',
+      }],
+    })).toMatchObject({ ok: true, applied: true });
+  });
+  const produced = main.applyLocalUpdate(typed.updates[0]!);
+  stop();
+  expect(produced).toBe(seen!);
+  expect(main.version()).not.toBe(produced);
+  expect(accepted(main)).toEqual(['Edited!']);
+});
+
 test('one resident delete request removes several characters and stops at the story start', async () => {
   const main = await createYrsSession({ clientId: 5102 });
   sessions.push(main);
@@ -255,6 +290,65 @@ test('a resident delete does not merge a paragraph forward over a table', async 
   ).toEqual({ applied: false });
   expect(accepted(main)).toEqual(before);
   expect(client.isReady()).toBe(true);
+});
+
+test('input during completion paints first, inserts once and undoes in one step', async () => {
+  const main = await createYrsSession({ clientId: 5112 });
+  sessions.push(main);
+  const filler = 'lorem ipsum dolor sit amet '.repeat(8);
+  const paragraphs = Array.from({ length: 240 }, (_, index) => ({
+    text: index === 0 ? 'Seed' : `${index} ${filler}`,
+  }));
+  const ids = main.loadStories([{ storyId: 'body', paragraphs }]).body!;
+  main.registerFont(new Uint8Array(readFileSync(FONT)));
+  main.adoptResidentWorkerLayout!(LAYOUT);
+  main.setSelection({ story: 'body', paraId: ids[0]!, offset: paragraphs[0]!.text.length });
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  const booted = await client.bootstrap(main.residentWorkerSnapshot()!, '', {
+    layoutExtras: '{}', provisionalPages: 1, displayWindow: [0, 1],
+  });
+  expect(booted.layoutProvisional).toBe(true);
+  let frame = applyFrameDeltaOwned(null, decodeFrameDelta(booted.frame));
+  const order: string[] = [];
+  const completion = client.completeLayout(frame.frameEpoch, false, 1).then((reply) => {
+    order.push('complete');
+    return reply;
+  });
+  const typed = await client.applyInput(
+    ' typed', main.selection()!, frame.frameEpoch, false, false, [0, 1]
+  ).then((reply) => {
+    order.push('input');
+    return reply;
+  });
+  if (!typed.applied) throw new Error('the worker refused provisional input');
+  expect(order).toEqual(['input']);
+  expect(typed.layoutJson).toBeUndefined();
+  expect(typed.layoutProvisional).toBe(true);
+  expect(typed.selection?.head).toMatchObject({ offset: paragraphs[0]!.text.length + 6 });
+  expect(typed.caret.caretRect).not.toBeNull();
+  frame = applyFrameDeltaOwned(frame, decodeFrameDelta(typed.frame));
+  expect(frameText(frame)).toContain(`${paragraphs[0]!.text} typed`);
+  for (const update of typed.updates) main.applyLocalUpdate(update);
+
+  const completed = await completion;
+  if (!completed?.layoutJson) throw new Error('the worker omitted the completed layout');
+  expect(order).toEqual(['input', 'complete']);
+  const full = JSON.parse(completed.layoutJson) as { layout: { pages: unknown[] }; provisional?: boolean };
+  expect(full.provisional).not.toBe(true);
+  expect(full.layout.pages.length).toBeGreaterThan(3);
+  expect(full).toEqual(JSON.parse(main.layoutDocumentWithRegionsRetainedJson(LAYOUT)));
+  frame = applyFrameDeltaOwned(frame, decodeFrameDelta(completed.frame));
+  expect(frame.displayList.pages.length).toBe(full.layout.pages.length);
+  const read = await client.documentRead({ kind: 'readParagraphs', request: { view: 'accepted' } });
+  expect(read.value).toMatchObject({
+    ok: true,
+    paragraphs: paragraphs.map(({ text }, index) => ({ text: index === 0 ? `${text} typed` : text })),
+  });
+  expect(accepted(main)[0]).toBe(`${paragraphs[0]!.text} typed`);
+  expect(main.undo()).toBe(true);
+  expect(accepted(main)).toEqual(paragraphs.map(({ text }) => text));
+  expect(main.undo()).toBe(false);
 });
 
 test('the worker lays a host batch out exactly as the main thread does', async () => {
@@ -392,6 +486,7 @@ test('worker registry operations match a direct registry and hand their records 
   expect(client.remoteStateVector()).toEqual(main.encodeStateVector());
   expect(applied.geometry.version).toBe(applied.mirror.version);
   expect(applied.geometry.previewVersion).toBe(0);
+  expect(applied.geometry.navigationTargets).toBeUndefined();
 
   const compareTexts = async () => {
     const fresh = await createYrsSession({ clientId: 5200 + sessions.length });
@@ -433,6 +528,14 @@ test('worker registry operations match a direct registry and hand their records 
   expect(decided.geometry.previewVersion).toBe(1);
   expect(decided.updates).toEqual([]);
   expect(decided.changedStories).toEqual([]);
+  for (const { id, paragraph } of applied.result.snapshot.proposals) {
+    expect(decided.geometry.navigationTargets?.[id]).toEqual(
+      resolveNavigationTarget(main, paragraph.story, paragraph.paraId)
+    );
+    expect(await client.documentRead({
+      kind: 'navigationTarget', story: paragraph.story, paraId: paragraph.paraId,
+    })).toEqual({ version: decided.mirror.version, value: decided.geometry.navigationTargets![id]! });
+  }
   await compareTexts();
 
   const withdrawn = await client.proposal({
@@ -444,6 +547,7 @@ test('worker registry operations match a direct registry and hand their records 
     proposalResultWithoutVersion(directWithdrawal)
   );
   expect(withdrawn.changedStories).toEqual(['body']);
+  expect(withdrawn.geometry.navigationTargets).toBeUndefined();
   expect(withdrawn.updates.length).toBeGreaterThan(0);
   fresh = await compareTexts();
   expect(paragraphTexts(fresh, 'original')).toEqual(['First', 'Beta', 'Gamma']);
@@ -503,6 +607,10 @@ test('worker registry operations match a direct registry and hand their records 
     version: retried.mirror.version,
     value: resolveNavigationTarget(main, paragraph.story, paragraph.paraId),
   });
+  expect(await client.documentRead({
+    kind: 'navigationTarget', story: paragraph.story, paraId: paragraph.paraId,
+  })).toEqual(navigation);
+  expect(retried.geometry.navigationTargets?.p1).toEqual(navigation.value);
 
   const handoff = await client.handOver();
   expect(handoff.version).toBe(retried.mirror.version);

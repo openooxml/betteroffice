@@ -12,6 +12,11 @@ import { version as packageVersion } from '../package.json';
 export const VERSION: string = packageVersion;
 
 export { preloadDocxEngine } from '@betteroffice/docx/yrs';
+export type {
+  DocxParagraphAnchor,
+  DocxParagraphAnchorResult,
+  DocxParagraphIdentitySnapshot,
+} from '@betteroffice/docx/yrs';
 
 // Main editor contract
 export {
@@ -21,6 +26,7 @@ export {
   type DocxEditorCollaborationOptions,
   type EditorMode,
 } from './components/DocxEditor';
+export { DocxReplicaNotReadyError } from './components/DocxEditor/hooks/useDocxEditorRefApi';
 
 // Commands: one authority for built-in and host chrome
 export { DocxCommandProvider, type DocxCommandProviderProps } from './commands/DocxCommandProvider';

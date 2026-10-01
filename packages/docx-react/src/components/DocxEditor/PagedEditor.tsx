@@ -413,6 +413,8 @@ export interface PagedEditorRef {
     dirtyStories?: readonly string[],
     options?: { inWorker?: boolean }
   ): boolean;
+  /** Schedules layout of the resident worker document. */
+  refreshWorkerLayout(): void;
   /** Apply a body-toolbar command through yrs. */
   applyYrsFormatting(action: FormattingAction): boolean;
   /** Apply a non-toolbar body command through yrs. */
@@ -826,6 +828,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         scheduleLayout(origin, inWorker);
       },
       [scheduleLayout, syncCoordinator]
+    );
+
+    const refreshWorkerLayout = useCallback(
+      () => refreshYrsLayout('remote', true),
+      [refreshYrsLayout]
     );
 
     /**
@@ -1800,7 +1807,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // source. The mirror speaks the same data-doc-* semantics
     // contract, so third-party plugins keep resolving geometry unchanged.
     useEffect(() => {
-      if (!yrsCore.replicaReady || !displayListQueries || !onRenderedDomContextReady) return;
+      if (
+        (!yrsCore.replicaReady && !yrsCore.workerProposalsReady) ||
+        !displayListQueries ||
+        !onRenderedDomContextReady
+      ) return;
       let cancelled = false;
       let hostRaf: number | null = null;
       const emit = (): void => {
@@ -1823,7 +1834,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         cancelled = true;
         if (hostRaf !== null) cancelAnimationFrame(hostRaf);
       };
-    }, [displayListQueries, onRenderedDomContextReady, canvasHostRef, zoom, yrsCore.replicaReady]);
+    }, [
+      displayListQueries, onRenderedDomContextReady, canvasHostRef, zoom,
+      yrsCore.replicaReady, yrsCore.workerProposalsReady,
+    ]);
 
     // Re-layout triggers: web-font load complete + header/footer content + render-env changes.
     useLayoutTriggers({
@@ -1860,6 +1874,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       documentFromYrs: yrsCore.documentFromYrs,
       yrsSession: yrsCore.session,
       replicaReady: yrsCore.replicaReady,
+      refreshWorkerLayout,
       experimentalWorkerOpen: yrsCore.experimentalWorkerOpen,
       yrsLocToDisplayPosition,
       syncYrsInputState: (docChanged, dirtyStory, options) =>

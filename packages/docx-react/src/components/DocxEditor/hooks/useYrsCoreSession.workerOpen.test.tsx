@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
@@ -9,6 +9,7 @@ import {
   createYrsSession,
   preloadResidentEngineWorker,
   ResidentWorkerOutOfMemoryError,
+  proposalRevisionPreview,
   type YrsDocxHost,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
@@ -16,21 +17,22 @@ import {
   residentWorkerFactory,
   type InProcessResidentWorker,
 } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
-import type { ResidentEngineWorkerRequest } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
+import type { ResidentEngineWorkerRequest, ResidentEngineWorkerResponse } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { LayoutSelectionGate } from '@betteroffice/docx/layout';
 import { useCanvasRenderer, type OpenInWorker } from './useDisplayList';
 import { useLayoutPipeline } from './useLayoutPipeline';
 import type { DocxHostSearch } from './useHostSearch';
 import { useYrsCoreSession } from './useYrsCoreSession';
 import type { DocxEditorCollaborationOptions } from '../types';
-import { awaitWorkerOpenReplica, ensureWorkerOpenReplica } from '../internals/workerOpenReplica';
-import { sourceVersionOf } from '../internals/layoutProvenance';
+import { awaitWorkerOpenReplica, ensureWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
+import { isLayoutQueued, revisionPreviewKey, revisionPreviewKeyOf, sourceVersionOf } from '../internals/layoutProvenance';
 import * as replicaHelpers from '../internals/workerOpenReplica';
+import { registeredWorkerProposalAuthority, workerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { DocxEditorRef } from '../../DocxEditor';
 import type { PagedEditorRef } from '../PagedEditor';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
 import { createCommentIdAllocator } from '../commentFactories';
-import { useDocxEditorRefApi } from './useDocxEditorRefApi';
+import { DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
 import { usePagedEditorCommandBridge, type PagedEditorCommandBridge } from './usePagedEditorRefApi';
 import { YrsInput, type YrsInputRef } from '../YrsInput';
 
@@ -89,36 +91,83 @@ afterAll(async () => {
 function installWorker(options: {
   failOpen?: boolean;
   failState?: boolean;
+  failProposal?: boolean;
+  crashProposalOnce?: boolean;
+  /** Fails the replacement worker's first snapshot once this settles. */
+  failReplacementSnapshot?: Promise<void>;
   holdState?: boolean;
   holdOpen?: boolean;
-  oomStage?: 'open' | 'fontRequirements' | 'bootstrap' | 'encodeState';
+  oomStage?: 'open' | 'fontRequirements' | 'bootstrap' | 'encodeState' | 'proposal' |
+    'documentRead';
   holdRetryOpen?: boolean;
   revisionCount?: number;
   failRevisionCount?: boolean;
   onRevisionCount?: () => void;
+  holdBootstrap?: boolean;
+  holdSync?: boolean;
   holdCompletion?: boolean;
+  holdReply?: (request: ResidentEngineWorkerRequest) => boolean;
 } = {}) {
   const workers: InProcessResidentWorker[] = [];
   const posted: ResidentEngineWorkerRequest[] = [];
+  const replies = new Map<number, () => void>();
+  const received = new Set<ResidentEngineWorkerRequest>();
+  const replyWaiters = new Set<() => void>();
+  let proposalCrashed = false;
+  let snapshotFailed = false;
   globalThis.Worker = class {
     constructor() {
       const worker = startWorker();
+      let onmessage: typeof worker.onmessage = null;
+      if (options.holdReply) Object.defineProperty(worker, 'onmessage', {
+        get: () => {
+          const listener = onmessage;
+          return (event: MessageEvent<ResidentEngineWorkerResponse>) => {
+            const request = posted.find((request) => request.id === event.data.id);
+            const deliver = () => listener?.(event);
+            if (request && options.holdReply?.(request)) replies.set(request.id, deliver);
+            else deliver();
+            if (request) received.add(request);
+            for (const waiter of replyWaiters) waiter();
+          };
+        },
+        set: (listener: typeof worker.onmessage) => { onmessage = listener; },
+      });
       const send = worker.postMessage.bind(worker);
       worker.postMessage = (request, transfer) => {
         posted.push(request);
         if ((options.holdState && request.type === 'encodeState') ||
             (options.holdOpen && request.type === 'open') ||
+            (options.holdBootstrap && request.type === 'bootstrap') ||
+            (options.holdSync && request.type === 'sync') ||
             (options.holdRetryOpen && workers.length > 1 && request.type === 'open') ||
             (options.holdCompletion && request.type === 'completeLayout')) worker.hold();
         if (options.oomStage === request.type &&
-            (request.type !== 'encodeState' || workers.length === 1)) {
+            (!['encodeState', 'proposal', 'documentRead'].includes(request.type) ||
+              workers.length === 1)) {
           queueMicrotask(() => worker.onmessage?.({
             data: { id: request.id, ok: false, error: 'worker exhausted memory', terminal: true, outOfMemory: true },
+          } as MessageEvent));
+        } else if (options.crashProposalOnce && !proposalCrashed &&
+            request.type === 'proposal' && request.operation.kind === 'propose') {
+          proposalCrashed = true;
+          queueMicrotask(() => worker.onmessage?.({
+            data: { id: request.id, ok: false, error: 'proposal crashed', terminal: true },
+          } as MessageEvent));
+        } else if (options.failReplacementSnapshot && !snapshotFailed && workers.indexOf(worker) > 0 &&
+            request.type === 'proposal' && request.operation.kind === 'snapshot') {
+          snapshotFailed = true;
+          void options.failReplacementSnapshot.then(() => worker.onmessage?.({
+            data: { id: request.id, ok: false, error: 'snapshot failed' },
           } as MessageEvent));
         } else if ((options.failOpen && request.type === 'open') ||
             (options.failState && request.type === 'encodeState')) {
           queueMicrotask(() => worker.onmessage?.({
             data: { id: request.id, ok: false, error: 'open failed', terminal: true },
+          } as MessageEvent));
+        } else if (options.failProposal && request.type === 'proposal' && request.operation.kind === 'propose') {
+          queueMicrotask(() => worker.onmessage?.({
+            data: { id: request.id, ok: false, error: 'proposal failed' },
           } as MessageEvent));
         } else if (request.type === 'revisionCount') {
           options.onRevisionCount?.();
@@ -133,7 +182,27 @@ function installWorker(options: {
       return worker;
     }
   } as unknown as typeof Worker;
-  return { workers, posted };
+  return {
+    workers, posted, replies,
+    received(type: ResidentEngineWorkerRequest['type'], afterId = 0): Promise<ResidentEngineWorkerRequest> {
+      return new Promise((resolve) => {
+        const check = () => {
+          const request = [...received].find((request) => request.type === type && request.id > afterId);
+          if (!request) return;
+          replyWaiters.delete(check);
+          resolve(request);
+        };
+        replyWaiters.add(check);
+        check();
+      });
+    },
+    reply(request: ResidentEngineWorkerRequest) {
+      const deliver = replies.get(request.id);
+      if (!deliver) throw new Error(`No held reply for ${request.type} ${request.id}`);
+      replies.delete(request.id);
+      deliver();
+    },
+  };
 }
 
 interface HarnessProps {
@@ -145,7 +214,14 @@ interface HarnessProps {
   generation: number;
   collaboration?: DocxEditorCollaborationOptions;
   readOnly?: boolean;
+  workerProposals?: boolean;
+  onWorkerRevisions?: () => void;
+  onWorkerContentChange?: () => void;
+  allowHostProposals?: boolean;
   resolvedCommentIds?: ReadonlySet<number>;
+  measurementFont?: Uint8Array;
+  onHostDocument?: (session: YrsSession) => void;
+  onPresented?: (session: unknown) => void;
   /** Asks for the replica as soon as the session exists, as DocxEditor does for plugins, sidebars or the outline. */
   wanted?: boolean;
   /** Passes the renderer's own pending completion, as DocxEditor does. */
@@ -156,6 +232,7 @@ interface HarnessProps {
 
 function useHarness(props: HarnessProps) {
   const relayout = useRef<(() => void) | null>(null);
+  const workerRelayout = useRef<(() => void) | null>(null);
   const handoffFromRef = useRef<YrsSession | null>(null);
   const renderer = useCanvasRenderer(
     undefined,
@@ -169,6 +246,12 @@ function useHarness(props: HarnessProps) {
   const [host, setHost] = useState<YrsDocxHost | null>(null);
   const mainOpens = useRef<boolean[]>([]);
   const errors = useRef<Error[]>([]);
+  const notifiedErrors = useRef(new WeakSet<Error>());
+  const notifyError = useCallback((error: Error) => {
+    if (notifiedErrors.current.has(error)) return;
+    notifiedErrors.current.add(error);
+    errors.current.push(error);
+  }, []);
   const loadChecks = useRef<number[]>([]);
   const openInWorker = useCallback<OpenInWorker>((session, source, digest, generation) => {
     return (props.openInWorker ?? renderer.openInWorker)(session, source, digest, generation);
@@ -188,8 +271,11 @@ function useHarness(props: HarnessProps) {
           return open(input, seed, options);
         };
       },
-      onHostDocument: setHost,
-      onError: (error) => errors.current.push(error),
+      onHostDocument: (host, _generation, session) => {
+        setHost(host);
+        props.onHostDocument?.(session);
+      },
+      onError: notifyError,
     },
     {
       previewFirstPage: props.previewFirstPage,
@@ -197,13 +283,27 @@ function useHarness(props: HarnessProps) {
       shownEngine: renderer.presentedEngine,
       workerOpen: props.experimentalWorkerOpen ? {
         openInWorker,
+        workerProposals: props.workerProposals,
+        refreshWorkerLayout: () => workerRelayout.current?.(),
         renderedFrame: renderer.status === 'ready' ? renderer.displayList : null,
         ...(props.holdReplica ? { pendingCompletion: renderer.presentedEngine } : {}),
         ...(props.followCompletion ? { pendingCompletion: renderer.pendingCompletion } : {}),
         hydrateOnDemand: props.hydrateOnDemand,
+        onWorkerRevisions: props.onWorkerRevisions,
+        onWorkerContentChange: props.onWorkerContentChange,
       } : undefined,
     }
   );
+  useEffect(() => {
+    const error = renderer.error;
+    const owner = renderer.errorEngine;
+    if (!error || (props.experimentalWorkerOpen && owner && owner !== core.session &&
+      (owner as YrsSession).isDisplayOnly?.() !== true)) return;
+    if (!core.failOpening(error, owner ?? undefined)) notifyError(error);
+  }, [core.failOpening, core.session, notifyError, props.experimentalWorkerOpen, renderer.error, renderer.errorEngine]);
+  useEffect(() => {
+    if (renderer.status === 'ready') props.onPresented?.(renderer.presentedEngine);
+  }, [props.onPresented, renderer.presentedEngine, renderer.status]);
   handoffFromRef.current = core.handoffFrom;
   const replicaPending = Boolean(core.hydrateOnDemand && core.session && !core.replicaReady);
   useEffect(() => {
@@ -211,7 +311,7 @@ function useHarness(props: HarnessProps) {
   }, [core, props.wanted, replicaPending]);
   const syncCoordinator = useRef(new LayoutSelectionGate());
   const element = useRef<HTMLDivElement | null>(null);
-  const registeredFont = useRef<{ session: YrsSession; id: number } | null>(null);
+  const registeredFont = useRef<{ session: YrsSession; bytes: Uint8Array; id: number } | null>(null);
   const pipeline = useLayoutPipeline({
     document: host?.document ?? null,
     session: core.session,
@@ -221,8 +321,9 @@ function useHarness(props: HarnessProps) {
     residentMeasurementConfig: (requirements) => {
       const session = core.session;
       if (!session) return null;
-      if (registeredFont.current?.session !== session) {
-        registeredFont.current = { session, id: session.registerFont(font) };
+      const fontBytes = props.measurementFont ?? font;
+      if (registeredFont.current?.session !== session || registeredFont.current.bytes !== fontBytes) {
+        registeredFont.current = { session, bytes: fontBytes, id: session.registerFont(fontBytes) };
       }
       const id = registeredFont.current.id;
       return {
@@ -242,10 +343,11 @@ function useHarness(props: HarnessProps) {
     experimentalWorkerOpen: props.experimentalWorkerOpen,
     fontRequirementsInWorker: props.experimentalWorkerOpen ? renderer.fontRequirementsInWorker : undefined,
     onError: (error, session) => {
-      if (!core.failOpening(error, session)) errors.current.push(error);
+      if (!core.failOpening(error, session)) notifyError(error);
     },
   });
   relayout.current = pipeline.runLayoutPipeline;
+  workerRelayout.current = () => pipeline.scheduleLayout('remote', true);
   useEffect(() => {
     if (props.readOnly && core.session) relayout.current?.();
   }, [props.readOnly, core.session]);
@@ -254,7 +356,9 @@ function useHarness(props: HarnessProps) {
     getYrsSession: () => core.session,
     getDocument: core.documentFromYrs,
     flushPendingInput: async () => {},
-  } as PagedEditorRef : null;
+    syncYrsInputState: () => true,
+    refreshWorkerLayout: () => workerRelayout.current?.(),
+  } as unknown as PagedEditorRef : null;
   const ref = useRef<DocxEditorRef>(null);
   useDocxEditorRefApi({
     experimentalWorkerOpen: props.experimentalWorkerOpen,
@@ -278,8 +382,9 @@ function useHarness(props: HarnessProps) {
     commentIdAllocator: createCommentIdAllocator(),
     commands: UNAVAILABLE_DOCX_COMMANDS,
     modeRef: { current: 'viewing' },
-    allowHostProposalsRef: { current: false },
+    allowHostProposalsRef: { current: props.allowHostProposals === true },
     hostSearch: {} as DocxHostSearch,
+    settledDisplayList: renderer.settledDisplayList,
   });
   const bridgeRef = useRef<PagedEditorCommandBridge | null>(null);
   const inputRef = useRef<YrsInputRef | null>(null);
@@ -861,7 +966,8 @@ test('failure of the accepted full session before its frame cancels deferred hyd
     expect(result.current.core.failOpening(new Error('late preview error'), preview)).toBe(false);
     act(() => { expect(result.current.core.failOpening(failure, full)).toBe(true); });
     const rejection = await pending.then(() => null, (error: unknown) => error);
-    expect(rejection).toMatchObject({ message: expect.stringContaining('document changed') });
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toContain('document changed');
     expect(replicaHelpers.workerOpenReplicaPending(full)).toBe(false);
     expect(destroyed).toHaveBeenCalledTimes(1);
     expect(result.current.core.session).toBeNull();
@@ -879,6 +985,66 @@ test('failure of the accepted full session before its frame cancels deferred hyd
     unmount();
   } finally {
     cleanup();
+    frames.restore();
+  }
+});
+
+test('a terminal worker failure before the accepted full frame tears down opening and notifies once', async () => {
+  const options: Parameters<typeof installWorker>[0] = { holdReply: () => false };
+  const { workers, posted, received } = installWorker(options);
+  const frames = holdFrames();
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  let acceptFull!: (session: YrsSession) => void;
+  const fullAccepted = new Promise<YrsSession>((resolve) => { acceptFull = resolve; });
+  let presentPreview!: () => void;
+  const previewPresented = new Promise<void>((resolve) => { presentPreview = resolve; });
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: {
+      ...initialProps, previewFirstPage: true, source: longBytes,
+      workerProposals: true, hydrateOnDemand: true,
+      onHostDocument: (session) => { if (!session.isDisplayOnly()) acceptFull(session); },
+      onPresented: (session) => { if ((session as YrsSession)?.isDisplayOnly()) presentPreview(); },
+    },
+  });
+  try {
+    await act(async () => { await received('open'); });
+    await act(async () => {});
+    expect(result.current.core.previewing).toBe(true);
+    const preview = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await act(async () => {});
+    await previewPresented;
+    await act(async () => {});
+    expect(result.current.renderer.presentedEngine).toBe(preview);
+    act(() => result.current.presentFrame());
+    await act(async () => frames.run());
+    await act(async () => frames.run());
+    await act(async () => { await fullAccepted; });
+    expect(result.current.core.previewing).toBe(false);
+    const full = result.current.core.session!;
+    expect(result.current.core.handoffFrom).toBe(preview);
+    const pending = awaitWorkerOpenReplica(full)!;
+    const rejected = pending.catch((error: unknown) => error);
+    options.oomStage = 'fontRequirements';
+    await act(async () => {
+      result.current.pipeline.runLayoutPipeline();
+      await received('fontRequirements');
+    });
+    await act(async () => { await rejected; });
+    expect(result.current.core.session).toBeNull();
+    expect(result.current.core.handoffFrom).toBeNull();
+    expect(result.current.core.opening).toBe(false);
+    expect(result.current.errors).toEqual([result.current.renderer.error!]);
+    expect(result.current.errors[0]).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    expect(result.current.errors).toHaveLength(1);
+    expect(workers).toHaveLength(2);
+    for (let frame = 0; frame < 5; frame += 1) await act(async () => frames.run());
+    expect(result.current.errors).toHaveLength(1);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+  } finally {
+    unmount();
+    errorLog.mockRestore();
     frames.restore();
   }
 });
@@ -1338,4 +1504,1304 @@ test('disabled worker open preserves main-thread open, projection and flush with
   } finally {
     for (const spy of spies) spy.mockRestore();
   }
+});
+
+const workerProposalProps: HarnessProps = {
+  ...initialProps,
+  source: longBytes,
+  readOnly: true,
+  hydrateOnDemand: true,
+  workerProposals: true,
+  allowHostProposals: true,
+};
+
+async function openWorkerProposals(props: HarnessProps = workerProposalProps) {
+  const harness = renderHook(useHarness, { initialProps: props });
+  await waitFor(() => expect(harness.result.current.core.workerProposalsReady).toBe(true));
+  await act(async () => {
+    await harness.result.current.ref.current!.whenLayoutComplete({ timeoutMs: 5000 });
+  });
+  return harness;
+}
+
+test.each(['A then B', 'B then A'])('Undo keeps worker proposals through font preflight replies %s', async (order) => {
+  let holdRequirements = false;
+  const { posted, replies, reply, received } = installWorker({
+    holdReply: (request) => holdRequirements && request.type === 'fontRequirements',
+  });
+  const frames = holdFrames();
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  const { result, rerender, unmount } = renderHook(useHarness, {
+    initialProps: { ...workerProposalProps, source: bytes },
+  });
+  let layoutHere: ReturnType<typeof spyOn> | undefined;
+  let ensureReplica: ReturnType<typeof spyOn> | undefined;
+  try {
+    await act(async () => { await received('open'); });
+    await act(async () => { await received('bootstrap'); });
+    await act(async () => { await received('proposal'); });
+    await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+    const api = result.current.ref.current!;
+    const session = result.current.core.session!;
+    layoutHere = spyOn(session, 'layoutDocumentWithRegionsRetainedJson');
+    ensureReplica = spyOn(replicaHelpers, 'ensureWorkerOpenReplica');
+    const identities = await api.getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
+    const initial = await api.getProposals();
+    await act(async () => {
+      expect(await api.proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'font-race-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Added text ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    const settle = async () => {
+      const previous = posted.filter((request) => request.type === 'sync').at(-1)?.id ?? 0;
+      await act(async () => { frames.run(); await received('sync', previous); });
+      await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+      expect(isLayoutQueued(session)).toBe(false);
+    };
+    const setState = async (state: 'accepted' | 'proposed' | 'rejected') => {
+      const snapshot = await api.getProposals();
+      await act(async () => {
+        expect(await api.setProposalStates({
+          expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion,
+          changes: [{ id: 'font-race-proposal', state }],
+        })).toMatchObject({ ok: true });
+      });
+      expect(session.getProposals().proposals[0]!.state).toBe(state);
+    };
+    const assertCurrent = async () => {
+      const preview = revisionPreviewKey(proposalRevisionPreview(session.getProposals()));
+      expect(sourceVersionOf(result.current.pipeline.layout)).toBe(session.version());
+      expect(revisionPreviewKeyOf(result.current.pipeline.layout)).toBe(preview);
+      expect(sourceVersionOf(result.current.renderer.queries)).toBe(session.version());
+      expect(revisionPreviewKeyOf(result.current.renderer.queries)).toBe(preview);
+      const authority = workerProposalAuthority(session)!;
+      expect(authority.holdsWorkerState()).toBe(true);
+      const geometry = authority.geometry()!;
+      expect(geometry.version).toBe(session.version());
+      expect(geometry.previewVersion).toBe(session.getProposals().previewVersion);
+      const geometryTarget = geometry.targets['font-race-proposal']!;
+      expect(geometryTarget).toMatchObject({ ok: true });
+      if (!geometryTarget.ok) throw new Error('proposal geometry unavailable');
+      expect(geometryTarget.ranges.length).toBeGreaterThan(0);
+      const queries = result.current.renderer.queries!;
+      const rects = geometryTarget.ranges.flatMap(({ from, to }) => queries.rangeRects(from, to));
+      expect(rects.length).toBeGreaterThan(0);
+      for (const rect of rects) {
+        expect(rect.width).toBeGreaterThan(0);
+        expect(rect.height).toBeGreaterThan(0);
+      }
+      const target = await authority.navigationTarget(paragraph.story, paragraph.paraId, () => {
+        throw new Error('unexpected main-thread navigation');
+      });
+      expect(target.version).toBe(session.version());
+      expect(target.target).toMatchObject({ loc: { story: paragraph.story, paraId: paragraph.paraId } });
+      if (!target.target || typeof target.target === 'string') throw new Error('proposal navigation unavailable');
+      expect(target.target.position).toBeGreaterThan(0);
+      expect(queries.caretRect(target.target.position)?.height).toBeGreaterThan(0);
+      expect(layoutHere).not.toHaveBeenCalled();
+      expect(ensureReplica).not.toHaveBeenCalled();
+      expect(result.current.renderer.error).toBeNull();
+      expect(result.current.errors).toEqual([]);
+      expect(errorLog).not.toHaveBeenCalled();
+      expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+      expect(result.current.mainOpens).toEqual([]);
+    };
+    await settle();
+    await setState('accepted');
+    await settle();
+    holdRequirements = true;
+    const previous = posted.filter((request) => request.type === 'fontRequirements').at(-1)!.id;
+    await setState('proposed');
+    let passA!: ResidentEngineWorkerRequest;
+    await act(async () => { frames.run(); passA = await received('fontRequirements', previous); });
+    expect(replies.has(passA.id)).toBe(true);
+    const loadedFont = new Uint8Array(readFileSync(resolve(
+      import.meta.dir, '../../../../../../crates/docx-raster/tests/assets/Carlito-Regular.ttf'
+    )));
+    rerender({ ...workerProposalProps, source: bytes, measurementFont: loadedFont });
+    let passB!: ResidentEngineWorkerRequest;
+    await act(async () => {
+      result.current.pipeline.runLayoutPipeline();
+      passB = await received('fontRequirements', passA.id);
+    });
+    expect(replies.has(passB.id)).toBe(true);
+    expect(passB.id).not.toBe(passA.id);
+    holdRequirements = false;
+    const previousSync = posted.filter((request) => request.type === 'sync').at(-1)!.id;
+    await act(async () => {
+      for (const pass of order === 'A then B' ? [passA, passB] : [passB, passA]) reply(pass);
+    });
+    expect(layoutHere).not.toHaveBeenCalled();
+    expect(ensureReplica).not.toHaveBeenCalled();
+    expect(result.current.errors).toEqual([]);
+    expect(errorLog).not.toHaveBeenCalled();
+    await act(async () => { await received('sync', previousSync); });
+    await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+    expect(isLayoutQueued(session)).toBe(false);
+    await assertCurrent();
+    await setState('rejected');
+    await settle();
+    await setState('proposed');
+    await settle();
+    await assertCurrent();
+  } finally {
+    layoutHere?.mockRestore();
+    ensureReplica?.mockRestore();
+    unmount();
+    errorLog.mockRestore();
+    frames.restore();
+  }
+});
+
+test.each(['unavailable', 'no adoption', 'no snapshot'])('a holding session with %s worker layout fails once without a frame loop', async (path) => {
+  const { posted, received } = installWorker({ holdReply: () => false });
+  const frames = holdFrames();
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...workerProposalProps, source: bytes },
+  });
+  try {
+    await act(async () => { await received('open'); });
+    await act(async () => { await received('bootstrap'); });
+    await act(async () => { await received('proposal'); });
+    await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+    const session = result.current.core.session!;
+    const api = result.current.ref.current!;
+    const snapshot = await api.getProposals();
+    await act(async () => {
+      expect(await api.setProposalStates({
+        expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion, changes: [],
+      })).toMatchObject({ ok: true });
+    });
+    expect(workerProposalAuthority(session)?.holdsWorkerState()).toBe(true);
+    const layoutHere = spyOn(session, 'layoutDocumentWithRegionsRetainedJson');
+    const ensureReplica = spyOn(replicaHelpers, 'ensureWorkerOpenReplica');
+    const requestFrame = spyOn(globalThis, 'requestAnimationFrame');
+    const requirements = posted.filter((request) => request.type === 'fontRequirements');
+    const invalid = path === 'no snapshot'
+      ? spyOn(session, 'residentWorkerSnapshot').mockReturnValue(null)
+      : path === 'unavailable'
+        ? spyOn(session, 'isDisplayOnly').mockReturnValue(true)
+        : null;
+    const adopt = session.adoptResidentWorkerLayout;
+    if (path === 'no adoption') session.adoptResidentWorkerLayout = undefined as never;
+    try {
+      act(() => result.current.pipeline.scheduleLayout('remote'));
+      await act(async () => {
+        frames.run();
+        await received('fontRequirements', requirements.at(-1)!.id);
+      });
+      const failure = result.current.renderer.error;
+      expect(failure?.message).toBe('The resident worker holding proposals cannot lay out the document');
+      expect(result.current.errors).toEqual([failure!]);
+      const requests = posted.length;
+      const frameRequests = requestFrame.mock.calls.length;
+      for (let frame = 0; frame < 8; frame += 1) await act(async () => frames.run());
+      expect(requestFrame.mock.calls.length).toBe(frameRequests);
+      expect(posted).toHaveLength(requests);
+      expect(posted.filter((request) => request.type === 'fontRequirements')).toHaveLength(requirements.length + 1);
+      expect(result.current.errors).toEqual([failure!]);
+      expect(errorLog).toHaveBeenCalledTimes(1);
+      expect(layoutHere).not.toHaveBeenCalled();
+      expect(ensureReplica).not.toHaveBeenCalled();
+      expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    } finally {
+      session.adoptResidentWorkerLayout = adopt;
+      invalid?.mockRestore();
+      layoutHere.mockRestore();
+      ensureReplica.mockRestore();
+      requestFrame.mockRestore();
+    }
+  } finally {
+    unmount();
+    errorLog.mockRestore();
+    frames.restore();
+  }
+});
+
+test('a toggle and local refresh wait for an older worker sync without rebuilding proposals', async () => {
+  const options = { holdReply: (request: ResidentEngineWorkerRequest) => request.type === 'sync' };
+  const { workers, posted, replies, reply, received } = installWorker(options);
+  const frames = holdFrames();
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...workerProposalProps, source: bytes },
+  });
+  try {
+    await act(async () => { await received('open'); });
+    await act(async () => { await received('bootstrap'); });
+    await act(async () => { await received('proposal'); });
+    expect(result.current.core.workerProposalsReady).toBe(true);
+    const api = result.current.ref.current!;
+    const session = result.current.core.session!;
+    const layoutHere = spyOn(session, 'layoutDocumentWithRegionsRetainedJson');
+    const ensureReplica = spyOn(replicaHelpers, 'ensureWorkerOpenReplica');
+    try {
+      const identities = await api.getParagraphIdentities();
+      const paragraph = identities.paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
+      const initial = await api.getProposals();
+      await act(async () => {
+        expect(await api.proposeChanges({
+          expectVersion: initial.version,
+          proposals: [{
+            id: 'racing-proposal', paragraph,
+            suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+            op: 'insertText', at: 'start', text: 'Added text ',
+          }],
+        })).toMatchObject({ ok: true });
+      });
+      await act(async () => {
+        frames.run();
+        await received('sync');
+      });
+      const sync = posted.filter((request) => request.type === 'sync').at(-1)!;
+      expect(sync).toBeDefined();
+      expect(replies.has(sync.id)).toBe(true);
+      const beforeToggle = await api.getProposals();
+      await act(async () => {
+        expect(await api.setProposalStates({
+          expectVersion: beforeToggle.version,
+          expectPreviewVersion: beforeToggle.previewVersion,
+          changes: [{ id: 'racing-proposal', state: 'accepted' }],
+        })).toMatchObject({ ok: true });
+      });
+      expect(session.getProposals().proposals[0]!.state).toBe('accepted');
+      expect(workerProposalAuthority(session)?.holdsWorkerState()).toBe(true);
+      act(() => result.current.pipeline.scheduleLayout('local'));
+      await act(async () => frames.run());
+      expect(result.current.errors).toEqual([]);
+      expect(errorLog).not.toHaveBeenCalled();
+      expect(layoutHere).not.toHaveBeenCalled();
+      expect(ensureReplica).not.toHaveBeenCalled();
+      expect(result.current.mainOpens).toEqual([]);
+      expect(posted.filter((request) => request.type === 'sync')).toHaveLength(1);
+
+      await act(async () => reply(sync));
+      await act(async () => frames.run());
+      const latest = posted.filter((request) => request.type === 'sync').at(-1)!;
+      expect(latest.id).not.toBe(sync.id);
+      expect(replies.has(latest.id)).toBe(true);
+      await act(async () => reply(latest));
+      await act(async () => {});
+      await act(async () => { await result.current.renderer.settledDisplayList(null, null); });
+      expect(isLayoutQueued(session)).toBe(false);
+      expect(revisionPreviewKeyOf(result.current.pipeline.layout)).toBe(
+        revisionPreviewKey(proposalRevisionPreview(session.getProposals()))
+      );
+      expect(sourceVersionOf(result.current.renderer.queries)).toBe(session.version());
+      expect(workerProposalAuthority(session)?.geometry()?.targets['racing-proposal']).toMatchObject({ ok: true });
+      expect(result.current.renderer.error).toBeNull();
+      expect(result.current.errors).toEqual([]);
+      expect(errorLog).not.toHaveBeenCalled();
+      expect(layoutHere).not.toHaveBeenCalled();
+      expect(ensureReplica).not.toHaveBeenCalled();
+      expect(result.current.mainOpens).toEqual([]);
+      expect(result.current.core.replicaReady).toBe(false);
+      expect(workerProposalAuthority(session)?.holdsWorkerState()).toBe(true);
+      expect(workers).toHaveLength(1);
+      expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    } finally {
+      layoutHere.mockRestore();
+      ensureReplica.mockRestore();
+    }
+  } finally {
+    unmount();
+    errorLog.mockRestore();
+    frames.restore();
+  }
+});
+
+test('a lost worker during proposal sync fails the document once without rebuilding', async () => {
+  const { workers, posted, received } = installWorker({ holdReply: (request) => request.type === 'sync' });
+  const frames = holdFrames();
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...workerProposalProps, source: bytes },
+  });
+  try {
+    await act(async () => { await received('open'); });
+    await act(async () => { await received('bootstrap'); });
+    await act(async () => { await received('proposal'); });
+    const api = result.current.ref.current!;
+    const session = result.current.core.session!;
+    const snapshot = await api.getProposals();
+    await act(async () => {
+      expect(await api.setProposalStates({
+        expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion, changes: [],
+      })).toMatchObject({ ok: true });
+    });
+    expect(workerProposalAuthority(session)?.holdsWorkerState()).toBe(true);
+    act(() => result.current.pipeline.scheduleLayout('remote'));
+    await act(async () => { frames.run(); await received('sync'); });
+    const waiting = result.current.renderer.settledDisplayList(null, null);
+    void waiting.catch(() => {});
+    await act(async () => {
+      workers[0].onerror?.({ message: 'resident worker lost' } as ErrorEvent);
+    });
+    const failure = result.current.renderer.error;
+    expect(failure?.message).toContain('resident worker lost');
+    await expect(waiting).rejects.toBe(failure);
+    expect(result.current.errors).toEqual([failure!]);
+    expect(errorLog).toHaveBeenCalledTimes(1);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+  } finally {
+    unmount();
+    errorLog.mockRestore();
+    frames.restore();
+  }
+});
+
+test('worker-held proposals fail the document on proposal OOM without reopening source bytes', async () => {
+  const options: Parameters<typeof installWorker>[0] = {};
+  const { workers, posted } = installWorker(options);
+  const { result, unmount } = await openWorkerProposals();
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const api = result.current.ref.current!;
+    const identities = await api.getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    const initial = await api.getProposals();
+    await act(async () => {
+      expect(await api.proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'held-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Held ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    const held = await api.getProposals();
+    expect(held.proposals.map(({ id }) => id)).toEqual(['held-proposal']);
+    await waitFor(() => expect(
+      sourceVersionOf(result.current.renderer.queries)
+    ).toBe(held.version));
+    options.oomStage = 'proposal';
+    let failure!: ResidentWorkerOutOfMemoryError;
+    await act(async () => {
+      await expect(api.proposeChanges({
+        expectVersion: held.version,
+        proposals: [{
+          id: 'next-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'end', text: ' Next',
+        }],
+      }).catch((error) => {
+        failure = error;
+        throw error;
+      })).rejects.toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    });
+    await expect(api.getProposals()).rejects.toBe(failure);
+    await expect(api.readParagraphs({ view: 'accepted' })).rejects.toBe(failure);
+    await expect(api.getProposals()).rejects.toBe(failure);
+    await waitFor(() => expect(result.current.renderer.error).toBe(failure));
+    expect(workers).toHaveLength(1);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
+    expect(posted.filter((request) => request.type === 'proposal' &&
+      request.operation.kind === 'propose')).toHaveLength(2);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(errorLog.mock.calls.filter(([, error]) => error === failure)).toEqual([
+      ['[CanvasRenderer] Resident engine worker holding proposals ran out of memory', failure],
+    ]);
+  } finally {
+    unmount();
+    errorLog.mockRestore();
+  }
+}, 15_000);
+
+test('a document read OOM before proposals reopens the source document once', async () => {
+  const { workers, posted } = installWorker({ oomStage: 'documentRead' });
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const initial = await result.current.ref.current!.getProposals();
+    expect(initial.proposals).toEqual([]);
+    const read = await result.current.ref.current!.readParagraphs({ view: 'accepted' });
+    expect(read).toMatchObject({ ok: true });
+    if (!read.ok) throw new Error(read.failure.message);
+    expect(read.paragraphs).toHaveLength(205);
+    expect(workers).toHaveLength(2);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(2);
+    expect(posted.filter((request) => request.type === 'documentRead')).toHaveLength(2);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
+test('an OOM during the first proposal starts a fresh worker instead of failing the document', async () => {
+  const options: Parameters<typeof installWorker>[0] = {};
+  const { workers, posted } = installWorker(options);
+  const { result, unmount } = await openWorkerProposals();
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const api = result.current.ref.current!;
+    const session = result.current.core.session!;
+    const identities = await api.getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    const initial = await api.getProposals();
+    options.oomStage = 'proposal';
+    let outcome!: { ok: boolean } | Error;
+    await act(async () => {
+      outcome = await api.proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'first-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'First ',
+        }],
+      }).catch((error: Error) => error);
+    });
+    expect(outcome).not.toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    expect(workers).toHaveLength(2);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(2);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    expect(errorLog.mock.calls.some(([message]) =>
+      String(message).includes('holding proposals ran out of memory')
+    )).toBe(false);
+    expect(registeredWorkerProposalAuthority(session)?.holdsWorkerState() ?? false).toBe(
+      !(outcome instanceof Error) && outcome.ok
+    );
+    const after = await api.getProposals();
+    expect(after.proposals.map(({ id }) => id)).toEqual(
+      !(outcome instanceof Error) && outcome.ok ? ['first-proposal'] : []
+    );
+  } finally {
+    unmount();
+    errorLog.mockRestore();
+  }
+}, 15_000);
+
+test('a later proposal succeeds after an OOM during the first proposal', async () => {
+  const options: Parameters<typeof installWorker>[0] = {};
+  const { workers, posted } = installWorker(options);
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const api = () => result.current.ref.current!;
+    const session = result.current.core.session!;
+    const identities = await api().getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
+    const initial = await api().getProposals();
+    options.oomStage = 'proposal';
+    await act(async () => {
+      await expect(api().proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'failed-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Failed ',
+        }],
+      })).rejects.toThrow();
+    });
+    expect(registeredWorkerProposalAuthority(session)!.holdsWorkerState()).toBe(false);
+    expect(session.getProposals().proposals).toEqual([]);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    await act(async () => { await api().whenLayoutComplete({ timeoutMs: 5000 }); });
+    const recovered = await api().getProposals();
+    const recoveredParagraph = (await api().getParagraphIdentities()).paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    await act(async () => {
+      expect(await api().proposeChanges({
+        expectVersion: recovered.version,
+        proposals: [{
+          id: 'recovered-after-oom', paragraph: recoveredParagraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Recovered ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    const proposed = await api().getProposals();
+    expect(proposed.proposals.map(({ id }) => id)).toEqual(['recovered-after-oom']);
+    await act(async () => {
+      expect(await api().setProposalStates({
+        expectVersion: proposed.version,
+        expectPreviewVersion: proposed.previewVersion,
+        changes: [{ id: 'recovered-after-oom', state: 'accepted' }],
+      })).toMatchObject({ ok: true });
+    });
+    expect((await api().getProposals()).proposals).toMatchObject([
+      { id: 'recovered-after-oom', state: 'accepted' },
+    ]);
+    expect(workers).toHaveLength(2);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(2);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
+test.each([true, false])(
+  'worker revisions are asked at the replica gate, before the completion finishes, with onWorkerRevisions=%s',
+  async (withCallback) => {
+    let completionReplied = false;
+    const asked: boolean[] = [];
+    const onWorkerRevisions = mock(() => {});
+    const { workers, posted } = installWorker({
+      holdState: true,
+      holdBootstrap: true,
+      holdCompletion: true,
+      revisionCount: 1,
+      onRevisionCount: () => asked.push(completionReplied),
+    });
+    const frames = holdFrames();
+    const props = {
+      ...workerProposalProps,
+      source: await longFixture(1200),
+      followCompletion: true,
+      onWorkerRevisions: withCallback ? onWorkerRevisions : undefined,
+    };
+    const { result, unmount } = renderHook(useHarness, { initialProps: props });
+    try {
+      await waitFor(() => expect(result.current.host).not.toBeNull());
+      const session = result.current.core.session!;
+      const receive = workers[0].onmessage;
+      workers[0].onmessage = (event) => {
+        if (posted.some((request) =>
+          request.type === 'completeLayout' && request.id === event.data.id
+        )) completionReplied = true;
+        receive?.(event);
+      };
+      await waitFor(() => expect(posted.map((request) => request.type)).toContain('bootstrap'));
+      expect(result.current.core.workerProposalsReady).toBe(false);
+      expect(posted.some((request) => request.type === 'proposal')).toBe(false);
+      await act(async () => { workers[0].release(); });
+      await waitFor(() => expect(posted.map((request) => request.type)).toContain('completeLayout'), {
+        timeout: 5000,
+      });
+      await waitFor(() => expect(result.current.renderer.pendingCompletion).toBeNull());
+      await act(async () => {});
+      expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
+      expect(onWorkerRevisions).not.toHaveBeenCalled();
+      act(() => result.current.presentFrame());
+      act(() => frames.run());
+      act(() => frames.run());
+      await waitFor(() => expect(posted.filter((request) =>
+        request.type === 'revisionCount'
+      )).toHaveLength(1));
+      expect(asked).toEqual([false]);
+      expect(completionReplied).toBe(false);
+      expect(posted.findIndex((request) => request.type === 'revisionCount')).toBeGreaterThan(
+        posted.findIndex((request) => request.type === 'completeLayout')
+      );
+      if (withCallback) {
+        await waitFor(() => expect(onWorkerRevisions).toHaveBeenCalledTimes(1));
+      } else {
+        await waitFor(() => expect(posted.filter((request) =>
+          request.type === 'encodeState'
+        )).toHaveLength(1));
+      }
+      act(() => result.current.presentFrame());
+      act(() => frames.run());
+      act(() => frames.run());
+      await act(async () => {});
+      expect(onWorkerRevisions).toHaveBeenCalledTimes(withCallback ? 1 : 0);
+      expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
+      expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(
+        withCallback ? 0 : 1
+      );
+      expect(result.current.core.replicaReady).toBe(false);
+      expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(true);
+      expect(session.storyIds()).toEqual([]);
+      expect(result.current.mainOpens).toEqual([]);
+      await waitFor(() => expect(result.current.core.workerProposalsReady).toBe(true));
+      expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(1);
+      expect(completionReplied).toBe(false);
+      if (withCallback) {
+        await act(async () => { workers[0].release(); });
+        await waitFor(() => expect(result.current.core.workerProposalsReady).toBe(true));
+        expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(1);
+        expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+        expect(result.current.core.replicaReady).toBe(false);
+        expect(result.current.mainOpens).toEqual([]);
+      } else {
+        await act(async () => {
+          workers[0].release();
+          await awaitWorkerOpenReplica(session);
+        });
+        await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+        expect(session.hasStory('body')).toBe(true);
+      }
+      expect(result.current.errors).toEqual([]);
+    } finally {
+      unmount();
+      frames.restore();
+    }
+  },
+  15_000
+);
+
+test('worker content and preview mutations wait for the replacement frame before settling', async () => {
+  const options = { holdSync: false };
+  const { workers, posted } = installWorker(options);
+  const { result, unmount } = await openWorkerProposals({
+    ...workerProposalProps, source: await longFixture(45),
+  });
+  const frames = holdFrames();
+  try {
+    const api = result.current.ref.current!;
+    const session = result.current.core.session!;
+    const identities = await api.getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
+    const initialPages = result.current.renderer.displayList!.pages.length;
+    for (const kind of ['propose', 'reject', 'withdraw'] as const) {
+      const previous = result.current.renderer.displayList!;
+      expect(previous.pages.some((page) => page.unbuilt)).toBe(false);
+      const snapshot = await api.getProposals();
+      await act(async () => {
+        const changed = kind === 'propose'
+          ? await api.proposeChanges({
+              expectVersion: snapshot.version,
+              proposals: [{
+                id: 'layout-proposal', paragraph,
+                suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+                op: 'insertText', at: 'start', text: 'Added '.repeat(1000),
+              }],
+            })
+          : kind === 'reject'
+            ? await api.setProposalStates({
+                expectVersion: snapshot.version,
+                expectPreviewVersion: snapshot.previewVersion,
+                changes: [{ id: 'layout-proposal', state: 'rejected' }],
+              })
+            : await api.withdrawProposals({ expectVersion: snapshot.version, ids: ['layout-proposal'] });
+        expect(changed).toMatchObject({ ok: true });
+        if (kind === 'reject') expect(session.version()).toBe(snapshot.version);
+      });
+      let completed: number | null = null;
+      const complete = api.whenLayoutComplete().then((pages) => { completed = pages; return pages; });
+      void complete.catch(() => {});
+      await act(async () => {});
+      expect(completed).toBeNull();
+      expect(isLayoutQueued(session)).toBe(true);
+      expect(result.current.renderer.displayList).toBe(previous);
+
+      const layouts = posted.filter((request) => request.type === 'sync').length;
+      options.holdSync = true;
+      await act(async () => frames.run());
+      expect(posted.filter((request) => request.type === 'sync')).toHaveLength(layouts + 1);
+      expect(completed).toBeNull();
+      let duringLayout: number | null = null;
+      const during = api.whenLayoutComplete().then((pages) => { duringLayout = pages; return pages; });
+      void during.catch(() => {});
+      await act(async () => {});
+      expect(duringLayout).toBeNull();
+
+      options.holdSync = false;
+      await act(async () => workers[0]!.release());
+      for (let frame = 0; frame < 100 && completed === null; frame += 1) {
+        await act(async () => frames.run());
+      }
+      expect(completed).not.toBeNull();
+      const pages = await complete;
+      expect(await during).toBe(pages);
+      expect(result.current.renderer.displayList).not.toBe(previous);
+      expect(result.current.renderer.displayList!.pages.some((page) => page.unbuilt)).toBe(false);
+      expect(sourceVersionOf(result.current.renderer.queries)).toBe(session.version());
+      expect(isLayoutQueued(session)).toBe(false);
+      if (kind === 'propose') expect(pages).toBeGreaterThan(initialPages);
+      else expect(pages).toBe(initialPages);
+    }
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+    frames.restore();
+  }
+}, 15_000);
+
+test('worker content callbacks skip preview states and refused proposals', async () => {
+  const onWorkerContentChange = mock(() => {});
+  const { posted } = installWorker();
+  const { result, unmount } = await openWorkerProposals({
+    ...workerProposalProps, onWorkerContentChange,
+  });
+  try {
+    const api = result.current.ref.current!;
+    const identities = await api.getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    const initial = await api.getProposals();
+    expect(onWorkerContentChange).not.toHaveBeenCalled();
+    await act(async () => {
+      expect(await api.proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'content-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Changed ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    expect(onWorkerContentChange).toHaveBeenCalledTimes(1);
+    const proposed = await api.getProposals();
+    expect(proposed.version).not.toBe(initial.version);
+    await act(async () => {
+      expect(await api.setProposalStates({
+        expectVersion: proposed.version,
+        expectPreviewVersion: proposed.previewVersion,
+        changes: [{ id: 'content-proposal', state: 'accepted' }],
+      })).toMatchObject({ ok: true });
+    });
+    const preview = await api.getProposals();
+    expect(preview.version).toBe(proposed.version);
+    expect(preview.previewVersion).toBe(proposed.previewVersion + 1);
+    expect(preview.proposals[0]!.state).toBe('accepted');
+    expect(onWorkerContentChange).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      expect(await api.proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'refused-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'end', text: ' Refused',
+        }],
+      })).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+    });
+    expect(await api.getProposals()).toEqual(preview);
+    expect(onWorkerContentChange).toHaveBeenCalledTimes(1);
+    expect(posted.filter((request) => request.type === 'proposal' &&
+      request.operation.kind === 'propose')).toHaveLength(2);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
+test('worker proposals reach the registry before hydration and survive hand-over', async () => {
+  const { posted } = installWorker();
+  const frames = holdFrames();
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: workerProposalProps,
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const api = () => result.current.ref.current!;
+    const identities = await api().getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((identity) => identity.session?.story === 'body')!.session!;
+    const initial = await api().getProposals();
+    let applied!: Awaited<ReturnType<DocxEditorRef['proposeChanges']>>;
+    await act(async () => {
+      applied = await api().proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'worker-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Proposed ',
+        }],
+      });
+    });
+    expect(applied.ok).toBe(true);
+    expect(result.current.core.workerProposalsReady).toBe(true);
+    expect(posted.some((request) => request.type === 'proposal' && request.operation.kind === 'propose')).toBe(true);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(session.storyIds()).toEqual([]);
+    const mirrored = await api().getProposals();
+    expect(mirrored.proposals.map((proposal) => proposal.id)).toEqual(['worker-proposal']);
+    await act(async () => { await requestWorkerOpenReplica(session); });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(session.workerDocumentMirrored()).toBe(false);
+    expect(session.getProposals().proposals).toEqual(mirrored.proposals);
+    const workerCalls = posted.filter((request) => request.type === 'proposal').length;
+    const decided = await api().setProposalStates({
+      expectVersion: session.version(),
+      expectPreviewVersion: session.getProposals().previewVersion,
+      changes: [{ id: 'worker-proposal', state: 'accepted' }],
+    });
+    expect(decided.ok).toBe(true);
+    expect(session.getProposals().proposals[0]!.state).toBe('accepted');
+    expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(workerCalls);
+  } finally {
+    unmount();
+    frames.restore();
+  }
+});
+
+test('a sync ref call during the first in-flight proposal keeps the worker\'s proposals', async () => {
+  const { workers, posted, received, reply } = installWorker({
+    holdReply: (request) => request.type === 'proposal' && request.operation.kind === 'propose',
+  });
+  const frames = holdFrames();
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: workerProposalProps,
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const api = () => result.current.ref.current!;
+    const identities = await api().getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((identity) => identity.session?.story === 'body')!.session!;
+    const initial = await api().getProposals();
+    const snapshot = await received('proposal');
+    const authority = workerProposalAuthority(session)!;
+    expect(authority.holdsWorkerState()).toBe(false);
+    const terminate = spyOn(workers[0]!, 'terminate');
+    const ensureReplica = spyOn(replicaHelpers, 'ensureWorkerOpenReplica');
+    try {
+      const proposed = api().proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'in-flight-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Proposed ',
+        }],
+      });
+      void proposed.catch(() => {});
+      let proposal!: ResidentEngineWorkerRequest;
+      await act(async () => { proposal = await received('proposal', snapshot.id); });
+      expect(proposal).toMatchObject({ operation: { kind: 'propose' } });
+      act(() => { expect(() => api().getDocument()).toThrow(DocxReplicaNotReadyError); });
+      await act(async () => {});
+      expect(authority.holdsWorkerState()).toBe(true);
+      expect(workerProposalAuthority(session)).toBe(authority);
+      expect(ensureReplica).not.toHaveBeenCalled();
+      expect(terminate).not.toHaveBeenCalled();
+      expect(result.current.mainOpens).toEqual([]);
+      expect(session.storyIds()).toEqual([]);
+      expect(result.current.core.replicaReady).toBe(false);
+      expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+      await act(async () => {
+        reply(proposal);
+        expect(await proposed).toMatchObject({ ok: true });
+        await awaitWorkerOpenReplica(session);
+      });
+      await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+      expect(result.current.mainOpens).toEqual([false]);
+      expect(session.workerDocumentMirrored()).toBe(false);
+      const mirrored = await api().getProposals();
+      expect(mirrored.proposals.map((proposal) => proposal.id)).toEqual(['in-flight-proposal']);
+      await act(async () => {
+        expect(await api().setProposalStates({
+          expectVersion: mirrored.version,
+          expectPreviewVersion: mirrored.previewVersion,
+          changes: [{ id: 'in-flight-proposal', state: 'accepted' }],
+        })).toMatchObject({ ok: true });
+      });
+      expect((await api().getProposals()).proposals[0]!.state).toBe('accepted');
+      expect(result.current.errors).toEqual([]);
+    } finally {
+      terminate.mockRestore();
+      ensureReplica.mockRestore();
+    }
+  } finally {
+    unmount();
+    frames.restore();
+  }
+});
+
+test('a failed first proposal leaves the replica fallback available', async () => {
+  const { workers, posted, received, reply } = installWorker({
+    failProposal: true,
+    holdReply: (request) => request.type === 'proposal' && request.operation.kind === 'propose',
+  });
+  const frames = holdFrames();
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: workerProposalProps,
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const api = () => result.current.ref.current!;
+    const identities = await api().getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((identity) => identity.session?.story === 'body')!.session!;
+    const initial = await api().getProposals();
+    const snapshot = await received('proposal');
+    const authority = workerProposalAuthority(session)!;
+    expect(authority.holdsWorkerState()).toBe(false);
+    const terminate = spyOn(workers[0]!, 'terminate');
+    try {
+      const proposed = api().proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'failed-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Proposed ',
+        }],
+      });
+      void proposed.catch(() => {});
+      let proposal!: ResidentEngineWorkerRequest;
+      await act(async () => { proposal = await received('proposal', snapshot.id); });
+      expect(proposal).toMatchObject({ operation: { kind: 'propose' } });
+      expect(authority.holdsWorkerState()).toBe(true);
+      expect(result.current.mainOpens).toEqual([]);
+      expect(terminate).not.toHaveBeenCalled();
+      await act(async () => {
+        reply(proposal);
+        await expect(proposed).rejects.toThrow('proposal failed');
+      });
+      expect(authority.holdsWorkerState()).toBe(false);
+      expect(session.getProposals()).toEqual(initial);
+      expect(terminate).not.toHaveBeenCalled();
+      expect(result.current.core.replicaReady).toBe(false);
+      act(() => { expect(api().getDocument()).not.toBeNull(); });
+      expect(result.current.mainOpens).toEqual([true]);
+      expect(terminate).toHaveBeenCalledTimes(1);
+      expect(result.current.core.replicaReady).toBe(true);
+      expect(session.workerDocumentMirrored()).toBe(false);
+      expect(workerProposalAuthority(session)).toBeNull();
+      expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+      expect((await api().getProposals()).proposals).toEqual([]);
+      expect(result.current.errors).toEqual([]);
+    } finally {
+      terminate.mockRestore();
+    }
+  } finally {
+    unmount();
+    frames.restore();
+  }
+});
+
+test('a later proposal succeeds after a terminal crash during the first proposal', async () => {
+  installWorker({ crashProposalOnce: true });
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const api = () => result.current.ref.current!;
+    const session = result.current.core.session!;
+    const identities = await api().getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
+    const initial = await api().getProposals();
+    await act(async () => {
+      await expect(api().proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'failed-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Failed ',
+        }],
+      })).rejects.toThrow('proposal crashed');
+    });
+    expect(registeredWorkerProposalAuthority(session)!.holdsWorkerState()).toBe(false);
+    expect(session.getProposals().proposals).toEqual([]);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    await act(async () => { await api().whenLayoutComplete({ timeoutMs: 5000 }); });
+    const recovered = await api().getProposals();
+    const recoveredParagraph = (await api().getParagraphIdentities()).paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    await act(async () => {
+      expect(await api().proposeChanges({
+        expectVersion: recovered.version,
+        proposals: [{
+          id: 'recovered-after-crash', paragraph: recoveredParagraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Recovered ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    const proposed = await api().getProposals();
+    expect(proposed.proposals.map(({ id }) => id)).toEqual(['recovered-after-crash']);
+    await act(async () => {
+      expect(await api().setProposalStates({
+        expectVersion: proposed.version,
+        expectPreviewVersion: proposed.previewVersion,
+        changes: [{ id: 'recovered-after-crash', state: 'accepted' }],
+      })).toMatchObject({ ok: true });
+    });
+    expect((await api().getProposals()).proposals).toMatchObject([
+      { id: 'recovered-after-crash', state: 'accepted' },
+    ]);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
+test('a call queued behind a first proposal that crashes runs on the replacement worker', async () => {
+  installWorker({ crashProposalOnce: true });
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const api = () => result.current.ref.current!;
+    const bodyParagraph = async () => (await api().getParagraphIdentities()).paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    const paragraph = await bodyParagraph();
+    const initial = await api().getProposals();
+    const request = (id: string, expectVersion: string, target = paragraph) => ({
+      expectVersion,
+      proposals: [{
+        id, paragraph: target,
+        suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+        op: 'insertText' as const, at: 'start' as const, text: 'Queued ',
+      }],
+    });
+    let first!: Promise<unknown>;
+    let queued!: Promise<unknown>;
+    await act(async () => {
+      first = api().proposeChanges(request('failed-proposal', initial.version)).catch((error: Error) => error);
+      queued = api().proposeChanges(request('queued-proposal', initial.version)).catch((error: Error) => error);
+      expect(await first).toBeInstanceOf(Error);
+    });
+    let outcome: unknown;
+    await act(async () => {
+      outcome = await Promise.race([
+        queued,
+        new Promise((resolve) => setTimeout(() => resolve('hung'), 5000)),
+      ]);
+    });
+    expect(outcome).not.toBe('hung');
+    expect(outcome).toMatchObject({ ok: expect.any(Boolean) });
+    await act(async () => { await api().whenLayoutComplete({ timeoutMs: 5000 }); });
+    const current = await api().getProposals();
+    if (!current.proposals.some(({ id }) => id === 'queued-proposal')) {
+      const target = await bodyParagraph();
+      await act(async () => {
+        expect(await api().proposeChanges(request('queued-proposal', current.version, target)))
+          .toMatchObject({ ok: true });
+      });
+    }
+    expect((await api().getProposals()).proposals.map(({ id }) => id)).toEqual(['queued-proposal']);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
+test('a hand-over while a call waits for the replacement worker\'s layout settles both', async () => {
+  const options: Parameters<typeof installWorker>[0] = { crashProposalOnce: true };
+  const { workers, posted } = installWorker(options);
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const api = () => result.current.ref.current!;
+    const session = result.current.core.session!;
+    const bodyParagraph = async () => (await api().getParagraphIdentities()).paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    const initial = await api().getProposals();
+    const paragraph = await bodyParagraph();
+    options.holdBootstrap = true;
+    let first!: Promise<unknown>;
+    let queued!: Promise<unknown>;
+    await act(async () => {
+      first = api().proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'failed-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Failed ',
+        }],
+      }).catch((error: Error) => error);
+      queued = api().getProposals().catch((error: Error) => error);
+      expect(await first).toBeInstanceOf(Error);
+    });
+    await waitFor(() => expect(posted.filter((request) => request.type === 'bootstrap')).toHaveLength(2));
+    expect(workers).toHaveLength(2);
+    await act(async () => {});
+    let replica!: Promise<unknown>;
+    let outcome: unknown;
+    await act(async () => {
+      replica = requestWorkerOpenReplica(session)!;
+      workers[1]!.release();
+      outcome = await Promise.race([
+        Promise.all([queued, replica]),
+        new Promise((resolve) => setTimeout(() => resolve('hung'), 5000)),
+      ]);
+    });
+    expect(outcome).not.toBe('hung');
+    expect((outcome as [unknown])[0]).toMatchObject({ proposals: [] });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    const current = await api().getProposals();
+    const target = await bodyParagraph();
+    await act(async () => {
+      expect(await api().proposeChanges({
+        expectVersion: current.version,
+        proposals: [{
+          id: 'after-handover', paragraph: target,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Recovered ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    expect((await api().getProposals()).proposals.map(({ id }) => id)).toEqual(['after-handover']);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
+test('a hand-over queued behind a recovery snapshot that fails still hydrates the calls behind it', async () => {
+  let failSnapshot!: () => void;
+  const { workers, posted } = installWorker({
+    crashProposalOnce: true,
+    failReplacementSnapshot: new Promise<void>((resolve) => { failSnapshot = resolve; }),
+  });
+  const { result, unmount } = await openWorkerProposals();
+  try {
+    const api = () => result.current.ref.current!;
+    const session = result.current.core.session!;
+    const bodyParagraph = async () => (await api().getParagraphIdentities()).paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    const initial = await api().getProposals();
+    const paragraph = await bodyParagraph();
+    let first!: Promise<unknown>;
+    let initializing!: Promise<unknown>;
+    let queued!: Promise<unknown>;
+    await act(async () => {
+      first = api().proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'failed-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Failed ',
+        }],
+      }).catch((error: Error) => error);
+      initializing = api().getProposals().catch((error: Error) => error);
+      queued = api().getProposals().catch((error: Error) => error);
+      expect(await first).toBeInstanceOf(Error);
+    });
+    await waitFor(() => expect(posted.filter((request) =>
+      request.type === 'proposal' && request.operation.kind === 'snapshot'
+    )).toHaveLength(2));
+    expect(workers).toHaveLength(2);
+    let outcome: unknown;
+    await act(async () => {
+      const replica = requestWorkerOpenReplica(session)!;
+      failSnapshot();
+      outcome = await Promise.race([
+        Promise.all([initializing, queued, replica]),
+        new Promise((resolve) => setTimeout(() => resolve('hung'), 5000)),
+      ]);
+    });
+    expect(outcome).not.toBe('hung');
+    const [initialized, answered] = outcome as [unknown, unknown];
+    expect(initialized).toBeInstanceOf(Error);
+    expect((initialized as Error).message).toBe('snapshot failed');
+    expect(answered).toMatchObject({ proposals: [] });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    const current = await api().getProposals();
+    const target = await bodyParagraph();
+    await act(async () => {
+      expect(await api().proposeChanges({
+        expectVersion: current.version,
+        proposals: [{
+          id: 'after-handover', paragraph: target,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Recovered ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    expect((await api().getProposals()).proposals.map(({ id }) => id)).toEqual(['after-handover']);
+    expect(result.current.renderer.error ?? null).toBeNull();
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+  }
+}, 15_000);
+
+test('without worker proposals the ref waits for hydration before applying a proposal', async () => {
+  const { posted, workers } = installWorker({ holdState: true });
+  const { result } = renderHook(useHarness, {
+    initialProps: { ...initialProps, workerProposals: false, allowHostProposals: true },
+  });
+  await waitFor(() => expect(result.current.host).not.toBeNull());
+  const session = result.current.core.session!;
+  let settled = false;
+  const call = result.current.ref.current!.proposeChanges({ expectVersion: session.version(), proposals: [] });
+  void call.then(() => { settled = true; });
+  expect(posted.some((request) => request.type === 'proposal')).toBe(false);
+  expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+  expect(result.current.mainOpens).toEqual([]);
+  expect(settled).toBe(false);
+  act(() => { requestWorkerOpenReplica(session); });
+  await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
+  expect(settled).toBe(false);
+  await act(async () => { workers[0].release(); await call; });
+  expect(settled).toBe(true);
+  expect(result.current.mainOpens).toEqual([false]);
+  expect(posted.some((request) => request.type === 'proposal')).toBe(false);
+});
+
+test('the host proposal gate refuses before initializing the worker authority', async () => {
+  const { posted } = installWorker();
+  const { result } = renderHook(useHarness, {
+    initialProps: { ...initialProps, workerProposals: true },
+  });
+  await waitFor(() => expect(result.current.host).not.toBeNull());
+  const session = result.current.core.session!;
+  expect(await result.current.ref.current!.proposeChanges({ expectVersion: session.version(), proposals: [] })).toEqual({
+    ok: false, version: session.version(),
+    failure: { code: 'read-only', message: 'The editor is read-only' },
+  });
+  expect(posted.some((request) => request.type === 'proposal')).toBe(false);
+  expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+  expect(result.current.mainOpens).toEqual([]);
+});
+
+test('a failed hand-over refuses to reseed worker proposals', async () => {
+  const { workers, posted } = installWorker({ failState: true });
+  const { result } = renderHook(useHarness, {
+    initialProps: workerProposalProps,
+  });
+  await waitFor(() => expect(result.current.host).not.toBeNull());
+  const session = result.current.core.session!;
+  const api = () => result.current.ref.current!;
+  const initial = await api().getProposals();
+  await act(async () => {
+    expect(await api().setProposalStates({
+      expectVersion: initial.version, expectPreviewVersion: initial.previewVersion, changes: [],
+    })).toMatchObject({ ok: true });
+  });
+  let failure!: Error;
+  await act(async () => {
+    await expect(requestWorkerOpenReplica(session)!.catch((error) => {
+      failure = error;
+      throw error;
+    })).rejects.toThrow('open failed');
+  });
+  await expect(api().getProposals()).rejects.toBe(failure);
+  await expect(api().readParagraphs({ view: 'accepted' })).rejects.toBe(failure);
+  expect(result.current.renderer.error).toBe(failure);
+  expect(workers).toHaveLength(1);
+  expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
+  expect(result.current.mainOpens).toEqual([]);
+  expect(result.current.core.replicaReady).toBe(false);
+});
+
+test('a failed empty hand-over releases the mirror before using the main replica', async () => {
+  const { received } = installWorker({ failState: true, holdReply: () => false });
+  const { result } = renderHook(useHarness, {
+    initialProps: workerProposalProps,
+  });
+  await waitFor(() => expect(result.current.host).not.toBeNull());
+  await act(async () => { await received('bootstrap'); });
+  const session = result.current.core.session!;
+  await act(async () => { await result.current.ref.current!.getProposals(); });
+  expect(session.workerDocumentMirrored()).toBe(true);
+  await act(async () => { await requestWorkerOpenReplica(session); });
+  expect(result.current.mainOpens).toEqual([true]);
+  expect(session.workerDocumentMirrored()).toBe(false);
+  expect(await result.current.ref.current!.setProposalStates({
+    expectVersion: session.version(), expectPreviewVersion: session.getProposals().previewVersion,
+    changes: [],
+  })).toMatchObject({ ok: true });
 });

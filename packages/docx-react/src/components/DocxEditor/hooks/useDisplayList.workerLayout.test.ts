@@ -8,9 +8,11 @@ import { decodeFrameDelta, loadRustDisplayListQueryEngine } from '@betteroffice/
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
   preloadDocxEngine,
+  proposalSetIdentity,
   ResidentEngineWorkerClient,
   takePreloadedResidentEngineWorker,
   type ResidentEngineWorkerFrame,
+  type ResidentProposalReply,
   type YrsRenderEnv,
   type YrsSelection,
   type YrsSession,
@@ -19,7 +21,8 @@ import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
-import { markSupersededLayout } from '../internals/layoutProvenance';
+import { markSupersededLayout, provisionalInputVersion } from '../internals/layoutProvenance';
+import { registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import { useRustDisplayList, type ResidentFrameApplyResult } from './useDisplayList';
 import { useLayoutPipeline, type UseLayoutPipelineOptions } from './useLayoutPipeline';
 
@@ -1413,6 +1416,88 @@ test('after a worker layout the host dropped, the next one paints the current te
   }
 });
 
+test.each([[false, false], [true, false], [true, true]])(
+  'a stale sync reply keeps the host path with worker-open=%s unless proposals are held=%s',
+  async (experimentalWorkerOpen, holding) => {
+    const { native, engine, layoutJson, frame } = setup();
+    const hook = renderHook(() => useRustDisplayList(
+      null, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      experimentalWorkerOpen
+    ));
+    try {
+      const first = hook.result.current.layoutInWorker(engine, REQUEST)!;
+      const worker = FakeWorker.last!;
+      worker.reply({
+        id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+        caret: { frameEpoch: 1, caretRect: null }, selection: null,
+        layoutRevision: 1, layoutJson,
+      });
+      expect(await first).not.toBeNull();
+      if (holding) {
+        const snapshot = { version: '1', previewVersion: 0, proposals: [] };
+        Object.assign(engine, { getProposals: () => snapshot, mirrorWorkerDocument: () => {} });
+        const reply: ResidentProposalReply = {
+          mirror: { version: snapshot.version, proposals: { previewVersion: 0, entries: [] } },
+          result: { ok: true, snapshot }, changedStories: [],
+          geometry: {
+            version: snapshot.version, previewVersion: 0,
+            proposals: proposalSetIdentity(snapshot), targets: {}, hidden: [],
+          },
+          updates: [], stateVector: new Uint8Array(),
+        };
+        const authority = registerWorkerProposalAuthority(engine, {
+          proposal: async () => reply,
+          documentRead: async () => { throw new Error('unexpected document read'); },
+          handOver: async () => { throw new Error('unexpected handover'); },
+        }, {
+          relayout: () => {}, current: () => true, laidOut: async () => {},
+          adopted: () => {}, handedOver: () => {}, contentChanged: () => {},
+        });
+        await authority.initialize();
+        await authority.setStates({
+          expectVersion: snapshot.version, expectPreviewVersion: 0, changes: [],
+        }, async () => { throw new Error('unexpected main-thread toggle'); });
+        expect(authority.holdsWorkerState()).toBe(true);
+      }
+      const older = hook.result.current.layoutInWorker(engine, REQUEST)!;
+      const olderRequest = worker.posted.at(-1)!;
+      const olderFrame = native.build_display_list_frame('{}', 0);
+      const newer = hook.result.current.layoutInWorker(engine, REQUEST)!;
+      const newerRequest = worker.posted.at(-1)!;
+      const newerFrame = native.build_display_list_frame('{}', 0);
+      expect(olderRequest.type).toBe('sync');
+      expect(newerRequest.type).toBe('sync');
+      worker.reply({
+        id: newerRequest.id, ok: true, frame: newerFrame.slice().buffer,
+        caret: { frameEpoch: 3, caretRect: null }, selection: null,
+        layoutRevision: 3, layoutJson,
+      });
+      const current = await newer;
+      expect(current?.layout.pages.length).toBeGreaterThan(0);
+      let stale!: Awaited<typeof older>;
+      await act(async () => {
+        worker.reply({
+          id: olderRequest.id, ok: true, frame: olderFrame.slice().buffer,
+          caret: { frameEpoch: 2, caretRect: null }, selection: null,
+          layoutRevision: 2, layoutJson, layoutProvisional: true,
+        });
+        stale = await older;
+      });
+      if (holding) expect(stale).toBeNull();
+      else {
+        expect(stale?.layout.pages.length).toBeGreaterThan(0);
+        expect(stale?.complete).toBeDefined();
+      }
+      expect(worker.posted.some((request) => request.type === 'completeLayout')).toBe(false);
+      expect(hook.result.current.error).toBeNull();
+      expect(worker.terminated).toBe(false);
+    } finally {
+      hook.unmount();
+      native.free();
+    }
+  }
+);
+
 test('a failed worker layout hands the pass back to the main thread', async () => {
   const { native, engine } = setup();
   const errors = spyOn(console, 'error').mockImplementation(() => {});
@@ -1572,6 +1657,185 @@ test('a provisional layout paints first and settles only once the full layout fo
   }
 });
 
+test('a provisional input frame paints without settling the waiting full layout', async () => {
+  const { native, paraId, layoutJson, frame, engine } = setup();
+  native.set_selection('body', paraId, 0, paraId, 0);
+  let version = 7;
+  Object.assign(engine, {
+    selection: () => JSON.parse(native.selection()) as YrsSelection,
+    version: () => `v${version}`,
+    applyLocalUpdate: mock(() => {
+      version += 1;
+      return `v${version}`;
+    }),
+  });
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) => useRustDisplayList(layout, undefined, undefined, undefined, source),
+      { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+    );
+    const pending = result.current.layoutInWorker(engine, REQUEST);
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null }, selection: engine.selection(),
+      layoutRevision: 1, layoutJson, layoutProvisional: true,
+    });
+    const provisional = (await pending!)!;
+    await act(async () => rerender({ layout: provisional.layout, source: engine }));
+    await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(1));
+    await act(async () => {
+      const attaching = result.current.attachOffscreenCanvases(
+        [], [], 1, 1, { color: '#000', width: 2 }
+      );
+      worker.reply({ id: worker.posted[1].id, ok: true });
+      expect(await attaching).toBe(true);
+    });
+    await waitFor(() => expect(worker.posted[2]).toMatchObject({ type: 'completeLayout' }));
+    let settled = false;
+    void result.current.settledDisplayList(() => {}).then(() => { settled = true; });
+    const input = result.current.applyInput('!');
+    await waitFor(() => expect(worker.posted[3]).toMatchObject({
+      type: 'applyInput', expectedFrameEpoch: 1,
+    }));
+    const inputFrame = native.apply_input('!', 1);
+    await act(async () => {
+      worker.reply({
+        id: worker.posted[3].id, ok: true, frame: inputFrame.slice().buffer,
+        updates: [new Uint8Array([1]).buffer],
+        caret: { frameEpoch: 2, caretRect: null }, selection: engine.selection(),
+        layoutRevision: 1, layoutProvisional: true, precedesCompletion: true,
+      });
+      expect(await input).toMatchObject({ frameEpoch: 2 });
+    });
+    await act(async () => {});
+    expect(result.current.frame?.frameEpoch).toBe(2);
+    expect(settled).toBe(false);
+    expect(provisionalInputVersion(engine, 'v7')).toBe('v8');
+
+    const full = laidOut(native, 2);
+    worker.reply({
+      id: worker.posted[2].id, ok: true, frame: full.frame.slice().buffer,
+      caret: { frameEpoch: 3, caretRect: null }, selection: engine.selection(),
+      layoutRevision: 1, layoutJson: full.layoutJson,
+    });
+    const complete = (await provisional.complete!)!;
+    await act(async () => rerender({ layout: complete.layout, source: engine }));
+    expect(worker.posted[4]).toMatchObject({ type: 'buildFrame', expectedFrameEpoch: 2 });
+    const completeFrame = native.build_display_list_frame('{}', 2);
+    await act(async () => {
+      worker.reply({
+        id: worker.posted[4].id, ok: true, frame: completeFrame.slice().buffer,
+        caret: { frameEpoch: 4, caretRect: null }, selection: engine.selection(), layoutRevision: 1,
+      });
+    });
+    await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(4));
+    await waitFor(() => expect(settled).toBe(true));
+    unmount();
+  } finally {
+    native.free();
+  }
+});
+
+test.each([
+  { name: 'within a provisional prefix', reply: { layoutProvisional: true, precedesCompletion: true }, edits: 0, shown: 'v8' },
+  { name: 'completing the prefix', reply: { precedesCompletion: true }, edits: 0, shown: 'v8' },
+  { name: 'while an update listener edits', reply: { layoutProvisional: true, precedesCompletion: true }, edits: 1, shown: 'v7' },
+  { name: 'after the completion', reply: {}, edits: 0, shown: 'v7' },
+])('input the worker answered $name records only the version its own updates produced', async ({
+  reply, edits, shown,
+}) => {
+  const { native, paraId, layoutJson, frame, engine } = setup();
+  native.set_selection('body', paraId, 0, paraId, 0);
+  let version = 7;
+  Object.assign(engine, {
+    selection: () => JSON.parse(native.selection()) as YrsSelection,
+    version: () => `v${version}`,
+    applyLocalUpdate: mock(() => {
+      version += 1;
+      const produced = `v${version}`;
+      version += edits;
+      return produced;
+    }),
+  });
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) => useRustDisplayList(layout, undefined, undefined, undefined, source),
+      { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+    );
+    const pending = result.current.layoutInWorker(engine, REQUEST);
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null }, selection: engine.selection(),
+      layoutRevision: 1, layoutJson, layoutProvisional: true,
+    });
+    const provisional = (await pending!)!;
+    await act(async () => rerender({ layout: provisional.layout, source: engine }));
+    await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(1));
+    await act(async () => {
+      const attaching = result.current.attachOffscreenCanvases(
+        [], [], 1, 1, { color: '#000', width: 2 }
+      );
+      worker.reply({ id: worker.posted[1].id, ok: true });
+      expect(await attaching).toBe(true);
+    });
+    await waitFor(() => expect(worker.posted[2]).toMatchObject({ type: 'completeLayout' }));
+    const input = result.current.applyInput('!');
+    await waitFor(() => expect(worker.posted[3]).toMatchObject({ type: 'applyInput' }));
+    const inputFrame = native.apply_input('!', 1);
+    await act(async () => {
+      worker.reply({
+        id: worker.posted[3].id, ok: true, frame: inputFrame.slice().buffer,
+        updates: [new Uint8Array([1]).buffer],
+        caret: { frameEpoch: 2, caretRect: null }, selection: engine.selection(),
+        layoutRevision: 1, ...reply,
+      });
+      expect(await input).toMatchObject({ frameEpoch: 2 });
+    });
+    expect(provisionalInputVersion(engine, 'v7')).toBe(shown);
+    unmount();
+  } finally {
+    native.free();
+  }
+});
+
+test('host relayout sync is foreground only within the painted-caret input window', async () => {
+  const { native, layoutJson, frame, engine } = setup();
+  const clock = spyOn(performance, 'now').mockReturnValue(1000);
+  try {
+    const { result, unmount } = renderHook(() => useRustDisplayList(null));
+    const bootstrap = result.current.layoutInWorker(engine, REQUEST);
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null }, selection: null, layoutRevision: 1, layoutJson,
+    });
+    await act(() => bootstrap!);
+    for (const [now, foreground] of [[1000, false], [1200, true], [1701, false]] as const) {
+      clock.mockReturnValue(now);
+      if (foreground) act(() => result.current.notifyCaretInput());
+      const pending = result.current.layoutInWorker(engine, REQUEST);
+      const request = worker.posted.at(-1)!;
+      expect(request).toMatchObject({ type: 'sync' });
+      if (foreground) expect(request).toHaveProperty('foreground', true);
+      else expect(request).not.toHaveProperty('foreground');
+      const nextFrame = native.build_display_list_frame('{}', 0);
+      const epoch = decodeFrameDelta(nextFrame.slice().buffer).frameEpoch;
+      worker.reply({
+        id: request.id, ok: true, frame: nextFrame.slice().buffer,
+        caret: { frameEpoch: epoch, caretRect: null }, selection: null,
+        layoutRevision: engine.residentWorkerProbe()!.layoutRevision, layoutJson,
+      });
+      expect(await act(() => pending!)).not.toBeNull();
+    }
+    unmount();
+  } finally {
+    clock.mockRestore();
+    native.free();
+  }
+});
+
 test('with worker open, a provisional layout names its engine until the rest is asked of the worker', async () => {
   const { native, layoutJson, frame, engine } = setup();
   try {
@@ -1617,6 +1881,135 @@ test('with worker open, a provisional layout names its engine until the rest is 
     await waitFor(() => expect(worker.posted).toHaveLength(3));
     expect(worker.posted[2]).toMatchObject({ type: 'completeLayout' });
     expect(result.current.pendingCompletion).toBeNull();
+    unmount();
+  } finally {
+    native.free();
+  }
+});
+
+test('an older surface timeout cannot supersede the newer provisional completion', async () => {
+  const { native, layoutJson, frame, engine, adopted } = setup();
+  const snapshot = engine.residentWorkerSnapshot.bind(engine);
+  engine.residentWorkerSnapshot = (options) => ({
+    ...snapshot(options)!, workerAuthoritative: true,
+  });
+  const surfaceTimers: Array<() => void> = [];
+  const schedule = globalThis.setTimeout;
+  const timers = spyOn(globalThis, 'setTimeout').mockImplementation(
+    ((...input: Parameters<typeof setTimeout>) => {
+      const [callback, delay, ...args] = input;
+      if (delay === 250 && typeof callback === 'function') {
+        surfaceTimers.push(() => callback(...args));
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      }
+      return schedule(callback, delay, ...args);
+    }) as typeof setTimeout
+  );
+  const hook = renderHook(() => useRustDisplayList(
+    null, undefined, undefined, undefined, null, undefined, undefined, undefined, true
+  ));
+  try {
+    const first = hook.result.current.layoutInWorker(engine, REQUEST)!;
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null }, selection: null,
+      layoutRevision: 1, layoutJson, layoutProvisional: true,
+    });
+    const older = (await act(() => first))!;
+    expect(surfaceTimers).toHaveLength(1);
+
+    const second = hook.result.current.layoutInWorker(engine, REQUEST)!;
+    const nextFrame = native.build_display_list_frame('{}', 1);
+    expect(worker.posted[1]).toMatchObject({ type: 'sync', snapshot: { layoutRevision: 2 } });
+    worker.reply({
+      id: worker.posted[1].id, ok: true, frame: nextFrame.slice().buffer,
+      caret: { frameEpoch: 2, caretRect: null }, selection: null,
+      layoutRevision: 2, layoutJson, layoutProvisional: true,
+    });
+    const current = (await act(() => second))!;
+    expect(surfaceTimers).toHaveLength(2);
+    expect(hook.result.current.pendingCompletion).toBe(engine);
+    await act(async () => {
+      const attaching = hook.result.current.attachOffscreenCanvases(
+        [], [], 1, 1, { color: '#000', width: 2 }
+      );
+      worker.reply({ id: worker.posted[2].id, ok: true });
+      expect(await attaching).toBe(true);
+    });
+    expect(worker.posted[3]).toMatchObject({
+      type: 'completeLayout', expectedFrameEpoch: 2, sliceBlocks: 64,
+    });
+
+    await act(async () => surfaceTimers[0]!());
+    expect(worker.posted.filter((request): boolean => request.type === 'completeLayout')).toEqual([
+      worker.posted[3]!,
+    ]);
+    expect(await older.complete).toBeNull();
+    const fullFrame = native.build_display_list_frame('{}', 2);
+    worker.reply({
+      id: worker.posted[3].id, ok: true, frame: fullFrame.slice().buffer,
+      caret: { frameEpoch: 3, caretRect: null }, selection: null,
+      layoutRevision: 2, layoutJson,
+    });
+    expect((await current.complete)?.layout.pages.length).toBeGreaterThan(0);
+    await act(async () => surfaceTimers[1]!());
+    expect(worker.posted).toHaveLength(4);
+    expect(adopted).toEqual([REQUEST, REQUEST]);
+    expect(hook.result.current.pendingCompletion).toBeNull();
+    expect(hook.result.current.error).toBeNull();
+    expect(worker.terminated).toBe(false);
+  } finally {
+    hook.unmount();
+    timers.mockRestore();
+    native.free();
+  }
+});
+
+test('a worker-authoritative relayout covers the visible prefix and completes it separately', async () => {
+  const { native, layoutJson, frame, engine } = setup();
+  const snapshot = engine.residentWorkerSnapshot.bind(engine);
+  engine.residentWorkerSnapshot = (options) => ({
+    ...snapshot(options)!, workerAuthoritative: true,
+  });
+  try {
+    const { result, unmount } = renderHook(() => useRustDisplayList(null));
+    const first = result.current.layoutInWorker(engine, REQUEST);
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null }, selection: null,
+      layoutRevision: 1, layoutJson,
+    });
+    await first!;
+    act(() => result.current.setDisplayWindow(4, 6));
+    const next = result.current.layoutInWorker(engine, REQUEST);
+    expect(worker.posted[1]).toMatchObject({
+      type: 'sync', provisionalPages: 6, displayWindow: [4, 6],
+      snapshot: { workerAuthoritative: true },
+    });
+    const nextFrame = native.build_display_list_frame('{}', 1);
+    worker.reply({
+      id: worker.posted[1].id, ok: true, frame: nextFrame.slice().buffer,
+      caret: { frameEpoch: 2, caretRect: null }, selection: null,
+      layoutRevision: 2, layoutJson, layoutProvisional: true,
+    });
+    const prefix = await act(() => next!);
+    expect(prefix!.complete).toBeInstanceOf(Promise);
+    await act(async () => {
+      void result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
+    });
+    worker.reply({ id: worker.posted[2].id, ok: true });
+    await waitFor(() => expect(worker.posted[3]).toMatchObject({
+      type: 'completeLayout', expectedFrameEpoch: 2, sliceBlocks: 64,
+    }));
+    const completedFrame = native.build_display_list_frame('{}', 2);
+    worker.reply({
+      id: worker.posted[3].id, ok: true, frame: completedFrame.slice().buffer,
+      caret: { frameEpoch: 3, caretRect: null }, selection: null,
+      layoutRevision: 2, layoutJson,
+    });
+    expect(await prefix!.complete).not.toBeNull();
     unmount();
   } finally {
     native.free();

@@ -2,8 +2,8 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import JSZip from 'jszip';
 import { createRef } from 'react';
+import { pagedDocx } from './__fixtures__/pagedDocx';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -16,7 +16,6 @@ const { DocxEditor } = await import('../../index');
 type DocxEditorRef = import('../../index').DocxEditorRef;
 
 const WASM = resolve(import.meta.dir, '../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm');
-const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const quiet = { error: console.error, warn: console.warn };
 
 beforeAll(async () => {
@@ -40,31 +39,6 @@ afterAll(async () => {
   console.warn = quiet.warn;
   if (ownsDom) await GlobalRegistrator.unregister();
 });
-
-async function pagedDocx(pages: number): Promise<ArrayBuffer> {
-  const body = Array.from(
-    { length: pages },
-    (_, index) =>
-      `<w:p>${index ? '<w:pPr><w:pageBreakBefore/></w:pPr>' : ''}<w:r><w:t>Page ${index + 1}</w:t></w:r></w:p>`
-  ).join('');
-  const zip = new JSZip();
-  zip.file(
-    '[Content_Types].xml',
-    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
-      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
-      '<Default Extension="xml" ContentType="application/xml"/>' +
-      '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
-      '</Types>'
-  );
-  zip.file(
-    '_rels/.rels',
-    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
-      '</Relationships>'
-  );
-  zip.file('word/document.xml', `<w:document xmlns:w="${W}"><w:body>${body}</w:body></w:document>`);
-  return zip.generateAsync({ type: 'arraybuffer' });
-}
 
 async function tick(ms = 10) {
   await act(async () => {

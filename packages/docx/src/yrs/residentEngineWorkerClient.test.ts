@@ -183,6 +183,20 @@ test('frame and edit requests carry the current display window and retention fla
   await unwindowed;
 });
 
+test('sync forwards foreground only when requested', async () => {
+  const { worker, client } = setup();
+  const foreground = client.sync(snapshot, '', 0, false, { foreground: true });
+  expect(worker.posted.at(-1)).toMatchObject({ type: 'sync', foreground: true });
+  worker.reply(frameReply(worker.lastId()));
+  await foreground;
+
+  const background = client.sync(snapshot, '', 0);
+  expect(worker.posted.at(-1)).toMatchObject({ type: 'sync' });
+  expect(worker.posted.at(-1)).not.toHaveProperty('foreground');
+  worker.reply(frameReply(worker.lastId()));
+  await background;
+});
+
 test('default windowed requests omit the retention flag', async () => {
   const { worker, client } = setup();
   const requests = [

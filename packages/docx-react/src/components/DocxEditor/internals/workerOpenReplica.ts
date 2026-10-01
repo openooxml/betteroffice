@@ -8,9 +8,14 @@ interface PendingReplica {
   cancel(): void;
   pending: boolean;
   onDemand?: WorkerOpenReplicaDemand;
+  readonly started: boolean;
   initialVersion: string;
   readyVersion?: string;
   loadedVersion?: string;
+  /** The worker's version for the opened state, once the session mirrors the worker. */
+  mirrorVersion?: string;
+  /** The worker's version the replica took over, when it hydrated from worker-held proposals. */
+  handoverVersion?: string;
 }
 
 /** Loads a replica only when asked: `request` starts it at the point its owner allows. */
@@ -65,6 +70,9 @@ export function deferWorkerOpenReplica(
     ready,
     pending: true,
     onDemand,
+    get started() {
+      return started || !replica.pending;
+    },
     initialVersion: session.version(),
     start() {
       if (started || !replica.pending) return;
@@ -90,6 +98,10 @@ export function deferWorkerOpenReplica(
   };
   replicas.set(session, replica);
   return replica;
+}
+
+export function workerOpenReplicaStarted(session: YrsSession): boolean {
+  return replicas.get(session)?.started === true;
 }
 
 export function workerOpenReplicaPending(session: YrsSession): boolean {
@@ -138,7 +150,25 @@ export function failWorkerOpenReplica(session: YrsSession, error: unknown): void
 
 export function workerOpenSourceVersion(session: YrsSession, version: string | null): string | null {
   const replica = replicas.get(session);
-  return replica?.readyVersion !== undefined && replica.initialVersion === version
-    ? replica.readyVersion
-    : version;
+  if (!replica || version === null) return version;
+  let mapped = version;
+  if (mapped === replica.initialVersion) {
+    mapped = replica.mirrorVersion ?? replica.readyVersion ?? mapped;
+  }
+  if (mapped === replica.handoverVersion && replica.readyVersion !== undefined) {
+    mapped = replica.readyVersion;
+  }
+  return mapped;
+}
+
+/** Layouts of the worker's `version` show the state the replica hydrates with. */
+export function adoptWorkerOpenHandoverVersion(session: YrsSession, version: string): void {
+  const replica = replicas.get(session);
+  if (replica?.pending) replica.handoverVersion = version;
+}
+
+/** Layouts of the opened state now carry `version`, the worker's version the session mirrors. */
+export function adoptWorkerOpenMirrorVersion(session: YrsSession, version: string): void {
+  const replica = replicas.get(session);
+  if (replica?.pending) replica.mirrorVersion = version;
 }

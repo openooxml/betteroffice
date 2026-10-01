@@ -12,6 +12,7 @@ import {
   type DocxProposalResult,
 } from './proposals';
 import { computeProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
+import { hasCachedYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import {
   presentOffscreenPageBackBuffer,
   presentOffscreenPageBackBufferWithCaret,
@@ -42,6 +43,7 @@ import {
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 let session: ResidentEngineSession | null = null;
 let proposals: DocxProposalRegistry | null = null;
+let lastProposalMirrorVersion: string | null = null;
 /** Set while the session holds the document `open` seeded, with the heap limit it used. */
 let openedDocument: { heapLimitBytes?: number } | null = null;
 let unsubscribe: (() => void) | null = null;
@@ -77,7 +79,9 @@ interface LayoutRequest {
   extras: string;
   layoutExtras?: string;
 }
-let incompleteLayout: (LayoutRequest & { layoutInput: string }) | null = null;
+let incompleteLayout:
+  | (LayoutRequest & { layoutInput: string; pages: number; workerAuthoritative?: boolean })
+  | null = null;
 let completedLayout:
   | (LayoutRequest & { layoutJson: string; headersFootersJson: string | undefined })
   | null = null;
@@ -98,22 +102,71 @@ const COMPLETION_SLICE_MS = 24;
 const COMPLETION_RESTARTS = 3;
 const ALL_BLOCKS = 2 ** 32 - 1;
 
+// Foreground requests (what the user is waiting on) hold background work back:
+// a background step never starts while one is queued, and after an edit it
+// waits until the user has been idle for FOREGROUND_IDLE_MS.
+const FOREGROUND_IDLE_MS = 300;
+let foregroundQueued = 0;
+let backgroundIdleUntil = 0;
+
+/**
+ * Whether a request is an edit the user waits on. Reads and proposal
+ * snapshots keep their queue order, so nothing queued behind a completion
+ * slice (replica encoding included) overtakes it.
+ */
+function isForeground(request: ResidentEngineWorkerRequest): boolean {
+  switch (request.type) {
+    case 'applyInput':
+    case 'applyDelete':
+      return true;
+    case 'proposal':
+      return request.operation.kind !== 'snapshot';
+    case 'sync':
+      return request.foreground === true;
+    default:
+      return false;
+  }
+}
+
+/** Milliseconds background work must still wait, or 0 when it may run now. */
+function backgroundDelay(): number {
+  if (foregroundQueued > 0) return 1;
+  return Math.max(0, backgroundIdleUntil - performance.now());
+}
+
 // The request being handled, and the requests answered with a trap.
 let handlingId = 0;
 const trappedIds = new Set<number>();
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
-  enqueue(() => handle(event.data), event.data.id);
+  const request = event.data;
+  if (!isForeground(request)) {
+    enqueue(() => handle(request), request.id);
+    return;
+  }
+  foregroundQueued += 1;
+  backgroundIdleUntil = performance.now() + FOREGROUND_IDLE_MS;
+  enqueue(
+    () => handle(request),
+    request.id,
+    () => true,
+    () => (foregroundQueued -= 1)
+  );
 };
 
-/** `current` drops an operation whose request was answered while it waited. */
+/**
+ * `current` drops an operation whose request was answered while it waited;
+ * `settled` runs once its turn has come, whether or not it ran.
+ */
 function enqueue(
   operation: () => Promise<void> | void,
   id: number,
-  current: () => boolean = () => true
+  current: () => boolean = () => true,
+  settled?: () => void
 ): void {
   operations = operations
     .then(() => {
+      settled?.();
       if (!current()) return;
       if (trap) throw trap;
       handlingId = id;
@@ -222,6 +275,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     if (provisional) {
       incompleteLayout = {
         layoutInput: request.snapshot.layoutInput,
+        pages: request.provisionalPages!,
+        workerAuthoritative: request.snapshot.workerAuthoritative,
         extras: request.extras,
         layoutExtras: request.layoutExtras,
       };
@@ -272,7 +327,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'revisionCount') {
     if (!session) throw new Error('Resident engine worker is not initialized');
-    reply({ id: request.id, ok: true, revisionCount: session.revisionCount() });
+    // Host proposals' revisions are not the document's own.
+    const proposed = new Set(proposals?.snapshot().proposals.flatMap((p) => p.revisionIds));
+    reply({ id: request.id, ok: true, revisionCount: session.revisionCount(proposed) });
     return;
   }
   if (request.type === 'eraseCaret') {
@@ -284,12 +341,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (!session) throw new Error('Resident engine worker is not initialized');
   if (request.type === 'proposal') {
     if (!unsubscribe) throw new Error('Resident engine worker has not laid out its document');
-    await completeProvisionalLayout();
     pendingUpdates = [];
     let committed = false;
     try {
       const registry = proposals ??= createProposalRegistry(session.proposalEngine);
       const since = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+      const previousVersion = session.proposalEngine.version();
       let result: DocxProposalResult | undefined;
       switch (request.operation.kind) {
         case 'propose':
@@ -307,17 +364,26 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       if (changedStories.length > 0) completedLayout = null;
       const updates = pendingUpdates.map(exactBuffer);
       const stateVector = exactBuffer(session.encodeStateVector());
+      const version = session.proposalEngine.version();
+      const geometry = computeProposalGeometryMirror(
+        session.geometryReader,
+        registry.snapshot(),
+        version === previousVersion && (
+          version === lastProposalMirrorVersion || hasCachedYrsSidebarProjection(session.geometryReader)
+        )
+      );
+      lastProposalMirrorVersion = geometry.version;
       reply(
         {
           id: request.id,
           ok: true,
           proposal: {
             ...(result === undefined ? {} : { result }),
-            mirror: { version: session.proposalEngine.version(), proposals: registry.exportState() },
+            mirror: { version, proposals: registry.exportState() },
             changedStories,
             updates,
             stateVector,
-            geometry: computeProposalGeometryMirror(session.geometryReader, registry.snapshot()),
+            geometry,
           },
         },
         [...updates, stateVector]
@@ -337,7 +403,6 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'documentRead') {
-    await completeProvisionalLayout();
     const engine = session.proposalEngine;
     let value: unknown;
     switch (request.read.kind) {
@@ -367,7 +432,20 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     unsubscribe?.();
     unsubscribe = null;
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
-    const { layoutJson } = hydrate(request.snapshot, undefined, request.layoutExtras !== undefined);
+    const { layoutJson, provisional } = hydrate(
+      request.snapshot,
+      request.provisionalPages,
+      request.layoutExtras !== undefined
+    );
+    if (provisional) {
+      incompleteLayout = {
+        layoutInput: request.snapshot.layoutInput,
+        pages: request.provisionalPages!,
+        workerAuthoritative: request.snapshot.workerAuthoritative,
+        extras: request.extras,
+        layoutExtras: request.layoutExtras,
+      };
+    }
     subscribe();
     const started = performance.now();
     const frame = session.buildDisplayListFrame(
@@ -383,7 +461,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       started,
       false,
       request.paintCaret,
-      request.layoutExtras === undefined ? undefined : (layoutJson ?? undefined)
+      request.layoutExtras === undefined ? undefined : (layoutJson ?? undefined),
+      provisional
     );
     return;
   }
@@ -425,7 +504,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'buildFrame') {
-    await completeProvisionalLayout();
+    if (!incompleteLayout?.workerAuthoritative) await completeProvisionalLayout();
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     pendingUpdates = [];
     const started = performance.now();
@@ -479,6 +558,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     reply({ id: request.id, ok: true });
     return;
   }
+  if (request.type === 'applyInput' && incompleteLayout && (await applyProvisionalInput(request))) return;
   await completeProvisionalLayout();
   // The edit replaces the pagination a cached completion's frame would paint.
   completedLayout = null;
@@ -523,21 +603,103 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       request.type === 'applyDelete' ? session.residentDeletedUnits() : undefined
     );
   } catch (error) {
-    if (trap) throw trap;
-    if (error instanceof WebAssembly.RuntimeError) throw error;
-    const message = error instanceof Error ? error.message : String(error);
-    reply({
-      id: request.id,
-      ok: false,
-      error: message,
-      residentUnavailable: message.includes('resident input state is not ready'),
-      // The edit committed here but never reached the host: this replica is
-      // no longer the host's, so the host must replace it.
-      ...(pendingUpdates.length > 0 ? { terminal: true } : {}),
-    });
+    replyInputFailure(request.id, error);
   } finally {
     pendingUpdates = [];
   }
+}
+
+async function applyProvisionalInput(
+  request: Extract<ResidentEngineWorkerRequest, { type: 'applyInput' }>
+): Promise<boolean> {
+  const layout = incompleteLayout;
+  const { anchor, head } = request.selection;
+  if (
+    !session ||
+    !layout ||
+    head.story !== 'body' ||
+    anchor.story !== head.story ||
+    anchor.paraId !== head.paraId ||
+    anchor.offset !== head.offset
+  ) return false;
+  setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
+  session.setSelection(anchor, head);
+  if (!session.residentCaretSnapshot().caretRect) return false;
+
+  completedLayout = null;
+  pendingUpdates = [];
+  const started = performance.now();
+  let waiting: SlicedCompletion | null = null;
+  try {
+    session.insertText(head.story, head.paraId, head.offset, request.text);
+    const pages = Math.max(layout.pages, request.displayWindow?.[1] ?? 0);
+    const layoutJson = session.layoutDocumentWithRegionsPrefixRetainedJson(layout.layoutInput, pages);
+    layout.pages = pages;
+    const provisional = (JSON.parse(layoutJson) as { provisional?: boolean }).provisional === true;
+    if (!provisional) {
+      const { layoutInput: _input, ...fields } = layout;
+      incompleteLayout = null;
+      waiting = slicedCompletion;
+      slicedCompletion = null;
+      completedLayout = {
+        ...fields,
+        layoutJson,
+        headersFootersJson: session.retainedHeadersFootersJson(),
+      };
+    } else if (slicedCompletion) {
+      // The edit abandoned the pass; it begins again once the user is idle.
+      slicedCompletion.begun = false;
+    }
+    const frame = session.buildDisplayListFrame(
+      frameExtras(layout.extras, layout.layoutExtras, layoutJson),
+      request.expectedFrameEpoch
+    );
+    await replyFrame(
+      request.id,
+      frame,
+      performance.now() - started,
+      pendingUpdates,
+      undefined,
+      started,
+      true,
+      request.paintCaret,
+      undefined,
+      provisional,
+      undefined,
+      true
+    );
+  } catch (error) {
+    if (waiting) replyFailure(waiting.id, error);
+    replyInputFailure(request.id, error);
+    return true;
+  } finally {
+    pendingUpdates = [];
+  }
+  if (waiting) {
+    try {
+      await replyCompletedLayout(waiting.id, waiting.expectedFrameEpoch, waiting.paintCaret);
+    } catch (error) {
+      replyFailure(waiting.id, error);
+    } finally {
+      pendingUpdates = [];
+    }
+  }
+  return true;
+}
+
+function replyInputFailure(id: number, error: unknown): void {
+  if (trap) throw trap;
+  if (error instanceof WebAssembly.RuntimeError) throw error;
+  const message = error instanceof Error ? error.message : String(error);
+  reply({
+    id,
+    ok: false,
+    error: message,
+    residentUnavailable: message.includes('resident input state is not ready'),
+    // The edit committed here but never reached the host: this replica is
+    // no longer the host's, so the host must replace it.
+    ...(pendingUpdates.length > 0 ? { terminal: true } : {}),
+  });
 }
 
 /**
@@ -709,6 +871,11 @@ function scheduleCompletionSlice(completion: SlicedCompletion): void {
 /** One bounded step of a sliced completion, which then queues the next. */
 async function completionSlice(completion: SlicedCompletion): Promise<void> {
   if (!session || slicedCompletion !== completion || !incompleteLayout) return;
+  const delay = backgroundDelay();
+  if (delay > 0) {
+    setTimeout(() => scheduleCompletionSlice(completion), delay);
+    return;
+  }
   let progress;
   if (!completion.begun) {
     progress = session.beginRegionLayout(incompleteLayout.layoutInput);
@@ -719,11 +886,21 @@ async function completionSlice(completion: SlicedCompletion): Promise<void> {
       progress = session.resumeRegionLayout(completion.blocks);
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) throw error;
-      // A change in between abandoned the pass: begin again on the new state,
-      // or finish in one step once changes keep coming.
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        message !== 'no region layout to resume' &&
+        message !== 'the document or its fonts changed since the region layout began'
+      ) throw error;
+      // A change in between abandoned the pass: begin again on the new state. Host
+      // proposals the worker holds keep yielding to user requests; other changes
+      // finish in one step once they keep coming.
       completion.begun = false;
       completion.restarts += 1;
-      if (completion.restarts > COMPLETION_RESTARTS) {
+      if (
+        completion.restarts > COMPLETION_RESTARTS &&
+        !incompleteLayout.workerAuthoritative &&
+        !proposals
+      ) {
         try {
           await completeProvisionalLayout();
         } catch {
@@ -803,6 +980,7 @@ function destroySession(keepSurfaces = false): void {
   proposals?.destroy();
   proposals = null;
   session?.destroy();
+  lastProposalMirrorVersion = null;
   session = null;
   openedDocument = null;
   pendingUpdates = [];
@@ -845,7 +1023,8 @@ async function replyFrame(
   paintCaret = false,
   layoutJson?: string,
   layoutProvisional = false,
-  deletedUnits?: number
+  deletedUnits?: number,
+  precedesCompletion = false
 ): Promise<void> {
   retainedFrame = applyFrameDeltaOwned(retainedFrame, decodeFrameDelta(bytes));
   for (const pageId of retainedFrame.damagedPageIds) pendingOffscreenPageIds.add(pageId.toString());
@@ -897,6 +1076,7 @@ async function replyFrame(
       ...(stateVector ? { stateVector } : {}),
       ...(layoutJson !== undefined ? { layoutJson } : {}),
       ...(layoutProvisional ? { layoutProvisional } : {}),
+      ...(precedesCompletion ? { precedesCompletion } : {}),
     },
     [frame, ...updateBuffers, ...(stateVector ? [stateVector] : [])]
   );

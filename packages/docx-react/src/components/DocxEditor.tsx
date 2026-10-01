@@ -23,6 +23,9 @@ import type {
   DocxFindTextResult,
   DocxLayoutMap,
   DocxPageExportOptions,
+  DocxParagraphAnchor,
+  DocxParagraphAnchorResult,
+  DocxParagraphIdentitySnapshot,
   DocxPagedStructuredContent,
   DocxProposalRequest,
   DocxProposalResult,
@@ -71,6 +74,7 @@ import {
 } from './DocxEditor/overlays/CanvasSidebarBrightenOverlay';
 import { useCanvasOverlayTarget } from './DocxEditor/internals/useCanvasOverlayTarget';
 import { isWithinPageArea } from './DocxEditor/internals/pageAreaRouting';
+import { requestWorkerOpenReplica } from './DocxEditor/internals/workerOpenReplica';
 import { pagePressNeedsReplica } from './DocxEditor/internals/replicaTriggers';
 import { useImageActions } from './DocxEditor/hooks/useImageActions';
 import { useDocxEditorRefApi } from './DocxEditor/hooks/useDocxEditorRefApi';
@@ -190,6 +194,8 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   /**
    * Open DOCX files in the resident worker. Off by default. A read-only editor without
    * collaboration then loads its main-thread copy of the document only when something needs it.
+   * While a read-only document's host proposals are held in the worker, synchronous ref members
+   * that need the main-thread document throw `DocxReplicaNotReadyError`; await `flushPendingInput()` first.
    * @experimental
    */
   experimentalWorkerOpen?: boolean;
@@ -445,6 +451,13 @@ export interface DocxEditorRef {
    * edit targets and `expectVersion` from this result.
    */
   readParagraphs: (request: DocxReadParagraphsRequest) => Promise<DocxReadParagraphsResult>;
+  /** Reads paragraph identities from the current document. */
+  getParagraphIdentities: () => Promise<DocxParagraphIdentitySnapshot>;
+  /** Resolves paragraph anchors in input order at the current version. */
+  resolveParagraphAnchors: (anchors: readonly DocxParagraphAnchor[]) => Promise<{
+    version: string;
+    results: DocxParagraphAnchorResult[];
+  }>;
   /** Flushes pending input, then searches exactly and case-sensitively within one scope. */
   findText: (request: DocxFindTextRequest) => Promise<DocxFindTextResult>;
   /** Flushes pending input, then checks an edit batch without changing anything. */
@@ -992,6 +1005,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // load, which reports it. Each render error is handled once: one the
   // preview left set is not the full session's.
   const failOpeningRef = useRef<(error: Error, session?: unknown) => boolean>(() => false);
+  const notifiedErrorsRef = useRef(new WeakSet<Error>());
+  const notifyError = useCallback((error: Error) => {
+    if (notifiedErrorsRef.current.has(error)) return;
+    notifiedErrorsRef.current.add(error);
+    onError?.(error);
+  }, [onError]);
   const handledRenderErrorRef = useRef<Error | null>(null);
   const renderErrorEngine = canvasRenderer.errorEngine ?? undefined;
   const coreSessionRef = useRef<unknown>(null);
@@ -1009,8 +1028,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     if (!error || error === handledRenderErrorRef.current) return;
     handledRenderErrorRef.current = error;
     if (untakenWorkerSession(renderErrorEngine)) return;
-    if (!failOpeningRef.current(error, renderErrorEngine)) onError?.(error);
-  }, [canvasRenderer.error, renderErrorEngine, onError, untakenWorkerSession]);
+    if (!failOpeningRef.current(error, renderErrorEngine)) notifyError(error);
+  }, [canvasRenderer.error, renderErrorEngine, notifyError, untakenWorkerSession]);
   useMemoryPressure(onMemoryPressure, memoryBudget, canvasRenderer.workerMemory, [
     canvasRenderer.frame,
     canvasRenderer.error,
@@ -1187,7 +1206,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     ),
     setComments,
     setShowCommentsSidebar,
-    onError,
+    onError: notifyError,
     resetForNewDocument,
     commentsLoadedRef,
     commentIdAllocator: commentIdAllocatorRef.current,
@@ -1208,6 +1227,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     [reportDocumentLayoutError, resetSettled, yrsSeedGeneration]
   );
   useDocxEnginePrewarmOnBytes(experimentalPrewarm, yrsSeedBytes);
+  // A read-only worker-open document keeps host proposals in the worker until the replica loads.
+  const workerProposals = modeReadOnly && !collaboration;
+  const workerContentChangeRef = useRef<() => void>(() => {});
+  const workerRevisionsRef = useRef<() => void>(() => {});
   const yrsCore = useYrsCoreSession(
     true,
     history.state,
@@ -1231,9 +1254,13 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       workerOpen: experimentalWorkerOpen
         ? {
             openInWorker: canvasRenderer.openInWorker,
+            workerProposals,
+            refreshWorkerLayout: () => pagedEditorRef.current?.refreshWorkerLayout(),
             renderedFrame: canvasRenderer.status === 'ready' ? canvasRenderer.displayList : null,
             pendingCompletion: canvasRenderer.pendingCompletion,
-            hydrateOnDemand: modeReadOnly && !collaboration,
+            hydrateOnDemand: workerProposals,
+            onWorkerContentChange: () => workerContentChangeRef.current(),
+            onWorkerRevisions: () => workerRevisionsRef.current(),
           }
         : undefined,
       mediaTokens,
@@ -1524,6 +1551,18 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     pushDocument,
     yrsCore.documentFromYrs,
   ]);
+  // A worker-held change reaches document listeners once the replica holds it; without them,
+  // nothing needs the replica.
+  workerContentChangeRef.current = () => {
+    const session = yrsCore.session;
+    if (!session || (!onChange && contentChangeSubscribersRef.current.size === 0)) return;
+    void requestWorkerOpenReplica(session)?.then(
+      () => {
+        if (coreSessionRef.current === session) handleYrsContentChange();
+      },
+      () => {}
+    );
+  };
 
   // Recompute the floating "add comment" button position from the current Yrs
   // selection + page/container geometry. Called from handleSelectionChange and
@@ -1759,7 +1798,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     session:
       yrsCore.session &&
       !opening &&
-      yrsCore.replicaReady &&
+      (yrsCore.replicaReady || yrsCore.workerProposalsReady) &&
       yrsCore.sessionGeneration === yrsSeedGeneration &&
       history.state &&
       !state.isLoading &&
@@ -2154,13 +2193,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const replicaPending = Boolean(
     experimentalWorkerOpen && yrsCore.hydrateOnDemand && yrsCore.session && !yrsCore.replicaReady
   );
-  // Plugins, sidebars, the outline and geometry callbacks read the replica.
+  // Sidebars and the outline read the replica; so do plugins and geometry callbacks, unless the
+  // worker serves them proposals.
   const replicaWanted =
-    (plugins?.length ?? 0) > 0 ||
+    (!(experimentalWorkerOpen && workerProposals) &&
+      ((plugins?.length ?? 0) > 0 || Boolean(onRenderedDomContextReady))) ||
     showCommentsSidebar ||
     sidebarOpen ||
-    showOutline ||
-    Boolean(onRenderedDomContextReady);
+    showOutline;
   useEffect(() => {
     if (replicaPending && replicaWanted) requestReplica();
   }, [replicaPending, replicaWanted, requestReplica, yrsCore.session]);
@@ -2302,6 +2342,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     sidebarAutoOpenedRef.current = true;
     setShowCommentsSidebar(true);
   }, [commentSidebarItems, getProposalAnchorKeys, setShowCommentsSidebar]);
+  // A document whose worker found tracked changes asks for the sidebar, as a loaded one does; a
+  // host that keeps the sidebar closed keeps the replica unloaded.
+  workerRevisionsRef.current = () => setShowCommentsSidebar(true);
 
   const editorContainerStyle: CSSProperties = {
     flex: 1,

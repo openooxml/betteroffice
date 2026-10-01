@@ -41,8 +41,10 @@ export interface ResidentEngineWorkerFrame {
   deletedUnits: number;
   /** The region layout the worker ran, when the request handed it the layout. */
   layoutJson?: string;
-  /** `layoutJson` covers only the first pages; `completeLayout` finishes it. */
+  /** The layout (`layoutJson`, or an input reply's frame) covers only the first pages; `completeLayout` finishes it. */
   layoutProvisional?: boolean;
+  /** Input answered ahead of the pending `completeLayout`, whose layout includes it. */
+  precedesCompletion?: boolean;
 }
 
 /** A bootstrap/sync whose snapshot layout the worker runs as the only layout. */
@@ -51,7 +53,7 @@ export interface ResidentEngineWorkerLayoutOptions {
   layoutExtras?: string;
   /** The host state vector the snapshot brings the worker to. */
   stateVector?: Uint8Array;
-  /** Bootstrap only: lay out just the body's first pages before replying. */
+  /** Lay out just the body's first pages before replying. */
   provisionalPages?: number;
   /** Bootstrap only: lay out the document {@link ResidentEngineWorkerClient.open} opened. */
   opened?: boolean;
@@ -438,7 +440,11 @@ export class ResidentEngineWorkerClient {
     extras: string,
     expectedFrameEpoch: number,
     paintCaret = false,
-    options: ResidentEngineWorkerLayoutOptions & ResidentEngineWorkerSnapshotOptions = {}
+    options: ResidentEngineWorkerLayoutOptions &
+      ResidentEngineWorkerSnapshotOptions & {
+        /** A relayout the user waits on, which holds the worker's background work back like an edit. */
+        foreground?: boolean;
+      } = {}
   ): Promise<ResidentEngineWorkerFrame> {
     const fontsRevision = snapshot.fontsRevision;
     const pending = this.request(
@@ -448,7 +454,11 @@ export class ResidentEngineWorkerClient {
         extras,
         expectedFrameEpoch,
         paintCaret,
+        ...(options.foreground ? { foreground: true } : {}),
         ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
+        ...(options.provisionalPages !== undefined
+          ? { provisionalPages: options.provisionalPages }
+          : {}),
         ...(options.displayWindow
           ? {
               displayWindow: options.displayWindow,
@@ -747,6 +757,7 @@ function frameResult(
     deletedUnits: response.deletedUnits ?? 0,
     ...(response.layoutJson !== undefined ? { layoutJson: response.layoutJson } : {}),
     ...(response.layoutProvisional ? { layoutProvisional: true } : {}),
+    ...(response.precedesCompletion ? { precedesCompletion: true } : {}),
   };
 }
 
