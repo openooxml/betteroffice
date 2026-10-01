@@ -316,11 +316,20 @@ type PageBuildInFlight =
   | { kind: 'release' }
   | { kind: 'build'; background: boolean; cancel(): void; promote(): void };
 
+function isPageBuildTask(scheduled: PageBuildTimer): scheduled is PageBuildTask {
+  return typeof scheduled === 'object' && 'cancel' in scheduled;
+}
+
+/** A page build queued on a timer, which runs sooner than an idle-time build. */
+function pageBuildTimerQueued(scheduled: PageBuildTimer | null): boolean {
+  return scheduled !== null && !isPageBuildTask(scheduled);
+}
+
 function cancelPageBuilds(timer: { current: PageBuildTimer | null }): void {
   const scheduled = timer.current;
   timer.current = null;
   if (scheduled === null) return;
-  if (typeof scheduled === 'object' && 'cancel' in scheduled) scheduled.cancel();
+  if (isPageBuildTask(scheduled)) scheduled.cancel();
   else clearTimeout(scheduled);
 }
 
@@ -1714,7 +1723,11 @@ export function useRustDisplayList(
       const finish = (): void => {
         if (pageBuildInFlightRef.current !== build) return;
         pageBuildInFlightRef.current = null;
-        schedulePageBuildsWhenIdleRef.current();
+        const keepTimer =
+          !workerOpenEnabledRef.current &&
+          settleWaitersRef.current.size === 0 &&
+          pageBuildTimerQueued(pageBuildTimerRef.current);
+        if (!keepTimer) schedulePageBuildsWhenIdleRef.current();
       };
       const line = sourceLine(worker.engine);
       const paintToken = paintedCaretMachine.token();
