@@ -1504,7 +1504,7 @@ export function useRustDisplayList(
       if (background) {
         if (provisionalPageFrameRef.current) return;
         const settling = settleWaitersRef.current.size > 0;
-        if (!idle) {
+        if (!idle && !settling) {
           schedulePageBuildsWhenIdleRef.current();
           return;
         }
@@ -1635,13 +1635,13 @@ export function useRustDisplayList(
                   return;
                 }
               }
-              attachment = scheduleIdlePageBuild(decode);
+              attachment = scheduleIdlePageBuild(decode, settleWaitersRef.current.size > 0);
             } catch (error) {
               finish();
               failed(error);
             }
           };
-          attachment = scheduleIdlePageBuild(decode);
+          attachment = scheduleIdlePageBuild(decode, settleWaitersRef.current.size > 0);
         },
         (error) => {
           finish();
@@ -1679,7 +1679,7 @@ export function useRustDisplayList(
     pageBuildTimerRef.current = scheduleIdlePageBuild((deadline) => {
       if (deadline.timeRemaining() > 0) buildUnbuiltPages(true);
       else schedulePageBuildsWhenIdleRef.current();
-    });
+    }, settleWaitersRef.current.size > 0);
   };
 
   const setDisplayWindow = useCallback(
