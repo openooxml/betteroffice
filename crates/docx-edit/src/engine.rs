@@ -5901,6 +5901,7 @@ mod tests {
             engine
                 .layout_document_with_regions_retained_json(&request)
                 .unwrap();
+            engine.build_display_list_frame("{}", 0).unwrap();
             (engine, request)
         };
         docx_layout::clear_measure_fonts();
@@ -5932,8 +5933,10 @@ mod tests {
                 let range = StoryRange::new(story, start, end);
                 engine.edit_resident_text(range, text, true).unwrap();
             }
-            let epoch = engine.stats().frame_epoch;
-            engine.apply_and_layout(story, epoch).unwrap();
+            let epoch = engine.display.borrow().binary_frame_epoch;
+            engine
+                .apply_and_layout(story, epoch)
+                .unwrap_or_else(|error| panic!("{story} [{start}, {end}) {text:?}: {error}"));
             let after = Rc::as_ptr(&engine.render.borrow().stories["body"].blocks);
             assert_eq!(before == after, patched && enabled);
             let incremental = snapshot(engine);
@@ -5952,6 +5955,7 @@ mod tests {
         let engine = paragraphs_engine(9600, 3);
         engine.set_local_lowering(enabled);
         engine.layout_document_with_regions_json(&request).unwrap();
+        engine.build_display_list_frame("{}", 0).unwrap();
         for (paragraph, offset) in (0..3).flat_map(|p| [0, 13, u32::MAX].map(|at| (p, at))) {
             let paragraphs = engine.doc().paragraphs("body").unwrap();
             let width = paragraphs[0].text.encode_utf16().count() as u32;
@@ -5971,6 +5975,7 @@ mod tests {
         let doc = empty.doc();
         doc.create_story("body", "A", "Normal", "left").unwrap();
         empty.layout_document_with_regions_json(&request).unwrap();
+        empty.build_display_list_frame("{}", 0).unwrap();
         for (end, text) in [(1, None), (0, Some("😀")), (2, None), (0, Some("B"))] {
             step(&empty, &request, "body", (0, end, text), true);
         }
