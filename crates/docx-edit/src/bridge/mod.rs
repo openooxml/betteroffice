@@ -458,8 +458,8 @@ fn lower_story<T: ReadTxn>(
         let comment_coverage = resolve_comment_intervals(txn, story_id, env)?;
         let comments: Vec<_> = comment_coverage
             .iter()
-            .cloned()
             .filter(|interval| interval.start < interval.end)
+            .cloned()
             .collect();
         let mut blocks = Vec::new();
         let mut paragraph_runs = Vec::new();

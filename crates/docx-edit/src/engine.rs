@@ -2110,7 +2110,7 @@ impl EngineSession {
             return None;
         }
         self.pagination.borrow_mut().input_lowering = None;
-        let blocks = Rc::get_mut(&mut lowered.blocks)?;
+        let blocks = Rc::make_mut(&mut lowered.blocks);
         let map = Rc::get_mut(&mut lowered.map)?;
         let txn = self.doc.yrs_doc().transact();
         let revealable = Rc::get_mut(&mut lowered.revealable_blocks)?;
@@ -6700,7 +6700,7 @@ mod tests {
                 serde_json::to_string(&pagination.layout.as_ref().unwrap().pages).unwrap(),
             )
         };
-        let before = Rc::as_ptr(&engine.render.borrow().stories["body"].blocks);
+        let before = Rc::as_ptr(&engine.render.borrow().stories["body"].map);
         if text.is_none() && start == end {
             let ctx = crate::EditCtx::local("", "");
             let position = Position::new(story, start);
@@ -6713,7 +6713,7 @@ mod tests {
         engine
             .apply_and_layout(story, epoch)
             .unwrap_or_else(|error| panic!("{story} [{start}, {end}) {text:?}: {error}"));
-        let after = Rc::as_ptr(&engine.render.borrow().stories["body"].blocks);
+        let after = Rc::as_ptr(&engine.render.borrow().stories["body"].map);
         let incremental = snapshot(engine);
         macro_rules! cold {
             ($($field:ident)+) => {{
@@ -7019,6 +7019,50 @@ mod tests {
     }
 
     #[test]
+    fn resident_anchored_drawing_local_patch_reuses_measured_blocks() {
+        use super::lowering_fixture::{Package, para, run};
+
+        let body = format!(
+            "{}{}{}",
+            para("10000001", &run("ab")),
+            para("10000002", &format!("{}{}", run("ab"), local_anchored_image())),
+            para(
+                "10000003",
+                &format!("<w:pPr><w:pageBreakBefore/></w:pPr>{}", run("ab")),
+            ),
+        );
+        let bytes = local_image_package(Package::new(&body)).bytes();
+        let (engine, request) = local_patch_laid_out(&bytes, 9620, true);
+        let block_count = {
+            let pagination = engine.pagination.borrow();
+            assert!(pagination.measured_with_floats);
+            assert!(pagination.lowered_from.is_some());
+            pagination.input.as_ref().unwrap().measured.len() as u64
+        };
+        let (start, _) = engine
+            .doc()
+            .paragraph_index("body")
+            .unwrap()
+            .para_span("10000003")
+            .unwrap();
+        for (end, text) in [(start, Some("x")), (start + 1, None)] {
+            let before = engine.stats();
+            local_patch_step(&engine, &request, "body", (start, end, text), true);
+            let after = engine.stats();
+            assert_eq!(
+                after.resident_measure_calls,
+                before.resident_measure_calls + 1,
+                "only the edited float flow segment re-measures",
+            );
+            assert_eq!(
+                after.resident_reused_blocks,
+                before.resident_reused_blocks + block_count - 1,
+                "the unchanged float flow segment retains its measured blocks",
+            );
+        }
+    }
+
+    #[test]
     fn resident_note_reference_paragraph_blockers_match_cold_full() {
         for kind in ["footnote", "endnote"] {
             local_blocker_matrix(
@@ -7110,7 +7154,7 @@ mod tests {
             r#"<w:ins w:id="1" w:author="A"><w:r><w:t>ab</w:t></w:r></w:ins>"#,
             r#"<w:del w:id="1" w:author="A"><w:r><w:delText>ab</w:delText></w:r></w:del>"#,
             r#"<w:r><w:rPr><w:b/><w:rPrChange w:id="1" w:author="A"><w:rPr/></w:rPrChange></w:rPr><w:t>ab</w:t></w:r>"#,
-            r#"<w:pPr><w:pPrChange w:id="1" w:author="A"><w:pPr/></w:pPrChange></w:pPr><w:r><w:t>ab</w:t></w:r>"#,
+            r#"<w:pPr><w:pPrChange w:id="1" w:author="A"><w:pPr><w:jc w:val="center"/></w:pPr></w:pPrChange></w:pPr><w:r><w:t>ab</w:t></w:r>"#,
             r#"<w:moveTo w:id="1" w:author="A"><w:r><w:t>ab</w:t></w:r></w:moveTo>"#,
             r#"<w:moveFrom w:id="1" w:author="A"><w:r><w:delText>ab</w:delText></w:r></w:moveFrom>"#,
         ] {
@@ -7848,7 +7892,7 @@ mod tests {
                         (at, Some(inserted)),
                         (at + inserted.encode_utf16().count() as u32, None),
                     ] {
-                        let before = Rc::as_ptr(&engines[1].render.borrow().stories["body"].blocks);
+                        let before = Rc::as_ptr(&engines[1].render.borrow().stories["body"].map);
                         for engine in &engines {
                             engine
                                 .edit_resident_text(StoryRange::new("body", at, end), text, true)
@@ -7858,7 +7902,7 @@ mod tests {
                         }
                         assert_eq!(
                             before,
-                            Rc::as_ptr(&engines[1].render.borrow().stories["body"].blocks),
+                            Rc::as_ptr(&engines[1].render.borrow().stories["body"].map),
                             "paragraph {paragraph} offset {offset} {text:?} must patch"
                         );
                         let frames = frames();
@@ -7876,7 +7920,7 @@ mod tests {
                     .map(|paragraph| paragraph.text.encode_utf16().count() as u32 + 1)
                     .sum();
                 let at = start + offset;
-                let before = Rc::as_ptr(&engines[1].render.borrow().stories["body"].blocks);
+                let before = Rc::as_ptr(&engines[1].render.borrow().stories["body"].map);
                 for engine in &engines {
                     engine
                         .edit_resident_text(StoryRange::new("body", at, at + 1), None, true)
@@ -7884,7 +7928,7 @@ mod tests {
                     let epoch = engine.display.borrow().binary_frame_epoch;
                     engine.apply_and_layout("body", epoch).unwrap();
                 }
-                let after = Rc::as_ptr(&engines[1].render.borrow().stories["body"].blocks);
+                let after = Rc::as_ptr(&engines[1].render.borrow().stories["body"].map);
                 assert_eq!(
                     before == after,
                     !(paragraph == 0 && matches!(offset, 2 | 4 | 6)),
