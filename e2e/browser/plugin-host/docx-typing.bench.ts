@@ -112,6 +112,35 @@ const log = (message: string) => {
   if (env.TYPING_VERBOSE === '1') console.log(`[${((Date.now() - begun) / 1000).toFixed(1)}s] ${message}`);
 };
 
+// A page whose wasm trapped never settles again; its arm run stops at the first trap line.
+const TRAP =
+  /RuntimeError: unreachable|RuntimeError: memory access out of bounds|RefCell already borrowed|already mutably borrowed|display-list build failed|Layout pipeline error/;
+// Worker failures and main-thread fallbacks, kept per run so arms can be compared.
+const NOTABLE =
+  /out of memory|fresh worker|unavailable|main thread|main-thread|Building display pages failed|Layout pipeline took|destroyed/i;
+const STEP_MS = Number(env.TYPING_STEP_MS ?? 180_000);
+const LAYOUT_MS = Number(env.TYPING_LAYOUT_MS ?? 300_000);
+
+class ArmFailed extends Error {}
+
+/** Runs one step of an arm, failing the arm on a trap or after `ms`. */
+async function step<T>(label: string, ms: number, poisoned: Promise<string>, run: () => Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      run(),
+      new Promise<never>((_, fail) => {
+        timer = setTimeout(() => fail(new ArmFailed(`timeout after ${ms} ms in ${label}`)), ms);
+      }),
+      poisoned.then((reason) => {
+        throw new ArmFailed(`trap in ${label}: ${reason}`);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 class Screencast {
   frames: Frame[] = [];
   recording = false;
@@ -447,16 +476,26 @@ test('docx keystroke latency', async ({ browser }) => {
   const firstRun = Math.max(-1, ...openRows.map((row) => row.run as number)) + 1;
   const write = async () => {
     const floors = openRows
-      .flatMap((row) => row.echoFloorMs as (number | null)[])
+      .flatMap((row) => (row.echoFloorMs as (number | null)[] | undefined) ?? [])
       .filter((v): v is number => v !== null);
     const table =
       summarise(keyRows, scenarioRows) +
       `\n\nDOM echo floor (style change to screencast frame): p50 ${fmt(quantile(floors, 0.5))} ms, max ${fmt(floors.length ? Math.max(...floors) : null)} ms.\n` +
       openRows
-        .map(
-          (row) =>
-            `- ${row.arm} ${row.mode} run ${row.run}: ${row.pages} pages, first page ${row.firstPageMs} ms, layout complete ${Math.round(row.layoutMs as number)} ms, main-thread long tasks during open: ${row.openLongTasks}`
+        .map((row) =>
+          row.failed
+            ? `- ${row.arm} ${row.mode} run ${row.run}: FAILED, ${row.failed}`
+            : `- ${row.arm} ${row.mode} run ${row.run}: ${row.pages} pages, first page ${row.firstPageMs} ms, layout complete ${Math.round(row.layoutMs as number)} ms, worker wasm at layout complete ${row.layoutWasmMB ?? '–'} MB, main-thread long tasks during open: ${row.openLongTasks}`
         )
+        .join('\n') +
+      '\n\n' +
+      [...new Set(openRows.map((row) => `${row.arm} ${row.mode}`))]
+        .map((arm) => {
+          const rows = openRows.filter((row) => `${row.arm} ${row.mode}` === arm);
+          const trapped = rows.filter((row) => row.trapped).length;
+          const failed = rows.filter((row) => row.failed).length;
+          return `- ${arm}: ${rows.length} runs, ${failed} failed (${trapped} trapped)`;
+        })
         .join('\n');
     await writeFile(
       resolve(OUT, `${name}.json`),
@@ -479,198 +518,263 @@ test('docx keystroke latency', async ({ browser }) => {
         );
         const page = await context.newPage();
         const errors: string[] = [];
-        page.on('pageerror', (error) => errors.push(String(error)));
-        page.on('console', (message) => {
-          if (message.type() === 'error') log(`console: ${message.text().slice(0, 300)}`);
+        const notable: string[] = [];
+        let trapped: string | null = null;
+        let failure: string | null = null;
+        let poison: (reason: string) => void = () => {};
+        const poisoned = new Promise<string>((done) => (poison = done));
+        const armStart = Date.now();
+        const seen = (kind: string, text: string) => {
+          if ((NOTABLE.test(text) || TRAP.test(text)) && notable.length < 60) {
+            notable.push(`${((Date.now() - armStart) / 1000).toFixed(1)}s ${kind}: ${text.slice(0, 240)}`);
+          }
+          if (trapped === null && TRAP.test(text)) {
+            trapped = text.slice(0, 300);
+            log(`${arm.name} ${mode} run ${run}: trap: ${trapped}`);
+            poison(trapped);
+          }
+        };
+        page.on('pageerror', (error) => {
+          errors.push(String(error));
+          seen('pageerror', String(error));
         });
-        const cdp = await context.newCDPSession(page);
-        const cast = new Screencast(cdp);
-        await cast.start();
-        const opened = Date.now();
-        await page.goto(`${arm.url}/docx-typing.html?mode=${mode}`);
-        await page.locator('canvas[data-page-index="0"]').first().waitFor({ timeout: 300_000 });
-        const firstPageMs = Date.now() - opened;
-        log(`${arm.name} ${mode} run ${run}: first page after ${firstPageMs} ms`);
-        if (PROFILE) await page.evaluate(() => (window.__typing.profileEdits = true));
-
-        const measure = async (
-          scenario: string,
-          pageNumber: number,
-          count: number,
-          gapMs: number,
-          layoutPending: boolean
-        ) => {
-          log(`${scenario}: start`);
-          const before = await caretRect(page, 1500);
-          const posts = await page.evaluate(() => window.__typing.posts.length);
-          const keysBefore = await page.evaluate(() => window.__typing.keys.length);
-          await startTrace(browser, page);
-          const mark = await traceClock(page);
-          cast.record();
-          await pressKeys(page, count, gapMs);
-          const settleMs = await settle(page);
-          log(`${scenario}: settled after ${Math.round(settleMs)} ms`);
-          const frames = cast.take();
-          const trace = await browser.stopTracing();
-          await sleep(700);
-          const after = await caretRect(page, 1500);
-          const probe = await page.evaluate(
-            async ({ posts, keysBefore }) => ({
-              keys: window.__typing.keys.slice(keysBefore).map((key) => key.t),
-              posts: window.__typing.posts.slice(posts),
-              replies: window.__typing.replies,
-              worker: await window.__typing.workerLog(),
-              wasmBytes: window.__typing.workerWasmBytes,
-            }),
-            { posts, keysBefore }
+        page.on('console', (message) => {
+          const type = message.type();
+          const text = message.text();
+          if (type === 'error' || type === 'warning') log(`console.${type}: ${text.slice(0, 300)}`);
+          seen(type, text);
+        });
+        try {
+          const cdp = await context.newCDPSession(page);
+          const cast = new Screencast(cdp);
+          await cast.start();
+          const opened = Date.now();
+          await step('open', STEP_MS, poisoned, () => page.goto(`${arm.url}/docx-typing.html?mode=${mode}`));
+          await step('first page', STEP_MS, poisoned, () =>
+            page.locator('canvas[data-page-index="0"]').first().waitFor({ timeout: STEP_MS })
           );
-          const keys = probe.keys.slice(-count);
-          const wrapped = !before || !after || Math.abs(after.y - before.y) > 2 || after.x <= before.x;
-          const pixels =
-            !wrapped && before && after
-              ? await analyse(analysis, frames, keys, before, after)
-              : { glyph: keys.map(() => null), caret: keys.map(() => null) };
-          const workerById = new Map<unknown, Fields>();
-          for (const entry of probe.worker) workerById.set(entry.id, { ...workerById.get(entry.id), ...entry });
-          const replyById = new Map(probe.replies.map((reply) => [reply.id, reply]));
-          const edits = probe.posts.filter((post) => post.type === 'applyInput');
-          keys.forEach((t, key) => {
-            const edit = edits.find((post) => (post.t as number) >= t - 1);
-            const reply = edit && replyById.get(edit.id);
-            const worker = edit && workerById.get(edit.id);
-            const num = (value: unknown) => (typeof value === 'number' ? value : null);
-            const start = num(worker?.start);
-            const arrive = num(worker?.arrive);
-            const replied = num(worker?.reply);
-            const total = num(reply?.workerTotalMs);
-            keyRows.push({
+          const firstPageMs = Date.now() - opened;
+          log(`${arm.name} ${mode} run ${run}: first page after ${firstPageMs} ms`);
+          if (PROFILE) await page.evaluate(() => (window.__typing.profileEdits = true));
+
+          const measure = (
+            scenario: string,
+            pageNumber: number,
+            count: number,
+            gapMs: number,
+            layoutPending: boolean
+          ) => step(scenario, STEP_MS, poisoned, async () => {
+            log(`${scenario}: start`);
+            const before = await caretRect(page, 1500);
+            const posts = await page.evaluate(() => window.__typing.posts.length);
+            const keysBefore = await page.evaluate(() => window.__typing.keys.length);
+            await startTrace(browser, page);
+            const mark = await traceClock(page);
+            cast.record();
+            await pressKeys(page, count, gapMs);
+            const settleMs = await settle(page);
+            log(`${scenario}: settled after ${Math.round(settleMs)} ms`);
+            const frames = cast.take();
+            const trace = await browser.stopTracing();
+            await sleep(700);
+            const after = await caretRect(page, 1500);
+            const probe = await page.evaluate(
+              async ({ posts, keysBefore }) => ({
+                keys: window.__typing.keys.slice(keysBefore).map((key) => key.t),
+                posts: window.__typing.posts.slice(posts),
+                replies: window.__typing.replies,
+                worker: await window.__typing.workerLog(),
+                wasmBytes: window.__typing.workerWasmBytes,
+              }),
+              { posts, keysBefore }
+            );
+            if (failure !== null) return;
+            const keys = probe.keys.slice(-count);
+            const wrapped = !before || !after || Math.abs(after.y - before.y) > 2 || after.x <= before.x;
+            const pixels =
+              !wrapped && before && after
+                ? await analyse(analysis, frames, keys, before, after)
+                : { glyph: keys.map(() => null), caret: keys.map(() => null) };
+            const workerById = new Map<unknown, Fields>();
+            for (const entry of probe.worker) workerById.set(entry.id, { ...workerById.get(entry.id), ...entry });
+            const replyById = new Map(probe.replies.map((reply) => [reply.id, reply]));
+            const edits = probe.posts.filter((post) => post.type === 'applyInput');
+            keys.forEach((t, key) => {
+              const edit = edits.find((post) => (post.t as number) >= t - 1);
+              const reply = edit && replyById.get(edit.id);
+              const worker = edit && workerById.get(edit.id);
+              const num = (value: unknown) => (typeof value === 'number' ? value : null);
+              const start = num(worker?.start);
+              const arrive = num(worker?.arrive);
+              const replied = num(worker?.reply);
+              const total = num(reply?.workerTotalMs);
+              keyRows.push({
+                arm: arm.name,
+                mode,
+                run,
+                scenario,
+                key,
+                glyphMs: pixels.glyph[key],
+                caretMs: pixels.caret[key],
+                replyMs: reply ? (reply.t as number) - t : null,
+                queueMs: start !== null && arrive !== null ? start - arrive : null,
+                preMs: start !== null && replied !== null && total !== null ? replied - start - total : null,
+                handleMs: start !== null && replied !== null ? replied - start : null,
+                engineMs: num(reply?.engineMs),
+                replayMs: num(reply?.replayMs),
+                requests: edits.length,
+              });
+            });
+            if (env.TYPING_TRACES === '1') {
+              await mkdir(resolve(OUT, 'traces'), { recursive: true });
+              await writeFile(resolve(OUT, 'traces', `${arm.name}-${mode}-${run}-${scenarioRows.length}.json`), trace);
+            }
+            const clock = clockFrom(trace, mark);
+            const tasks = clock ? longestTasks(trace, keys[0] ?? 0, (keys.at(-1) ?? 0) + settleMs, clock) : null;
+            scenarioRows.push({
               arm: arm.name,
               mode,
               run,
               scenario,
-              key,
-              glyphMs: pixels.glyph[key],
-              caretMs: pixels.caret[key],
-              replyMs: reply ? (reply.t as number) - t : null,
-              queueMs: start !== null && arrive !== null ? start - arrive : null,
-              preMs: start !== null && replied !== null && total !== null ? replied - start - total : null,
-              handleMs: start !== null && replied !== null ? replied - start : null,
-              engineMs: num(reply?.engineMs),
-              replayMs: num(reply?.replayMs),
-              requests: edits.length,
+              page: pageNumber,
+              keys: count,
+              wrapped,
+              layoutPending,
+              settleMs,
+              longestMainTaskMs: tasks?.main ?? null,
+              longestWorkerTaskMs: tasks?.worker ?? null,
+              longTasksOver50: tasks?.over50 ?? 0,
+              requests: probe.posts.map((post) => String(post.type)),
+              workerWasmMB: Math.round(probe.wasmBytes / 2 ** 20),
+              profile: PROFILE
+                ? edits.map((edit) => (replyById.get(edit.id)?.engineProfile as Fields) ?? {})
+                : [],
             });
           });
-          if (env.TYPING_TRACES === '1') {
-            await mkdir(resolve(OUT, 'traces'), { recursive: true });
-            await writeFile(resolve(OUT, 'traces', `${arm.name}-${mode}-${run}-${scenarioRows.length}.json`), trace);
-          }
-          const clock = clockFrom(trace, mark);
-          const tasks = clock ? longestTasks(trace, keys[0] ?? 0, (keys.at(-1) ?? 0) + settleMs, clock) : null;
-          scenarioRows.push({
-            arm: arm.name,
-            mode,
-            run,
-            scenario,
-            page: pageNumber,
-            keys: count,
-            wrapped,
-            layoutPending,
-            settleMs,
-            longestMainTaskMs: tasks?.main ?? null,
-            longestWorkerTaskMs: tasks?.worker ?? null,
-            longTasksOver50: tasks?.over50 ?? 0,
-            requests: probe.posts.map((post) => String(post.type)),
-            workerWasmMB: Math.round(probe.wasmBytes / 2 ** 20),
-            profile: PROFILE
-              ? edits.map((edit) => (replyById.get(edit.id)?.engineProfile as Fields) ?? {})
-              : [],
-          });
-        };
 
-        // Straight after the first page paints, while the rest of the layout is still running.
-        // The background layout has finished once every completion request is answered; the
-        // worker-open replica is ready once the session reads. whenLayoutComplete would also
-        // build every page's display list, which a user never does.
-        const layoutDone = page.evaluate(async () => {
-          const probe = window.__typing;
-          const since = performance.now();
-          for (;;) {
-            const completions = probe.posts.filter((post) => post.type === 'completeLayout');
-            const replied = new Set(probe.replies.map((reply) => reply.id));
-            const completed =
-              completions.length > 0
-                ? completions.every((post) => replied.has(post.id))
-                : performance.now() - since > 5_000;
-            let replica = false;
-            try {
-              replica = (probe.editor?.getEditorRef()?.getYrsSession().paragraphSpans('body').length ?? 0) > 0;
-            } catch {
-              replica = false;
+          // Straight after the first page paints, while the rest of the layout is still running.
+          // The background layout has finished once every completion request is answered; the
+          // worker-open replica is ready once the session reads. whenLayoutComplete would also
+          // build every page's display list, which a user never does.
+          const layoutDone = page.evaluate(async (deadlineMs) => {
+            const probe = window.__typing;
+            const since = performance.now();
+            for (;;) {
+              if (performance.now() - since > deadlineMs) return Number.NaN;
+              const completions = probe.posts.filter((post) => post.type === 'completeLayout');
+              const replied = new Set(probe.replies.map((reply) => reply.id));
+              const completed =
+                completions.length > 0
+                  ? completions.every((post) => replied.has(post.id))
+                  : performance.now() - since > 5_000;
+              let replica = false;
+              try {
+                replica = (probe.editor?.getEditorRef()?.getYrsSession().paragraphSpans('body').length ?? 0) > 0;
+              } catch {
+                replica = false;
+              }
+              if (completed && replica) return performance.timeOrigin + performance.now();
+              await new Promise((done) => setTimeout(done, 50));
             }
-            if (completed && replica) return performance.timeOrigin + performance.now();
-            await new Promise((done) => setTimeout(done, 50));
-          }
-        });
-        const surface = await page.evaluate(() => {
-          for (const canvas of document.querySelectorAll('canvas[data-page-index="0"]')) {
-            const box = canvas.getBoundingClientRect();
-            if (box.width > 0 && box.height > 0) return { x: box.x, y: box.y };
-          }
-          return null;
-        });
-        if (surface) await page.mouse.click(surface.x + 300, surface.y + 200);
-        await page.keyboard.press('ControlOrMeta+Home');
-        await page.keyboard.press('End');
-        const pending = await Promise.race([layoutDone.then(() => false), sleep(50).then(() => true)]);
-        await measure('open: first key', 1, 1, 0, pending);
-        const layoutMs = (await layoutDone) - opened;
-        log(`layout complete after ${Math.round(layoutMs)} ms`);
-        await settle(page, 1500);
-        const floors: (number | null)[] = [];
-        await page.evaluate(() => {
-          const square = document.createElement('div');
-          square.id = 'typing-floor';
-          Object.assign(square.style, {
-            position: 'fixed',
-            left: '0',
-            top: '0',
-            width: '24px',
-            height: '24px',
-            background: '#fff',
-            zIndex: '2147483647',
+          }, LAYOUT_MS);
+          layoutDone.catch(() => undefined);
+          const surface = await page.evaluate(() => {
+            for (const canvas of document.querySelectorAll('canvas[data-page-index="0"]')) {
+              const box = canvas.getBoundingClientRect();
+              if (box.width > 0 && box.height > 0) return { x: box.x, y: box.y };
+            }
+            return null;
           });
-          document.body.append(square);
-        });
-        for (let sample = 0; sample < 3; sample++) {
-          await sleep(300);
-          cast.record();
-          const from = await page.evaluate(() => {
-            document.getElementById('typing-floor')!.style.background = '#000';
-            return performance.timeOrigin + performance.now();
+          if (surface) await page.mouse.click(surface.x + 300, surface.y + 200);
+          await page.keyboard.press('ControlOrMeta+Home');
+          await page.keyboard.press('End');
+          const pending = await Promise.race([layoutDone.then(() => false), sleep(50).then(() => true)]);
+          await measure('open: first key', 1, 1, 0, pending);
+          const layoutAt = await step('layout complete', LAYOUT_MS + 15_000, poisoned, () => layoutDone);
+          if (Number.isNaN(layoutAt)) throw new ArmFailed(`layout incomplete after ${LAYOUT_MS} ms`);
+          const layoutMs = layoutAt - opened;
+          log(`layout complete after ${Math.round(layoutMs)} ms`);
+          const layoutWasmMB = await step('worker memory', 30_000, poisoned, () =>
+            page.evaluate(async () => {
+              await window.__typing.workerLog();
+              return Math.round(window.__typing.workerWasmBytes / 2 ** 20);
+            })
+          );
+          await step('settle after layout', STEP_MS, poisoned, () => settle(page, 1500));
+          const floors: (number | null)[] = [];
+          await step('echo floor', STEP_MS, poisoned, async () => {
+            await page.evaluate(() => {
+              const square = document.createElement('div');
+              square.id = 'typing-floor';
+              Object.assign(square.style, {
+                position: 'fixed',
+                left: '0',
+                top: '0',
+                width: '24px',
+                height: '24px',
+                background: '#fff',
+                zIndex: '2147483647',
+              });
+              document.body.append(square);
+            });
+            for (let sample = 0; sample < 3; sample++) {
+              await sleep(300);
+              cast.record();
+              const from = await page.evaluate(() => {
+                document.getElementById('typing-floor')!.style.background = '#000';
+                return performance.timeOrigin + performance.now();
+              });
+              await sleep(300);
+              floors.push(await analyseFloor(analysis, cast.take(), from));
+              await page.evaluate(() => (document.getElementById('typing-floor')!.style.background = '#fff'));
+            }
+            await page.evaluate(() => document.getElementById('typing-floor')!.remove());
           });
-          await sleep(300);
-          floors.push(await analyseFloor(analysis, cast.take(), from));
-          await page.evaluate(() => (document.getElementById('typing-floor')!.style.background = '#fff'));
-        }
-        await page.evaluate(() => document.getElementById('typing-floor')!.remove());
-        const openLongTasks = await page.evaluate((opened) => {
-          const tasks = window.__typing.longTasks.filter((task) => task.start >= opened);
-          return `${tasks.length}, total ${Math.round(tasks.reduce((sum, task) => sum + task.duration, 0))} ms, max ${Math.round(Math.max(0, ...tasks.map((task) => task.duration)))} ms`;
-        }, opened);
-        openRows.push({ arm: arm.name, mode, run, firstPageMs, layoutMs, openLongTasks, pages: await page.evaluate(() => window.__typing.editor!.getTotalPages()), echoFloorMs: floors });
+          const openLongTasks = await step('open long tasks', 30_000, poisoned, () =>
+            page.evaluate((opened) => {
+              const tasks = window.__typing.longTasks.filter((task) => task.start >= opened);
+              return `${tasks.length}, total ${Math.round(tasks.reduce((sum, task) => sum + task.duration, 0))} ms, max ${Math.round(Math.max(0, ...tasks.map((task) => task.duration)))} ms`;
+            }, opened)
+          );
+          const pages = await step('page count', 30_000, poisoned, () =>
+            page.evaluate(() => window.__typing.editor!.getTotalPages())
+          );
+          openRows.push({ arm: arm.name, mode, run, firstPageMs, layoutMs, layoutWasmMB, openLongTasks, pages, echoFloorMs: floors, notable });
 
-        for (const position of POSITIONS) {
-          const fraction = position === 'start' ? 0.002 : position === 'middle' ? 0.5 : 0.995;
-          const pageNumber = await placeCaret(page, fraction, run);
-          await settle(page, 1200);
-          for (let single = 0; single < SINGLES; single++) {
-            await measure(`${position}: single`, pageNumber, 1, 0, false);
+          for (const position of POSITIONS) {
+            const fraction = position === 'start' ? 0.002 : position === 'middle' ? 0.5 : 0.995;
+            const pageNumber = await step(`${position}: place caret`, STEP_MS, poisoned, () =>
+              placeCaret(page, fraction, run)
+            );
+            await step(`${position}: settle`, STEP_MS, poisoned, () => settle(page, 1200));
+            for (let single = 0; single < SINGLES; single++) {
+              await measure(`${position}: single`, pageNumber, 1, 0, false);
+            }
+            await measure(`${position}: burst ${BURST}@${BURST_GAP_MS}ms`, pageNumber, BURST, BURST_GAP_MS, false);
           }
-          await measure(`${position}: burst ${BURST}@${BURST_GAP_MS}ms`, pageNumber, BURST, BURST_GAP_MS, false);
+        } catch (error) {
+          if (!(error instanceof ArmFailed)) throw error;
+          failure = error.message;
+          log(`${arm.name} ${mode} run ${run}: FAILED ${failure}`);
+          openRows.push({ arm: arm.name, mode, run, failed: failure, trapped, notable });
+          await browser.stopTracing().catch(() => undefined);
+        }
+        if (failure || env.TYPING_DUMP === '1') {
+          const order = await Promise.race([
+            page
+              .evaluate(() => ({ posts: window.__typing.posts, replies: window.__typing.replies, longTasks: window.__typing.longTasks }))
+              .catch(() => null),
+            sleep(15_000).then(() => null),
+          ]);
+          await mkdir(resolve(OUT, 'order'), { recursive: true });
+          await writeFile(
+            resolve(OUT, 'order', `${name}-${arm.name}-${mode}-${run}.json`),
+            JSON.stringify({ opened: armStart, failure, trapped, notable, ...order })
+          );
         }
         if (errors.length > 0) console.warn(`${arm.name} ${mode} run ${run}: ${errors.join('; ')}`);
-        await context.close();
-        console.log(`${arm.name} ${mode} run ${run + 1}/${firstRun + RUNS} done`);
+        await Promise.race([context.close(), sleep(30_000)]);
+        console.log(`${arm.name} ${mode} run ${run + 1}/${firstRun + RUNS} ${failure ? 'failed' : 'done'}`);
         await write();
       }
     }

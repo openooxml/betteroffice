@@ -149,6 +149,8 @@ class TapWorker extends NativeWorker {
         layoutProvisional: data?.layoutProvisional,
         engineProfile: data?.engineProfile,
         frameBytes: data?.frame instanceof ArrayBuffer ? data.frame.byteLength : undefined,
+        error: data?.ok === false ? String(data.error).slice(0, 200) : undefined,
+        worker: workers.indexOf(this),
       });
     });
   }
@@ -162,7 +164,12 @@ class TapWorker extends NativeWorker {
     ) {
       request.profile = true;
     }
-    probe.posts.push({ t: origin + performance.now(), id: request?.id, type: request?.type });
+    probe.posts.push({
+      t: origin + performance.now(),
+      id: request?.id,
+      type: request?.type,
+      worker: workers.indexOf(this),
+    });
     (super.postMessage as (message: unknown, transfer?: unknown) => void)(message, transfer);
   }
 }
