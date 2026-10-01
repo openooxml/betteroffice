@@ -2062,6 +2062,70 @@ describe('resident worker opening', () => {
     expect(calls.slice(-3)).toEqual(['begin:{"request":1}', 'resume:2', 'frame:1']);
   });
 
+  test('opens a preview, lays it out, and replaces it with the whole package', async () => {
+    const { w, calls } = openingWorker();
+    Object.assign(w.harness.session, {
+      openDocxPreview: (bytes: Uint8Array, blocks: number) => {
+        calls.push(`preview:${bytes.join(',')}:${blocks}`);
+        return '{"host":"preview"}';
+      },
+      destroy: () => calls.push('destroy'),
+    });
+    const bootstrap = {
+      type: 'bootstrap',
+      opened: true,
+      snapshot,
+      extras: '',
+      layoutExtras: '{}',
+      expectedFrameEpoch: 0,
+      provisionalPages: 3,
+    } as const;
+
+    const preview = await w.send({ type: 'open', bytes: new Uint8Array([1, 2]).buffer, previewBlocks: 200 });
+    expect(preview.ok && preview.hostJson).toBe('{"host":"preview"}');
+    expect(preview.ok && preview.stateVector).toBeDefined();
+    const framed = await w.send(bootstrap);
+    expect(framed.ok && framed.layoutJson).toBe(provisional);
+    // A second preview never replaces the first.
+    const again = await w.send({ type: 'open', bytes: new Uint8Array([1, 2]).buffer, previewBlocks: 200 });
+    expect(again.ok).toBe(false);
+
+    const opened = await w.send({ type: 'open', bytes: new Uint8Array([3]).buffer, digest: 'abc' });
+    expect(opened.ok && opened.hostJson).toBe('{"host":1}');
+    const full = await w.send({ ...bootstrap, expectedFrameEpoch: 1 });
+    expect(full.ok && full.layoutJson).toBe(provisional);
+    expect(calls).toEqual([
+      'preview:1,2:200',
+      'font',
+      'prefix:{"request":1}:3',
+      'frame:0',
+      'destroy',
+      'open:3:abc:undefined',
+      'font',
+      'prefix:{"request":1}:3',
+      'frame:1',
+    ]);
+    expect(w.harness.sessionsCreated).toBe(2);
+
+    // The whole package is never replaced.
+    const replaced = await w.send({ type: 'open', bytes: new Uint8Array([4]).buffer });
+    expect(replaced.ok).toBe(false);
+    expect(calls).not.toContain('open:4:undefined:undefined');
+
+    // A package that cannot open as a preview opens nothing, and the whole package opens after.
+    const refusing = openingWorker();
+    Object.assign(refusing.w.harness.session, {
+      openDocxPreview: () => null,
+      destroy: () => refusing.calls.push('destroy'),
+    });
+    const refused = await refusing.w.send({ type: 'open', bytes: new Uint8Array([5]).buffer, previewBlocks: 200 });
+    expect(refused.ok && refused.previewRefused).toBe(true);
+    expect(refused.ok && refused.hostJson).toBeUndefined();
+    const fallback = await refusing.w.send({ type: 'open', bytes: new Uint8Array([6]).buffer });
+    expect(fallback.ok && fallback.hostJson).toBe('{"host":1}');
+    expect(refusing.calls).toEqual(['destroy', 'open:6:undefined:undefined']);
+  });
+
   test('proposal requests between open and bootstrap leave the worker registry empty', async () => {
     const { w } = openingWorker();
     expect((await w.send({ type: 'open', bytes: new Uint8Array([4]).buffer })).ok).toBe(true);

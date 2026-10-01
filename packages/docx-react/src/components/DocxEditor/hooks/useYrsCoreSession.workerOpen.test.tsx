@@ -103,6 +103,7 @@ function installWorker(options: {
   holdSync?: boolean;
   holdCompletion?: boolean;
   holdReply?: (request: ResidentEngineWorkerRequest) => boolean;
+  refusePreview?: boolean;
 } = {}) {
   const workers: InProcessResidentWorker[] = [];
   const posted: ResidentEngineWorkerRequest[] = [];
@@ -141,6 +142,10 @@ function installWorker(options: {
               workers.length === 1)) {
           queueMicrotask(() => worker.onmessage?.({
             data: { id: request.id, ok: false, error: 'worker exhausted memory', terminal: true, outOfMemory: true },
+          } as MessageEvent));
+        } else if (options.refusePreview && request.type === 'open' && request.previewBlocks !== undefined) {
+          queueMicrotask(() => worker.onmessage?.({
+            data: { id: request.id, ok: true, previewRefused: true },
           } as MessageEvent));
         } else if ((options.failOpen && request.type === 'open') ||
             (options.failState && request.type === 'encodeState')) {
@@ -187,6 +192,8 @@ interface HarnessProps {
   experimentalWorkerOpen: boolean;
   hydrateOnDemand?: boolean;
   previewFirstPage?: boolean;
+  /** Opens the first-page preview in the worker, as DocxEditor does. */
+  workerPreview?: boolean;
   openInWorker?: OpenInWorker;
   source: Uint8Array;
   generation: number;
@@ -261,6 +268,7 @@ function useHarness(props: HarnessProps) {
       shownEngine: renderer.presentedEngine,
       workerOpen: props.experimentalWorkerOpen ? {
         openInWorker,
+        ...(props.workerPreview ? { openPreviewInWorker: renderer.openPreviewInWorker } : {}),
         workerProposals: props.workerProposals,
         refreshWorkerLayout: () => workerRelayout.current?.(),
         renderedFrame: renderer.status === 'ready' ? renderer.displayList : null,
@@ -1049,6 +1057,97 @@ test('a preloaded spare worker takes the open that starts alongside the preview'
     await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(result.current.core.session));
     expect(workers).toHaveLength(1);
     expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
+
+test('a preview the worker opens lays out there, and the full open queues right behind its layout', async () => {
+  const fullOpen = (request: ResidentEngineWorkerRequest) =>
+    request.type === 'open' && request.previewBlocks === undefined;
+  const { workers, posted, reply } = installWorker({ holdReply: fullOpen });
+  const frames = holdFrames();
+  try {
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, previewFirstPage: true, workerPreview: true, source: longBytes },
+    });
+    await waitFor(() => expect(result.current.core.previewing).toBe(true));
+    const preview = result.current.core.session!;
+    expect(preview.isDisplayOnly()).toBe(true);
+    // This thread parsed none of it: the worker holds the preview.
+    expect(preview.storyIds()).toEqual([]);
+    expect(posted.map((request) => request.type)).toEqual(['open']);
+    expect(posted[0].type === 'open' && posted[0].previewBlocks).toBeGreaterThan(0);
+
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(preview));
+    expect(result.current.renderer.status).toBe('ready');
+    expect(result.current.renderer.displayList?.pages.length).toBeGreaterThan(0);
+    // The preview paints here: the full open runs in that worker next.
+    expect(result.current.renderer.workerSurfacesActive).toBe(false);
+    await waitFor(() => expect(posted.filter(fullOpen)).toHaveLength(1));
+    const bootstrap = posted.findIndex((request) => request.type === 'bootstrap');
+    expect(bootstrap).toBeGreaterThan(0);
+    expect(posted[bootstrap].type === 'bootstrap' && posted[bootstrap].opened).toBe(true);
+    expect(posted.findIndex(fullOpen)).toBeGreaterThan(bootstrap);
+    expect(posted.map((request) => request.type)).not.toContain('encodeState');
+    expect(preview.storyIds()).toEqual([]);
+    expect(result.current.mainOpens).toEqual([]);
+
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await act(async () => {
+      reply(posted.find(fullOpen)!);
+    });
+    await waitFor(() => expect(result.current.core.previewing).toBe(false));
+    const full = result.current.core.session!;
+    expect(full).not.toBe(preview);
+    expect(full.isDisplayOnly()).toBe(false);
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(full));
+    expect(workers).toHaveLength(1);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(2);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
+
+test('a package the worker cannot preview opens its preview here and the full document in that worker', async () => {
+  const { workers, posted } = installWorker({ refusePreview: true });
+  const frames = holdFrames();
+  try {
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, previewFirstPage: true, workerPreview: true, source: longBytes },
+    });
+    await waitFor(() => expect(result.current.core.previewing).toBe(true));
+    const preview = result.current.core.session!;
+    expect(preview.isDisplayOnly()).toBe(true);
+    expect(preview.storyIds()).not.toEqual([]);
+    await waitFor(() => expect(posted.filter((request) => request.type === 'open')).toHaveLength(2));
+    expect(
+      posted
+        .filter((request) => request.type === 'open')
+        .map((request) => request.type === 'open' && request.previewBlocks !== undefined)
+    ).toEqual([true, false]);
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(preview));
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await waitFor(() => expect(result.current.core.previewing).toBe(false));
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() =>
+      expect(result.current.renderer.presentedEngine).toBe(result.current.core.session)
+    );
+    expect(workers).toHaveLength(1);
     expect(result.current.errors).toEqual([]);
     unmount();
   } finally {
