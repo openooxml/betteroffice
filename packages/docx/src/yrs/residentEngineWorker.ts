@@ -53,6 +53,13 @@ let fontRequirements: {
 } | null = null;
 /** Set while the session holds the document `open` seeded, with the heap limit it used. */
 let openedDocument: { heapLimitBytes?: number } | null = null;
+// The last font requirements answered, kept until the session's next document update.
+let requirementsAnswered: {
+  session: ResidentEngineSession;
+  layoutInput: string;
+  json: string;
+  release: () => void;
+} | null = null;
 // The opened document is a display-only preview that an `open` of the whole package replaces.
 let previewing = false;
 let unsubscribe: (() => void) | null = null;
@@ -287,17 +294,25 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'fontRequirements') {
     if (!session) throw new Error('Resident engine worker is not initialized');
-    const requirementsJson = session.layoutFontRequirementsJson(request.layoutInput);
+    if (
+      requirementsAnswered?.session !== session ||
+      requirementsAnswered.layoutInput !== request.layoutInput
+    ) {
+      forgetRequirements();
+      const json = session.layoutFontRequirementsJson(request.layoutInput);
+      requirementsAnswered = {
+        session,
+        layoutInput: request.layoutInput,
+        json,
+        release: session.onUpdate(forgetRequirements),
+      };
+    }
     fontRequirements = {
       version: session.proposalEngine.version(),
       layoutInput: request.layoutInput,
-      requirementsJson,
+      requirementsJson: requirementsAnswered.json,
     };
-    reply({
-      id: request.id,
-      ok: true,
-      requirementsJson,
-    });
+    reply({ id: request.id, ok: true, requirementsJson: requirementsAnswered.json });
     return;
   }
   if (request.type === 'encodeState') {
@@ -1028,6 +1043,11 @@ function asciiProposalFontsUnchanged(
   return true;
 }
 
+function forgetRequirements(): void {
+  requirementsAnswered?.release();
+  requirementsAnswered = null;
+}
+
 /**
  * Drops the document. `keepSurfaces` keeps the attached page canvases, still
  * showing the old pages, for a document that replaces it page for page.
@@ -1037,6 +1057,7 @@ function destroySession(keepSurfaces = false): void {
   fontRequirements = null;
   unsubscribe?.();
   unsubscribe = null;
+  forgetRequirements();
   proposals?.destroy();
   proposals = null;
   session?.destroy();
