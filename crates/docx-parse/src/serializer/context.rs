@@ -10,7 +10,7 @@ use super::s10::SerializerDeterminism;
 
 /// Per-serialization state. Generated identities are taken only from the
 /// injected seed; serializers never consult ambient randomness or a clock.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SerializerContext {
     ids: HexIdAllocator,
     now: String,
@@ -23,7 +23,7 @@ pub struct SerializerContext {
 }
 
 /// The XML written for each model paragraph a spliced part addresses by `sourceOrdinal`.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct SpliceRecorder {
     expected: HashSet<u32>,
     written: HashMap<u32, String>,

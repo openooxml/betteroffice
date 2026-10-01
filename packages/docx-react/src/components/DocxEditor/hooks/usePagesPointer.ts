@@ -831,7 +831,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     (e: React.MouseEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      if (!tableInsertButton) return;
+      if (readOnly || !tableInsertButton) return;
       const at = resolveTarget(tableInsertButton.cellPmPos + 1)?.cell;
       if (!at) return;
       yrsSession?.setCellSelection({ anchor: at, head: at });
@@ -844,7 +844,15 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       setTableInsertButton(null);
       focusInput();
     },
-    [applyYrsCommand, focusInput, resolveTarget, setTextSelection, tableInsertButton, yrsSession]
+    [
+      applyYrsCommand,
+      focusInput,
+      readOnly,
+      resolveTarget,
+      setTextSelection,
+      tableInsertButton,
+      yrsSession,
+    ]
   );
 
   /** Whether a text range, or a cell range holding the point, is selected. */
@@ -959,7 +967,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         }
       }
 
-      if (e.detail === 2 && !partEdit && onHeaderFooterDoubleClick) {
+      if (e.detail === 2 && !readOnly && !partEdit && onHeaderFooterDoubleClick) {
         const region = point?.hit?.region;
         if (region === 'header' || region === 'footer') {
           clearPendingGesture();
@@ -1098,6 +1106,9 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
   );
 
   const hideTableInsertButton = useCallback(() => setTableInsertButton(null), []);
+  useEffect(() => {
+    if (readOnly) setTableInsertButton(null);
+  }, [readOnly]);
   const canvasHandlersRef = useRef({
     mousedown: handlePagesMouseDown,
     mousemove: handlePagesMouseMove,

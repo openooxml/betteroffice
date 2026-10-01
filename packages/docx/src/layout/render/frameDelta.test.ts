@@ -87,12 +87,23 @@ type CraftedAnchor = [area: number, note: number, start: bigint, end: bigint];
 function shiftFrame(
   runs: CraftedRun[],
   anchors: CraftedAnchor[],
-  options: { recordAnchors?: number; opcode?: number; tail?: number; padding?: number } = {}
+  options: {
+    recordAnchors?: number;
+    opcode?: number;
+    tail?: number;
+    padding?: number;
+    spanDelta?: bigint;
+    flags?: number;
+  } = {}
 ): Uint8Array {
-  const { recordAnchors = anchors.length, opcode = 5, tail = 0, padding = 0 } = options;
+  const { recordAnchors = anchors.length, opcode = 5, tail = 0, padding = 0, spanDelta } = options;
   const dataOffset = 136;
   const payload =
-    8 + runs.length * 24 + (anchors.length > 0 ? 8 + anchors.length * 24 : 0) + padding;
+    8 +
+    (spanDelta !== undefined ? 8 : 0) +
+    runs.length * 24 +
+    (anchors.length > 0 ? 8 + anchors.length * 24 : 0) +
+    padding;
   const bytes = new Uint8Array(dataOffset + payload);
   const view = new DataView(bytes.buffer);
   bytes.set([0x46, 0x44, 0x56, 0x31]);
@@ -119,7 +130,12 @@ function shiftFrame(
   view.setUint32(124, tail, true);
   let at = dataOffset;
   view.setUint32(at, runs.length, true);
+  view.setUint32(at + 4, options.flags ?? (spanDelta !== undefined ? 1 : 0), true);
   at += 8;
+  if (spanDelta !== undefined) {
+    view.setBigInt64(at, spanDelta, true);
+    at += 8;
+  }
   for (const [start, count, mask, delta] of runs) {
     view.setUint32(at, start, true);
     view.setUint32(at + 4, count, true);
@@ -632,6 +648,134 @@ describe('FrameDelta wire round-trip', () => {
       );
       expect(viaExact.pages[0]!.header!.primitives[0]).toMatchObject({ docStart: 3 });
     }
+  });
+});
+
+describe('FrameDelta position span shifts', () => {
+  const placeholderFrame = (span?: [number, number]): RetainedFrame => {
+    const page: DisplayPage = {
+      pageIndex: 0,
+      width: 100,
+      height: 100,
+      primitives: [],
+      unbuilt: true,
+      ...(span ? { positionSpan: span } : {}),
+    };
+    return {
+      ...notedFrame(),
+      pages: [
+        { pageIndex: 0, pageId: 1n, fingerprint: 1n, primitiveIds: new BigUint64Array(), page },
+      ],
+      displayList: { pages: [page] },
+    };
+  };
+
+  it('applies span-only shifts like equivalent upserts with both appliers', () => {
+    for (const spanDelta of [6n, -4n]) {
+      const delta = decodeFrameDelta(shiftFrame([], [], { spanDelta }));
+      expect(delta.operations[0]).toMatchObject({
+        runs: [],
+        anchors: [],
+        spanDelta: Number(spanDelta),
+      });
+      const page = placeholderFrame([8 + Number(spanDelta), 30 + Number(spanDelta)]).pages[0]!;
+      const upsert: DecodedFrameDelta = {
+        ...delta,
+        operations: [{ kind: 'upsert', ...page, fingerprint: 2n }],
+      };
+      const expected = applyFrameDelta(placeholderFrame([8, 30]), upsert).displayList;
+      const previous = placeholderFrame([8, 30]);
+      const copied = applyFrameDelta(previous, delta);
+      expect(copied.displayList).toEqual(expected);
+      expect(previous.displayList.pages[0]!.positionSpan).toEqual([8, 30]);
+      const owned = applyFrameDeltaOwned(placeholderFrame([8, 30]), delta);
+      expect(owned.displayList).toEqual(expected);
+      expect(owned.pages[0]!.fingerprint).toBe(2n);
+      expect(displayPageShiftsSince(owned.displayList.pages[0]!, 0)).toEqual([
+        { runs: [], anchors: [], spanDelta: Number(spanDelta) },
+      ]);
+    }
+  });
+
+  it('refreshes query-store pages after owned span shifts', () => {
+    const initial = placeholderFrame([8, 30]);
+    const unchanged: DisplayPage = { pageIndex: 1, width: 100, height: 100, primitives: [] };
+    const previous: RetainedFrame = {
+      ...initial,
+      pages: [
+        ...initial.pages,
+        {
+          pageIndex: 1,
+          pageId: 2n,
+          fingerprint: 1n,
+          primitiveIds: new BigUint64Array(),
+          page: unchanged,
+        },
+      ],
+      displayList: { pages: [...initial.displayList.pages, unchanged] },
+    };
+    const updates: string[] = [];
+    let canUpdate = false;
+    const engine: RustDisplayListQueryEngine = {
+      hitTestRegionsJson: () => 'null',
+      rangeRectsJson: () => '[]',
+      hasDisplayListSession: () => true,
+      openDisplayList: () => 1,
+      closeDisplayList: () => {},
+      hasDisplayListUpdate: () => canUpdate,
+      updateDisplayList: (_handle, update) => {
+        updates.push(update);
+      },
+      rangeRectsByHandle: () => '[]',
+      verticalMoveByHandle: () => 'null',
+    };
+    const first = createDisplayListQueries(previous.displayList, engine);
+    first.prime();
+    canUpdate = true;
+    const shifted = applyFrameDeltaOwned(
+      placeholderFrame([8, 30]),
+      decodeFrameDelta(shiftFrame([], [], { spanDelta: 6n }))
+    );
+    const original = previous.displayList.pages[0]!;
+    const applied = applyFrameDeltaOwned(previous, {
+      ...decodeFrameDelta(shiftFrame([], [], { spanDelta: 6n })),
+      pageCount: 2,
+    });
+    const second = createDisplayListQueries(applied.displayList, engine, first);
+    second.prime();
+    expect(applied.displayList.pages[0]).toBe(original);
+    expect(JSON.parse(updates[0]!)).toEqual({
+      total: 2,
+      reuse: [[1, 1]],
+      replace: [[0, { pageIndex: 0, width: 100, height: 100, primitives: [] }]],
+    });
+    const fresh = createDisplayListQueries(
+      { pages: [shifted.displayList.pages[0]!, unchanged] },
+      engine
+    );
+    for (const pos of [8, 14, 30, 36, 37]) {
+      expect(second.caretRect(pos)).toEqual(fresh.caretRect(pos));
+    }
+    first.dispose();
+    second.dispose();
+    fresh.dispose();
+  });
+
+  it('rejects malformed span shifts with both appliers', () => {
+    const delta = decodeFrameDelta(shiftFrame([], [], { spanDelta: 1n }));
+    for (const apply of [applyFrameDelta, applyFrameDeltaOwned]) {
+      expect(() => apply(placeholderFrame(), delta)).toThrow('requires retained positionSpan');
+      const previous = placeholderFrame([8, Number.MAX_SAFE_INTEGER]);
+      expect(() => apply(previous, delta)).toThrow('overflows positionSpan');
+      expect(previous.displayList.pages[0]!.positionSpan).toEqual([8, Number.MAX_SAFE_INTEGER]);
+      expect(displayPageRevision(previous.displayList.pages[0]!)).toBe(0);
+      expect(() => apply(placeholderFrame([1.5, 8]), delta)).toThrow('overflows positionSpan');
+    }
+    expect(() => decodeFrameDelta(shiftFrame([], [], { spanDelta: 2n ** 53n }))).toThrow();
+    expect(() => decodeFrameDelta(shiftFrame([], [], { spanDelta: 0n }))).toThrow();
+    expect(() => decodeFrameDelta(shiftFrame([], [], { spanDelta: 1n, flags: 3 }))).toThrow();
+    expect(() => decodeFrameDelta(shiftFrame([], [], { flags: 1 }))).toThrow();
+    expect(() => decodeFrameDelta(shiftFrame([], []))).toThrow('position shift run count mismatch');
   });
 });
 

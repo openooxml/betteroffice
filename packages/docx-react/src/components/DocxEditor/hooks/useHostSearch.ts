@@ -6,6 +6,7 @@ import type { PagedEditorRef } from '../PagedEditor';
 import type { CanvasFindMatch } from '../overlays/CanvasFindHighlightOverlay';
 import { scrollViewport } from '../internals/viewportBand';
 import { sourceVersionOf } from '../internals/layoutProvenance';
+import { workerProposalAuthority, type WorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import {
   displayOrder,
   matchesInRange,
@@ -46,6 +47,8 @@ interface SearchMatch extends CanvasFindMatch {
 }
 
 interface SearchRun {
+  generation: number;
+  workerBacked: boolean;
   query: string;
   options: Required<DocxSearchOptions>;
   session: YrsSession;
@@ -54,6 +57,9 @@ interface SearchRun {
   current: number;
   /** Where the current match starts, carried across document changes. */
   anchor: YrsStickyPosition | null;
+  anchorIndex: number;
+  anchorPending: Promise<void> | null;
+  nearby: Map<number, YrsStickyPosition>;
   /** Whether a layout of `version` was shown when the display ranges were mapped. */
   placed: boolean;
 }
@@ -195,6 +201,20 @@ function carriedCurrent(
   return after >= 0 ? after : matches.length - 1;
 }
 
+function mainSearch(
+  editor: PagedEditorRef,
+  session: YrsSession,
+  query: string,
+  options: Required<DocxSearchOptions>,
+  carry: YrsStickyPosition | null
+): Awaited<ReturnType<WorkerProposalAuthority['searchText']>>['value'] {
+  const matches = collectMatches(editor, session, query, options);
+  return {
+    carried: carriedCurrent(editor, session, matches, carry),
+    matches,
+  };
+}
+
 /**
  * Host-driven find over the live session: every body match is highlighted, the
  * current one is revealed without moving selection or focus, and a document
@@ -216,6 +236,11 @@ export function useHostSearch({
   queriesRef.current = displayListQueries;
   // Bumped by every search and clear; a search that resumes after another started stops.
   const generationRef = useRef(0);
+  const refreshRef = useRef<{
+    generation: number;
+    fresh: boolean;
+    revealing: boolean;
+  } | null>(null);
   // A reveal the layout could not place yet, retried as the layout grows.
   const pendingRevealRef = useRef<number | null>(null);
   const [highlight, setHighlight] = useState<{
@@ -269,6 +294,49 @@ export function useHostSearch({
     if (runRef.current) publish(null);
   }, [publish, stopRevealing]);
 
+  const requestAnchor = useCallback((run: SearchRun) => {
+    const match = run.matches[run.current];
+    if (!run.workerBacked || !match) return;
+    const { generation, version, current: index, session } = run;
+    const indices = [...new Set([
+      index,
+      (index + run.matches.length - 1) % run.matches.length,
+      (index + 1) % run.matches.length,
+    ])];
+    const locs = indices.map((i) => {
+      const { story, paraId, start } = run.matches[i];
+      return { story, paraId, offset: start };
+    });
+    if (!run.nearby.has(index)) {
+      run.anchor = null;
+      run.anchorIndex = -1;
+    }
+    const main = () => indices.map((i) => anchorOf(session, run.matches[i]));
+    const authority = workerProposalAuthority(session);
+    const pending = (authority
+      ? authority.stickyAnchors(locs, version, main)
+      : Promise.resolve({ version: session.version(), value: main() })
+    ).then((read) => {
+      const live = runRef.current;
+      if (generationRef.current === generation && pagedEditorRef.current?.getYrsSession() === session &&
+        live?.generation === generation && live.version === version && live.current === index) {
+        if (read.version === version || !live.nearby.has(index)) {
+          live.anchor = read.value[0] ?? null;
+          live.anchorIndex = index;
+        }
+        if (read.version === version) {
+          read.value.forEach((anchor, i) => {
+            if (anchor) live.nearby.set(indices[i], anchor);
+          });
+        }
+      }
+    }).catch(() => {}).finally(() => {
+      const live = runRef.current;
+      if (live?.anchorPending === pending) live.anchorPending = null;
+    });
+    run.anchorPending = pending;
+  }, [pagedEditorRef]);
+
   /**
    * `run` against the session as it is now, keeping its current match. `fresh` says whether a
    * layout of an unknown version counts as showing the current one.
@@ -281,14 +349,90 @@ export function useHostSearch({
       const shown = sourceVersionOf(queriesRef.current);
       return {
         ...run,
+        workerBacked: false,
         version,
         matches,
         current,
         anchor: anchorOf(session, matches[current]),
+        anchorIndex: current,
+        anchorPending: null,
+        nearby: new Map(),
         placed: shown === null ? fresh : shown === version,
       };
     },
     []
+  );
+
+  const refreshWorker = useCallback(
+    (run: SearchRun, session: YrsSession, fresh: boolean) => {
+      if (run.generation !== generationRef.current) return;
+      const pending = refreshRef.current;
+      if (pending?.generation === run.generation) {
+        pending.fresh ||= fresh;
+        pending.revealing ||= pendingRevealRef.current !== null;
+        return;
+      }
+      const refresh = {
+        generation: run.generation,
+        fresh,
+        revealing: pendingRevealRef.current !== null,
+      };
+      refreshRef.current = refresh;
+      stopRevealing();
+      const current = () =>
+        generationRef.current === refresh.generation &&
+        pagedEditorRef.current?.getYrsSession() === session &&
+        runRef.current?.generation === refresh.generation;
+      void (async () => {
+        while (current()) {
+          const anchorPending = runRef.current!.anchorPending;
+          if (anchorPending) {
+            await anchorPending;
+            if (!current()) return;
+            if (runRef.current!.anchorPending) continue;
+          }
+          const latest = runRef.current!;
+          const carry = latest.anchorIndex === latest.current ? latest.anchor : null;
+          const authority = workerProposalAuthority(session);
+          let next: SearchRun;
+          if (authority) {
+            const read = await authority.searchText(latest.query, latest.options.caseSensitive, carry,
+              () => mainSearch(pagedEditorRef.current!, session, latest.query, latest.options, carry));
+            if (!current()) return;
+            if (read.version !== session.version() || runRef.current!.current !== latest.current ||
+              runRef.current!.anchor !== carry || runRef.current!.anchorPending) continue;
+            const shown = sourceVersionOf(queriesRef.current);
+            next = {
+              ...runRef.current!,
+              workerBacked: true,
+              version: read.version,
+              matches: read.value.matches,
+              current: read.value.carried,
+              anchor: null,
+              anchorIndex: -1,
+              anchorPending: null,
+              nearby: new Map(),
+              placed: shown === null ? refresh.fresh : shown === read.version,
+            };
+          } else {
+            next = refreshed(latest, pagedEditorRef.current!, session, refresh.fresh);
+          }
+          const revealing = refresh.revealing || pendingRevealRef.current !== null;
+          publish(next);
+          if (current() && runRef.current === next) requestAnchor(next);
+          if (revealing && current() && runRef.current === next && next.current >= 0) {
+            reveal(next.matches[next.current].displayFrom, next.version);
+          }
+          if (current() && runRef.current!.version !== session.version()) continue;
+          return;
+        }
+      })().catch((error) => {
+        if (current()) console.error('[DocxEditor] search refresh failed', error);
+      }).finally(() => {
+        if (refreshRef.current === refresh) refreshRef.current = null;
+      });
+    },
+    [pagedEditorRef, publish, refreshed, requestAnchor, reveal, stopRevealing]
   );
 
   /**
@@ -305,10 +449,14 @@ export function useHostSearch({
       return null;
     }
     if (session.version() === run.version) return run;
+    if (workerProposalAuthority(session)) {
+      refreshWorker(run, session, false);
+      return run;
+    }
     const next = refreshed(run, editor, session, false);
     publish(next);
     return runRef.current === next ? next : null;
-  }, [clearSearch, pagedEditorRef, publish, refreshed]);
+  }, [clearSearch, pagedEditorRef, publish, refreshed, refreshWorker]);
 
   const goTo = useCallback(
     (index: number): DocxSearchState | null => {
@@ -316,12 +464,30 @@ export function useHostSearch({
       if (!run) return null;
       if (run.matches.length === 0 || !Number.isInteger(index)) return stateOf(run);
       const current = ((index % run.matches.length) + run.matches.length) % run.matches.length;
-      const next = { ...run, current, anchor: anchorOf(run.session, run.matches[current]) };
+      const next = { ...run, current, nearby: new Map(run.nearby) };
+      const nearby = next.nearby.get(current);
+      if (!run.workerBacked) {
+        next.anchor = anchorOf(run.session, run.matches[current]);
+        next.anchorIndex = current;
+      } else if (nearby) {
+        next.anchor = nearby;
+        next.anchorIndex = current;
+        next.anchorPending = null;
+      } else if (current !== run.current) {
+        next.anchor = null;
+        next.anchorIndex = -1;
+        next.anchorPending = null;
+      }
+      if (refreshRef.current?.generation === next.generation) refreshRef.current.revealing = true;
       publish(next);
-      if (runRef.current === next) reveal(run.matches[current].displayFrom, run.version);
+      if (runRef.current === next && next.generation === generationRef.current) {
+        if (next.workerBacked && (nearby ? next.session.version() === next.version :
+          current !== run.current || (next.anchorIndex !== current && !next.anchorPending))) requestAnchor(next);
+        reveal(run.matches[current].displayFrom, run.version);
+      }
       return stateOf(runRef.current);
     },
-    [liveRun, publish, reveal]
+    [liveRun, publish, requestAnchor, reveal]
   );
 
   const search = useCallback(
@@ -330,7 +496,8 @@ export function useHostSearch({
       const generation = (generationRef.current += 1);
       const empty = { query, options: normalized, total: 0, current: -1 };
       const pending = pagedEditorRef.current;
-      if (pending?.hasPendingInput()) {
+      const pendingSession = pending?.getYrsSession();
+      if (!(pendingSession && workerProposalAuthority(pendingSession)) && pending?.hasPendingInput()) {
         // a document replaced mid-flush leaves nothing to search in; the checks below see that
         await pending.flushPendingInput().catch(() => undefined);
       }
@@ -342,25 +509,53 @@ export function useHostSearch({
         publish(null);
         return empty;
       }
-      const matches = collectMatches(editor, session, query, normalized);
+      let matches: SearchMatch[];
+      let version: string;
+      let workerBacked = false;
+      for (let attempt = 0; ; attempt += 1) {
+        const authority = workerProposalAuthority(session);
+        if (!authority) {
+          matches = collectMatches(pagedEditorRef.current!, session, query, normalized);
+          version = session.version();
+          break;
+        }
+        const read = await authority.searchText(query, normalized.caseSensitive, null,
+          () => mainSearch(pagedEditorRef.current!, session, query, normalized, null));
+        if (generation !== generationRef.current ||
+          pagedEditorRef.current?.getYrsSession() !== session) return stateOf(runRef.current) ?? empty;
+        if (read.version !== session.version() && attempt === 0) continue;
+        matches = read.value.matches;
+        version = read.version;
+        workerBacked = true;
+        break;
+      }
       const current = firstInView(matches, queriesRef.current, topPageInView(canvasHostRef.current));
       const shown = sourceVersionOf(queriesRef.current);
       const run: SearchRun = {
+        generation,
+        workerBacked,
         query,
         options: normalized,
         session,
-        version: session.version(),
+        version,
         matches,
         current,
-        anchor: anchorOf(session, matches[current]),
-        placed: shown === null || shown === session.version(),
+        anchor: workerBacked ? null : anchorOf(session, matches[current]),
+        anchorIndex: workerBacked ? -1 : current,
+        anchorPending: null,
+        nearby: new Map(),
+        placed: shown === null || shown === version,
       };
       publish(run);
-      if (runRef.current !== run) return stateOf(runRef.current) ?? empty;
+      if (runRef.current !== run || generation !== generationRef.current) {
+        return stateOf(runRef.current) ?? empty;
+      }
+      requestAnchor(run);
       if (current >= 0) reveal(matches[current].displayFrom, run.version);
+      if (workerBacked && run.version !== session.version()) refreshWorker(run, session, false);
       return stateOf(run)!;
     },
-    [canvasHostRef, pagedEditorRef, publish, reveal, stopRevealing]
+    [canvasHostRef, pagedEditorRef, publish, refreshWorker, requestAnchor, reveal, stopRevealing]
   );
 
   // A new display list follows every document change, and every page the layout adds.
@@ -373,7 +568,26 @@ export function useHostSearch({
       clearSearch();
       return;
     }
+    if (run.workerBacked && session.version() === run.version) {
+      let next = run;
+      if (!run.placed) {
+        const shown = sourceVersionOf(queriesRef.current);
+        const placed = shown === null ? true : shown === run.version;
+        if (placed !== run.placed) {
+          next = { ...run, placed };
+          publish(next);
+        }
+      }
+      if (runRef.current === next && pendingRevealRef.current !== null) {
+        reveal(pendingRevealRef.current, run.version);
+      }
+      return;
+    }
     if (session.version() !== run.version || !run.placed) {
+      if (workerProposalAuthority(session)) {
+        refreshWorker(run, session, true);
+        return;
+      }
       const revealing = pendingRevealRef.current !== null;
       // positions moved: never keep following the old one onto an unbuilt page
       stopRevealing();
@@ -385,7 +599,7 @@ export function useHostSearch({
     } else if (pendingRevealRef.current !== null) {
       reveal(pendingRevealRef.current, run.version);
     }
-  }, [clearSearch, displayListQueries, pagedEditorRef, publish, refreshed, reveal, stopRevealing]);
+  }, [clearSearch, displayListQueries, pagedEditorRef, publish, refreshed, refreshWorker, reveal, stopRevealing]);
 
   useEffect(() => clearSearch, [clearSearch]);
 

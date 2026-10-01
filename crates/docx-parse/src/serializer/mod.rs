@@ -1,6 +1,7 @@
 //! Safe, deterministic XML serialization primitives and DOCX writer families.
 
 pub(crate) mod comment_references;
+mod comment_splice;
 pub mod context;
 pub mod foundation;
 pub mod numbering;
