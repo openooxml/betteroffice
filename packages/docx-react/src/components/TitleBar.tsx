@@ -32,7 +32,27 @@ interface BreakSubmenuItem {
 
 function BreakSubmenu({ items, closeMenu }: { items: BreakSubmenuItem[]; closeMenu: () => void }) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minWidth: 220 }}>
+    <div
+      style={{ display: 'flex', flexDirection: 'column', minWidth: 220 }}
+      onKeyDown={(event) => {
+        if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const choices = Array.from(
+          event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')
+        );
+        const currentIndex = choices.indexOf(event.target as HTMLButtonElement);
+        const nextIndex =
+          event.key === 'Home'
+            ? 0
+            : event.key === 'End'
+              ? choices.length - 1
+              : event.key === 'ArrowDown'
+                ? (currentIndex + 1 + choices.length) % choices.length
+                : (currentIndex <= 0 ? choices.length : currentIndex) - 1;
+        choices[nextIndex]?.focus();
+      }}
+    >
       {items.map((item) => {
         const disabled = !item.onClick;
         return (
@@ -40,6 +60,8 @@ function BreakSubmenu({ items, closeMenu }: { items: BreakSubmenuItem[]; closeMe
             key={item.label}
             type="button"
             disabled={disabled}
+            role="menuitem"
+            aria-disabled={disabled || undefined}
             title={disabled ? item.description : undefined}
             style={{
               display: 'flex',
@@ -237,6 +259,7 @@ export function MenuBar() {
     ? {
         icon: 'grid_on',
         label: insertTable.label,
+        submenuRole: 'group',
         submenuContent: (closeMenu: () => void) => (
           <TableGridInline
             onInsert={(rows: number, cols: number) => {

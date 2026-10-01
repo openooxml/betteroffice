@@ -1,10 +1,5 @@
-/**
- * TableGridInline — a grid picker for table dimensions, rendered inline (no button/dropdown wrapper).
- * Used both standalone inside menu submenus and internally by TableGridPicker.
- */
-
-import { useState, useCallback } from 'react';
-import type { CSSProperties, ReactElement } from 'react';
+import { useRef, useState } from 'react';
+import type { CSSProperties, KeyboardEvent, ReactElement } from 'react';
 
 interface TableGridInlineProps {
   onInsert: (rows: number, columns: number) => void;
@@ -42,28 +37,68 @@ const labelStyle: CSSProperties = {
 export function TableGridInline({ onInsert, gridRows = 6, gridColumns = 6 }: TableGridInlineProps) {
   const [hoverRows, setHoverRows] = useState(0);
   const [hoverCols, setHoverCols] = useState(0);
-
-  const handleCellClick = useCallback(() => {
-    if (hoverRows > 0 && hoverCols > 0) {
-      onInsert(hoverRows, hoverCols);
-    }
-  }, [hoverRows, hoverCols, onInsert]);
+  const [focusedCell, setFocusedCell] = useState({ row: 1, col: 1 });
+  const cellRefs = useRef(new Map<string, HTMLDivElement>());
 
   const gridCells: ReactElement[] = [];
   for (let row = 1; row <= gridRows; row++) {
     for (let col = 1; col <= gridColumns; col++) {
       const isSelected = row <= hoverRows && col <= hoverCols;
+      const isFocused = focusedCell.row === row && focusedCell.col === col;
+      const key = `${row}-${col}`;
+      const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+        const movement: Record<string, [number, number]> = {
+          ArrowUp: [-1, 0],
+          ArrowDown: [1, 0],
+          ArrowLeft: [0, -1],
+          ArrowRight: [0, 1],
+        };
+        const delta = movement[event.key];
+        if (delta) {
+          event.preventDefault();
+          event.stopPropagation();
+          const next = {
+            row: Math.max(1, Math.min(gridRows, row + delta[0])),
+            col: Math.max(1, Math.min(gridColumns, col + delta[1])),
+          };
+          setFocusedCell(next);
+          setHoverRows(next.row);
+          setHoverCols(next.col);
+          cellRefs.current.get(`${next.row}-${next.col}`)?.focus();
+        } else if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          event.stopPropagation();
+          onInsert(row, col);
+        }
+      };
+
       gridCells.push(
         <div
-          key={`${row}-${col}`}
+          key={key}
+          ref={(element) => {
+            if (element) cellRefs.current.set(key, element);
+            else cellRefs.current.delete(key);
+          }}
           style={isSelected ? cellSelectedStyle : cellStyle}
           onMouseEnter={() => {
             setHoverRows(row);
             setHoverCols(col);
           }}
-          onClick={handleCellClick}
+          onFocus={() => {
+            setFocusedCell({ row, col });
+            setHoverRows(row);
+            setHoverCols(col);
+          }}
+          onKeyDown={handleKeyDown}
+          onClick={() => onInsert(row, col)}
           role="gridcell"
+          aria-label={`${col} columns, ${row} rows`}
           aria-selected={isSelected}
+          aria-rowindex={row}
+          aria-colindex={col}
+          data-row={row}
+          data-column={col}
+          tabIndex={isFocused ? 0 : -1}
         />
       );
     }
@@ -88,7 +123,9 @@ export function TableGridInline({ onInsert, gridRows = 6, gridColumns = 6 }: Tab
       >
         {gridCells}
       </div>
-      <div style={labelStyle}>{gridLabel}</div>
+      <div style={labelStyle} aria-live="polite">
+        {gridLabel}
+      </div>
     </div>
   );
 }
