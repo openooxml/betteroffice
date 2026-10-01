@@ -1,12 +1,6 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
-export const wasm_failed_allocation_bytes: () => number;
-export const wasm_heap_counted: () => number;
-export const wasm_live_bytes: () => number;
-export const wasm_peak_bytes: () => number;
-export const set_wasm_heap_limit: (a: number) => void;
-export const reset_wasm_peak_bytes: () => void;
 export const __wbg_editsession_free: (a: number, b: number) => void;
 export const editsession_accept_change: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_add_comment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
@@ -185,6 +179,12 @@ export const find_docx_content_controls_json: (a: number, b: number, c: number, 
 export const list_docx_content_controls_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const render_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const render_docx_markdown_with_pages_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const wasm_failed_allocation_bytes: () => number;
+export const wasm_heap_counted: () => number;
+export const wasm_live_bytes: () => number;
+export const wasm_peak_bytes: () => number;
+export const reset_wasm_peak_bytes: () => void;
+export const set_wasm_heap_limit: (a: number) => void;
 export const build_display_list_json: (a: number, b: number) => [number, number, number, number];
 export const clear_measure_fonts: () => [number, number];
 export const hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -203,8 +203,8 @@ export const register_substitute_measure_font: (a: number, b: number, c: number)
 export const update_display_list: (a: number, b: number, c: number) => [number, number];
 export const vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-export const install_panic_hook: () => void;
 export const close_display_list: (a: number) => void;
+export const install_panic_hook: () => void;
 export const decodeTiffPng: (a: number, b: number) => [number, number, number, number];
 export const parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
 export const parse_docx_s2: (a: number, b: number) => [number, number, number, number];

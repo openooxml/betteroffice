@@ -12,7 +12,12 @@ import { preloadEditWasm } from '../wasm/edit';
 import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
 import { createYrsSession, type DocxEditRequest, type YrsSession } from './index';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
-import type { DocxProposalInput, DocxProposalResult, DocxProposalSnapshot } from './proposals';
+import {
+  proposalRevisionPreview,
+  type DocxProposalInput,
+  type DocxProposalResult,
+  type DocxProposalSnapshot,
+} from './proposals';
 import { resolveNavigationTarget } from './proposalGeometry';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
@@ -369,8 +374,15 @@ test('ASCII worker proposals carry verified font requirements and Unicode propos
     expectPreviewVersion: unicode.geometry.previewVersion,
     changes: [{ id: 'unicode', state: 'rejected' }],
   } });
-  expect(decided.result?.ok).toBe(true);
-  expect(decided.fontRequirements).toBeUndefined();
+  if (!decided.result?.ok) throw new Error('expected a decision');
+  const previewed = JSON.stringify({
+    ...JSON.parse(LAYOUT),
+    renderEnv: { revisionPreview: proposalRevisionPreview(decided.result.snapshot) },
+  });
+  expect(decided.fontRequirements).toEqual({
+    layoutInput: previewed,
+    requirementsJson: await client.fontRequirements(previewed),
+  });
 });
 
 test.each(['', '漢字 Alpha'])('worker font preflight is preserved for an ASCII insertion into %j', async (text) => {
