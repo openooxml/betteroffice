@@ -246,28 +246,35 @@ interface WorkerLayoutFrame {
   layoutExtras: string;
   /** The frame shows a layout of the first pages only. */
   provisional: boolean;
-  /** The interim frame of the same completion that this frame's delta builds on. */
-  predecessor?: WorkerLayoutFrame;
+  link: WorkerFrameLink;
+}
+
+/** A worker layout frame, linked to the interim frame of the same completion its delta builds on. */
+interface WorkerFrameLink {
+  frame: Uint8Array;
+  engine: YrsSession;
+  contentEpoch: number;
+  predecessor?: WorkerFrameLink;
 }
 
 /**
- * The deltas that take `base` to `entry`'s frame: its own, preceded by those of
+ * The deltas that take `base` to `link`'s frame: its own, preceded by those of
  * the interims the display skipped. Null when no chain starts at `base`.
  */
-function workerLayoutFrameChain(
-  entry: WorkerLayoutFrame,
+function workerFrameChain(
+  link: WorkerFrameLink,
   delta: DecodedFrameDelta,
   base: RetainedFrame | null
 ): DecodedFrameDelta[] | null {
   const chain = [delta];
-  for (let link: WorkerLayoutFrame | undefined = entry; ;) {
+  for (let step: WorkerFrameLink | undefined = link; ;) {
     const head = chain[0]!;
     if (head.full ? !base || head.frameEpoch > base.frameEpoch : head.baseFrameEpoch === base?.frameEpoch) {
       return chain;
     }
-    link = link.predecessor;
-    if (!link || link.engine !== entry.engine || link.contentEpoch !== entry.contentEpoch) return null;
-    chain.unshift(decodeFrameDelta(link.result.frame));
+    step = step.predecessor;
+    if (!step || step.engine !== link.engine || step.contentEpoch !== link.contentEpoch) return null;
+    chain.unshift(decodeFrameDelta(step.frame));
   }
 }
 
@@ -2014,7 +2021,7 @@ export function useRustDisplayList(
       const adopt = (
         result: ResidentEngineWorkerFrame,
         base: RetainedFrame | null | undefined,
-        predecessor?: WorkerLayoutFrame
+        predecessor?: WorkerFrameLink
       ): LayoutComputation => {
         if (result.layoutJson === undefined) {
           throw new ResidentWorkerFailureError('Resident engine worker omitted its layout');
@@ -2027,7 +2034,12 @@ export function useRustDisplayList(
           contentEpoch,
           layoutExtras: options.layoutExtras,
           provisional: result.layoutProvisional === true,
-          ...(predecessor ? { predecessor } : {}),
+          link: {
+            frame: result.frame,
+            engine: hostEngine,
+            contentEpoch,
+            ...(predecessor ? { predecessor } : {}),
+          },
         });
         return computation;
       };
@@ -2051,7 +2063,7 @@ export function useRustDisplayList(
           const gate = { engine: hostEngine };
           const listeners = new Set<(interim: LayoutComputation) => void>();
           let latestInterim: LayoutComputation | null = null;
-          let interimFrame: WorkerLayoutFrame | undefined;
+          let interimFrame: WorkerFrameLink | undefined;
           const interims = (listener: (interim: LayoutComputation) => void) => {
             listeners.add(listener);
             if (latestInterim) listener(latestInterim);
@@ -2091,7 +2103,7 @@ export function useRustDisplayList(
                           base?.docEpoch === provisionalDocEpoch ? base : undefined,
                           interimFrame
                         );
-                        interimFrame = workerLayoutFramesRef.current.get(latestInterim.layout);
+                        interimFrame = workerLayoutFramesRef.current.get(latestInterim.layout)?.link;
                         for (const listener of listeners) listener(latestInterim);
                       },
                     }
@@ -2563,7 +2575,7 @@ export function useRustDisplayList(
         // The frame is adopted only while nothing newer reached the session
         // or the display since the worker built it. A whole frame (the worker
         // sends one when a page build ran first) replaces any older base.
-        const chain = prebuilt && delta ? workerLayoutFrameChain(prebuilt, delta, base) : null;
+        const chain = prebuilt && delta ? workerFrameChain(prebuilt.link, delta, base) : null;
         if (
           prebuilt &&
           chain &&
@@ -2585,6 +2597,7 @@ export function useRustDisplayList(
             }
             nextFrame = { ...nextFrame, damagedPageIds, removedPageIds };
           }
+          delete prebuilt.link.predecessor;
           pending = Promise.resolve({
             displayList: nextFrame.displayList,
             frame: nextFrame,
