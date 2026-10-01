@@ -37,6 +37,16 @@ fn attributes(attrs: Option<&Attrs>) -> Attrs {
     attrs
 }
 
+fn same_attributes(attrs: &Attrs, other: Option<&Attrs>) -> bool {
+    let other = || {
+        other
+            .into_iter()
+            .flatten()
+            .filter(|(_, value)| **value != Any::Null)
+    };
+    other().count() == attrs.len() && other().all(|(key, value)| attrs.get(key) == Some(value))
+}
+
 fn unsafe_value(key: &str, value: &Any) -> bool {
     if matches!(value, Any::Null | Any::Undefined | Any::Bool(false)) {
         return false;
@@ -79,10 +89,15 @@ impl LocalLowering {
             .flatten()
             .any(|(key, value)| unsafe_value(key, value));
         match &diff.insert {
+            Out::Any(Any::String(_)) if paragraph.mixed => {}
             Out::Any(Any::String(text)) => {
-                let attrs = attributes(attrs);
-                paragraph.mixed |= !paragraph.text.is_empty() && paragraph.attrs != attrs;
-                paragraph.attrs = attrs;
+                if paragraph.text.is_empty() {
+                    paragraph.attrs = attributes(attrs);
+                } else if !same_attributes(&paragraph.attrs, attrs) {
+                    paragraph.mixed = true;
+                    paragraph.text = String::new();
+                    return;
+                }
                 paragraph.text.push_str(text);
             }
             Out::YMap(mark) => {
