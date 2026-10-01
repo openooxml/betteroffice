@@ -292,10 +292,29 @@ const PARENTS: [&str; 6] = [
     "w:endnote",
 ];
 
-/// Whether `xml`, one paragraph, holds no field characters, equations or content controls, and
-/// closes every bookmark, permission or range it opens after opening it, so that rewriting it
-/// leaves every other paragraph's markup whole. `None` on a range marker without an ID.
+/// Whether `xml`, one paragraph, holds no equations or content controls and pairs only within
+/// itself, so that rewriting it leaves every other paragraph's markup whole.
 fn simple(xml: &str) -> Option<bool> {
+    for tag in tags(xml)? {
+        if !tag.end
+            && matches!(
+                tag.name
+                    .rsplit_once(':')
+                    .map_or(tag.name, |(_, local)| local),
+                "oMath" | "oMathPara" | "sdt"
+            )
+        {
+            return Some(false);
+        }
+    }
+    pairs_within(xml)
+}
+
+/// Whether `xml`, one paragraph, holds both ends of everything in it that can pair across
+/// paragraphs: bookmarks, permissions, comment and custom XML ranges and proofing marks, each
+/// opened before it is closed; and no field character or move, whose partners lie elsewhere.
+/// `None` on a range marker without an ID or a proofing mark without a type.
+fn pairs_within(xml: &str) -> Option<bool> {
     let mut open: HashMap<(&str, String), usize> = HashMap::new();
     for tag in tags(xml)? {
         if tag.end {
@@ -305,26 +324,36 @@ fn simple(xml: &str) -> Option<bool> {
             .name
             .rsplit_once(':')
             .map_or(tag.name, |(_, local)| local);
-        if matches!(local, "fldChar" | "oMath" | "oMathPara" | "sdt") {
+        if local == "fldChar" || local.starts_with("move") || local.starts_with("customXmlMove") {
             return Some(false);
         }
-        let (kind, opens) = match local {
-            "bookmarkStart" => ("bookmark", true),
-            "bookmarkEnd" => ("bookmark", false),
-            "permStart" => ("perm", true),
-            "permEnd" => ("perm", false),
-            name => match (
-                name.strip_suffix("RangeStart"),
-                name.strip_suffix("RangeEnd"),
-            ) {
-                (Some(kind), _) => (kind, true),
-                (_, Some(kind)) => (kind, false),
-                _ => continue,
-            },
+        let (kind, id, opens) = if local == "proofErr" {
+            let (kind, opens) = match &*unescaped(xml, attribute(&tag, "w:type")?)? {
+                "spellStart" => ("spell", true),
+                "spellEnd" => ("spell", false),
+                "gramStart" => ("gram", true),
+                "gramEnd" => ("gram", false),
+                _ => return None,
+            };
+            (kind, String::new(), opens)
+        } else {
+            let (kind, opens) = match local {
+                "bookmarkStart" => ("bookmark", true),
+                "bookmarkEnd" => ("bookmark", false),
+                "permStart" => ("perm", true),
+                "permEnd" => ("perm", false),
+                name => match (
+                    name.strip_suffix("RangeStart"),
+                    name.strip_suffix("RangeEnd"),
+                ) {
+                    (Some(kind), _) => (kind, true),
+                    (_, Some(kind)) => (kind, false),
+                    _ => continue,
+                },
+            };
+            (kind, unescaped(xml, attribute(&tag, "w:id")?)?, opens)
         };
-        let count = open
-            .entry((kind, unescaped(xml, attribute(&tag, "w:id")?)?))
-            .or_insert(0);
+        let count = open.entry((kind, id)).or_insert(0);
         if opens {
             *count += 1;
         } else if *count == 0 {
@@ -720,6 +749,108 @@ mod tests {
             splice(&source, &[(0, opening), (1, crossed), (2, closing)], &[1]),
             None
         );
+    }
+
+    /// Asserts that a paragraph holding `start` or `end` of a pair spanning two paragraphs is not
+    /// rewritten alone, and that an edit to a third paragraph keeps both.
+    fn refuses_rewriting_one_end(start: &str, end: &str) {
+        let opening = format!("<w:p>{start}<w:r><w:t>a</w:t></w:r></w:p>");
+        let closing = format!("<w:p><w:r><w:t>b</w:t></w:r>{end}</w:p>");
+        let outside = "<w:p><w:r><w:t>c</w:t></w:r></w:p>";
+        let source = format!("{ROOT}<w:body>{opening}{closing}{outside}</w:body></w:document>");
+        let edited = |xml: &str| xml.replace("</w:t>", ", edited</w:t>");
+        let (opening_edited, closing_edited) = (edited(&opening), edited(&closing));
+        for (paragraphs, changed) in [
+            (
+                [
+                    (0, opening_edited.as_str()),
+                    (1, closing.as_str()),
+                    (2, outside),
+                ],
+                0,
+            ),
+            (
+                [
+                    (0, opening.as_str()),
+                    (1, closing_edited.as_str()),
+                    (2, outside),
+                ],
+                1,
+            ),
+        ] {
+            assert_eq!(
+                splice(&source, &paragraphs, &[changed]),
+                None,
+                "{start} {end}"
+            );
+        }
+        let outside_edited = edited(outside);
+        assert_eq!(
+            splice(
+                &source,
+                &[
+                    (0, opening.as_str()),
+                    (1, closing.as_str()),
+                    (2, outside_edited.as_str())
+                ],
+                &[2]
+            ),
+            Some(format!(
+                "{ROOT}<w:body>{opening}{closing}{outside_edited}</w:body></w:document>"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_bookmark_across_paragraphs_is_not_rewritten_at_one_end() {
+        refuses_rewriting_one_end(
+            "<w:bookmarkStart w:id=\"1\" w:name=\"b\"/>",
+            "<w:bookmarkEnd w:id=\"1\"/>",
+        );
+    }
+
+    #[test]
+    fn a_comment_range_across_paragraphs_is_not_rewritten_at_one_end() {
+        refuses_rewriting_one_end(
+            "<w:commentRangeStart w:id=\"1\"/>",
+            "<w:commentRangeEnd w:id=\"1\"/><w:r><w:commentReference w:id=\"1\"/></w:r>",
+        );
+    }
+
+    #[test]
+    fn a_permission_across_paragraphs_is_not_rewritten_at_one_end() {
+        refuses_rewriting_one_end(
+            "<w:permStart w:id=\"1\" w:edGrp=\"everyone\"/>",
+            "<w:permEnd w:id=\"1\"/>",
+        );
+    }
+
+    #[test]
+    fn a_custom_xml_range_across_paragraphs_is_not_rewritten_at_one_end() {
+        refuses_rewriting_one_end(
+            "<w:customXmlInsRangeStart w:id=\"1\" w:author=\"A\"/>",
+            "<w:customXmlInsRangeEnd w:id=\"1\"/>",
+        );
+    }
+
+    #[test]
+    fn a_proofing_mark_across_paragraphs_is_not_rewritten_at_one_end() {
+        refuses_rewriting_one_end(
+            "<w:proofErr w:type=\"spellStart\"/>",
+            "<w:proofErr w:type=\"spellEnd\"/>",
+        );
+    }
+
+    #[test]
+    fn a_move_is_not_rewritten_at_either_half() {
+        refuses_rewriting_one_end(
+            "<w:moveFromRangeStart w:id=\"0\" w:name=\"m\" w:author=\"A\"/><w:moveFrom w:id=\"1\" w:author=\"A\"><w:r><w:delText>x</w:delText></w:r></w:moveFrom><w:moveFromRangeEnd w:id=\"0\"/>",
+            "<w:moveToRangeStart w:id=\"2\" w:name=\"m\" w:author=\"A\"/><w:moveTo w:id=\"3\" w:author=\"A\"><w:r><w:t>x</w:t></w:r></w:moveTo><w:moveToRangeEnd w:id=\"2\"/>",
+        );
+        let whole_move = "<w:p><w:moveFrom w:id=\"1\" w:author=\"A\"><w:r><w:delText>x</w:delText></w:r></w:moveFrom><w:moveTo w:id=\"3\" w:author=\"A\"><w:r><w:t>x</w:t></w:r></w:moveTo></w:p>";
+        let source = format!("{ROOT}<w:body>{whole_move}</w:body></w:document>");
+        let rewritten = "<w:p><w:del w:id=\"1\" w:author=\"A\"><w:r><w:delText>x</w:delText></w:r></w:del><w:ins w:id=\"3\" w:author=\"A\"><w:r><w:t>x, edited</w:t></w:r></w:ins></w:p>";
+        assert_eq!(splice(&source, &[(0, rewritten)], &[0]), None);
     }
 
     #[test]
