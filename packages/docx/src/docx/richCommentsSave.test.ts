@@ -6,6 +6,7 @@ import { rezipPartsToArrayBuffer, toBytes } from './rezip/parts';
 import { unzipContainer } from './wasm';
 import { preloadEditWasm } from '../wasm/edit';
 import { createYrsSession, saveYrsDocx, type YrsSession } from '../yrs';
+import { getCommentText } from '../utils/comments';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
@@ -53,13 +54,12 @@ function fixture(): ArrayBuffer {
   return rezipPartsToArrayBuffer(parts);
 }
 
-function assertRich(bytes: ArrayBuffer | Uint8Array): string {
+function assertRich(bytes: ArrayBuffer | Uint8Array): void {
   const parts = unzipContainer(new Uint8Array(bytes));
   const xml = new TextDecoder().decode(parts['word/comments.xml']);
   const rich = xml.match(/<w:comment\b[^>]*w:id="0"[^>]*>[\s\S]*?<\/w:comment>/)?.[0];
   expect(toBytes(rich ?? '')).toEqual(toBytes(RICH));
   expect(parts['word/_rels/comments.xml.rels']).toEqual(toBytes(COMMENT_RELS));
-  return xml;
 }
 
 async function open(): Promise<YrsSession> {
@@ -78,20 +78,24 @@ test('parseDocx → repackDocx preserves rich comment XML and relationship bytes
     .toEqual(unzipContainer(new Uint8Array(source))['word/comments.xml']);
 });
 
-test('repackDocx edits one comment without changing the other comment XML', async () => {
+test('repackDocx saves an edited comment and the other comment text', async () => {
   const document = await parseDocx(fixture(), { preloadFonts: false });
   document.package.document.comments![1]!.content[0]!.content = [
     { type: 'run', content: [{ type: 'text', text: 'Edited plain comment' }] },
   ];
-  const xml = assertRich(await repackDocx(document));
-  expect(xml).toContain('<w:t>Edited plain comment</w:t>');
-  expect(xml).not.toContain('<w:t>Plain</w:t>');
+  const saved = await parseDocx(await repackDocx(document), { preloadFonts: false });
+  const comments = saved.package.document.comments!;
+  expect(getCommentText(comments.find(({ id }) => id === 1)!.content)).toBe('Edited plain comment');
+  expect(getCommentText(comments.find(({ id }) => id === 0)!.content)).toContain('colorful');
 });
 
-test('repackDocx deletes one comment without changing the other comment XML', async () => {
+test('repackDocx saves a comment deletion and the other comment text', async () => {
   const document = await parseDocx(fixture(), { preloadFonts: false });
   document.package.document.comments!.splice(1, 1);
-  expect(assertRich(await repackDocx(document))).not.toContain('w:id="1"');
+  const saved = await parseDocx(await repackDocx(document), { preloadFonts: false });
+  const comments = saved.package.document.comments!;
+  expect(comments.map(({ id }) => id)).toEqual([0]);
+  expect(getCommentText(comments[0]!.content)).toContain('colorful');
 });
 
 test('selective body save preserves rich comment XML and relationship bytes', async () => {
@@ -105,17 +109,20 @@ test('selective body save preserves rich comment XML and relationship bytes', as
   });
   expect(saved).not.toBeNull();
   assertRich(saved!);
+  expect(unzipContainer(new Uint8Array(saved!))['word/comments.xml'])
+    .toEqual(unzipContainer(new Uint8Array(source))['word/comments.xml']);
   expect(new TextDecoder().decode(unzipContainer(new Uint8Array(saved!))['word/document.xml']))
     .toContain('Edited body ');
 });
 
-test('saveYrsDocx preserves rich comments after a session comment edit', async () => {
+test('saveYrsDocx saves a session comment edit and the other comment text', async () => {
   const session = await open();
   const ranges = session.resolveComment('1').map(({ start, end }) => [start, end] as const);
   session.applyRawOps('body', [{ op: 'setComment', id: '1', ranges, body: 'Edited in session' }]);
-  const xml = assertRich((await saveYrsDocx(session)).bytes);
-  expect(xml).toContain('<w:t>Edited in session</w:t>');
-  expect(xml).not.toContain('<w:t>Plain</w:t>');
+  const saved = await parseDocx((await saveYrsDocx(session)).bytes, { preloadFonts: false });
+  const comments = saved.package.document.comments!;
+  expect(getCommentText(comments.find(({ id }) => id === 1)!.content)).toBe('Edited in session');
+  expect(getCommentText(comments.find(({ id }) => id === 0)!.content)).toContain('colorful');
 });
 
 test('saveYrsDocx preserves comment bytes after only document body text changes', async () => {

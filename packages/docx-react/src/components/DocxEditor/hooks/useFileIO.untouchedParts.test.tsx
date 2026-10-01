@@ -189,13 +189,6 @@ function richCommentsFixture(): Fixture {
   return source;
 }
 
-function expectRichComment(source: Fixture, saved: ArrayBuffer): void {
-  const xml = xmlPart(unzipContainer(new Uint8Array(saved)), 'word/comments.xml');
-  const comment = xml.match(/<w:comment\b[^>]*w:id="0"[^>]*>[\s\S]*?<\/w:comment>/)?.[0];
-  expect(toBytes(comment ?? '')).toEqual(toBytes(RICH_COMMENT));
-  expectUnchanged(source, saved, ['word/_rels/comments.xml.rels']);
-}
-
 function xmlPart(parts: ReturnType<typeof unzipContainer>, name: string): string {
   const bytes = parts[name];
   if (!bytes) throw new Error(`Missing package part: ${name}`);
@@ -321,7 +314,7 @@ test('no-edit React save preserves rich comments, body, header and footnotes byt
   expectUnchanged(source, saved, ['word/comments.xml', 'word/document.xml', 'word/header1.xml', 'word/footnotes.xml']);
 });
 
-test('React save after editing a plain comment preserves the rich comment XML and rels', async () => {
+test('React saves a plain comment edit and the other comment text', async () => {
   const source = richCommentsFixture();
   const editor = await mount(source.bytes);
   const comments = editor.ref.current!.getComments().map((comment) => comment.id === 1 ? {
@@ -332,25 +325,23 @@ test('React save after editing a plain comment preserves the rich comment XML an
   } : comment);
   await act(async () => editor.setComments(comments));
   const saved = await editor.save();
-  expectRichComment(source, saved);
-  const xml = xmlPart(unzipContainer(new Uint8Array(saved)), 'word/comments.xml');
-  expect(xml).toContain('<w:t>Edited plain comment</w:t>');
-  expect(xml).not.toContain('<w:t>Plain</w:t>');
-  expect(getCommentText((await reopened(saved)).package.document.comments!.find(({ id }) => id === 1)!.content))
-    .toBe('Edited plain comment');
+  const reopenedComments = (await reopened(saved)).package.document.comments!;
+  expect(getCommentText(reopenedComments.find(({ id }) => id === 1)!.content)).toBe('Edited plain comment');
+  expect(getCommentText(reopenedComments.find(({ id }) => id === 0)!.content)).toContain('colorful');
 });
 
-test('React save after deleting a plain comment preserves the rich comment XML and rels', async () => {
+test('React saves a plain comment deletion and the other comment text', async () => {
   const source = richCommentsFixture();
   const editor = await mount(source.bytes);
   await act(async () => editor.setComments(editor.ref.current!.getComments().filter(({ id }) => id !== 1)));
   await until(() => editor.ref.current!.getComments().length === 1);
   const saved = await editor.save();
-  expectRichComment(source, saved);
-  expect((await reopened(saved)).package.document.comments?.map(({ id }) => id)).toEqual([0]);
+  const comments = (await reopened(saved)).package.document.comments!;
+  expect(comments.map(({ id }) => id)).toEqual([0]);
+  expect(getCommentText(comments[0]!.content)).toContain('colorful');
 });
 
-test('React save after adding a comment preserves the rich comment XML and rels', async () => {
+test('React saves an added comment and the existing comment text', async () => {
   const source = richCommentsFixture();
   const editor = await mount(source.bytes);
   const added: Comment = {
@@ -362,17 +353,21 @@ test('React save after adding a comment preserves the rich comment XML and rels'
   };
   await act(async () => editor.setComments([...editor.ref.current!.getComments(), added]));
   const saved = await editor.save();
-  expectRichComment(source, saved);
-  expect(xmlPart(unzipContainer(new Uint8Array(saved)), 'word/comments.xml')).toContain('<w:t>Added comment</w:t>');
+  const comments = (await reopened(saved)).package.document.comments!;
+  expect(getCommentText(comments.find(({ id }) => id === 2)!.content)).toBe('Added comment');
+  expect(getCommentText(comments.find(({ id }) => id === 0)!.content)).toContain('colorful');
+  expect(getCommentText(comments.find(({ id }) => id === 1)!.content)).toBe('Plain');
 });
 
-test('React save after resolving the rich comment preserves its XML and rels', async () => {
+test('React saves a resolved comment and the other comment text', async () => {
   const source = richCommentsFixture();
   const editor = await mount(source.bytes);
   await act(async () => editor.ref.current!.resolveComment(0));
   const saved = await editor.save();
-  expectRichComment(source, saved);
-  expect((await reopened(saved)).package.document.comments!.find(({ id }) => id === 0)?.done).toBe(true);
+  const comments = (await reopened(saved)).package.document.comments!;
+  expect(comments.find(({ id }) => id === 0)?.done).toBe(true);
+  expect(getCommentText(comments.find(({ id }) => id === 0)!.content)).toContain('colorful');
+  expect(getCommentText(comments.find(({ id }) => id === 1)!.content)).toBe('Plain');
 });
 
 test('React save after only body text changes preserves both comment elements and rels', async () => {

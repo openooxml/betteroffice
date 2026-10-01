@@ -17,7 +17,8 @@ use crate::xml::{
     parse_xml_strict,
 };
 
-use super::parts::CommentParaInfo;
+use super::context::SerializerContext;
+use super::parts::{CommentParaInfo, serialize_comments_with_info};
 use super::xml_writer::js_number;
 
 pub(super) fn splice_comments(
@@ -27,82 +28,79 @@ pub(super) fn splice_comments(
     comments: &[Comment],
     serialized: &str,
     infos: &mut Vec<CommentParaInfo>,
+    mut source_context: SerializerContext,
 ) -> Result<String, ParseError> {
     if !crate::xml::reads_as_written(source) {
         return Err(error_xml("source requires whole-part writing"));
     }
     let source = std::str::from_utf8(source).map_err(|error| error_xml(error.to_string()))?;
-    let source = expand_empty_root(source)?;
     let original = source_comments(parts, seed)?;
-    let (spans, end) = comment_spans(&source)?;
-    let (written, _) = comment_spans(serialized)?;
-    let fragments: HashMap<_, _> = written
+    let spans = comment_spans(source)?;
+    let source_ids: HashSet<_> = spans.iter().map(|(id, _)| id.as_str()).collect();
+    let model_ids: HashSet<_> = comments
         .iter()
-        .map(|(id, span)| (id.as_str(), &serialized[span.clone()]))
+        .map(|comment| js_number(comment.id))
         .collect();
-    let models: HashMap<_, _> = comments
+    let original_ids: HashSet<_> = original
         .iter()
-        .map(|comment| (js_number(comment.id), comment))
+        .map(|comment| js_number(comment.id))
         .collect();
-    let originals: HashMap<_, _> = original
-        .iter()
-        .map(|comment| (js_number(comment.id), comment))
-        .collect();
-    if models.len() != comments.len() || originals.len() != original.len() {
+    if source_ids.len() != spans.len()
+        || model_ids.len() != comments.len()
+        || original_ids.len() != original.len()
+    {
         return Err(error_xml("duplicate comment ids"));
+    }
+    if comments.len() != original.len()
+        || comments
+            .iter()
+            .zip(&original)
+            .any(|(comment, original)| js_number(comment.id) != js_number(original.id))
+    {
+        return Err(error_xml("comment ids or order changed"));
     }
     let parent_ids: HashSet<_> = comments
         .iter()
         .filter_map(|comment| comment.parent_id.map(js_number))
         .collect();
-    let info_indices: HashMap<_, _> = infos
+    let fragments: HashMap<_, _> = spans
         .iter()
-        .enumerate()
-        .map(|(index, info)| (js_number(info.comment_id), index))
+        .map(|(id, span)| (id.as_str(), &source[span.clone()]))
         .collect();
-    let mut kept = HashSet::new();
-    let mut without_ids = HashSet::new();
-    let mut output = String::new();
-    let mut cursor = 0;
-    let mut rewritten = false;
-    for (id, span) in spans {
-        output.push_str(&source[cursor..span.start]);
-        if let Some(comment) = models.get(&id) {
-            kept.insert(id.clone());
-            if let Some(original) = originals.get(&id)
-                && (original.para_id.is_some() || !parent_ids.contains(&id))
-                && can_replay(original, comment, &source[span.clone()])?
-            {
-                output.push_str(&source[span.clone()]);
-                if let Some(para_id) = &original.para_id {
-                    if let Some(&index) = info_indices.get(&id) {
-                        infos[index].last_para_id.clone_from(para_id);
-                    }
-                } else {
-                    without_ids.insert(id.clone());
-                }
-            } else {
-                output.push_str(
-                    fragments
-                        .get(id.as_str())
-                        .ok_or_else(|| error_xml("missing written comment"))?,
-                );
-                rewritten = true;
-            }
-        } else if !originals.contains_key(&id) {
-            output.push_str(&source[span.clone()]);
-        }
-        cursor = span.end;
-    }
-    output.push_str(&source[cursor..end]);
-    for (id, span) in written {
-        if !kept.contains(&id) {
-            output.push_str(&serialized[span]);
-            rewritten = true;
+    for (comment, original) in comments.iter().zip(&original) {
+        let id = js_number(comment.id);
+        let fragment = fragments
+            .get(id.as_str())
+            .ok_or_else(|| error_xml("missing source comment"))?;
+        let same_para_id = match (&original.para_id, &comment.para_id) {
+            (Some(source), Some(written)) => source.eq_ignore_ascii_case(written),
+            (None, None) => true,
+            _ => false,
+        };
+        if (original.para_id.is_none() && parent_ids.contains(&id))
+            || !same_para_id
+            || source_metadata_changed(original, comment)
+            || !can_replay(original, comment, fragment)?
+        {
+            return Err(error_xml("comment changed"));
         }
     }
-    output.push_str(&source[end..]);
-    infos.retain(|info| !without_ids.contains(&js_number(info.comment_id)));
+    let (source_xml, source_infos) = serialize_comments_with_info(&original, &mut source_context);
+    if source_xml != serialized || source_infos != *infos {
+        return Err(error_xml("comment serialization changed"));
+    }
+    let original_para_ids: HashMap<_, _> = original
+        .iter()
+        .map(|comment| (js_number(comment.id), comment.para_id.as_ref()))
+        .collect();
+    infos.retain_mut(|info| {
+        if let Some(Some(para_id)) = original_para_ids.get(&js_number(info.comment_id)) {
+            info.last_para_id.clone_from(para_id);
+            true
+        } else {
+            false
+        }
+    });
     if infos.is_empty()
         && [
             "word/commentsExtended.xml",
@@ -114,10 +112,7 @@ pub(super) fn splice_comments(
     {
         return Err(error_xml("empty comment companions"));
     }
-    if rewritten {
-        output = with_writer_namespaces(output)?;
-    }
-    Ok(output)
+    Ok(source.to_owned())
 }
 
 fn source_metadata_changed(source: &Comment, written: &Comment) -> bool {
@@ -376,9 +371,9 @@ fn source_comments(parts: &[(String, Vec<u8>)], seed: &str) -> Result<Vec<Commen
     )
 }
 
-fn comment_spans(xml: &str) -> Result<(Vec<(String, Range<usize>)>, usize), ParseError> {
+fn comment_spans(xml: &str) -> Result<Vec<(String, Range<usize>)>, ParseError> {
     if xml.is_empty() {
-        return Ok((Vec::new(), 0));
+        return Ok(Vec::new());
     }
     let limits = ParseLimits::default();
     let document = parse_xml(
@@ -437,54 +432,8 @@ fn comment_spans(xml: &str) -> Result<(Vec<(String, Range<usize>)>, usize), Pars
             }
         }
     }
-    Ok((spans, end.ok_or_else(|| error_xml("missing comments end"))?))
-}
-
-fn expand_empty_root(xml: &str) -> Result<String, ParseError> {
-    let all_tags = tags(xml).ok_or_else(|| error_xml("invalid comments root"))?;
-    let root = all_tags
-        .first()
-        .ok_or_else(|| error_xml("missing comments root"))?;
-    if !root.empty {
-        return Ok(xml.to_owned());
-    }
-    let mut output = xml.to_owned();
-    let close = xml[root.range.clone()]
-        .rfind('/')
-        .ok_or_else(|| error_xml("invalid empty comments root"))?;
-    output.replace_range(
-        root.range.start + close..root.range.end,
-        &format!("></{}>", root.name),
-    );
-    Ok(output)
-}
-
-fn with_writer_namespaces(mut xml: String) -> Result<String, ParseError> {
-    let all_tags = tags(&xml).ok_or_else(|| error_xml("invalid comments root"))?;
-    let root = all_tags
-        .first()
-        .ok_or_else(|| error_xml("missing comments root"))?;
-    let mut added = String::new();
-    for (prefix, uri) in [
-        (
-            "w",
-            "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
-        ),
-        (
-            "w14",
-            "http://schemas.microsoft.com/office/word/2010/wordml",
-        ),
-    ] {
-        let name = format!("xmlns:{prefix}");
-        match attribute(root, &name).and_then(|range| unescaped(&xml, range)) {
-            Some(bound) if bound != uri => return Err(error_xml("conflicting comments namespace")),
-            Some(_) => {}
-            None => added.push_str(&format!(" {name}=\"{uri}\"")),
-        }
-    }
-    let at = root.range.end - 1;
-    xml.insert_str(at, &added);
-    Ok(xml)
+    end.ok_or_else(|| error_xml("missing comments end"))?;
+    Ok(spans)
 }
 
 fn error_xml(message: impl Into<String>) -> ParseError {

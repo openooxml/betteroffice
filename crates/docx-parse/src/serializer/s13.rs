@@ -900,8 +900,12 @@ fn serialize_comment_parts(
     else {
         return;
     };
+    let source_context = allow_source_splice
+        .then(|| package.original_bytes(COMMENTS_PART))
+        .flatten()
+        .map(|source| (source, context.clone()));
     let (mut comments_xml, mut infos) = serialize_comments_with_info(comments, context);
-    if allow_source_splice && let Some(source) = package.original_bytes(COMMENTS_PART) {
+    if let Some((source, source_context)) = source_context {
         let original_infos = infos.clone();
         match super::comment_splice::splice_comments(
             source,
@@ -910,6 +914,7 @@ fn serialize_comment_parts(
             comments,
             &comments_xml,
             &mut infos,
+            source_context,
         ) {
             Ok(spliced) => comments_xml = spliced,
             Err(_) => infos = original_infos,
