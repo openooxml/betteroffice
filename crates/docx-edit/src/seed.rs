@@ -1517,6 +1517,7 @@ fn image_payload(image: &Value) -> JsonObject {
         })),
         "borderWidth": border_width,
         "borderColor": border_color,
+        "borderColorValue": nullish(field(outline, "color")),
         "borderStyle": border_style,
         "wrapText": wrap_text,
         "hlinkHref": nullish(field(Some(image), "hlinkHref")),

@@ -46,6 +46,7 @@ use docx_layout::types::{
     ShapeBlock, Size, SpacingExplicit, TabRun, TabStop, TableBlock, TableCell, TableRow, TextRun,
     UnderlineSpec,
 };
+use docx_parse::{drawingml::resolve_color_value_to_hex, scalars::ColorValue};
 use serde_json::{Map as JsonMap, Value};
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
@@ -1809,6 +1810,36 @@ fn image_transform_metrics(
     )
 }
 
+fn image_outline(
+    values: &std::collections::HashMap<String, Any>,
+    env: &RenderEnv,
+) -> Option<CellBorderSpec> {
+    let color = values
+        .get("borderColorValue")
+        .and_then(any_json)
+        .and_then(|value| serde_json::from_value::<ColorValue>(value).ok())
+        .and_then(|mut color| {
+            color.rgb = color.rgb.take().or_else(|| {
+                color
+                    .theme_color
+                    .as_deref()
+                    .and_then(|slot| theme_color(slot, env))
+            });
+            color.theme_color = None;
+            resolve_color_value_to_hex(Some(&color))
+        })
+        .or_else(|| map_string(values, "borderColor").map(|color| css_hex(&color)))?;
+    Some(CellBorderSpec {
+        width: Some(
+            map_number(values, "borderWidth")
+                .filter(|width| *width > 0.0)
+                .unwrap_or(1.0),
+        ),
+        color: Some(color),
+        style: Some(map_string(values, "borderStyle").unwrap_or_else(|| "solid".to_owned())),
+    })
+}
+
 fn lower_image_values(
     values: &std::collections::HashMap<String, Any>,
     formatting: &RunFormatting,
@@ -1880,7 +1911,7 @@ fn lower_image_values(
         layout_in_cell: None,
         effect_extent: None,
         effects: None,
-        outline: None,
+        outline: image_outline(values, env),
         decorative: None,
         hyperlink: None,
         inline_shape: None,
