@@ -78,6 +78,7 @@ mod ctx;
 mod deterministic;
 mod fingerprint;
 mod format;
+mod header_footer;
 mod heading;
 mod identity;
 mod inline_content;

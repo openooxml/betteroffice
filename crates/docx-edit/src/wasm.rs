@@ -1366,8 +1366,10 @@ impl EditSession {
             self.engine.doc().install_media(media);
             fonts
         } else {
+            let aliases = envelope.document.package.header_footer_aliases.clone();
             let (mut metadata, index, fonts) =
                 crate::seed::replica_source(envelope, parts, Arc::clone(&source), digest.clone())?;
+            self.engine.doc().seed_header_footer_aliases(&aliases);
             metadata.watch_comments(self.engine.doc());
             self.engine.doc().install_source(metadata, js_entropy());
             self.engine
@@ -2253,6 +2255,25 @@ impl EditSession {
     /// Starts a new opening of the document; see [`EditingDoc::begin_opening`].
     pub fn begin_opening(&self, generation: Option<String>) {
         self.engine.doc().begin_opening(generation.as_deref());
+    }
+
+    /// Declares header/footer alias groups before host-side seeding.
+    pub fn set_header_footer_aliases(&self, json: &str) -> Result<(), JsValue> {
+        self.engine
+            .doc()
+            .set_header_footer_aliases(json)
+            .map_err(js_err)
+    }
+
+    /// Returns active alias-to-canonical relationship ids as a JSON object.
+    pub fn header_footer_aliases_json(&self) -> String {
+        let aliases: BTreeMap<_, _> = self
+            .engine
+            .doc()
+            .header_footer_aliases()
+            .into_iter()
+            .collect();
+        serde_json::to_string(&aliases).expect("header/footer aliases serialize")
     }
 
     /// Unions seeded opaque sequence names into document state.
@@ -4875,6 +4896,63 @@ mod tests {
     use super::*;
     use crate::{EditCtx, RawOp};
 
+    #[test]
+    fn header_footer_alias_exports_seed_and_follow_legacy_updates() {
+        let session = EditSession::new(41.0).unwrap();
+        let before = session.engine.doc().encode_state_as_update_v1();
+        session.set_header_footer_aliases("[]").unwrap();
+        assert_eq!(session.engine.doc().encode_state_as_update_v1(), before);
+        assert_eq!(session.header_footer_aliases_json(), "{}");
+        let groups = json!([{
+            "isHeader": true, "partPath": "word/header1.xml", "relationshipIds": ["rId7", "rId9"]
+        }]);
+        session
+            .set_header_footer_aliases(&groups.to_string())
+            .unwrap();
+        session
+            .engine
+            .doc()
+            .create_story("hf:rId7", "Header", "Normal", "left")
+            .unwrap();
+        assert_eq!(session.header_footer_aliases_json(), r#"{"rId9":"rId7"}"#);
+        let peer = EditingDoc::new(42);
+        peer.apply_update_v1(&session.engine.doc().encode_state_as_update_v1())
+            .unwrap();
+        peer.create_story("hf:rId9:t0:r0c0", "Legacy", "Normal", "left")
+            .unwrap();
+        session
+            .engine
+            .doc()
+            .apply_update_v1(&peer.encode_state_as_update_v1())
+            .unwrap();
+        assert_eq!(session.header_footer_aliases_json(), "{}");
+    }
+
+    #[test]
+    fn docx_open_preserves_aliases_when_seeding_or_retaining_source() {
+        let bytes = crate::seed::header_footer_alias_fixture::package(
+            &[("rId7", "header1.xml"), ("rId9", "./header1.xml")],
+            &[],
+        );
+        for seed in [true, false] {
+            let session = EditSession::new(41.0).unwrap();
+            let result: Value = serde_json::from_str(
+                &session
+                    .open_docx(&bytes, seed, Some("aliases".to_owned()), None)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(session.header_footer_aliases_json(), r#"{"rId9":"rId7"}"#);
+            assert_eq!(
+                result["envelope"]["document"]["package"]["headerFooterAliases"][0]["relationshipIds"],
+                json!(["rId7", "rId9"])
+            );
+            if seed {
+                assert!(session.engine.doc().paragraphs("hf:rId7").is_ok());
+                assert!(session.engine.doc().paragraphs("hf:rId9").is_err());
+            }
+        }
+    }
     #[test]
     fn seeded_docx_retains_original_images_for_materialization_and_save() {
         let image_bytes = vec![1, 2, 3, 4];
