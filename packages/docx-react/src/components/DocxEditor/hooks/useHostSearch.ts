@@ -299,10 +299,10 @@ export function useHostSearch({
     const { generation, version, current: index, session } = run;
     run.anchor = null;
     run.anchorIndex = -1;
-    const main = () => session.version() === version ? anchorOf(session, match) : null;
+    const main = () => anchorOf(session, match);
     const authority = workerProposalAuthority(session);
     const pending = (authority
-      ? authority.stickyAnchor({ story: match.story, paraId: match.paraId, offset: match.start }, version, main)
+      ? authority.stickyAnchor({ story: match.story, paraId: match.paraId, offset: match.start }, main)
       : Promise.resolve(main())
     ).then((anchor) => {
       const live = runRef.current;
@@ -452,9 +452,11 @@ export function useHostSearch({
         next.anchorIndex = -1;
         next.anchorPending = null;
       }
+      if (refreshRef.current?.generation === next.generation) refreshRef.current.revealing = true;
       publish(next);
       if (runRef.current === next && next.generation === generationRef.current) {
-        if (current !== run.current) requestAnchor(next);
+        if (next.workerBacked && (current !== run.current ||
+          (next.anchorIndex !== current && !next.anchorPending))) requestAnchor(next);
         reveal(run.matches[current].displayFrom, run.version);
       }
       return stateOf(runRef.current);
@@ -523,9 +525,10 @@ export function useHostSearch({
       }
       requestAnchor(run);
       if (current >= 0) reveal(matches[current].displayFrom, run.version);
+      if (workerBacked && run.version !== session.version()) refreshWorker(run, session, false);
       return stateOf(run)!;
     },
-    [canvasHostRef, pagedEditorRef, publish, requestAnchor, reveal, stopRevealing]
+    [canvasHostRef, pagedEditorRef, publish, refreshWorker, requestAnchor, reveal, stopRevealing]
   );
 
   // A new display list follows every document change, and every page the layout adds.

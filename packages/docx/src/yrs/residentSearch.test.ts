@@ -53,6 +53,25 @@ test('resident search carries exact locations, the first at or after, and the la
   expect(readResidentSearch(source, 'cat', false, carry).carried).toBe(0);
 });
 
+test('resident search carries an old match offset encoded in the current paragraph to the following match', () => {
+  const source = reader();
+  const carry = { story: 'body', encoded: Uint8Array.of(1) };
+  source.resolveStickyPosition = () => ({ story: 'body', paraId: 'p1', offset: 4 });
+  expect(readResidentSearch(source, 'cat', false, carry).carried).toBe(1);
+  source.storySegments()[0] = { kind: 'text', text: 'x cat cat', attributes: {} };
+  source.paragraphSpans = () => [{ paraId: 'p1', length: 9 }];
+  source.searchText.mockReturnValue([
+    { story: 'body', paraId: 'p1', start: 2, end: 5, text: 'cat' },
+    { story: 'body', paraId: 'p1', start: 6, end: 9, text: 'cat' },
+  ]);
+  const result = readResidentSearch(source, 'cat', false, carry);
+  expect(result.carried).toBe(1);
+  expect(result.matches[result.carried]).toEqual({
+    story: 'body', paraId: 'p1', start: 6, displayFrom: 7, displayTo: 10,
+  });
+  expect(source.encodeStickyPosition).not.toHaveBeenCalled();
+});
+
 test('resident search handles empty results without encoding anchors', () => {
   const source = reader();
   expect(readResidentSearch(source, '', false)).toEqual({ matches: [], carried: -1 });

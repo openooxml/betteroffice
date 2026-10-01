@@ -476,11 +476,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         break;
       case 'stickyAnchor':
         value = null;
-        if (engine.version() === request.read.version) {
-          try {
-            value = session.encodeStickyPosition(request.read.loc);
-          } catch {}
-        }
+        try {
+          value = session.encodeStickyPosition(request.read.loc);
+        } catch {}
         break;
     }
     reply({ id: request.id, ok: true, read: { version: engine.version(), value } });

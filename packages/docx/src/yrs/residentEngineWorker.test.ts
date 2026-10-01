@@ -2259,30 +2259,25 @@ describe('worker proposals during sliced completion', () => {
       expect(order).toEqual(['search', 'complete']);
       expect(calls.filter((call) => call === 'begin')).toHaveLength(1);
       await expectFullLayout(completed);
-      const searchVersion = reply.read.version;
-      const anchor = async (index: number, version = searchVersion) => {
+      const anchor = async (index: number) => {
         const match = value.matches[index];
         const loc = { story: match.story, paraId: match.paraId, offset: match.start };
-        const answer = await w.send({ type: 'documentRead', read: { kind: 'stickyAnchor', loc, version } });
+        const answer = await w.send({ type: 'documentRead', read: { kind: 'stickyAnchor', loc } });
         expect(answer.ok).toBe(true);
         if (!answer.ok || !answer.read) throw new Error('expected sticky anchor read');
         const sticky = answer.read.value as ReturnType<typeof engine.encodeStickyPosition> | null;
-        if (version === engine.proposalEngine.version()) {
-          expect(sticky).not.toBeNull();
-          expect(engine.resolveStickyPosition(sticky!)).toEqual(loc);
-          expect(main.resolveStickyPosition(sticky!)).toEqual(loc);
-        } else {
-          expect(sticky).toBeNull();
-        }
+        expect(answer.read.version).toBe(engine.proposalEngine.version());
+        expect(sticky).not.toBeNull();
+        expect(sticky).toEqual(engine.encodeStickyPosition(loc));
+        expect(engine.resolveStickyPosition(sticky!)).toEqual(loc);
+        expect(main.resolveStickyPosition(sticky!)).toEqual(loc);
         return sticky;
       };
       const firstAnchor = await anchor(0);
       const cellAnchor = await anchor(2);
       const lastAnchor = await anchor(value.matches.length - 1);
-      await anchor(2, 'stale-version');
       const invalid = await w.send({ type: 'documentRead', read: {
         kind: 'stickyAnchor', loc: { story: 'missing', paraId: 'missing', offset: 0 },
-        version: engine.proposalEngine.version(),
       } });
       expect(invalid).toMatchObject({ ok: true, read: { value: null } });
       const search = async (caseSensitive: boolean, carry = cellAnchor) => {
@@ -2305,7 +2300,9 @@ describe('worker proposals during sliced completion', () => {
           text: 'Changed 1',
         }],
       }).ok).toBe(true);
+      main.loadState(engine.encodeState());
       await anchor(0);
+      await anchor(2);
       const after = await search(false, firstAnchor);
       expect(after.matches).toHaveLength(42);
       expect(after.carried).toBe(0);

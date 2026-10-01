@@ -67,7 +67,6 @@ export interface WorkerProposalAuthority {
   ): Promise<SearchRead>;
   stickyAnchor(
     loc: YrsLoc,
-    version: string,
     main: () => YrsStickyPosition | null
   ): Promise<YrsStickyPosition | null>;
   resolveParagraphAnchors(
@@ -284,8 +283,8 @@ export function registerWorkerProposalAuthority(
       assertCurrent();
       return read;
     }, () => ({ version: session.version(), value: main() })),
-    stickyAnchor: (loc, version, main) => route(async () => {
-      const read = await worker.documentRead({ kind: 'stickyAnchor', loc, version });
+    stickyAnchor: (loc, main) => route(async () => {
+      const read = await worker.documentRead({ kind: 'stickyAnchor', loc });
       assertCurrent();
       return read.value;
     }, main),
