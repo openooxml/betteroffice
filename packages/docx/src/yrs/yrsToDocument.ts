@@ -39,6 +39,7 @@ import type {
   SimpleField,
   ComplexField,
   FieldType,
+  FieldInlineContent,
   MathEquation,
   Image,
   Shape,
@@ -931,6 +932,18 @@ function inlineSdtContent(content: ParagraphContent[]): InlineSdt['content'] {
   );
 }
 
+function fieldInlineContent(content: ParagraphContent[]): FieldInlineContent[] {
+  return content.filter(
+    (child): child is FieldInlineContent =>
+      child.type === 'run' ||
+      child.type === 'hyperlink' ||
+      child.type === 'simpleField' ||
+      child.type === 'complexField' ||
+      child.type === 'inlineSdt' ||
+      child.type === 'mathEquation'
+  );
+}
+
 function contentControlValue(value: unknown): ContentControlValue | null {
   const authored = asObject(value);
   if (authored?.kind === 'checkbox' && typeof authored.checked === 'boolean') {
@@ -1104,14 +1117,14 @@ function restoreProjectedFieldResults(items: InlineItem[]): InlineItem[] {
     if (stored.type !== 'complexField') continue;
     const projection = asObject(owner.payload.resultProjection);
     const originals = Array.isArray(projection?.children) ? projection.children : [];
-    const replacements = new Map<number, ReturnType<typeof inlineSdtContent>>();
+    const replacements = new Map<number, FieldInlineContent[]>();
     for (const raw of originals) {
       const child = asObject(raw);
       const index = asFiniteNumber(child?.index);
       if (index === undefined || !Array.isArray(child?.items)) continue;
       const current = groups.get(owner)?.get(index) ?? [];
       if (projectionSignature(current) === projectionSignature(child.items as InlineItem[])) continue;
-      const rebuilt = inlineSdtContent(buildParagraphContent(current));
+      const rebuilt = fieldInlineContent(buildParagraphContent(current));
       const original = index < 0 ? stored.structuredCode?.inline?.[-index - 1] : stored.structuredResult?.inline?.[index];
       if (original?.type === 'hyperlink' && rebuilt.length === 1 && rebuilt[0]?.type === 'hyperlink') {
         rebuilt[0] = { ...original, ...rebuilt[0], structuredChildren: rebuilt[0].structuredChildren };

@@ -203,7 +203,7 @@ function collectNewImages(blocks: BlockContent[]): Image[] {
               if (node.type === 'run') visitRun(node);
             }, false, true);
           }
-        } else if (content.type !== 'run') {
+        } else {
           visitTrackedControlContent(content, (node) => {
             if (node.type === 'run') visitRun(node);
           });
