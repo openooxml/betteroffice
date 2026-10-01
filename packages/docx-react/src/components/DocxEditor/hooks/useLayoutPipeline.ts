@@ -222,8 +222,13 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   // Bumped by every pass, so a worker pass answering late never overwrites a
   // newer layout.
   const passRef = useRef(0);
+  const interimSubscriptionRef = useRef<(() => void) | null>(null);
   const sessionRef = useRef(session);
   sessionRef.current = session;
+  useEffect(() => () => {
+    interimSubscriptionRef.current?.();
+    interimSubscriptionRef.current = null;
+  }, [session]);
   // The document version the first pass of this session laid out.
   const openedVersionRef = useRef<{ session: YrsSession; version: string | null } | null>(null);
   // The last layout this pipeline applied: its session, document version,
@@ -396,6 +401,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       queuedBehindWorkerRef.current = false;
       pendingInWorkerRef.current = null;
       const pass = ++passRef.current;
+      interimSubscriptionRef.current?.();
+      interimSubscriptionRef.current = null;
       const layoutUpdateOrigin = pendingLayoutOriginRef.current ?? 'local';
       pendingLayoutOriginRef.current = null;
       if (layoutUpdateOrigin === 'local') scrollRestoreController.cancel();
@@ -669,9 +676,31 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
               }
               if (stale || queued) markSupersededLayout(computation.layout);
               applyComputation(computation);
+              const unsubscribe = computation.interims?.((interim) => {
+                if (pass !== passRef.current || sessionRef.current !== session) return;
+                if (
+                  readSessionVersion(session) !==
+                  (workerOpenEnabledRef.current
+                    ? workerOpenSourceVersion(session, sourceVersion)
+                    : sourceVersion)
+                ) return;
+                if (queuedBehindWorkerRef.current) markSupersededLayout(interim.layout);
+                applyComputation(interim, 'remote');
+              });
+              let subscribed = true;
+              const stopInterims = () => {
+                if (!subscribed) return;
+                subscribed = false;
+                unsubscribe?.();
+                if (interimSubscriptionRef.current === stopInterims) {
+                  interimSubscriptionRef.current = null;
+                }
+              };
+              if (unsubscribe) interimSubscriptionRef.current = stopInterims;
               // The first pages paint now; the full layout replaces them.
               void computation.complete?.then(
                 (complete) => {
+                  stopInterims();
                   if (pass !== passRef.current || sessionRef.current !== session) return;
                   if (
                     complete &&
@@ -695,7 +724,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                     layOutHere();
                   }
                 },
-                () => {}
+                stopInterims
               );
             },
             (error: unknown) => {

@@ -8,6 +8,7 @@ import type {
 } from '@betteroffice/docx/layout/render';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import { usePagedScrollApi } from './usePagedScrollApi';
+import { pendingWorkerNavigationPositions } from '../internals/workerProposalAuthority';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -61,6 +62,52 @@ test('a page past a partial layout waits for the full one', () => {
   hook.rerender({ layout: layout(29), queries: queries(29) });
   expect(scrolled).toEqual([20]);
 });
+
+test('a page jump resolves as soon as an interim layout covers it', () => {
+  const { hook, scrolled, scrollTo } = scrollApi();
+  scrollTo(20);
+  hook.rerender({ layout: layout(12, true), queries: queries(12) });
+  expect(scrolled).toEqual([]);
+  hook.rerender({ layout: layout(25, true), queries: queries(25) });
+  expect(scrolled).toEqual([20]);
+  hook.rerender({ layout: layout(29), queries: queries(29) });
+  expect(scrolled).toEqual([20]);
+});
+
+test.each(['covered', 'navigation', 'session', 'default', 'preview'] as const)(
+  'a pending progressive position handles %s', (outcome: 'covered' | 'navigation' | 'session' | 'default' | 'preview') => {
+    let available = false;
+    let epoch = 0;
+    const scrolled: number[] = [];
+    const session = { version: () => '1', isDisplayOnly: () => outcome === 'preview' } as YrsSession;
+    const queries = {
+      anchorRect: () => available ? ({ pageIndex: 0 } as DisplayListRect) : null,
+      pageCount: () => available ? 2 : 1,
+    } as unknown as DisplayListQueries;
+    const hook = renderHook(({ session, layout }: { session: YrsSession; layout: Layout }) =>
+      usePagedScrollApi({
+        pagesContainerRef: { current: null }, yrsInputRef: { current: null },
+        yrsSession: session, yrsLocToDisplayPosition: () => null, getScrollContainer: () => null,
+        displayListQueries: queries, layout, experimentalWorkerOpen: outcome !== 'default',
+        onNavigationIntent: () => { scrolled.push(500); epoch += 1; },
+        navigationEpoch: () => epoch,
+      }), { initialProps: { session, layout: layout(1, true) } }
+    );
+    act(() => hook.result.current.scrollToPositionImpl(500));
+    expect(scrolled).toEqual([500]);
+    expect(pendingWorkerNavigationPositions(session)).toEqual(
+      outcome === 'default' || outcome === 'preview' ? [] : [500]
+    );
+    if (outcome === 'navigation') epoch += 1;
+    available = true;
+    hook.rerender({
+      session: outcome === 'session' ? { ...session } as YrsSession : session,
+      layout: layout(2, true),
+    });
+    expect(scrolled).toEqual(outcome === 'covered' ? [500, 500] : [500]);
+    expect(pendingWorkerNavigationPositions(session)).toEqual([]);
+  }
+);
 
 test('a page past the full layout is dropped', () => {
   const { hook, scrolled, scrollTo } = scrollApi();

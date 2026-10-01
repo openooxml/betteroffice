@@ -2,9 +2,10 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { useState } from 'react';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { LayoutSelectionGate, type ResidentMeasurementConfig } from '@betteroffice/docx/layout';
-import { decodeFrameDelta, loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
+import { decodeFrameDelta, loadRustDisplayListQueryEngine, type DisplayList } from '@betteroffice/docx/layout/render';
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
   preloadDocxEngine,
@@ -22,7 +23,7 @@ import type {
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { markSupersededLayout } from '../internals/layoutProvenance';
-import { registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
+import { trackWorkerNavigationPosition, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import { useRustDisplayList, type ResidentFrameApplyResult } from './useDisplayList';
 import { useLayoutPipeline, type UseLayoutPipelineOptions } from './useLayoutPipeline';
 
@@ -1654,6 +1655,84 @@ test('a provisional layout paints first and settles only once the full layout fo
     unmount();
   } finally {
     native.free();
+  }
+});
+
+test.each([false, true])('the pipeline adopts progressive interims while layout-complete waits with a navigation target=%s', async (waitingTarget: boolean) => {
+  const source = setupLayoutPipeline();
+  const releaseTarget = waitingTarget ? trackWorkerNavigationPosition(source.engine, 42) : () => {};
+  const syncCoordinator = new LayoutSelectionGate();
+  const measurement: ResidentMeasurementConfig = {
+    fontChains: {}, defaults: { fontSize: 11, fontFamily: 'Calibri' },
+    compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true,
+  };
+  const hook = renderHook(() => {
+    const [layout, setLayout] = useState<Layout | null>(null);
+    const display = useRustDisplayList(
+      layout, undefined, undefined, undefined, source.engine,
+      undefined, undefined, undefined, true
+    );
+    const pipeline = useLayoutPipeline({
+      document: null, session: source.engine, experimentalWorkerOpen: true,
+      renderEnv: {} as YrsRenderEnv, pageGap: 24, zoom: 1,
+      residentMeasurementConfig: () => measurement, deferLayoutPass: () => false,
+      pagesContainerRef: { current: null }, viewportLayoutRef: { current: null },
+      syncCoordinator, getScrollContainer: () => null,
+      layoutInWorker: display.layoutInWorker, onLayoutComputed: setLayout,
+    });
+    return { display, pipeline };
+  });
+  try {
+    act(() => hook.result.current.pipeline.runLayoutPipeline());
+    const worker = FakeWorker.last!;
+    await waitFor(() => expect(worker.posted.at(-1)?.type).toBe('bootstrap'));
+    const full = JSON.parse(source.layoutJson);
+    const prefixJson = JSON.stringify({ ...full, layout: { ...full.layout, partial: true } });
+    await act(async () => worker.reply({
+      id: worker.posted.at(-1)!.id, ok: true, frame: source.frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null }, selection: null,
+      layoutRevision: 1, layoutJson: prefixJson, layoutProvisional: true,
+    }));
+    await waitFor(() => expect(hook.result.current.display.frame?.frameEpoch).toBe(1));
+    await act(async () => {
+      const attaching = hook.result.current.display.attachOffscreenCanvases(
+        [], [], 1, 1, { color: '#000', width: 2 }
+      );
+      worker.reply({ id: worker.posted.at(-1)!.id, ok: true });
+      await attaching;
+    });
+    await waitFor(() => expect(worker.posted.at(-1)).toMatchObject({
+      type: 'completeLayout', progressive: waitingTarget ? { targets: [42] } : {},
+    }));
+    const completionId = worker.posted.at(-1)!.id;
+    let completed = false;
+    const whenLayoutComplete = hook.result.current.display.settledDisplayList(null, null)
+      .then((list: DisplayList) => { completed = true; return list.pages.length; });
+    const interimFrame = source.native.build_display_list_frame('{}', 1);
+    const interimEpoch = decodeFrameDelta(interimFrame).frameEpoch;
+    await act(async () => worker.reply({
+      id: completionId, ok: true, interim: true, frame: interimFrame.slice().buffer,
+      caret: { frameEpoch: interimEpoch, caretRect: null }, selection: null,
+      layoutRevision: 1, layoutJson: prefixJson, layoutProvisional: true,
+    }));
+    await waitFor(() => expect(hook.result.current.display.frame?.frameEpoch).toBe(interimEpoch));
+    expect(hook.result.current.pipeline.layout?.partial).toBe(true);
+    expect(completed).toBe(false);
+    const fullFrame = source.native.build_display_list_frame('{}', interimEpoch);
+    const fullEpoch = decodeFrameDelta(fullFrame).frameEpoch;
+    await act(async () => worker.reply({
+      id: completionId, ok: true, frame: fullFrame.slice().buffer,
+      caret: { frameEpoch: fullEpoch, caretRect: null }, selection: null,
+      layoutRevision: 1, layoutJson: source.layoutJson,
+    }));
+    await waitFor(() => expect(hook.result.current.display.frame?.frameEpoch).toBe(fullEpoch));
+    expect(await whenLayoutComplete).toBeGreaterThan(0);
+    expect(completed).toBe(true);
+    expect(hook.result.current.pipeline.layout?.partial).not.toBe(true);
+  } finally {
+    releaseTarget();
+    hook.unmount();
+    source.native.free();
   }
 });
 

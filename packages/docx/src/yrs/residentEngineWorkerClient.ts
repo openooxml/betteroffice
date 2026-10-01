@@ -101,6 +101,7 @@ const FRAME_REQUESTS = new Set<AwaitedRequest['type']>([
 
 type PendingRequest = {
   type: AwaitedRequest['type'];
+  onInterim?: (frame: ResidentEngineWorkerFrame) => void;
   resolve(response: ResidentEngineWorkerResponse & { ok: true }): void;
   reject(error: Error): void;
 };
@@ -178,6 +179,10 @@ export class ResidentEngineWorkerClient {
       if (this.pending.size > 0) this.armWatchdog();
       const pending = this.pending.get(response.id);
       if (!pending) return;
+      if (response.ok && response.interim) {
+        pending.onInterim?.(frameResult(response));
+        return;
+      }
       this.pending.delete(response.id);
       if (this.pending.size === 0) this.disarmWatchdog();
       if (response.ok) pending.resolve(response);
@@ -494,14 +499,19 @@ export class ResidentEngineWorkerClient {
   async completeLayout(
     expectedFrameEpoch: number,
     paintCaret = false,
-    sliceBlocks?: number
+    sliceBlocks?: number,
+    options?: {
+      progressive?: { targets?: number[]; minIntervalMs?: number };
+      onInterim?: (frame: ResidentEngineWorkerFrame) => void;
+    }
   ): Promise<ResidentEngineWorkerFrame | null> {
     const response = await this.request({
       type: 'completeLayout',
       expectedFrameEpoch,
       paintCaret,
       ...(sliceBlocks ? { sliceBlocks } : {}),
-    });
+      ...(options?.progressive ? { progressive: options.progressive } : {}),
+    }, [], options?.onInterim);
     return response.frame ? frameResult(response) : null;
   }
 
@@ -655,13 +665,14 @@ export class ResidentEngineWorkerClient {
 
   private request(
     request: AwaitedRequest,
-    transfer: Transferable[] = []
+    transfer: Transferable[] = [],
+    onInterim?: (frame: ResidentEngineWorkerFrame) => void
   ): Promise<ResidentEngineWorkerResponse & { ok: true }> {
     if (this.terminalError) return Promise.reject(this.terminalError);
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       if (this.pending.size === 0) this.armWatchdog();
-      this.pending.set(id, { type: request.type, resolve, reject });
+      this.pending.set(id, { type: request.type, resolve, reject, onInterim });
       this.worker.postMessage({ ...request, id } as ResidentEngineWorkerRequest, transfer);
     });
   }

@@ -193,6 +193,59 @@ test('a superseded null completion requests the worker while it holds proposals'
   expect(h.errors).toEqual([]);
 });
 
+test.each(['final', 'new pass', 'session', 'unmount'] as const)(
+  'a worker interim subscription stops on %s', async (end: 'final' | 'new pass' | 'session' | 'unmount') => {
+    const h = await opened({ experimentalWorkerOpen: true });
+    act(() => h.hook.result.current.scheduleLayout('remote'));
+    await h.frame();
+    let finish!: (computation: LayoutComputation | null) => void;
+    let publish!: (computation: LayoutComputation) => void;
+    let unsubscribed = 0;
+    const complete = new Promise<LayoutComputation | null>((resolve) => { finish = resolve; });
+    await h.answer(1, {
+      layout: { pages: [], partial: true } as unknown as Layout, notesConverged: true, complete,
+      interims: (listener) => {
+        publish = listener;
+        return () => { unsubscribed += 1; };
+      },
+    });
+    const interim = { pages: [], partial: true } as unknown as Layout;
+    await act(async () => publish({ layout: interim, notesConverged: true }));
+    expect(h.hook.result.current.layout).toBe(interim);
+    if (end === 'final') {
+      await act(async () => finish({ layout: { pages: [] } as unknown as Layout, notesConverged: true }));
+    } else if (end === 'new pass') {
+      act(() => h.hook.result.current.scheduleLayout('remote'));
+      await h.frame();
+    } else if (end === 'session') {
+      await act(async () => h.hook.rerender({ session: fakeDocument().session }));
+    } else {
+      h.hook.unmount();
+    }
+    expect(unsubscribed).toBe(1);
+    if (end !== 'final') await act(async () => finish(null));
+    expect(unsubscribed).toBe(1);
+  }
+);
+
+test('an interim from a changed session version never replaces the shown layout', async () => {
+  const h = await opened({ experimentalWorkerOpen: true });
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  let publish!: (computation: LayoutComputation) => void;
+  await h.answer(1, {
+    layout: { pages: [], partial: true } as unknown as Layout, notesConverged: true,
+    complete: new Promise(() => {}),
+    interims: (listener) => { publish = listener; return () => {}; },
+  });
+  const shown = h.hook.result.current.layout;
+  h.doc.version = 2;
+  await act(async () => publish({
+    layout: { pages: [], partial: true } as unknown as Layout, notesConverged: true,
+  }));
+  expect(h.hook.result.current.layout).toBe(shown);
+});
+
 test.each([false, true])('a null completion without held proposals keeps the host path with worker-open=%s', async (experimentalWorkerOpen) => {
   const h = await opened({ experimentalWorkerOpen, pendingReplica: true });
   act(() => h.hook.result.current.scheduleLayout('remote'));

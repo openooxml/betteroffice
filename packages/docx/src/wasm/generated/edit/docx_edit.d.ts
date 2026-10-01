@@ -761,6 +761,7 @@ export class EditSession {
      * anything was reapplied.
      */
     redo(): boolean;
+    region_layout_snapshot_json(): string | undefined;
     /**
      * Registers raw sfnt bytes in this session's resident measurement store
      * and returns the font id that measurement and display inputs reference.
@@ -1599,6 +1600,7 @@ export interface InitOutput {
     readonly editsession_read_paragraphs_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_record_saved_paragraph_ids: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_redo: (a: number) => number;
+    readonly editsession_region_layout_snapshot_json: (a: number) => [number, number, number, number];
     readonly editsession_register_measure_font: (a: number, b: number, c: number) => [number, number, number];
     readonly editsession_register_substitute_measure_font: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly editsession_reject_change: (a: number, b: number, c: number) => [number, number, number, number];

@@ -932,6 +932,34 @@ describe('plugin read and navigation clients', () => {
     expect(clock.timers.size).toBe(0);
   });
 
+  test('a provisional worker navigation stays pending beyond the safety cap and resolves on an interim', async () => {
+    const env = await setup();
+    const clock = navigationClock();
+    const worker = routeWorker(env);
+    env.state.partial = true;
+    env.state.anchorReady = false;
+    Object.assign(env.pagedEditorRef.current!, {
+      getLayout: () => ({ partial: env.state.partial, pages: [] }),
+    });
+    let settled = false;
+    const scroll = env.clients.navigation.scrollToParagraph(
+      { story: 'body', paraId: '00000002' }, { expectVersion: env.session.version() }
+    ).then((result) => { settled = true; return result; });
+    await env.waiting;
+    expect(workerProposals.pendingWorkerNavigationPositions(env.session)).toEqual([42]);
+    clock.advance(60_000);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    env.state.anchorReady = true;
+    env.publishLayout();
+    expect(await scroll).toEqual({ ok: true });
+    expect(env.state.partial).toBe(true);
+    expect(workerProposals.pendingWorkerNavigationPositions(env.session)).toEqual([]);
+    expect(clock.timers.size).toBe(0);
+    expect(worker.replica).not.toHaveBeenCalled();
+    expect(env.events.filter((event) => event.startsWith('scroll'))).toHaveLength(1);
+  });
+
   test('a complete layout with no target position returns unsupported', async () => {
     const env = await setup();
     const clock = navigationClock();

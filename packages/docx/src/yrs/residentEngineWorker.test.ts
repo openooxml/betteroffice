@@ -90,11 +90,14 @@ function worker() {
   let frameEpoch = 0;
   const replies = new Map<number, (reply: ResidentEngineWorkerResponse) => void>();
   const answered: number[] = [];
+  const responses: ResidentEngineWorkerResponse[] = [];
   const surfaces = new Map<string, Surface>();
   const scope = {
     onmessage: (_event: { data: ResidentEngineWorkerRequest }) => {},
     postMessage(reply: ResidentEngineWorkerResponse) {
       answered.push(reply.id);
+      responses.push(reply);
+      if (reply.ok && reply.interim) return;
       replies.get(reply.id)?.(reply);
       replies.delete(reply.id);
     },
@@ -257,6 +260,7 @@ function worker() {
     harness,
     surfaces,
     answered,
+    responses,
     send,
     resetCalls() {
       harness.rasterized = [];
@@ -1243,7 +1247,7 @@ describe('sliced layout completion', () => {
     let begun = false;
     let changed = false;
     const onResume: Array<() => void> = [];
-    Object.assign(w.harness.session, {
+    const resumable = Object.assign(w.harness.session, {
       layoutDocumentWithRegionsPrefixRetainedJson: () => provisional,
       layoutDocumentWithRegionsRetainedJson: () => {
         calls.push('whole');
@@ -1264,7 +1268,9 @@ describe('sliced layout completion', () => {
           throw new Error('the document or its fonts changed since the region layout began');
         }
         measured = Math.min(bodyBlocks, measured + blocks);
-        if (measured < bodyBlocks) return { measuredBlocks: measured, bodyBlocks };
+        if (measured < bodyBlocks) return {
+          measuredBlocks: measured, bodyBlocks, coveredPosition: measured,
+        };
         begun = false;
         return { measuredBlocks: measured, bodyBlocks, layoutJson: full };
       },
@@ -1273,6 +1279,7 @@ describe('sliced layout completion', () => {
         changed = true;
         return null;
       },
+      regionLayoutSnapshotJson: () => provisional,
       buildDisplayPagesFrame: () => {
         calls.push('pages');
         return new Uint8Array([0]);
@@ -1313,8 +1320,79 @@ describe('sliced layout completion', () => {
         layoutExtras: '{}',
         provisionalPages: 3,
       });
-    return { w, calls, onResume, bootstrap };
+    return { w, calls, onResume, bootstrap, invalidate: resumable.applyUpdate };
   }
+
+  test('disables snapshots after an ineligible progressive snapshot', async () => {
+    const { w, bootstrap } = steppedWorker(100);
+    await bootstrap();
+    let snapshots = 0;
+    Object.assign(w.harness.session, {
+      regionLayoutSnapshotJson: () => { snapshots += 1; return undefined; },
+    });
+    const completed = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 1,
+      progressive: { targets: [1, 9] },
+    });
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(snapshots).toBe(1);
+    expect(w.responses.filter((reply) => reply.ok && reply.interim)).toEqual([]);
+  });
+
+  test('a changed progressive snapshot leaves the next resume to restart the pass', async () => {
+    const { w, calls, bootstrap, invalidate } = steppedWorker(100);
+    await bootstrap();
+    let snapshots = 0;
+    Object.assign(w.harness.session, { regionLayoutSnapshotJson: () => {
+      if (snapshots++ === 0) {
+        invalidate();
+        throw new Error('the document or its fonts changed since the region layout began');
+      }
+      return provisional;
+    } });
+    const completed = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 1,
+      progressive: { targets: [1] },
+    });
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(calls.filter((call) => call === 'begin')).toHaveLength(2);
+    expect(w.responses.some((reply) => reply.ok && reply.interim)).toBe(true);
+  });
+
+  test('a progressive snapshot failure answers the completion as a failure', async () => {
+    const { w, bootstrap } = steppedWorker(100);
+    await bootstrap();
+    Object.assign(w.harness.session, {
+      regionLayoutSnapshotJson: () => { throw new Error('snapshot failed'); },
+    });
+    const completed = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 1,
+      progressive: { targets: [1] },
+    });
+    expect(completed).toMatchObject({ ok: false, error: 'snapshot failed' });
+    expect(w.responses.filter((reply) => reply.ok && reply.interim)).toEqual([]);
+  });
+
+  test('a superseded progressive completion emits no further frames', async () => {
+    const { w, onResume, bootstrap } = steppedWorker(100);
+    await bootstrap();
+    let replacement!: Promise<ResidentEngineWorkerResponse>;
+    onResume.push(() => {
+      replacement = w.send({
+        type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 1,
+      });
+    });
+    const superseded = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 1,
+      progressive: { targets: [1, 9] },
+    });
+    expect(superseded).toMatchObject({ ok: true });
+    expect(superseded.ok && superseded.frame).toBeUndefined();
+    const replacedAt = w.responses.indexOf(superseded);
+    const completed = await replacement;
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(w.responses.slice(replacedAt + 1).some((reply) => reply.id === superseded.id)).toBe(false);
+  });
 
   test('measures the rest in steps, running requests that arrive meanwhile between them', async () => {
     const { w, calls, onResume, bootstrap } = steppedWorker();
@@ -1682,6 +1760,82 @@ describe('worker proposals during sliced completion', () => {
     };
     return { w, engine, calls, onResume, snapshot, booted, proposal, complete, expectFullLayout };
   }
+
+  test('progressive completion publishes provisional frames before the unchanged full layout', async () => {
+    const progressive = await proposalWorker();
+    const ordinary = await proposalWorker();
+    try {
+      const expectedEpochs: number[] = [];
+      Object.assign(progressive.w.harness.session, { buildDisplayListFrame: (extras: string, epoch: number) => {
+        expectedEpochs.push(epoch);
+        const frame = progressive.engine.buildDisplayListFrame(extras, epoch);
+        progressive.w.harness.delta = decodeFrameDelta(frame);
+        return frame;
+      } });
+      const completed = await progressive.w.send({
+        type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 1,
+        progressive: { targets: [1, 100, 200] },
+      });
+      const final = await ordinary.complete();
+      expect(completed.ok).toBe(true);
+      expect(final.ok).toBe(true);
+      if (!completed.ok || !final.ok) throw new Error('Completion failed');
+      expect(completed.layoutJson).toBe(final.layoutJson);
+      const replies = progressive.w.responses.filter((reply) => reply.id === completed.id);
+      const interims = replies.slice(0, -1);
+      expect(interims.length).toBeGreaterThanOrEqual(1);
+      const finalPages = JSON.parse(completed.layoutJson!).layout.pages.length;
+      expect(finalPages).toBeGreaterThan(3);
+      let epoch = progressive.booted.ok ? progressive.booted.caret!.frameEpoch : 0;
+      for (const [index, reply] of replies.entries()) {
+        expect(reply.ok).toBe(true);
+        if (!reply.ok) throw new Error('Frame reply failed');
+        expect(reply.frame).toBeDefined();
+        expect(reply.caret!.frameEpoch).toBeGreaterThan(epoch);
+        expect(expectedEpochs[index]).toBe(epoch);
+        epoch = reply.caret!.frameEpoch;
+        if (index < interims.length) {
+          expect(reply.interim).toBe(true);
+          expect(reply.layoutProvisional).toBe(true);
+          expect(JSON.parse(reply.layoutJson!).layout.pages.length).toBeLessThan(finalPages);
+          const delta = decodeFrameDelta(new Uint8Array(reply.frame!));
+          const built = delta.operations.filter((operation) =>
+            operation.kind === 'upsert' && !operation.page.unbuilt
+          );
+          expect(built.every((operation) => operation.kind === 'upsert' && operation.pageIndex === 0)).toBe(true);
+        }
+      }
+      expect(completed.interim).toBeUndefined();
+      expect(completed.layoutProvisional).toBeUndefined();
+      expect(ordinary.w.responses.some((reply) => reply.ok && reply.interim)).toBe(false);
+    } finally {
+      progressive.engine.destroy();
+      ordinary.engine.destroy();
+    }
+  });
+
+  test('a progressive snapshot yields to a foreground request queued during its resume', async () => {
+    const { w, engine, onResume } = await proposalWorker();
+    try {
+      let foreground!: Promise<ResidentEngineWorkerResponse>;
+      onResume.push(() => {
+        foreground = w.send({
+          type: 'documentRead', read: { kind: 'navigationTarget', story: 'body', paraId: '00000001' },
+        });
+      });
+      const completed = await w.send({
+        type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 1,
+        progressive: { targets: [1] },
+      });
+      const read = await foreground;
+      expect(read.ok).toBe(true);
+      expect(completed.ok).toBe(true);
+      const firstInterim = w.responses.findIndex((reply) => reply.ok && reply.interim);
+      expect(firstInterim).toBeGreaterThan(w.responses.indexOf(read));
+    } finally {
+      engine.destroy();
+    }
+  });
 
   test('proposal mirrors retain the same navigation target as repeated worker reads', async () => {
     const { w, engine, proposal } = await proposalWorker();

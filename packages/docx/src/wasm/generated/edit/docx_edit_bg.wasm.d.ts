@@ -107,6 +107,7 @@ export const editsession_persist_paragraph_ids: (a: number) => [number, number, 
 export const editsession_read_paragraphs_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_record_saved_paragraph_ids: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_redo: (a: number) => number;
+export const editsession_region_layout_snapshot_json: (a: number) => [number, number, number, number];
 export const editsession_register_measure_font: (a: number, b: number, c: number) => [number, number, number];
 export const editsession_register_substitute_measure_font: (a: number, b: number, c: number, d: number) => [number, number, number];
 export const editsession_reject_change: (a: number, b: number, c: number) => [number, number, number, number];

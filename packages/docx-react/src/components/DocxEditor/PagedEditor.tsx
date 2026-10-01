@@ -1399,6 +1399,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         canvasHostRef,
         onNavigationIntent: cancelPendingScrollRestore,
         navigationEpoch,
+        experimentalWorkerOpen: yrsCore.experimentalWorkerOpen,
         requestCanvasParagraphFlash,
       });
 

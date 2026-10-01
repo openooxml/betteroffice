@@ -103,6 +103,14 @@ interface SlicedCompletion {
   begun: boolean;
   /** Times a change in between abandoned the pass. */
   restarts: number;
+  progressive?: {
+    targets: number[];
+    minIntervalMs?: number;
+    lastInterimAt: number;
+    coveredPosition: number;
+    lastSnapshotMs: number;
+    disabled: boolean;
+  };
 }
 let slicedCompletion: SlicedCompletion | null = null;
 const COMPLETION_SLICE_MS = 24;
@@ -497,6 +505,16 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         blocks: request.sliceBlocks,
         begun: false,
         restarts: 0,
+        ...(request.progressive ? {
+          progressive: {
+            targets: request.progressive.targets?.filter(Number.isFinite) ?? [],
+            minIntervalMs: request.progressive.minIntervalMs,
+            lastInterimAt: performance.now(),
+            coveredPosition: -1,
+            lastSnapshotMs: 0,
+            disabled: false,
+          },
+        } : {}),
       };
       scheduleCompletionSlice(slicedCompletion);
       return;
@@ -738,6 +756,17 @@ async function replyCompletedLayout(
     reply({ id, ok: true });
     return;
   }
+  await replyRetainedLayout(id, expectedFrameEpoch, paintCaret, completed);
+}
+
+async function replyRetainedLayout(
+  id: number,
+  expectedFrameEpoch: number,
+  paintCaret: boolean,
+  completed: LayoutRequest & { layoutJson: string; headersFootersJson: string | undefined },
+  interim?: SlicedCompletion
+): Promise<boolean> {
+  if (!session) return false;
   setFrameDisplayWindow(session);
   pendingUpdates = [];
   const started = performance.now();
@@ -745,7 +774,7 @@ async function replyCompletedLayout(
     frameExtras(completed.extras, completed.layoutExtras, null, completed.headersFootersJson),
     expectedFrameEpoch
   );
-  await replyFrame(
+  return replyFrame(
     id,
     frame,
     performance.now() - started,
@@ -754,7 +783,11 @@ async function replyCompletedLayout(
     started,
     false,
     paintCaret,
-    completed.layoutJson
+    completed.layoutJson,
+    interim !== undefined,
+    undefined,
+    [],
+    interim
   );
 }
 
@@ -842,6 +875,7 @@ function scheduleCompletionSlice(completion: SlicedCompletion): void {
 async function completionSlice(completion: SlicedCompletion): Promise<void> {
   if (!session || slicedCompletion !== completion || !incompleteLayout) return;
   let progress;
+  const resumed = completion.begun;
   if (!completion.begun) {
     progress = session.beginRegionLayout(incompleteLayout.layoutInput);
     completion.begun = true;
@@ -883,6 +917,7 @@ async function completionSlice(completion: SlicedCompletion): Promise<void> {
     );
   }
   if (progress.layoutJson === undefined) {
+    if (resumed) await replyProgressiveLayout(completion, progress.coveredPosition);
     scheduleCompletionSlice(completion);
     return;
   }
@@ -895,6 +930,47 @@ async function completionSlice(completion: SlicedCompletion): Promise<void> {
     headersFootersJson: session.retainedHeadersFootersJson(),
   };
   await replyCompletedLayout(completion.id, completion.expectedFrameEpoch, completion.paintCaret);
+}
+
+async function replyProgressiveLayout(
+  completion: SlicedCompletion,
+  coveredPosition: number | undefined
+): Promise<void> {
+  const progressive = completion.progressive;
+  if (!session || !incompleteLayout || slicedCompletion !== completion ||
+    !progressive || progressive.disabled || coveredPosition === undefined ||
+    backgroundDelay() > 0) return;
+  const reachesTarget = progressive.targets.some((target) => target <= coveredPosition);
+  const interval = Math.max(progressive.minIntervalMs ?? 250, 100, 4 * progressive.lastSnapshotMs);
+  if (!reachesTarget && (coveredPosition <= progressive.coveredPosition ||
+    performance.now() - progressive.lastInterimAt < interval)) return;
+  const started = performance.now();
+  let layoutJson: string | undefined;
+  try {
+    layoutJson = session.regionLayoutSnapshotJson();
+  } catch (error) {
+    if (error instanceof WebAssembly.RuntimeError) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    if (message === 'the document or its fonts changed since the region layout began') return;
+    throw error;
+  }
+  progressive.lastSnapshotMs = performance.now() - started;
+  if (layoutJson === undefined) {
+    progressive.disabled = true;
+    return;
+  }
+  const emitted = await replyRetainedLayout(
+    completion.id,
+    completion.expectedFrameEpoch,
+    completion.paintCaret,
+    { ...incompleteLayout, layoutJson, headersFootersJson: session.retainedHeadersFootersJson() },
+    completion
+  );
+  if (!emitted) return;
+  completion.expectedFrameEpoch = retainedFrame!.frameEpoch;
+  progressive.coveredPosition = coveredPosition;
+  progressive.targets = progressive.targets.filter((target) => target > coveredPosition);
+  progressive.lastInterimAt = performance.now();
 }
 
 /** A snapshot or a new session replaces the layout a sliced completion was finishing. */
@@ -1043,8 +1119,9 @@ async function replyFrame(
   layoutJson?: string,
   layoutProvisional = false,
   deletedUnits?: number,
-  precedingPageFrames: Uint8Array[] = []
-): Promise<void> {
+  precedingPageFrames: Uint8Array[] = [],
+  interim?: SlicedCompletion
+): Promise<boolean> {
   applyWorkerFrame(bytes);
   const caret = session?.residentCaretSnapshot();
   if (!caret || !retainedFrame || !residentCaretSnapshotForFrame(caret, retainedFrame)) {
@@ -1080,6 +1157,7 @@ async function replyFrame(
     {
       id,
       ok: true,
+      ...(interim ? { interim: true } : {}),
       frame,
       ...(pageFrames.length > 0 ? { pageFrames: [...pageFrames, frame] } : {}),
       updates: updateBuffers,
@@ -1099,6 +1177,7 @@ async function replyFrame(
     },
     [frame, ...pageFrames, ...updateBuffers, ...(stateVector ? [stateVector] : [])]
   );
+  return true;
 }
 
 async function replayOffscreen(
