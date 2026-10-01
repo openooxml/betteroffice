@@ -247,12 +247,14 @@ async function openWorkerPreview(
       throw new Error('The first-page preview cannot open');
     }
   };
-  deferWorkerOpenReplica(session, async () => loadHere, loadHere, () => {});
+  let release = (): void => {};
+  deferWorkerOpenReplica(session, async () => loadHere, loadHere, () => release());
   try {
     const pending = openPreviewInWorker(session, bytes, PREVIEW_BODY_BLOCKS);
     onPosted();
     const opened = await pending;
     if (opened) {
+      release = opened.release;
       return {
         session,
         host: yrs.decodeDocxHostJson(opened.hostJson, bytes),

@@ -1137,6 +1137,48 @@ test('a preview the worker opens lays out there, and the full open queues right 
   }
 });
 
+test('a worker preview loaded here before its first layout stops using the worker', async () => {
+  const fontRequirements = (request: ResidentEngineWorkerRequest) => request.type === 'fontRequirements';
+  const { workers, posted, received, reply } = installWorker({ holdReply: fontRequirements });
+  const frames = holdFrames();
+  try {
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, previewFirstPage: true, workerPreview: true, source: longBytes },
+    });
+    await waitFor(() => expect(result.current.core.previewing).toBe(true));
+    const preview = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    const held = await received('fontRequirements');
+    // Something on this thread needs the preview's content before its first layout.
+    await act(async () => {
+      await requestWorkerOpenReplica(preview);
+    });
+    expect(preview.storyIds()).not.toEqual([]);
+    expect(preview.isDisplayOnly()).toBe(true);
+    await act(async () => {
+      reply(held);
+    });
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(preview));
+    expect(posted.map((request) => request.type)).not.toContain('bootstrap');
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await waitFor(() => expect(result.current.core.previewing).toBe(false));
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() =>
+      expect(result.current.renderer.presentedEngine).toBe(result.current.core.session)
+    );
+    // The preview's worker went with it; the full document opened in a new one.
+    expect(workers).toHaveLength(2);
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
+
 test('a package the worker cannot preview opens its preview here and the full document in that worker', async () => {
   const { workers, posted } = installWorker({ refusePreview: true });
   const frames = holdFrames();

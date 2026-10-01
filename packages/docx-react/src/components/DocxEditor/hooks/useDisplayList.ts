@@ -108,7 +108,8 @@ export interface WorkerOpenedPreview {
   hostJson: string;
   /** Resolves once the preview's first layout is queued in the worker, or the worker is gone. */
   bootstrapPosted: Promise<void>;
-  destroy(): void;
+  /** The preview loaded on this thread: it lays out here from now on, not in the worker. */
+  release(): void;
 }
 
 /**
@@ -1438,11 +1439,9 @@ export function useRustDisplayList(
         return {
           hostJson: opened.hostJson,
           bootstrapPosted: client.whenBootstrapSent(),
-          destroy: () => {
-            workerOpenSourcesRef.current.delete(hostEngine);
-            if (workerRef.current?.engine !== hostEngine) return;
-            workerRef.current.client.destroy();
-            workerRef.current = null;
+          release: () => {
+            if (unmountedRef.current || handedOverEnginesRef.current.has(hostEngine)) return;
+            dropWorker(hostEngine);
           },
         };
       } catch (error) {
@@ -1458,7 +1457,7 @@ export function useRustDisplayList(
         return null;
       }
     },
-    [isCurrentWorker, overrides?.build, requestOpenedWorker]
+    [dropWorker, isCurrentWorker, overrides?.build, requestOpenedWorker]
   );
 
   const fontRequirementsInWorker = useCallback<FontRequirementsInWorker>(
