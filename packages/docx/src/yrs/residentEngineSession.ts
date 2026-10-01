@@ -19,7 +19,7 @@ import type {
   DocxParagraphAnchorResult,
   DocxParagraphIdentitySnapshot,
 } from './paragraphIdentity';
-import type { ProposalGeometryReader } from './proposalGeometry';
+import type { ProposalGeometryReader, ProposalGeometryRevision } from './proposalGeometry';
 import type { DocxProposalSession } from './proposals';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
@@ -95,6 +95,31 @@ export async function createResidentEngineSession(
   let observing = false;
   let destroyed = false;
   let undoTracked = false;
+  const geometryStories = new Map<string, {
+    revision: number;
+    segments: YrsStorySegment[];
+    spans?: YrsParagraphLength[];
+  }>();
+
+  const geometryStory = (story: string) => {
+    let cached = geometryStories.get(story);
+    const changes = JSON.parse(
+      session.stories_changed_since(cached?.revision ?? Number.MAX_SAFE_INTEGER)
+    ) as {
+      revision: number;
+      stories: string[];
+    };
+    if (!cached || changes.stories.includes(story)) {
+      cached = {
+        revision: changes.revision,
+        segments: JSON.parse(session.story_segments(story)) as YrsStorySegment[],
+      };
+      geometryStories.set(story, cached);
+    } else {
+      cached.revision = changes.revision;
+    }
+    return cached;
+  };
 
   const ensureUndo = (): void => {
     if (undoTracked) return;
@@ -155,13 +180,102 @@ export async function createResidentEngineSession(
     storyIds: () => session.story_ids(),
     paragraphs: (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],
     paragraphIdCount: (story, paraId) => session.paragraph_id_count(story, paraId),
-    paragraphSpans: (story) => JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[],
-    storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
+    paragraphSpans: (story) => {
+      const cached = geometryStory(story);
+      if (!cached.spans) {
+        cached.spans = [];
+        let length = 0;
+        for (const segment of cached.segments) {
+          if (segment.kind === 'pilcrow') {
+            cached.spans.push({ paraId: segment.paraId, length });
+            length = 0;
+          } else {
+            length += segment.kind === 'text' ? segment.text.length : 1;
+          }
+        }
+      }
+      return cached.spans;
+    },
+    storySegments: (story) => geometryStory(story).segments,
     locateParagraph: (story, paraId) =>
       JSON.parse(session.locate_paragraph(story, paraId)) as YrsParagraphSpan,
     listRevisions: () => JSON.parse(session.list_revisions()) as YrsRevisionInfo[],
     resolveParagraphAnchor: proposalEngine.resolveParagraphAnchor,
     findText: proposalEngine.findText,
+    proposalRevisions: (ids) => {
+      const owned = new Set(ids);
+      const revisions: ProposalGeometryRevision[] = [];
+      const fallback = () =>
+        geometryReader.listRevisions().filter(({ revisionId }) => owned.has(revisionId));
+      for (const story of session.story_ids().sort()) {
+        let offset = 0;
+        const paragraphs = new Set<string>();
+        let changes: Array<{
+          revisionId: string;
+          kind: 'insertion' | 'deletion';
+          start: number;
+          end: number;
+        }> = [];
+        const previous = new Map<string, (typeof changes)[number]>();
+        for (const segment of geometryStory(story).segments) {
+          if (segment.kind === 'pilcrow') {
+            if (hasRevisionProperties(segment.properties) || paragraphs.has(segment.paraId)) {
+              return fallback();
+            }
+            paragraphs.add(segment.paraId);
+            for (const change of changes.sort((a, b) => a.start - b.start)) {
+              revisions.push({
+                revisionId: change.revisionId,
+                kind: change.kind,
+                story,
+                range: {
+                  story,
+                  start: { paraId: segment.paraId, offset: change.start },
+                  end: { paraId: segment.paraId, offset: change.end },
+                },
+              });
+            }
+            offset = 0;
+            changes = [];
+            previous.clear();
+            continue;
+          }
+          if (segment.kind === 'embed' && hasRevisionProperties(segment.payload)) {
+            return fallback();
+          }
+          const length = segment.kind === 'text' ? segment.text.length : 1;
+          for (const [key, kind] of [['ins', 'insertion'], ['del', 'deletion']] as const) {
+            const value = segment.attributes[key];
+            if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+            const attributes = value as Record<string, unknown>;
+            const info = attributes.info;
+            const stamp = info && typeof info === 'object' && !Array.isArray(info)
+              ? info as Record<string, unknown>
+              : attributes;
+            const id = 'id' in stamp ? stamp.id : stamp.revisionId;
+            if (typeof id !== 'string' && !(typeof id === 'number' && Number.isFinite(id))) {
+              continue;
+            }
+            const revisionId = String(id);
+            if (!owned.has(revisionId)) {
+              previous.delete(kind);
+              continue;
+            }
+            const last = previous.get(kind);
+            if (last?.revisionId === revisionId && last.end === offset) {
+              last.end += length;
+            } else {
+              const change = { revisionId, kind, start: offset, end: offset + length };
+              changes.push(change);
+              previous.set(kind, change);
+            }
+          }
+          offset += length;
+        }
+        if (changes.length > 0) return fallback();
+      }
+      return revisions;
+    },
   };
 
   return {
@@ -171,12 +285,15 @@ export async function createResidentEngineSession(
       JSON.parse(session.paragraph_identities()) as DocxParagraphIdentitySnapshot,
     storiesChangedSince: (since) =>
       JSON.parse(session.stories_changed_since(since)) as { revision: number; stories: string[] },
-    openDocx: (bytes, digest, generation) =>
-      resolveHostJsonCommentMedia(
+    openDocx: (bytes, digest, generation) => {
+      geometryStories.clear();
+      return resolveHostJsonCommentMedia(
         session.open_docx(bytes, true, generation, digest),
         (token) => (token.startsWith('media:') ? (session.media_data_url(token) ?? null) : null)
-      ),
+      );
+    },
     openDocxPreview: (bytes, blocks) => {
+      geometryStories.clear();
       const json = session.open_docx_preview(bytes, blocks);
       return json === undefined
         ? null
@@ -247,7 +364,10 @@ export async function createResidentEngineSession(
     },
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
     loadMediaSources: (json) => session.load_media_sources(json),
-    loadState: (update) => session.load(update),
+    loadState: (update) => {
+      geometryStories.clear();
+      session.load(update);
+    },
     applyUpdate: (update) =>
       JSON.parse(
         session.apply_update_with_inference(update)
@@ -267,6 +387,7 @@ export async function createResidentEngineSession(
       if (destroyed) return;
       destroyed = true;
       listeners.clear();
+      geometryStories.clear();
       if (observing) session.clear_update_observer();
       session.free();
     },
@@ -274,6 +395,15 @@ export async function createResidentEngineSession(
 }
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+function hasRevisionProperties(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  return Object.entries(value).some(([key, child]) =>
+    key === 'id' || key === 'revisionId' || key === 'pPrIns' || key === 'pPrDel' ||
+    key === 'pPrChange' || key === 'trIns' || key === 'trDel' ||
+    key === 'tableIns' || key === 'tableDel' || hasRevisionProperties(child)
+  );
+}
 
 function randomClientId(): number {
   if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {

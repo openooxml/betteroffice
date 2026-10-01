@@ -236,6 +236,16 @@ for (const stage of ['fontRequirements', 'bootstrap'] as const) {
 
 test('a page-build failure with worker-held proposals fails the document and settles waits', async () => {
   const { engine, inputs, host } = lazyFixture();
+  const originalIdle = globalThis.requestIdleCallback;
+  const originalCancelIdle = globalThis.cancelIdleCallback;
+  const idleCallbacks = new Map<number, IdleRequestCallback>();
+  let nextIdle = 1;
+  globalThis.requestIdleCallback = (callback) => {
+    const id = nextIdle++;
+    idleCallbacks.set(id, callback);
+    return id;
+  };
+  globalThis.cancelIdleCallback = (id) => { idleCallbacks.delete(id); };
   const { authority, hold } = proposalAuthority(host);
   const replica = deferWorkerOpenReplica(host, () => new Promise(() => {}), () => {
     throw new Error('unexpected hydration');
@@ -257,7 +267,12 @@ test('a page-build failure with worker-held proposals fails the document and set
     const ready = replica.ready.catch((error: unknown) => error);
     let failure: unknown;
     await act(async () => {
-      failure = await result.current.settledDisplayList(null, null).catch((error: unknown) => error);
+      const pending = result.current.settledDisplayList(null, null).catch((error: unknown) => error);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      for (const callback of [...idleCallbacks.values()]) {
+        callback({ didTimeout: false, timeRemaining: () => 50 });
+      }
+      failure = await pending;
     });
     await waitFor(() => expect(result.current.error).toBe(failure as Error));
     expect(failure).toBeInstanceOf(Error);
@@ -279,6 +294,8 @@ test('a page-build failure with worker-held proposals fails the document and set
     unmount();
   } finally {
     cleanup();
+    globalThis.requestIdleCallback = originalIdle;
+    globalThis.cancelIdleCallback = originalCancelIdle;
     process.off('unhandledRejection', unhandled);
     errors.mockRestore();
     engine.free();

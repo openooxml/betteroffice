@@ -11,6 +11,7 @@ import {
   resolveNavigationTarget,
   resolveMirroredNavigationTarget,
   type ProposalGeometryReader,
+  type ProposalGeometryRevision,
 } from './proposalGeometry';
 import { createResidentEngineSession } from './residentEngineSession';
 
@@ -139,6 +140,94 @@ describe('proposal geometry readers', () => {
     } finally {
       count.mockRestore();
       stories.mockRestore();
+      main.destroy();
+    }
+  });
+
+  test('resident proposal geometry reads text revisions from segments and falls back for structural revisions', async () => {
+    const main = await createYrsSession({ clientId: 79104 });
+    const resident = await createResidentEngineSession();
+    try {
+      const { paraId } = main.createStory('body', 'same 😀same same');
+      main.formatRange({
+        story: 'body',
+        start: { paraId, offset: 1 },
+        end: { paraId, offset: 3 },
+      }, { bold: true });
+      const snapshot = snapshotOf(main.proposeChanges({
+        expectVersion: main.version(),
+        proposals: [{
+          id: 'all',
+          paragraph: { kind: 'session', sessionId: main.paragraphIdentities().sessionId, story: 'body', paraId },
+          suggest: SUGGEST,
+          op: 'replaceText', search: 'same', replaceWith: 'new', occurrence: 'all',
+        }],
+      }));
+      resident.loadState(main.encodeState());
+      const listed = spyOn(resident.geometryReader, 'listRevisions');
+      try {
+        const expected = computeProposalGeometryMirror(main, snapshot);
+        const actual = computeProposalGeometryMirror(resident.geometryReader, snapshot);
+        expect({ ...actual, version: expected.version }).toEqual(expected);
+        expect(listed).not.toHaveBeenCalled();
+        expect(actual.targets.all).toMatchObject({ ok: true, ranges: expect.any(Array) });
+        const ids = snapshot.proposals.flatMap(({ revisionIds }) => revisionIds);
+        const fields = ({ revisionId, kind, story, range }: ProposalGeometryRevision) =>
+          ({ revisionId, kind, story, range });
+        expect(resident.geometryReader.proposalRevisions!(ids).map(fields)).toEqual(
+          main.listRevisions().filter(({ revisionId }) => ids.includes(revisionId)).map(fields)
+        );
+        const at = { paraId, offset: 0 };
+        main.setParagraphAttrs(
+          { story: 'body', start: at, end: at },
+          { alignment: 'right' },
+          { name: SUGGEST.author, date: SUGGEST.date }
+        );
+        const structural = main.listRevisions().find(({ kind }) => kind === 'pPrChange')!;
+        expect(ids).toContain(structural.revisionId);
+        resident.loadState(main.encodeState());
+        const expectedStructural = computeProposalGeometryMirror(main, main.getProposals());
+        const actualStructural = computeProposalGeometryMirror(resident.geometryReader, main.getProposals());
+        expect({ ...actualStructural, version: expectedStructural.version }).toEqual(expectedStructural);
+        expect(listed).toHaveBeenCalledTimes(1);
+      } finally {
+        listed.mockRestore();
+      }
+    } finally {
+      resident.destroy();
+      main.destroy();
+    }
+  });
+
+  test('resident geometry reuses unchanged stories and refreshes edited or reloaded stories', async () => {
+    const main = await createYrsSession({ clientId: 79103 });
+    const resident = await createResidentEngineSession();
+    try {
+      main.openDocx(fixture(), true);
+      resident.loadState(main.encodeState());
+      const reader = resident.geometryReader;
+      const body = reader.storySegments('body');
+      const cell = reader.storySegments('body:t0:r0c0');
+      const spans = reader.paragraphSpans('body');
+      expect(spans).toEqual(main.paragraphSpans('body'));
+      expect(reader.storySegments('body')).toBe(body);
+      expect(reader.paragraphSpans('body')).toBe(spans);
+      const vector = resident.encodeStateVector();
+      snapshotOf(main.proposeChanges({
+        expectVersion: main.version(),
+        proposals: [replace('edit', '00000001', 'Keep', 'Revised')],
+      }));
+      resident.applyUpdate(main.encodeStateAsUpdate(vector));
+      expect(reader.storySegments('body')).not.toBe(body);
+      expect(reader.storySegments('body')).toEqual(main.storySegments('body'));
+      expect(reader.paragraphSpans('body')).toEqual(main.paragraphSpans('body'));
+      expect(reader.storySegments('body:t0:r0c0')).toBe(cell);
+      const updated = reader.storySegments('body');
+      resident.loadState(main.encodeState());
+      expect(reader.storySegments('body')).not.toBe(updated);
+      expect(reader.storySegments('body')).toEqual(main.storySegments('body'));
+    } finally {
+      resident.destroy();
       main.destroy();
     }
   });

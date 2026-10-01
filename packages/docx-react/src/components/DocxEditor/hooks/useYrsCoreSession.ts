@@ -903,20 +903,19 @@ export function useYrsCoreSession(
     retirePreview,
   ]);
 
+  const hasOwnWorkerFrame = workerOpen?.renderedFrame != null &&
+    workerOpen.renderedFrame !== inheritedFrameRef.current;
   useEffect(() => {
-    if (!openInWorker) return;
-    const frame = workerOpen?.renderedFrame;
-    const pending = pendingReplicaRef.current;
-    const start = startReplicaRef.current;
     if (
+      !openInWorker ||
       !session ||
       session !== sessionRef.current ||
-      !frame ||
-      frame === inheritedFrameRef.current ||
-      !pending?.pending ||
-      !start
+      !hasOwnWorkerFrame ||
+      !pendingReplicaRef.current?.pending ||
+      !startReplicaRef.current ||
+      previewing ||
+      (handoffFrom && options?.shownEngine !== session)
     ) return;
-    if (previewing || (handoffFrom && options?.shownEngine !== session)) return;
     workerLaidOutRef.current?.();
     const authority = registeredWorkerProposalAuthority(session);
     if (authority) {
@@ -924,6 +923,28 @@ export function useYrsCoreSession(
         console.error('[yrs] failed to initialize worker proposals', error);
       });
     }
+  }, [
+    openInWorker,
+    session,
+    hasOwnWorkerFrame,
+    workerOpen?.renderedFrame,
+    previewing,
+    handoffFrom,
+    options?.shownEngine,
+  ]);
+
+  useEffect(() => {
+    if (!openInWorker) return;
+    const pending = pendingReplicaRef.current;
+    const start = startReplicaRef.current;
+    if (
+      !session ||
+      session !== sessionRef.current ||
+      !hasOwnWorkerFrame ||
+      !pending?.pending ||
+      !start
+    ) return;
+    if (previewing || (handoffFrom && options?.shownEngine !== session)) return;
     // The replica blocks this thread: it loads once the worker is laying out the rest.
     if (workerOpen?.pendingCompletion === session) return;
     armReplicaGate(REPLICA_FRAME_WAIT_MS);
@@ -938,7 +959,7 @@ export function useYrsCoreSession(
   }, [
     openInWorker,
     session,
-    workerOpen?.renderedFrame,
+    hasOwnWorkerFrame,
     workerOpen?.pendingCompletion,
     workerOpen?.hydrateOnDemand,
     previewing,

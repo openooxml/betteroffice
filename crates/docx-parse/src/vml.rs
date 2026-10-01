@@ -681,21 +681,30 @@ fn vml_fraction(raw: Option<&str>) -> Option<f64> {
 
 /// Whether `shape`'s style positions it from the page or margin.
 pub(crate) fn placed_off_the_text(shape: &XmlElement) -> bool {
-    let Some(style) = shape.attribute(None, "style") else {
-        return false;
-    };
-    let style = parse_style_attr(Some(style));
-    matches!(
-        style.get("position").map(String::as_str),
-        Some("absolute" | "relative")
-    ) && matches!(
-        vml_vertical_relative_to(
-            style
-                .get("mso-position-vertical-relative")
-                .map(String::as_str)
-        ),
-        "page" | "margin"
-    )
+    style_placed_off_the_text(shape.attribute(None, "style"))
+}
+
+pub(crate) fn style_placed_off_the_text(style: Option<&str>) -> bool {
+    let Some(style) = style else { return false };
+    let mut position = None;
+    let mut vertical = None;
+    for declaration in truncate_utf8(style, MAX_STYLE_BYTES)
+        .split(';')
+        .take(MAX_STYLE_DECLARATIONS)
+    {
+        let Some((key, value)) = declaration.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = truncate_utf8(value.trim(), MAX_STYLE_VALUE_BYTES);
+        if key.eq_ignore_ascii_case("position") {
+            position = Some(value);
+        } else if key.eq_ignore_ascii_case("mso-position-vertical-relative") {
+            vertical = Some(value);
+        }
+    }
+    matches!(position, Some("absolute" | "relative"))
+        && matches!(vml_vertical_relative_to(vertical), "page" | "margin")
 }
 
 fn vml_horizontal_relative_to(raw: Option<&str>) -> &'static str {
