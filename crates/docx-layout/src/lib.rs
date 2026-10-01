@@ -67,6 +67,7 @@
 
 mod anchor;
 pub mod canonical;
+mod extent_key;
 pub mod hooks;
 pub mod page_flow;
 pub mod paragraph_spacing;
