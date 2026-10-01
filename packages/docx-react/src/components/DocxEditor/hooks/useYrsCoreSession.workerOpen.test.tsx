@@ -131,7 +131,7 @@ function installWorker(options: {
         get: () => {
           const listener = onmessage;
           return (event: MessageEvent<ResidentEngineWorkerResponse>) => {
-            const request = requests.get(event.data.id);
+            const request = posted.find((request) => request.id === event.data.id);
             const data = event.data;
             const delivered = options.withoutDecisionFontRequirements && data.ok && data.proposal &&
               request?.type === 'proposal' && request.operation.kind === 'setStates'
@@ -140,10 +140,9 @@ function installWorker(options: {
             const deliver = () => listener?.(delivered);
             if (request && options.holdReply?.(request)) replies.set(request.id, deliver);
             else deliver();
-            if (request) {
-              received.add(request);
-              responses.set(request, event.data);
-            }
+            if (request) received.add(request);
+            const workerRequest = requests.get(event.data.id);
+            if (workerRequest) responses.set(workerRequest, event.data);
             for (const waiter of replyWaiters) waiter();
           };
         },
@@ -401,7 +400,7 @@ function useHarness(props: HarnessProps) {
     loadBuffer: async () => {},
     comments: [],
     setComments: () => {},
-    setShowCommentsSidebar: setCommentsSidebarOpen,
+    setShowCommentsSidebar: () => {},
     contentChangeSubscribersRef: { current: new Set() },
     selectionChangeSubscribersRef: { current: new Set() },
     getCachedStyleResolver: (() => { throw new Error('unused'); }) as never,
@@ -664,6 +663,18 @@ function holdFrames() {
         run();
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
+      return promise;
+    },
+    async untilCommitted<T>(promise: Promise<T>): Promise<T> {
+      let settled = false;
+      void promise.then(() => { settled = true; }, () => { settled = true; });
+      while (!settled) {
+        await act(async () => {
+          run();
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        });
+      }
+      await act(async () => {});
       return promise;
     },
     restore() {
@@ -1685,7 +1696,7 @@ test('getEditorRef during load opens the main replica and recovers worker render
     expect(mirror).toHaveBeenCalledWith(null);
     expect(session.workerDocumentMirrored()).toBe(false);
     expect(terminate).toHaveBeenCalledTimes(1);
-    await act(async () => { await frames.until(result.current.renderer.settledDisplayList(null, null)); });
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, 3000));
     expect(workers).toHaveLength(2);
     expect(workers[1]!.requests[0]).toBe('bootstrap');
     const bootstrap = posted.find((request) => request.type === 'bootstrap')!;
@@ -1702,6 +1713,7 @@ test('getEditorRef during load opens the main replica and recovers worker render
 
     const api = result.current.ref.current!;
     const paragraph = (await api.getParagraphIdentities()).paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
+    const proposalSyncs = posted.filter((request) => request.type === 'sync').length;
     await act(async () => {
       expect(await api.proposeChanges({
         expectVersion: session.version(),
@@ -1713,7 +1725,11 @@ test('getEditorRef during load opens the main replica and recovers worker render
       })).toMatchObject({ ok: true });
       result.current.pipeline.scheduleLayout('remote', true);
     });
-    await act(async () => { await frames.until(result.current.renderer.settledDisplayList(null, null)); });
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, 3000));
+    expect(posted.filter((request) => request.type === 'sync').length).toBeGreaterThan(proposalSyncs);
+    const proposed = posted.filter((request) => request.type === 'sync').at(-1)!;
+    if (proposed.type !== 'sync') throw new Error('Missing proposal sync');
+    expect(proposed.snapshot.workerAuthoritative).toBeUndefined();
     const proposal = await api.getProposals();
     const syncs = posted.filter((request) => request.type === 'sync').length;
     await act(async () => {
@@ -1723,13 +1739,13 @@ test('getEditorRef during load opens the main replica and recovers worker render
       })).toMatchObject({ ok: true });
       result.current.pipeline.scheduleLayout('remote', true);
     });
-    await act(async () => { await frames.until(result.current.renderer.settledDisplayList(null, null)); });
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, 3000));
     expect(session.getProposals().proposals[0]!.state).toBe('accepted');
     expect(posted.filter((request) => request.type === 'sync').length).toBeGreaterThan(syncs);
     const accepted = posted.filter((request) => request.type === 'sync').at(-1)!;
     if (accepted.type !== 'sync') throw new Error('Missing proposal sync');
     expect(accepted.snapshot.workerAuthoritative).toBeUndefined();
-    expect(sourceVersionOf(result.current.renderer.displayList)).toBe(session.version());
+    await waitFor(() => expect(sourceVersionOf(result.current.renderer.queries)).toBe(session.version()));
     expect(workers[1]!.requests).toContain('sync');
     expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
     expect(result.current.mainOpens).toEqual([true]);
@@ -1782,7 +1798,7 @@ test('sync recovery follows the shown epoch and ignores a destroyed worker\'s la
       act(() => { result.current.ref.current!.getEditorRef(); });
       expect(terminate).toHaveBeenCalledTimes(1);
       holdSync = false;
-      await act(async () => { await frames.until(result.current.renderer.settledDisplayList(null, null)); });
+      await frames.untilCommitted(result.current.renderer.settledDisplayList(null, 3000));
       expect(workers).toHaveLength(2);
       const bootstrap = posted.filter((request) => request.type === 'bootstrap').at(-1)!;
       if (bootstrap.type !== 'bootstrap') throw new Error('Missing recovery bootstrap');
