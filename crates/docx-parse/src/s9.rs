@@ -14,7 +14,7 @@ use crate::chart::{Chart, parse_chart_parts};
 use crate::comments::remove_orphan_comment_ranges;
 use crate::document::{DocumentBody, extract_all_template_variables, parse_document_body_compact};
 use crate::fonts::{FontTable, parse_font_table};
-use crate::header_footer::{HeaderFooter, parse_related_header_footers};
+use crate::header_footer::{HeaderFooter, HeaderFooterAliasGroup, parse_related_header_footers};
 use crate::media::{MediaFile, MediaScan, MediaTable, build_media_map_with_warnings};
 use crate::notes::Note;
 use crate::numbering::{NumberingDefinitions, parse_numbering};
@@ -67,6 +67,8 @@ pub struct S9PackageWire {
     pub header_entries: Option<Vec<(String, HeaderFooter)>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub footer_entries: Option<Vec<(String, HeaderFooter)>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub header_footer_aliases: Vec<HeaderFooterAliasGroup>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub footnotes: Option<Vec<Note>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -491,8 +493,8 @@ fn parse_s9_package_impl(
         }
     };
 
-    let (mut headers, mut footers) = if options.parse_headers_footers {
-        let (headers, footers) = parse_related_header_footers(
+    let (mut headers, mut footers, header_footer_aliases) = if options.parse_headers_footers {
+        let (headers, footers, aliases) = parse_related_header_footers(
             parts,
             &relationships,
             Some(&theme),
@@ -505,9 +507,9 @@ fn parse_s9_package_impl(
             &mut budget,
             &mut ids,
         )?;
-        (Some(headers), Some(footers))
+        (Some(headers), Some(footers), aliases)
     } else {
-        (None, None)
+        (None, None, Vec::new())
     };
 
     let (mut footnotes, mut endnotes, mut footnote_separators, mut endnote_separators) =
@@ -629,6 +631,7 @@ fn parse_s9_package_impl(
             font_table,
             header_entries: headers.map(|stories| stories.into_iter().collect()),
             footer_entries: footers.map(|stories| stories.into_iter().collect()),
+            header_footer_aliases,
             footnotes,
             endnotes,
             footnote_separators,
@@ -928,6 +931,118 @@ fn canonical_media(entries: &[(String, Arc<MediaFile>)]) -> Result<CanonicalValu
 mod tests {
     use super::*;
 
+    fn header_parts(relationship_ids: &[&str]) -> Vec<(String, Vec<u8>)> {
+        let relationships = relationship_ids
+            .iter()
+            .map(|id| {
+                format!(
+                    r#"<Relationship Id="{id}" Type="{}" Target="header1.xml"/>"#,
+                    crate::relationships::relationship_types::HEADER,
+                )
+            })
+            .collect::<String>();
+        vec![
+            (
+                "word/document.xml".to_owned(),
+                br#"<w:document xmlns:w="w"><w:body><w:p/></w:body></w:document>"#.to_vec(),
+            ),
+            (
+                "word/_rels/document.xml.rels".to_owned(),
+                format!("<Relationships>{relationships}</Relationships>").into_bytes(),
+            ),
+            (
+                "word/header1.xml".to_owned(),
+                br#"<w:hdr xmlns:w="w"><w:p/></w:hdr>"#.to_vec(),
+            ),
+        ]
+    }
+
+    fn parse_header_package(relationship_ids: &[&str], options: S9ParseOptions) -> S9PackageWire {
+        parse_s9_package(
+            &header_parts(relationship_ids),
+            b"synthetic header package",
+            options,
+            &ParseLimits::default(),
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap()
+        .document
+        .package
+    }
+
+    #[test]
+    fn header_aliases_are_carried_to_the_wire_in_relationship_order() {
+        for ids in [&["rId9", "rId7"][..], &["rId9", "rId7", "rId2"][..]] {
+            let package = parse_header_package(ids, S9ParseOptions::default());
+            assert_eq!(
+                package.header_footer_aliases,
+                vec![HeaderFooterAliasGroup {
+                    is_header: true,
+                    part_path: "word/header1.xml".to_owned(),
+                    relationship_ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+                }]
+            );
+            let headers = package.header_entries.as_ref().unwrap();
+            assert_eq!(
+                headers
+                    .iter()
+                    .map(|(id, _)| id.as_str())
+                    .collect::<Vec<_>>(),
+                ids
+            );
+            assert!(headers.iter().all(|(_, story)| story.content.len() == 1));
+            let json = serde_json::to_value(&package).unwrap();
+            assert_eq!(
+                json["headerFooterAliases"],
+                serde_json::json!([{
+                    "isHeader": true,
+                    "partPath": "word/header1.xml",
+                    "relationshipIds": ids,
+                }])
+            );
+            assert_eq!(
+                serde_json::from_value::<S9PackageWire>(json).unwrap(),
+                package
+            );
+        }
+    }
+
+    #[test]
+    fn packages_without_aliases_keep_the_previous_wire_json() {
+        for ids in [&[][..], &["rId9"][..]] {
+            let package = parse_header_package(ids, S9ParseOptions::default());
+            assert!(package.header_footer_aliases.is_empty());
+            let json = serde_json::to_string(&package).unwrap();
+            let legacy_json: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert!(legacy_json.get("headerFooterAliases").is_none());
+            let restored: S9PackageWire = serde_json::from_str(&json).unwrap();
+            assert!(restored.header_footer_aliases.is_empty());
+            assert_eq!(serde_json::to_string(&restored).unwrap(), json);
+        }
+    }
+
+    #[test]
+    fn disabling_header_footer_parsing_leaves_aliases_empty() {
+        let package = parse_header_package(
+            &["rId9", "rId7", "rId2"],
+            S9ParseOptions {
+                parse_headers_footers: false,
+                ..S9ParseOptions::default()
+            },
+        );
+        assert!(package.header_entries.is_none());
+        assert!(package.footer_entries.is_none());
+        assert!(package.header_footer_aliases.is_empty());
+        assert!(
+            serde_json::to_value(&package)
+                .unwrap()
+                .get("headerFooterAliases")
+                .is_none()
+        );
+    }
+
     #[test]
     fn full_wire_applies_options_and_package_wide_paragraph_ids() {
         let parts = vec![
@@ -954,6 +1069,7 @@ mod tests {
         )
         .unwrap();
         assert!(parsed.document.package.header_entries.is_none());
+        assert!(parsed.document.package.header_footer_aliases.is_empty());
         assert!(parsed.document.package.footnotes.is_none());
         assert_eq!(
             parsed.document.template_variables.as_deref(),

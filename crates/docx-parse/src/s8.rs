@@ -128,7 +128,7 @@ pub fn parse_docx_s8_projection(data: &[u8]) -> Result<S8Projection, ParseError>
         None => DocumentBody::default(),
     };
 
-    let (mut headers, mut footers) = parse_related_header_footers(
+    let (mut headers, mut footers, _) = parse_related_header_footers(
         &parts,
         &document_relationships,
         Some(&theme),

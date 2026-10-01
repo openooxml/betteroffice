@@ -1297,6 +1297,7 @@ fn thin_docx_envelope(envelope: &docx_parse::S9WireEnvelope) -> docx_parse::S9Wi
                 font_table: package.font_table.clone(),
                 header_entries: thin_header_footer(&package.header_entries),
                 footer_entries: thin_header_footer(&package.footer_entries),
+                header_footer_aliases: package.header_footer_aliases.clone(),
                 footnotes: thin_notes(&package.footnotes),
                 endnotes: thin_notes(&package.endnotes),
                 footnote_separators: None,
