@@ -48,7 +48,7 @@ export type ResidentDocumentRead =
   | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
   | { kind: 'readParagraphs'; request: DocxReadParagraphsRequest }
   | { kind: 'searchText'; query: string; caseSensitive: boolean; carry?: YrsStickyPosition | null }
-  | { kind: 'stickyAnchor'; loc: YrsLoc }
+  | { kind: 'stickyAnchors'; locs: YrsLoc[]; version: string }
   | { kind: 'navigationTarget'; story: string; paraId: string };
 
 /** @internal */
@@ -58,7 +58,7 @@ export interface ResidentDocumentReadValues {
   readParagraphs: DocxReadParagraphsResult;
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
   searchText: ResidentSearchResult;
-  stickyAnchor: YrsStickyPosition | null;
+  stickyAnchors: Array<YrsStickyPosition | null>;
 }
 
 export type ResidentEngineWorkerRequest =

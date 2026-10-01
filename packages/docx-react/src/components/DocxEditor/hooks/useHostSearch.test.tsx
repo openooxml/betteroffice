@@ -148,7 +148,34 @@ async function mount(page = 1, repeat = false) {
   };
 }
 
-async function workerSearch(h: Awaited<ReturnType<typeof mount>>) {
+async function mountText(text: string) {
+  const session = await createYrsSession();
+  sessions.push(session);
+  const { paraId } = session.createStory('body', text);
+  const reveals: number[] = [];
+  let placeable = () => true;
+  const pagedEditorRef = { current: {
+    getYrsSession: () => session,
+    hasPendingInput: () => false,
+    yrsLocToDisplayPosition: (loc: Parameters<PagedEditorRef['yrsLocToDisplayPosition']>[0]) =>
+      createYrsPositionProjection(session, 'body')!.positionForLoc(loc),
+    revealDisplayPosition: (position: number) => {
+      reveals.push(position);
+      return placeable() ? 'scrolled' : 'unsupported';
+    },
+  } as unknown as PagedEditorRef };
+  const hook = renderHook(() => useHostSearch({
+    pagedEditorRef,
+    displayListQueries: null,
+    canvasHostRef: { current: null },
+  }));
+  return {
+    session, paraId, reveals, pagedEditorRef, hook,
+    layOut: (canPlace: () => boolean) => { placeable = canPlace; },
+  };
+}
+
+async function workerSearch(h: Pick<Awaited<ReturnType<typeof mount>>, 'session' | 'pagedEditorRef'>) {
   const session = await createYrsSession();
   sessions.push(session);
   session.loadState(h.session.encodeState());
@@ -160,20 +187,23 @@ async function workerSearch(h: Awaited<ReturnType<typeof mount>>) {
   let blocked: Promise<void> | null = null;
   let blockedAnchor: Promise<void> | null = null;
   const reads: Extract<ResidentDocumentRead, { kind: 'searchText' }>[] = [];
-  const anchorReads: Extract<ResidentDocumentRead, { kind: 'stickyAnchor' }>[] = [];
+  const anchorReads: Extract<ResidentDocumentRead, { kind: 'stickyAnchors' }>[] = [];
   const anchors: Array<YrsStickyPosition | null> = [];
   const worker = {
     proposal: async () => snapshot(),
     documentRead: async (read: ResidentDocumentRead) => {
-      if (read.kind === 'stickyAnchor') {
+      if (read.kind === 'stickyAnchors') {
         anchorReads.push(read);
         const waiting = blockedAnchor;
         blockedAnchor = null;
-        let value: YrsStickyPosition | null = null;
-        try {
-          value = session.encodeStickyPosition(read.loc);
-        } catch {}
-        anchors.push(value);
+        const value = read.locs.map((loc) => {
+          try {
+            return session.encodeStickyPosition(loc);
+          } catch {
+            return null;
+          }
+        });
+        anchors.push(value[0] ?? null);
         const version = session.version();
         await waiting;
         return { version, value };
@@ -245,10 +275,13 @@ test('worker search starts in view and navigates cached body and table ranges', 
       expect(api.searchPrevious()?.current).toBe(4);
     });
     expect(worker.reads).toHaveLength(1);
-    expect(worker.anchorReads.map(({ loc }) => loc)).toEqual([2, 4, 0, 4].map((index) => {
-      const match = readResidentSearch(worker.session, 'the', false).matches[index];
-      return { story: match.story, paraId: match.paraId, offset: match.start };
-    }));
+    expect(worker.anchorReads.map(({ locs }) => locs)).toEqual([2, 4, 0, 4].map((index) =>
+      [index, (index + 4) % 5, (index + 1) % 5].map((i) => {
+        const match = readResidentSearch(worker.session, 'the', false).matches[i];
+        return { story: match.story, paraId: match.paraId, offset: match.start };
+      })
+    ));
+    expect(worker.anchorReads.every((read) => read.version === worker.session.version())).toBe(true);
     for (const read of mainReads) expect(read).not.toHaveBeenCalled();
   } finally {
     for (const read of mainReads) read.mockRestore();
@@ -428,7 +461,7 @@ test('worker refresh waits for the navigated match anchor before carrying it thr
 });
 
 test('navigation during a held worker refresh encodes the old match at the current state and carries it', async () => {
-  const h = await mount();
+  const h = await mount(2);
   const worker = await workerSearch(h);
   const api = h.hook.result.current.api;
   await act(async () => { await api.search('the'); });
@@ -455,6 +488,100 @@ test('navigation during a held worker refresh encodes the old match at the curre
   expect(h.hook.result.current.highlight!.matches[6].displayFrom).toBe(before + 8);
   expect(h.hook.result.current.highlight!.matches).toEqual(readResidentSearch(worker.session, 'the', false).matches);
   expect(h.reveals.at(-1)).toBe(h.hook.result.current.highlight!.matches[6].displayFrom);
+  expect(worker.replicaRequests()).toBe(0);
+});
+
+test.each(['next', 'goTo', 'previous'] as const)('stale %s navigation carries an exact neighbour through a prefix deletion', async (navigation) => {
+  const h = await mountText('the A the B the C');
+  const worker = await workerSearch(h);
+  const api = h.hook.result.current.api;
+  await act(async () => { expect(await api.search('the')).toMatchObject({ total: 3, current: 0 }); });
+  const index = navigation === 'previous' ? 2 : 1;
+  const carry = worker.session.encodeStickyPosition({ story: 'body', paraId: h.paraId, offset: index * 6 });
+  expect(worker.anchorReads).toEqual([{
+    kind: 'stickyAnchors', version: worker.session.version(),
+    locs: [0, 12, 6].map((offset) => ({ story: 'body', paraId: h.paraId, offset })),
+  }]);
+  const release = worker.holdRead();
+  worker.session.deleteRange({
+    story: 'body', start: { paraId: h.paraId, offset: 0 }, end: { paraId: h.paraId, offset: 6 },
+  });
+  worker.mirror();
+  act(() => { api.getSearchState(); });
+  await waitFor(() => expect(worker.reads).toHaveLength(2));
+  act(() => {
+    const state = navigation === 'next' ? api.searchNext() :
+      navigation === 'previous' ? api.searchPrevious() : api.searchGoTo(1);
+    expect(state).toMatchObject({ total: 3, current: index });
+  });
+  expect(worker.anchorReads).toHaveLength(1);
+  await act(async () => { release(); });
+  await waitFor(() => expect(api.getSearchState()).toMatchObject({ total: 2, current: index - 1 }));
+  const matches = readResidentSearch(worker.session, 'the', false).matches;
+  expect(worker.reads.at(-1)!.carry).toEqual(carry);
+  expect(h.hook.result.current.highlight).toEqual({ matches, current: index - 1 });
+  expect(h.reveals.at(-1)).toBe(matches[index - 1].displayFrom);
+  expect(worker.replicaRequests()).toBe(0);
+});
+
+test.each([3, 5])('two next steps during a held refresh use cached anchors when available with %i matches', async (count) => {
+  const h = await mountText(['the A', 'the B', 'the C', 'the D', 'the E'].slice(0, count).join(' '));
+  const worker = await workerSearch(h);
+  const api = h.hook.result.current.api;
+  await act(async () => { expect(await api.search('the')).toMatchObject({ total: count, current: 0 }); });
+  const loc = { story: 'body', paraId: h.paraId, offset: 12 };
+  const exact = worker.session.encodeStickyPosition(loc);
+  const release = worker.holdRead();
+  worker.session.deleteRange({
+    story: 'body', start: { paraId: h.paraId, offset: 0 }, end: { paraId: h.paraId, offset: 6 },
+  });
+  worker.mirror();
+  const carry = count === 3 ? exact : worker.session.encodeStickyPosition(loc);
+  const current = count === 3 ? 1 : 2;
+  act(() => { api.getSearchState(); });
+  await waitFor(() => expect(worker.reads).toHaveLength(2));
+  act(() => {
+    expect(api.searchNext()?.current).toBe(1);
+    expect(api.searchNext()?.current).toBe(2);
+  });
+  expect(worker.anchorReads).toHaveLength(1);
+  await act(async () => { release(); });
+  await waitFor(() => expect(api.getSearchState()).toMatchObject({ total: count - 1, current }));
+  const matches = readResidentSearch(worker.session, 'the', false).matches;
+  expect(worker.reads.at(-1)!.carry).toEqual(carry);
+  if (count === 5) {
+    expect(carry).not.toEqual(exact);
+    expect(worker.anchors[1]).toEqual(carry);
+  }
+  expect(h.hook.result.current.highlight).toEqual({ matches, current });
+  expect(h.reveals.at(-1)).toBe(matches[current].displayFrom);
+  expect(worker.replicaRequests()).toBe(0);
+});
+
+test('an approximate neighbour prefetch preserves the exact current anchor', async () => {
+  const h = await mountText('the A the B the C the D the E');
+  const worker = await workerSearch(h);
+  const api = h.hook.result.current.api;
+  await act(async () => { await api.search('the'); });
+  const version = worker.session.version();
+  const carry = worker.session.encodeStickyPosition({ story: 'body', paraId: h.paraId, offset: 6 });
+  h.layOut(() => false);
+  await act(async () => {
+    expect(api.searchNext()?.current).toBe(1);
+    worker.session.deleteRange({
+      story: 'body', start: { paraId: h.paraId, offset: 0 }, end: { paraId: h.paraId, offset: 6 },
+    });
+    worker.mirror();
+    api.getSearchState();
+    h.layOut(() => true);
+  });
+  await waitFor(() => expect(api.getSearchState()).toMatchObject({ total: 4, current: 0 }));
+  const matches = readResidentSearch(worker.session, 'the', false).matches;
+  expect(worker.anchorReads[1].version).toBe(version);
+  expect(worker.anchors[1]).not.toEqual(carry);
+  expect(worker.reads[1].carry).toEqual(carry);
+  expect(h.hook.result.current.highlight).toEqual({ matches, current: 0 });
+  expect(h.reveals.at(-1)).toBe(matches[0].displayFrom);
   expect(worker.replicaRequests()).toBe(0);
 });
 

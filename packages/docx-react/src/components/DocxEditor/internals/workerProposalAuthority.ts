@@ -26,6 +26,7 @@ import {
 } from './workerOpenReplica';
 
 type SearchRead = Awaited<ReturnType<typeof ResidentEngineWorkerClient.prototype.documentRead<'searchText'>>>;
+type StickyAnchorsRead = Awaited<ReturnType<typeof ResidentEngineWorkerClient.prototype.documentRead<'stickyAnchors'>>>;
 
 export interface WorkerProposalAuthority {
   /** The session mirrors the worker registry and version. */
@@ -65,10 +66,11 @@ export interface WorkerProposalAuthority {
     carry: YrsStickyPosition | null,
     main: () => SearchRead['value']
   ): Promise<SearchRead>;
-  stickyAnchor(
-    loc: YrsLoc,
-    main: () => YrsStickyPosition | null
-  ): Promise<YrsStickyPosition | null>;
+  stickyAnchors(
+    locs: YrsLoc[],
+    version: string,
+    main: () => Array<YrsStickyPosition | null>
+  ): Promise<StickyAnchorsRead>;
   resolveParagraphAnchors(
     anchors: readonly DocxParagraphAnchor[],
     main: (anchors: readonly DocxParagraphAnchor[]) => Promise<{
@@ -283,11 +285,11 @@ export function registerWorkerProposalAuthority(
       assertCurrent();
       return read;
     }, () => ({ version: session.version(), value: main() })),
-    stickyAnchor: (loc, main) => route(async () => {
-      const read = await worker.documentRead({ kind: 'stickyAnchor', loc });
+    stickyAnchors: (locs, version, main) => route(async () => {
+      const read = await worker.documentRead({ kind: 'stickyAnchors', locs, version });
       assertCurrent();
-      return read.value;
-    }, main),
+      return read;
+    }, () => ({ version: session.version(), value: main() })),
     resolveParagraphAnchors: (anchors, main) => route(async () => {
       const read = await worker.documentRead({ kind: 'resolveParagraphAnchors', anchors: [...anchors] });
       assertCurrent();

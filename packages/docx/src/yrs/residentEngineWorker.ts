@@ -474,12 +474,17 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           request.read.carry
         );
         break;
-      case 'stickyAnchor':
-        value = null;
-        try {
-          value = session.encodeStickyPosition(request.read.loc);
-        } catch {}
+      case 'stickyAnchors': {
+        const currentSession = session;
+        value = request.read.locs.map((loc) => {
+          try {
+            return currentSession.encodeStickyPosition(loc);
+          } catch {
+            return null;
+          }
+        });
         break;
+      }
     }
     reply({ id: request.id, ok: true, read: { version: engine.version(), value } });
     return;

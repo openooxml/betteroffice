@@ -2259,27 +2259,37 @@ describe('worker proposals during sliced completion', () => {
       expect(order).toEqual(['search', 'complete']);
       expect(calls.filter((call) => call === 'begin')).toHaveLength(1);
       await expectFullLayout(completed);
-      const anchor = async (index: number) => {
-        const match = value.matches[index];
-        const loc = { story: match.story, paraId: match.paraId, offset: match.start };
-        const answer = await w.send({ type: 'documentRead', read: { kind: 'stickyAnchor', loc } });
+      const anchors = async (indices: number[]) => {
+        const locs = indices.map((index) => {
+          const match = value.matches[index];
+          return { story: match.story, paraId: match.paraId, offset: match.start };
+        });
+        const answer = await w.send({ type: 'documentRead', read: {
+          kind: 'stickyAnchors', locs, version: reply.read!.version,
+        } });
         expect(answer.ok).toBe(true);
         if (!answer.ok || !answer.read) throw new Error('expected sticky anchor read');
-        const sticky = answer.read.value as ReturnType<typeof engine.encodeStickyPosition> | null;
+        const sticky = answer.read.value as Array<ReturnType<typeof engine.encodeStickyPosition> | null>;
         expect(answer.read.version).toBe(engine.proposalEngine.version());
-        expect(sticky).not.toBeNull();
-        expect(sticky).toEqual(engine.encodeStickyPosition(loc));
-        expect(engine.resolveStickyPosition(sticky!)).toEqual(loc);
-        expect(main.resolveStickyPosition(sticky!)).toEqual(loc);
+        expect(sticky).toHaveLength(locs.length);
+        sticky.forEach((anchor, index) => {
+          expect(anchor).not.toBeNull();
+          expect(anchor).toEqual(engine.encodeStickyPosition(locs[index]));
+          expect(engine.resolveStickyPosition(anchor!)).toEqual(locs[index]);
+          expect(main.resolveStickyPosition(anchor!)).toEqual(locs[index]);
+        });
         return sticky;
       };
-      const firstAnchor = await anchor(0);
-      const cellAnchor = await anchor(2);
-      const lastAnchor = await anchor(value.matches.length - 1);
+      const [firstAnchor, cellAnchor, lastAnchor] = await anchors([0, 2, value.matches.length - 1]);
+      const validLoc = { story: 'body', paraId: '00000001', offset: 0 };
       const invalid = await w.send({ type: 'documentRead', read: {
-        kind: 'stickyAnchor', loc: { story: 'missing', paraId: 'missing', offset: 0 },
+        kind: 'stickyAnchors', version: reply.read.version, locs: [
+          { story: 'missing', paraId: 'missing', offset: 0 }, validLoc,
+        ],
       } });
-      expect(invalid).toMatchObject({ ok: true, read: { value: null } });
+      expect(invalid).toMatchObject({
+        ok: true, read: { value: [null, engine.encodeStickyPosition(validLoc)] },
+      });
       const search = async (caseSensitive: boolean, carry = cellAnchor) => {
         const answer = await w.send({ type: 'documentRead', read: {
           ...read, query: 'Paragraph', caseSensitive, carry,
@@ -2301,8 +2311,8 @@ describe('worker proposals during sliced completion', () => {
         }],
       }).ok).toBe(true);
       main.loadState(engine.encodeState());
-      await anchor(0);
-      await anchor(2);
+      expect(engine.proposalEngine.version()).not.toBe(reply.read.version);
+      await anchors([0, 2]);
       const after = await search(false, firstAnchor);
       expect(after.matches).toHaveLength(42);
       expect(after.carried).toBe(0);

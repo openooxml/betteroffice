@@ -59,6 +59,7 @@ interface SearchRun {
   anchor: YrsStickyPosition | null;
   anchorIndex: number;
   anchorPending: Promise<void> | null;
+  nearby: Map<number, YrsStickyPosition>;
   /** Whether a layout of `version` was shown when the display ranges were mapped. */
   placed: boolean;
 }
@@ -297,19 +298,37 @@ export function useHostSearch({
     const match = run.matches[run.current];
     if (!run.workerBacked || !match) return;
     const { generation, version, current: index, session } = run;
-    run.anchor = null;
-    run.anchorIndex = -1;
-    const main = () => anchorOf(session, match);
+    const indices = [...new Set([
+      index,
+      (index + run.matches.length - 1) % run.matches.length,
+      (index + 1) % run.matches.length,
+    ])];
+    const locs = indices.map((i) => {
+      const { story, paraId, start } = run.matches[i];
+      return { story, paraId, offset: start };
+    });
+    if (!run.nearby.has(index)) {
+      run.anchor = null;
+      run.anchorIndex = -1;
+    }
+    const main = () => indices.map((i) => anchorOf(session, run.matches[i]));
     const authority = workerProposalAuthority(session);
     const pending = (authority
-      ? authority.stickyAnchor({ story: match.story, paraId: match.paraId, offset: match.start }, main)
-      : Promise.resolve(main())
-    ).then((anchor) => {
+      ? authority.stickyAnchors(locs, version, main)
+      : Promise.resolve({ version: session.version(), value: main() })
+    ).then((read) => {
       const live = runRef.current;
       if (generationRef.current === generation && pagedEditorRef.current?.getYrsSession() === session &&
         live?.generation === generation && live.version === version && live.current === index) {
-        live.anchor = anchor;
-        live.anchorIndex = index;
+        if (read.version === version || !live.nearby.has(index)) {
+          live.anchor = read.value[0] ?? null;
+          live.anchorIndex = index;
+        }
+        if (read.version === version) {
+          read.value.forEach((anchor, i) => {
+            if (anchor) live.nearby.set(indices[i], anchor);
+          });
+        }
       }
     }).catch(() => {}).finally(() => {
       const live = runRef.current;
@@ -337,6 +356,7 @@ export function useHostSearch({
         anchor: anchorOf(session, matches[current]),
         anchorIndex: current,
         anchorPending: null,
+        nearby: new Map(),
         placed: shown === null ? fresh : shown === version,
       };
     },
@@ -391,6 +411,7 @@ export function useHostSearch({
               anchor: null,
               anchorIndex: -1,
               anchorPending: null,
+              nearby: new Map(),
               placed: shown === null ? refresh.fresh : shown === read.version,
             };
           } else {
@@ -443,10 +464,15 @@ export function useHostSearch({
       if (!run) return null;
       if (run.matches.length === 0 || !Number.isInteger(index)) return stateOf(run);
       const current = ((index % run.matches.length) + run.matches.length) % run.matches.length;
-      const next = { ...run, current };
+      const next = { ...run, current, nearby: new Map(run.nearby) };
+      const nearby = next.nearby.get(current);
       if (!run.workerBacked) {
         next.anchor = anchorOf(run.session, run.matches[current]);
         next.anchorIndex = current;
+      } else if (nearby) {
+        next.anchor = nearby;
+        next.anchorIndex = current;
+        next.anchorPending = null;
       } else if (current !== run.current) {
         next.anchor = null;
         next.anchorIndex = -1;
@@ -455,8 +481,8 @@ export function useHostSearch({
       if (refreshRef.current?.generation === next.generation) refreshRef.current.revealing = true;
       publish(next);
       if (runRef.current === next && next.generation === generationRef.current) {
-        if (next.workerBacked && (current !== run.current ||
-          (next.anchorIndex !== current && !next.anchorPending))) requestAnchor(next);
+        if (next.workerBacked && (nearby ? next.session.version() === next.version :
+          current !== run.current || (next.anchorIndex !== current && !next.anchorPending))) requestAnchor(next);
         reveal(run.matches[current].displayFrom, run.version);
       }
       return stateOf(runRef.current);
@@ -517,6 +543,7 @@ export function useHostSearch({
         anchor: workerBacked ? null : anchorOf(session, matches[current]),
         anchorIndex: workerBacked ? -1 : current,
         anchorPending: null,
+        nearby: new Map(),
         placed: shown === null || shown === version,
       };
       publish(run);
