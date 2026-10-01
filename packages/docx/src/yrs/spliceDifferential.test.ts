@@ -161,16 +161,13 @@ function relationships(all: Record<string, string>, part: string): Map<string, s
 const MARKER =
   /<w:(commentRangeStart|commentRangeEnd|commentReference|bookmarkStart|bookmarkEnd|ins|del|moveFrom|moveTo|moveFromRangeStart|moveFromRangeEnd|moveToRangeStart|moveToRangeEnd|fldChar|fldSimple|footnoteReference|endnoteReference|permStart|permEnd|hyperlink)\b((?:[^>"']|"[^"]*"|'[^']*')*)>/g;
 
-/**
- * The range, revision, field, note and link markers of `xml`, link targets resolved and a move
- * read as the deletion and insertion the model holds it as.
- */
+/** The range, revision, field, note and link markers of `xml`, link targets resolved. */
 function markers(xml: string, links: Map<string, string>): string[] {
   return [...xml.matchAll(MARKER)].map(([, name, attributes]) => {
     const value = (key: string) => new RegExp(`\\s${key}="([^"]*)"`).exec(attributes!)?.[1];
     const relationship = value('r:id');
     return [
-      name === 'moveFrom' ? 'del' : name === 'moveTo' ? 'ins' : name,
+      name,
       value('w:id'),
       value('w:name'),
       value('w:author'),
@@ -182,7 +179,16 @@ function markers(xml: string, links: Map<string, string>): string[] {
   });
 }
 
+/**
+ * `wanted` markers missing from `held`. The model holds a move as a deletion and an insertion, so
+ * a held `moveFrom` or `moveTo` stands for a wanted `del` or `ins` with the same id and author.
+ */
 function missing(wanted: string[], held: string[]): string[] {
+  const asRevision: Record<string, string> = { moveFrom: 'del', moveTo: 'ins' };
+  held = held.map((marker) => {
+    const [name, ...rest] = marker.split('|');
+    return asRevision[name!] ? [asRevision[name!], ...rest].join('|') : marker;
+  });
   const counts = new Map<string, number>();
   for (const marker of held) counts.set(marker, (counts.get(marker) ?? 0) + 1);
   return wanted.filter((marker) => {
@@ -203,6 +209,22 @@ function unpaired(xml: string): Set<string> {
     open.set(key, (open.get(key) ?? 0) + (edge === 'Start' ? 1 : -1));
   }
   return new Set([...open].filter(([, count]) => count !== 0).map(([key]) => key));
+}
+
+const MOVE_RANGE =
+  /<w:(moveFromRangeStart|moveToRangeStart)\b(?:[^>"']|"[^"]*"|'[^']*')*?\sw:name="([^"]*)"/g;
+
+/** Move names of `xml` holding only one of their two ranges, and `(containers)` for a half-move. */
+function unpairedMoves(xml: string): Set<string> {
+  const halves = new Map<string, Set<string>>();
+  for (const [, half, name] of xml.matchAll(MOVE_RANGE)) {
+    if (!halves.has(name!)) halves.set(name!, new Set());
+    halves.get(name!)!.add(half!);
+  }
+  const unpaired = new Set([...halves].filter(([, held]) => held.size !== 2).map(([name]) => name));
+  const containers = (name: string) => (xml.match(new RegExp(`<w:${name}[\\s>]`, 'g')) ?? []).length;
+  if ((containers('moveFrom') === 0) !== (containers('moveTo') === 0)) unpaired.add('(containers)');
+  return unpaired;
 }
 
 const strayAmpersands = (xml: string) =>
@@ -388,6 +410,9 @@ describe('a spliced session save', () => {
             ]);
             const broken = [...unpaired(xml)].filter((key) => !allowed.has(key));
             if (broken.length > 0) fail(`${part} unpaired ranges ${broken.join(', ')}`);
+            const pairedBefore = unpairedMoves(original[part] ?? '');
+            const lostMoves = [...unpairedMoves(xml)].filter((name) => !pairedBefore.has(name));
+            if (lostMoves.length > 0) fail(`${part} moves without their other half ${lostMoves.join(', ')}`);
           }
           if (texts(await open(splicedBytes)).join('\n') !== texts(await open(wholeBytes)).join('\n')) {
             fail('reopened paragraph texts differ from the whole-part save');
