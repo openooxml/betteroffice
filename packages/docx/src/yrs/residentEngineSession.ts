@@ -34,6 +34,7 @@ export type ResidentEngineSession = Pick<
   | 'beginRegionLayout'
   | 'buildDisplayListFrame'
   | 'buildDisplayPagesFrame'
+  | 'releaseDisplayPagesFrame'
   | 'clearFonts'
   | 'destroy'
   | 'encodeStateVector'
@@ -70,6 +71,8 @@ export type ResidentEngineSession = Pick<
   setWindowedIncrementalBuilds(enabled: boolean): void;
   /** Parses and seeds a DOCX; returns the host metadata JSON the main thread decodes. */
   openDocx(bytes: Uint8Array, digest?: string, generation?: string): string;
+  /** Opens a display-only preview of the first `blocks` body blocks; null when it refuses. */
+  openDocxPreview(bytes: Uint8Array, blocks: number): string | null;
   /** The whole document state as one yrs v1 update. */
   encodeState(): Uint8Array;
   /** Tracked changes in the document, leaving out the revisions in `excluding`. */
@@ -173,6 +176,15 @@ export async function createResidentEngineSession(
         session.open_docx(bytes, true, generation, digest),
         (token) => (token.startsWith('media:') ? (session.media_data_url(token) ?? null) : null)
       ),
+    openDocxPreview: (bytes, blocks) => {
+      const json = session.open_docx_preview(bytes, blocks);
+      return json === undefined
+        ? null
+        : resolveHostJsonCommentMedia(
+            json,
+            (token) => (token.startsWith('media:') ? (session.media_data_url(token) ?? null) : null)
+          );
+    },
     encodeState: () => session.encode_state(),
     revisionCount: (excluding) =>
       (JSON.parse(session.list_revisions()) as { revisionId: string }[]).filter(
@@ -205,6 +217,10 @@ export async function createResidentEngineSession(
     setWindowedIncrementalBuilds: (enabled) => session.set_windowed_incremental_builds(enabled),
     buildDisplayPagesFrame: (pages, expectedFrameEpoch) =>
       session.build_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch),
+    releaseDisplayPagesFrame: (pages, expectedFrameEpoch) => {
+      const frame = session.release_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch);
+      return frame.length === 0 ? null : frame;
+    },
     residentCaretSnapshot: () =>
       JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
     selection: () => JSON.parse(session.selection()) as YrsSelection | null,

@@ -568,8 +568,9 @@ fn layout_table_with_position(
 /// `outside` flip with page parity. Only when the wrap gutters on both sides of
 /// the table fall below the minimum wrap segment (24px) does the pen advance
 /// past the table plus its `w:bottomFromText` distance, since no line could
-/// wrap beside it. In a single column, text-anchored full-width tables that
-/// cross the bottom boundary use row fragmentation and retain their X position.
+/// wrap beside it. In a single column, text-anchored tables that cross the
+/// bottom boundary use row fragmentation and retain their X position; text
+/// after a side-wrapped one resumes beside its last fragment.
 /// Page-relative full-width tables advance when inline collisions cannot reflow.
 pub fn layout_floating_table(
     block: &TableBlock,
@@ -701,18 +702,39 @@ pub fn layout_floating_table(
         let next_content_width = paginator.get_content_width();
         return layout_floating_table(block, measure, paginator, next_content_width);
     }
-    if full_width
-        && (content_width - column_width).abs() < f64::EPSILON
+    if (content_width - column_width).abs() < f64::EPSILON
         && vertical == "text"
         && !matches!(floating.tblp_x_spec.as_deref(), Some("inside" | "outside"))
         && y >= state.pen_y
         && y + measure.total_height > state.content_limit
     {
+        let pen_y = state.pen_y;
+        let spacing = paginator.spacing(state_idx);
+        if !full_width {
+            paginator.set_spacing(state_idx, (0.0, spacing.1));
+        }
         paginator.set_pen_y(state_idx, y);
         layout_table_with_position(block, measure, paginator, Some(x))?;
         let last_state = paginator.get_current();
-        let bottom = paginator.state(last_state).pen_y + finite(floating.bottom_from_text).max(0.0);
-        paginator.set_pen_y(last_state, bottom);
+        let resume = if full_width {
+            paginator.state(last_state).pen_y + finite(floating.bottom_from_text).max(0.0)
+        } else if last_state == state_idx {
+            paginator.set_spacing(state_idx, spacing);
+            pen_y
+        } else {
+            paginator.set_spacing(last_state, (0.0, f64::INFINITY));
+            let last = paginator.state(last_state);
+            paginator.pages[last.page_index]
+                .fragments
+                .iter()
+                .rev()
+                .find_map(|fragment| match fragment {
+                    Fragment::Table(table) if table.block_id == block.id => Some(table.y),
+                    _ => None,
+                })
+                .unwrap_or(last.content_top)
+        };
+        paginator.set_pen_y(last_state, resume);
         return Ok(());
     }
 

@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:t
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { createRef, useCallback, useEffect, useRef, useState } from 'react';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
   createYrsSession,
@@ -29,12 +29,13 @@ import { isLayoutQueued, revisionPreviewKey, revisionPreviewKeyOf, sourceVersion
 import * as replicaHelpers from '../internals/workerOpenReplica';
 import { registeredWorkerProposalAuthority, workerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { DocxEditorRef } from '../../DocxEditor';
-import type { PagedEditorRef } from '../PagedEditor';
+import { PagedEditor, type PagedEditorRef } from '../PagedEditor';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
 import { createCommentIdAllocator } from '../commentFactories';
 import { DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
 import { usePagedEditorCommandBridge, type PagedEditorCommandBridge } from './usePagedEditorRefApi';
 import { YrsInput, type YrsInputRef } from '../YrsInput';
+import { flushEditorInput } from '../editorBatches';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -107,6 +108,7 @@ function installWorker(options: {
   holdSync?: boolean;
   holdCompletion?: boolean;
   holdReply?: (request: ResidentEngineWorkerRequest) => boolean;
+  refusePreview?: boolean;
 } = {}) {
   const workers: InProcessResidentWorker[] = [];
   const posted: ResidentEngineWorkerRequest[] = [];
@@ -160,6 +162,10 @@ function installWorker(options: {
           void options.failReplacementSnapshot.then(() => worker.onmessage?.({
             data: { id: request.id, ok: false, error: 'snapshot failed' },
           } as MessageEvent));
+        } else if (options.refusePreview && request.type === 'open' && request.previewBlocks !== undefined) {
+          queueMicrotask(() => worker.onmessage?.({
+            data: { id: request.id, ok: true, previewRefused: true },
+          } as MessageEvent));
         } else if ((options.failOpen && request.type === 'open') ||
             (options.failState && request.type === 'encodeState')) {
           queueMicrotask(() => worker.onmessage?.({
@@ -209,6 +215,8 @@ interface HarnessProps {
   experimentalWorkerOpen: boolean;
   hydrateOnDemand?: boolean;
   previewFirstPage?: boolean;
+  /** Opens the first-page preview in the worker, as DocxEditor does. */
+  workerPreview?: boolean;
   openInWorker?: OpenInWorker;
   source: Uint8Array;
   generation: number;
@@ -283,6 +291,7 @@ function useHarness(props: HarnessProps) {
       shownEngine: renderer.presentedEngine,
       workerOpen: props.experimentalWorkerOpen ? {
         openInWorker,
+        ...(props.workerPreview ? { openPreviewInWorker: renderer.openPreviewInWorker } : {}),
         workerProposals: props.workerProposals,
         refreshWorkerLayout: () => workerRelayout.current?.(),
         renderedFrame: renderer.status === 'ready' ? renderer.displayList : null,
@@ -419,6 +428,187 @@ function useHarness(props: HarnessProps) {
 }
 
 const initialProps: HarnessProps = { experimentalWorkerOpen: true, source: bytes, generation: 1 };
+
+test('eager worker open preserves input and command order after first paint until loadState completes', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+  });
+  const source = await longFixture(1);
+  const editor = createRef<PagedEditorRef>();
+  const bridge = { current: null as PagedEditorCommandBridge | null };
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  function Editable() {
+    harness = useHarness({ ...initialProps, source, hydrateOnDemand: false });
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={harness.renderer.layoutInWorker}
+        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries}
+        commandBridgeRef={bridge} />
+    </>;
+  }
+  const view = render(<Editable />);
+  await waitFor(() => expect(harness.host).not.toBeNull());
+  act(() => harness.pipeline.runLayoutPipeline());
+  await waitFor(() => expect(harness.renderer.status).toBe('ready'));
+  act(() => harness.presentFrame());
+  await waitFor(() => expect(posted.some((r) => r.type === 'encodeState')).toBe(true));
+  const session = harness.core.session!;
+  const load = spyOn(session, 'loadState');
+  const insert = spyOn(session, 'insertText');
+  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  expect(textarea.readOnly).toBe(false);
+  await waitFor(() => expect(document.activeElement).toBe(textarea));
+  const queries = harness.renderer.queries!;
+  const caret = queries.caretRect(6)!;
+  const size = queries.pageSize(0)!;
+  const canvas = canvasHost.current!.firstElementChild!;
+  canvas.getBoundingClientRect = () => ({ left: 0, top: 0, right: size.width,
+    bottom: size.height, ...size }) as DOMRect;
+  fireEvent.mouseDown(canvas, { clientX: caret.x, clientY: caret.y + caret.height / 2, button: 0 });
+  fireEvent.mouseUp(window, { clientX: caret.x, clientY: caret.y + caret.height / 2, button: 0 });
+  fireEvent.input(textarea, { target: { value: 'A' } });
+  let seen: string[] = [];
+  const command = bridge.current!.runAfterPendingInput(() => {
+    seen = session.paragraphs('body').map((p) => p.text);
+  });
+  fireEvent.input(textarea, { target: { value: 'B' } });
+  fireEvent.keyDown(textarea, { key: 'Enter' });
+  fireEvent.paste(textarea, { clipboardData: { getData: () => 'P\r\nQ' } });
+  fireEvent.compositionStart(textarea);
+  textarea.value = '日本';
+  fireEvent.compositionEnd(textarea, { data: '日本' });
+  await act(async () => { await Promise.resolve(); });
+  fireEvent.input(textarea);
+  fireEvent.keyDown(textarea, { key: 'Backspace' });
+  const flush = editor.current!.flushPendingInput();
+  await act(async () => { await Promise.resolve(); });
+  expect(editor.current!.hasPendingInput()).toBe(true);
+  expect(insert).not.toHaveBeenCalled();
+  expect(load).not.toHaveBeenCalled();
+  expect(seen).toEqual([]);
+  await act(async () => { workers[0].release(); await command; await flush; });
+  expect(load).toHaveBeenCalledTimes(1);
+  expect(seen[0]).toBe('FirstA paragraph');
+  expect(session.paragraphs('body').slice(0, 3).map((p) => p.text))
+    .toEqual(['FirstAB', 'P', 'Q日 paragraph']);
+  expect(session.selection()?.head.offset).toBe(2);
+  expect(textarea.value).toBe('');
+  load.mockRestore();
+  insert.mockRestore();
+});
+
+test('read-only on-demand worker open supersedes pending select-all when admitting a command', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+  });
+  const source = await longFixture(2);
+  const editor = createRef<PagedEditorRef>();
+  const bridge = { current: null as PagedEditorCommandBridge | null };
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  function ReadOnly() {
+    harness = useHarness({ ...initialProps, source, readOnly: true, hydrateOnDemand: true });
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core} readOnly
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={harness.renderer.layoutInWorker}
+        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries}
+        commandBridgeRef={bridge} />
+    </>;
+  }
+  const view = render(<ReadOnly />);
+  await waitFor(() => expect(harness.renderer.status).toBe('ready'));
+  act(() => harness.presentFrame());
+  const session = harness.core.session!;
+  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  expect(textarea.readOnly).toBe(true);
+  expect(harness.core.replicaReady).toBe(false);
+  fireEvent.keyDown(textarea, { key: 'a', ctrlKey: true });
+  await waitFor(() => expect(posted.some((r) => r.type === 'encodeState')).toBe(true));
+  const command = bridge.current!.runAfterPendingInput(() => session.selection());
+  let selected!: ReturnType<YrsSession['selection']>;
+  await act(async () => { workers[0].release(); selected = await command; });
+  const paragraphs = session.paragraphs('body');
+  expect(selected).not.toEqual({
+    anchor: { story: 'body', paraId: paragraphs[0].paraId, offset: 0 },
+    head: { story: 'body', paraId: paragraphs.at(-1)!.paraId, offset: paragraphs.at(-1)!.text.length },
+  });
+});
+
+test('eager worker-open hydration failure rejects flush, command and save during composition', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+  });
+  const source = await longFixture(1);
+  const editor = createRef<PagedEditorRef>();
+  const bridge = { current: null as PagedEditorCommandBridge | null };
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  function Editable() {
+    harness = useHarness({ ...initialProps, source, hydrateOnDemand: false });
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={harness.renderer.layoutInWorker}
+        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries}
+        commandBridgeRef={bridge} />
+    </>;
+  }
+  const view = render(<Editable />);
+  await waitFor(() => expect(harness.host).not.toBeNull());
+  act(() => harness.pipeline.runLayoutPipeline());
+  await waitFor(() => expect(harness.renderer.status).toBe('ready'));
+  act(() => harness.presentFrame());
+  await waitFor(() => expect(posted.some((r) => r.type === 'encodeState')).toBe(true));
+  const session = harness.core.session!;
+  const failure = new Error('hydration failed');
+  const open = spyOn(session, 'openDocx').mockImplementation(() => { throw failure; });
+  const insert = spyOn(session, 'insertText');
+  const operation = mock(() => true);
+  try {
+    const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    expect(textarea.readOnly).toBe(false);
+    expect(harness.core.replicaReady).toBe(false);
+    fireEvent.compositionStart(textarea);
+    textarea.value = '日本';
+    const calls = Promise.allSettled([
+      editor.current!.flushPendingInput(),
+      bridge.current!.runAfterPendingInput(operation),
+      flushEditorInput(editor, true),
+    ]);
+    const request = posted.find((r) => r.type === 'encodeState')!;
+    await act(async () => {
+      workers[0].onmessage?.({
+        data: { id: request.id, ok: false, error: failure.message },
+      } as MessageEvent<ResidentEngineWorkerResponse>);
+    });
+    const settled = await calls;
+    expect(settled[0]).toEqual({ status: 'rejected', reason: failure });
+    expect(settled[1]).toEqual({ status: 'rejected', reason: failure });
+    expect(settled[2]).toEqual({
+      status: 'fulfilled', value: { ok: false, code: 'input-failed', error: failure },
+    });
+    expect(editor.current!.hasPendingInput()).toBe(true);
+    expect(textarea.value).toBe('日本');
+    expect(operation).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
+    expect(session.storyIds()).toEqual([]);
+  } finally {
+    open.mockRestore();
+    insert.mockRestore();
+  }
+}, 3_000);
 
 function texts(session: YrsSession) {
   return Object.fromEntries(session.storyIds().sort().map((story) => [
@@ -1071,6 +1261,146 @@ test('a preloaded spare worker takes the open that starts alongside the preview'
     await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(result.current.core.session));
     expect(workers).toHaveLength(1);
     expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
+
+test('a preview the worker opens lays out there, and the full open queues right behind its layout', async () => {
+  const fullOpen = (request: ResidentEngineWorkerRequest) =>
+    request.type === 'open' && request.previewBlocks === undefined;
+  const { workers, posted, reply } = installWorker({ holdReply: fullOpen });
+  const frames = holdFrames();
+  try {
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, previewFirstPage: true, workerPreview: true, source: longBytes },
+    });
+    await waitFor(() => expect(result.current.core.previewing).toBe(true));
+    const preview = result.current.core.session!;
+    expect(preview.isDisplayOnly()).toBe(true);
+    // This thread parsed none of it: the worker holds the preview.
+    expect(preview.storyIds()).toEqual([]);
+    expect(posted.map((request) => request.type)).toEqual(['open']);
+    expect(posted[0].type === 'open' && posted[0].previewBlocks).toBeGreaterThan(0);
+
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(preview));
+    expect(result.current.renderer.status).toBe('ready');
+    expect(result.current.renderer.displayList?.pages.length).toBeGreaterThan(0);
+    // The preview paints here: the full open runs in that worker next.
+    expect(result.current.renderer.workerSurfacesActive).toBe(false);
+    await waitFor(() => expect(posted.filter(fullOpen)).toHaveLength(1));
+    const bootstrap = posted.findIndex((request) => request.type === 'bootstrap');
+    expect(bootstrap).toBeGreaterThan(0);
+    expect(posted[bootstrap].type === 'bootstrap' && posted[bootstrap].opened).toBe(true);
+    expect(posted.findIndex(fullOpen)).toBeGreaterThan(bootstrap);
+    expect(posted.map((request) => request.type)).not.toContain('encodeState');
+    expect(preview.storyIds()).toEqual([]);
+    expect(result.current.mainOpens).toEqual([]);
+    // A relayout of the preview after the full open took its worker over keeps the shown
+    // layout: it asks nothing of the worker and opens nothing here.
+    const shownLayout = result.current.pipeline.layout;
+    const before = posted.length;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(posted.length).toBe(before);
+    expect(result.current.pipeline.layout).toBe(shownLayout);
+    expect(preview.storyIds()).toEqual([]);
+    expect(result.current.errors).toEqual([]);
+
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await act(async () => {
+      reply(posted.find(fullOpen)!);
+    });
+    await waitFor(() => expect(result.current.core.previewing).toBe(false));
+    const full = result.current.core.session!;
+    expect(full).not.toBe(preview);
+    expect(full.isDisplayOnly()).toBe(false);
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(full));
+    expect(workers).toHaveLength(1);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(2);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
+
+test('a worker preview loaded here before its first layout stops using the worker', async () => {
+  const { workers, posted } = installWorker();
+  const frames = holdFrames();
+  try {
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, previewFirstPage: true, workerPreview: true, source: longBytes },
+    });
+    await waitFor(() => expect(result.current.core.previewing).toBe(true));
+    const preview = result.current.core.session!;
+    expect(preview.storyIds()).toEqual([]);
+    // Something on this thread needs the preview's content before its first layout.
+    await act(async () => {
+      await requestWorkerOpenReplica(preview);
+    });
+    expect(preview.storyIds()).not.toEqual([]);
+    expect(preview.isDisplayOnly()).toBe(true);
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(preview));
+    expect(posted.map((request) => request.type)).not.toContain('bootstrap');
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await waitFor(() => expect(result.current.core.previewing).toBe(false));
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() =>
+      expect(result.current.renderer.presentedEngine).toBe(result.current.core.session)
+    );
+    // The preview's worker went with it; the full document opened in a new one.
+    expect(workers).toHaveLength(2);
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
+
+test('a package the worker cannot preview opens its preview here and the full document in that worker', async () => {
+  const { workers, posted } = installWorker({ refusePreview: true });
+  const frames = holdFrames();
+  try {
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, previewFirstPage: true, workerPreview: true, source: longBytes },
+    });
+    await waitFor(() => expect(result.current.core.previewing).toBe(true));
+    const preview = result.current.core.session!;
+    expect(preview.isDisplayOnly()).toBe(true);
+    expect(preview.storyIds()).not.toEqual([]);
+    await waitFor(() => expect(posted.filter((request) => request.type === 'open')).toHaveLength(2));
+    expect(
+      posted
+        .filter((request) => request.type === 'open')
+        .map((request) => request.type === 'open' && request.previewBlocks !== undefined)
+    ).toEqual([true, false]);
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(preview));
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await waitFor(() => expect(result.current.core.previewing).toBe(false));
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() =>
+      expect(result.current.renderer.presentedEngine).toBe(result.current.core.session)
+    );
+    expect(workers).toHaveLength(1);
     expect(result.current.errors).toEqual([]);
     unmount();
   } finally {

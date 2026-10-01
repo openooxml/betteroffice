@@ -409,6 +409,7 @@ mod tests {
     fn make_line(line_height: f64) -> TypesetRow {
         TypesetRow {
             line_height,
+            marker_tab_offset: None,
             ..Default::default()
         }
     }

@@ -53,6 +53,25 @@
     </w:p>
     <w:p>
       <w:r>
+        <w:drawing>
+          <wp:inline>
+            <wp:extent cx="914400" cy="457200"/>
+            <wp:docPr id="3" name="Outlined picture" descr="Scheme outline"/>
+            <a:graphic>
+              <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+                <pic:pic>
+                  <pic:nvPicPr><pic:cNvPr id="3" name="image1.png"/><pic:cNvPicPr/></pic:nvPicPr>
+                  <pic:blipFill><a:blip r:embed="rId4"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>
+                  <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:ln><a:solidFill><a:schemeClr val="bg1"><a:lumMod val="75000"/></a:schemeClr></a:solidFill></a:ln></pic:spPr>
+                </pic:pic>
+              </a:graphicData>
+            </a:graphic>
+          </wp:inline>
+        </w:drawing>
+      </w:r>
+    </w:p>
+    <w:p>
+      <w:r>
         <w:pict>
           <v:shape id="VmlPicture1" style="position:absolute;width:72pt;height:72pt;margin-left:9pt" alt="VML logo">
             <v:imagedata r:id="rId4" o:title="Logo"/>
