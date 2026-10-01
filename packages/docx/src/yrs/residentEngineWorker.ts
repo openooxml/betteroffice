@@ -94,32 +94,75 @@ interface SlicedCompletion {
   /** Body blocks a step measures, tuned toward `COMPLETION_SLICE_MS`. */
   blocks: number;
   begun: boolean;
-  idleUntil?: number;
   /** Times a change in between abandoned the pass. */
   restarts: number;
 }
 let slicedCompletion: SlicedCompletion | null = null;
 const COMPLETION_SLICE_MS = 24;
 const COMPLETION_RESTARTS = 3;
-const INPUT_IDLE_MS = 300;
 const ALL_BLOCKS = 2 ** 32 - 1;
+
+// Foreground requests (what the user is waiting on) hold background work back:
+// a background step neither starts while one is queued nor until the user has
+// been idle for FOREGROUND_IDLE_MS since the last one arrived.
+const FOREGROUND_IDLE_MS = 300;
+let foregroundQueued = 0;
+let backgroundIdleUntil = 0;
+
+/** Whether a request is one the user waits on. */
+function isForegroundRequest(request: ResidentEngineWorkerRequest): boolean {
+  switch (request.type) {
+    case 'applyInput':
+    case 'applyDelete':
+    case 'proposal':
+    case 'documentRead':
+      return true;
+    case 'sync':
+      return request.foreground === true;
+    default:
+      return false;
+  }
+}
+
+/** Milliseconds background work must still wait, or 0 when it may run now. */
+function backgroundDelay(): number {
+  if (foregroundQueued > 0) return 1;
+  return Math.max(0, backgroundIdleUntil - performance.now());
+}
 
 // The request being handled, and the requests answered with a trap.
 let handlingId = 0;
 const trappedIds = new Set<number>();
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
-  enqueue(() => handle(event.data), event.data.id);
+  const request = event.data;
+  if (!isForegroundRequest(request)) {
+    enqueue(() => handle(request), request.id);
+    return;
+  }
+  foregroundQueued += 1;
+  backgroundIdleUntil = performance.now() + FOREGROUND_IDLE_MS;
+  enqueue(
+    () => handle(request),
+    request.id,
+    () => true,
+    () => (foregroundQueued -= 1)
+  );
 };
 
-/** `current` drops an operation whose request was answered while it waited. */
+/**
+ * `current` drops an operation whose request was answered while it waited;
+ * `settled` runs once its turn has come, whether or not it ran.
+ */
 function enqueue(
   operation: () => Promise<void> | void,
   id: number,
-  current: () => boolean = () => true
+  current: () => boolean = () => true,
+  settled?: () => void
 ): void {
   operations = operations
     .then(() => {
+      settled?.();
       if (!current()) return;
       if (trap) throw trap;
       handlingId = id;
@@ -599,8 +642,8 @@ async function applyProvisionalInput(
         headersFootersJson: session.retainedHeadersFootersJson(),
       };
     } else if (slicedCompletion) {
+      // The edit abandoned the pass; it begins again once the user is idle.
       slicedCompletion.begun = false;
-      slicedCompletion.idleUntil = performance.now() + INPUT_IDLE_MS;
     }
     const frame = session.buildDisplayListFrame(
       frameExtras(layout.extras, layout.layoutExtras, layoutJson),
@@ -819,13 +862,10 @@ function scheduleCompletionSlice(completion: SlicedCompletion): void {
 /** One bounded step of a sliced completion, which then queues the next. */
 async function completionSlice(completion: SlicedCompletion): Promise<void> {
   if (!session || slicedCompletion !== completion || !incompleteLayout) return;
-  if (completion.idleUntil !== undefined) {
-    const remaining = completion.idleUntil - performance.now();
-    if (remaining > 0) {
-      setTimeout(() => scheduleCompletionSlice(completion), remaining);
-      return;
-    }
-    delete completion.idleUntil;
+  const delay = backgroundDelay();
+  if (delay > 0) {
+    setTimeout(() => scheduleCompletionSlice(completion), delay);
+    return;
   }
   let progress;
   if (!completion.begun) {

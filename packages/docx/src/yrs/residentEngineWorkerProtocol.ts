@@ -112,6 +112,8 @@ export type ResidentEngineWorkerRequest =
       displayWindow?: [number, number];
       retainBuiltPages?: boolean;
       provisionalPages?: number;
+      /** A relayout the user waits on, which holds background work back like an edit. */
+      foreground?: boolean;
     }
   | {
       id: number;

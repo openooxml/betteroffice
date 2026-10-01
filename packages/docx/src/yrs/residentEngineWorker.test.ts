@@ -1357,6 +1357,40 @@ describe('sliced layout completion', () => {
     expect(calls).not.toContain('whole');
   });
 
+  test('the completion resumes only once input has been idle for a while', async () => {
+    const { w, calls, onResume, bootstrap } = steppedWorker(100_000);
+    await bootstrap();
+    w.harness.caret = { pageId: '1', pageIndex: 0, x: 10, y: 10, height: 12 };
+    let answered = 0;
+    let resumed = 0;
+    Object.assign(w.harness.session, {
+      insertText: () => calls.push('input'),
+      layoutDocumentWithRegionsPrefixRetainedJson: () => provisional,
+    });
+    const begin = w.harness.session.beginRegionLayout;
+    Object.assign(w.harness.session, {
+      beginRegionLayout: (input: string) => {
+        if (answered && !resumed) resumed = performance.now();
+        return begin(input);
+      },
+    });
+    onResume.push(() => {
+      const loc = { story: 'body', paraId: '1', offset: 0 };
+      void w
+        .send({
+          type: 'applyInput', text: 'x', selection: { anchor: loc, head: loc },
+          expectedFrameEpoch: w.harness.delta!.frameEpoch, profile: false, paintCaret: false,
+        })
+        .then(() => (answered = performance.now()));
+    });
+    const completed = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 50_000,
+    });
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(answered).toBeGreaterThan(0);
+    expect(resumed - answered).toBeGreaterThanOrEqual(250);
+  });
+
   test('input whose prefix covers the document answers before the waiting completion', async () => {
     const { w, calls, onResume, bootstrap } = steppedWorker(100);
     await bootstrap();
