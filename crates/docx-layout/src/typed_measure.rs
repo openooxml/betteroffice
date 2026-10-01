@@ -334,6 +334,7 @@ fn row_from_out(row: ooxml_text::TypesetRowOut) -> TypesetRow {
                 .collect()
         }),
         float_skip_before: row.float_skip_before.map(normalize_output),
+        marker_tab_offset: row.marker_tab_offset.map(normalize_output),
         run_advances: row.run_advances.map(|advances| {
             advances
                 .into_iter()
@@ -692,6 +693,36 @@ mod parity_tests {
             "list-marker",
             &paragraph(vec![text_run("numbered item text")], Some(attrs)),
             220.0,
+            &fixture.config,
+            None,
+            0.0,
+        );
+    }
+
+    /// Marker tab offsets survive typed conversion with JSON-equivalent precision.
+    #[test]
+    fn list_marker_tab_overrun_matches_the_json_path() {
+        let fixture = fixture();
+        let attrs = crate::types::ParagraphAttrs {
+            list_marker: Some("1.2.3.4.5.6.7.8.9".to_owned()),
+            list_marker_font_family: Some("Liberation Sans".to_owned()),
+            list_marker_font_size: Some(12.0),
+            indent: Some(crate::types::ParagraphIndent {
+                left: Some(113.4),
+                right: None,
+                first_line: None,
+                hanging: Some(113.4),
+            }),
+            default_tab_stop_twips: Some(709.0),
+            ..Default::default()
+        };
+        assert_parity(
+            "list-marker-tab-overrun",
+            &paragraph(
+                vec![text_run(&"numbered item text ".repeat(20))],
+                Some(attrs),
+            ),
+            400.0,
             &fixture.config,
             None,
             0.0,
