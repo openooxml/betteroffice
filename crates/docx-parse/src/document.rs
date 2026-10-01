@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use indexmap::IndexMap;
 use quick_xml::Reader;
-use quick_xml::events::Event;
+use quick_xml::events::{BytesDecl, Event};
 use serde::{Deserialize, Serialize};
 
 use crate::block::{BlockContent, StoryParser, transparent_children};
@@ -167,14 +167,17 @@ pub(crate) fn streaming_body_cut(
     let repaired = crate::xml::escape_stray_ampersands(xml);
     let xml = repaired.as_ref();
     let part = "word/document.xml";
-    budget.charge_xml_bytes(xml.len(), part)?;
-    let mut reader = Reader::from_reader(xml);
-    reader.config_mut().check_end_names = true;
     let error = |offset, message: String| ParseError::MalformedXml {
         part: part.to_owned(),
         offset,
         message,
     };
+    if starts_with_a_byte_order_mark(xml) {
+        return Err(error(0, "byte order mark".to_owned()));
+    }
+    budget.charge_xml_bytes(xml.len(), part)?;
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().check_end_names = true;
     let mut stack: Vec<CutFrame> = Vec::new();
     let mut drawings: Vec<CutDrawing> = Vec::new();
     let mut roots = 0;
@@ -412,6 +415,9 @@ pub(crate) fn streaming_body_cut(
                     part: part.to_owned(),
                 });
             }
+            Event::Decl(ref declaration) if declares_an_encoding_other_than_utf8(declaration) => {
+                return Err(error(0, "declared encoding other than UTF-8".to_owned()));
+            }
             Event::Decl(_) | Event::PI(_) | Event::Comment(_) => {}
             Event::Eof => break,
         }
@@ -425,13 +431,24 @@ pub(crate) fn streaming_body_cut(
     Ok(refused)
 }
 
-pub(crate) fn body_prefix(xml: &[u8], keep: usize) -> Option<Vec<u8>> {
-    // The kept ranges are reader offsets into `xml`, which a BOM shifts; other encodings
-    // decode attribute names the byte scan does not see.
-    if [&b"\xEF\xBB\xBF"[..], b"\xFE\xFF", b"\xFF\xFE"]
+// Reader offsets index the input and raw attribute names are the decoded ones only for
+// UTF-8 without a byte order mark.
+fn starts_with_a_byte_order_mark(xml: &[u8]) -> bool {
+    [&b"\xEF\xBB\xBF"[..], b"\xFE\xFF", b"\xFF\xFE"]
         .iter()
         .any(|bom| xml.starts_with(bom))
-    {
+}
+
+fn declares_an_encoding_other_than_utf8(declaration: &BytesDecl<'_>) -> bool {
+    match declaration.encoding() {
+        Some(Ok(encoding)) => !encoding.eq_ignore_ascii_case(b"utf-8"),
+        Some(Err(_)) => true,
+        None => false,
+    }
+}
+
+pub(crate) fn body_prefix(xml: &[u8], keep: usize) -> Option<Vec<u8>> {
+    if starts_with_a_byte_order_mark(xml) {
         return None;
     }
     let mut reader = Reader::from_reader(xml);
@@ -538,13 +555,8 @@ pub(crate) fn body_prefix(xml: &[u8], keep: usize) -> Option<Vec<u8>> {
                 }
                 stack.pop()?;
             }
-            Event::Decl(ref declaration) => {
-                if let Some(encoding) = declaration.encoding() {
-                    let encoding = encoding.ok()?;
-                    if !encoding.eq_ignore_ascii_case(b"utf-8") {
-                        return None;
-                    }
-                }
+            Event::Decl(ref declaration) if declares_an_encoding_other_than_utf8(declaration) => {
+                return None;
             }
             Event::DocType(_) => return None,
             Event::Eof => break,
@@ -1296,16 +1308,23 @@ mod tests {
     }
 
     #[test]
-    fn body_prefix_falls_back_for_a_bom_or_a_declared_encoding_other_than_utf8() {
+    fn the_streaming_cut_falls_back_for_a_bom_or_a_declared_encoding_other_than_utf8() {
         let body = "<w:body><w:p/><w:p/><w:p/><w:sectPr/></w:body></w:document>";
         let plain = format!("<w:document xmlns:w=\"w\">{body}");
         assert!(body_prefix(plain.as_bytes(), 1).is_some());
+        assert!(!streaming_refuses_a_body_cut(plain.as_bytes()).unwrap());
         let declared = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>{plain}");
         assert!(body_prefix(declared.as_bytes(), 1).is_some());
+        assert!(!streaming_refuses_a_body_cut(declared.as_bytes()).unwrap());
         let bom = [b"\xEF\xBB\xBF".as_slice(), plain.as_bytes()].concat();
         assert!(body_prefix(&bom, 1).is_none());
+        assert!(streaming_refuses_a_body_cut(&bom).is_err());
         let other = format!("<?xml version=\"1.0\" encoding=\"ISO-2022-JP\"?>{plain}");
         assert!(body_prefix(other.as_bytes(), 1).is_none());
+        assert!(streaming_refuses_a_body_cut(other.as_bytes()).is_err());
+        let refusing = "<?xml version='1.0' encoding='ISO-2022-JP'?><w:document xmlns:w='w' \
+            xmlns:wp='wp'><w:body><wp:anchor simplePos='1'/></w:body></w:document>";
+        assert!(streaming_refuses_a_body_cut(refusing.as_bytes()).is_err());
     }
 
     #[test]
