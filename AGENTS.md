@@ -59,11 +59,11 @@ full open finishes. Off by default."
 
 ## PR review
 
-- After opening a PR, wait for Greptile's review before handing it back as ready.
+- After opening a PR, wait for the automated reviews: Greptile and kyora review (the `kyora-review[bot]` summary and the `kyora review` check). Both have the same standing. If both review, address both; if only one is present, iterate on that one's findings.
 - Read every finding, assess whether it is valid, and tell the user what you propose to fix or dismiss. Fix valid findings within the authorized scope and run the relevant checks.
 - Reply to each review thread with the fix and validation, or explain why the finding does not apply. Resolve threads only once addressed.
-- After pushing fixes, post `@greptileai review` in a PR comment and wait for the new review. Repeat until there are no actionable findings.
-- Verify that Greptile reviewed the latest commit; resolving a thread does not replace a fresh review. If review is unavailable or still pending, report that explicitly and do not present the PR as cleared.
+- After pushing fixes, request a fresh review from each reviewer present (`@greptileai review`, `@kyora-review review`) and wait for it. Repeat until there are no actionable findings.
+- Verify that each reviewer present reviewed the latest commit (kyora's summary names the commit it reviewed); resolving a thread does not replace a fresh review. If a review is unavailable or still pending, report that explicitly and do not present the PR as cleared.
 
 ## Review artifacts
 

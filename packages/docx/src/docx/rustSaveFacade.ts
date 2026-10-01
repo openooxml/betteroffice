@@ -54,7 +54,8 @@ export async function writeDocumentWithRust(
   options: RustSaveOptions = {},
   selective?: RustSelectiveSave,
   determinism?: RustSaveDeterminism,
-  paragraphIds?: RustParagraphIds
+  paragraphIds?: RustParagraphIds,
+  skipMutations = false
 ): Promise<RustSaveResult> {
   await preloadOpcWasm();
   await preloadParseWasm();
@@ -97,7 +98,7 @@ export async function writeDocumentWithRust(
   assertSafeSaveTree(request, 'save');
   const bytes = writeDocxS13Wire(JSON.stringify(request), new Uint8Array(originalBuffer));
   const buffer = exactArrayBuffer(bytes);
-  if (!selective) applyRustSaveMutations(document, originalBuffer, buffer);
+  if (!selective && !skipMutations) applyRustSaveMutations(document, originalBuffer, buffer);
   return { buffer, determinism: fixed };
 }
 

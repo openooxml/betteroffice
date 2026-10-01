@@ -129,13 +129,20 @@ struct InlineUnit {
     content: UnitContent,
     attrs: JsonObject,
     pm_size: u32,
-    comment_id: Option<String>,
     marks: Vec<Mark>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CommentMark {
+    unit: usize,
+    start: bool,
+    id: String,
 }
 
 struct StoryPlan {
     story_id: String,
     units: Vec<InlineUnit>,
+    comment_marks: Vec<CommentMark>,
     comment_coverage: Vec<(String, Vec<(u32, u32)>)>,
     /// How many units [`StoryPlan::width`] has measured, and their width.
     measured: (usize, u32),
@@ -1365,23 +1372,16 @@ fn with_mark(marks: &[Mark], next: Mark) -> Vec<Mark> {
         .collect()
 }
 
-fn text_unit(text: String, marks: &[Mark], comment_id: Option<String>) -> InlineUnit {
+fn text_unit(text: String, marks: &[Mark]) -> InlineUnit {
     InlineUnit {
         pm_size: utf16_len(&text),
         content: UnitContent::Text(text),
         attrs: marks_to_attrs(marks),
-        comment_id,
         marks: marks.to_vec(),
     }
 }
 
-fn embed_unit(
-    kind: &str,
-    payload: JsonObject,
-    marks: &[Mark],
-    comment_id: Option<String>,
-    pm_size: u32,
-) -> InlineUnit {
+fn embed_unit(kind: &str, payload: JsonObject, marks: &[Mark], pm_size: u32) -> InlineUnit {
     InlineUnit {
         content: UnitContent::Embed {
             kind: kind.to_owned(),
@@ -1389,7 +1389,6 @@ fn embed_unit(
         },
         attrs: marks_to_attrs(marks),
         pm_size,
-        comment_id,
         marks: marks.to_vec(),
     }
 }
@@ -1756,12 +1755,7 @@ fn hyperlink_mark(hyperlink: &Value) -> Mark {
     )
 }
 
-fn note_ref_unit(
-    id: &Value,
-    note_type: &str,
-    marks: &[Mark],
-    comment_id: Option<String>,
-) -> InlineUnit {
+fn note_ref_unit(id: &Value, note_type: &str, marks: &[Mark]) -> InlineUnit {
     let note_mark = mark(
         "footnoteRef",
         ordered_object([
@@ -1782,7 +1776,6 @@ fn note_ref_unit(
             json!({ "footnoteRefId": id })
         }),
         &all_marks,
-        comment_id,
         1,
     )
 }
@@ -1799,23 +1792,22 @@ fn drawing_marks(marks: &[Mark]) -> Vec<Mark> {
 fn run_content_to_units(
     content: &Value,
     marks: &[Mark],
-    comment_id: Option<String>,
     source: &BTreeMap<String, String>,
 ) -> Vec<InlineUnit> {
     match string(field(Some(content), "type")).unwrap_or_default() {
         "text" => string(field(Some(content), "text"))
             .filter(|text| !text.is_empty())
-            .map(|text| vec![text_unit(text.to_owned(), marks, comment_id)])
+            .map(|text| vec![text_unit(text.to_owned(), marks)])
             .unwrap_or_default(),
-        "tab" => vec![text_unit("\t".to_owned(), marks, comment_id)],
+        "tab" => vec![text_unit("\t".to_owned(), marks)],
         "break"
             if string(field(Some(content), "breakType"))
                 .is_none_or(|kind| kind == "textWrapping") =>
         {
-            vec![embed_unit("break", JsonObject::new(), marks, comment_id, 1)]
+            vec![embed_unit("break", JsonObject::new(), marks, 1)]
         }
-        "softHyphen" => vec![text_unit("\u{00ad}".to_owned(), marks, comment_id)],
-        "noBreakHyphen" => vec![text_unit("\u{2011}".to_owned(), marks, comment_id)],
+        "softHyphen" => vec![text_unit("\u{00ad}".to_owned(), marks)],
+        "noBreakHyphen" => vec![text_unit("\u{2011}".to_owned(), marks)],
         "symbol" => {
             let Some(codepoint) = string(field(Some(content), "char"))
                 .and_then(|value| u32::from_str_radix(value, 16).ok())
@@ -1843,7 +1835,6 @@ fn run_content_to_units(
             vec![text_unit(
                 codepoint.to_string(),
                 &with_mark(marks, symbol_mark),
-                comment_id,
             )]
         }
         "commentReference" => {
@@ -1864,20 +1855,18 @@ fn run_content_to_units(
                     .unwrap()
                     .insert("commentId".to_owned(), id.clone());
             }
-            vec![embed_unit("field", map_from_value(value), &[], None, 1)]
+            vec![embed_unit("field", map_from_value(value), &[], 1)]
         }
         "drawing" => vec![embed_unit(
             "image",
             image_payload(field(Some(content), "image").unwrap_or(&Value::Null)),
             &drawing_marks(marks),
-            None,
             1,
         )],
         "horizontalRule" => vec![embed_unit(
             "horizontalRule",
             map_from_value(json!({"rule": field(Some(content), "rule")})),
             marks,
-            comment_id,
             1,
         )],
         "shape" => vec![embed_unit(
@@ -1887,7 +1876,6 @@ fn run_content_to_units(
                 source,
             ),
             &drawing_marks(marks),
-            None,
             1,
         )],
         "chart" => vec![embed_unit(
@@ -1897,15 +1885,14 @@ fn run_content_to_units(
                 source,
             ),
             &drawing_marks(marks),
-            None,
             1,
         )],
         "footnoteRef" => field(Some(content), "id")
-            .map(|id| note_ref_unit(id, "footnote", marks, comment_id))
+            .map(|id| note_ref_unit(id, "footnote", marks))
             .into_iter()
             .collect(),
         "endnoteRef" => field(Some(content), "id")
-            .map(|id| note_ref_unit(id, "endnote", marks, comment_id))
+            .map(|id| note_ref_unit(id, "endnote", marks))
             .into_iter()
             .collect(),
         _ => vec![],
@@ -1916,7 +1903,6 @@ fn run_to_units(
     run: &Value,
     style_formatting: Option<&Value>,
     styles: &StyleResolver,
-    comment_id: Option<String>,
     extra_marks: &[Mark],
     source: &BTreeMap<String, String>,
 ) -> Vec<InlineUnit> {
@@ -1926,7 +1912,7 @@ fn run_to_units(
         .collect();
     array(field(Some(run), "content"))
         .iter()
-        .flat_map(|content| run_content_to_units(content, &marks, comment_id.clone(), source))
+        .flat_map(|content| run_content_to_units(content, &marks, source))
         .collect()
 }
 
@@ -1951,7 +1937,7 @@ fn hyperlink_to_units(
                     .chain(std::iter::once(link.clone()))
                     .collect();
                 for content in array(field(Some(child), "content")) {
-                    units.extend(run_content_to_units(content, &marks, None, source));
+                    units.extend(run_content_to_units(content, &marks, source));
                 }
             }
             "simpleField" | "complexField" => {
@@ -1962,7 +1948,7 @@ fn hyperlink_to_units(
                     .chain(extra_marks.iter().cloned())
                     .chain(std::iter::once(link.clone()))
                     .collect();
-                units.push(embed_unit("field", payload, &marks, None, 1));
+                units.push(embed_unit("field", payload, &marks, 1));
             }
             "mathEquation" => {
                 let marks: Vec<Mark> = extra_marks
@@ -1970,7 +1956,7 @@ fn hyperlink_to_units(
                     .cloned()
                     .chain(std::iter::once(link.clone()))
                     .collect();
-                units.push(embed_unit("math", math_payload(child), &marks, None, 1));
+                units.push(embed_unit("math", math_payload(child), &marks, 1));
             }
             _ => {}
         }
@@ -2010,7 +1996,7 @@ fn field_to_units(
     {
         opaque_sequences.extend(nested_sequence_names(value));
         let (payload, marks) = field_payload(value, style_formatting, source);
-        return vec![embed_unit("field", payload, &marks, None, 1)];
+        return vec![embed_unit("field", payload, &marks, 1)];
     }
     let mut units = Vec::new();
     let mut children = Vec::new();
@@ -2030,7 +2016,7 @@ fn field_to_units(
             Some("simpleField") => {
                 opaque_sequences.extend(nested_sequence_names(child));
                 let (payload, marks) = field_payload(child, style_formatting, source);
-                vec![embed_unit("field", payload, &marks, None, 1)]
+                vec![embed_unit("field", payload, &marks, 1)]
             }
             _ => continue,
         };
@@ -2072,7 +2058,7 @@ fn field_to_units(
         "resultProjection".to_owned(),
         json!({"id":projection_id, "children":children}),
     );
-    units.push(embed_unit("field", payload, &marks, None, 1));
+    units.push(embed_unit("field", payload, &marks, 1));
     units
 }
 
@@ -2092,7 +2078,6 @@ fn tracked_to_units(
     content: &Value,
     style_formatting: Option<&Value>,
     styles: &StyleResolver,
-    comment_id: Option<String>,
     source: &BTreeMap<String, String>,
     opaque_sequences: &mut Vec<String>,
 ) -> Vec<InlineUnit> {
@@ -2114,7 +2099,6 @@ fn tracked_to_units(
                 child,
                 style_formatting,
                 styles,
-                comment_id.clone(),
                 std::slice::from_ref(&marker),
                 source,
             ));
@@ -2122,7 +2106,7 @@ fn tracked_to_units(
             if string(field(Some(child), "type")) == Some("hyperlink") {
                 opaque_sequences.extend(hyperlink_sequence_names(child));
             }
-            let mut linked = hyperlink_to_units(
+            let linked = hyperlink_to_units(
                 child,
                 style_formatting,
                 styles,
@@ -2130,11 +2114,6 @@ fn tracked_to_units(
                 source,
                 opaque_sequences,
             );
-            if let Some(comment_id) = &comment_id {
-                for unit in &mut linked {
-                    unit.comment_id = Some(comment_id.clone());
-                }
-            }
             units.extend(linked);
         }
     }
@@ -2206,7 +2185,7 @@ fn sdt_payload(
     for child in array(field(Some(sdt), "content")) {
         match string(field(Some(child), "type")).unwrap_or_default() {
             "run" => {
-                for unit in run_to_units(child, style_formatting, styles, None, &[], source) {
+                for unit in run_to_units(child, style_formatting, styles, &[], source) {
                     append(&mut content, unit);
                 }
             }
@@ -2226,7 +2205,7 @@ fn sdt_payload(
             "simpleField" | "complexField" => {
                 opaque_sequences.extend(nested_sequence_names(child));
                 let (payload, marks) = field_payload(child, style_formatting, source);
-                append(&mut content, embed_unit("field", payload, &marks, None, 1));
+                append(&mut content, embed_unit("field", payload, &marks, 1));
             }
             "inlineSdt" => append(
                 &mut content,
@@ -2234,13 +2213,12 @@ fn sdt_payload(
                     "sdt",
                     sdt_payload(child, style_formatting, styles, source, opaque_sequences),
                     &[],
-                    None,
                     1,
                 ),
             ),
             "mathEquation" => append(
                 &mut content,
-                embed_unit("math", math_payload(child), &[], None, 1),
+                embed_unit("math", math_payload(child), &[], 1),
             ),
             _ => {}
         }
@@ -2324,7 +2302,7 @@ fn flow_break_offsets(run: &Value, source: &BTreeMap<String, String>) -> Vec<Val
             breaks.push(json!({ "offset": offset, "type": kind }));
             continue;
         }
-        offset += units_text(&run_content_to_units(content, &[], None, source))
+        offset += units_text(&run_content_to_units(content, &[], source))
             .encode_utf16()
             .count();
     }
@@ -2741,7 +2719,7 @@ fn run_breaks(
                 revision: revision.cloned(),
                 control_offset: None,
             }),
-            None => offset += run_content_to_units(content, &[], None, source).len(),
+            None => offset += run_content_to_units(content, &[], source).len(),
         }
     }
     offset
@@ -2767,7 +2745,7 @@ fn control_break_offsets(
         for item in array(field(Some(run), "content")) {
             match break_kind(item) {
                 Some(_) => offsets.push(vec![at]),
-                None => at += units_width(&run_content_to_units(item, &[], None, source)),
+                None => at += units_width(&run_content_to_units(item, &[], source)),
             }
         }
         at
@@ -2995,6 +2973,7 @@ fn unmodelled_nodes(content: &Value, output: &mut Vec<String>) {
 /// A paragraph's units and pilcrow properties, with the content seeding leaves out of them.
 struct ParagraphUnits {
     units: Vec<InlineUnit>,
+    comment_marks: Vec<CommentMark>,
     ppr: JsonObject,
     omitted: Vec<Omitted>,
     breaks: Vec<FlowBreak>,
@@ -3011,37 +2990,25 @@ fn paragraph_units(
     let mut omitted = Vec::new();
     let mut breaks = Vec::new();
     let mut opaque_sequences = Vec::new();
-    let mut active_comments: Vec<String> = Vec::new();
+    let mut comment_marks = Vec::new();
     let mut boundaries = Some(Vec::new());
     let mut unit_counts = Vec::new();
     let style_formatting = paragraph_style_formatting(paragraph, styles, extra_run_formatting);
     for content in array(field(Some(paragraph), "content")) {
         let start = units.len();
-        let comment_id = active_comments.first().cloned();
         match string(field(Some(content), "type")).unwrap_or_default() {
-            "commentRangeStart" => {
+            "commentRangeStart" | "commentRangeEnd" => {
                 if let Some(id) = field(Some(content), "id") {
-                    let id = js_string(id);
-                    if !active_comments.contains(&id) {
-                        active_comments.push(id);
-                    }
-                }
-            }
-            "commentRangeEnd" => {
-                if let Some(id) = field(Some(content), "id") {
-                    let id = js_string(id);
-                    active_comments.retain(|candidate| candidate != &id);
+                    comment_marks.push(CommentMark {
+                        unit: start,
+                        start: string(field(Some(content), "type")) == Some("commentRangeStart"),
+                        id: js_string(id),
+                    });
                 }
             }
             "run" => {
-                let run_units = run_to_units(
-                    content,
-                    style_formatting.as_ref(),
-                    styles,
-                    comment_id,
-                    &[],
-                    source,
-                );
+                let run_units =
+                    run_to_units(content, style_formatting.as_ref(), styles, &[], source);
                 if let Some(run_boundaries) = &mut boundaries {
                     if let Some(boundary) = run_boundary(content, &run_units, source) {
                         run_boundaries.push(boundary);
@@ -3054,7 +3021,7 @@ fn paragraph_units(
             "hyperlink" => {
                 boundaries = None;
                 opaque_sequences.extend(hyperlink_sequence_names(content));
-                let mut linked = hyperlink_to_units(
+                let linked = hyperlink_to_units(
                     content,
                     style_formatting.as_ref(),
                     styles,
@@ -3062,9 +3029,6 @@ fn paragraph_units(
                     source,
                     &mut opaque_sequences,
                 );
-                for unit in &mut linked {
-                    unit.comment_id.clone_from(&comment_id);
-                }
                 units.extend(linked);
             }
             "simpleField" | "complexField" => {
@@ -3090,7 +3054,6 @@ fn paragraph_units(
                         &mut opaque_sequences,
                     ),
                     &[],
-                    None,
                     2,
                 ));
             }
@@ -3100,14 +3063,13 @@ fn paragraph_units(
                     content,
                     style_formatting.as_ref(),
                     styles,
-                    comment_id,
                     source,
                     &mut opaque_sequences,
                 ));
             }
             "mathEquation" => {
                 boundaries = None;
-                units.push(embed_unit("math", math_payload(content), &[], None, 1));
+                units.push(embed_unit("math", math_payload(content), &[], 1));
             }
             "bookmarkStart" | "bookmarkEnd" | "rawXml" => {}
             _ => boundaries = None,
@@ -3135,6 +3097,7 @@ fn paragraph_units(
     ParagraphUnits {
         ppr: para_attrs_to_ppr(attrs),
         units,
+        comment_marks,
         omitted,
         breaks,
         opaque_sequences,
@@ -3146,7 +3109,7 @@ fn run_prefix_units(run: &Value, source: &BTreeMap<String, String>) -> usize {
     array(field(Some(run), "content"))
         .iter()
         .take_while(|item| string(field(Some(item), "type")) != Some("opaqueDrawing"))
-        .map(|item| run_content_to_units(item, &[], None, source).len())
+        .map(|item| run_content_to_units(item, &[], source).len())
         .sum()
 }
 
@@ -4121,33 +4084,58 @@ fn opens_with_field_separator(block: &Value) -> bool {
 }
 
 fn add_comment_coverage(plan: &mut StoryPlan) {
-    let mut offset = 0u32;
-    for unit in &plan.units {
-        let width = match &unit.content {
-            UnitContent::Text(text) => utf16_len(text),
-            UnitContent::Embed { .. } => 1,
-        };
-        if let Some(comment_id) = &unit.comment_id {
-            let index = plan
-                .comment_coverage
-                .iter()
-                .position(|(id, _)| id == comment_id);
-            if let Some(index) = index {
-                let ranges = &mut plan.comment_coverage[index].1;
-                if let Some(previous) = ranges.last_mut()
-                    && previous.1 == offset
-                {
-                    previous.1 = offset + width;
-                } else {
-                    ranges.push((offset, offset + width));
-                }
+    let add_range =
+        |coverage: &mut Vec<(String, Vec<(u32, u32)>)>, id: &str, start: u32, end: u32| {
+            if end <= start {
+                return;
+            }
+            let ranges = &mut coverage.iter_mut().find(|(key, _)| key == id).unwrap().1;
+            if let Some(previous) = ranges.last_mut()
+                && previous.1 == start
+            {
+                previous.1 = end;
             } else {
-                plan.comment_coverage
-                    .push((comment_id.clone(), vec![(offset, offset + width)]));
+                ranges.push((start, end));
+            }
+        };
+    let mut offset = 0u32;
+    let mut open: Vec<(String, u32, Option<u32>)> = Vec::new();
+    let mut marks = plan.comment_marks.iter().peekable();
+    for unit_index in 0..=plan.units.len() {
+        while marks.peek().is_some_and(|mark| mark.unit == unit_index) {
+            let mark = marks.next().unwrap();
+            if mark.start {
+                if open.iter().any(|(id, _, _)| id == &mark.id) {
+                    continue;
+                }
+                if !plan.comment_coverage.iter().any(|(id, _)| id == &mark.id) {
+                    plan.comment_coverage.push((mark.id.clone(), Vec::new()));
+                }
+                open.push((mark.id.clone(), offset, None));
+            } else if let Some(index) = open.iter().position(|(id, _, _)| id == &mark.id) {
+                let (id, start, _) = open.remove(index);
+                add_range(&mut plan.comment_coverage, &id, start, offset);
             }
         }
-        offset += width;
+        if let Some(unit) = plan.units.get(unit_index) {
+            if matches!(&unit.content, UnitContent::Embed { kind, .. } if kind == "pilcrow") {
+                for (_, _, paragraph_end) in &mut open {
+                    paragraph_end.get_or_insert(offset);
+                }
+            }
+            offset += unit_width(unit);
+        }
     }
+    for (id, start, paragraph_end) in open {
+        add_range(
+            &mut plan.comment_coverage,
+            &id,
+            start,
+            paragraph_end.unwrap_or(offset),
+        );
+    }
+    plan.comment_coverage
+        .retain(|(_, ranges)| !ranges.is_empty());
 }
 
 /// For each row of `table`, the source index of every cell seeding keeps as a cell story.
@@ -4340,6 +4328,7 @@ fn visit_story(
     context.plans.push(StoryPlan {
         story_id: story_id.clone(),
         units: Vec::new(),
+        comment_marks: Vec::new(),
         comment_coverage: Vec::new(),
         measured: (0, 0),
     });
@@ -4416,13 +4405,13 @@ fn visit_story(
                             kind,
                             JsonObject::new(),
                             &[],
-                            None,
                             1,
                         ));
                     }
                 }
                 let ParagraphUnits {
                     mut units,
+                    comment_marks,
                     mut ppr,
                     omitted,
                     breaks,
@@ -4477,10 +4466,17 @@ fn visit_story(
                     &mut result_table_ids,
                 );
                 bind_field_code_blocks(&mut units, &story_id, blocks, block_index, cursor);
+                let unit_base = context.plans[plan_index].units.len();
+                context.plans[plan_index]
+                    .comment_marks
+                    .extend(comment_marks.into_iter().map(|mark| CommentMark {
+                        unit: unit_base + mark.unit,
+                        ..mark
+                    }));
                 context.plans[plan_index].units.extend(units);
                 context.plans[plan_index]
                     .units
-                    .push(embed_unit("pilcrow", ppr, &[], None, 1));
+                    .push(embed_unit("pilcrow", ppr, &[], 1));
                 if options.include_page_breaks {
                     for kind in trailing_breaks {
                         embeds.push(context.plans[plan_index].width());
@@ -4488,7 +4484,6 @@ fn visit_story(
                             kind,
                             JsonObject::new(),
                             &[],
-                            None,
                             1,
                         ));
                     }
@@ -4565,7 +4560,7 @@ fn visit_story(
                 }
                 context.plans[plan_index]
                     .units
-                    .push(embed_unit("table", payload, &[], None, 1));
+                    .push(embed_unit("table", payload, &[], 1));
                 let previous_table_formatting = context.styles.table_paragraph_formatting.take();
                 let sources = source_cells(block);
                 for (row_index, row) in table.rows.into_iter().enumerate() {
@@ -4616,13 +4611,9 @@ fn visit_story(
                     &context.source_json,
                 );
                 properties.insert("story".to_owned(), Value::String(child_story.clone()));
-                context.plans[plan_index].units.push(embed_unit(
-                    "blockSdt",
-                    properties,
-                    &[],
-                    None,
-                    1,
-                ));
+                context.plans[plan_index]
+                    .units
+                    .push(embed_unit("blockSdt", properties, &[], 1));
                 if let Some(steps) = context.locators.get(&story_id) {
                     let mut steps = steps.clone();
                     steps.extend([Step::Block(block_index), Step::Content]);
@@ -4669,7 +4660,6 @@ fn visit_story(
                 (PARA_ORIGIN): SYNTHETIC
             })),
             &[],
-            None,
             1,
         ));
         context.paragraphs.push(SeededParagraph {
@@ -6966,7 +6956,7 @@ mod tests {
                 "formatting": { "styleId": "FootnoteReference" },
                 "content": [{ "type": content_type }, { "type": content_type }],
             });
-            let units = run_to_units(&run, None, &styles, None, &[], &BTreeMap::new());
+            let units = run_to_units(&run, None, &styles, &[], &BTreeMap::new());
             assert!(units.is_empty());
             let boundary = run_boundary(&run, &units, &BTreeMap::new()).unwrap();
             assert_eq!(
@@ -6988,7 +6978,7 @@ mod tests {
                 { "type": "break", "breakType": "textWrapping" },
             ],
         });
-        let units = run_to_units(&wrapping, None, &styles, None, &[], &BTreeMap::new());
+        let units = run_to_units(&wrapping, None, &styles, &[], &BTreeMap::new());
         // A wrapping break is an inline unit, so the run keeps no boundary.
         assert!(run_boundary(&wrapping, &units, &BTreeMap::new()).is_none());
 
@@ -7001,7 +6991,7 @@ mod tests {
                 { "type": "break", "breakType": "column" },
             ],
         });
-        let units = run_to_units(&run, None, &styles, None, &[], &BTreeMap::new());
+        let units = run_to_units(&run, None, &styles, &[], &BTreeMap::new());
         let boundary = run_boundary(&run, &units, &BTreeMap::new()).unwrap();
         assert_eq!(boundary.get("text"), Some(&json!("ABC")));
         assert_eq!(
@@ -7015,7 +7005,12 @@ mod tests {
 
     #[test]
     fn reused_run_units_keep_comments_out_of_saved_boundaries() {
-        let ParagraphUnits { units, ppr, .. } = paragraph_units(
+        let ParagraphUnits {
+            units,
+            comment_marks,
+            ppr,
+            ..
+        } = paragraph_units(
             &json!({"content": [
                 {"type": "commentRangeStart", "id": 7},
                 {"type": "run", "formatting": {"bold": true}, "content": [
@@ -7031,12 +7026,21 @@ mod tests {
             &BTreeMap::new(),
         );
         assert_eq!(units.len(), 4);
-        assert!(
-            units[..3]
-                .iter()
-                .all(|unit| unit.comment_id.as_deref() == Some("7"))
+        assert_eq!(
+            comment_marks,
+            [
+                CommentMark {
+                    unit: 0,
+                    start: true,
+                    id: "7".to_owned()
+                },
+                CommentMark {
+                    unit: 3,
+                    start: false,
+                    id: "7".to_owned()
+                },
+            ]
         );
-        assert!(units[3].comment_id.is_none());
         assert_eq!(units[3].pm_size, 1);
         let boundaries = ppr["_originalRunBoundaries"].as_array().unwrap();
         assert_eq!(boundaries.len(), 2);
@@ -7052,7 +7056,11 @@ mod tests {
                 {"type": "run", "content": [{"type": "text", "text": text}]}
             ]})
         };
-        let ParagraphUnits { units, .. } = paragraph_units(
+        let ParagraphUnits {
+            units,
+            comment_marks,
+            ..
+        } = paragraph_units(
             &json!({"content": [
                 {"type": "run", "content": [{"type": "text", "text": "See "}]},
                 {"type": "commentRangeStart", "id": 7},
@@ -7064,11 +7072,95 @@ mod tests {
             None,
             &BTreeMap::new(),
         );
-        let comments: Vec<_> = units
-            .iter()
-            .map(|unit| unit.comment_id.as_deref())
-            .collect();
-        assert_eq!(comments, [None, Some("7"), None]);
+        assert_eq!(units.len(), 3);
+        assert_eq!(units_text(&units), "See the link");
+        assert!(
+            units[1..]
+                .iter()
+                .all(|unit| unit.marks.iter().any(|mark| mark.name == "hyperlink"))
+        );
+        assert_eq!(
+            comment_marks,
+            [
+                CommentMark {
+                    unit: 1,
+                    start: true,
+                    id: "7".to_owned()
+                },
+                CommentMark {
+                    unit: 2,
+                    start: false,
+                    id: "7".to_owned()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn comment_coverage_follows_overlapping_and_cross_paragraph_markers() {
+        let mut context = LoweringContext {
+            styles: StyleResolver::new(None),
+            theme: None,
+            source_json: Arc::new(BTreeMap::new()),
+            plans: Vec::new(),
+            compatibility_mode: 12,
+            root: "body".to_owned(),
+            paragraphs: Vec::new(),
+            opaque_sequences: Vec::new(),
+            source: SourceStructure::default(),
+            provenance: Provenance::default(),
+            locators: HashMap::new(),
+        };
+        visit_story(
+            &mut context,
+            "body".to_owned(),
+            &[
+                json!({"type": "paragraph", "content": [
+                    {"type": "commentRangeStart", "id": 3},
+                    run("A"),
+                    {"type": "commentRangeStart", "id": 4},
+                    run("B"),
+                    {"type": "commentRangeEnd", "id": 3},
+                    run("C"),
+                    {"type": "commentRangeEnd", "id": 4}
+                ]}),
+                json!({"type": "paragraph", "content": [
+                    run("Before "),
+                    {"type": "commentRangeStart", "id": 5},
+                    run("first")
+                ]}),
+                json!({"type": "paragraph", "content": [
+                    run("second"),
+                    {"type": "commentRangeEnd", "id": 5},
+                    run(" after "),
+                    {"type": "commentRangeStart", "id": 6},
+                    run("tail")
+                ]}),
+                json!({"type": "paragraph", "content": [
+                    {"type": "commentRangeEnd", "id": 7},
+                    {"type": "commentRangeStart", "id": 0},
+                    run("😀"),
+                    {"type": "commentRangeEnd", "id": 0},
+                    run("!")
+                ]}),
+            ],
+            StoryOptions {
+                include_page_breaks: false,
+                append_body_tail: false,
+                seed_comments: true,
+            },
+        );
+        assert_eq!(context.plans.len(), 1);
+        assert_eq!(
+            context.plans[0].comment_coverage,
+            [
+                ("3".to_owned(), vec![(0, 2)]),
+                ("4".to_owned(), vec![(1, 3)]),
+                ("5".to_owned(), vec![(11, 23)]),
+                ("6".to_owned(), vec![(30, 34)]),
+                ("0".to_owned(), vec![(35, 37)]),
+            ]
+        );
     }
 
     #[test]
@@ -7081,7 +7173,6 @@ mod tests {
             }),
             None,
             &styles,
-            None,
             &[],
             &BTreeMap::new(),
         );

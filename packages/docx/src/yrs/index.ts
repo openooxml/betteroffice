@@ -19,6 +19,7 @@ import type { Document } from '../types/document';
 import type { CompatibilityFlags } from '../docx/settingsParser';
 import { resolveCommentMedia } from './hostMedia';
 import { registerSessionInternals } from './sessionInternals';
+import { editorSaveKeys } from './editorSaveKeys';
 import { noteYrsStoriesDirty } from './yrsToDocument';
 import type {
   DocxParagraphAnchor,
@@ -131,6 +132,8 @@ export {
   type DocxSavedParagraph,
   type DocxSessionSave,
 } from './saveYrsDocx';
+export { sessionSourcePackage } from './sessionInternals';
+export { editorSaveKeys } from './editorSaveKeys';
 export * from './yrsPositionProjection';
 export * from './proposalGeometry';
 
@@ -1601,6 +1604,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   };
   let residentFontsRevision = 0;
   let docxSource: Uint8Array | null = null;
+  let docxSourceKeys: ReturnType<typeof editorSaveKeys> | null = null;
 
   const invalidateReadCaches = (): void => {
     cachedSelection = undefined;
@@ -1730,6 +1734,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     });
     const host = withHostMedia(decodeDocxHost(json, source));
     docxSource = source;
+    docxSourceKeys = editorSaveKeys(host.document);
     partialDocument = false;
     return host;
   };
@@ -2730,6 +2735,10 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   };
 
   registerSessionInternals(facade, {
+    sourcePackage: () =>
+      docxSource && docxSourceKeys
+        ? { buffer: docxSourceBuffer(docxSource), keys: docxSourceKeys }
+        : null,
     compareDocx: (original, revised, options) => {
       markDirty('all');
       const json = mutate(() => {
@@ -2738,6 +2747,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         return compared;
       });
       docxSource = original.slice();
+      docxSourceKeys = null;
       return json;
     },
     finishComparedDocx: (bytes) => session.finish_compared_docx_json(bytes),
