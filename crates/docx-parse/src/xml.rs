@@ -609,84 +609,377 @@ fn repaired(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     escape_stray_ampersands(xml)
 }
 
-/// Whether [`parse_xml`] reads `xml` exactly as written, so that its bytes mean what was read
-/// from them: nothing repaired, UTF-8, one root element, every prefix bound, and none of the
-/// constructs the parser passes over that XML forbids (a declaration after the start, a
-/// malformed comment or processing instruction, `]]>` in character data).
+/// Whether a splice may keep `xml`'s bytes verbatim: [`parse_xml`] reads it without repair, and
+/// it is UTF-8 holding only the plain XML below, a subset of XML 1.0 (Fifth Edition) with
+/// Namespaces in XML 1.0 (Third Edition). Any other part is written whole.
+///
+/// ```text
+/// part        ::= BOM? XMLDecl? S? element S?
+/// XMLDecl     ::= '<?xml' S 'version' Eq Q('1.0') (S 'encoding' Eq Q('UTF-8'))?
+///                 (S 'standalone' Eq Q('yes' | 'no'))? S? '?>'
+/// element     ::= '<' QName (S Attribute)* S? ('/>' | '>' content '</' QName S? '>')
+/// Attribute   ::= QName Eq ('"' ((Char - [<&"]) | Reference)* '"'
+///                         | "'" ((Char - [<&']) | Reference)* "'")
+/// content     ::= ((Char - [<&]) | Reference | element)*
+/// Reference   ::= '&' ('amp' | 'lt' | 'gt' | 'quot' | 'apos') ';'
+///               | '&#' [0-9]+ ';' | '&#x' [0-9a-fA-F]+ ';'
+/// QName       ::= NCName (':' NCName)?
+/// NCName      ::= [A-Za-z_] [A-Za-z0-9._-]*
+/// Eq          ::= S? '=' S?
+/// S           ::= (#x20 | #x9 | #xD | #xA)+
+/// Char        ::= #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+/// ```
+///
+/// `Q(v)` is `v` in single or double quotes, `UTF-8` in any case. Character data holds no `]]>`,
+/// a character reference names a `Char` in at most 12 bytes, and an end tag's name is its start
+/// tag's. So there are no comments, processing instructions, CDATA sections or document type
+/// declarations. Namespaces: every element and attribute prefix is bound (`xml` implicitly), no
+/// element has the `xmlns` prefix, attributes are unique by expanded name, a prefixed declaration
+/// is non-empty, `xmlns` is never declared, `xml` only to its own namespace, and no other prefix or
+/// default to the `xml` or `xmlns` namespace; declaration values hold no reference or whitespace.
 pub fn reads_as_written(xml: &[u8]) -> bool {
-    use quick_xml::name::ResolveResult;
-    use quick_xml::reader::NsReader;
-    if matches!(repaired(xml), std::borrow::Cow::Owned(_)) {
-        return false;
+    matches!(repaired(xml), std::borrow::Cow::Borrowed(_)) && PlainXml::new(xml).accepts()
+}
+
+const XML_NAMESPACE: &[u8] = b"http://www.w3.org/XML/1998/namespace";
+const XMLNS_NAMESPACE: &[u8] = b"http://www.w3.org/2000/xmlns/";
+const UNPREFIXED: &[u8] = b"";
+
+/// A part's attribute: its prefix (empty when unprefixed), local name and raw value.
+type PlainAttribute<'a> = (&'a [u8], &'a [u8], &'a [u8]);
+
+/// The scanner behind [`reads_as_written`].
+struct PlainXml<'a> {
+    xml: &'a [u8],
+    at: usize,
+    /// Open elements' names, each with the length of `bindings` before its start tag.
+    open: Vec<(&'a [u8], usize)>,
+    /// In-scope prefix bindings, innermost last; the default namespace has the empty prefix.
+    bindings: Vec<(&'a [u8], &'a [u8])>,
+    attributes: Vec<PlainAttribute<'a>>,
+    names: Vec<(&'a [u8], &'a [u8])>,
+}
+
+impl<'a> PlainXml<'a> {
+    fn new(xml: &'a [u8]) -> Self {
+        Self {
+            xml,
+            at: 0,
+            open: Vec::new(),
+            bindings: Vec::new(),
+            attributes: Vec::new(),
+            names: Vec::new(),
+        }
     }
-    let mut reader = NsReader::from_reader(xml);
-    reader.config_mut().check_comments = true;
-    reader.config_mut().check_end_names = true;
-    let mut depth = 0usize;
-    let mut roots = 0usize;
-    for index in 0usize.. {
-        let Ok((resolved, event)) = reader.read_resolved_event() else {
-            return false;
-        };
-        if matches!(resolved, ResolveResult::Unknown(_)) {
+
+    fn accepts(mut self) -> bool {
+        let xml = self.xml;
+        if std::str::from_utf8(xml).is_err()
+            || xml.iter().enumerate().any(|(index, &byte)| {
+                (byte < 0x20 && !matches!(byte, b'\t' | b'\n' | b'\r'))
+                    || (byte == 0xEF
+                        && xml.get(index + 1) == Some(&0xBF)
+                        && matches!(xml.get(index + 2), Some(0xBE | 0xBF)))
+            })
+        {
             return false;
         }
-        match event {
-            Event::Eof => return depth == 0 && roots == 1,
-            Event::Decl(declaration) => {
-                let utf8 = match declaration.encoding() {
-                    None => true,
-                    Some(Ok(encoding)) => encoding.eq_ignore_ascii_case(b"utf-8"),
-                    Some(Err(_)) => false,
-                };
-                if index != 0 || !utf8 {
+        self.eat(b"\xEF\xBB\xBF");
+        if xml[self.at..].starts_with(b"<?xml") && !self.declaration() {
+            return false;
+        }
+        let mut roots = 0usize;
+        loop {
+            let start = self.at;
+            while !matches!(xml.get(self.at), None | Some(b'<' | b'&')) {
+                self.at += 1;
+            }
+            let run = &xml[start..self.at];
+            if self.open.is_empty() {
+                if !run.iter().all(is_xml_space) {
                     return false;
                 }
+            } else if run.windows(3).any(|window| window == b"]]>") {
+                return false;
             }
-            Event::PI(instruction) => {
-                if instruction.target().eq_ignore_ascii_case(b"xml") {
-                    return false;
-                }
-            }
-            Event::DocType(_) => return false,
-            Event::Start(ref element) | Event::Empty(ref element) => {
-                if depth == 0 {
-                    roots += 1;
-                }
-                for attribute in element.attributes() {
-                    let Ok(attribute) = attribute else {
-                        return false;
-                    };
-                    if attribute.key.as_namespace_binding().is_none()
-                        && matches!(
-                            reader.resolver().resolve_attribute(attribute.key).0,
-                            ResolveResult::Unknown(_)
-                        )
-                    {
+            match xml.get(self.at) {
+                None => return self.open.is_empty() && roots == 1,
+                Some(b'&') => {
+                    if self.open.is_empty() || !self.reference() {
                         return false;
                     }
                 }
-                if matches!(event, Event::Start(_)) {
-                    depth += 1;
+                Some(_) => {
+                    self.at += 1;
+                    let accepted = if self.eat(b"/") {
+                        self.end_tag()
+                    } else {
+                        if self.open.is_empty() {
+                            roots += 1;
+                        }
+                        roots == 1 && self.start_tag()
+                    };
+                    if !accepted {
+                        return false;
+                    }
                 }
             }
-            Event::End(_) => depth = depth.saturating_sub(1),
-            Event::Text(text) => {
-                if text.windows(3).any(|window| window == b"]]>")
-                    || (depth == 0 && !text.iter().all(u8::is_ascii_whitespace))
-                {
-                    return false;
-                }
-            }
-            Event::CData(_) | Event::GeneralRef(_) => {
-                if depth == 0 {
-                    return false;
-                }
-            }
-            Event::Comment(_) => {}
         }
     }
-    false
+
+    fn declaration(&mut self) -> bool {
+        self.at += b"<?xml".len();
+        if !(self.space()
+            && self.eat(b"version")
+            && self.eq()
+            && self.quoted(|value| value == b"1.0"))
+        {
+            return false;
+        }
+        let mut spaced = self.space();
+        if spaced && self.eat(b"encoding") {
+            if !(self.eq() && self.quoted(|value| value.eq_ignore_ascii_case(b"utf-8"))) {
+                return false;
+            }
+            spaced = self.space();
+        }
+        if spaced && self.eat(b"standalone") {
+            if !(self.eq() && self.quoted(|value| value == b"yes" || value == b"no")) {
+                return false;
+            }
+            self.space();
+        }
+        self.eat(b"?>")
+    }
+
+    fn start_tag(&mut self) -> bool {
+        let Some((name, prefix, _)) = self.qname() else {
+            return false;
+        };
+        let mark = self.bindings.len();
+        let mut attributes = std::mem::take(&mut self.attributes);
+        attributes.clear();
+        let empty = loop {
+            let spaced = self.space();
+            if self.eat(b">") {
+                break false;
+            }
+            if self.eat(b"/>") {
+                break true;
+            }
+            let Some((_, key_prefix, key_local)) = self.qname().filter(|_| spaced) else {
+                return false;
+            };
+            if !self.eq() {
+                return false;
+            }
+            let Some(value) = self.attribute_value() else {
+                return false;
+            };
+            attributes.push((key_prefix, key_local, value));
+        };
+        for &(key_prefix, key_local, value) in &attributes {
+            let declared = match (key_prefix, key_local) {
+                (b"xmlns", b"xmlns") => return false,
+                (b"xmlns", local) => {
+                    if value.is_empty() || (local == b"xml") != (value == XML_NAMESPACE) {
+                        return false;
+                    }
+                    local
+                }
+                (b"", b"xmlns") => {
+                    if value == XML_NAMESPACE {
+                        return false;
+                    }
+                    UNPREFIXED
+                }
+                _ => continue,
+            };
+            if value == XMLNS_NAMESPACE
+                || value
+                    .iter()
+                    .any(|&byte| byte == b'&' || is_xml_space(&byte))
+            {
+                return false;
+            }
+            self.bindings.push((declared, value));
+        }
+        if prefix == b"xmlns" || (!prefix.is_empty() && self.resolve(prefix).is_none()) {
+            return false;
+        }
+        let mut names = std::mem::take(&mut self.names);
+        names.clear();
+        for &(key_prefix, key_local, _) in &attributes {
+            let namespace = match (key_prefix, key_local) {
+                (b"xmlns", _) | (b"", b"xmlns") => XMLNS_NAMESPACE,
+                (b"", _) => UNPREFIXED,
+                _ => match self.resolve(key_prefix) {
+                    Some(namespace) => namespace,
+                    None => return false,
+                },
+            };
+            let local = if key_prefix.is_empty() && key_local == b"xmlns" {
+                UNPREFIXED
+            } else {
+                key_local
+            };
+            names.push((namespace, local));
+        }
+        names.sort_unstable();
+        let unique = names.windows(2).all(|pair| pair[0] != pair[1]);
+        self.attributes = attributes;
+        self.names = names;
+        if !unique {
+            return false;
+        }
+        if empty {
+            self.bindings.truncate(mark);
+        } else {
+            self.open.push((name, mark));
+        }
+        true
+    }
+
+    fn end_tag(&mut self) -> bool {
+        let Some((name, _, _)) = self.qname() else {
+            return false;
+        };
+        self.space();
+        let Some((open, mark)) = self.open.pop() else {
+            return false;
+        };
+        self.bindings.truncate(mark);
+        open == name && self.eat(b">")
+    }
+
+    fn resolve(&self, prefix: &[u8]) -> Option<&'a [u8]> {
+        if prefix == b"xml" {
+            return Some(XML_NAMESPACE);
+        }
+        self.bindings
+            .iter()
+            .rev()
+            .find(|(bound, _)| *bound == prefix)
+            .map(|(_, namespace)| *namespace)
+    }
+
+    fn attribute_value(&mut self) -> Option<&'a [u8]> {
+        let quote = *self
+            .xml
+            .get(self.at)
+            .filter(|&&byte| byte == b'"' || byte == b'\'')?;
+        self.at += 1;
+        let start = self.at;
+        loop {
+            match *self.xml.get(self.at)? {
+                byte if byte == quote => {
+                    self.at += 1;
+                    let xml = self.xml;
+                    return Some(&xml[start..self.at - 1]);
+                }
+                b'<' => return None,
+                b'&' => {
+                    if !self.reference() {
+                        return None;
+                    }
+                }
+                _ => self.at += 1,
+            }
+        }
+    }
+
+    fn reference(&mut self) -> bool {
+        let rest = &self.xml[self.at..];
+        let Some(end) = rest.iter().take(12).position(|&byte| byte == b';') else {
+            return false;
+        };
+        self.at += end + 1;
+        let number = |digits: &[u8], radix: u32| {
+            !digits.is_empty()
+                && std::str::from_utf8(digits)
+                    .ok()
+                    .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                    .and_then(|digits| u32::from_str_radix(digits, radix).ok())
+                    .and_then(char::from_u32)
+                    .is_some_and(is_legal_xml_character)
+        };
+        match &rest[1..end] {
+            b"amp" | b"lt" | b"gt" | b"quot" | b"apos" => true,
+            [b'#', b'x', digits @ ..] => number(digits, 16),
+            [b'#', digits @ ..] => digits.iter().all(u8::is_ascii_digit) && number(digits, 10),
+            _ => false,
+        }
+    }
+
+    /// A QName as (whole name, prefix, local name), the prefix empty when unprefixed.
+    fn qname(&mut self) -> Option<(&'a [u8], &'a [u8], &'a [u8])> {
+        let start = self.at;
+        let first = self.ncname()?;
+        if !self.eat(b":") {
+            return Some((first, UNPREFIXED, first));
+        }
+        let local = self.ncname()?;
+        let xml = self.xml;
+        Some((&xml[start..self.at], first, local))
+    }
+
+    fn ncname(&mut self) -> Option<&'a [u8]> {
+        let start = self.at;
+        if !matches!(self.xml.get(self.at), Some(byte) if byte.is_ascii_alphabetic() || *byte == b'_')
+        {
+            return None;
+        }
+        self.at += 1;
+        while matches!(self.xml.get(self.at), Some(byte) if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        {
+            self.at += 1;
+        }
+        let xml = self.xml;
+        Some(&xml[start..self.at])
+    }
+
+    fn quoted(&mut self, valid: impl Fn(&[u8]) -> bool) -> bool {
+        let Some(&quote) = self
+            .xml
+            .get(self.at)
+            .filter(|&&byte| byte == b'"' || byte == b'\'')
+        else {
+            return false;
+        };
+        let start = self.at + 1;
+        let Some(length) = self.xml[start..].iter().position(|&byte| byte == quote) else {
+            return false;
+        };
+        self.at = start + length + 1;
+        valid(&self.xml[start..start + length])
+    }
+
+    fn eq(&mut self) -> bool {
+        self.space();
+        let equals = self.eat(b"=");
+        self.space();
+        equals
+    }
+
+    fn space(&mut self) -> bool {
+        let start = self.at;
+        while self.xml.get(self.at).is_some_and(is_xml_space) {
+            self.at += 1;
+        }
+        self.at > start
+    }
+
+    fn eat(&mut self, token: &[u8]) -> bool {
+        let found = self.xml[self.at..].starts_with(token);
+        if found {
+            self.at += token.len();
+        }
+        found
+    }
+}
+
+fn is_xml_space(byte: &u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
 }
 
 /// Parse emitted XML without repairing malformed entity references.
@@ -1286,45 +1579,137 @@ mod tests {
     }
 
     #[test]
-    fn reads_as_written_only_xml_it_reads_without_repair_or_tolerance() {
+    fn reads_as_written_only_plain_xml() {
         let w = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"";
         let part = |body: &str| {
             format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<w:document {w}><w:body>{body}</w:body></w:document>"
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n<w:document {w}><w:body>{body}</w:body></w:document>"
             )
         };
-        let paragraph = "<w:p><w:r><w:t xml:space=\"preserve\">A &amp; B</w:t></w:r></w:p><!-- note --><?pi x?>";
-        assert!(reads_as_written(part(paragraph).as_bytes()));
-        assert!(reads_as_written(
-            format!("\u{feff}{}", part(paragraph)).as_bytes()
-        ));
+        let paragraph = "<w:p w:rsidR='00A1'><w:r><w:t xml:space=\"preserve\">A &amp; B &#x41;&#66; ]] &gt; \u{e9}\t</w:t></w:r></w:p>";
+        for xml in [
+            part(paragraph),
+            format!("\u{feff}{}", part(paragraph)),
+            part(paragraph).replacen(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
+                "<?xml version='1.0'?>",
+                1,
+            ),
+            format!(
+                "<w:document {w} xmlns=\"urn:x\"><w:body><p xmlns=\"\"/><x:p xmlns:x=\"urn:y\" x:a=\"1\" a=\"1\"/></w:body></w:document>\n"
+            ),
+        ] {
+            assert!(reads_as_written(xml.as_bytes()), "{xml}");
+        }
+        let declaration = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
         for (case, xml) in [
             (
                 "stray ampersand",
                 part("<w:p><w:r><w:t>A & B</w:t></w:r></w:p>"),
             ),
             (
-                "declared encoding",
-                part(paragraph).replace("UTF-8", "windows-1252"),
+                "undefined entity",
+                part("<w:p><w:r><w:t>A&nbsp;B</w:t></w:r></w:p>"),
             ),
-            ("late declaration", part("<?xml version=\"1.0\"?>")),
-            ("reserved instruction", part("<?XML x?>")),
-            ("malformed comment", part("<!-- a--b -->")),
             (
-                "character data",
-                part("<w:p><w:r><w:t>A ]]> B</w:t></w:r></w:p>"),
+                "reference to a control",
+                part("<w:p><w:r><w:t>&#1;</w:t></w:r></w:p>"),
             ),
-            ("unbound element", part("<x:p/>")),
-            ("unbound attribute", part("<w:p x:a=\"1\"/>")),
-            ("second root", format!("{}<w:document {w}/>", part(""))),
-            ("text after the root", format!("{}text", part(""))),
+            (
+                "reference to a noncharacter",
+                part("<w:p w:val=\"&#xFFFE;\"/>"),
+            ),
+            (
+                "control character",
+                part("<w:p><w:r><w:t>\u{1}</w:t></w:r></w:p>"),
+            ),
+            (
+                "noncharacter",
+                part("<w:p><w:r><w:t>\u{ffff}</w:t></w:r></w:p>"),
+            ),
+            (
+                "declared encoding",
+                part("").replace("UTF-8", "windows-1252"),
+            ),
+            (
+                "declaration without a version",
+                part("").replacen(declaration, "<?xml?>", 1),
+            ),
+            (
+                "declaration without a version, with an encoding",
+                part("").replacen(declaration, "<?xml encoding=\"UTF-8\"?>", 1),
+            ),
+            ("version 1.1", part("").replacen("1.0", "1.1", 1)),
+            (
+                "declaration fields out of order",
+                part("").replacen(
+                    declaration,
+                    "<?xml version=\"1.0\" standalone=\"yes\" encoding=\"UTF-8\"?>",
+                    1,
+                ),
+            ),
+            ("space before the declaration", format!(" {}", part(""))),
+            ("late declaration", part("<?xml version=\"1.0\"?>")),
+            ("processing instruction", part("<?pi x?>")),
+            ("empty processing instruction", part("<??>")),
+            ("comment", part("<!-- note -->")),
+            ("control character in a comment", part("<!--\u{1}-->")),
+            (
+                "CDATA section",
+                part("<w:p><w:r><w:t><![CDATA[x]]></w:t></w:r></w:p>"),
+            ),
             (
                 "document type",
                 part("").replacen("<w:document", "<!DOCTYPE w:document><w:document", 1),
             ),
+            (
+                "character data end",
+                part("<w:p><w:r><w:t>A ]]> B</w:t></w:r></w:p>"),
+            ),
+            ("invalid attribute name", part("<w:p bad?=\"x\"/>")),
+            ("non-ASCII name", part("<w:p\u{e9}/>")),
+            (
+                "attributes without space",
+                part("<w:p w:a=\"1\"w:b=\"2\"/>"),
+            ),
+            ("less-than in a value", part("<w:p w:a=\"<\"/>")),
+            ("duplicate attribute", part("<w:p w:a=\"1\" w:a=\"2\"/>")),
+            (
+                "duplicate expanded name",
+                part(
+                    "<w:p xmlns:v=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" w:a=\"1\" v:a=\"2\"/>",
+                ),
+            ),
+            ("unbound element", part("<x:p/>")),
+            ("unbound attribute", part("<w:p x:a=\"1\"/>")),
+            ("element with the xmlns prefix", part("<xmlns:p/>")),
+            ("empty prefixed declaration", part("<w:p xmlns:x=\"\"/>")),
+            ("declared xmlns", part("<w:p xmlns:xmlns=\"urn:x\"/>")),
+            ("xml rebound", part("<w:p xmlns:xml=\"urn:x\"/>")),
+            (
+                "xml namespace on another prefix",
+                part("<w:p xmlns:x=\"http://www.w3.org/XML/1998/namespace\"/>"),
+            ),
+            (
+                "xmlns namespace as the default",
+                part("<w:p xmlns=\"http://www.w3.org/2000/xmlns/\"/>"),
+            ),
+            (
+                "reference in a declaration",
+                part("<w:p xmlns:x=\"urn:&amp;\"/>"),
+            ),
+            ("mismatched end tag", part("<w:p></w:r>")),
+            ("unclosed element", part("<w:p>")),
+            ("second root", format!("{}<w:document {w}/>", part(""))),
+            ("text after the root", format!("{}text", part(""))),
+            ("reference after the root", format!("{}&amp;", part(""))),
         ] {
             assert!(!reads_as_written(xml.as_bytes()), "{case}");
         }
+        let mut latin1 = part("<w:p w:val=\"#\"/>").into_bytes();
+        let at = latin1.iter().position(|&byte| byte == b'#').unwrap();
+        latin1[at] = 0xE9;
+        assert!(!reads_as_written(&latin1), "not UTF-8");
     }
 
     #[test]
