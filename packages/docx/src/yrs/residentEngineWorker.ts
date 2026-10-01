@@ -741,11 +741,15 @@ async function completionSlice(completion: SlicedCompletion): Promise<void> {
         message !== 'the document or its fonts changed since the region layout began'
       ) throw error;
       // A change in between abandoned the pass: begin again on the new state. Host
-      // proposals on a worker-authoritative document keep yielding to user requests;
-      // other changes finish in one step once they keep coming.
+      // proposals the worker holds keep yielding to user requests; other changes
+      // finish in one step once they keep coming.
       completion.begun = false;
       completion.restarts += 1;
-      if (completion.restarts > COMPLETION_RESTARTS && !incompleteLayout.workerAuthoritative) {
+      if (
+        completion.restarts > COMPLETION_RESTARTS &&
+        !incompleteLayout.workerAuthoritative &&
+        !proposals
+      ) {
         try {
           await completeProvisionalLayout();
         } catch {
