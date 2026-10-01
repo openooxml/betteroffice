@@ -172,7 +172,7 @@ for (const seeder of ['native', 'projected'] as const) {
         });
         const xml = documentXml(bytes);
         expect(xml).toContain('<w:pStyle w:val="Spaced"/>');
-        for (const tag of ['spacing', 'jc', 'keepNext', 'widowControl', 'ind']) {
+        for (const tag of ['spacing', 'jc', 'keepNext', 'widowControl']) {
           expect(xml).not.toContain(`<w:${tag}`);
         }
       }
@@ -293,6 +293,55 @@ test('an indent edit is kept on a paragraph whose new style is numbered', async 
     setFirst(session, { indentLeft: 720 });
   });
   expect(paragraphs(xml)[0]).toContain('<w:pStyle w:val="List"/>');
+  expect(paragraphs(xml)[0]).toContain('w:left="720"');
+});
+
+test('an indent edit is kept on a paragraph whose new style uses w:start', async () => {
+  const styles = `<w:styles xmlns:w="${W}">
+  <w:docDefaults><w:pPrDefault><w:pPr><w:ind w:left="720"/></w:pPr></w:pPrDefault></w:docDefaults>
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="Body"><w:name w:val="Body"/><w:basedOn w:val="Normal"/><w:pPr><w:ind w:start="1440"/></w:pPr></w:style>
+</w:styles>`;
+  const xml = await repackAfter(fixture('', '', '', { styles }), (session) => {
+    const first = session.paragraphs('body')[0]!;
+    const position = { paraId: first.paraId, offset: 0 };
+    session.applyParagraphStyle({ story: 'body', start: position, end: position }, 'Body');
+    setFirst(session, { indentLeft: 720 });
+  });
+  expect(paragraphs(xml)[0]).toContain('<w:pStyle w:val="Body"/>');
+  expect(paragraphs(xml)[0]).toContain('w:left="720"');
+});
+
+test('an indent edit is kept on a paragraph whose new style uses w:end', async () => {
+  const styles = `<w:styles xmlns:w="${W}">
+  <w:docDefaults><w:pPrDefault><w:pPr><w:ind w:right="720"/></w:pPr></w:pPrDefault></w:docDefaults>
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="Body"><w:name w:val="Body"/><w:basedOn w:val="Normal"/><w:pPr><w:ind w:end="1440"/></w:pPr></w:style>
+</w:styles>`;
+  const xml = await repackAfter(fixture('', '', '', { styles }), (session) => {
+    const first = session.paragraphs('body')[0]!;
+    const position = { paraId: first.paraId, offset: 0 };
+    session.applyParagraphStyle({ story: 'body', start: position, end: position }, 'Body');
+    setFirst(session, { indentRight: 720 });
+  });
+  expect(paragraphs(xml)[0]).toContain('<w:pStyle w:val="Body"/>');
+  expect(paragraphs(xml)[0]).toContain('w:right="720"');
+});
+
+test('an indent edit is kept when its new style inherits w:start from a basedOn ancestor', async () => {
+  const styles = `<w:styles xmlns:w="${W}">
+  <w:docDefaults><w:pPrDefault><w:pPr><w:ind w:left="720"/></w:pPr></w:pPrDefault></w:docDefaults>
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="Indented"><w:name w:val="Indented"/><w:basedOn w:val="Normal"/><w:pPr><w:ind w:start="1440"/></w:pPr></w:style>
+  <w:style w:type="paragraph" w:styleId="Body"><w:name w:val="Body"/><w:basedOn w:val="Indented"/></w:style>
+</w:styles>`;
+  const xml = await repackAfter(fixture('', '', '', { styles }), (session) => {
+    const first = session.paragraphs('body')[0]!;
+    const position = { paraId: first.paraId, offset: 0 };
+    session.applyParagraphStyle({ story: 'body', start: position, end: position }, 'Body');
+    setFirst(session, { indentLeft: 720 });
+  });
+  expect(paragraphs(xml)[0]).toContain('<w:pStyle w:val="Body"/>');
   expect(paragraphs(xml)[0]).toContain('w:left="720"');
 });
 

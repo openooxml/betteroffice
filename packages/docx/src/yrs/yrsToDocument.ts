@@ -2330,8 +2330,8 @@ class SaveContext {
    * What a paragraph of `storyId` with pilcrow `properties` inherits from
    * docDefaults and its style. None where more can apply than the resolver
    * sees: table cells and content controls (a table style), numbered
-   * paragraphs or styles (the numbering level) and defaults the resolver
-   * synthesizes.
+   * paragraphs or styles (the numbering level), synthesized defaults, and
+   * left and right indents (the style parser ignores w:start and w:end).
    */
   private inheritedFormatting(storyId: string, properties: Attrs): ParagraphFormatting | undefined {
     if (NESTED_STORY_ID.test(storyId) || this.syntheticDefaults || properties.numPr != null) {
@@ -2339,8 +2339,15 @@ class SaveContext {
     }
     const key = typeof properties.pStyle === 'string' ? properties.pStyle : '';
     if (!this.inherited.has(key)) {
-      const formatting = this.styles.resolveParagraphStyle(key || null).paragraphFormatting;
-      this.inherited.set(key, formatting?.numPr != null ? undefined : formatting);
+      const resolved = this.styles.resolveParagraphStyle(key || null).paragraphFormatting;
+      if (resolved === undefined || resolved.numPr != null) {
+        this.inherited.set(key, undefined);
+      } else {
+        const formatting = { ...resolved };
+        delete formatting.indentLeft;
+        delete formatting.indentRight;
+        this.inherited.set(key, formatting);
+      }
     }
     return this.inherited.get(key);
   }
