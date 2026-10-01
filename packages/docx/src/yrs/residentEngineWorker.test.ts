@@ -123,6 +123,9 @@ function worker() {
     retainBuiltPages: [] as boolean[],
     windowedIncrementalBuilds: [] as boolean[],
     rasterized: [] as number[],
+    buffers: [] as Surface[],
+    releaseCalls: [] as Array<{ pages: number[]; expectedFrameEpoch: number }>,
+    releaseSuperseded: false,
     presented: [] as number[],
     failRaster: null as number | null,
     failPresent: null as number | null,
@@ -151,6 +154,19 @@ function worker() {
       },
       buildDisplayListFrame() {
         return new Uint8Array([frameEpoch]);
+      },
+      buildDisplayPagesFrame(pages: number[], _expectedFrameEpoch: number) {
+        delta(pages.map((index) => index + 1));
+        return new Uint8Array([frameEpoch]);
+      },
+      releaseDisplayPagesFrame(pages: number[], expectedFrameEpoch: number): Uint8Array | null {
+        harness.releaseCalls.push({ pages, expectedFrameEpoch });
+        if (harness.releaseSuperseded || expectedFrameEpoch !== frameEpoch) return null;
+        delta(pages.map((index) => index + 1), false, 100, 3, pages);
+        return new Uint8Array([frameEpoch]);
+      },
+      applyUpdate(_update: Uint8Array) {
+        harness.releaseSuperseded = true;
       },
       setSelection() {},
       applyInput() {
@@ -187,6 +203,7 @@ function worker() {
     ) {
       const id = page.pageIndex + 1;
       harness.rasterized.push(id);
+      harness.buffers.push(buffer);
       if (harness.failRaster === id) {
         harness.failRaster = null;
         throw new Error('raster failed');
@@ -231,7 +248,13 @@ function worker() {
       });
     });
   }
-  function delta(upserts: number[], full = false, width = 100, pageCount = 3) {
+  function delta(
+    upserts: number[],
+    full = false,
+    width = 100,
+    pageCount = 3,
+    unbuilt: number[] = []
+  ) {
     const baseFrameEpoch = frameEpoch++;
     const operations: FramePageOperation[] = upserts.map((id) => ({
       kind: 'upsert',
@@ -239,7 +262,15 @@ function worker() {
       pageIndex: id - 1,
       fingerprint: BigInt(frameEpoch),
       primitiveIds: new BigUint64Array(),
-      page: { pageIndex: id - 1, width, height: 100, primitives: [] },
+      page: {
+        pageIndex: id - 1,
+        width,
+        height: 100,
+        primitives: [],
+        ...(unbuilt.includes(id - 1)
+          ? { unbuilt: true, positionSpan: [id, id + 1] as [number, number] }
+          : {}),
+      },
     }));
     harness.delta = {
       protocolVersion: 1,
@@ -339,6 +370,150 @@ function deferred() {
   });
   return { promise, resolve };
 }
+
+describe('resident display page release', () => {
+  test('answers build, release, then input in FIFO order', async () => {
+    const w = worker();
+    await w.bootstrap();
+    w.harness.caret = caret(1);
+    const order: string[] = [];
+    const build = w
+      .send({ type: 'buildPages', pages: [2], expectedFrameEpoch: 1, paintCaret: false })
+      .then((reply) => {
+        order.push('build');
+        return reply;
+      });
+    const release = w
+      .send({
+        type: 'releasePages',
+        pages: [{ index: 2, pageId: '3' }],
+        expectedFrameEpoch: 2,
+        paintCaret: false,
+      })
+      .then((reply) => {
+        order.push('release');
+        return reply;
+      });
+    const loc = { story: 'body', paraId: 'p1', offset: 0 };
+    const input = w
+      .send({
+        type: 'applyInput',
+        text: 'x',
+        selection: { anchor: loc, head: loc },
+        expectedFrameEpoch: 3,
+        profile: false,
+        paintCaret: false,
+      })
+      .then((reply) => {
+        order.push('input');
+        return reply;
+      });
+    const replies = await Promise.all([build, release, input]);
+    expect(order).toEqual(['build', 'release', 'input']);
+    expect(w.answered).toEqual([1, 2, 3, 4]);
+    for (const [index, reply] of replies.entries()) {
+      expect(reply).toMatchObject({ ok: true, caret: { frameEpoch: index + 2 }, selection: null });
+      expect(reply).toHaveProperty('frame');
+    }
+    expect(w.harness.releaseCalls).toEqual([{ pages: [2], expectedFrameEpoch: 2 }]);
+  });
+
+  test('stale epochs and mismatched page identities supersede without calling the engine', async () => {
+    const w = worker();
+    await w.bootstrap();
+    await w.attach([3]);
+    w.resetCalls();
+    const before = w.harness.delta;
+    for (const request of [
+      { pages: [{ index: 2, pageId: '3' }], expectedFrameEpoch: 0 },
+      { pages: [{ index: 2, pageId: '2' }], expectedFrameEpoch: 1 },
+      { pages: [{ index: 8, pageId: '3' }], expectedFrameEpoch: 1 },
+    ]) {
+      const reply = await w.send({ type: 'releasePages', ...request, paintCaret: false });
+      expect(reply).toMatchObject({ ok: true, superseded: true });
+      expect(reply).not.toHaveProperty('frame');
+    }
+    expect(w.harness.releaseCalls).toEqual([]);
+    expect(w.harness.delta).toBe(before);
+    expect(w.harness.rasterized).toEqual([]);
+    expect(w.surfaces.get('3')?.pixels).toBe('3:100');
+    expect(
+      await w.send({
+        type: 'releasePages',
+        pages: [{ index: 2, pageId: '3' }],
+        expectedFrameEpoch: 1,
+        paintCaret: false,
+      })
+    ).toHaveProperty('frame');
+  });
+
+  test('an engine superseded release after an update emits no frame and preserves surfaces', async () => {
+    const w = worker();
+    await w.bootstrap();
+    await w.attach([3]);
+    w.resetCalls();
+    const before = w.harness.delta;
+    void w.send({ type: 'applyUpdate', update: new Uint8Array([1]), selection: null });
+    const reply = await w.send({
+      type: 'releasePages',
+      pages: [{ index: 2, pageId: '3' }],
+      expectedFrameEpoch: 1,
+      paintCaret: false,
+    });
+    expect(reply).toMatchObject({ ok: true, superseded: true });
+    expect(reply).not.toHaveProperty('frame');
+    expect(w.harness.delta).toBe(before);
+    expect(w.harness.rasterized).toEqual([]);
+    expect(w.surfaces.get('3')?.pixels).toBe('3:100');
+  });
+
+  test('a released page keeps its transferred canvas without pixels and paints into it once rebuilt', async () => {
+    const w = worker();
+    await w.bootstrap();
+    await w.build([], 100, caret(3));
+    await w.attach([3]);
+    const canvas = w.surfaces.get('3')!;
+    expect(canvas.pixels).toStartWith('3:100');
+    const oldBuffer = w.harness.buffers.at(-1)!;
+    w.resetCalls();
+    const reply = await w.send({
+      type: 'releasePages',
+      pages: [{ index: 2, pageId: '3' }],
+      expectedFrameEpoch: 2,
+      paintCaret: false,
+    });
+    expect(reply).toMatchObject({ ok: true, replayedPages: 0, caretPainted: false });
+    expect(w.harness.rasterized).toEqual([]);
+    expect([canvas.pixels, canvas.width, canvas.height]).toEqual([null, 1, 1]);
+    await w.attach([3]);
+    expect(w.harness.rasterized).toEqual([]);
+    expect(canvas.pixels).toBeNull();
+    await w.send({ type: 'buildPages', pages: [2], expectedFrameEpoch: 3, paintCaret: false });
+    expect(w.harness.rasterized).toEqual([3]);
+    expect(w.surfaces.get('3')).toBe(canvas);
+    expect(canvas.pixels).toBe('3:100');
+    expect(w.harness.buffers.at(-1)).not.toBe(oldBuffer);
+  });
+
+  test('a canvas attached while its page is unbuilt is painted once the page builds', async () => {
+    const w = worker();
+    await w.bootstrap();
+    await w.send({
+      type: 'releasePages',
+      pages: [{ index: 2, pageId: '3' }],
+      expectedFrameEpoch: 1,
+      paintCaret: false,
+    });
+    w.resetCalls();
+    await w.attach([3]);
+    const canvas = w.surfaces.get('3')!;
+    expect(w.harness.rasterized).toEqual([]);
+    expect(canvas.pixels).toBeNull();
+    await w.send({ type: 'buildPages', pages: [2], expectedFrameEpoch: 2, paintCaret: false });
+    expect(w.harness.rasterized).toEqual([3]);
+    expect(canvas.pixels).toBe('3:100');
+  });
+});
 
 describe('resident worker warmup', () => {
   test('initializes wasm without creating a session, then bootstraps a frame', async () => {

@@ -196,6 +196,7 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
    * collaboration then loads its main-thread copy of the document only when something needs it.
    * While a read-only document's host proposals are held in the worker, synchronous ref members
    * that need the main-thread document throw `DocxReplicaNotReadyError`; await `flushPendingInput()` first.
+   * Display lists are built for visible pages and a small margin instead of the whole document.
    * @experimental
    */
   experimentalWorkerOpen?: boolean;
@@ -541,6 +542,8 @@ export interface DocxEditorRef {
    * Resolves with the page count once the whole document, as it is now, is laid out and its
    * pages are ready to paint. Waits for the layout the editor runs on its own and never asks for
    * one. Rejects when rendering fails, or after `options.timeoutMs` when given.
+   * With `experimentalWorkerOpen`, resolves once layout is complete and visible pages are built;
+   * pages away from the viewport build when shown.
    * @example const pages = await ref.current?.whenLayoutComplete({ timeoutMs: 60_000 })
    */
   whenLayoutComplete: (options?: { timeoutMs?: number }) => Promise<number>;

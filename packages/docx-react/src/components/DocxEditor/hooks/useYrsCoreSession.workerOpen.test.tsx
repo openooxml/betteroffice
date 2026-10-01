@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:t
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { createRef, useCallback, useEffect, useRef, useState } from 'react';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
   createYrsSession,
@@ -29,12 +29,13 @@ import { isLayoutQueued, revisionPreviewKey, revisionPreviewKeyOf, sourceVersion
 import * as replicaHelpers from '../internals/workerOpenReplica';
 import { registeredWorkerProposalAuthority, workerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { DocxEditorRef } from '../../DocxEditor';
-import type { PagedEditorRef } from '../PagedEditor';
+import { PagedEditor, type PagedEditorRef } from '../PagedEditor';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
 import { createCommentIdAllocator } from '../commentFactories';
 import { DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
 import { usePagedEditorCommandBridge, type PagedEditorCommandBridge } from './usePagedEditorRefApi';
 import { YrsInput, type YrsInputRef } from '../YrsInput';
+import { flushEditorInput } from '../editorBatches';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -427,6 +428,187 @@ function useHarness(props: HarnessProps) {
 }
 
 const initialProps: HarnessProps = { experimentalWorkerOpen: true, source: bytes, generation: 1 };
+
+test('eager worker open preserves input and command order after first paint until loadState completes', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+  });
+  const source = await longFixture(1);
+  const editor = createRef<PagedEditorRef>();
+  const bridge = { current: null as PagedEditorCommandBridge | null };
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  function Editable() {
+    harness = useHarness({ ...initialProps, source, hydrateOnDemand: false });
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={harness.renderer.layoutInWorker}
+        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries}
+        commandBridgeRef={bridge} />
+    </>;
+  }
+  const view = render(<Editable />);
+  await waitFor(() => expect(harness.host).not.toBeNull());
+  act(() => harness.pipeline.runLayoutPipeline());
+  await waitFor(() => expect(harness.renderer.status).toBe('ready'));
+  act(() => harness.presentFrame());
+  await waitFor(() => expect(posted.some((r) => r.type === 'encodeState')).toBe(true));
+  const session = harness.core.session!;
+  const load = spyOn(session, 'loadState');
+  const insert = spyOn(session, 'insertText');
+  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  expect(textarea.readOnly).toBe(false);
+  await waitFor(() => expect(document.activeElement).toBe(textarea));
+  const queries = harness.renderer.queries!;
+  const caret = queries.caretRect(6)!;
+  const size = queries.pageSize(0)!;
+  const canvas = canvasHost.current!.firstElementChild!;
+  canvas.getBoundingClientRect = () => ({ left: 0, top: 0, right: size.width,
+    bottom: size.height, ...size }) as DOMRect;
+  fireEvent.mouseDown(canvas, { clientX: caret.x, clientY: caret.y + caret.height / 2, button: 0 });
+  fireEvent.mouseUp(window, { clientX: caret.x, clientY: caret.y + caret.height / 2, button: 0 });
+  fireEvent.input(textarea, { target: { value: 'A' } });
+  let seen: string[] = [];
+  const command = bridge.current!.runAfterPendingInput(() => {
+    seen = session.paragraphs('body').map((p) => p.text);
+  });
+  fireEvent.input(textarea, { target: { value: 'B' } });
+  fireEvent.keyDown(textarea, { key: 'Enter' });
+  fireEvent.paste(textarea, { clipboardData: { getData: () => 'P\r\nQ' } });
+  fireEvent.compositionStart(textarea);
+  textarea.value = '日本';
+  fireEvent.compositionEnd(textarea, { data: '日本' });
+  await act(async () => { await Promise.resolve(); });
+  fireEvent.input(textarea);
+  fireEvent.keyDown(textarea, { key: 'Backspace' });
+  const flush = editor.current!.flushPendingInput();
+  await act(async () => { await Promise.resolve(); });
+  expect(editor.current!.hasPendingInput()).toBe(true);
+  expect(insert).not.toHaveBeenCalled();
+  expect(load).not.toHaveBeenCalled();
+  expect(seen).toEqual([]);
+  await act(async () => { workers[0].release(); await command; await flush; });
+  expect(load).toHaveBeenCalledTimes(1);
+  expect(seen[0]).toBe('FirstA paragraph');
+  expect(session.paragraphs('body').slice(0, 3).map((p) => p.text))
+    .toEqual(['FirstAB', 'P', 'Q日 paragraph']);
+  expect(session.selection()?.head.offset).toBe(2);
+  expect(textarea.value).toBe('');
+  load.mockRestore();
+  insert.mockRestore();
+});
+
+test('read-only on-demand worker open supersedes pending select-all when admitting a command', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+  });
+  const source = await longFixture(2);
+  const editor = createRef<PagedEditorRef>();
+  const bridge = { current: null as PagedEditorCommandBridge | null };
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  function ReadOnly() {
+    harness = useHarness({ ...initialProps, source, readOnly: true, hydrateOnDemand: true });
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core} readOnly
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={harness.renderer.layoutInWorker}
+        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries}
+        commandBridgeRef={bridge} />
+    </>;
+  }
+  const view = render(<ReadOnly />);
+  await waitFor(() => expect(harness.renderer.status).toBe('ready'));
+  act(() => harness.presentFrame());
+  const session = harness.core.session!;
+  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  expect(textarea.readOnly).toBe(true);
+  expect(harness.core.replicaReady).toBe(false);
+  fireEvent.keyDown(textarea, { key: 'a', ctrlKey: true });
+  await waitFor(() => expect(posted.some((r) => r.type === 'encodeState')).toBe(true));
+  const command = bridge.current!.runAfterPendingInput(() => session.selection());
+  let selected!: ReturnType<YrsSession['selection']>;
+  await act(async () => { workers[0].release(); selected = await command; });
+  const paragraphs = session.paragraphs('body');
+  expect(selected).not.toEqual({
+    anchor: { story: 'body', paraId: paragraphs[0].paraId, offset: 0 },
+    head: { story: 'body', paraId: paragraphs.at(-1)!.paraId, offset: paragraphs.at(-1)!.text.length },
+  });
+});
+
+test('eager worker-open hydration failure rejects flush, command and save during composition', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+  });
+  const source = await longFixture(1);
+  const editor = createRef<PagedEditorRef>();
+  const bridge = { current: null as PagedEditorCommandBridge | null };
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  function Editable() {
+    harness = useHarness({ ...initialProps, source, hydrateOnDemand: false });
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={harness.renderer.layoutInWorker}
+        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries}
+        commandBridgeRef={bridge} />
+    </>;
+  }
+  const view = render(<Editable />);
+  await waitFor(() => expect(harness.host).not.toBeNull());
+  act(() => harness.pipeline.runLayoutPipeline());
+  await waitFor(() => expect(harness.renderer.status).toBe('ready'));
+  act(() => harness.presentFrame());
+  await waitFor(() => expect(posted.some((r) => r.type === 'encodeState')).toBe(true));
+  const session = harness.core.session!;
+  const failure = new Error('hydration failed');
+  const open = spyOn(session, 'openDocx').mockImplementation(() => { throw failure; });
+  const insert = spyOn(session, 'insertText');
+  const operation = mock(() => true);
+  try {
+    const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    expect(textarea.readOnly).toBe(false);
+    expect(harness.core.replicaReady).toBe(false);
+    fireEvent.compositionStart(textarea);
+    textarea.value = '日本';
+    const calls = Promise.allSettled([
+      editor.current!.flushPendingInput(),
+      bridge.current!.runAfterPendingInput(operation),
+      flushEditorInput(editor, true),
+    ]);
+    const request = posted.find((r) => r.type === 'encodeState')!;
+    await act(async () => {
+      workers[0].onmessage?.({
+        data: { id: request.id, ok: false, error: failure.message },
+      } as MessageEvent<ResidentEngineWorkerResponse>);
+    });
+    const settled = await calls;
+    expect(settled[0]).toEqual({ status: 'rejected', reason: failure });
+    expect(settled[1]).toEqual({ status: 'rejected', reason: failure });
+    expect(settled[2]).toEqual({
+      status: 'fulfilled', value: { ok: false, code: 'input-failed', error: failure },
+    });
+    expect(editor.current!.hasPendingInput()).toBe(true);
+    expect(textarea.value).toBe('日本');
+    expect(operation).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
+    expect(session.storyIds()).toEqual([]);
+  } finally {
+    open.mockRestore();
+    insert.mockRestore();
+  }
+}, 3_000);
 
 function texts(session: YrsSession) {
   return Object.fromEntries(session.storyIds().sort().map((story) => [

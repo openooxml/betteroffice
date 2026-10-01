@@ -15,6 +15,7 @@ import { YrsInput, type YrsInputProps, type YrsInputRef } from './YrsInput';
 import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
 import { performYrsHistoryAction } from './yrsCommands';
 import { DocxCommandAdmissionError } from '../../commands/createDocxCommandStore';
+import { deferWorkerOpenReplica } from './internals/workerOpenReplica';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -52,10 +53,11 @@ function inputFor(
   input: React.Ref<YrsInputRef>,
   applyResidentInput?: YrsInputProps['applyResidentInput'],
   applyResidentDelete?: YrsInputProps['applyResidentDelete'],
-  props: Pick<
+  props: Partial<Pick<
     YrsInputProps,
-    'isSuggesting' | 'author' | 'onPendingInputChange' | 'resolveDisplayListQueries'
-  > = {}
+    'isSuggesting' | 'author' | 'onPendingInputChange' | 'resolveDisplayListQueries' |
+    'replicaReadyRef' | 'inputEpoch' | 'onStateChange' | 'onDirectInput'
+  >> = {}
 ) {
   const map = () =>
     createYrsInputPositionMap(
@@ -100,6 +102,129 @@ function text(session: YrsSession): string {
 function admissionCode(error: unknown): string | null {
   return error instanceof DocxCommandAdmissionError ? error.code : null;
 }
+
+async function pendingHydration() {
+  const original = await seededSession();
+  let retired = false;
+  const oldCalls: string[] = [];
+  const session = new Proxy(original, { get(target, key) {
+    const value = Reflect.get(target, key);
+    if (typeof value !== 'function') return value;
+    return (...args: unknown[]) => {
+      if (retired) oldCalls.push(String(key));
+      return value.apply(target, args);
+    };
+  } });
+  const input = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: false };
+  let release!: () => void;
+  const replica = deferWorkerOpenReplica(session,
+    () => new Promise<() => void>((resolve) => { release = () => resolve(() => {}); }),
+    () => {}, () => { replicaReadyRef.current = true; });
+  replica.start();
+  const resident = mock(async (_text: string) => null);
+  const changed = mock(() => {});
+  const props = { replicaReadyRef, onStateChange: changed, onDirectInput: changed,
+    onPendingInputChange: changed };
+  const view = render(inputFor(session, input, resident, undefined, props));
+  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  return { session, input, replica, release, resident, changed, props, view, textarea,
+    oldCalls, retire: () => { retired = true; } };
+}
+
+test('pending hydration preserves mixed input and event-time paste in sealed FIFO batches', async () => {
+  const { session, input, release, resident, view, textarea, props } = await pendingHydration();
+  let epoch = 0;
+  view.rerender(inputFor(session, input, resident, undefined, { ...props, inputEpoch: () => epoch }));
+  fireEvent.input(textarea, { target: { value: 'A' } });
+  fireEvent.keyDown(textarea, { key: 'Enter' });
+  let clipboard = 'P\r\nQ';
+  fireEvent.paste(textarea, { clipboardData: { getData: () => clipboard } });
+  clipboard = 'invalidated';
+  fireEvent.input(textarea, { target: { value: 'B' } });
+  fireEvent.compositionStart(textarea);
+  textarea.value = '日本';
+  fireEvent.compositionEnd(textarea, { data: '日本' });
+  await act(async () => { await Promise.resolve(); });
+  fireEvent.input(textarea);
+  fireEvent.keyDown(textarea, { key: 'Backspace' });
+  epoch += 1;
+  await act(async () => { await Promise.resolve(); });
+  expect(input.current!.hasPendingInput()).toBe(true);
+  expect(text(session)).toBe('Seed');
+  expect(resident).not.toHaveBeenCalled();
+  await act(async () => { release(); await input.current!.flushPendingInput(); });
+  fireEvent.input(textarea, { target: { value: 'C' } });
+  await act(async () => { await input.current!.flushPendingInput(); });
+  expect(session.paragraphs('body').map((p) => p.text)).toEqual(['SeedA', 'P', 'QB日C']);
+  expect(session.selection()?.head.offset).toBe(4);
+  expect(resident.mock.calls).toEqual([['A'], ['B'], ['C']]);
+});
+
+test('flush includes a pending-hydration IME commit exactly once', async () => {
+  const { session, input, release, textarea } = await pendingHydration();
+  fireEvent.compositionStart(textarea);
+  let done = false;
+  const flush = input.current!.flushPendingInput().then(() => { done = true; });
+  textarea.value = '日本';
+  fireEvent.compositionEnd(textarea, { data: '日本' });
+  fireEvent(textarea, new InputEvent('textInput', { bubbles: true, data: '日本' }));
+  fireEvent.input(textarea);
+  await act(async () => { await Promise.resolve(); });
+  fireEvent.input(textarea);
+  expect(done).toBe(false);
+  expect(text(session)).toBe('Seed');
+  expect(input.current!.hasPendingInput()).toBe(true);
+  await act(async () => { release(); await flush; });
+  expect(text(session)).toBe('Seed日本');
+  expect(session.selection()?.head.offset).toBe(6);
+  expect(textarea.value).toBe('');
+});
+
+test.each(['replacement', 'unmount'])('retained hydration input cancels safely on %s', async (lifecycle) => {
+  const { session, input, replica, release, resident, changed, view, textarea, oldCalls, retire } = await pendingHydration();
+  fireEvent.input(textarea, { target: { value: 'A' } });
+  fireEvent.keyDown(textarea, { key: 'Enter' });
+  fireEvent.keyDown(textarea, { key: 'Backspace' });
+  const flush = input.current!.flushPendingInput().catch((error) => error);
+  await act(async () => { await Promise.resolve(); });
+  expect(input.current!.hasPendingInput()).toBe(true);
+  expect(text(session)).toBe('Seed');
+  const replacement = await seededSession();
+  if (lifecycle === 'unmount') view.unmount();
+  else view.rerender(inputFor(replacement, input, resident));
+  replica.cancel();
+  retire();
+  changed.mockClear();
+  await act(async () => { release(); expect(await flush).toBeInstanceOf(Error); });
+  expect(oldCalls).toEqual([]);
+  expect(resident).not.toHaveBeenCalled();
+  expect(changed).not.toHaveBeenCalled();
+  expect(text(replacement)).toBe('Seed');
+  if (lifecycle === 'unmount') render(inputFor(replacement, input, resident));
+  act(() => input.current!.insertText('C'));
+  await act(async () => { await input.current!.flushPendingInput(); });
+  expect(text(replacement)).toBe('SeedC');
+});
+
+test('live hydration failure rejects a waiting flush and command', async () => {
+  const { session, input, replica } = await pendingHydration();
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    act(() => input.current!.insertText('A'));
+    const flush = input.current!.flushPendingInput().catch((error) => error);
+    const command = input.current!.runAfterPendingInput(() => 'ran').catch((error) => error);
+    await act(async () => { await Promise.resolve(); });
+    expect(input.current!.hasPendingInput()).toBe(true);
+    const failure = new Error('hydration failed');
+    replica.fail(failure);
+    expect(await flush).toBe(failure);
+    expect(admissionCode(await command)).toBe('input-failed');
+    expect(text(session)).toBe('Seed');
+  } finally {
+    errors.mockRestore();
+  }
+});
 
 test('flush waits for resident input and publishes the latest selection', async () => {
   let release!: () => void;

@@ -42,6 +42,7 @@ import type {
   FieldInlineContent,
   MathEquation,
   Image,
+  ColorValue,
   Shape,
   Chart,
   InlineSdt,
@@ -74,6 +75,7 @@ interface YrsImageAttrs {
   };
   borderWidth?: number;
   borderColor?: string;
+  borderColorValue?: ColorValue;
   borderStyle?: string;
   wrapText?: string;
   hlinkHref?: string;
