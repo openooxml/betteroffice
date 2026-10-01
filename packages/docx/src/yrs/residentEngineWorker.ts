@@ -5,7 +5,7 @@ import {
   createResidentEngineSession,
   type ResidentEngineSession,
 } from './residentEngineSession';
-import { setFinalPreviewDisplayWindow } from './previewDisplayWindow';
+import { finalPreviewDisplayWindow, finalPreviewPageCount } from './previewDisplayWindow';
 import { preloadEditWasm } from './wasm/index';
 import {
   createProposalRegistry,
@@ -63,6 +63,8 @@ let requirementsAnswered: {
 } | null = null;
 // The opened document is a display-only preview that an `open` of the whole package replaces.
 let previewing = false;
+/** Pages of a cut preview's layout that match the whole document's; null for a whole document. */
+let previewFinalPages: number | null = null;
 let unsubscribe: (() => void) | null = null;
 let pendingUpdates: Uint8Array[] = [];
 let layoutRevision = 0;
@@ -258,20 +260,17 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     }
     unsubscribe?.();
     unsubscribe = null;
+    previewFinalPages = null;
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
-    const { layoutJson, provisional, pageCount } = hydrate(
+    const { layoutJson, provisional } = hydrate(
       request.snapshot,
       request.provisionalPages,
       request.layoutExtras !== undefined,
       request.opened !== true
     );
-    setFinalPreviewDisplayWindow(
-      session,
-      request.displayWindow,
-      request.snapshot.partialDocument,
-      provisional,
-      pageCount
-    );
+    if (previewFinalPages !== null) {
+      setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
+    }
     if (provisional) {
       incompleteLayout = {
         layoutInput: request.snapshot.layoutInput,
@@ -462,19 +461,16 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'sync') {
     unsubscribe?.();
     unsubscribe = null;
+    previewFinalPages = null;
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
-    const { layoutJson, provisional, pageCount } = hydrate(
+    const { layoutJson, provisional } = hydrate(
       request.snapshot,
       request.provisionalPages,
       request.layoutExtras !== undefined
     );
-    setFinalPreviewDisplayWindow(
-      session,
-      request.displayWindow,
-      request.snapshot.partialDocument,
-      provisional,
-      pageCount
-    );
+    if (previewFinalPages !== null) {
+      setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
+    }
     if (provisional) {
       incompleteLayout = {
         layoutInput: request.snapshot.layoutInput,
@@ -504,9 +500,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'buildPages') {
-    if (request.background && request.pages.length > BACKGROUND_SLICE_PAGES) {
+    const limit = previewFinalPages;
+    const pages = limit === null ? request.pages : request.pages.filter((index) => index < limit);
+    if (request.background && pages.length > BACKGROUND_SLICE_PAGES) {
       const build: BackgroundPageBuild = {
-        request, owner: session, frameEpoch: request.expectedFrameEpoch,
+        request: pages === request.pages ? request : { ...request, pages },
+        owner: session, frameEpoch: request.expectedFrameEpoch,
         frames: [], offset: 0, started: performance.now(), engineMs: 0,
       };
       backgroundPageBuild = build;
@@ -517,7 +516,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     // Pages of the provisional frame build between steps, as before a completion.
     pendingUpdates = [];
     const started = performance.now();
-    const frame = session.buildDisplayPagesFrame(request.pages, request.expectedFrameEpoch);
+    const frame = session.buildDisplayPagesFrame(pages, request.expectedFrameEpoch);
     await replyFrame(
       request.id,
       frame,
@@ -709,7 +708,7 @@ function hydrate(
   provisionalPages?: number,
   reply = true,
   loadState = true
-): { layoutJson: string | null; provisional: boolean; pageCount: number | null } {
+): { layoutJson: string | null; provisional: boolean } {
   if (!session) throw new Error('Resident engine worker is not initialized');
   supersedeSlicedCompletion();
   incompleteLayout = null;
@@ -719,6 +718,7 @@ function hydrate(
     session.loadState(snapshot.state);
   }
   session.setPartialDocument(snapshot.partialDocument === true);
+  previewFinalPages = snapshot.partialDocument === true ? 0 : null;
   if (!snapshot.workerAuthoritative) session.loadMediaSources(snapshot.mediaSources ?? '');
   if (snapshot.fontsRevision !== fontsRevision) {
     // A mismatched revision always carries the full font set (the client only
@@ -762,7 +762,13 @@ function hydrate(
   }
   layoutRevision = snapshot.layoutRevision;
   pendingUpdates = [];
-  return { layoutJson, provisional, pageCount };
+  previewFinalPages = finalPreviewPageCount(
+    snapshot.partialDocument,
+    provisional,
+    provisionalPages,
+    pageCount
+  );
+  return { layoutJson, provisional };
 }
 
 function setFrameDisplayWindow(
@@ -770,6 +776,12 @@ function setFrameDisplayWindow(
   window?: [number, number],
   retainBuiltPages?: boolean
 ): void {
+  if (previewFinalPages !== null) {
+    engine.setDisplayWindow(...finalPreviewDisplayWindow(window, previewFinalPages));
+    engine.setDisplayRetainBuiltPages(window !== undefined && retainBuiltPages === true);
+    engine.setWindowedIncrementalBuilds(true);
+    return;
+  }
   if (window) {
     engine.setDisplayWindow(...window);
     engine.setDisplayRetainBuiltPages(retainBuiltPages === true);
@@ -1089,6 +1101,7 @@ function destroySession(keepSurfaces = false): void {
   session = null;
   openedDocument = null;
   previewing = false;
+  previewFinalPages = null;
   pendingUpdates = [];
   layoutRevision = 0;
   fontsRevision = -1;

@@ -6,11 +6,14 @@ import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/p
 import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
 import type { DisplayPage } from '../layout/render/displayList';
 import { applyFrameDelta, decodeFrameDelta } from '../layout/render/frameDelta';
-import { encodeDisplayListFrameExtras } from '../layout/render/rustDisplayList';
+import {
+  encodeDisplayListFrameExtras,
+  type DisplayListBuildInputs,
+} from '../layout/render/rustDisplayList';
 import type { Document } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { decodeDocxHostJson, type YrsRenderEnv } from './index';
-import { setFinalPreviewDisplayWindow } from './previewDisplayWindow';
+import { finalPreviewDisplayWindow, finalPreviewPageCount } from './previewDisplayWindow';
 import { createResidentEngineSession } from './residentEngineSession';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
@@ -21,6 +24,7 @@ const FONT = new Uint8Array(
   )
 );
 const BLOCKS = 320;
+const WHOLE_BLOCKS = 120;
 const FLAVOURS = [
   'plain',
   'keepnext',
@@ -31,6 +35,7 @@ const FLAVOURS = [
   'floats',
   'final-sect',
   'early-sect',
+  'whole',
 ] as const;
 type Flavour = (typeof FLAVOURS)[number];
 
@@ -50,15 +55,20 @@ function renderEnvironment(document: Document): YrsRenderEnv {
   };
 }
 
-async function build(
-  bytes: Uint8Array,
-  preview: boolean
-): Promise<{ refused: boolean; pages: DisplayPage[] }> {
+interface Built {
+  refused: boolean;
+  wholeBody: boolean;
+  pages: DisplayPage[];
+}
+
+async function build(bytes: Uint8Array, preview: boolean): Promise<Built> {
   const session = await createResidentEngineSession();
   try {
     const hostJson = preview ? session.openDocxPreview(bytes, 200) : session.openDocx(bytes);
-    if (hostJson === null) return { refused: true, pages: [] };
-    const document = decodeDocxHostJson(hostJson, bytes).document;
+    if (hostJson === null) return { refused: true, wholeBody: false, pages: [] };
+    const host = decodeDocxHostJson(hostJson, bytes);
+    const document = host.document;
+    const partial = preview && host.wholeBody !== true;
     const request = buildResidentRegionLayoutRequest(document, 24, renderEnvironment(document));
     const requirements = JSON.parse(
       session.layoutFontRequirementsJson(JSON.stringify(request))
@@ -67,7 +77,7 @@ async function build(
     session.setDisplayWindow(...window);
     session.setDisplayRetainBuiltPages(false);
     session.setWindowedIncrementalBuilds(true);
-    session.setPartialDocument(preview);
+    session.setPartialDocument(partial);
     session.clearFonts();
     const font = session.registerFont(FONT);
     const fontChains = Object.fromEntries(requirements.map(({ key }) => [key, [font]]));
@@ -87,21 +97,22 @@ async function build(
         ? session.layoutDocumentWithRegionsPrefixRetainedJson(input, 3)
         : session.layoutDocumentWithRegionsRetainedJson(input)
     ) as { provisional?: boolean; layout: { pages: unknown[] } };
-    setFinalPreviewDisplayWindow(
-      session,
-      window,
-      preview,
+    const finalPages = finalPreviewPageCount(
+      partial,
       layout.provisional === true,
+      3,
       layout.layout.pages.length
     );
+    if (finalPages !== null) session.setDisplayWindow(...finalPreviewDisplayWindow(window, finalPages));
     const retained = session.retainedHeadersFootersJson();
     const extras = encodeDisplayListFrameExtras({
       fontChains,
       ...(retained === undefined ? {} : { headersFooters: JSON.parse(retained) }),
-    });
+    } as DisplayListBuildInputs);
     const frame = session.buildDisplayListFrame(extras, 0);
     return {
       refused: false,
+      wholeBody: host.wholeBody === true,
       pages: applyFrameDelta(null, decodeFrameDelta(frame)).displayList.pages,
     };
   } finally {
@@ -109,7 +120,9 @@ async function build(
   }
 }
 
-async function comparePreview(bytes: Uint8Array): Promise<number> {
+async function comparePreview(
+  bytes: Uint8Array
+): Promise<{ built: DisplayPage[]; wholeBody: boolean; fullPages: number }> {
   const preview = await build(bytes, true);
   expect(preview.refused).toBe(false);
   const full = await build(bytes, false);
@@ -120,7 +133,9 @@ async function comparePreview(bytes: Uint8Array): Promise<number> {
     expect(twin?.unbuilt).not.toBe(true);
     expect(page).toEqual(twin);
   }
-  return built.length;
+  // A cut that holds the whole body shows the window's pages, as the whole document does.
+  if (preview.wholeBody) expect(built).toHaveLength(Math.min(2, full.pages.length));
+  return { built, wholeBody: preview.wholeBody, fullPages: full.pages.length };
 }
 
 const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
@@ -143,12 +158,12 @@ function run(text: string): string {
   return `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
 }
 
-function pageField(): string {
+function field(instruction: string, cached: string): string {
   return (
     '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
-    '<w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>' +
+    `<w:r><w:instrText xml:space="preserve"> ${instruction} </w:instrText></w:r>` +
     '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
-    '<w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>'
+    `<w:r><w:t>${cached}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>`
   );
 }
 
@@ -218,7 +233,8 @@ function syntheticDocx(flavour: Flavour, size: number, seed: number): Uint8Array
   const footnotes: number[] = [];
   const endnotes: number[] = [];
   const body: string[] = [];
-  for (let i = 1; i <= BLOCKS; i += 1) {
+  const blocks = flavour === 'whole' ? WHOLE_BLOCKS : BLOCKS;
+  for (let i = 1; i <= blocks; i += 1) {
     let properties = '';
     let runs = run(text(3, 9));
     if (flavour === 'keepnext' && i >= 150 && i <= 230 && i % 40 < 30) {
@@ -257,7 +273,9 @@ function syntheticDocx(flavour: Flavour, size: number, seed: number): Uint8Array
   set('word/header2.xml', `<w:hdr ${W}><w:p>${run('First page header')}</w:p></w:hdr>`);
   set(
     'word/footer1.xml',
-    `<w:ftr ${W}><w:p><w:pPr><w:jc w:val="center"/></w:pPr>${run('Page ')}${pageField()}</w:p></w:ftr>`
+    `<w:ftr ${W}><w:p><w:pPr><w:jc w:val="center"/></w:pPr>${run('Page ')}${field('PAGE', '1')}` +
+      (flavour === 'whole' ? `${run(' of ')}${field('NUMPAGES', '99')}` : '') +
+      '</w:p></w:ftr>'
   );
   for (const [kind, notes, id] of [
     ['footnote', footnotes, 'rIdFn'],
@@ -316,7 +334,7 @@ function syntheticDocx(flavour: Flavour, size: number, seed: number): Uint8Array
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-const fixtures = readdirSync(CORPUS, { recursive: true })
+const fixtures = readdirSync(CORPUS, { recursive: true, encoding: 'utf8' })
   .filter((name) => name.endsWith('.docx'))
   .sort();
 for (const name of fixtures) {
@@ -325,7 +343,7 @@ for (const name of fixtures) {
     if (basename(name) === 'wordprocessingml-comprehensive.docx') {
       expect((await build(bytes, true)).refused).toBe(true);
     } else {
-      expect(await comparePreview(bytes)).toBeGreaterThanOrEqual(1);
+      await comparePreview(bytes);
     }
   });
 }
@@ -333,9 +351,20 @@ for (const name of fixtures) {
 for (const [index, flavour] of FLAVOURS.entries()) {
   for (const size of [4, 10, 12, 22]) {
     test(`worker preview matches full layout: ${flavour} sz${size}`, async () => {
-      const built = await comparePreview(syntheticDocx(flavour, size, index * 100 + size));
-      if (size === 22) expect(built).toBe(2);
-      if (size === 4) expect(built).toBe(0);
+      const { built, wholeBody, fullPages } = await comparePreview(
+        syntheticDocx(flavour, size, index * 100 + size)
+      );
+      expect(wholeBody).toBe(flavour === 'whole');
+      if (flavour === 'whole') {
+        // The whole body counts the document's pages, not the saved result.
+        const count = built[0]?.footer?.primitives.find(
+          (primitive) => 'field' in primitive && primitive.field?.category === 'NUMPAGES'
+        );
+        expect(count && 'text' in count ? count.text : undefined).toBe(String(fullPages));
+      } else {
+        if (size === 22) expect(built).toHaveLength(2);
+        if (size === 4) expect(built).toHaveLength(0);
+      }
     });
   }
 }

@@ -932,6 +932,84 @@ describe('resident worker layout ownership', () => {
     expect(calls).toEqual(['load', 'partial:false', 'layout']);
   });
 
+  test('builds only the pages a cut preview lays out like the whole document', async () => {
+    const w = worker();
+    let epoch = 0;
+    const built: number[][] = [];
+    const frame = (full: boolean) => {
+      epoch += 1;
+      w.harness.delta = {
+        protocolVersion: 1,
+        full,
+        frameEpoch: epoch,
+        baseFrameEpoch: full ? 0 : epoch - 1,
+        docEpoch: epoch,
+        layoutEpoch: epoch,
+        pageCount: 0,
+        operations: [],
+        bytes: new Uint8Array(),
+      };
+      return new Uint8Array([0]);
+    };
+    Object.assign(w.harness.session, {
+      layoutDocumentWithRegionsPrefixRetainedJson: () =>
+        '{"layout":{"pages":[1,2,3]},"notesConverged":true}',
+      residentCaretSnapshot: () => ({ frameEpoch: epoch, caretRect: null }),
+      buildDisplayListFrame: () => frame(true),
+      buildDisplayPagesFrame: (pages: number[]) => {
+        built.push(pages);
+        return frame(false);
+      },
+    });
+    const snapshot = {
+      clientId: 1,
+      state: new Uint8Array(),
+      fontsRevision: 0,
+      fonts: [],
+      renderInputs: [],
+      measureInputs: [],
+      layoutInput: '{}',
+      layoutWithRegions: true,
+      layoutRevision: 1,
+      selection: null,
+      partialDocument: true,
+    };
+    // The seed ran out on its third page, so only its first is final.
+    await w.send({
+      type: 'bootstrap',
+      expectedFrameEpoch: 0,
+      extras: '',
+      snapshot,
+      layoutExtras: '{}',
+      provisionalPages: 3,
+      displayWindow: [0, 2],
+    });
+    expect(w.harness.displayWindows.at(-1)).toEqual([0, 1]);
+    await w.send({
+      type: 'buildFrame',
+      extras: '',
+      expectedFrameEpoch: epoch,
+      paintCaret: false,
+      displayWindow: [0, 3],
+    });
+    expect(w.harness.displayWindows.at(-1)).toEqual([0, 1]);
+    await w.send({ type: 'buildPages', pages: [0, 1, 2], expectedFrameEpoch: epoch, paintCaret: false });
+    expect(built).toEqual([[0]]);
+    await w.send({
+      type: 'sync',
+      expectedFrameEpoch: epoch,
+      extras: '',
+      paintCaret: false,
+      snapshot: { ...snapshot, partialDocument: false },
+      layoutExtras: '{}',
+      provisionalPages: 3,
+      displayWindow: [0, 3],
+    });
+    expect(w.harness.displayWindows.at(-1)).toEqual([0, 3]);
+    await w.send({ type: 'buildPages', pages: [0, 1, 2], expectedFrameEpoch: epoch, paintCaret: false });
+    expect(built).toEqual([[0], [0, 1, 2]]);
+  });
+
   test('lays out the media sources a snapshot carries, and clears them when it carries none', async () => {
     const w = worker();
     const loaded: string[] = [];
