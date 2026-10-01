@@ -154,6 +154,7 @@ export class ResidentEngineWorkerClient {
    * not replace the state it recorded. */
   private lastSnapshotId = 0;
   private keepSurfaces = false;
+  private bootstrapWaiters: Array<() => void> = [];
   private lastMemory: WasmModuleMemory[] | null = null;
   private answeredFrameEpoch = 0;
   private retainBuiltPages = false;
@@ -248,6 +249,12 @@ export class ResidentEngineWorkerClient {
     return this.bootstrapped;
   }
 
+  /** Resolves once a bootstrap is sent, at once when one was. */
+  whenBootstrapSent(): Promise<void> {
+    if (this.bootstrapped) return Promise.resolve();
+    return new Promise((resolve) => this.bootstrapWaiters.push(resolve));
+  }
+
   /**
    * Starts over with another document in the same worker: the next request
    * is a bootstrap, which keeps the page surfaces already attached so the
@@ -298,6 +305,48 @@ export class ResidentEngineWorkerClient {
     }
     if (response.hostJson === undefined || !response.stateVector) {
       throw new ResidentWorkerFailureError('Resident engine worker omitted the opened document');
+    }
+    return { hostJson: response.hostJson, stateVector: new Uint8Array(response.stateVector) };
+  }
+
+  /**
+   * Opens a display-only preview of the first `blocks` body blocks of a DOCX in the worker, or
+   * resolves null when the package cannot open as a preview. Its first layout is a bootstrap
+   * with `opened`; {@link rebootstrap} then lets {@link open} replace it with the whole document.
+   * A copy of `bytes` is transferred.
+   */
+  async openPreview(
+    bytes: Uint8Array,
+    blocks: number,
+    options: { heapLimitBytes?: number } = {}
+  ): Promise<ResidentEngineWorkerOpened | null> {
+    if (this.openedHeapLimit || this.bootstrapped) {
+      throw new ResidentWorkerFailureError('Resident engine worker already holds a document');
+    }
+    const reservation = { bytes: options.heapLimitBytes };
+    this.openedHeapLimit = reservation;
+    let response: ResidentEngineWorkerResponse & { ok: true };
+    try {
+      const copy = new Uint8Array(bytes);
+      response = await this.request(
+        {
+          type: 'open',
+          bytes: copy.buffer,
+          previewBlocks: blocks,
+          ...(options.heapLimitBytes !== undefined ? { heapLimitBytes: options.heapLimitBytes } : {}),
+        },
+        [copy.buffer]
+      );
+    } catch (error) {
+      if (this.openedHeapLimit === reservation) this.openedHeapLimit = null;
+      throw error;
+    }
+    if (response.previewRefused) {
+      if (this.openedHeapLimit === reservation) this.openedHeapLimit = null;
+      return null;
+    }
+    if (response.hostJson === undefined || !response.stateVector) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted the opened preview');
     }
     return { hostJson: response.hostJson, stateVector: new Uint8Array(response.stateVector) };
   }
@@ -411,6 +460,7 @@ export class ResidentEngineWorkerClient {
     }
     const fontsRevision = snapshot.fontsRevision;
     this.bootstrapped = true;
+    for (const resolve of this.bootstrapWaiters.splice(0)) resolve();
     const keepSurfaces = this.keepSurfaces;
     this.keepSurfaces = false;
     const generation = ++this.bootstraps;
@@ -740,6 +790,7 @@ export class ResidentEngineWorkerClient {
     this.worker.terminate();
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
+    for (const resolve of this.bootstrapWaiters.splice(0)) resolve();
   }
 }
 

@@ -123,6 +123,17 @@ impl StoryParser<'_, '_> {
         in_header_footer: bool,
         limit: Option<usize>,
     ) -> Result<(Vec<BlockContent>, usize), ParseError> {
+        self.parse_blocks_until_with_read_limit(parent, depth, in_header_footer, limit, None)
+    }
+
+    pub(crate) fn parse_blocks_until_with_read_limit(
+        &mut self,
+        parent: &XmlElement,
+        depth: usize,
+        in_header_footer: bool,
+        limit: Option<usize>,
+        read_limit: Option<usize>,
+    ) -> Result<(Vec<BlockContent>, usize), ParseError> {
         self.budget.check_nesting_depth(depth, self.part)?;
         let mut content = Vec::new();
         let mut records: Vec<FieldRecord> = Vec::new();
@@ -130,7 +141,9 @@ impl StoryParser<'_, '_> {
         let mut read = 0;
 
         for child in transparent_children(parent, false) {
-            if limit.is_some_and(|limit| content.len() >= limit) && open_fields.is_empty() {
+            if read_limit.is_some_and(|limit| read >= limit)
+                || (limit.is_some_and(|limit| content.len() >= limit) && open_fields.is_empty())
+            {
                 break;
             }
             read += 1;
