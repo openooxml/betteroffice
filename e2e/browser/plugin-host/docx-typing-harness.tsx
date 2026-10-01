@@ -169,6 +169,8 @@ class TapWorker extends NativeWorker {
       id: request?.id,
       type: request?.type,
       worker: workers.indexOf(this),
+      ...(request?.foreground === true ? { foreground: true } : {}),
+      ...(typeof request?.provisionalPages === 'number' ? { provisionalPages: request.provisionalPages } : {}),
     });
     (super.postMessage as (message: unknown, transfer?: unknown) => void)(message, transfer);
   }
