@@ -54,16 +54,35 @@ function parts(bytes: Uint8Array | ArrayBuffer): Record<string, string> {
   );
 }
 
-/** The `w:p` elements not nested in another `w:p`, and the XML between them. */
-function paragraphs(xml: string): { spans: string[]; gaps: string[] } {
-  const tag = /<(\/?)w:p(?=[\s>/])((?:[^>"']|"[^"]*"|'[^']*')*)>/g;
+/**
+ * The `w:p` elements not nested in another `w:p`, the XML between them, and whether each sits in
+ * a vertically merged continuation cell, whose content Word and the model do not read.
+ */
+function paragraphs(xml: string): { spans: string[]; gaps: string[]; continued: boolean[] } {
+  const tag =
+    /<w:tcPr\b(?:[^>"'/]|"[^"]*"|'[^']*')*>([\s\S]*?)<\/w:tcPr>|<(\/?)w:tc(?=[\s>/])((?:[^>"']|"[^"]*"|'[^']*')*)>|<(\/?)w:p(?=[\s>/])((?:[^>"']|"[^"]*"|'[^']*')*)>/g;
   const spans: string[] = [];
   const gaps: string[] = [];
+  const continued: boolean[] = [];
+  const cells: boolean[] = [];
   let depth = 0;
   let start = 0;
   let cursor = 0;
-  for (const match of xml.matchAll(tag)) {
-    const at = match.index!;
+  for (const found of xml.matchAll(tag)) {
+    if (found[1] !== undefined) {
+      if (cells.length > 0) {
+        cells[cells.length - 1] = /<w:vMerge\b(?![^>]*\sw:val="restart")/.test(found[1]);
+      }
+      continue;
+    }
+    if (found[3] !== undefined) {
+      if (found[2]) cells.pop();
+      else if (!found[3].trimEnd().endsWith('/')) cells.push(false);
+      continue;
+    }
+    const match = [found[0], found[4], found[5]] as const;
+    const at = found.index!;
+    if (depth === 0 && !match[1]) continued.push(cells.includes(true));
     if (match[1]) {
       depth -= 1;
       if (depth === 0) {
@@ -85,7 +104,20 @@ function paragraphs(xml: string): { spans: string[]; gaps: string[] } {
     }
   }
   gaps.push(xml.slice(cursor));
-  return { spans, gaps };
+  return { spans, gaps, continued };
+}
+
+/** Each paragraph's field group: the index of the first paragraph a complex field joins it to. */
+function fieldGroups(spans: string[]): number[] {
+  let depth = 0;
+  let first = 0;
+  return spans.map((span, index) => {
+    if (depth === 0) first = index;
+    for (const [, type] of span.matchAll(/<w:fldChar\b[^>]*\sw:fldCharType="(begin|end)"/g)) {
+      depth = Math.max(0, depth + (type === 'begin' ? 1 : -1));
+    }
+    return first;
+  });
 }
 
 function withoutIds(paragraph: string): string {
@@ -108,7 +140,9 @@ function text(paragraph: string): string {
     .replace(/<w:(pPr|rPr)\b[^>]*\/>/g, '')
     .replace(/<w:(pPr|rPr)\b[^>]*>[\s\S]*?<\/w:\1>/g, '');
   return [
-    ...content.matchAll(/<w:(t|delText)\b[^>]*>([^<]*)<\/w:\1>|<w:(tab|br|cr)\b[^>]*\/>/g),
+    ...content.matchAll(
+      /<w:(t|delText)\b[^>]*>([^<]*)<\/w:\1>|<w:(tab|cr)\b[^>]*\/>|<w:br\b(?![^>]*\sw:type="(?:page|column)")[^>]*\/>/g
+    ),
   ]
     .map((match) => (match[1] ? decode(match[2]!) : match[3] === 'tab' ? '\t' : '\n'))
     .join('');
@@ -127,13 +161,16 @@ function relationships(all: Record<string, string>, part: string): Map<string, s
 const MARKER =
   /<w:(commentRangeStart|commentRangeEnd|commentReference|bookmarkStart|bookmarkEnd|ins|del|moveFrom|moveTo|moveFromRangeStart|moveFromRangeEnd|moveToRangeStart|moveToRangeEnd|fldChar|fldSimple|footnoteReference|endnoteReference|permStart|permEnd|hyperlink)\b((?:[^>"']|"[^"]*"|'[^']*')*)>/g;
 
-/** The range, revision, field, note and link markers of `xml`, link targets resolved. */
+/**
+ * The range, revision, field, note and link markers of `xml`, link targets resolved and a move
+ * read as the deletion and insertion the model holds it as.
+ */
 function markers(xml: string, links: Map<string, string>): string[] {
   return [...xml.matchAll(MARKER)].map(([, name, attributes]) => {
     const value = (key: string) => new RegExp(`\\s${key}="([^"]*)"`).exec(attributes!)?.[1];
     const relationship = value('r:id');
     return [
-      name,
+      name === 'moveFrom' ? 'del' : name === 'moveTo' ? 'ins' : name,
       value('w:id'),
       value('w:name'),
       value('w:author'),
@@ -310,22 +347,38 @@ describe('a spliced session save', () => {
               if (gap !== from.gaps[index]) fail(`${part} XML before paragraph ${index} changed`);
             });
             const links = { spliced: relationships(spliced, part), whole: relationships(whole, part) };
+            const groups = fieldGroups(from.spans);
+            const grouped = new Map<number, number[]>();
+            groups.forEach((first, index) => {
+              if (!grouped.has(first)) grouped.set(first, []);
+              grouped.get(first)!.push(index);
+            });
+            const members = (first: number) => grouped.get(first)!;
+            const source = kept.spans.map(
+              (paragraph, index) => withoutIds(paragraph) === withoutIds(from.spans[index]!)
+            );
             kept.spans.forEach((paragraph, index) => {
-              if (paragraph === written.spans[index]) {
+              if (!source[index] && paragraph === written.spans[index]) {
                 tally.rewritten += 1;
+                if (members(groups[index]!).some((member) => source[member])) {
+                  fail(`${part} field group of paragraph ${index} is partly kept`);
+                }
                 return;
               }
-              if (withoutIds(paragraph) !== withoutIds(from.spans[index]!)) {
+              if (!source[index]) {
                 fail(`${part} paragraph ${index} is neither its source nor the written XML`);
                 return;
               }
               tally.kept += 1;
-              if (text(paragraph) !== text(written.spans[index]!)) {
+              if (groups[index] !== index || kept.continued[index]) return;
+              const group = members(index);
+              const join = (spans: string[]) => group.map((member) => spans[member]!).join('');
+              if (text(join(kept.spans)) !== text(join(written.spans))) {
                 fail(`${part} kept paragraph ${index} text differs from the model`);
               }
               const lost = missing(
-                markers(written.spans[index]!, links.whole),
-                markers(paragraph, links.spliced)
+                markers(join(written.spans), links.whole),
+                markers(join(kept.spans), links.spliced)
               );
               if (lost.length > 0) fail(`${part} kept paragraph ${index} lacks ${lost.join(', ')}`);
             });
