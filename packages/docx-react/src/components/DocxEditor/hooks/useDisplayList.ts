@@ -583,6 +583,10 @@ export function useRustDisplayList(
   );
   const pageBuildTimerRef = useRef<PageBuildTimer | null>(null);
   const provisionalPageFrameRef = useRef(false);
+  const deferredPageBuildsRef = useRef(new WeakMap<ResidentEngineWorkerClient, {
+    layoutEpoch: number;
+    pages: Set<number>;
+  }>());
   const schedulePageBuildsWhenIdleRef = useRef<() => void>(() => {});
   const retryPageBuildsRef = useRef<(idle: boolean) => void>(() => {});
   const unadoptedFrameSinceRef = useRef<number | null>(null);
@@ -1676,9 +1680,11 @@ export function useRustDisplayList(
       const last = windowOnly
         ? Math.min(pages.length, end + WORKER_OPEN_BUILD_MARGIN_PAGES)
         : pages.length;
+      const deferred = deferredPageBuildsRef.current.get(worker.client);
+      const deferredPages = deferred?.layoutEpoch === frame.layoutEpoch ? deferred.pages : undefined;
       const unbuilt: number[] = [];
       for (let index = first; index < last; index += 1) {
-        if (pages[index]?.unbuilt) unbuilt.push(index);
+        if (pages[index]?.unbuilt && !deferredPages?.has(index)) unbuilt.push(index);
       }
       const release = unbuilt.length === 0 ? pagesToRelease(frame) : [];
       if (unbuilt.length === 0 && release.length === 0) return;
@@ -1831,6 +1837,16 @@ export function useRustDisplayList(
                       line
                     )
                   : { displayList: nextFrame.displayList, frame: nextFrame, queries: null, caret };
+              const deferred = deferredPageBuildsRef.current.get(worker.client);
+              const deferredPages = deferred?.layoutEpoch === nextFrame.layoutEpoch
+                ? deferred.pages
+                : new Set<number>();
+              for (const index of batch) {
+                if (nextFrame.displayList.pages[index]?.unbuilt) deferredPages.add(index);
+              }
+              deferredPageBuildsRef.current.set(worker.client, {
+                layoutEpoch: nextFrame.layoutEpoch, pages: deferredPages,
+              });
               snapshotRef.current = nextSnapshot;
               publishQuerySnapshot(nextSnapshot, contentEpochRef.current);
               if (background) startTransition(() => setSnapshot(nextSnapshot));
