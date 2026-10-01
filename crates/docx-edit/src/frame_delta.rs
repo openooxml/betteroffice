@@ -47,6 +47,7 @@ const POSITION_FIELDS: [u8; 5] = [
 
 const MAGIC: [u8; 4] = *b"FDV1";
 const MAX_U32: usize = u32::MAX as usize;
+const MAX_SAFE_INTEGER: i64 = (1 << 53) - 1;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
@@ -609,6 +610,8 @@ fn prepare_pages<'a>(
         }
     };
     let mut prepared = Vec::with_capacity(list.pages.len());
+    let mut placeholder_strings = StringTable::default();
+    let mut placeholder_out = Vec::new();
     for ((index, page), anchor) in list.pages.iter().enumerate().zip(anchors) {
         let page_index = checked_u32(index, "page index")?;
         let matched = matched_previous[index].map(|previous_index| &previous[previous_index]);
@@ -634,7 +637,9 @@ fn prepare_pages<'a>(
         let placeholder_hash = if same_placeholder {
             matched.expect("matched placeholder").placeholder_hash
         } else if let Some(normalized) = &placeholder {
-            encode_page(normalized, &mut StringTable::default(), &mut Vec::new())?.fingerprint
+            placeholder_strings.rollback(0);
+            placeholder_out.clear();
+            encode_page(normalized, &mut placeholder_strings, &mut placeholder_out)?.fingerprint
         } else {
             0
         };
@@ -756,6 +761,9 @@ fn page_change(
                 && let Some(delta) = next_start.checked_sub(start)
                 && next_end.checked_sub(end) == Some(delta)
                 && delta != 0
+                && [start, end, next_start, next_end, delta]
+                    .into_iter()
+                    .all(|value| (-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&value))
             {
                 return PageChange::ShiftPositions(Vec::new(), Vec::new(), Some(delta));
             }
@@ -2455,6 +2463,46 @@ mod tests {
     }
 
     #[test]
+    fn compact_placeholders_upsert_unsafe_position_span_shifts() {
+        let max = MAX_SAFE_INTEGER;
+        for (before_span, after_span) in [
+            ([-max, -max + 1], [1, 2]),
+            ([1, 2], [-max, -max + 1]),
+            ([-max, -max + 1], [-max - 1, -max]),
+            ([-max - 1, -max], [-max, -max + 1]),
+            ([max - 1, max], [max, max + 1]),
+            ([max, max + 1], [max - 1, max]),
+        ] {
+            let before = placeholder_list(Some(before_span));
+            let after = placeholder_list(Some(after_span));
+            let mut next_id = 0;
+            let (full, snapshots) = encode_frame_delta(
+                &before,
+                &[],
+                placeholder_epochs(1),
+                true,
+                &mut next_id,
+                true,
+            )
+            .unwrap();
+            let mut retained = HashMap::new();
+            assert_eq!(apply_placeholder_test_frame(&full, &mut retained), before);
+            let (bytes, _) = encode_frame_delta_incremental(
+                &after,
+                &snapshots,
+                placeholder_epochs(2),
+                &mut next_id,
+                &HashSet::new(),
+                true,
+            )
+            .unwrap();
+            assert_eq!(u32_at(&bytes, 52), 1);
+            assert_eq!(bytes[FRAME_HEADER_LEN], PAGE_OP_UPSERT);
+            assert_eq!(apply_placeholder_test_frame(&bytes, &mut retained), after);
+        }
+    }
+
+    #[test]
     fn compact_placeholders_upsert_nonuniform_or_missing_spans_and_metadata_changes() {
         let before = placeholder_list(Some([8, 30]));
         let moved = placeholder_list(Some([14, 36]));
@@ -2464,6 +2512,7 @@ mod tests {
         geometry.pages[0].width = 800.into();
         let mut built = moved.clone();
         built.pages[0].unbuilt = false;
+        built.pages[0].primitives = list_at_position(14).pages[0].primitives.clone();
         let cases = [
             (placeholder_list(None), moved.clone()),
             (before.clone(), placeholder_list(None)),
@@ -2479,7 +2528,7 @@ mod tests {
         ];
         for (before, after) in cases {
             let mut next_id = 0;
-            let (_, snapshots) = encode_frame_delta(
+            let (full, snapshots) = encode_frame_delta(
                 &before,
                 &[],
                 placeholder_epochs(1),
@@ -2488,17 +2537,33 @@ mod tests {
                 true,
             )
             .unwrap();
-            let (bytes, _) = encode_frame_delta_incremental(
+            let mut retained = HashMap::new();
+            assert_eq!(apply_placeholder_test_frame(&full, &mut retained), before);
+            let rebuilt = if before.pages[0].unbuilt && !after.pages[0].unbuilt {
+                HashSet::from([0])
+            } else {
+                HashSet::new()
+            };
+            let (bytes, next_snapshots) = encode_frame_delta_incremental(
                 &after,
                 &snapshots,
                 placeholder_epochs(2),
                 &mut next_id,
-                &HashSet::new(),
+                &rebuilt,
                 true,
             )
             .unwrap();
             assert_eq!(u32_at(&bytes, 52), 1);
             assert_eq!(bytes[FRAME_HEADER_LEN], PAGE_OP_UPSERT);
+            let applied = apply_placeholder_test_frame(&bytes, &mut retained);
+            assert_eq!(applied, after);
+            if !rebuilt.is_empty() {
+                assert!(!applied.pages[0].unbuilt);
+                assert_eq!(applied.pages[0].position_span, Some([14, 36]));
+                assert_eq!(applied.pages[0].primitives, after.pages[0].primitives);
+                assert_ne!(next_snapshots[0].fingerprint, snapshots[0].fingerprint);
+                assert_eq!(next_snapshots[0].primitive_ids.len(), 1);
+            }
         }
         let mut next_id = 0;
         let (_, snapshots) = encode_frame_delta(
