@@ -226,6 +226,7 @@ struct Layout<'s> {
 struct Edges<'s> {
     before: Option<(&'s str, bool)>,
     after: Option<(&'s str, bool)>,
+    field_after: bool,
 }
 
 impl Edges<'_> {
@@ -233,6 +234,7 @@ impl Edges<'_> {
     /// paragraph, a table, the section or the edge of its story or cell on the far side.
     fn admit(&self, anchor: S13SpliceAnchor) -> bool {
         match anchor {
+            S13SpliceAnchor::After(_) if self.field_after => false,
             S13SpliceAnchor::After(_) => match self.after {
                 Some((name, true)) => PARENTS.contains(&name),
                 Some((name, false)) => matches!(name, "w:p" | "w:tbl" | "w:sectPr"),
@@ -280,7 +282,9 @@ fn layout<'s>(
     let mut previous = None;
     for tag in tags(source)? {
         while let Some((_, ordinal)) = ends.next_if(|(end, _)| *end <= tag.range.start) {
-            layout.edges.entry(ordinal).or_default().after = Some((tag.name, tag.end));
+            let edges = layout.edges.entry(ordinal).or_default();
+            edges.after = Some((tag.name, tag.end));
+            edges.field_after = fields > 0;
         }
         let last = previous.replace((tag.name, tag.end));
         if tag.end {
@@ -805,6 +809,18 @@ mod tests {
                 vec![(Some(0), opening), (Some(2), closing)],
                 Edit {
                     removed: &[1],
+                    ..Edit::default()
+                },
+            ),
+            (
+                vec![
+                    (Some(0), opening),
+                    (None, new),
+                    (Some(1), middle),
+                    (Some(2), closing),
+                ],
+                Edit {
+                    inserted: &[S13SpliceAnchor::After(0)],
                     ..Edit::default()
                 },
             ),

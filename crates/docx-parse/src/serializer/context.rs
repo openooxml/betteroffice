@@ -31,7 +31,7 @@ struct SpliceRecorder {
 }
 
 /// The paragraphs written for a spliced part, outside any other paragraph.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct RecordedParagraphs {
     /// The XML of each paragraph written from a source paragraph, by `sourceOrdinal`.
     pub(crate) written: HashMap<u32, String>,

@@ -172,6 +172,12 @@ function paragraphSources(kept: string[], from: string[]): (number | undefined)[
   return sourceOf;
 }
 
+/** The offsets in `gaps` joined at which the paragraphs between them sit. */
+function cuts(gaps: string[]): number[] {
+  let at = 0;
+  return gaps.slice(0, -1).map((gap) => (at += gap.length));
+}
+
 function decode(text: string): string {
   return text.replace(/&(#x[0-9a-fA-F]+|#[0-9]+|amp|lt|gt|quot|apos);/g, (_, entity: string) => {
     if (entity.startsWith('#x')) return String.fromCodePoint(Number.parseInt(entity.slice(2), 16));
@@ -443,6 +449,13 @@ describe('a spliced session save', () => {
                   });
                 } else if (saved.join('') !== source.join('')) {
                   fail(`${part} XML around paragraphs ${ka + 1}..${kb - 1} changed`);
+                } else {
+                  const between = new Set([0, saved.join('').length, ...cuts(source)]);
+                  if (cuts(saved).some((at) => !between.has(at))) {
+                    fail(
+                      `${part} paragraphs ${ka + 1}..${kb - 1} sit inside the XML between source paragraphs`
+                    );
+                  }
                 }
                 ka = kb;
                 ja = jb;
