@@ -2237,6 +2237,34 @@ describe('resident worker opening', () => {
     expect(calls.slice(-3)).toEqual(['begin:{"request":1}', 'resume:2', 'frame:1']);
   });
 
+  test('answers a repeated font requirements request from the last answer until the document updates', async () => {
+    const { w, calls } = openingWorker();
+    const listeners = new Set<() => void>();
+    Object.assign(w.harness.session, {
+      onUpdate: (listener: () => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    });
+    expect((await w.send({ type: 'open', bytes: new Uint8Array([1]).buffer })).ok).toBe(true);
+    const ask = async (layoutInput: string) => {
+      const answer = await w.send({ type: 'fontRequirements', layoutInput });
+      expect(answer.ok && answer.requirementsJson).toBe('[{"key":"a"}]');
+    };
+    for (const input of ['{"request":1}', '{"request":1}', '{"request":2}', '{"request":2}']) {
+      await ask(input);
+    }
+    for (const listener of [...listeners]) listener();
+    expect(listeners.size).toBe(0);
+    await ask('{"request":2}');
+    await ask('{"request":2}');
+    expect(calls.filter((call) => call.startsWith('requirements:'))).toEqual([
+      'requirements:{"request":1}',
+      'requirements:{"request":2}',
+      'requirements:{"request":2}',
+    ]);
+  });
+
   test('opens a preview, lays it out, and replaces it with the whole package', async () => {
     const { w, calls } = openingWorker();
     Object.assign(w.harness.session, {
