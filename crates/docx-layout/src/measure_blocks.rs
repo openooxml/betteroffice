@@ -2340,10 +2340,11 @@ fn measure_table(
 
     for (row_index, row) in table.rows.iter_mut().enumerate() {
         let mut cells = Vec::with_capacity(row.cells.len());
-        let rotated_length = row
-            .height
-            .filter(|_| row.is_exact_height())
-            .unwrap_or(content_width);
+        let rotated_length = match row.height {
+            Some(height) if row.is_exact_height() => height,
+            Some(height) => height.max(content_width),
+            None => content_width,
+        };
         for (cell_index, cell) in row.cells.iter_mut().enumerate() {
             let resolved = grid
                 .iter()
@@ -3815,12 +3816,17 @@ mod tests {
             defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
             ..MeasurementConfig::default()
         };
-        for height in [Some(20.0), None] {
+        let long = "A vertical label longer than the table is wide";
+        for (height, text) in [
+            (Some(20.0), "Vertical label"),
+            (None, "Vertical label"),
+            (Some(500.0), long),
+        ] {
             let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([{
                 "kind":"table","id":"table","columnWidths":[30],"rows":[{
                     "id":"row","height":height,"heightRule":height.map(|_| "atLeast"),"cells":[{
                         "id":"cell","textDirection":"btLr","padding":{"left":0,"right":0,"top":4,"bottom":4},
-                        "blocks":[{"kind":"paragraph","id":"label","runs":[{"kind":"text","text":"Vertical label","fontSize":12}]}]
+                        "blocks":[{"kind":"paragraph","id":"label","runs":[{"kind":"text","text":text,"fontSize":12}]}]
                     }]
                 }]
             }])).unwrap();
@@ -3831,9 +3837,17 @@ mod tests {
             let BlockExtent::Paragraph(label) = &table.rows[0].cells[0].blocks[0] else {
                 panic!()
             };
+            let width = label.lines[0].width;
             assert_eq!(label.lines.len(), 1, "{height:?}");
-            assert!(label.lines[0].width > 20.0, "{height:?}");
-            assert_eq!(table.total_height, label.lines[0].width + 8.0, "{height:?}");
+            assert!(width > 20.0, "{height:?}");
+            if text == long {
+                assert!(width > 200.0);
+            }
+            assert_eq!(
+                table.total_height,
+                (width + 8.0).max(height.unwrap_or(0.0) + 8.0),
+                "{height:?}"
+            );
         }
     }
 
