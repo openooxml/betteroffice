@@ -583,7 +583,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
           if (pending) setPendingPartCaretVersion((version) => version + 1);
           return;
         }
-      } else if ((region === 'header' || region === 'footer') && e.detail !== 2) {
+      } else if (region === 'header' || region === 'footer') {
         return;
       }
 

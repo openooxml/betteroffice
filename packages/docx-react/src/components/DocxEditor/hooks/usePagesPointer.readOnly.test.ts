@@ -142,19 +142,28 @@ test('a read-only press selects text only: no image, note or header', () => {
   expect(selections).toEqual([[5, 5]]);
 });
 
-test('a header or footer click opens part editing only when editable, with or without a pending replica', () => {
+/** A header above y 80 and a footer below y 900; `shift` moves the content under the pointer. */
+function bandQueries(shift: () => number = () => 0): DisplayListQueries {
   const bands = fakeQueries();
-  bands.hitTestRegions = (_pageIndex: number, x: number, y: number): DisplayListRegionHit =>
-    y < HEADER_BOTTOM
+  bands.hitTestRegions = (_pageIndex: number, x: number, y: number): DisplayListRegionHit => {
+    const at = y + shift();
+    return at < HEADER_BOTTOM
       ? { region: 'header', rId: 'rId7', pos: 1, target: 'text' }
-      : y >= NOTE_TOP
+      : at >= NOTE_TOP
         ? { region: 'footer', rId: 'rId8', pos: 1, target: 'text' }
         : { region: 'body', pos: Math.floor(x / 10), target: 'text' };
-  const press = (y: number, detail: number) => {
-    mouse('mousedown', 400, y, canvasOf(), detail);
-    mouse('mouseup', 400, y, window, detail);
-    mouse('click', 400, y, canvasOf(), detail);
   };
+  return bands;
+}
+
+function press(y: number, detail: number): void {
+  mouse('mousedown', 400, y, canvasOf(), detail);
+  mouse('mouseup', 400, y, window, detail);
+  mouse('click', 400, y, canvasOf(), detail);
+}
+
+test('a header or footer click opens part editing only when editable, with or without a pending replica', () => {
+  const bands = bandQueries();
   for (const readOnly of [true, false]) {
     for (const pending of [false, true]) {
       const opened: Array<['header' | 'footer', number | undefined]> = [];
@@ -175,6 +184,68 @@ test('a header or footer click opens part editing only when editable, with or wi
       view.unmount();
     }
   }
+});
+
+test('an editable double-click opens the header or footer it lands on and leaves the caret', () => {
+  for (const pending of [false, true]) {
+    let caretMoved = () => false;
+    // a caret the press places scrolls the page, so the release lands lower
+    const bands = bandQueries(() => (caretMoved() ? NOTE_TOP : 0));
+    const opened: Array<['header' | 'footer', number | undefined]> = [];
+    const { opts, selections, words } = options({
+      readOnly: false,
+      displayListQueries: bands,
+      replicaPending: () => pending,
+      onHeaderFooterDoubleClick: (region, pageNumber) => opened.push([region, pageNumber]),
+    });
+    caretMoved = () => selections.length > 0;
+    const view = renderHook(() => usePagesPointer(opts));
+    press(40, 1);
+    press(950, 1);
+    expect({ opened, selections, words }).toEqual({ opened: [], selections: [], words: [] });
+    press(40, 1);
+    press(40, 2);
+    expect(opened).toEqual([['header', 1]]);
+    press(950, 1);
+    press(950, 2);
+    expect({ opened, selections, words }).toEqual({
+      opened: [
+        ['header', 1],
+        ['footer', 1],
+      ],
+      selections: [],
+      words: [],
+    });
+    view.unmount();
+  }
+});
+
+test('a header double-click while the footer is open switches to the header', () => {
+  let caretMoved = () => false;
+  const bands = bandQueries(() => (caretMoved() ? NOTE_TOP : 0));
+  const opened: Array<['header' | 'footer', number | undefined]> = [];
+  let closed = 0;
+  const { opts, selections } = options({
+    readOnly: false,
+    displayListQueries: bands,
+    onHeaderFooterDoubleClick: (region, pageNumber) => opened.push([region, pageNumber]),
+    onBodyClick: () => {
+      closed += 1;
+    },
+  });
+  caretMoved = () => selections.length > 0;
+  const view = renderHook(
+    ({ partEdit }: { partEdit: UsePagesPointerOptions['partEdit'] }) =>
+      usePagesPointer({ ...opts, partEdit }),
+    { initialProps: { partEdit: { kind: 'footer', rId: 'rId8' } } }
+  );
+  mouse('mousedown', 400, 40, canvasOf(), 1);
+  expect(closed).toBe(1);
+  view.rerender({ partEdit: null });
+  mouse('mouseup', 400, 40, window, 1);
+  mouse('click', 400, 40, canvasOf(), 1);
+  press(40, 2);
+  expect({ opened, selections }).toEqual({ opened: [['header', 1]], selections: [] });
 });
 
 test('the table insert button hides and inserts nothing once the editor turns read-only', () => {

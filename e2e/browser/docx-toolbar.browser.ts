@@ -17,13 +17,19 @@ async function open(page: Page) {
   await expect(page.getByTestId('formatting-bar')).toBeVisible();
 }
 
-async function savedText(page: Page, info: TestInfo, label: string) {
+async function savedText(
+  page: Page,
+  info: TestInfo,
+  label: string,
+  part = /^word\/document\.xml$/
+) {
   const downloading = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Save', exact: true }).first().click();
   const file = info.outputPath(label + '.docx');
   await (await downloading).saveAs(file);
   const zip = await JSZip.loadAsync(await readFile(file));
-  const xml = await zip.file('word/document.xml')!.async('string');
+  const parts = await Promise.all(zip.file(part).map((entry) => entry.async('string')));
+  const xml = parts.join('');
   return page.evaluate(
     (xml) =>
       Array.from(
@@ -266,4 +272,25 @@ test('docx: a toolbar command issued during IME composition applies after the co
   expect(await savedText(page, info, 'undone')).not.toContain('漢字');
   await redo.click();
   expect(await savedText(page, info, 'redone')).toContain('漢字');
+});
+
+test('docx: a double-click on the first page header opens the header for editing', async ({
+  page,
+}, info) => {
+  await open(page);
+  await focusDocument(page);
+  const header = page.locator('.layout-page[data-page-index="0"] .layout-page-header');
+  const box = (await header.boundingBox())!;
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+
+  await page.mouse.click(x, y);
+  await expect(page.locator('.hf-inline-editor')).toHaveCount(0);
+  expect((await header.boundingBox())!.y).toBe(box.y);
+
+  await page.mouse.dblclick(x, y);
+  await expect(page.locator('.hf-inline-editor')).toContainText('Header');
+  expect((await header.boundingBox())!.y).toBe(box.y);
+  await page.keyboard.type('Edited');
+  expect(await savedText(page, info, 'header', /^word\/header\d+\.xml$/)).toContain('Edited');
 });

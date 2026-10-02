@@ -2,4 +2,4 @@
 "@betteroffice/docx-react": patch
 ---
 
-Plugins receive a `layout-change` that carries geometry when a document opened in a background tab is shown, so overlays can be placed without a scroll first.
+Plugin overlays get their positions when a document opened in a background tab is shown, without a scroll.
