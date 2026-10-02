@@ -557,15 +557,53 @@ struct ResolvedParagraphStyle {
     default_run: Option<Arc<Value>>,
 }
 
+/// Maximum approximate retained value size across both style memos.
+const STYLE_MEMO_BYTES: usize = 4 << 20;
+
+/// Paragraph styles grouped by exact lookup result.
+#[derive(Default)]
+struct ParagraphStyleMemo {
+    absent: Option<Arc<ResolvedParagraphStyle>>,
+    undefined: Option<Arc<ResolvedParagraphStyle>>,
+    styles: HashMap<String, Arc<ResolvedParagraphStyle>>,
+}
+
+/// Run styles grouped by exact lookup result.
+#[derive(Default)]
+struct RunStyleMemo {
+    unstyled: Option<Option<Arc<Value>>>,
+    styles: HashMap<String, Option<Arc<Value>>>,
+}
+
+/// Style memos sharing one retained value budget.
+#[derive(Default)]
+struct MemoState {
+    paragraphs: ParagraphStyleMemo,
+    runs: RunStyleMemo,
+    bytes: usize,
+}
+
 #[derive(Default)]
 struct StyleMemo {
-    paragraphs: Mutex<HashMap<Option<String>, Arc<ResolvedParagraphStyle>>>,
-    runs: Mutex<HashMap<Option<String>, Option<Arc<Value>>>>,
+    state: Mutex<MemoState>,
 }
 
 impl Clone for StyleMemo {
     fn clone(&self) -> Self {
         Self::default()
+    }
+}
+
+/// Estimates JSON storage from nodes, strings, and object keys.
+fn approx_bytes(value: &Value) -> usize {
+    32 + match value {
+        Value::String(value) => value.len(),
+        Value::Array(values) => values.iter().map(approx_bytes).sum(),
+        Value::Object(values) => values
+            .iter()
+            .map(|(key, value)| key.len() + approx_bytes(value))
+            .sum(),
+        _ => 0,
     }
 }
 
@@ -1078,44 +1116,65 @@ impl StyleResolver {
         id.and_then(|id| self.style(id))
     }
 
-    fn set_table_paragraph_formatting(
-        &mut self,
-        formatting: Option<Value>,
-    ) -> (Option<Value>, StyleMemo) {
-        (
-            std::mem::replace(&mut self.table_paragraph_formatting, formatting),
-            std::mem::take(&mut self.memo),
-        )
+    fn set_table_paragraph_formatting(&mut self, formatting: Option<Value>) -> Option<Value> {
+        let previous = std::mem::replace(&mut self.table_paragraph_formatting, formatting);
+        self.memo = StyleMemo::default();
+        previous
     }
 
-    fn restore_table_paragraph_formatting(&mut self, state: (Option<Value>, StyleMemo)) {
-        self.table_paragraph_formatting = state.0;
-        self.memo = state.1;
+    fn restore_table_paragraph_formatting(&mut self, state: Option<Value>) {
+        self.table_paragraph_formatting = state;
+        self.memo = StyleMemo::default();
     }
 
     fn resolve_paragraph_style(&self, style_id: Option<&str>) -> Arc<ResolvedParagraphStyle> {
+        let defined_id = style_id.filter(|id| self.style(id).is_some());
         let mut memo = self
             .memo
-            .paragraphs
+            .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        Arc::clone(memo.entry(style_id.map(str::to_owned)).or_insert_with(|| {
-            let (paragraph, run) = self.resolve_paragraph_style_uncached(style_id);
-            let run = run.map(Arc::new);
-            let default_character = self
-                .default_style("character")
-                .and_then(|style| field(Some(style), "rPr"));
-            let default_run = if default_character.is_some() {
-                merge_text_formatting(run.as_deref(), default_character).map(Arc::new)
-            } else {
-                run.clone()
-            };
-            Arc::new(ResolvedParagraphStyle {
-                paragraph,
-                run,
-                default_run,
-            })
-        }))
+        let cached = match (style_id, defined_id) {
+            (None, _) => memo.paragraphs.absent.as_ref(),
+            (_, Some(id)) => memo.paragraphs.styles.get(id),
+            _ => memo.paragraphs.undefined.as_ref(),
+        };
+        if let Some(cached) = cached {
+            return Arc::clone(cached);
+        }
+        let (paragraph, run) = self.resolve_paragraph_style_uncached(style_id);
+        let run = run.map(Arc::new);
+        let default_character = self
+            .default_style("character")
+            .and_then(|style| field(Some(style), "rPr"));
+        let default_run = if default_character.is_some() {
+            merge_text_formatting(run.as_deref(), default_character).map(Arc::new)
+        } else {
+            run.clone()
+        };
+        let size = [paragraph.as_ref(), run.as_deref(), default_run.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(approx_bytes)
+            .sum::<usize>();
+        let resolved = Arc::new(ResolvedParagraphStyle {
+            paragraph,
+            run,
+            default_run,
+        });
+        if memo.bytes + size <= STYLE_MEMO_BYTES {
+            memo.bytes += size;
+            match (style_id, defined_id) {
+                (None, _) => memo.paragraphs.absent = Some(Arc::clone(&resolved)),
+                (_, Some(id)) => {
+                    memo.paragraphs
+                        .styles
+                        .insert(id.to_owned(), Arc::clone(&resolved));
+                }
+                _ => memo.paragraphs.undefined = Some(Arc::clone(&resolved)),
+            }
+        }
+        resolved
     }
 
     fn resolve_paragraph_style_uncached(
@@ -1155,14 +1214,31 @@ impl StyleResolver {
     }
 
     fn resolve_run_style(&self, style_id: Option<&str>) -> Option<Arc<Value>> {
+        let defined_id = style_id.filter(|id| self.style(id).is_some());
         let mut memo = self
             .memo
-            .runs
+            .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        memo.entry(style_id.map(str::to_owned))
-            .or_insert_with(|| self.resolve_run_style_uncached(style_id).map(Arc::new))
-            .clone()
+        let cached = match defined_id {
+            Some(id) => memo.runs.styles.get(id),
+            None => memo.runs.unstyled.as_ref(),
+        };
+        if let Some(cached) = cached {
+            return cached.clone();
+        }
+        let resolved = self.resolve_run_style_uncached(style_id).map(Arc::new);
+        let size = resolved.as_deref().map_or(0, approx_bytes);
+        if memo.bytes + size <= STYLE_MEMO_BYTES {
+            memo.bytes += size;
+            match defined_id {
+                Some(id) => {
+                    memo.runs.styles.insert(id.to_owned(), resolved.clone());
+                }
+                None => memo.runs.unstyled = Some(resolved.clone()),
+            }
+        }
+        resolved
     }
 
     fn resolve_run_style_uncached(&self, style_id: Option<&str>) -> Option<Value> {
@@ -6926,49 +7002,144 @@ mod tests {
             json!({}),
             json!({ "bold": false, "fontFamily": { "ascii": "Direct" } }),
         ];
+        let assert_formatting = |styles: &StyleResolver, style_id: Option<&str>| {
+            let paragraph = json!({ "formatting": { "styleId": style_id }, "content": [] });
+            let (ppr, run) = styles.resolve_paragraph_style_uncached(style_id);
+            let inherited_run = styles.enabled.then_some(run.as_ref()).flatten();
+            for extra in std::iter::once(None).chain(extras.iter().map(Some)) {
+                let actual = paragraph_style_formatting(&paragraph, styles, extra);
+                let expected = merge_text_formatting(inherited_run, extra);
+                assert_eq!(actual.as_deref(), expected.as_ref());
+            }
+            let attrs = paragraph_attrs(&paragraph, styles, &[], &[], None);
+            if styles.enabled {
+                for key in STYLE_FALLBACK_KEYS {
+                    assert_eq!(
+                        attrs.get(key),
+                        Some(field(ppr.as_ref(), key).unwrap_or(&Value::Null))
+                    );
+                }
+                let character = styles
+                    .default_style("character")
+                    .and_then(|style| field(Some(style), "rPr"));
+                let expected = merge_text_formatting(run.as_ref(), character);
+                assert_eq!(
+                    attrs.get("defaultTextFormatting"),
+                    Some(expected.as_ref().unwrap_or(&Value::Null))
+                );
+            }
+            let formatting = json!({ "styleId": style_id, "color": { "rgb": "123456" } });
+            let run = style_id.and_then(|id| styles.resolve_run_style_uncached(Some(id)));
+            assert_eq!(
+                resolved_text_formatting(Some(&formatting), styles),
+                merge_text_formatting(run.as_ref(), Some(&formatting))
+            );
+            assert_eq!(
+                styles.resolve_run_style(style_id).as_deref(),
+                styles.resolve_run_style_uncached(style_id).as_ref()
+            );
+            let memo = styles.memo.state.lock().unwrap();
+            assert!(memo.bytes <= STYLE_MEMO_BYTES);
+            assert!(memo.paragraphs.styles.len() <= styles.styles.len());
+            assert!(memo.runs.styles.len() <= styles.styles.len());
+        };
         for styles in [
             StyleResolver::new(Some(&definitions)),
             StyleResolver::new(Some(&json!({}))),
             StyleResolver::new(None),
         ] {
             for _ in 0..2 {
-                for style_id in [None, Some(""), Some("Missing"), Some("Body"), Some("body")] {
-                    let paragraph = json!({ "formatting": { "styleId": style_id }, "content": [] });
-                    let (ppr, run) = styles.resolve_paragraph_style_uncached(style_id);
-                    let inherited_run = styles.enabled.then_some(run.as_ref()).flatten();
-                    for extra in std::iter::once(None).chain(extras.iter().map(Some)) {
-                        let actual = paragraph_style_formatting(&paragraph, &styles, extra);
-                        let expected = merge_text_formatting(inherited_run, extra);
-                        assert_eq!(actual.as_deref(), expected.as_ref());
-                    }
-                    let attrs = paragraph_attrs(&paragraph, &styles, &[], &[], None);
-                    if styles.enabled {
-                        for key in STYLE_FALLBACK_KEYS {
-                            assert_eq!(
-                                attrs.get(key),
-                                Some(field(ppr.as_ref(), key).unwrap_or(&Value::Null))
-                            );
-                        }
-                        let character = styles
-                            .default_style("character")
-                            .and_then(|style| field(Some(style), "rPr"));
-                        let expected = merge_text_formatting(run.as_ref(), character);
-                        assert_eq!(
-                            attrs.get("defaultTextFormatting"),
-                            Some(expected.as_ref().unwrap_or(&Value::Null))
-                        );
-                    }
-                    for run_id in ["Accent", "Body", "body", "Missing", ""] {
-                        let formatting = json!({ "styleId": run_id, "color": { "rgb": "123456" } });
-                        let run = styles.resolve_run_style_uncached(Some(run_id));
-                        assert_eq!(
-                            resolved_text_formatting(Some(&formatting), &styles),
-                            merge_text_formatting(run.as_ref(), Some(&formatting))
-                        );
-                    }
+                for style_id in [
+                    None,
+                    Some(""),
+                    Some("Missing"),
+                    Some("Normal"),
+                    Some("Body"),
+                    Some("body"),
+                    Some("Character"),
+                    Some("Accent"),
+                ] {
+                    assert_formatting(&styles, style_id);
                 }
             }
         }
+        let styles = StyleResolver::new(Some(&json!({})));
+        let absent = styles.resolve_paragraph_style(None);
+        let undefined = styles.resolve_paragraph_style(Some("Missing"));
+        assert_eq!(
+            absent.paragraph,
+            Some(json!({ "spaceAfter": 160, "lineSpacing": 259, "lineSpacingRule": "auto" }))
+        );
+        assert_eq!(undefined.paragraph, None);
+        assert!(!Arc::ptr_eq(&absent, &undefined));
+        assert!(Arc::ptr_eq(
+            &undefined,
+            &styles.resolve_paragraph_style(Some("AnotherMissing"))
+        ));
+
+        let font_name = "x".repeat(64 << 10);
+        let mut definitions = json!({
+            "docDefaults": {
+                "pPr": { "alignment": "left", "runProperties": { "fontFamily": { "ascii": font_name } } },
+                "rPr": { "bold": false, "fontFamily": { "ascii": font_name } }
+            },
+            "styles": [
+                { "styleId": "Character", "type": "character", "default": true,
+                    "rPr": { "italic": true } }
+            ]
+        });
+        definitions["styles"]
+            .as_array_mut()
+            .unwrap()
+            .extend((0..200).map(|index| {
+                json!({
+                    "styleId": format!("Defined{index}"), "type": "paragraph",
+                    "pPr": { "spaceAfter": index }, "rPr": { "bold": index % 2 == 0 }
+                })
+            }));
+        let mut styles = StyleResolver::new(Some(&definitions));
+        let mut style_ids = Vec::new();
+        for index in 0..500 {
+            style_ids.push(format!("Undefined{index}"));
+            if index < 200 {
+                style_ids.push(format!("Defined{index}"));
+            }
+        }
+        assert_formatting(&styles, None);
+        assert!(Arc::ptr_eq(
+            &styles.resolve_run_style(None).unwrap(),
+            &styles.resolve_run_style(Some("Undefined0")).unwrap()
+        ));
+        for _ in 0..2 {
+            for style_id in &style_ids {
+                assert_formatting(&styles, Some(style_id));
+            }
+        }
+        {
+            let memo = styles.memo.state.lock().unwrap();
+            assert!(memo.bytes > STYLE_MEMO_BYTES / 2);
+            assert!(memo.paragraphs.absent.is_some());
+            assert!(memo.paragraphs.undefined.is_some());
+            assert!(memo.runs.unstyled.is_some());
+            assert!(memo.paragraphs.styles.len() < 200);
+            assert!(memo.runs.styles.len() < 200);
+        }
+        let cloned = styles.clone();
+        assert_eq!(cloned.memo.state.lock().unwrap().bytes, 0);
+        let previous = styles.set_table_paragraph_formatting(Some(json!({ "alignment": "right" })));
+        assert_eq!(previous, None);
+        assert_eq!(styles.memo.state.lock().unwrap().bytes, 0);
+        assert_formatting(&styles, Some("Defined0"));
+        let outer = styles.set_table_paragraph_formatting(Some(json!({ "alignment": "center" })));
+        assert_eq!(outer, Some(json!({ "alignment": "right" })));
+        assert_eq!(styles.memo.state.lock().unwrap().bytes, 0);
+        assert_formatting(&styles, Some("Defined0"));
+        styles.restore_table_paragraph_formatting(outer);
+        assert_eq!(styles.memo.state.lock().unwrap().bytes, 0);
+        assert_formatting(&styles, Some("Defined0"));
+        styles.restore_table_paragraph_formatting(previous);
+        assert_eq!(styles.memo.state.lock().unwrap().bytes, 0);
+        assert_formatting(&styles, Some("Defined0"));
     }
 
     #[test]
@@ -7100,7 +7271,8 @@ mod tests {
             "content": []
         });
         let actual = paragraph_attrs(&paragraph, &StyleResolver::new(None), &[], &[], None);
-        let expected: JsonObject = serde_json::from_value(json!({
+        let expected: JsonObject = serde_json::from_str(
+            r#"{
             "paraId": "12345678",
             "textId": "ABCDEF01",
             "styleId": "List",
@@ -7152,7 +7324,8 @@ mod tests {
             "indentFirstLine": null,
             "hangingIndent": false,
             "defaultTextFormatting": null
-        }))
+        }"#,
+        )
         .unwrap();
         assert_eq!(actual, expected);
         assert_eq!(
