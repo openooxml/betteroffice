@@ -1,5 +1,6 @@
 //! Direct serialization into ordered JSON values.
 
+use std::cell::Cell;
 use std::fmt;
 
 use serde::Serialize;
@@ -13,13 +14,26 @@ use super::{OrderedValue, SOURCE_ORDINAL};
 const MAX_DIRECT_DEPTH: u32 = 100;
 const MAX_PREALLOCATED_BYTES: usize = 1024 * 1024;
 
-/// Builds an ordered JSON value, returning `None` when unsupported.
+thread_local! {
+    static FAILED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Builds an ordered JSON value; falls back (`None`) on any serializer error.
 pub(super) fn ordered_value<T: Serialize + ?Sized>(value: &T) -> Option<OrderedValue> {
-    value.serialize(ValueSerializer { depth: 0 }).ok()
+    let outer = FAILED.replace(false);
+    let ordered = value.serialize(ValueSerializer { depth: 0 }).ok();
+    if FAILED.replace(outer) { None } else { ordered }
 }
 
 #[derive(Debug)]
-struct Error;
+struct Error(());
+
+impl Error {
+    fn new() -> Self {
+        FAILED.set(true);
+        Self(())
+    }
+}
 
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -31,13 +45,13 @@ impl std::error::Error for Error {}
 
 impl serde::ser::Error for Error {
     fn custom<T: fmt::Display>(_message: T) -> Self {
-        Self
+        Self::new()
     }
 }
 
 fn float_value<T: Serialize>(value: T) -> Result<OrderedValue, Error> {
-    let token = serde_json::to_string(&value).map_err(|_| Error)?;
-    serde_json::from_str(&token).map_err(|_| Error)
+    let token = serde_json::to_string(&value).map_err(|_| Error::new())?;
+    serde_json::from_str(&token).map_err(|_| Error::new())
 }
 
 fn preallocated<T>(len: usize) -> Vec<T> {
@@ -61,7 +75,7 @@ impl ValueSerializer {
     fn nested(self, levels: u32) -> Result<Self, Error> {
         let depth = self.depth + levels;
         if depth > MAX_DIRECT_DEPTH {
-            return Err(Error);
+            return Err(Error::new());
         }
         Ok(Self { depth })
     }
@@ -104,9 +118,9 @@ impl serde::Serializer for ValueSerializer {
 
     fn serialize_i128(self, value: i128) -> Result<Self::Ok, Error> {
         if value >= 0 {
-            self.serialize_u64(value.try_into().map_err(|_| Error)?)
+            self.serialize_u64(value.try_into().map_err(|_| Error::new())?)
         } else {
-            self.serialize_i64(value.try_into().map_err(|_| Error)?)
+            self.serialize_i64(value.try_into().map_err(|_| Error::new())?)
         }
     }
 
@@ -127,7 +141,7 @@ impl serde::Serializer for ValueSerializer {
     }
 
     fn serialize_u128(self, value: u128) -> Result<Self::Ok, Error> {
-        self.serialize_u64(value.try_into().map_err(|_| Error)?)
+        self.serialize_u64(value.try_into().map_err(|_| Error::new())?)
     }
 
     fn serialize_f32(self, value: f32) -> Result<Self::Ok, Error> {
@@ -200,15 +214,11 @@ impl serde::Serializer for ValueSerializer {
     }
 
     fn serialize_seq(self, len: Option<usize>) -> Result<ArraySerializer, Error> {
-        Ok(ArraySerializer::new(
-            len.unwrap_or(0),
-            None,
-            self.nested(1)?.depth,
-        ))
+        Ok(ArraySerializer::new(len, None, self.nested(1)?.depth))
     }
 
     fn serialize_tuple(self, len: usize) -> Result<ArraySerializer, Error> {
-        Ok(ArraySerializer::new(len, None, self.nested(1)?.depth))
+        Ok(ArraySerializer::new(Some(len), None, self.nested(1)?.depth))
     }
 
     fn serialize_tuple_struct(
@@ -216,7 +226,7 @@ impl serde::Serializer for ValueSerializer {
         _name: &'static str,
         len: usize,
     ) -> Result<ArraySerializer, Error> {
-        Ok(ArraySerializer::new(len, None, self.nested(1)?.depth))
+        Ok(ArraySerializer::new(Some(len), None, self.nested(1)?.depth))
     }
 
     fn serialize_tuple_variant(
@@ -227,25 +237,25 @@ impl serde::Serializer for ValueSerializer {
         len: usize,
     ) -> Result<ArraySerializer, Error> {
         Ok(ArraySerializer::new(
-            len,
+            Some(len),
             Some(variant),
             self.nested(2)?.depth,
         ))
     }
 
     fn serialize_map(self, len: Option<usize>) -> Result<ObjectSerializer, Error> {
-        Ok(ObjectSerializer::new(
-            len.unwrap_or(0),
-            None,
-            self.nested(1)?.depth,
-        ))
+        Ok(ObjectSerializer::new(len, None, self.nested(1)?.depth))
     }
 
     fn serialize_struct(self, name: &'static str, len: usize) -> Result<ObjectSerializer, Error> {
         if name.starts_with("$serde_json::private::") {
-            return Err(Error);
+            return Err(Error::new());
         }
-        Ok(ObjectSerializer::new(len, None, self.nested(1)?.depth))
+        Ok(ObjectSerializer::new(
+            Some(len),
+            None,
+            self.nested(1)?.depth,
+        ))
     }
 
     fn serialize_struct_variant(
@@ -256,7 +266,7 @@ impl serde::Serializer for ValueSerializer {
         len: usize,
     ) -> Result<ObjectSerializer, Error> {
         Ok(ObjectSerializer::new(
-            len,
+            Some(len),
             Some(variant),
             self.nested(2)?.depth,
         ))
@@ -269,20 +279,25 @@ impl serde::Serializer for ValueSerializer {
 
 struct ArraySerializer {
     values: Vec<OrderedValue>,
+    empty: bool,
     variant: Option<&'static str>,
     depth: u32,
 }
 
 impl ArraySerializer {
-    fn new(len: usize, variant: Option<&'static str>, depth: u32) -> Self {
+    fn new(len: Option<usize>, variant: Option<&'static str>, depth: u32) -> Self {
         Self {
-            values: preallocated(len),
+            values: preallocated(len.unwrap_or(0)),
+            empty: len == Some(0),
             variant,
             depth,
         }
     }
 
     fn push<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Error> {
+        if self.empty {
+            return Err(Error::new());
+        }
         self.values
             .push(value.serialize(ValueSerializer { depth: self.depth })?);
         Ok(())
@@ -352,21 +367,26 @@ impl SerializeTupleVariant for ArraySerializer {
 struct ObjectSerializer {
     entries: Vec<(String, OrderedValue)>,
     key: Option<String>,
+    empty: bool,
     variant: Option<&'static str>,
     depth: u32,
 }
 
 impl ObjectSerializer {
-    fn new(len: usize, variant: Option<&'static str>, depth: u32) -> Self {
+    fn new(len: Option<usize>, variant: Option<&'static str>, depth: u32) -> Self {
         Self {
-            entries: preallocated(len),
+            entries: preallocated(len.unwrap_or(0)),
             key: None,
+            empty: len == Some(0),
             variant,
             depth,
         }
     }
 
     fn push<T: Serialize + ?Sized>(&mut self, key: String, value: &T) -> Result<(), Error> {
+        if self.empty {
+            return Err(Error::new());
+        }
         let value = value.serialize(ValueSerializer { depth: self.depth })?;
         if key != SOURCE_ORDINAL {
             self.entries.push((key, value));
@@ -376,7 +396,7 @@ impl ObjectSerializer {
 
     fn finish(self) -> Result<OrderedValue, Error> {
         if self.key.is_some() {
-            return Err(Error);
+            return Err(Error::new());
         }
         let value = OrderedValue::Object(self.entries);
         Ok(match self.variant {
@@ -391,15 +411,15 @@ impl SerializeMap for ObjectSerializer {
     type Error = Error;
 
     fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), Error> {
-        if self.key.is_some() {
-            return Err(Error);
+        if self.empty || self.key.is_some() {
+            return Err(Error::new());
         }
         self.key = Some(key.serialize(KeySerializer)?);
         Ok(())
     }
 
     fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Error> {
-        let key = self.key.take().ok_or(Error)?;
+        let key = self.key.take().ok_or_else(Error::new)?;
         self.push(key, value)
     }
 
@@ -456,7 +476,7 @@ impl serde::Serializer for KeySerializer {
     type SerializeStructVariant = Impossible<String, Error>;
 
     fn serialize_bool(self, _value: bool) -> Result<String, Error> {
-        Err(Error)
+        Err(Error::new())
     }
 
     fn serialize_i8(self, value: i8) -> Result<String, Error> {
@@ -500,11 +520,11 @@ impl serde::Serializer for KeySerializer {
     }
 
     fn serialize_f32(self, _value: f32) -> Result<String, Error> {
-        Err(Error)
+        Err(Error::new())
     }
 
     fn serialize_f64(self, _value: f64) -> Result<String, Error> {
-        Err(Error)
+        Err(Error::new())
     }
 
     fn serialize_char(self, value: char) -> Result<String, Error> {
@@ -516,23 +536,23 @@ impl serde::Serializer for KeySerializer {
     }
 
     fn serialize_bytes(self, _value: &[u8]) -> Result<String, Error> {
-        Err(Error)
+        Err(Error::new())
     }
 
     fn serialize_none(self) -> Result<String, Error> {
-        Err(Error)
+        Err(Error::new())
     }
 
     fn serialize_some<T: Serialize + ?Sized>(self, _value: &T) -> Result<String, Error> {
-        Err(Error)
+        Err(Error::new())
     }
 
     fn serialize_unit(self) -> Result<String, Error> {
-        Err(Error)
+        Err(Error::new())
     }
 
     fn serialize_unit_struct(self, _name: &'static str) -> Result<String, Error> {
-        Err(Error)
+        Err(Error::new())
     }
 
     fn serialize_unit_variant(
@@ -559,15 +579,15 @@ impl serde::Serializer for KeySerializer {
         _variant: &'static str,
         _value: &T,
     ) -> Result<String, Error> {
-        Err(Error)
+        Err(Error::new())
     }
 
     fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq, Error> {
-        Err(Error)
+        Err(Error::new())
     }
 
     fn serialize_tuple(self, _len: usize) -> Result<Self::SerializeTuple, Error> {
-        Err(Error)
+        Err(Error::new())
     }
 
     fn serialize_tuple_struct(
@@ -575,7 +595,7 @@ impl serde::Serializer for KeySerializer {
         _name: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeTupleStruct, Error> {
-        Err(Error)
+        Err(Error::new())
     }
 
     fn serialize_tuple_variant(
@@ -585,11 +605,11 @@ impl serde::Serializer for KeySerializer {
         _variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeTupleVariant, Error> {
-        Err(Error)
+        Err(Error::new())
     }
 
     fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, Error> {
-        Err(Error)
+        Err(Error::new())
     }
 
     fn serialize_struct(
@@ -597,7 +617,7 @@ impl serde::Serializer for KeySerializer {
         _name: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStruct, Error> {
-        Err(Error)
+        Err(Error::new())
     }
 
     fn serialize_struct_variant(
@@ -607,7 +627,7 @@ impl serde::Serializer for KeySerializer {
         _variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStructVariant, Error> {
-        Err(Error)
+        Err(Error::new())
     }
 
     fn is_human_readable(&self) -> bool {
@@ -1042,5 +1062,59 @@ mod tests {
         assert_source_round_trip(&MapKey(UnitStruct));
         assert_source_round_trip(&MapKey(TupleStruct(true, 'a')));
         assert_source_round_trip(&MapKey(Variant::Newtype(nested())));
+    }
+
+    struct SwallowedError;
+
+    impl Serialize for SwallowedError {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut map = serializer.serialize_map(None)?;
+            let _ = map.serialize_entry(&true, &1);
+            map.serialize_entry("fallback", &2)?;
+            map.end()
+        }
+    }
+
+    #[test]
+    fn swallowed_errors_fall_back() {
+        assert!(ordered_value(&SwallowedError).is_none());
+        assert_source_round_trip(&SwallowedError);
+        assert_source_round_trip(&[SwallowedError]);
+    }
+
+    enum ZeroHint {
+        Seq,
+        Map,
+        Struct,
+    }
+
+    impl Serialize for ZeroHint {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            match self {
+                Self::Seq => {
+                    let mut seq = serializer.serialize_seq(Some(0))?;
+                    seq.serialize_element(&1)?;
+                    seq.end()
+                }
+                Self::Map => {
+                    let mut map = serializer.serialize_map(Some(0))?;
+                    map.serialize_entry(SOURCE_ORDINAL, &1)?;
+                    map.end()
+                }
+                Self::Struct => {
+                    let mut value = serializer.serialize_struct("ZeroHint", 0)?;
+                    value.serialize_field("a", &1)?;
+                    value.end()
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zero_length_hints_with_children_fall_back() {
+        for hint in [ZeroHint::Seq, ZeroHint::Map, ZeroHint::Struct] {
+            assert!(ordered_value(&hint).is_none());
+            assert_source_round_trip(&hint);
+        }
     }
 }
