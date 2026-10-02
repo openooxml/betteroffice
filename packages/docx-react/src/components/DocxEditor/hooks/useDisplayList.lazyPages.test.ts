@@ -245,15 +245,36 @@ test.each([
     if (workerOpen) expect(hook.result.current.frame).toBe(before);
     else expect(hook.result.current.queries).toBeNull();
 
+    // Answer sync through the fake's existing frame builder.
+    const postMessage = worker.postMessage.bind(worker);
+    worker.postMessage = (request) => {
+      postMessage(request.type === 'sync' ? { ...request, type: 'buildFrame' } : request);
+      worker.posted[worker.posted.length - 1] = request;
+    };
+    Object.assign(host, { residentWorkerProbe: () => ({ layoutRevision: 2 }) });
+    const requestsBeforeRelayout = worker.posted.length;
+    await act(async () => {
+      inputs.layout = { ...inputs.layout };
+      hook.rerender();
+    });
+    await waitFor(() => {
+      expect(hook.result.current.frame!.frameEpoch).toBeGreaterThan(adoptedEpoch);
+      expect(hook.result.current.queries).not.toBeNull();
+    });
+    expect(worker.posted.slice(requestsBeforeRelayout).find(
+      (request) => 'expectedFrameEpoch' in request
+    )).toMatchObject({ type: 'sync', expectedFrameEpoch: adoptedEpoch });
+
     const { paraId } = JSON.parse(engine.paragraphs('body'))[0] as { paraId: string };
     engine.set_selection('body', paraId, 1, paraId, 1);
     const requestsBeforeInput = worker.posted.length;
+    const typingEpoch = hook.result.current.frame!.frameEpoch;
     await act(async () => {
       expect(await hook.result.current.applyInput('Next ')).not.toBeNull();
     });
     expect(worker.posted.slice(requestsBeforeInput).filter(
       (request) => request.type === 'applyInput'
-    )).toEqual([expect.objectContaining({ expectedFrameEpoch: adoptedEpoch })]);
+    )).toEqual([expect.objectContaining({ expectedFrameEpoch: typingEpoch })]);
     expect(hook.result.current.error).toBeNull();
   } finally {
     hook.unmount();
