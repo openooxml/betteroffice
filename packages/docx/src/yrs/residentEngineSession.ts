@@ -69,6 +69,8 @@ export type ResidentEngineSession = Pick<
   proposalEngine: DocxProposalSession;
   /** @internal */
   geometryReader: ProposalGeometryReader;
+  /** @internal The segments of the story's paragraphs at `indices`, each ending with its pilcrow. */
+  paragraphSegments(story: string, indices: readonly number[]): YrsStorySegment[][];
   /** @internal */
   paragraphIdentities(): DocxParagraphIdentitySnapshot;
   /** The region layout of only as much of the body as fills `pages` pages. */
@@ -105,8 +107,9 @@ export async function createResidentEngineSession(
   const geometryStories = new Map<string, {
     revision: number;
     segments: YrsStorySegment[];
-    spans?: YrsParagraphLength[];
   }>();
+
+  const geometrySpans = new Map<string, { revision: number; spans: YrsParagraphLength[] }>();
 
   const geometryStory = (story: string) => {
     let cached = geometryStories.get(story);
@@ -188,26 +191,21 @@ export async function createResidentEngineSession(
     paragraphs: (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],
     paragraphIdCount: (story, paraId) => session.paragraph_id_count(story, paraId),
     paragraphSpans: (story) => {
-      const cached = geometryStory(story);
-      if (!cached.spans) {
-        cached.spans = [];
-        let length = 0;
-        for (const segment of cached.segments) {
-          if (segment.kind === 'pilcrow') {
-            cached.spans.push({ paraId: segment.paraId, length });
-            length = 0;
-          } else {
-            length += segment.kind === 'text' ? segment.text.length : 1;
-          }
-        }
+      const cached = geometrySpans.get(story);
+      const changes = JSON.parse(
+        session.stories_changed_since(cached?.revision ?? Number.MAX_SAFE_INTEGER)
+      ) as { revision: number; stories: string[] };
+      if (cached && !changes.stories.includes(story)) {
+        cached.revision = changes.revision;
+        return cached.spans;
       }
-      return cached.spans;
+      const spans = JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[];
+      geometrySpans.set(story, { revision: changes.revision, spans });
+      return spans;
     },
     storySegments: (story) => geometryStory(story).segments,
     positionOutline: (root) => {
-      if (LONE_SURROGATE.test(root) || typeof session.geometry_position_outline_json !== 'function') {
-        return null;
-      }
+      if (LONE_SURROGATE.test(root)) return null;
       const outline = JSON.parse(session.geometry_position_outline_json(root)) as
         YrsPositionOutline | 'legacy';
       return outline === 'legacy' ? null : outline;
@@ -218,14 +216,12 @@ export async function createResidentEngineSession(
     resolveParagraphAnchor: proposalEngine.resolveParagraphAnchor,
     findText: proposalEngine.findText,
     proposalRevisions: (ids) => {
-      if (typeof session.proposal_revision_ranges_json === 'function') {
-        const result = JSON.parse(session.proposal_revision_ranges_json(JSON.stringify(ids))) as
-          ProposalGeometryRevision[] | 'fallback' | 'legacy';
-        if (Array.isArray(result)) return result;
-        if (result === 'fallback') {
-          const owned = new Set(ids);
-          return geometryReader.listRevisions().filter(({ revisionId }) => owned.has(revisionId));
-        }
+      const result = JSON.parse(session.proposal_revision_ranges_json(JSON.stringify(ids))) as
+        ProposalGeometryRevision[] | 'fallback' | 'legacy';
+      if (Array.isArray(result)) return result;
+      if (result === 'fallback') {
+        const owned = new Set(ids);
+        return geometryReader.listRevisions().filter(({ revisionId }) => owned.has(revisionId));
       }
       return readLegacyProposalRevisions(geometryReader, ids);
     },
@@ -234,6 +230,8 @@ export async function createResidentEngineSession(
   return {
     proposalEngine,
     geometryReader,
+    paragraphSegments: (story, indices) =>
+      JSON.parse(session.story_segment_units(story, Uint32Array.from(indices))) as YrsStorySegment[][],
     searchText: (query, options = {}) => {
       if (!query) return [];
       const limit = options.limit ?? Number.POSITIVE_INFINITY;

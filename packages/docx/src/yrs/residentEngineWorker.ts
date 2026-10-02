@@ -1139,25 +1139,26 @@ function asciiProposalFontsUnchanged(
     stories.set(story, paragraphs);
   }
   for (const [story, targets] of stories) {
-    let ascii = true;
-    let existingText = false;
-    const found = new Set<string>();
-    for (const segment of engine.geometryReader.storySegments(story)) {
-      if (segment.kind === 'pilcrow') {
-        if (targets.has(segment.paraId)) {
-          if (!ascii || !existingText || found.has(segment.paraId)) return false;
-          found.add(segment.paraId);
-        }
-        ascii = true;
-        existingText = false;
-      } else if (segment.kind === 'text') {
-        ascii &&= /^[\x20-\x7e]*$/.test(segment.text);
-        existingText ||= segment.text.length > 0 && segment.attributes.ins == null;
-      } else {
-        ascii = false;
-      }
+    const spans = engine.geometryReader.paragraphSpans(story);
+    const indices: number[] = [];
+    for (const target of targets) {
+      const matches = spans.flatMap(({ paraId }, index) => (paraId === target ? [index] : []));
+      if (matches.length !== 1) return false;
+      indices.push(matches[0]!);
     }
-    if (found.size !== targets.size) return false;
+    for (const unit of engine.paragraphSegments(story, indices)) {
+      let ascii = true;
+      let existingText = false;
+      for (const segment of unit) {
+        if (segment.kind === 'text') {
+          ascii &&= /^[\x20-\x7e]*$/.test(segment.text);
+          existingText ||= segment.text.length > 0 && segment.attributes.ins == null;
+        } else if (segment.kind !== 'pilcrow') {
+          ascii = false;
+        }
+      }
+      if (!ascii || !existingText) return false;
+    }
   }
   return true;
 }

@@ -120,11 +120,24 @@ function parity(
     proposalRevisions: (owned) => readLegacyProposalRevisions(reader, owned),
   };
   same(reader.proposalRevisions!(ids), legacy.proposalRevisions!(ids));
-  const native = JSON.parse(raw.proposal_revision_ranges_json!(JSON.stringify(ids)));
+  const native = JSON.parse(raw.proposal_revision_ranges_json(JSON.stringify(ids)));
   if (Array.isArray(native)) same(native, readLegacyProposalRevisions(reader, ids));
   for (const includeNavigation of navigation ? [false, true] : [false]) {
     same(computeProposalGeometryMirror(reader, current, includeNavigation),
       computeProposalGeometryMirror(legacy, current, includeNavigation));
+  }
+  for (const story of reader.storyIds()) {
+    const spans: { paraId: string; length: number }[] = [];
+    let length = 0;
+    for (const segment of reader.storySegments(story)) {
+      if (segment.kind === 'pilcrow') {
+        spans.push({ paraId: segment.paraId, length });
+        length = 0;
+      } else {
+        length += segment.kind === 'text' ? segment.text.length : 1;
+      }
+    }
+    expect(reader.paragraphSpans(story)).toEqual(spans);
   }
   const outline = reader.positionOutline!('body');
   const old = createYrsPositionProjection(reader, 'body');
@@ -300,7 +313,7 @@ describe('native proposal geometry outline parity', () => {
       story(main, 'body:orphan', [text('cat', ins), pilcrow('op')]);
       const loaded = await replica(main);
       resident = loaded.resident;
-      expect(JSON.parse(loaded.raw.proposal_revision_ranges_json!(JSON.stringify(OWNED)))).toBeArray();
+      expect(JSON.parse(loaded.raw.proposal_revision_ranges_json(JSON.stringify(OWNED)))).toBeArray();
       parity(resident, loaded.raw);
     } finally {
       resident?.destroy();
@@ -317,7 +330,7 @@ describe('native proposal geometry outline parity', () => {
           story(main, 'body', [text('cat', ins), { kind, payload: { paraId: 'p', extra: [{ nested: { [key]: null } }] } }, ...(kind === 'pilcrow' ? [] : [pilcrow('p')])]);
           const loaded = await replica(main);
           resident = loaded.resident;
-          expect(JSON.parse(loaded.raw.proposal_revision_ranges_json!(JSON.stringify(OWNED)))).toBe('fallback');
+          expect(JSON.parse(loaded.raw.proposal_revision_ranges_json(JSON.stringify(OWNED)))).toBe('fallback');
           parity(resident, loaded.raw);
         } finally {
           resident?.destroy();
@@ -339,7 +352,7 @@ describe('native proposal geometry outline parity', () => {
           loaded.raw.apply_seed_raw_ops('body', JSON.stringify([{ op: 'setEmbedAttr', index: 7, key: 'paraId', value: 'p' }]));
           expect(resident.geometryReader.paragraphSpans('body').map(({ paraId }) => paraId)).toEqual(['p', 'p']);
         }
-        expect(JSON.parse(loaded.raw.proposal_revision_ranges_json!(JSON.stringify(OWNED)))).toBe('fallback');
+        expect(JSON.parse(loaded.raw.proposal_revision_ranges_json(JSON.stringify(OWNED)))).toBe('fallback');
         parity(resident, loaded.raw);
       } finally {
         resident?.destroy();
@@ -360,7 +373,7 @@ describe('native proposal geometry outline parity', () => {
         }
         const loaded = await replica(main);
         resident = loaded.resident;
-        expect(JSON.parse(loaded.raw.proposal_revision_ranges_json!(JSON.stringify(OWNED)))).toBe('legacy');
+        expect(JSON.parse(loaded.raw.proposal_revision_ranges_json(JSON.stringify(OWNED)))).toBe('legacy');
         parity(resident, loaded.raw, numeric ? ['0', '1e+21'] : OWNED);
       } finally {
         resident?.destroy();

@@ -12,7 +12,7 @@
 
 import wasmInit, {
   initSync,
-  EditSession as WasmEditSession,
+  EditSession,
   export_docx_markdown_json,
   export_docx_structured_json,
   find_docx_content_controls_json,
@@ -26,11 +26,6 @@ import wasmInit, {
   wasm_peak_bytes,
 } from './generated/edit/docx_edit.js';
 import { createWasmModuleState, type WasmAsyncInput } from './loadWasmAsset';
-
-export type EditSession = WasmEditSession & {
-  geometry_position_outline_json?(root: string): string;
-  proposal_revision_ranges_json?(idsJson: string): string;
-};
 
 const state = createWasmModuleState({
   label: 'docx-edit',
@@ -69,7 +64,7 @@ export function setEditWasmHeapLimit(bytes: number | undefined): void {
  */
 export function createEditSession(clientId: number): EditSession {
   state.ensure();
-  return new WasmEditSession(clientId);
+  return new EditSession(clientId);
 }
 
 /** Structured export of DOCX bytes: `{ok: true, content}` or `{ok: false, failure}` JSON. */
@@ -111,3 +106,5 @@ export function renderDocxMarkdownWithPagesJson(content: string, options: string
   state.ensure();
   return render_docx_markdown_with_pages_json(content, options);
 }
+
+export type { EditSession };
