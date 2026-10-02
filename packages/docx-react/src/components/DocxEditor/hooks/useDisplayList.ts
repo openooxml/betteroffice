@@ -576,6 +576,14 @@ export function useRustDisplayList(
       workerFrameOwnersRef.current.get(frame) === owner,
     [isCurrentWorker]
   );
+  const canRegisterWorkerFrame = useCallback(
+    (base: RetainedFrame | null, frames: readonly Uint8Array[], owner: WorkerLayoutFrame['owner']): boolean =>
+      base === null
+        ? frames.length > 0 && decodeFrameDelta(frames[0]!).full
+        : workerFrameOwnersRef.current.get(base) === owner ||
+          frames.some((bytes) => decodeFrameDelta(bytes).full),
+    []
+  );
   // The engines whose worker ran out of memory, each with the failure once its
   // replacement did too. Weak, so a replaced document's session is not kept.
   const outOfMemoryRef = useRef(new WeakMap<YrsSession, ResidentWorkerOutOfMemoryError | null>());
@@ -1198,7 +1206,9 @@ export function useRustDisplayList(
           return { frameEpoch: null, caretSynchronized: false, deletedUnits: result.deletedUnits };
         }
         const { frame: nextFrame } = applyFrameChain(previous.frame, result.pageFrames ?? [result.frame], true);
-        workerFrameOwnersRef.current.set(nextFrame, worker);
+        if (canRegisterWorkerFrame(previous.frame, result.pageFrames ?? [result.frame], worker)) {
+          workerFrameOwnersRef.current.set(nextFrame, worker);
+        }
         mainFrameRef.current = null;
         const caret = residentCaretForSelection(
           result.caret,
@@ -1287,6 +1297,7 @@ export function useRustDisplayList(
     [
       adoptHostEngine,
       applyPaintedCaretReply,
+      canRegisterWorkerFrame,
       canReplayWorkerFrame,
       markSettled,
       isCurrentWorker,
@@ -1981,7 +1992,9 @@ export function useRustDisplayList(
                 return;
               }
               const { frame: nextFrame } = applyFrameChain(previous, result.pageFrames ?? [result.frame], true);
-              if (worker) workerFrameOwnersRef.current.set(nextFrame, worker);
+              if (worker && canRegisterWorkerFrame(previous, result.pageFrames ?? [result.frame], worker)) {
+                workerFrameOwnersRef.current.set(nextFrame, worker);
+              }
               attach(nextFrame);
             } catch (error) {
               finish();
@@ -2005,7 +2018,9 @@ export function useRustDisplayList(
             for (const id of removedPageIds) if (pageIds.has(id)) removedPageIds.delete(id);
             for (const id of damagedPageIds) if (!pageIds.has(id)) damagedPageIds.delete(id);
             const frame = { ...nextFrame, damagedPageIds, removedPageIds };
-            if (worker) workerFrameOwnersRef.current.set(frame, worker);
+            if (worker && canRegisterWorkerFrame(buildBase, pageFrames, worker)) {
+              workerFrameOwnersRef.current.set(frame, worker);
+            }
             return frame;
           }
           const steps = decodePages();
@@ -2049,6 +2064,7 @@ export function useRustDisplayList(
     },
     [
       applyPaintedCaretReply,
+      canRegisterWorkerFrame,
       canReplayWorkerFrame,
       dropWorker,
       isCurrentWorker,
@@ -2833,7 +2849,9 @@ export function useRustDisplayList(
               throw new SupersededPreviewError();
             }
             const { frame: nextFrame } = applyFrameChain(previousFrame, result.pageFrames ?? [result.frame], false);
-            workerFrameOwnersRef.current.set(nextFrame, owner);
+            if (canRegisterWorkerFrame(previousFrame, result.pageFrames ?? [result.frame], owner)) {
+              workerFrameOwnersRef.current.set(nextFrame, owner);
+            }
             return {
               displayList: nextFrame.displayList,
               frame: nextFrame,
@@ -2887,7 +2905,9 @@ export function useRustDisplayList(
           // The worker ran this layout and built its frame in the same pass.
           const { result } = prebuilt;
           const { frame: nextFrame } = applyFrameChain(appliesTo, result.pageFrames ?? [result.frame], false);
-          workerFrameOwnersRef.current.set(nextFrame, prebuilt.owner);
+          if (canRegisterWorkerFrame(appliesTo, result.pageFrames ?? [result.frame], prebuilt.owner)) {
+            workerFrameOwnersRef.current.set(nextFrame, prebuilt.owner);
+          }
           pending = Promise.resolve({
             displayList: nextFrame.displayList,
             frame: nextFrame,
@@ -2993,6 +3013,7 @@ export function useRustDisplayList(
   }, [
     adoptHostEngine,
     bootstrapFrameEpoch,
+    canRegisterWorkerFrame,
     canReplayWorkerFrame,
     ensureRebuildableReplica,
     failWorkerDocument,

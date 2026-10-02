@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { LayoutSelectionGate, type ResidentMeasurementConfig } from '@betteroffice/docx/layout';
-import { decodeFrameDelta, loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
+import { applyFrameDelta, decodeFrameDelta, loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import {
@@ -667,6 +667,132 @@ test('a worker disables replay over a colliding main-thread base until its frame
     await next;
   } finally {
     syncReply.mockRestore();
+    hook.unmount();
+    main.free();
+    native.free();
+  }
+});
+
+test('equal-latest-epoch main frames stay unowned until a worker full frame is adopted', async () => {
+  const request = JSON.stringify({
+    ...JSON.parse(REQUEST),
+    regions: { sections: [{ sectionId: 'main', properties: {
+      pageWidth: 4320, pageHeight: 2880,
+      marginTop: 300, marginRight: 300, marginBottom: 300, marginLeft: 300,
+    } }] },
+  });
+  const { native, engine, adopted } = setup(9301, 'Collision pages. '.repeat(600), request);
+  const main = createEditSession(9302);
+  main.load(native.encode_state());
+  const layoutJson = main.layout_document_with_regions_retained_json(request);
+  const inputs = {
+    ...JSON.parse(main.retained_kernel_inputs_json()), ...JSON.parse(layoutJson),
+  };
+  let enabled = false;
+  Object.assign(engine, {
+    residentLayoutInWorker: () => false,
+    residentWorkerProbe: () => enabled ? { layoutRevision: adopted.length } : null,
+    buildDisplayListFrame: (extras: string, expected: number) =>
+      main.build_display_list_frame(extras, expected),
+  });
+  const overrides = { getInputs: () => inputs };
+  const hook = renderHook(
+    ({ layout, resolved }) => useRustDisplayList(layout, overrides, undefined, resolved, engine),
+    {
+      initialProps: {
+        layout: inputs.layout as Layout, resolved: undefined as ReadonlySet<number> | undefined,
+      },
+    }
+  );
+  try {
+    await waitFor(() => {
+      if (hook.result.current.error) throw hook.result.current.error;
+      expect(hook.result.current.frame?.frameEpoch).toBe(1);
+    });
+    const bootstrap = hook.result.current.layoutInWorker(engine, request)!;
+    const worker = FakeWorker.last!;
+    native.set_display_window(0, 5);
+    native.set_windowed_incremental_builds(true);
+    native.reset_frame_base();
+    const initialFrame = native.build_display_list_frame('{}', 1);
+    const workerFrame = applyFrameDelta(null, decodeFrameDelta(initialFrame));
+    expect(workerFrame.frameEpoch).toBe(2);
+    await act(async () => {
+      worker.reply({
+        id: worker.requestAt(-1).id, ok: true, frame: initialFrame.slice().buffer,
+        caret: { frameEpoch: 2, caretRect: null }, selection: null,
+        layoutRevision: 1, layoutJson,
+      });
+      await bootstrap;
+      hook.rerender({ layout: inputs.layout, resolved: new Set([7]) });
+    });
+    await waitFor(() => {
+      if (hook.result.current.error) throw hook.result.current.error;
+      expect(hook.result.current.frame?.frameEpoch).toBe(2);
+    });
+    expect(hook.result.current.workerSurfacesActive).toBe(false);
+    const offWindow = hook.result.current.frame!.pages.length - 1;
+    expect(offWindow).toBeGreaterThanOrEqual(5);
+    const mainPage = hook.result.current.displayList!.pages[offWindow]!;
+    expect(mainPage.unbuilt).not.toBe(true);
+    expect(mainPage.primitives.length).toBeGreaterThan(0);
+    expect(workerFrame.displayList.pages[offWindow]).toMatchObject({ unbuilt: true, primitives: [] });
+    enabled = true;
+    for (const epoch of [2, 3]) {
+      const pending = hook.result.current.layoutInWorker(engine, request)!;
+      const sent = worker.requestAt(-1);
+      expect(sent).toMatchObject({ type: 'sync', expectedFrameEpoch: epoch, frameChain: false });
+      const frame = native.build_display_list_frame('{"resolvedCommentIds":[7]}', epoch);
+      const delta = decodeFrameDelta(frame);
+      expect(delta.full).toBe(false);
+      expect(delta.baseFrameEpoch).toBe(epoch);
+      expect(delta.frameEpoch).toBe(epoch + 1);
+      expect(delta.operations.some((operation) => operation.pageIndex === offWindow)).toBe(false);
+      worker.reply({
+        id: sent.id, ok: true, frame: frame.slice().buffer,
+        caret: { frameEpoch: epoch + 1, caretRect: null }, selection: null,
+        layoutRevision: adopted.length, layoutJson,
+      });
+      const computation = (await pending)!;
+      await act(async () => {
+        hook.rerender({ layout: computation.layout, resolved: new Set([7]) });
+      });
+      await waitFor(() => {
+        if (hook.result.current.error) throw hook.result.current.error;
+        expect(hook.result.current.frame?.frameEpoch).toBe(epoch + 1);
+      });
+      expect(hook.result.current.displayList!.pages[offWindow]).toBe(mainPage);
+    }
+    const recovery = hook.result.current.layoutInWorker(engine, request)!;
+    const sent = worker.requestAt(-1);
+    expect(sent).toMatchObject({ type: 'sync', expectedFrameEpoch: 4, frameChain: false });
+    native.reset_frame_base();
+    const full = native.build_display_list_frame('{"resolvedCommentIds":[7]}', 4);
+    expect(decodeFrameDelta(full).full).toBe(true);
+    worker.reply({
+      id: sent.id, ok: true, frame: full.slice().buffer,
+      caret: { frameEpoch: 5, caretRect: null }, selection: null,
+      layoutRevision: adopted.length, layoutJson,
+    });
+    const computation = (await recovery)!;
+    await act(async () => {
+      hook.rerender({ layout: computation.layout, resolved: new Set([7]) });
+    });
+    await waitFor(() => {
+      if (hook.result.current.error) throw hook.result.current.error;
+      expect(hook.result.current.frame?.frameEpoch).toBe(5);
+    });
+    expect(hook.result.current.displayList!.pages[offWindow]).toMatchObject({ unbuilt: true, primitives: [] });
+    const next = hook.result.current.layoutInWorker(engine, request)!;
+    expect(worker.posted.at(-1)).toMatchObject({ type: 'sync', expectedFrameEpoch: 5, frameChain: true });
+    const delta = native.build_display_list_frame('{"resolvedCommentIds":[7]}', 5);
+    worker.reply({
+      id: worker.requestAt(-1).id, ok: true, frame: delta.slice().buffer,
+      caret: { frameEpoch: 6, caretRect: null }, selection: null,
+      layoutRevision: adopted.length, layoutJson,
+    });
+    await next;
+  } finally {
     hook.unmount();
     main.free();
     native.free();
