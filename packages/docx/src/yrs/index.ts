@@ -1629,12 +1629,21 @@ function wrapSession(rawSession: EditSession, clientId: number): YrsSession {
   } | null = null;
   const headerFooterAliases = (): ReadonlyMap<string, string> => {
     if (!cachedHeaderFooterAliases || cachedHeaderFooterAliases.revision !== readCacheRevision) {
-      cachedHeaderFooterAliases = {
-        revision: readCacheRevision,
-        aliases: new Map(
-          Object.entries(JSON.parse(session.header_footer_aliases_json()) as Record<string, string>)
-        ),
-      };
+      let aliases = new Map<string, string>();
+      if (!destroyed) {
+        try {
+          const value: unknown = JSON.parse(session.header_footer_aliases_json());
+          if (
+            value !== null &&
+            typeof value === 'object' &&
+            Object.getPrototypeOf(value) === Object.prototype &&
+            Object.values(value).every((entry) => typeof entry === 'string')
+          ) {
+            aliases = new Map(Object.entries(value) as Array<[string, string]>);
+          }
+        } catch {}
+      }
+      cachedHeaderFooterAliases = { revision: readCacheRevision, aliases };
     }
     return cachedHeaderFooterAliases.aliases;
   };
@@ -2771,6 +2780,7 @@ function wrapSession(rawSession: EditSession, clientId: number): YrsSession {
     destroy: () => {
       if (destroyed) return;
       destroyed = true;
+      invalidateReadCaches();
       resetMedia();
       listeners.clear();
       proposals.destroy();

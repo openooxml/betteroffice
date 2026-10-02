@@ -11,7 +11,7 @@ use crate::canonical::{canonical_sha256, from_serializable, to_canonical_bytes};
 use crate::chart::parse_chart_parts;
 use crate::comments::{Comment, parse_comments, remove_orphan_comment_ranges};
 use crate::document::{DocumentBody, extract_all_template_variables, parse_document_body};
-use crate::header_footer::{HeaderFooter, parse_related_header_footers};
+use crate::header_footer::{HeaderFooter, parse_related_header_footers_with_aliases};
 use crate::media::build_media_map;
 use crate::notes::{Note, parse_notes};
 use crate::numbering::parse_numbering;
@@ -128,7 +128,7 @@ pub fn parse_docx_s8_projection(data: &[u8]) -> Result<S8Projection, ParseError>
         None => DocumentBody::default(),
     };
 
-    let (mut headers, mut footers, _) = parse_related_header_footers(
+    let (mut headers, mut footers, _) = parse_related_header_footers_with_aliases(
         &parts,
         &document_relationships,
         Some(&theme),

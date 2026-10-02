@@ -14,7 +14,9 @@ use crate::chart::{Chart, parse_chart_parts};
 use crate::comments::remove_orphan_comment_ranges;
 use crate::document::{DocumentBody, extract_all_template_variables, parse_document_body_compact};
 use crate::fonts::{FontTable, parse_font_table};
-use crate::header_footer::{HeaderFooter, HeaderFooterAliasGroup, parse_related_header_footers};
+use crate::header_footer::{
+    HeaderFooter, HeaderFooterAliasGroup, parse_related_header_footers_with_aliases,
+};
 use crate::media::{MediaFile, MediaScan, MediaTable, build_media_map_with_warnings};
 use crate::notes::Note;
 use crate::numbering::{NumberingDefinitions, parse_numbering};
@@ -494,7 +496,7 @@ fn parse_s9_package_impl(
     };
 
     let (mut headers, mut footers, header_footer_aliases) = if options.parse_headers_footers {
-        let (headers, footers, aliases) = parse_related_header_footers(
+        let (headers, footers, aliases) = parse_related_header_footers_with_aliases(
             parts,
             &relationships,
             Some(&theme),

@@ -65,6 +65,16 @@ export function headerFooterFilename(target: string): string {
   return target.startsWith('/') ? target.slice(1) : `word/${target}`;
 }
 
+export function headerFooterPartKey(target: string | undefined): string | undefined {
+  if (!target) return undefined;
+  const segments: string[] = [];
+  for (const segment of headerFooterFilename(target).split('/')) {
+    if (segment === '..') segments.pop();
+    else if (segment && segment !== '.') segments.push(segment);
+  }
+  return segments.join('/');
+}
+
 /**
  * Enumerate all parts that may contain newly inserted images/hyperlinks:
  * the document body, every header and footer, and the footnote/endnote parts.
@@ -98,7 +108,7 @@ export function collectParts(doc: Document): Part[] {
   const rels = doc.package.relationships;
   if (!rels) return parts;
 
-  const contents = new Set<BlockContent[]>();
+  const contents = new Map<string, Set<BlockContent[]>>();
   const addHeaderFooterParts = (map: Map<string, HeaderFooter> | undefined, type: string) => {
     if (!map) return;
     for (const [rId, hf] of map.entries()) {
@@ -106,8 +116,11 @@ export function collectParts(doc: Document): Part[] {
       if (!rel || rel.type !== type || !rel.target) continue;
       const filename = headerFooterFilename(rel.target);
       const basename = filename.replace(/^word\//, '');
-      if (contents.has(hf.content)) continue;
-      contents.add(hf.content);
+      const key = headerFooterPartKey(rel.target)!;
+      const partContents = contents.get(key) ?? new Set<BlockContent[]>();
+      if (partContents.has(hf.content)) continue;
+      partContents.add(hf.content);
+      contents.set(key, partContents);
       parts.push({ relsPath: `word/_rels/${basename}.rels`, blocks: hf.content });
     }
   };

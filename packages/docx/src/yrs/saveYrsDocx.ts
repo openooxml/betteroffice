@@ -1,6 +1,7 @@
 /** Session save that reports where each saved paragraph can be found after reopening. */
 
 import type { RepackOptions } from '../docx/rezip';
+import { headerFooterPartKey } from '../docx/rezip/parts';
 import { type RustParagraphIds, writeDocumentWithRust } from '../docx/rustSaveFacade';
 import type { Comment, Paragraph } from '../types/content';
 import type { BlockContent, Document } from '../types/document';
@@ -39,13 +40,18 @@ export interface DocxSavedDocument {
 
 function storyBlocks(document: Document): BlockContent[][] {
   const pkg = document.package;
-  const contents = new Set<BlockContent[]>();
+  const contents = new Map<string, Set<BlockContent[]>>();
   const headerFooterBlocks = [
-    ...(pkg.headers?.values() ?? []),
-    ...(pkg.footers?.values() ?? []),
-  ].flatMap((part) => {
-    if (contents.has(part.content)) return [];
-    contents.add(part.content);
+    ...(pkg.headers ?? []),
+    ...(pkg.footers ?? []),
+  ].flatMap(([rId, part]) => {
+    const key = headerFooterPartKey(pkg.relationships?.get(rId)?.target);
+    if (key !== undefined) {
+      const partContents = contents.get(key) ?? new Set<BlockContent[]>();
+      if (partContents.has(part.content)) return [];
+      partContents.add(part.content);
+      contents.set(key, partContents);
+    }
     return [part.content];
   });
   return [

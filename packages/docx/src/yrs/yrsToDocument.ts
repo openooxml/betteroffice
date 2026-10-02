@@ -2663,6 +2663,14 @@ function projectStories(
     ? context.storyToBlocks('body')
     : base.package.document.content;
 
+  const selectedHeaderFooterStories = new Set(
+    [...(base.package.headers?.keys() ?? []), ...(base.package.footers?.keys() ?? [])]
+      .filter((rId) => shouldProject(`hf:${rId}`))
+      .map((rId) => headerFooterStory(session, rId))
+  );
+  const shouldProjectHeaderFooter = (storyId: string): boolean =>
+    shouldProject(storyId) || selectedHeaderFooterStories.has(storyId);
+
   const headerFooterContents = new Map<string, BlockContent[]>();
   const projectHeaderFooter = (storyId: string): BlockContent[] => {
     let content = headerFooterContents.get(storyId);
@@ -2677,14 +2685,14 @@ function projectStories(
   if (
     headers &&
     (options.storyIds === undefined ||
-      [...headers.keys()].some((rId) => shouldProject(headerFooterStory(session, rId))))
+      [...headers.keys()].some((rId) => shouldProjectHeaderFooter(headerFooterStory(session, rId))))
   ) {
     headers = new Map(
       [...headers].map(([rId, part]) => {
         const storyId = headerFooterStory(session, rId);
         return [
           rId,
-          context.storyIds.has(storyId) && shouldProject(storyId)
+          context.storyIds.has(storyId) && shouldProjectHeaderFooter(storyId)
             ? { ...part, content: projectHeaderFooter(storyId) }
             : part,
         ];
@@ -2696,14 +2704,14 @@ function projectStories(
   if (
     footers &&
     (options.storyIds === undefined ||
-      [...footers.keys()].some((rId) => shouldProject(headerFooterStory(session, rId))))
+      [...footers.keys()].some((rId) => shouldProjectHeaderFooter(headerFooterStory(session, rId))))
   ) {
     footers = new Map(
       [...footers].map(([rId, part]) => {
         const storyId = headerFooterStory(session, rId);
         return [
           rId,
-          context.storyIds.has(storyId) && shouldProject(storyId)
+          context.storyIds.has(storyId) && shouldProjectHeaderFooter(storyId)
             ? { ...part, content: projectHeaderFooter(storyId) }
             : part,
         ];

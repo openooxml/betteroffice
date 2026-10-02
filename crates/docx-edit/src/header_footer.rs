@@ -51,6 +51,7 @@ impl EditingDoc {
     }
 
     /// The content story for a header/footer relationship in the current state.
+    #[doc(hidden)]
     pub fn header_footer_story(&self, relationship_id: &str) -> String {
         self.header_footer_aliases()
             .into_iter()
@@ -59,6 +60,7 @@ impl EditingDoc {
     }
 
     /// Active header/footer aliases paired with their canonical relationship ids.
+    #[doc(hidden)]
     pub fn header_footer_aliases(&self) -> Vec<(String, String)> {
         let txn = self.yrs_doc().transact();
         let Some(groups) = txn

@@ -73,6 +73,40 @@ fn text(value: &Value) -> String {
     }
 }
 
+fn layout_request(engine: &EngineSession, bytes: &[u8]) -> String {
+    let package = docx_parse::parse_docx_s9_wire(bytes, Default::default())
+        .unwrap()
+        .document
+        .package;
+    let sections: Vec<_> = package
+        .document
+        .sections
+        .unwrap()
+        .into_iter()
+        .map(|section| json!({"properties": section.properties}))
+        .collect();
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let mut request = json!({
+        "bodyStory": "body", "renderEnv": {},
+        "regions": {"sections": sections, "settings": package.settings},
+        "measurement": {
+            "fontChains": {"arial|0|0": [font]},
+            "defaults": {"fontFamily": "Arial", "fontSize": 12},
+            "authoritativeShaping": true
+        }
+    });
+    let requirements: Vec<Value> = serde_json::from_str(
+        &engine
+            .layout_font_requirements_json(&request.to_string())
+            .unwrap(),
+    )
+    .unwrap();
+    for requirement in requirements {
+        request["measurement"]["fontChains"][requirement["key"].as_str().unwrap()] = json!([font]);
+    }
+    request.to_string()
+}
+
 fn assert_shared_content(headers: &[(&str, &str)], footers: &[(&str, &str)], kind: StoryKind) {
     let bytes = fixture::package(headers, footers);
     let engine = EngineSession::new(41);
@@ -129,37 +163,7 @@ fn assert_shared_content(headers: &[(&str, &str)], footers: &[(&str, &str)], kin
     assert!(
         text(&serde_json::to_value(&stories[0].blocks).unwrap()).contains("Edited Shared band")
     );
-    let package = docx_parse::parse_docx_s9_wire(&bytes, Default::default())
-        .unwrap()
-        .document
-        .package;
-    let sections: Vec<_> = package
-        .document
-        .sections
-        .unwrap()
-        .into_iter()
-        .map(|section| json!({"properties": section.properties}))
-        .collect();
-    let font = docx_layout::register_measure_font(FONT).unwrap();
-    let mut request = json!({
-        "bodyStory": "body", "renderEnv": {},
-        "regions": {"sections": sections, "settings": package.settings},
-        "measurement": {
-            "fontChains": {"arial|0|0": [font]},
-            "defaults": {"fontFamily": "Arial", "fontSize": 12},
-            "authoritativeShaping": true
-        }
-    });
-    let requirements: Vec<Value> = serde_json::from_str(
-        &engine
-            .layout_font_requirements_json(&request.to_string())
-            .unwrap(),
-    )
-    .unwrap();
-    for requirement in requirements {
-        request["measurement"]["fontChains"][requirement["key"].as_str().unwrap()] = json!([font]);
-    }
-    let request = request.to_string();
+    let request = layout_request(&engine, &bytes);
     let output: Value =
         serde_json::from_str(&engine.layout_document_with_regions_json(&request).unwrap()).unwrap();
     let variants = output["headersFooters"]["variants"].as_array().unwrap();
@@ -220,20 +224,6 @@ fn assert_shared_content(headers: &[(&str, &str)], footers: &[(&str, &str)], kin
         matches!(&identity.paragraph, docx_edit::ParagraphRef::Session { story, .. } if story == &root)
     }).collect();
     assert_eq!(band_identities.len(), 1);
-    let plan = engine.doc().paragraph_save_plan();
-    let band_parts: Vec<_> = plan
-        .spliced_parts
-        .iter()
-        .filter(|part| {
-            part.part.contains(if kind == StoryKind::Header {
-                "header1.xml"
-            } else {
-                "footer1.xml"
-            })
-        })
-        .collect();
-    assert_eq!(band_parts.len(), 1);
-    assert_eq!(band_parts[0].paragraphs.len(), 1);
 }
 
 #[test]
@@ -251,7 +241,12 @@ fn default_open_keeps_every_relationship_story_without_alias_metadata() {
         seed_from_docx_with_generation(&doc, &fixture::package(&headers, &footers), "default")
             .unwrap();
         let mut expected = vec!["body".to_owned()];
-        expected.extend(headers.iter().chain(&footers).map(|(id, _)| format!("hf:{id}")));
+        expected.extend(
+            headers
+                .iter()
+                .chain(&footers)
+                .map(|(id, _)| format!("hf:{id}")),
+        );
         expected.sort();
         assert_eq!(story_ids(&doc), expected);
         assert!(doc.header_footer_aliases().is_empty());
@@ -386,8 +381,11 @@ fn nested_header_content_is_shared_and_indexed_for_the_canonical_story() {
         "</w:hdr>",
         r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p w14:paraId="20000002"><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sdt><w:sdtPr><w:id w:val="17"/><w:text/></w:sdtPr><w:sdtContent><w:p w14:paraId="20000003"><w:r><w:t>Control</w:t></w:r></w:p></w:sdtContent></w:sdt></w:hdr>"#,
     ).into_bytes();
-    let doc = seeded(&ooxml_opc::rezip_parts(&parts).unwrap());
-    let ids = story_ids(&doc);
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let engine = EngineSession::new(41);
+    build_aliased_room(engine.doc(), &bytes);
+    let doc = engine.doc();
+    let ids = story_ids(doc);
     assert!(ids.iter().any(|id| id.starts_with("hf:rId7:t")));
     assert!(ids.iter().any(|id| id.starts_with("hf:rId7:sdt")));
     assert!(
@@ -402,13 +400,70 @@ fn nested_header_content_is_shared_and_indexed_for_the_canonical_story() {
         .filter(|source| source.part_uri == "/word/header1.xml")
         .collect();
     assert_eq!(header_sources.len(), 3);
-    let plan = doc.paragraph_save_plan();
-    let header = plan
-        .spliced_parts
-        .iter()
-        .find(|part| part.part == "word/header1.xml")
+    for prefix in ["hf:rId7:t", "hf:rId7:sdt"] {
+        let story = ids.iter().find(|id| id.starts_with(prefix)).unwrap();
+        doc.insert_text(
+            &EditCtx::local("Ada", "2030-01-02T03:04:05Z"),
+            Position::new(story.clone(), 0),
+            "Edited ",
+            FormatPolicy::Plain,
+        )
         .unwrap();
-    assert_eq!(header.paragraphs.len(), 3);
+    }
+    let request = layout_request(&engine, &bytes);
+    let output: Value =
+        serde_json::from_str(&engine.layout_document_with_regions_json(&request).unwrap()).unwrap();
+    let variants = output["headersFooters"]["variants"].as_array().unwrap();
+    assert_eq!(variants.len(), 2);
+    for (section, id) in [(0, "rId7"), (1, "rId9")] {
+        let band = variants
+            .iter()
+            .find(|variant| variant["rId"] == id)
+            .unwrap();
+        assert_eq!(band["sectionIndex"], section);
+        assert!(text(band).contains("Edited Cell"));
+        assert!(text(band).contains("Edited Control"));
+    }
+    let paged = engine
+        .export_structured_with_pages_for(
+            &PageExportOptions {
+                stories: Some(vec![StorySelection::Body, StorySelection::Headers]),
+                ..PageExportOptions::new(RevisionView::Markup)
+            },
+            &request,
+        )
+        .unwrap()
+        .content;
+    let header = paged
+        .structured
+        .stories
+        .iter()
+        .find(|story| story.story == "hf:rId7")
+        .unwrap();
+    let header_text = text(&serde_json::to_value(&header.blocks).unwrap());
+    assert!(header_text.contains("Edited Cell"));
+    assert!(header_text.contains("Edited Control"));
+    assert_eq!(header.uses.len(), 2);
+    let occurrences: Vec<_> = paged
+        .layout
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.story == "hf:rId7")
+        .collect();
+    assert_eq!(occurrences.len(), 2);
+    for section in [0, 1] {
+        assert!(header.uses.iter().any(|used| used.section_index == section));
+        assert!(
+            occurrences
+                .iter()
+                .any(|occurrence| occurrence.section_index == Some(section))
+        );
+    }
+    assert!(
+        paged.layout.diagnostics.is_empty(),
+        "{:?}",
+        paged.layout.diagnostics
+    );
 }
 
 #[test]

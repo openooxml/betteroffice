@@ -1,11 +1,11 @@
-import { afterEach, beforeAll, describe, expect, test } from 'bun:test';
+import { afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { computeAnchorPositionsFromYrs } from '../layout/render/displayListAnchors';
 import type { DisplayListQueries } from '../layout/render/displayListQueries';
 import { createYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import type { BlockContent, Document } from '../types/document';
-import { preloadEditWasm } from '../wasm/edit';
+import * as editWasm from '../wasm/edit';
 import {
   createYrsInputPositionMap,
   createYrsPositionProjection,
@@ -18,8 +18,8 @@ import {
   type YrsSession,
 } from '../yrs';
 import { headerFooterStory, sessionInternals } from '../yrs/sessionInternals';
-import { parseDocx } from './index';
-import { collectParts, rezipPartsToArrayBuffer, toBytes } from './rezip/parts';
+import { parseDocx, repackDocx } from './index';
+import { collectParts, headerFooterPartKey, rezipPartsToArrayBuffer, toBytes } from './rezip/parts';
 import { decodeS9EnvelopeValue } from './rustParseFacade';
 import { unzipContainer } from './wasm';
 
@@ -29,7 +29,7 @@ const NS = `xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/mai
 const sessions: YrsSession[] = [];
 
 beforeAll(() =>
-  preloadEditWasm(new Uint8Array(readFileSync(
+  editWasm.preloadEditWasm(new Uint8Array(readFileSync(
     resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')
   )))
 );
@@ -112,6 +112,107 @@ function expectSameParts(actual: Uint8Array, expected: Uint8Array): void {
 }
 
 describe('header/footer aliases', () => {
+  test('repackages distinct header parts that share a content array', async () => {
+    const parts = new Map(Object.entries(unzipContainer(fixture('header2.xml'))));
+    parts.set('word/header2.xml', parts.get('word/header1.xml')!.slice());
+    parts.set('[Content_Types].xml', toBytes(
+      new TextDecoder().decode(parts.get('[Content_Types].xml'))
+        .replace('</Types>', `<Override PartName="/word/header2.xml" ContentType="${WORD}.header+xml"/></Types>`)
+    ));
+    const document = await parseDocx(rezipPartsToArrayBuffer(parts), { preloadFonts: false });
+    const content: BlockContent[] = [{
+      type: 'paragraph', formatting: {},
+      content: [{ type: 'run', formatting: {}, content: [{ type: 'text', text: 'New shared text' }] }],
+    }];
+    document.package.headers!.get('rId7')!.content = content;
+    document.package.headers!.get('rId9')!.content = content;
+    expect(collectParts(document).filter((part) => part.relsPath.includes('header')))
+      .toHaveLength(2);
+    const saved = new Uint8Array(await repackDocx(document, { updateModifiedDate: false }));
+    for (const path of ['word/header1.xml', 'word/header2.xml']) {
+      expect(xml(saved, path)).toContain('New shared text');
+      expect(xml(saved, path)).not.toContain('Shared</w:t>');
+    }
+  });
+
+  test('compares header/footer targets with resolved paths and exact case', () => {
+    for (const target of ['header1.xml', './header1.xml', '/word/header1.xml', 'bands/../header1.xml']) {
+      expect(headerFooterPartKey(target)).toBe('word/header1.xml');
+    }
+    expect(headerFooterPartKey('../header1.xml')).toBe('header1.xml');
+    expect(headerFooterPartKey('Header1.xml')).toBe('word/Header1.xml');
+    expect(headerFooterPartKey(undefined)).toBeUndefined();
+    expect(headerFooterPartKey('')).toBeUndefined();
+  });
+
+  for (const footer of [false, true]) {
+    test(`projects both ${footer ? 'footer' : 'header'} aliases when only the alias is selected`, async () => {
+      const session = await replica();
+      const bytes = fixture(`${footer ? 'footer' : 'header'}1.xml`, true, footer);
+      const document = aliasedRoom(session, bytes, footer);
+      const paragraph = session.paragraphs('hf:rId7')[0]!;
+      session.insertText({ story: 'hf:rId7', paraId: paragraph.paraId, offset: 6 }, ' edited');
+      const projected = yrsToDocument(session, document, { storyIds: new Set(['hf:rId9']) });
+      const entries = footer ? projected.package.footers! : projected.package.headers!;
+      expect(contentText(entries.get('rId7')!.content)).toBe('Shared edited');
+      expect(contentText(entries.get('rId9')!.content)).toBe('Shared edited');
+      expect(entries.get('rId7')!.content).toBe(entries.get('rId9')!.content);
+    });
+  }
+
+  for (const cached of [false, true]) {
+    test(`reads empty aliases after destruction ${cached ? 'with' : 'without'} a cached read`, async () => {
+      const session = await replica();
+      aliasedRoom(session);
+      if (cached) expect(headerFooterStory(session, 'rId9')).toBe('hf:rId7');
+      session.destroy();
+      expect(headerFooterStory(session, 'rId9')).toBe('hf:rId9');
+      expect([...sessionInternals(session).headerFooterAliases()]).toEqual([]);
+    });
+  }
+
+  test('fails closed for unavailable or malformed alias JSON', async () => {
+    const create = editWasm.createEditSession;
+    let raw: ReturnType<typeof create> & { header_footer_aliases_json(): string };
+    const creation = spyOn(editWasm, 'createEditSession').mockImplementation((clientId) => {
+      raw = create(clientId) as typeof raw;
+      return raw;
+    });
+    let session: YrsSession;
+    try {
+      session = await replica();
+    } finally {
+      creation.mockRestore();
+    }
+    aliasedRoom(session);
+    const reader = spyOn(raw!, 'header_footer_aliases_json');
+    try {
+      for (const value of [
+        '{', 'null', '[]', '["rId7"]', '"rId7"', '7',
+        '{"rId9":7}', '{"rId9":"rId7","rId11":null}',
+      ]) {
+        reader.mockReturnValue(value);
+        sessionInternals(session).setHeaderFooterAliases('[]');
+        expect(headerFooterStory(session, 'rId9')).toBe('hf:rId9');
+        expect([...sessionInternals(session).headerFooterAliases()]).toEqual([]);
+      }
+      reader.mockImplementation(() => {
+        throw new Error('Unavailable');
+      });
+      sessionInternals(session).setHeaderFooterAliases('[]');
+      expect(headerFooterStory(session, 'rId9')).toBe('hf:rId9');
+      reader.mockReturnValue('{"rId9":"rId7"}');
+      sessionInternals(session).setHeaderFooterAliases('[]');
+      expect(headerFooterStory(session, 'rId9')).toBe('hf:rId7');
+      const reads = reader.mock.calls.length;
+      session.destroy();
+      expect(headerFooterStory(session, 'rId9')).toBe('hf:rId9');
+      expect(reader.mock.calls).toHaveLength(reads);
+    } finally {
+      reader.mockRestore();
+    }
+  });
+
   for (const footer of [false, true]) {
     const kind = footer ? 'footer' : 'header';
     for (const target of [`${kind}1.xml`, `./${kind}1.xml`]) {
@@ -251,7 +352,7 @@ describe('header/footer aliases', () => {
       .toEqual(['hf:rId7', 'hf:rId9']);
   });
 
-  test('refreshes the alias cache across history, opening and native seeding', async () => {
+  test('refreshes the alias cache across history and opening', async () => {
     const session = await replica();
     aliasedRoom(session);
     const internals = sessionInternals(session);
@@ -269,10 +370,7 @@ describe('header/footer aliases', () => {
     aliases = internals.headerFooterAliases();
     session.beginOpening('cache');
     expect(internals.headerFooterAliases()).not.toBe(aliases);
-    aliases = internals.headerFooterAliases();
-    session.seedFromDocx(fixture());
-    expect(internals.headerFooterAliases()).not.toBe(aliases);
-    expect(headerFooterStory(session, 'rId9')).toBe('hf:rId9');
+    expect(headerFooterStory(session, 'rId9')).toBe('hf:rId7');
   });
 
   test('declared groups stay inactive while each relationship owns a story', async () => {
@@ -285,11 +383,16 @@ describe('header/footer aliases', () => {
     expect(headerFooterStory(session, 'rId9')).toBe('hf:rId9');
     const alias = session.paragraphs('hf:rId9')[0]!;
     session.insertText({ story: 'hf:rId9', paraId: alias.paraId, offset: 6 }, ' legacy');
-    const projected = yrsToDocument(session, document);
-    expect(headerText(projected, 'rId7')).toBe('Shared');
-    expect(headerText(projected, 'rId9')).toBe('Shared legacy');
-    expect(projected.package.headers!.get('rId7')!.content)
-      .not.toBe(projected.package.headers!.get('rId9')!.content);
+    for (const storyIds of [undefined, new Set(['hf:rId9'])]) {
+      const projected = yrsToDocument(session, document, { storyIds });
+      expect(headerText(projected, 'rId7')).toBe('Shared');
+      expect(headerText(projected, 'rId9')).toBe('Shared legacy');
+      expect(projected.package.headers!.get('rId7')!.content)
+        .not.toBe(projected.package.headers!.get('rId9')!.content);
+      if (storyIds) {
+        expect(projected.package.headers!.get('rId7')).toBe(document.package.headers!.get('rId7'));
+      }
+    }
   });
 
   test('shares footer content too', async () => {
@@ -316,8 +419,9 @@ describe('header/footer aliases', () => {
     expect(new TextDecoder().decode(session.encodeState())).not.toContain('hfAliases');
     const saved = await saveYrsDocx(session, { updateModifiedDate: false });
     expectSameParts(saved.bytes, bytes);
-    session.openDocx(fixture(), true);
-    expect(headerFooterStory(session, 'rId9')).toBe('hf:rId9');
+    const aliased = await replica();
+    aliased.openDocx(fixture(), true);
+    expect(headerFooterStory(aliased, 'rId9')).toBe('hf:rId9');
   });
 });
 

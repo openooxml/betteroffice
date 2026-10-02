@@ -5931,7 +5931,12 @@ mod header_footer_alias_tests {
             let baseline = EditingDoc::new(41);
             let order = main_seed(&baseline, &bytes);
             let expected_order: Vec<_> = std::iter::once("body".to_owned())
-                .chain(headers.iter().chain(&footers).map(|(id, _)| format!("hf:{id}")))
+                .chain(
+                    headers
+                        .iter()
+                        .chain(&footers)
+                        .map(|(id, _)| format!("hf:{id}")),
+                )
                 .collect();
             assert_eq!(order, expected_order);
             assert_eq!(

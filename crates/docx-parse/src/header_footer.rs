@@ -96,6 +96,43 @@ pub fn parse_related_header_footers(
     (
         IndexMap<String, HeaderFooter>,
         IndexMap<String, HeaderFooter>,
+    ),
+    ParseError,
+> {
+    let (headers, footers, _) = parse_related_header_footers_with_aliases(
+        parts,
+        document_relationships,
+        theme,
+        styles,
+        doc_defaults,
+        numbering,
+        media,
+        charts,
+        smart_art,
+        budget,
+        ids,
+    )?;
+    Ok((headers, footers))
+}
+
+/// Parses related headers and footers with alias groups.
+#[allow(clippy::too_many_arguments)]
+pub fn parse_related_header_footers_with_aliases(
+    parts: &[(String, Vec<u8>)],
+    document_relationships: &RelationshipMap,
+    theme: Option<&Theme>,
+    styles: Option<&StyleMap>,
+    doc_defaults: Option<&DocDefaults>,
+    numbering: Option<&NumberingMap>,
+    media: &MediaMap,
+    charts: &ChartPartsMap,
+    smart_art: &mut SmartArtContext,
+    budget: &mut ParseBudget<'_>,
+    ids: &mut HexIdAllocator,
+) -> Result<
+    (
+        IndexMap<String, HeaderFooter>,
+        IndexMap<String, HeaderFooter>,
         Vec<HeaderFooterAliasGroup>,
     ),
     ParseError,
@@ -315,7 +352,7 @@ mod tests {
         let charts = ChartPartsMap::new();
         let mut smart_art = SmartArtContext::default();
         let mut ids = HexIdAllocator::from_sha256(&"0".repeat(64)).unwrap();
-        parse_related_header_footers(
+        parse_related_header_footers_with_aliases(
             parts,
             relationships,
             None,
@@ -329,6 +366,72 @@ mod tests {
             &mut ids,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn legacy_related_header_footers_keeps_the_two_tuple_and_stories() {
+        let parts = vec![
+            (
+                "word/header1.xml".to_owned(),
+                br#"<w:hdr xmlns:w="w"><w:p><w:r><w:t>Header</w:t></w:r></w:p></w:hdr>"#.to_vec(),
+            ),
+            (
+                "word/footer1.xml".to_owned(),
+                br#"<w:ftr xmlns:w="w"><w:p><w:r><w:t>Footer</w:t></w:r></w:p></w:ftr>"#.to_vec(),
+            ),
+        ];
+        let relationships = relationships(&[
+            ("rId7", relationship_types::HEADER, "header1.xml", None),
+            ("rId9", relationship_types::HEADER, "./header1.xml", None),
+            ("rId11", relationship_types::FOOTER, "footer1.xml", None),
+            (
+                "rId13",
+                relationship_types::FOOTER,
+                "/word/footer1.xml",
+                None,
+            ),
+            ("rMissing", relationship_types::HEADER, "missing.xml", None),
+            (
+                "rExternal",
+                relationship_types::FOOTER,
+                "footer1.xml",
+                Some(TargetMode::External),
+            ),
+        ]);
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let media = MediaMap::new();
+        let charts = ChartPartsMap::new();
+        let mut smart_art = SmartArtContext::default();
+        let mut ids = HexIdAllocator::from_sha256(&"0".repeat(64)).unwrap();
+        let legacy: (
+            IndexMap<String, HeaderFooter>,
+            IndexMap<String, HeaderFooter>,
+        ) = parse_related_header_footers(
+            &parts,
+            &relationships,
+            None,
+            None,
+            None,
+            None,
+            &media,
+            &charts,
+            &mut smart_art,
+            &mut budget,
+            &mut ids,
+        )
+        .unwrap();
+        let (headers, footers, aliases) = related_stories(&parts, &relationships);
+        assert_eq!(legacy, (headers, footers));
+        assert_eq!(
+            legacy.0.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["rId7", "rId9"]
+        );
+        assert_eq!(
+            legacy.1.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["rId11", "rId13"]
+        );
+        assert_eq!(aliases.len(), 2);
     }
 
     #[test]
@@ -652,7 +755,7 @@ mod tests {
         let charts = ChartPartsMap::new();
         let mut smart_art = SmartArtContext::default();
         let mut ids = HexIdAllocator::from_sha256(&"0".repeat(64)).unwrap();
-        let (headers, footers, aliases) = parse_related_header_footers(
+        let (headers, footers, aliases) = parse_related_header_footers_with_aliases(
             &parts,
             &document_relationships,
             None,
