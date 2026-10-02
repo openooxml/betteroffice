@@ -117,7 +117,13 @@ export type ResidentEngineWorkerRequest =
   | { id: number; type: 'encodeState' }
   | { id: number; type: 'revisionCount' }
   | { id: number; type: 'proposal'; operation: ResidentProposalOperation }
-  | { id: number; type: 'documentRead'; read: ResidentDocumentRead }
+  | {
+      id: number;
+      type: 'documentRead';
+      read: ResidentDocumentRead;
+      /** Answered `superseded` instead when the document's version differs. */
+      expectVersion?: string;
+    }
   | {
       id: number;
       type: 'sync';

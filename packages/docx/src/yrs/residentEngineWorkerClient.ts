@@ -406,6 +406,19 @@ export class ResidentEngineWorkerClient {
   }
 
   /** @internal */
+  async documentReadAt<K extends ResidentDocumentRead['kind']>(
+    read: ResidentDocumentRead & { kind: K },
+    expectVersion: string
+  ): Promise<{ version: string; value: ResidentDocumentReadValues[K] } | null> {
+    const response = await this.request({ type: 'documentRead', read, expectVersion });
+    if (response.superseded) return null;
+    if (!response.read) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted the document read');
+    }
+    return response.read as { version: string; value: ResidentDocumentReadValues[K] };
+  }
+
+  /** @internal */
   async handOver(): Promise<{
     state: Uint8Array;
     version: string;
