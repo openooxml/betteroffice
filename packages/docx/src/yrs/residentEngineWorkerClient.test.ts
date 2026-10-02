@@ -723,6 +723,19 @@ describe('worker failure', () => {
     expect(worker.posted).toHaveLength(2);
   });
 
+  test('the failure listener hears an idle crash once and never a destroy', () => {
+    const { worker, client } = setup();
+    const failures: string[] = [];
+    client.onFailure((error) => failures.push(error.message));
+    worker.onerror?.({ message: 'boom' } as ErrorEvent);
+    worker.onerror?.({ message: 'again' } as ErrorEvent);
+    expect(failures).toEqual(['Resident engine worker failed: boom']);
+    const destroyed = setup();
+    destroyed.client.onFailure((error) => failures.push(error.message));
+    destroyed.client.destroy();
+    expect(failures).toHaveLength(1);
+  });
+
   test('a worker crash rejects input with a failure error, not an op error', async () => {
     const { worker, client } = setup();
     const bootstrap = client.bootstrap(snapshot, '');
