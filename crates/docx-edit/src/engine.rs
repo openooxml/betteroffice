@@ -946,6 +946,8 @@ struct DisplayState {
     binary_frame_epoch: u64,
     encoded_doc_epoch: u64,
     encoded_layout_epoch: u64,
+    /// The layout epoch of the last list frame; page frames leave it.
+    list_layout_epoch: u64,
     pages: Vec<FramePageSnapshot>,
     next_page_id: u64,
     extras_fingerprint: u64,
@@ -4500,7 +4502,7 @@ impl EngineSession {
             };
             // A preview pass is rebuilt incrementally only over the layout the list shows.
             let shows_base = !pagination.preview_only_pass
-                || display.encoded_layout_epoch == pagination.layout_epoch.wrapping_sub(1);
+                || display.list_layout_epoch == pagination.layout_epoch.wrapping_sub(1);
             if pagination.last_incremental
                 && display.extras_fingerprint == extras_fingerprint
                 && shows_base
@@ -4698,6 +4700,7 @@ impl EngineSession {
         display.binary_frame_epoch = frame_epoch;
         display.encoded_doc_epoch = epochs.doc_epoch;
         display.encoded_layout_epoch = epochs.layout_epoch;
+        display.list_layout_epoch = epochs.layout_epoch;
         display.fresh_base = false;
         Ok(bytes)
     }
@@ -11104,11 +11107,13 @@ mod tests {
 
     #[test]
     fn preview_decisions_laid_out_twice_before_a_frame_send_a_cold_window() {
-        for (local, retain, stale) in [
-            (false, false, false),
-            (true, false, false),
-            (false, false, true),
-            (true, true, false),
+        for (local, retain, stale, page_build) in [
+            (false, false, false, false),
+            (true, false, false, false),
+            (false, false, true, false),
+            (true, true, false, false),
+            (false, false, false, true),
+            (true, true, false, true),
         ] {
             let (engine, mut request, extras, first) = preview_display_fixture(" new", false);
             let at = {
@@ -11136,12 +11141,18 @@ mod tests {
             let mut mirror = HashMap::new();
             let mut epoch = 0;
             let bytes = engine.build_display_list_frame(&extras, epoch).unwrap();
-            let shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+            let mut shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
             assert!(shown.pages.len() >= 8);
             request["renderEnv"]["revisionPreview"] = json!({first.clone(): "rejected"});
             engine
                 .layout_document_with_regions_json(&request.to_string())
                 .unwrap();
+            if page_build {
+                let bytes = engine.build_display_pages_frame(&[1], epoch).unwrap();
+                if !bytes.is_empty() {
+                    shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+                }
+            }
             request["renderEnv"]["revisionPreview"] =
                 json!({first.clone(): "rejected", second.clone(): "rejected"});
             engine
@@ -11156,7 +11167,7 @@ mod tests {
             let decided = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
             assert_eq!(
                 decided, cold,
-                "local lowering {local}, retain {retain}, stale {stale}"
+                "local lowering {local}, retain {retain}, stale {stale}, page build {page_build}"
             );
             assert_eq!(
                 engine.stats().incremental_display_builds,
