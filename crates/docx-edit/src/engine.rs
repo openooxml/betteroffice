@@ -4498,7 +4498,13 @@ impl EngineSession {
             } else {
                 None
             };
-            if pagination.last_incremental && display.extras_fingerprint == extras_fingerprint {
+            // A preview pass is rebuilt incrementally only over the layout the list shows.
+            let shows_base = !pagination.preview_only_pass
+                || display.encoded_layout_epoch == pagination.layout_epoch.wrapping_sub(1);
+            if pagination.last_incremental
+                && display.extras_fingerprint == extras_fingerprint
+                && shows_base
+            {
                 // The first range is rebuilt as a range; the pages after it shift,
                 // but later ranges, the pages elsewhere whose notes anchor to
                 // references the edit moved, and retained pages whose section or
@@ -11094,6 +11100,70 @@ mod tests {
             );
         }
         docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn preview_decisions_laid_out_twice_before_a_frame_send_a_cold_window() {
+        for (local, retain, stale) in [
+            (false, false, false),
+            (true, false, false),
+            (false, false, true),
+            (true, true, false),
+        ] {
+            let (engine, mut request, extras, first) = preview_display_fixture(" new", false);
+            let at = {
+                let txn = engine.doc().yrs_doc().transact();
+                let text = crate::story_ref(&txn, "body").unwrap();
+                crate::op::para_bounds(&text, &txn).last().unwrap().pilcrow
+            };
+            let second = engine
+                .doc()
+                .insert_text(
+                    &crate::EditCtx::local("Bo", "2026-09-29T12:05:00Z").suggesting(),
+                    crate::Position::new("body", at),
+                    " late",
+                    crate::FormatPolicy::Inherit,
+                )
+                .unwrap()
+                .revision_ids[0]
+                .clone();
+            assert_ne!(first, second);
+            engine.set_local_lowering(local);
+            engine.set_display_retain_built_pages(retain);
+            engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap();
+            let mut mirror = HashMap::new();
+            let mut epoch = 0;
+            let bytes = engine.build_display_list_frame(&extras, epoch).unwrap();
+            let shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+            assert!(shown.pages.len() >= 8);
+            request["renderEnv"]["revisionPreview"] = json!({first.clone(): "rejected"});
+            engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap();
+            request["renderEnv"]["revisionPreview"] =
+                json!({first.clone(): "rejected", second.clone(): "rejected"});
+            engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap();
+            assert!(engine.pagination.borrow().preview_only_pass);
+            assert!(engine.pagination.borrow().last_incremental);
+            let cold = cold_preview_display_list(&engine, &request, &extras, &shown);
+            let before = engine.stats();
+            let expected = if stale { epoch + 1 } else { epoch };
+            let bytes = engine.build_display_list_frame(&extras, expected).unwrap();
+            let decided = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+            assert_eq!(
+                decided, cold,
+                "local lowering {local}, retain {retain}, stale {stale}"
+            );
+            assert_eq!(
+                engine.stats().incremental_display_builds,
+                before.incremental_display_builds
+            );
+            docx_layout::clear_measure_fonts();
+        }
     }
 
     #[test]
