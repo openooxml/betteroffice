@@ -656,18 +656,36 @@ fn locate(args: &[Expr], ctx: &EvalContext<'_>, case_sensitive: bool) -> CellVal
     if start > hay.len() + 1 {
         return err(ErrorValue::Value);
     }
-    let (needle, tail): (String, String) = if case_sensitive {
-        (needle, hay[start - 1..].iter().collect())
+    let tail = &hay[start - 1..];
+    let offset = if case_sensitive {
+        let tail: String = tail.iter().collect();
+        char_index_of(&tail, &needle)
     } else {
-        (
-            needle.to_lowercase(),
-            hay[start - 1..].iter().collect::<String>().to_lowercase(),
-        )
+        case_insensitive_char_index_of(tail, &needle)
     };
-    match char_index_of(&tail, &needle) {
+    match offset {
         Some(off) => num((start + off) as f64),
         None => err(ErrorValue::Value),
     }
+}
+
+fn case_insensitive_char_index_of(haystack: &[char], needle: &str) -> Option<usize> {
+    let needle = needle.to_lowercase();
+    if needle.is_empty() {
+        return Some(0);
+    }
+
+    let mut folded = String::new();
+    let mut source_indices = Vec::new();
+    for (index, character) in haystack.iter().enumerate() {
+        for lowered in character.to_lowercase() {
+            folded.push(lowered);
+            source_indices.push(index);
+        }
+    }
+    let byte_offset = folded.find(&needle)?;
+    let folded_index = folded[..byte_offset].chars().count();
+    source_indices.get(folded_index).copied()
 }
 
 /// position of `needle` in `haystack` measured in characters, not bytes.
