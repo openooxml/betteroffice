@@ -560,6 +560,9 @@ struct ResolvedParagraphStyle {
 /// Maximum approximate retained value size across both style memos.
 const STYLE_MEMO_BYTES: usize = 4 << 20;
 
+/// Approximate fixed cost charged for every memo entry.
+const STYLE_MEMO_ENTRY_BYTES: usize = 64;
+
 /// Paragraph styles grouped by exact lookup result.
 #[derive(Default)]
 struct ParagraphStyleMemo {
@@ -1152,7 +1155,14 @@ impl StyleResolver {
         } else {
             run.clone()
         };
-        let size = [paragraph.as_ref(), run.as_deref(), default_run.as_deref()]
+        let shared_default = default_character.is_none();
+        let size = STYLE_MEMO_ENTRY_BYTES
+            + defined_id.map_or(0, str::len)
+            + [
+                paragraph.as_ref(),
+                run.as_deref(),
+                default_run.as_deref().filter(|_| !shared_default),
+            ]
             .into_iter()
             .flatten()
             .map(approx_bytes)
@@ -1228,7 +1238,9 @@ impl StyleResolver {
             return cached.clone();
         }
         let resolved = self.resolve_run_style_uncached(style_id).map(Arc::new);
-        let size = resolved.as_deref().map_or(0, approx_bytes);
+        let size = STYLE_MEMO_ENTRY_BYTES
+            + defined_id.map_or(0, str::len)
+            + resolved.as_deref().map_or(0, approx_bytes);
         if memo.bytes + size <= STYLE_MEMO_BYTES {
             memo.bytes += size;
             match defined_id {
@@ -7140,6 +7152,33 @@ mod tests {
         styles.restore_table_paragraph_formatting(previous);
         assert_eq!(styles.memo.state.lock().unwrap().bytes, 0);
         assert_formatting(&styles, Some("Defined0"));
+    }
+
+    #[test]
+    fn style_memo_bounds_empty_styles_with_long_ids() {
+        let ids = (0..5000)
+            .map(|index| format!("{index:0>1024}"))
+            .collect::<Vec<_>>();
+        let definitions = json!({
+            "styles": ids
+                .iter()
+                .map(|id| json!({ "styleId": id, "type": "paragraph" }))
+                .collect::<Vec<_>>()
+        });
+        let styles = StyleResolver::new(Some(&definitions));
+        for id in &ids {
+            let resolved = styles.resolve_paragraph_style(Some(id));
+            let (paragraph, run) = styles.resolve_paragraph_style_uncached(Some(id));
+            assert_eq!(resolved.paragraph, paragraph);
+            assert_eq!(resolved.run.as_deref(), run.as_ref());
+            assert_eq!(
+                styles.resolve_run_style(Some(id)).as_deref(),
+                styles.resolve_run_style_uncached(Some(id)).as_ref()
+            );
+        }
+        let memo = styles.memo.state.lock().unwrap();
+        assert!(memo.bytes <= STYLE_MEMO_BYTES);
+        assert!(memo.paragraphs.styles.len() + memo.runs.styles.len() < ids.len());
     }
 
     #[test]
