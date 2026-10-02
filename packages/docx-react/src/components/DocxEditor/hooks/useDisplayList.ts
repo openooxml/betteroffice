@@ -565,9 +565,10 @@ export function useRustDisplayList(
       owner.load === documentLoadsRef.current,
     []
   );
-  // The engines whose worker ran out of memory, each with the failure once its
-  // replacement did too. Weak, so a replaced document's session is not kept.
-  const outOfMemoryRef = useRef(new WeakMap<YrsSession, ResidentWorkerOutOfMemoryError | null>());
+  // The engines whose worker was replaced, each with the failure once its
+  // replacement failed too. Weak, so a replaced document's session is not kept.
+  const outOfMemoryRef = useRef(new WeakMap<YrsSession, Error | null>());
+  const workerFailureListenerRef = useRef<(client: ResidentEngineWorkerClient, failure: Error) => void>(() => {});
   const workerFailureRef = useRef(new WeakMap<YrsSession, Error>());
   const displayWindowRef = useRef<[number, number]>(INITIAL_DISPLAY_WINDOW);
   const displayWindowListenersRef = useRef(new Set<() => void>());
@@ -796,6 +797,9 @@ export function useRustDisplayList(
     [failWorkerDocument]
   );
 
+  const watchWorkerFailure = (client: ResidentEngineWorkerClient): void =>
+    client.onFailure((failure) => workerFailureListenerRef.current(client, failure));
+
   // The worker for `hostEngine`: its own, the one of the session it
   // takes over from, a spare, or a new one.
   const workerFor = useCallback(
@@ -816,6 +820,7 @@ export function useRustDisplayList(
         handedOverEnginesRef.current.add(current.engine);
         current.client.rebootstrap();
         workerRef.current = { engine: hostEngine, client: current.client, load };
+        watchWorkerFailure(current.client);
         return workerRef.current;
       }
       if (
@@ -829,6 +834,7 @@ export function useRustDisplayList(
         current.client.rebootstrap();
         workerRef.current = { engine: hostEngine, client: current.client, load };
         workerRef.current.client.setRetainBuiltPages(retainBuiltPagesRef.current);
+        watchWorkerFailure(current.client);
         return workerRef.current;
       }
       current?.client.destroy();
@@ -841,6 +847,7 @@ export function useRustDisplayList(
         load,
       };
       workerRef.current.client.setRetainBuiltPages(retainBuiltPagesRef.current);
+      watchWorkerFailure(workerRef.current.client);
       return workerRef.current;
     },
     [failWorkerDocument, handoffFromRef, sessionLoad]
@@ -968,7 +975,8 @@ export function useRustDisplayList(
     return () => clearTimeout(id);
   }, [snapshot.queries]);
 
-  // A worker that ran out of memory is replaced by a fresh one once. The main
+  // A worker that ran out of memory, or with worker-open failed while no
+  // request handled it, is replaced by a fresh one once. The main
   // thread never takes over its work: its memory has the same limit and
   // already holds the document. `retry` asks the caller to use the current
   // worker, `stale` means the failed worker no longer serves this engine.
@@ -977,8 +985,9 @@ export function useRustDisplayList(
     (
       hostEngine: YrsSession,
       worker: { client: ResidentEngineWorkerClient; load: number } | null,
-      failure: ResidentWorkerOutOfMemoryError
+      failure: Error
     ): 'retry' | 'stale' | 'failed' => {
+      const outOfMemory = failure instanceof ResidentWorkerOutOfMemoryError;
       if (worker && worker.load !== documentLoadsRef.current) return 'stale';
       const client = worker?.client ?? null;
       const previous = outOfMemoryRef.current.has(hostEngine);
@@ -995,7 +1004,9 @@ export function useRustDisplayList(
       if (!previous && !holdsCommittedWorkerProposals(hostEngine)) {
         outOfMemoryRef.current.set(hostEngine, null);
         console.warn(
-          '[CanvasRenderer] Resident engine worker ran out of memory; starting a fresh worker',
+          outOfMemory
+            ? '[CanvasRenderer] Resident engine worker ran out of memory; starting a fresh worker'
+            : '[CanvasRenderer] Resident engine worker failed; starting a fresh worker',
           failure
         );
         return 'retry';
@@ -1005,13 +1016,29 @@ export function useRustDisplayList(
         hostEngine,
         failure,
         previous
-          ? '[CanvasRenderer] Resident engine worker ran out of memory again'
-          : '[CanvasRenderer] Resident engine worker holding proposals ran out of memory'
+          ? outOfMemory
+            ? '[CanvasRenderer] Resident engine worker ran out of memory again'
+            : '[CanvasRenderer] Resident engine worker failed again'
+          : outOfMemory
+            ? '[CanvasRenderer] Resident engine worker holding proposals ran out of memory'
+            : '[CanvasRenderer] Resident engine worker holding proposals failed'
       );
       return 'failed';
     },
     [failWorkerDocument, setWorkerPresentationActive]
   );
+
+  // A failure no request handled by the next task leaves the dead worker current.
+  workerFailureListenerRef.current = (client, failure) => {
+    if (!workerOpenEnabledRef.current) return;
+    setTimeout(() => {
+      const owner = workerRef.current;
+      if (unmountedRef.current || owner?.client !== client || workerFailureRef.current.has(owner.engine)) return;
+      if (replaceOutOfMemoryWorker(owner.engine, owner, failure) !== 'retry') return;
+      registeredWorkerProposalAuthority(owner.engine)?.restart();
+      requestLayoutRef.current?.();
+    }, 0);
+  };
 
   const applyResidentInput = useCallback(
     (operation: ResidentInputOperation): Promise<ResidentFrameApplyResult | null> => {
