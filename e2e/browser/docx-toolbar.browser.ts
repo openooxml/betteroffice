@@ -313,4 +313,5 @@ test('docx: with the first page footer open, a double-click on the next page hea
   expect((await header.boundingBox())!.y).toBe(box.y);
   await page.keyboard.type('Switched');
   expect(await savedText(page, info, 'switched', /^word\/header\d+\.xml$/)).toContain('Switched');
+  expect(await savedText(page, info, 'footer', /^word\/footer\d+\.xml$/)).not.toContain('Switched');
 });
