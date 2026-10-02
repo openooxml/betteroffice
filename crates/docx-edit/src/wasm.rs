@@ -2267,7 +2267,7 @@ impl EditSession {
     /// Unions seeded opaque sequence names into document state.
     pub fn seed_opaque_sequences(&self, names_json: &str) -> Result<(), JsValue> {
         let names: Vec<String> = serde_json::from_str(names_json).map_err(js_err)?;
-        crate::seed::seed_opaque_sequences(self.engine.doc(), &names);
+        crate::seed::seed_opaque_sequences(self.engine.doc(), &names, None);
         Ok(())
     }
 
