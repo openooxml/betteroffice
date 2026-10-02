@@ -161,13 +161,27 @@ fn cell_text_lower(v: &CellValue) -> String {
     }
 }
 
-/// any metacharacter routes through the glob matcher — even fully-escaped
-/// patterns, since `~` still has to be unescaped.
+/// route patterns through the glob matcher when they contain wildcards or a
+/// valid escape. Other uses of `~` are literal text.
 fn has_wildcard(s: &str) -> bool {
-    s.contains(['*', '?', '~'])
+    let chars: Vec<char> = s.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        match chars[index] {
+            '*' | '?' => return true,
+            '~' if chars
+                .get(index + 1)
+                .is_some_and(|next| matches!(*next, '*' | '?' | '~')) =>
+            {
+                return true;
+            }
+            _ => index += 1,
+        }
+    }
+    false
 }
 
-/// glob match with `*` and `?`; `~` escapes the following metacharacter.
+/// glob match with `*` and `?`; `~` escapes only `*`, `?`, or `~`.
 /// pattern and text are already lowercased.
 pub(crate) fn wildcard_match(pattern: &str, text: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
@@ -204,7 +218,13 @@ pub(crate) fn wildcard_match(pattern: &str, text: &str) -> bool {
 /// interpret the pattern element at `pi`: (literal char, is `*`, is `?`).
 fn classify(p: &[char], pi: usize) -> (Option<char>, bool, bool) {
     match p.get(pi) {
-        Some('~') => (p.get(pi + 1).copied(), false, false),
+        Some('~')
+            if p.get(pi + 1)
+                .is_some_and(|next| matches!(*next, '*' | '?' | '~')) =>
+        {
+            (p.get(pi + 1).copied(), false, false)
+        }
+        Some('~') => (Some('~'), false, false),
         Some('*') => (None, true, false),
         Some('?') => (None, false, true),
         Some(&c) => (Some(c), false, false),
@@ -214,7 +234,14 @@ fn classify(p: &[char], pi: usize) -> (Option<char>, bool, bool) {
 
 /// how many pattern chars a single match consumes (2 for an escape `~x`).
 fn advance(p: &[char], pi: usize) -> usize {
-    if p.get(pi) == Some(&'~') { 2 } else { 1 }
+    if p.get(pi) == Some(&'~')
+        && p.get(pi + 1)
+            .is_some_and(|next| matches!(*next, '*' | '?' | '~'))
+    {
+        2
+    } else {
+        1
+    }
 }
 
 /// build a criterion from a criteria argument's evaluated value.
@@ -419,6 +446,17 @@ mod tests {
         assert!(Criterion::parse("<>apple").matches(&txt("pear")));
         assert!(Criterion::parse("a~*").matches(&txt("a*")));
         assert!(!Criterion::parse("a~*").matches(&txt("ab")));
+    }
+
+    #[test]
+    fn tilde_escapes_only_wildcard_metacharacters() {
+        assert!(Criterion::parse("~a").matches(&txt("~a")));
+        assert!(!Criterion::parse("~a").matches(&txt("a")));
+        assert!(Criterion::parse("~").matches(&txt("~")));
+        assert!(!Criterion::parse("~").matches(&txt("")));
+        assert!(Criterion::parse("~~").matches(&txt("~")));
+        assert!(Criterion::parse("~*").matches(&txt("*")));
+        assert!(Criterion::parse("~?").matches(&txt("?")));
     }
 
     #[test]
