@@ -30,7 +30,6 @@ import {
   peekWorkerOpenSave,
   registerWorkerOpenSave,
   takeWorkerOpenSave,
-  workerOpenSaveNeedsBase,
   type WorkerOpenSave,
 } from '../internals/workerOpenSave';
 import {
@@ -660,35 +659,24 @@ export function useYrsCoreSession(
               gate.wanted = true;
               if (gate.reached) startReplicaRef.current?.();
             };
-            let hydrationFailure: unknown;
             const pending = deferWorkerOpenReplica(
               next,
               async () => {
-                try {
-                  const handover = beginWorkerProposalHandover(next);
-                  const handedOver = handover ? await handover : null;
-                  const update = handedOver ? handedOver.state : await worker.encodeState();
-                  const saves = awaitWorkerOpenSaves(next);
-                  if (saves) await saves;
-                  const saved = peekWorkerOpenSave(next);
-                  const savedBase = saved ? await worker.savedBase(saved) : null;
-                  return () => {
-                    next.openDocx(source, false);
-                    next.loadState(update);
-                    if (savedBase) compatibilityBaseRef.current = savedBase;
-                    handedOver?.complete();
-                  };
-                } catch (error) {
-                  const saves = awaitWorkerOpenSaves(next);
-                  if (saves) await saves;
-                  hydrationFailure = error;
-                  throw error;
-                }
+                const handover = beginWorkerProposalHandover(next);
+                const handedOver = handover ? await handover : null;
+                const update = handedOver ? handedOver.state : await worker.encodeState();
+                const saves = awaitWorkerOpenSaves(next);
+                if (saves) await saves;
+                const saved = peekWorkerOpenSave(next);
+                const savedBase = saved ? await worker.savedBase(saved) : null;
+                return () => {
+                  next.openDocx(source, false);
+                  next.loadState(update);
+                  if (savedBase) compatibilityBaseRef.current = savedBase;
+                  handedOver?.complete();
+                };
               },
               (reason) => {
-                if (workerOpenSaveNeedsBase(next)) {
-                  throw hydrationFailure ?? new Error('The saved resident document could not be hydrated');
-                }
                 if (registeredWorkerProposalAuthority(next)?.holdsWorkerState()) {
                   throw new Error('The resident worker holds proposals the main thread cannot rebuild');
                 }

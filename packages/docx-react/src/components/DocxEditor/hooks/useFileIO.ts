@@ -29,9 +29,7 @@ function saveInWorker(
   comments: Comment[]
 ): Promise<{ session: YrsSession; buffer: ArrayBuffer } | null> | null {
   const before = pagedEditorRef.current?.getYrsSession();
-  return before && workerOpenSave(before)
-    ? trackWorkerOpenSave(before, workerSave(pagedEditorRef, before, comments))
-    : null;
+  return before && workerOpenSave(before) ? workerSave(pagedEditorRef, before, comments) : null;
 }
 
 async function workerSave(
@@ -41,7 +39,14 @@ async function workerSave(
 ): Promise<{ session: YrsSession; buffer: ArrayBuffer } | null> {
   const { session } = await flushedSession(pagedEditorRef, false, false);
   const pending = session === before ? workerOpenSave(session)?.(comments) : null;
-  if (!pending) return null;
+  return pending ? trackWorkerOpenSave(session, adoptWorkerSave(pagedEditorRef, session, pending)) : null;
+}
+
+async function adoptWorkerSave(
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  session: YrsSession,
+  pending: Promise<{ bytes: ArrayBuffer; full: boolean }>
+): Promise<{ session: YrsSession; buffer: ArrayBuffer } | null> {
   let saved: Awaited<typeof pending>;
   try {
     saved = await pending;

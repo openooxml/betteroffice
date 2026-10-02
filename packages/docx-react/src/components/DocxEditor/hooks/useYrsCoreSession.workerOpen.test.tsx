@@ -2311,7 +2311,7 @@ test('hydration waits for an in-flight authority save and fetches only its recor
     expect(Object.keys(response.saved).sort()).toEqual(['bytes', 'full']);
     expect(posted.filter((request) => request.type === 'savedBase').map((request) => request.saveId))
       .toEqual([second.id]);
-    expect(result.current.core.documentFromYrs()?.originalBuffer).toBe(saved);
+    expect(result.current.core.documentFromYrs()?.originalBuffer).toBe(saved!);
     expect(result.current.mainOpens).toEqual([false]);
     expect(result.current.errors).toEqual([]);
   } finally {
@@ -2321,9 +2321,9 @@ test('hydration waits for an in-flight authority save and fetches only its recor
 });
 
 test.each(['request', 'gone', 'oom-handoff', 'oom-base'] as const)(
-  'a saved-base hydration failure rejects the replica without reopening the source: %s',
+  'a saved-base hydration failure reopens the source like any failed hydration: %s',
   async (failure) => {
-    const { workers, posted } = installWorker({
+    const { workers } = installWorker({
       failSavedBase: failure === 'request',
       ...(failure.startsWith('oom') ? {
         oomStage: failure === 'oom-handoff' ? 'encodeState' as const : 'savedBase' as const,
@@ -2333,23 +2333,17 @@ test.each(['request', 'gone', 'oom-handoff', 'oom-base'] as const)(
     const io = workerFileIO(result.current.pagedEditorRef);
     try {
       const session = result.current.core.session!;
-      await act(async () => { expect(await io.save()).toBeInstanceOf(ArrayBuffer); });
+      let saved: ArrayBuffer | null = null;
+      await act(async () => { saved = await io.save(); });
+      expect(saved).toBeInstanceOf(ArrayBuffer);
       if (failure === 'gone') workers[0]!.onerror?.({ message: 'worker gone' } as ErrorEvent);
-      const message = failure === 'request' ? 'saved base unavailable'
-        : failure === 'gone' ? 'worker gone' : 'The resident worker holding this document is gone';
-      await act(async () => {
-        await expect(requestWorkerOpenReplica(session)).rejects.toThrow(message);
-      });
-      expect(result.current.mainOpens).toEqual([]);
-      expect(result.current.core.replicaReady).toBe(false);
-      expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(false);
-      expect(result.current.errors.some((error) => error.message.includes(message))).toBe(true);
+      await act(async () => { await requestWorkerOpenReplica(session); });
+      await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+      expect(result.current.mainOpens).toEqual([true]);
+      expect(result.current.core.documentFromYrs()?.originalBuffer).toBe(saved!);
       if (failure.startsWith('oom')) {
         expect(workers).toHaveLength(2);
         expect(workers[1]!.requests).not.toContain('savedBase');
-        if (failure === 'oom-handoff') {
-          expect(posted.some((request) => request.type === 'savedBase')).toBe(false);
-        }
       }
     } finally {
       io.unmount();

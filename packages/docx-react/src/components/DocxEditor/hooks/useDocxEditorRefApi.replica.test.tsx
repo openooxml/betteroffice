@@ -31,7 +31,6 @@ import {
   registerWorkerOpenSave,
   trackWorkerOpenSave,
   workerOpenSave,
-  workerOpenSaveNeedsBase,
 } from '../internals/workerOpenSave';
 import type { EditorMode } from '../internals/editing-modes';
 import { DOCX_REF_REPLICA_ACCESS, DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
@@ -196,7 +195,6 @@ async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, 
       };
     },
     (reason) => {
-      if (workerOpenSaveNeedsBase(session)) throw new Error('The saved resident document could not be hydrated');
       fallbackReasons.push(reason);
       opens.push(true);
       session.openDocx(bytes, true);
@@ -652,6 +650,22 @@ test('an async read after a worker save fetches its saved base during hydration'
   expect(savedBase).toHaveBeenCalledTimes(1);
   expect(savedBase).toHaveBeenCalledWith(saved);
   expect(opens).toEqual([false]);
+});
+
+test('sync access after a worker save opens the replica from the source and keeps it usable', async () => {
+  const { api, session, replica, savedBase, opens, fallbackReasons } = await pendingReplica('viewing', false, true);
+  const saved = bytes.slice().buffer;
+  registerWorkerOpenSave(session, async () => ({ bytes: saved, full: false }));
+  await act(async () => { expect(await api.save()).toBe(saved); });
+  expect(api.getEditorRef()).not.toBeNull();
+  expect(replica.pending).toBe(false);
+  expect(opens).toEqual([true]);
+  expect(fallbackReasons).toEqual([{ syncAccess: 'getEditorRef' }]);
+  let resaved: ArrayBuffer | null = null;
+  await act(async () => { resaved = await api.save(); });
+  expect(resaved).toBeInstanceOf(ArrayBuffer);
+  expect(resaved).not.toBe(saved);
+  expect(savedBase).not.toHaveBeenCalled();
 });
 
 test('flushPendingInput waits for an on-demand replica that started loading', async () => {

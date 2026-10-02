@@ -45,10 +45,6 @@ export function peekWorkerOpenSave(session: YrsSession): ArrayBuffer | undefined
   return savedOriginals.get(session);
 }
 
-export function workerOpenSaveNeedsBase(session: YrsSession): boolean {
-  return savedOriginals.has(session) || (saving.get(session)?.size ?? 0) > 0;
-}
-
 export function takeWorkerOpenSave(session: YrsSession): ArrayBuffer | undefined {
   const bytes = savedOriginals.get(session);
   savedOriginals.delete(session);

@@ -12,7 +12,6 @@ import {
   peekWorkerOpenSave,
   registerWorkerOpenSave,
   takeWorkerOpenSave,
-  workerOpenSaveNeedsBase,
   type WorkerOpenSave,
 } from '../internals/workerOpenSave';
 import { useFileIO } from './useFileIO';
@@ -40,7 +39,7 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-async function workerOpened(save: WorkerOpenSave) {
+async function workerOpened(save: WorkerOpenSave, flushAwaitsReplica = false) {
   const worker = await createYrsSession();
   const session = await createYrsSession();
   sessions.push(worker, session);
@@ -67,10 +66,7 @@ async function workerOpened(save: WorkerOpenSave) {
         compatibilityBase = base;
       };
     },
-    () => {
-      if (workerOpenSaveNeedsBase(session)) throw new Error('The saved resident document could not be hydrated');
-      session.openDocx(bytes, true);
-    },
+    () => session.openDocx(bytes, true),
     () => {},
     { active: () => true, request: () => replica.start() }
   );
@@ -81,6 +77,7 @@ async function workerOpened(save: WorkerOpenSave) {
     flushPendingInput: async (awaitReplica?: boolean) => {
       flushes.push(awaitReplica);
       if (awaitReplica !== false) await awaitWorkerOpenReplica(session);
+      else if (flushAwaitsReplica) await replica.ready;
     },
     getDocument: () => {
       const base = compatibilityBase ?? session.materializeDocx();
@@ -141,6 +138,19 @@ test('fetches the last saved base once when the replica later hydrates', async (
   expect(await opened.save()).toBeInstanceOf(ArrayBuffer);
   expect(saves).toBe(2);
   expect(opened.savedBase).toHaveBeenCalledTimes(1);
+});
+
+test('hydration does not wait for a save whose input flush waits for the replica', async () => {
+  const saver = mock<WorkerOpenSave>(async () => ({ bytes: new ArrayBuffer(1), full: false }));
+  const opened = await workerOpened(saver, true);
+  const saving = opened.save();
+  await awaitWorkerOpenReplica(opened.session);
+  const buffer = await saving;
+  expect(buffer && new Uint8Array(buffer).subarray(0, 2)).toEqual(new Uint8Array([0x50, 0x4b]));
+  expect(opened.flushes[0]).toBe(false);
+  expect(saver).not.toHaveBeenCalled();
+  expect(opened.hydrated).toHaveBeenCalledTimes(1);
+  expect(opened.errors).toEqual([]);
 });
 
 test('falls back to the replica when the worker cannot save', async () => {

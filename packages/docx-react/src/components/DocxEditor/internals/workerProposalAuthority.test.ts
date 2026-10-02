@@ -288,6 +288,21 @@ test.each([false, true])('a queued save is cancelled by handover with initialize
   expect(h.events).toEqual(initialized ? ['snapshot', 'handOver'] : ['handOver']);
 });
 
+test('a save does not hold worker state and a story-changing proposal does', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  const task = mock(async () => Uint8Array.of(2));
+  await h.authority.save(task);
+  expect(h.authority.holdsWorkerState()).toBe(false);
+  h.worker.proposal.mockResolvedValue(reply('worker-2', ['body']));
+  await h.authority.propose(request, unusedMain);
+  expect(h.authority.holdsWorkerState()).toBe(true);
+  h.worker.proposal.mockResolvedValue(reply('worker-2'));
+  await h.authority.save(task);
+  expect(task).toHaveBeenCalledTimes(2);
+  expect(h.authority.holdsWorkerState()).toBe(true);
+});
+
 test('routed reads wait for layout and the initialization snapshot before posting', async () => {
   const laidOut = deferred<void>();
   const h = harness(() => laidOut.promise);

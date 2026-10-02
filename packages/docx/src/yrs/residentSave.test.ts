@@ -527,6 +527,28 @@ describe('worker save request', () => {
     expect(difference(new Uint8Array((await client.save(request)).bytes), new Uint8Array(second.bytes))).toBeNull();
   });
 
+  it('saves a replica reopened from the source after an unchanged worker save like the worker', async () => {
+    const bytes = synthetic(
+      '<w:p w14:paraId="0000B001"><w:r><w:t>abcdefghij</w:t></w:r>' +
+        '<x:mark xmlns:x="urn:example"/><w:r><w:t>klm</w:t></w:r></w:p>'
+    );
+    const client = new ResidentEngineWorkerClient(startWorker());
+    owned.push(client);
+    const { hostJson } = await client.open(bytes);
+    const host = decodeDocxHostJson(hostJson, bytes).document;
+    const request = { source: bytes, hostJson, host: hostSaveMetadata(host), comments: [] };
+    const saved = await client.save(request);
+    const session = await createYrsSession();
+    owned.push(session);
+    session.openDocx(bytes.slice(), true);
+    adoptEditorSave(session, saved.full ? { full: true } : { full: false, saved: saved.bytes });
+    const materialized = session.materializeDocx();
+    if (!materialized) throw new Error('the replica has no package');
+    const reopened = new Replica(session, host, { ...materialized, originalBuffer: saved.bytes });
+    const expected = new Uint8Array((await client.save(request)).bytes);
+    expect(difference(await reopened.save([]), expected)).toBeNull();
+  });
+
   it('refuses a save without an opened document', async () => {
     const client = new ResidentEngineWorkerClient(startWorker());
     owned.push(client);
