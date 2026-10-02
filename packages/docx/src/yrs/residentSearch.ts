@@ -2,7 +2,9 @@ import type { YrsLoc, YrsSession, YrsStickyPosition } from './index';
 import { createYrsInputPositionMap, type YrsInputPositionMap } from './inputPositionMap';
 import {
   createYrsPositionProjection,
+  createYrsLocProjectionFromOutline,
   yrsLocToProjectedDisplayPosition,
+  type YrsPositionOutline,
 } from './yrsPositionProjection';
 
 /** @internal */
@@ -27,7 +29,7 @@ type SearchReader = Pick<
   | 'paragraphSpans'
   | 'searchText'
   | 'resolveStickyPosition'
->;
+> & { positionOutline?(root: string): YrsPositionOutline | null };
 
 /** @internal */
 export function readResidentSearch(
@@ -41,7 +43,9 @@ export function readResidentSearch(
     hit.story === 'body' || hit.story.startsWith('body:')
   );
   if (hits.length === 0) return { matches: [], carried: -1 };
-  const projection = createYrsPositionProjection(reader, 'body');
+  const outline = reader.hasStory('body') ? reader.positionOutline?.('body') : null;
+  const projection = outline ? createYrsLocProjectionFromOutline(outline) :
+    createYrsPositionProjection(reader, 'body');
   const maps = new Map<string, YrsInputPositionMap | null>();
   const inputMap = (story: string): YrsInputPositionMap | null => {
     if (!maps.has(story)) {

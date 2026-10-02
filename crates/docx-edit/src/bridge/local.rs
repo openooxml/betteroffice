@@ -13,12 +13,16 @@ pub(super) struct ParagraphSeed {
     raw_start: u32,
     slot: usize,
     source: u32,
-    text: String,
-    attrs: Attrs,
+    segments: Vec<TextSegment>,
     pilcrow: Option<MapRef>,
     mark_attrs: Option<Attrs>,
     pm_start: u64,
-    mixed: bool,
+}
+
+#[derive(Clone, Debug)]
+struct TextSegment {
+    text: String,
+    attrs: Attrs,
 }
 
 #[derive(Debug)]
@@ -87,16 +91,18 @@ impl LocalLowering {
             .flatten()
             .any(|(key, value)| unsafe_value(key, value));
         match &diff.insert {
-            Out::Any(Any::String(_)) if story != "body" || paragraph.mixed => {}
+            Out::Any(Any::String(_)) if story != "body" => {}
             Out::Any(Any::String(text)) => {
-                if paragraph.text.is_empty() {
-                    paragraph.attrs = attributes(attrs);
-                } else if !same_attributes(&paragraph.attrs, attrs) {
-                    paragraph.mixed = true;
-                    paragraph.text = String::new();
-                    return;
+                if let Some(last) = paragraph.segments.last_mut()
+                    && same_attributes(&last.attrs, attrs)
+                {
+                    last.text.push_str(text);
+                } else {
+                    paragraph.segments.push(TextSegment {
+                        text: text.to_string(),
+                        attrs: attributes(attrs),
+                    });
                 }
-                paragraph.text.push_str(text);
             }
             Out::YMap(mark) if is_pilcrow(mark, txn) => {}
             Out::YMap(mark) => {
@@ -126,7 +132,7 @@ impl LocalLowering {
         self.blocked |= values.iter().any(|(key, value)| unsafe_value(key, value));
         let sectioned = values.contains_key("sectPr") || values.contains_key("sectionBreakType");
         self.blocked |= sectioned && (story != "body" || !last);
-        if story == "body" && !paragraph.mixed && !sectioned && !self.blocked {
+        if story == "body" && !sectioned && !self.blocked {
             paragraph.raw_start = start;
             paragraph.pm_start = pm_start;
             paragraph.slot = slot;
@@ -156,11 +162,7 @@ impl LocalLowering {
             let Some(LayoutBlock::Paragraph(paragraph)) = blocks.get(seed.slot) else {
                 return false;
             };
-            paragraph.pm_start == Some(seed.pm_start as f64)
-                && paragraph
-                    .attrs
-                    .as_ref()
-                    .is_some_and(|attrs| attrs.num_pr.is_none() && attrs.list_marker.is_none())
+            paragraph.pm_start == Some(seed.pm_start as f64) && paragraph.attrs.is_some()
         });
     }
 
@@ -182,37 +184,34 @@ impl LocalLowering {
         env: &RenderEnv,
         edit: &TextEdit,
     ) -> Option<()> {
-        let text = &edit.text;
         let seed = self.seeds.get_mut(&edit.paragraph)?;
         let pilcrow = seed.pilcrow.as_ref()?;
         let (raw, slot, source) = (seed.raw_start, seed.slot, seed.source);
         let pm_start = seed.pm_start;
-        let (start, end) = (edit.offset, edit.offset.checked_add(edit.removed)?);
-        let units: Vec<_> = seed.text.encode_utf16().collect();
-        let left = String::from_utf16(units.get(..start as usize)?).ok()?;
-        let removed = String::from_utf16(units.get(start as usize..end as usize)?).ok()?;
-        let right = String::from_utf16(units.get(end as usize..)?).ok()?;
-        if !removed.is_empty() && removed.chars().count() != 1 {
-            return None;
-        }
-        let attrs = edit
-            .attributes
-            .as_ref()
-            .map(|attrs| attributes(Some(attrs)))
-            .unwrap_or_else(|| seed.attrs.clone());
-        if !seed.text.is_empty() && attrs != seed.attrs {
-            return None;
-        }
-        let old_end = pm_start + u64::from(utf16_len(&seed.text)) + 2;
-        seed.text = left + text + &right;
-        seed.attrs = attrs;
-        let delta = i64::from(utf16_len(text)) - i64::from(end - start);
+        let old_units: u32 = seed
+            .segments
+            .iter()
+            .map(|segment| utf16_len(&segment.text))
+            .sum();
+        let old_end = pm_start + u64::from(old_units) + 2;
+        let segments = patch_segments(&seed.segments, edit)?;
+        let delta = i64::from(utf16_len(&edit.text)) - i64::from(edit.removed);
         let mut runs = Vec::new();
-        let text = &seed.text;
-        let attrs = Some(&seed.attrs);
-        push_text_chunks(&mut runs, text, raw, attrs, &[], env, 0);
+        let mut units = 0;
+        for segment in &segments {
+            push_text_chunks(
+                &mut runs,
+                &segment.text,
+                raw + units,
+                Some(&segment.attrs),
+                &[],
+                env,
+                units,
+            );
+            units += utf16_len(&segment.text);
+        }
         let mut replacement = LoweringMap::default();
-        let paragraph = flush_paragraph(
+        let mut paragraph = flush_paragraph(
             runs,
             pilcrow,
             seed.mark_attrs.as_ref(),
@@ -220,11 +219,22 @@ impl LocalLowering {
             "body",
             env,
             pm_start,
-            utf16_len(&seed.text),
+            units,
             &mut ListState::default(),
             (&mut replacement, source),
             Vec::new(),
         );
+        let LayoutBlock::Paragraph(old) = blocks.get(slot)? else {
+            return None;
+        };
+        if old
+            .attrs
+            .as_ref()
+            .is_some_and(|attrs| attrs.num_pr.is_some() || attrs.list_marker.is_some())
+        {
+            paragraph.attrs = old.attrs.clone();
+        }
+        seed.segments = segments;
         blocks[slot] = LayoutBlock::Paragraph(paragraph);
         for block in &mut blocks[slot + 1..] {
             shift_block(block, delta);
@@ -259,6 +269,80 @@ impl LocalLowering {
         }
         Some(())
     }
+}
+
+fn patch_segments(segments: &[TextSegment], edit: &TextEdit) -> Option<Vec<TextSegment>> {
+    let mut result = segments.to_vec();
+    if result.is_empty() {
+        if edit.offset != 0 || edit.removed != 0 {
+            return None;
+        }
+        result.push(TextSegment {
+            text: edit.text.clone(),
+            attrs: attributes(edit.attributes.as_ref()),
+        });
+        return Some(result);
+    }
+    let mut before = 0;
+    let slot = result.iter().position(|segment| {
+        let end = before + utf16_len(&segment.text);
+        if edit.offset < end || (edit.removed == 0 && edit.offset == end) {
+            true
+        } else {
+            before = end;
+            false
+        }
+    })?;
+    let segment = &result[slot];
+    let start = edit.offset.checked_sub(before)? as usize;
+    let end = start.checked_add(edit.removed as usize)?;
+    let units: Vec<_> = segment.text.encode_utf16().collect();
+    let left = String::from_utf16(units.get(..start)?).ok()?;
+    let removed = String::from_utf16(units.get(start..end)?).ok()?;
+    let right = String::from_utf16(units.get(end..)?).ok()?;
+    if !removed.is_empty() && removed.chars().count() != 1 {
+        return None;
+    }
+    if edit.removed != 0 && left.is_empty() && right.is_empty() && edit.text.is_empty() {
+        if result.len() > 1 {
+            return None;
+        }
+        return Some(Vec::new());
+    }
+    let attrs = edit
+        .attributes
+        .as_ref()
+        .map(|attrs| attributes(Some(attrs)))
+        .unwrap_or_else(|| segment.attrs.clone());
+    let replacement = [
+        TextSegment {
+            text: left,
+            attrs: segment.attrs.clone(),
+        },
+        TextSegment {
+            text: edit.text.clone(),
+            attrs,
+        },
+        TextSegment {
+            text: right,
+            attrs: segment.attrs.clone(),
+        },
+    ];
+    result.splice(slot..=slot, replacement);
+    let mut merged: Vec<TextSegment> = Vec::new();
+    for segment in result
+        .into_iter()
+        .filter(|segment| !segment.text.is_empty())
+    {
+        if let Some(last) = merged.last_mut()
+            && same_attributes(&last.attrs, Some(&segment.attrs))
+        {
+            last.text.push_str(&segment.text);
+        } else {
+            merged.push(segment);
+        }
+    }
+    Some(merged)
 }
 
 fn shift_pair(start: &mut Option<f64>, end: &mut Option<f64>, delta: i64) {

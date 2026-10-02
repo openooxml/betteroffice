@@ -79,3 +79,22 @@ test('resident search handles empty results without encoding anchors', () => {
   expect(readResidentSearch(source, 'missing', false)).toEqual({ matches: [], carried: -1 });
   expect(source.encodeStickyPosition).not.toHaveBeenCalled();
 });
+
+test('resident search uses the position outline without reading segments and preserves legacy results', () => {
+  const source = reader();
+  const expected = readResidentSearch(source, 'cat', false);
+  const segments = mock(() => { throw new Error('unexpected segment export'); });
+  const fast = {
+    ...source,
+    storySegments: segments,
+    positionOutline: () => ({ body: { contentStart: 0, size: 9, paragraphs: [
+      { paraId: 'p1', displayStart: 0, length: 7, leading: 0 },
+    ] } }),
+  };
+  const actual = readResidentSearch(fast, 'cat', false);
+  expect(actual).toEqual(expected);
+  expect(JSON.stringify(actual)).toBe(JSON.stringify(expected));
+  expect(segments).not.toHaveBeenCalled();
+  expect(readResidentSearch({ ...source, positionOutline: () => null }, 'cat', false)).toEqual(expected);
+  expect(readResidentSearch({ ...fast, hasStory: (story) => story !== 'body' }, 'cat', false)).toEqual({ matches: [], carried: -1 });
+});

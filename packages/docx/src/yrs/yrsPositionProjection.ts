@@ -8,6 +8,33 @@ import {
 
 type PositionReader = Pick<YrsSession, 'hasStory' | 'storySegments'>;
 
+export type YrsLocProjection = Pick<YrsPositionProjection, 'positionForLoc'>;
+
+export type YrsPositionOutline = Record<string, {
+  contentStart: number;
+  size: number;
+  paragraphs: Array<{ paraId: string; displayStart: number; length: number; leading: number }>;
+}>;
+
+export function createYrsLocProjectionFromOutline(outline: YrsPositionOutline): YrsLocProjection {
+  const stories = new Map(Object.entries(outline).map(([id, story]) => {
+    const paragraphs = new Map<string, (typeof story.paragraphs)[number]>();
+    for (const paragraph of story.paragraphs) {
+      if (!paragraphs.has(paragraph.paraId)) paragraphs.set(paragraph.paraId, paragraph);
+    }
+    return [id, { contentStart: story.contentStart, paragraphs }] as const;
+  }));
+  return {
+    positionForLoc: (loc) => {
+      const story = stories.get(loc.story);
+      const paragraph = story?.paragraphs.get(loc.paraId);
+      if (!story || !paragraph) return null;
+      return story.contentStart + paragraph.displayStart + 1 +
+        Math.min(Math.max(0, loc.offset - paragraph.leading), paragraph.length);
+    },
+  };
+}
+
 /** @internal */
 export interface YrsProjectedNode {
   kind: string;
@@ -450,7 +477,7 @@ function positiveSpan(value: unknown): number {
 /** @internal */
 export function yrsLocToProjectedDisplayPosition(
   reader: Pick<YrsSession, 'hasStory' | 'paragraphSpans'>,
-  projectionFor: (rootStory: string) => YrsPositionProjection | null,
+  projectionFor: (rootStory: string) => YrsLocProjection | null,
   loc: YrsLoc,
   activeRootStory = 'body',
   inputMap?: (story: string) => YrsInputPositionMap | null
