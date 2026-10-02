@@ -2,7 +2,7 @@
 
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
 
-import { markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
+import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
 import { headerFooterStory } from './sessionInternals';
 import { createStyleResolver, type StyleResolver } from '../styles';
 import { hasTrackedControlContent } from '../utils/trackedControlContent';
@@ -54,6 +54,7 @@ import type {
   Comment,
   Footnote,
   Endnote,
+  HeaderFooter,
 } from '../types/document';
 import type { YrsSession } from './index';
 
@@ -2682,43 +2683,38 @@ function projectStories(
     return content;
   };
 
-  let headers = base.package.headers;
-  if (
-    headers &&
-    (options.storyIds === undefined ||
-      [...headers.keys()].some((rId) => shouldProjectHeaderFooter(headerFooterStory(session, rId))))
-  ) {
-    headers = new Map(
-      [...headers].map(([rId, part]) => {
-        const storyId = headerFooterStory(session, rId);
-        if (!context.storyIds.has(storyId) || !shouldProjectHeaderFooter(storyId)) {
-          return [rId, part];
-        }
-        const projected = { ...part, content: projectHeaderFooter(storyId) };
-        if (storyId !== `hf:${rId}`) markHeaderFooterAlias(projected, storyId.slice(3));
-        return [rId, projected];
+  const canonicalFor = (rId: string, storyId: string): string | undefined =>
+    storyId === `hf:${rId}` ? undefined : storyId.slice(3);
+  const projectHeaderFooters = (
+    entries: Map<string, HeaderFooter> | undefined
+  ): Map<string, HeaderFooter> | undefined => {
+    if (!entries) return entries;
+    const routes = [...entries].map(
+      ([rId, part]) => [rId, part, headerFooterStory(session, rId)] as const
+    );
+    const project =
+      options.storyIds === undefined ||
+      routes.some(([, , storyId]) => shouldProjectHeaderFooter(storyId));
+    const remark = routes.some(
+      ([rId, part, storyId]) => headerFooterAliasOf(part) !== canonicalFor(rId, storyId)
+    );
+    if (!project && !remark) return entries;
+    return new Map(
+      routes.map(([rId, part, storyId]) => {
+        const canonical = canonicalFor(rId, storyId);
+        const next =
+          context.storyIds.has(storyId) && shouldProjectHeaderFooter(storyId)
+            ? { ...part, content: projectHeaderFooter(storyId) }
+            : headerFooterAliasOf(part) === canonical
+              ? part
+              : { ...part };
+        if (canonical !== undefined) markHeaderFooterAlias(next, canonical);
+        return [rId, next];
       })
     );
-  }
-
-  let footers = base.package.footers;
-  if (
-    footers &&
-    (options.storyIds === undefined ||
-      [...footers.keys()].some((rId) => shouldProjectHeaderFooter(headerFooterStory(session, rId))))
-  ) {
-    footers = new Map(
-      [...footers].map(([rId, part]) => {
-        const storyId = headerFooterStory(session, rId);
-        if (!context.storyIds.has(storyId) || !shouldProjectHeaderFooter(storyId)) {
-          return [rId, part];
-        }
-        const projected = { ...part, content: projectHeaderFooter(storyId) };
-        if (storyId !== `hf:${rId}`) markHeaderFooterAlias(projected, storyId.slice(3));
-        return [rId, projected];
-      })
-    );
-  }
+  };
+  const headers = projectHeaderFooters(base.package.headers);
+  const footers = projectHeaderFooters(base.package.footers);
 
   const projectNotes = <T extends Footnote | Endnote>(
     notes: T[] | undefined,

@@ -443,6 +443,35 @@ describe('header/footer aliases', () => {
       .toEqual(['hf:rId7', 'hf:rId9']);
   });
 
+  test('every projection routes header entries by the current aliases, reprojected or not', async () => {
+    const session = await replica();
+    const bytes = fixture();
+    const document = aliasedRoom(session, bytes);
+    const detached = (doc: Document): Document => ({
+      ...doc,
+      originalBuffer: bytes.slice().buffer,
+      package: {
+        ...doc.package,
+        headers: new Map([...doc.package.headers!].map(([rId, part]) => [rId, { ...part }])),
+      },
+    });
+    const active = yrsToDocument(session, document);
+    const bodyOnly = yrsToDocument(session, detached(active), { storyIds: new Set(['body']) });
+    expect(collectParts(detached(active))).toHaveLength(collectParts(active).length + 1);
+    expect(collectParts(bodyOnly)).toHaveLength(collectParts(active).length);
+
+    session.createStory('hf:rId9', 'Legacy');
+    const paragraph = session.paragraphs('hf:rId7')[0]!;
+    session.insertText({ story: 'hf:rId7', paraId: paragraph.paraId, offset: 0 }, 'Edited ');
+    const inactive = yrsToDocument(session, active, { storyIds: new Set(['hf:rId7']) });
+    const save = async (doc: Document) =>
+      new Uint8Array(await repackDocx(
+        { ...doc, originalBuffer: bytes.slice().buffer },
+        { updateModifiedDate: false }
+      ));
+    expectSameParts(await save(inactive), await save(detached(inactive)));
+  });
+
   test('refreshes the alias cache across history and opening', async () => {
     const session = await replica();
     aliasedRoom(session);
