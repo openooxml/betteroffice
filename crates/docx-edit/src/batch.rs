@@ -4125,4 +4125,28 @@ mod direct_tests {
         assert!(!fork.direct_batches.load(Ordering::Relaxed));
         assert_eq!(fork.direct_batches_applied(), 0);
     }
+
+    #[test]
+    fn forks_keep_a_leading_format_marker() {
+        use yrs::TextPrelim;
+
+        let doc = EditingDoc::new(9002);
+        let text = {
+            let mut txn = doc.yrs_doc().transact_mut();
+            let stories = txn.get_map(crate::STORIES).unwrap();
+            let text = stories.insert(&mut txn, "body", TextPrelim::new("ABX"));
+            let italic = yrs::types::Attrs::from([(Arc::from("italic"), Any::Bool(true))]);
+            text.format(&mut txn, 0, 2, italic);
+            text
+        };
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            txn.apply_update(Update::new()).unwrap();
+            text.remove_range(&mut txn, 0, 2);
+        }
+        let state = doc.encode_state_as_update_v1();
+        let blocks = Update::decode_v1(&state).unwrap().to_string();
+        assert!(blocks.contains("<italic=null>") && !blocks.contains("<italic=true>"));
+        assert_eq!(doc.fork(&state).unwrap().encode_state_as_update_v1(), state);
+    }
 }

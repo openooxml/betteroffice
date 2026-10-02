@@ -797,6 +797,46 @@ fn refusals_preserve_state_and_match() {
 }
 
 #[test]
+fn leading_format_marker_batches_match_the_replica_path() {
+    let bytes = docx(&format!(
+        "{}{}",
+        p(
+            "00000001",
+            &format!(
+                r#"<w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve">AB</w:t></w:r>{}"#,
+                r("X")
+            )
+        ),
+        p("00000002", &r("Tail")),
+    ));
+    let direct = open(&bytes);
+    let replica = open(&bytes);
+    direct.set_direct_batches(true);
+    let updates_direct = Updates::new(&direct);
+    let updates_replica = Updates::new(&replica);
+    let (direct_undo, replica_undo) = (UndoSession::new(), UndoSession::new());
+    for (steps, applied) in [
+        (vec![delete(range("00000001", 0, 2))], 1),
+        (vec![insert(range("00000001", 0, 0), "Y")], 2),
+    ] {
+        let result_direct = apply(&direct, &direct_undo, steps.clone());
+        let result_replica = apply(&replica, &replica_undo, steps);
+        assert!(result_direct.applied);
+        assert_eq!(normalized(&result_direct), normalized(&result_replica));
+        assert_eq!(direct.direct_batches_applied(), applied);
+        assert_eq!(replica.direct_batches_applied(), 0);
+        assert_eq!(
+            direct.encode_state_as_update_v1(),
+            replica.encode_state_as_update_v1()
+        );
+        assert_eq!(state_vector(&direct), state_vector(&replica));
+        assert_stories(&direct, &replica);
+        assert_export(&direct, &replica, &bytes);
+    }
+    assert_eq!(updates_direct.signature(), updates_replica.signature());
+}
+
+#[test]
 fn direct_and_replica_peers_converge() {
     let bytes = fixture();
     let seed = open(&bytes).encode_state_as_update_v1();
