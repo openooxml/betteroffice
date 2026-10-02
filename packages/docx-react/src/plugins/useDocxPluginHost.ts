@@ -398,7 +398,10 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     host.geometryChanged();
     if (!geometry || !dom) return;
     const shown = () => isPresented(dom.context.pagesContainer, dom.queries.displayList);
-    if (shown()) return;
+    if (shown()) {
+      host.geometryPresented(geometry.layout);
+      return;
+    }
     let frame = 0;
     const settle = () => {
       if (!shown()) {
