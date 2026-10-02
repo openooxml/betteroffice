@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import * as wasm from './wasm/index';
 import type { YrsResidentWorkerSnapshot, YrsSelection } from './index';
 import {
   RESIDENT_WORKER_SILENCE_MS,
@@ -11,6 +12,7 @@ import {
   type ResidentEngineWorkerPort,
 } from './residentEngineWorkerClient';
 import type {
+  ResidentEngineWorkerHostModule,
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from './residentEngineWorkerProtocol';
@@ -20,7 +22,7 @@ class FakeWorker implements ResidentEngineWorkerPort {
   onmessage: ResidentEngineWorkerPort['onmessage'] = null;
   onerror: ResidentEngineWorkerPort['onerror'] = null;
   onmessageerror: ResidentEngineWorkerPort['onmessageerror'] = null;
-  readonly posted: ResidentEngineWorkerRequest[] = [];
+  readonly posted: (ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule)[] = [];
   readonly transfers: Transferable[][] = [];
   terminated = false;
 
@@ -28,7 +30,10 @@ class FakeWorker implements ResidentEngineWorkerPort {
     FakeWorker.instances.push(this);
   }
 
-  postMessage(message: ResidentEngineWorkerRequest, transfer: Transferable[] = []): void {
+  postMessage(
+    message: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule,
+    transfer: Transferable[] = []
+  ): void {
     this.posted.push(message);
     this.transfers.push(transfer);
   }
@@ -41,8 +46,17 @@ class FakeWorker implements ResidentEngineWorkerPort {
     this.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
   }
 
+  requestAt(index: number): ResidentEngineWorkerRequest {
+    const message = this.posted.at(index)!;
+    if (!('id' in message)) throw new Error('Expected a worker request');
+    return message;
+  }
+
   lastId(): number {
-    return this.posted[this.posted.length - 1].id;
+    const requests = this.posted.filter((message): message is ResidentEngineWorkerRequest =>
+      'id' in message
+    );
+    return requests.at(-1)!.id;
   }
 }
 
@@ -52,8 +66,13 @@ let nextTimer = 1;
 const realSetTimeout = globalThis.setTimeout;
 const realClearTimeout = globalThis.clearTimeout;
 const originalWorker = globalThis.Worker;
+const editModule = new WebAssembly.Module(
+  new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+);
+let compileModule: ReturnType<typeof spyOn<typeof wasm, 'editWasmModule'>>;
 
 beforeEach(() => {
+  compileModule = spyOn(wasm, 'editWasmModule').mockResolvedValue(editModule);
   timers.clear();
   FakeWorker.instances = [];
   globalThis.setTimeout = ((callback: () => void, ms: number) => {
@@ -68,6 +87,7 @@ beforeEach(() => {
 
 afterEach(() => {
   takePreloadedResidentEngineWorker()?.destroy();
+  compileModule.mockRestore();
   globalThis.Worker = originalWorker;
   globalThis.setTimeout = realSetTimeout;
   globalThis.clearTimeout = realClearTimeout;
@@ -308,11 +328,15 @@ describe('warmup', () => {
   test('waits for warm without marking a session ready or bootstrapped', async () => {
     const { worker, client } = setup();
     const warm = client.warm();
-    expect(worker.posted).toEqual([{ id: 1, type: 'warm' }]);
+    expect(worker.posted).toEqual([{ id: 1, type: 'warm', hostModule: true }]);
     expect(client.isReady()).toBe(false);
     expect(client.bootstrapSent()).toBe(false);
     worker.reply({ id: worker.lastId(), ok: true });
     await warm;
+    expect(worker.posted).toEqual([
+      { id: 1, type: 'warm', hostModule: true },
+      { type: 'editModule', module: editModule },
+    ]);
     expect(client.isReady()).toBe(false);
     expect(client.remoteStateVector()).toBeNull();
     const bootstrap = client.bootstrap(snapshot, '');
@@ -331,6 +355,111 @@ describe('warmup', () => {
     await bootstrap;
     expect(worker.terminated).toBe(false);
     expect(client.isReady()).toBe(true);
+  });
+
+  test('posts the compiled module after warm without adding a request or watchdog', async () => {
+    let resolve!: (module: WebAssembly.Module) => void;
+    compileModule.mockReturnValue(
+      new Promise((settle) => {
+        resolve = settle;
+      })
+    );
+    const { worker, client } = setup();
+    const warm = client.warm();
+    expect(compileModule).toHaveBeenCalledTimes(1);
+    expect(worker.posted).toEqual([{ id: 1, type: 'warm', hostModule: true }]);
+    const watchdogs = [...timers.keys()];
+    resolve(editModule);
+    await Promise.resolve();
+    expect(worker.posted).toEqual([
+      { id: 1, type: 'warm', hostModule: true },
+      { type: 'editModule', module: editModule },
+    ]);
+    expect(worker.transfers).toEqual([[], []]);
+    expect([...timers.keys()]).toEqual(watchdogs);
+    worker.reply({ id: 1, ok: true });
+    await warm;
+    expect(timers.size).toBe(0);
+    const bootstrap = client.bootstrap(snapshot, '');
+    expect(worker.posted.at(-1)).toMatchObject({ id: 2, type: 'bootstrap' });
+    worker.reply(frameReply(2));
+    await bootstrap;
+  });
+
+  test('posts null once when the host has no shared module', async () => {
+    compileModule.mockResolvedValue(null);
+    const { worker, client } = setup();
+    const warm = client.warm();
+    await Promise.resolve();
+    expect(compileModule).toHaveBeenCalledTimes(1);
+    expect(worker.posted).toEqual([
+      { id: 1, type: 'warm', hostModule: true },
+      { type: 'editModule' as const, module: null },
+    ]);
+    expect(worker.transfers).toEqual([[], []]);
+    worker.reply({ id: 1, ok: true });
+    await warm;
+    expect(worker.posted.filter((message) => message.type === 'editModule')).toHaveLength(1);
+  });
+
+  test('posts null when compilation fails', async () => {
+    compileModule.mockRejectedValue(new Error('compile failed'));
+    const { worker, client } = setup();
+    const warm = client.warm();
+    await Promise.resolve();
+    expect(worker.posted).toEqual([
+      { id: 1, type: 'warm', hostModule: true },
+      { type: 'editModule' as const, module: null },
+    ]);
+    worker.reply({ id: 1, ok: true });
+    await warm;
+  });
+
+  test.each(['destroy', 'failure'])('does not post a compiled module after %s', async (ending) => {
+    let resolve!: (module: WebAssembly.Module) => void;
+    compileModule.mockReturnValue(
+      new Promise((settle) => {
+        resolve = settle;
+      })
+    );
+    const { worker, client } = setup();
+    const warm = client.warm();
+    if (ending === 'destroy') client.destroy();
+    else worker.onerror?.({ message: 'crashed' } as ErrorEvent);
+    await expect(warm).rejects.toThrow();
+    const posted = [...worker.posted];
+    resolve(editModule);
+    await Promise.resolve();
+    expect(worker.posted).toEqual(posted);
+    expect(worker.posted.some((message) => message.type === 'editModule')).toBe(false);
+  });
+
+  test.each([false, true])('falls back to null on DataCloneError, even if null also throws=%s', async (rejectNull) => {
+    const { worker, client } = setup();
+    const post = worker.postMessage.bind(worker);
+    const posting = spyOn(worker, 'postMessage').mockImplementation((message, transfer) => {
+      if (message.type === 'editModule' && (message.module !== null || rejectNull)) {
+        throw new DOMException('Module cannot be cloned', 'DataCloneError');
+      }
+      post(message, transfer);
+    });
+    try {
+      const warm = client.warm();
+      await Promise.resolve();
+      expect(posting.mock.calls.map(([message]) => message)).toEqual([
+        { id: 1, type: 'warm', hostModule: true },
+        { type: 'editModule', module: editModule },
+        { type: 'editModule' as const, module: null },
+      ]);
+      expect(worker.posted).toEqual([
+        { id: 1, type: 'warm', hostModule: true },
+        ...(!rejectNull ? [{ type: 'editModule' as const, module: null }] : []),
+      ]);
+      worker.reply({ id: 1, ok: true });
+      await warm;
+    } finally {
+      posting.mockRestore();
+    }
   });
 });
 
@@ -359,6 +488,11 @@ describe('preloaded worker', () => {
     expect(worker.options).toEqual({ type: 'module', name: 'openooxml-resident-engine' });
     worker.reply({ id: worker.lastId(), ok: true });
     await first;
+    expect(worker.posted).toEqual([
+      { id: 1, type: 'warm', hostModule: true },
+      { type: 'editModule', module: editModule },
+    ]);
+    expect(compileModule).toHaveBeenCalledTimes(1);
     const client = takePreloadedResidentEngineWorker();
     expect(client).not.toBeNull();
     expect(takePreloadedResidentEngineWorker()).toBeNull();
@@ -394,9 +528,13 @@ describe('preloaded worker', () => {
     expect(FakeWorker.instances).toHaveLength(1);
     expect(retry).not.toBe(warm);
     expect(sharedRetry).toBe(retry);
-    expect(worker.posted).toEqual([{ id: 1, type: 'warm' }, { id: 2, type: 'warm' }]);
+    expect(worker.posted.filter((message) => 'id' in message)).toEqual([
+      { id: 1, type: 'warm', hostModule: true },
+      { id: 2, type: 'warm', hostModule: true },
+    ]);
     worker.reply({ id: worker.lastId(), ok: true });
     await retry;
+    expect(worker.posted.filter((message) => message.type === 'editModule')).toHaveLength(2);
     expect(worker.terminated).toBe(false);
   });
 
@@ -432,7 +570,7 @@ describe('preloaded worker', () => {
     const worker = FakeWorker.instances[0];
     const client = takePreloadedResidentEngineWorker()!;
     const bootstrap = client.bootstrap(snapshot, '');
-    worker.reply({ id: worker.posted[0].id, ok: false, error: 'init failed' });
+    worker.reply({ id: worker.requestAt(0).id, ok: false, error: 'init failed' });
     await expect(warm).rejects.toThrow('init failed');
     worker.reply(frameReply(worker.lastId()));
     await bootstrap;
@@ -518,11 +656,11 @@ describe('watchdog', () => {
     const frame = client.buildFrame('', 0);
     expect(armedBudgets()).toEqual([RESIDENT_WORKER_SILENCE_MS]);
     const armed = [...timers.keys()];
-    worker.reply(frameReply(worker.posted[0].id));
+    worker.reply(frameReply(worker.requestAt(0).id));
     await bootstrap;
     expect(armedBudgets()).toEqual([RESIDENT_WORKER_SILENCE_MS]);
     expect([...timers.keys()]).not.toEqual(armed);
-    worker.reply(frameReply(worker.posted[1].id));
+    worker.reply(frameReply(worker.requestAt(1).id));
     await frame;
     expect(timers.size).toBe(0);
     expect(worker.terminated).toBe(false);
@@ -784,10 +922,10 @@ describe('resident worker opening', () => {
     const failed = client.open(new Uint8Array([1]));
     const bootstrap = client.bootstrap(snapshot, '', { opened: true });
     expect(worker.posted).toHaveLength(2);
-    worker.reply({ id: worker.posted[0].id, ok: false, error: 'not a package' });
+    worker.reply({ id: worker.requestAt(0).id, ok: false, error: 'not a package' });
     await expect(failed).rejects.toThrow('not a package');
     worker.reply({
-      id: worker.posted[1].id,
+      id: worker.requestAt(1).id,
       ok: false,
       error: 'Resident engine worker has no opened document',
     });
@@ -809,16 +947,16 @@ describe('resident worker opening', () => {
     const { worker, client } = setup();
     const failed = client.open(new Uint8Array([1]));
     const opened = client.bootstrap(snapshot, '', { opened: true });
-    worker.reply({ id: worker.posted[0].id, ok: false, error: 'not a package' });
+    worker.reply({ id: worker.requestAt(0).id, ok: false, error: 'not a package' });
     await expect(failed).rejects.toThrow('not a package');
     const recovery = client.bootstrap(snapshot, '');
     worker.reply({
-      id: worker.posted[1].id,
+      id: worker.requestAt(1).id,
       ok: false,
       error: 'Resident engine worker has no opened document',
     });
     await expect(opened).rejects.toThrow('no opened document');
-    worker.reply(frameReply(worker.posted[2].id));
+    worker.reply(frameReply(worker.requestAt(2).id));
     await recovery;
     expect(client.bootstrapSent()).toBe(true);
     await expect(client.open(new Uint8Array([2]))).rejects.toThrow('already holds a document');
@@ -982,11 +1120,11 @@ describe('queued snapshots', () => {
     expect(client.remoteStateVector()).toEqual(new Uint8Array([8]));
     expect(worker.posted[1]).not.toHaveProperty('layoutExtras');
 
-    const layoutReply = frameReply(worker.posted[0].id);
+    const layoutReply = frameReply(worker.requestAt(0).id);
     if (layoutReply.ok) layoutReply.layoutJson = '{"layout":{}}';
     worker.reply(layoutReply);
     expect((await bootstrap).layoutJson).toBe('{"layout":{}}');
-    worker.reply(frameReply(worker.posted[1].id));
+    worker.reply(frameReply(worker.requestAt(1).id));
     expect((await sync).layoutJson).toBeUndefined();
   });
 });
@@ -1000,13 +1138,13 @@ describe('sent snapshot state', () => {
     const sync = client.sync({ ...snapshot, fontsRevision: 2 }, '', 0, false, {
       stateVector: new Uint8Array([2]),
     });
-    const early = frameReply(worker.posted[0].id);
+    const early = frameReply(worker.requestAt(0).id);
     if (early.ok) early.stateVector = new Uint8Array([9]).buffer;
     worker.reply(early);
     await bootstrap;
     expect(client.remoteStateVector()).toEqual(new Uint8Array([2]));
     expect(client.syncedFontsRevision()).toBe(2);
-    const late = frameReply(worker.posted[1].id);
+    const late = frameReply(worker.requestAt(1).id);
     if (late.ok) late.stateVector = new Uint8Array([3]).buffer;
     worker.reply(late);
     await sync;

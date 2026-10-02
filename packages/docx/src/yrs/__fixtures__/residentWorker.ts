@@ -1,8 +1,9 @@
 import { resolve } from 'node:path';
 import { createResidentEngineSession } from '../residentEngineSession';
-import { preloadEditWasm } from '../wasm/index';
+import { preloadEditWasm, preloadEditWasmFrom } from '../wasm/index';
 import type { ResidentEngineWorkerPort } from '../residentEngineWorkerClient';
 import type {
+  ResidentEngineWorkerHostModule,
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from '../residentEngineWorkerProtocol';
@@ -10,7 +11,7 @@ import type {
 /** The real resident worker module running in-process on a real resident session. */
 export interface InProcessResidentWorker extends ResidentEngineWorkerPort {
   /** Request types posted to the worker, in order. */
-  readonly requests: ResidentEngineWorkerRequest['type'][];
+  readonly requests: (ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule)['type'][];
   /** Holds the worker's replies until `release`. */
   hold(): void;
   release(): void;
@@ -19,7 +20,10 @@ export interface InProcessResidentWorker extends ResidentEngineWorkerPort {
 const STUBS: Record<string, string> = {
   './residentEngineSession':
     'export const createResidentEngineSession = () => testHarness.createSession();',
-  './wasm/index': 'export const preloadEditWasm = () => testHarness.preload();',
+  './wasm/index': `
+    export const preloadEditWasm = () => testHarness.preload();
+    export const preloadEditWasmFrom = (source) => testHarness.preloadFrom(source);
+  `,
   '../layout/render/glyphCache': 'export class GlyphCache {}',
   '../layout/render/canvasBackend': `
     export const rasterizeDisplayPageToBackBuffer = async () => {};
@@ -65,7 +69,9 @@ export async function residentWorkerFactory(): Promise<() => InProcessResidentWo
   return () => {
     let held: ResidentEngineWorkerResponse[] | null = null;
     const scope = {
-      onmessage: null as ((event: { data: ResidentEngineWorkerRequest }) => void) | null,
+      onmessage: null as ((event: {
+        data: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule;
+      }) => void) | null,
       postMessage(reply: ResidentEngineWorkerResponse) {
         if (held) held.push(reply);
         else deliver(reply);
@@ -100,6 +106,7 @@ export async function residentWorkerFactory(): Promise<() => InProcessResidentWo
     start(scope, class {}, {
       createSession: createResidentEngineSession,
       preload: preloadEditWasm,
+      preloadFrom: preloadEditWasmFrom,
     });
     return worker;
   };

@@ -316,6 +316,9 @@ type PageBuildInFlight =
   | { kind: 'release' }
   | { kind: 'build'; background: boolean; cancel(): void; promote(): void };
 
+type DisplayPagesFrame = Pick<ResidentEngineWorkerFrame, 'frame' | 'pageFrames'> &
+  Partial<Pick<ResidentEngineWorkerFrame, 'caret' | 'selection' | 'caretPainted' | 'layoutRevision'>>;
+
 function isPageBuildTask(scheduled: PageBuildTimer): scheduled is PageBuildTask {
   return typeof scheduled === 'object' && 'cancel' in scheduled;
 }
@@ -425,6 +428,8 @@ export function useRustDisplayList(
   // The engine whose layout the shown frame is of: another engine's frames
   // never apply to it as a base.
   const frameEngineRef = useRef<unknown>(null);
+  // The worker-open main-engine frame shown, and the content epoch it was built for.
+  const mainFrameRef = useRef<{ engine: YrsSession; contentEpoch: number } | null>(null);
   const [presentedEngine, setPresentedEngine] = useState<unknown>(null);
   const [snapshot, setSnapshot] = useState<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
   const snapshotRef = useRef<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
@@ -718,6 +723,31 @@ export function useRustDisplayList(
   const residentEngineRef = useRef(residentEngine);
   residentEngineRef.current = residentEngine;
 
+  const setMainFrameDisplayWindow = useCallback((hostEngine: YrsSession | null): void => {
+    if (
+      !workerOpenEnabledRef.current ||
+      !hostEngine?.setDisplayWindow ||
+      hostEngine.isDisplayOnly?.() === true ||
+      handedOverEnginesRef.current.has(hostEngine)
+    ) return;
+    hostEngine.setDisplayWindow(...displayWindowRef.current);
+    hostEngine.setDisplayRetainBuiltPages(retainBuiltPagesRef.current);
+    hostEngine.setWindowedIncrementalBuilds(true);
+  }, []);
+
+  const mainPageBuildEngine = useCallback((): YrsSession | null => {
+    const hostEngine = residentEngineRef.current;
+    return workerOpenEnabledRef.current &&
+      hostEngine?.setDisplayWindow &&
+      mainFrameRef.current?.engine === hostEngine &&
+      mainFrameRef.current.contentEpoch === contentEpochRef.current &&
+      frameEngineRef.current === hostEngine &&
+      hostEngine.isDisplayOnly?.() !== true &&
+      !workerPreviewEnginesRef.current.has(hostEngine) &&
+      !handedOverEnginesRef.current.has(hostEngine)
+      ? hostEngine : null;
+  }, []);
+
   const failWorkerDocument = useCallback(
     (
       hostEngine: YrsSession,
@@ -824,6 +854,7 @@ export function useRustDisplayList(
         );
       }
       if (workerFallbackEngineRef.current === hostEngine) return;
+      setMainFrameDisplayWindow(hostEngine);
       hostEngine.resetFrameBase();
       queryEpochGate.clear();
       recoveryFrameEpochRef.current = snapshotRef.current.frame?.frameEpoch ?? 0;
@@ -832,8 +863,9 @@ export function useRustDisplayList(
       setSnapshot(fallbackSnapshot);
       endOpenLines(false);
       workerFallbackEngineRef.current = hostEngine;
+      mainFrameRef.current = null;
     },
-    [endOpenLines, failWorkerDocument, queryEpochGate]
+    [endOpenLines, failWorkerDocument, queryEpochGate, setMainFrameDisplayWindow]
   );
 
   useEffect(() => {
@@ -1041,6 +1073,7 @@ export function useRustDisplayList(
           sourceLine(hostEngine)
         );
         generationRef.current += 1;
+        mainFrameRef.current = null;
         snapshotRef.current = nextSnapshot;
         publishQuerySnapshot(nextSnapshot, contentEpochRef.current);
         setSnapshot(nextSnapshot);
@@ -1151,6 +1184,7 @@ export function useRustDisplayList(
           return { frameEpoch: null, caretSynchronized: false, deletedUnits: result.deletedUnits };
         }
         const nextFrame = applyFrameDeltaOwned(previous.frame, delta);
+        mainFrameRef.current = null;
         const caret = residentCaretForSelection(
           result.caret,
           result.selection,
@@ -1629,6 +1663,16 @@ export function useRustDisplayList(
     []
   );
 
+  const mainCaretPage = (): number | undefined => {
+    const main = mainFrameRef.current;
+    if (!main || frameEngineRef.current !== main.engine) return undefined;
+    try {
+      return main.engine.residentCaretSnapshot().caretRect?.pageIndex;
+    } catch {
+      return undefined;
+    }
+  };
+
   const pagesToRelease = useCallback((frame: RetainedFrame): number[] => {
     if (
       !workerOpenEnabledRef.current ||
@@ -1640,7 +1684,7 @@ export function useRustDisplayList(
     const [start, end] = displayWindowRef.current;
     const first = Math.max(0, start - WORKER_OPEN_RETAIN_MARGIN_PAGES);
     const last = Math.min(frame.pages.length, end + WORKER_OPEN_RETAIN_MARGIN_PAGES);
-    const caretPage = snapshotRef.current.caret?.caretRect?.pageIndex;
+    const caretPage = snapshotRef.current.caret?.caretRect?.pageIndex ?? mainCaretPage();
     const candidates: number[] = [];
     for (let index = 0; index < frame.pages.length; index += 1) {
       if (
@@ -1654,20 +1698,21 @@ export function useRustDisplayList(
     return candidates;
   }, []);
 
-  // Build the unbuilt pages of the worker frame: those the viewport shows
-  // first, then the rest while the main thread is idle, since accessibility
-  // mirrors and printing read every page's content.
   const buildUnbuiltPages = useCallback(
     (idle = false): void => {
       pageBuildTimerRef.current = null;
-      const worker = workerRef.current;
+      const mainEngine = mainPageBuildEngine();
+      // A main-engine frame of an older content epoch waits for the frame of its relayout.
+      if (!mainEngine && mainFrameRef.current?.engine === frameEngineRef.current) return;
+      const worker = mainEngine ? null : workerRef.current;
+      const targetEngine = worker?.engine ?? mainEngine;
       const frame = snapshotRef.current.frame;
-      if (!worker || !worker.client.isReady() || !frame) return;
+      if (!targetEngine || !frame || (worker && !worker.client.isReady())) return;
       // A worker handed to another session builds its pages once it has
       // presented that session's frame.
-      if (frameEngineRef.current !== worker.engine) return;
-      if (workerPreviewEnginesRef.current.has(worker.engine)) return;
-      if (isLayoutQueued(worker.engine) || isSupersededLayout(layoutRef.current)) {
+      if (frameEngineRef.current !== targetEngine) return;
+      if (workerPreviewEnginesRef.current.has(targetEngine)) return;
+      if (isLayoutQueued(targetEngine) || isSupersededLayout(layoutRef.current)) {
         retryPageBuildsRef.current(idle);
         return;
       }
@@ -1713,9 +1758,11 @@ export function useRustDisplayList(
           return;
         }
         if (
-          worker.client.frameRequestPending() ||
-          worker.client.answeredFrame() > frame.frameEpoch ||
-          paintedCaretMachine.shouldPaint(performance.now())
+          worker && (
+            worker.client.frameRequestPending() ||
+            worker.client.answeredFrame() > frame.frameEpoch ||
+            paintedCaretMachine.shouldPaint(performance.now())
+          )
         ) {
           retryPageBuildsRef.current(true);
           return;
@@ -1723,8 +1770,11 @@ export function useRustDisplayList(
       }
       // Behind a worker frame the display has not adopted, the pages would
       // come back as a whole-document recovery frame: wait for it.
-      const framePending = worker.client.frameRequestPending();
-      if (framePending || (!supersedingBackground && worker.client.answeredFrame() > frame.frameEpoch)) {
+      const framePending = worker?.client.frameRequestPending() ?? false;
+      if (
+        worker && (framePending ||
+          (!supersedingBackground && worker.client.answeredFrame() > frame.frameEpoch))
+      ) {
         const now = performance.now();
         if (framePending || unadoptedFrameSinceRef.current === null) {
           unadoptedFrameSinceRef.current = now;
@@ -1761,13 +1811,16 @@ export function useRustDisplayList(
       const buildBase = frame;
       const dispatchedEpoch = contentEpochRef.current;
       const dispatchedGeneration = generationRef.current;
+      const targetCurrent = (): boolean => worker
+        ? isCurrentWorker(targetEngine, worker)
+        : !unmountedRef.current && mainPageBuildEngine() === targetEngine;
       const current = (): boolean =>
-        isCurrentWorker(worker.engine, worker) &&
+        targetCurrent() &&
         pageBuildInFlightRef.current === build &&
         generationRef.current === dispatchedGeneration &&
-        frameEngineRef.current === worker.engine &&
-        (build.kind === 'release' ||
-          (contentEpochRef.current === dispatchedEpoch && !worker.client.frameRequestPending())) &&
+        frameEngineRef.current === targetEngine &&
+        ((worker && build.kind === 'release') ||
+          (contentEpochRef.current === dispatchedEpoch && !worker?.client.frameRequestPending())) &&
         (!background || snapshotRef.current.frame?.frameEpoch === buildBase.frameEpoch);
       const finish = (): void => {
         if (pageBuildInFlightRef.current !== build) return;
@@ -1778,12 +1831,29 @@ export function useRustDisplayList(
           pageBuildTimerQueued(pageBuildTimerRef.current);
         if (!keepTimer) schedulePageBuildsWhenIdleRef.current();
       };
-      const line = sourceLine(worker.engine);
+      const line = sourceLine(targetEngine);
       const paintToken = paintedCaretMachine.token();
       const paintCaret =
-        workerPresentationActiveRef.current && paintedCaretMachine.shouldPaint(performance.now());
+        Boolean(worker && workerPresentationActiveRef.current &&
+          paintedCaretMachine.shouldPaint(performance.now()));
       const failed = (cause: unknown): void => {
-        if (!isCurrentWorker(worker.engine, worker)) return;
+        if (!targetCurrent()) return;
+        if (!worker) {
+          if (
+            generationRef.current !== dispatchedGeneration ||
+            contentEpochRef.current !== dispatchedEpoch
+          ) return;
+          const nextError = cause instanceof Error
+            ? cause : new Error(`Display-list build failed: ${String(cause)}`);
+          console.error('[CanvasRenderer] Building display pages failed', nextError);
+          cancelPageBuilds(pageBuildTimerRef);
+          queryEpochGate.clear();
+          setError(nextError);
+          setErrorEngine(targetEngine);
+          setLoading(false);
+          markSettled(null, nextError);
+          return;
+        }
         if (cause instanceof ResidentWorkerOutOfMemoryError) {
           if (replaceOutOfMemoryWorker(worker.engine, worker, cause) === 'retry') {
             requestLayoutRef.current?.();
@@ -1797,14 +1867,21 @@ export function useRustDisplayList(
         );
         requestLayoutRef.current?.();
       };
-      const request =
-        release.length > 0
+      const request: Promise<DisplayPagesFrame | { superseded: true } | null> = worker
+        ? release.length > 0
           ? worker.client.releasePages(
               release.map((index) => ({ index, pageId: frame.pages[index]!.pageId.toString() })),
               frame.frameEpoch,
               false
             )
-          : worker.client.buildPages(batch, frame.frameEpoch, paintCaret, background);
+          : worker.client.buildPages(batch, frame.frameEpoch, paintCaret, background)
+        : (async () => {
+            setMainFrameDisplayWindow(targetEngine);
+            const bytes = release.length > 0
+              ? targetEngine.releaseDisplayPagesFrame(release, frame.frameEpoch)
+              : targetEngine.buildDisplayPagesFrame(batch, frame.frameEpoch);
+            return bytes === null ? null : { frame: bytes };
+          })();
       void request.then(
         (result) => {
           if (!result || 'superseded' in result || !current()) {
@@ -1822,22 +1899,26 @@ export function useRustDisplayList(
                 finish();
                 return;
               }
-              const caret = residentCaretForSelection(
-                result.caret,
-                result.selection,
-                worker.engine.selection(),
-                nextFrame
-              );
+              const caret = worker && result.caret
+                ? residentCaretForSelection(
+                    result.caret,
+                    result.selection ?? null,
+                    targetEngine.selection(),
+                    nextFrame
+                  )
+                : null;
               const nextSnapshot =
                 contentEpochRef.current === dispatchedEpoch
                   ? createRustDisplayListSnapshot(
                       nextFrame.displayList,
                       nextFrame,
                       caret,
-                      null,
+                      worker ? null : targetEngine,
                       previous,
                       sourceVersionOf(previous.queries),
-                      workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
+                      worker
+                        ? workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision!)
+                        : revisionPreviewKeyOf(previous.queries),
                       line
                     )
                   : { displayList: nextFrame.displayList, frame: nextFrame, queries: null, caret };
@@ -1856,7 +1937,7 @@ export function useRustDisplayList(
               publishQuerySnapshot(nextSnapshot, contentEpochRef.current);
               if (background) startTransition(() => setSnapshot(nextSnapshot));
               else setSnapshot(nextSnapshot);
-              applyPaintedCaretReply(Boolean(result.caretPainted && caret?.caretRect), paintToken);
+              if (worker) applyPaintedCaretReply(Boolean(result.caretPainted && caret?.caretRect), paintToken);
             } catch (error) {
               finish();
               failed(error);
@@ -1937,10 +2018,14 @@ export function useRustDisplayList(
       applyPaintedCaretReply,
       dropWorker,
       isCurrentWorker,
+      mainPageBuildEngine,
+      markSettled,
       paintedCaretMachine,
       pagesToRelease,
       publishQuerySnapshot,
+      queryEpochGate,
       replaceOutOfMemoryWorker,
+      setMainFrameDisplayWindow,
       sourceLine,
     ]
   );
@@ -1972,24 +2057,26 @@ export function useRustDisplayList(
       const current = displayWindowRef.current;
       if (current[0] === start && current[1] === end) return;
       displayWindowRef.current = [start, end];
+      setMainFrameDisplayWindow(mainPageBuildEngine());
       schedulePageBuilds(0);
       // A window wait may already be met by the pages the new window shows.
       for (const waiter of [...settleWaitersRef.current.keys()]) waiter();
       for (const listener of [...displayWindowListenersRef.current]) listener();
     },
-    [schedulePageBuilds]
+    [mainPageBuildEngine, schedulePageBuilds, setMainFrameDisplayWindow]
   );
 
   const setRetainBuiltPages = useCallback(
     (retain: boolean): void => {
       retainBuiltPagesRef.current = retain;
       workerRef.current?.client.setRetainBuiltPages(retain);
+      setMainFrameDisplayWindow(mainPageBuildEngine());
       const frame = snapshotRef.current.frame;
       if (!retain && frame && pagesToRelease(frame).length > 0) {
         schedulePageBuildsWhenIdleRef.current();
       }
     },
-    [pagesToRelease]
+    [mainPageBuildEngine, pagesToRelease, setMainFrameDisplayWindow]
   );
 
   useEffect(() => {
@@ -2477,6 +2564,11 @@ export function useRustDisplayList(
           caretPainted: false,
         }));
       }
+      try {
+        setMainFrameDisplayWindow(residentEngine);
+      } catch (error) {
+        return Promise.reject(error);
+      }
       // A frame engine paints the pagination it retains, which a newer layout may have replaced.
       const retainedRevision = residentEngine?.residentWorkerProbe()?.layoutRevision;
       const base = frameBase(residentEngine ?? engine ?? null);
@@ -2812,6 +2904,10 @@ export function useRustDisplayList(
         publishQuerySnapshot(nextSnapshot, contentEpoch);
         setSnapshot(nextSnapshot);
         frameEngineRef.current = residentEngine ?? engine ?? null;
+        mainFrameRef.current =
+          workerOpenEnabledRef.current && residentEngine && result.frame && !result.workerProduced
+            ? { engine: residentEngine, contentEpoch }
+            : null;
         setPresentedEngine(residentEngine ?? engine ?? null);
         setError(null);
         setLoading(false);
@@ -2866,6 +2962,7 @@ export function useRustDisplayList(
     resolvedCommentIds,
     engine,
     residentEngine,
+    setMainFrameDisplayWindow,
     dropWorker,
     endOpenLines,
     frameExtrasInputs,

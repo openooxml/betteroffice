@@ -78,10 +78,10 @@ function options(
   return { opts, selections, noteClicks, words, focused: () => focused };
 }
 
-function mouse(type: string, clientX: number, clientY: number, target: EventTarget): void {
+function mouse(type: string, clientX: number, clientY: number, target: EventTarget, detail = 0): void {
   act(() => {
     target.dispatchEvent(
-      new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY, button: 0 })
+      new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY, button: 0, detail })
     );
   });
 }
@@ -140,6 +140,100 @@ test('a read-only press selects text only: no image, note or header', () => {
 
   mouse('mousedown', 50, 400, canvasOf());
   expect(selections).toEqual([[5, 5]]);
+});
+
+test('a header or footer click opens part editing only when editable, with or without a pending replica', () => {
+  const bands = fakeQueries();
+  bands.hitTestRegions = (_pageIndex: number, x: number, y: number): DisplayListRegionHit =>
+    y < HEADER_BOTTOM
+      ? { region: 'header', rId: 'rId7', pos: 1, target: 'text' }
+      : y >= NOTE_TOP
+        ? { region: 'footer', rId: 'rId8', pos: 1, target: 'text' }
+        : { region: 'body', pos: Math.floor(x / 10), target: 'text' };
+  const press = (y: number, detail: number) => {
+    mouse('mousedown', 400, y, canvasOf(), detail);
+    mouse('mouseup', 400, y, window, detail);
+    mouse('click', 400, y, canvasOf(), detail);
+  };
+  for (const readOnly of [true, false]) {
+    for (const pending of [false, true]) {
+      const opened: Array<['header' | 'footer', number | undefined]> = [];
+      const { opts, selections, words } = options({
+        readOnly,
+        displayListQueries: bands,
+        replicaPending: () => pending,
+        onHeaderFooterDoubleClick: (region, pageNumber) => opened.push([region, pageNumber]),
+      });
+      const view = renderHook(() => usePagesPointer(opts));
+      press(40, 1);
+      press(950, 1);
+      expect(opened).toEqual([]);
+      press(40, 2);
+      press(950, 2);
+      expect(opened).toEqual(readOnly ? [] : [['header', 1], ['footer', 1]]);
+      if (readOnly) expect({ selections, words }).toEqual({ selections: [], words: [] });
+      view.unmount();
+    }
+  }
+});
+
+test('the table insert button hides and inserts nothing once the editor turns read-only', () => {
+  const grid = fakeQueries();
+  const cell = (row: number, col: number) => ({
+    kind: 'rect',
+    x: 10 + col * 100,
+    y: 200 + row * 20,
+    w: 100,
+    h: 20,
+    fill: '#ffffff',
+    cell: { row, col, rowSpan: 1, colSpan: 1 },
+    table: { tableId: 'A' },
+    docStart: 5 + row * 4 + col * 2,
+    docEnd: 6 + row * 4 + col * 2,
+  });
+  (grid.displayList.pages[0] as { primitives: unknown[] }).primitives = [
+    cell(0, 0),
+    cell(0, 1),
+    cell(1, 0),
+    cell(1, 1),
+  ];
+  const at = { story: 'body', tableIndex: 0, row: 0, column: 0 };
+  const projection = {
+    size: 100,
+    targetAt: (position: number) => ({ story: 'body', displayPosition: position, cell: at }),
+    tableAtPosition: () => ({ start: 3 }),
+    cellPosition: (_start: number, row: number, col: number) => 5 + row * 4 + col * 2,
+    nodeAt: () => null,
+  } as unknown as YrsPositionProjection;
+  for (const switched of [false, true]) {
+    const commands: unknown[] = [];
+    const { opts } = options({
+      displayListQueries: grid,
+      canvasOverlayTarget: document.body,
+      getYrsPositionProjection: () => projection,
+      yrsSession: { cellSelection: () => null, setCellSelection: () => {} } as unknown as YrsSession,
+      applyYrsCommand: (command) => {
+        commands.push(command);
+        return true;
+      },
+    });
+    const view = renderHook(
+      ({ readOnly }: { readOnly: boolean }) => usePagesPointer({ ...opts, readOnly }),
+      { initialProps: { readOnly: false } }
+    );
+    mouse('mousemove', 10, 220, canvasOf());
+    expect(view.result.current.tableInsertButton?.type).toBe('row');
+    if (switched) view.rerender({ readOnly: true });
+    expect(view.result.current.tableInsertButton === null).toBe(switched);
+    act(() =>
+      view.result.current.handleTableInsertClick({
+        preventDefault: () => {},
+        stopPropagation: () => {},
+      } as unknown as React.MouseEvent)
+    );
+    expect(commands).toHaveLength(switched ? 0 : 1);
+    view.unmount();
+  }
 });
 
 test('an editable press still selects the image under it', () => {

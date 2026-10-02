@@ -3,12 +3,14 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, spyOn, test } from 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
+import { decodeFrameDelta } from '@betteroffice/docx/layout/render';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { ResidentWorkerOutOfMemoryError } from '@betteroffice/docx/yrs';
 import {
   revisionPreviewKey,
   revisionPreviewKeyOf,
   sourceVersionOf,
+  stampRevisionPreviewKey,
   stampSourceVersion,
 } from '../internals/layoutProvenance';
 import { useRustDisplayList } from './useDisplayList';
@@ -740,6 +742,314 @@ test('a failed page build hands rendering back to the main thread', async () => 
   } finally {
     errors.mockRestore();
     engine.free();
+  }
+});
+
+async function renderMainFallbackFixture(workerOpen = true, paragraphLength = 120) {
+  const { engine, inputs, host } = lazyFixture(paragraphLength);
+  const workerEngine = lazyFixture(paragraphLength).engine;
+  Object.assign(inputs, { layoutRevision: 1 });
+  stampSourceVersion(inputs.layout, 'main-v1');
+  stampRevisionPreviewKey(inputs.layout, revisionPreviewKey(PREVIEW));
+  const frameBuiltPages: number[] = [];
+  const updateListeners = new Set<(update: Uint8Array) => void>();
+  Object.assign(host, {
+    onUpdate: (listener: (update: Uint8Array) => void) => {
+      updateListeners.add(listener);
+      return () => updateListeners.delete(listener);
+    },
+    residentCaretSnapshot: () => JSON.parse(engine.resident_caret_snapshot_json()),
+    buildDisplayListJson: (input: string) => engine.build_display_list_json(input),
+    buildDisplayListFrame: (input: string, epoch: number) => {
+      const bytes = engine.build_display_list_frame(input, epoch);
+      frameBuiltPages.push(decodeFrameDelta(bytes).operations.filter(
+        (operation) => operation.kind === 'upsert' && !operation.page.unbuilt
+      ).length);
+      return bytes;
+    },
+    setDisplayWindow: (start: number, end: number) => engine.set_display_window(start, end),
+    setDisplayRetainBuiltPages: (retain: boolean) => engine.set_display_retain_built_pages(retain),
+    setWindowedIncrementalBuilds: (enabled: boolean) => engine.set_windowed_incremental_builds(enabled),
+    buildDisplayPagesFrame: (pages: readonly number[], epoch: number) =>
+      engine.build_display_pages_frame(Uint32Array.from(pages), epoch),
+    releaseDisplayPagesFrame: (pages: number[], epoch: number) => {
+      const bytes = engine.release_display_pages_frame(Uint32Array.from(pages), epoch);
+      return bytes.length === 0 ? null : bytes;
+    },
+    resetFrameBase: () => engine.reset_frame_base(),
+    displayHitTestRegionsJson: (page: number, x: number, y: number) =>
+      engine.display_hit_test_regions_json(page, x, y),
+    displayVerticalMoveJson: (position: number, direction: 'up' | 'down', goalX: number) =>
+      engine.display_vertical_move_json(position, direction, goalX),
+    displayRangeRectsJson: (from: number, to: number) => engine.display_range_rects_json(from, to),
+    displayRangeRectsRegionJson: (region: string, partId: string, from: number, to: number) =>
+      engine.display_range_rects_region_json(region, partId, from, to),
+  });
+  const frameBuilds = spyOn(host, 'buildDisplayListFrame');
+  const pageBuilds = spyOn(host, 'buildDisplayPagesFrame');
+  const releases = spyOn(host, 'releaseDisplayPagesFrame');
+  const windows = spyOn(host, 'setDisplayWindow');
+  const retention = spyOn(host, 'setDisplayRetainBuiltPages');
+  const incremental = spyOn(host, 'setWindowedIncrementalBuilds');
+  const hits = spyOn(host, 'displayHitTestRegionsJson');
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  let relayouts = 0;
+  const overrides = { getInputs: () => inputs };
+  const hook = renderHook(
+    ({ layout }) => useRustDisplayList(
+      layout, overrides, undefined, undefined, host, () => { relayouts += 1; },
+      undefined, undefined, workerOpen
+    ),
+    { initialProps: { layout: inputs.layout as Layout } }
+  );
+  const dispose = () => {
+    hook.unmount();
+    for (const spy of [frameBuilds, pageBuilds, releases, windows, retention, incremental, hits, errors]) {
+      spy.mockRestore();
+    }
+    engine.free();
+    workerEngine.free();
+  };
+  try {
+    await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    EngineWorker.failPageBuilds = true;
+    await act(async () => hook.result.current.setDisplayWindow(5, 6));
+    await waitFor(() => expect(relayouts).toBe(1));
+    expect(worker.terminated).toBe(true);
+    expect(hook.result.current.frame).toBeNull();
+    const mainLayout = { ...inputs.layout } as Layout;
+    stampSourceVersion(mainLayout, 'main-v1');
+    stampRevisionPreviewKey(mainLayout, revisionPreviewKey(PREVIEW));
+    await act(async () => {
+      hook.result.current.setDisplayWindow(0, 5);
+      hook.rerender({ layout: mainLayout });
+    });
+    await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
+    expect(hook.result.current.workerSurfacesActive).toBe(false);
+    expect(hook.result.current.shownFrameEngine()).toBe(host);
+    expect(frameBuilds).toHaveBeenCalledTimes(1);
+    return {
+      ...hook, host, mainLayout, updateListeners, frameBuilds, frameBuiltPages,
+      pageBuilds, releases, windows, retention, incremental, hits, errors, dispose,
+    };
+  } catch (error) {
+    dispose();
+    throw error;
+  }
+}
+
+test('worker-open main fallback builds only the display window and idle margin', async () => {
+  const fixture = await renderMainFallbackFixture();
+  const { result, frameBuilds, frameBuiltPages, pageBuilds, windows, retention, incremental } = fixture;
+  try {
+    const pages = () => result.current.frame!.displayList.pages;
+    expect(pages()).toHaveLength(40);
+    expect(frameBuiltPages).toEqual([5]);
+    expect(pages().slice(0, 5).every((page) => !page.unbuilt)).toBe(true);
+    expect(pages().slice(7).every((page) => page.unbuilt)).toBe(true);
+    expect(windows).toHaveBeenCalledWith(0, 5);
+    expect(retention).toHaveBeenCalledWith(false);
+    expect(incremental).toHaveBeenCalledWith(true);
+    await idleUntil(() => pages().slice(0, 7).every((page) => !page.unbuilt));
+    expect(pageBuilds.mock.calls.map(([pages]) => pages)).toEqual([[5, 6]]);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      runIdleCallbacks();
+    });
+    expect(pages().slice(7).every((page) => page.unbuilt)).toBe(true);
+    expect(frameBuilds).toHaveBeenCalledTimes(1);
+    expect(frameBuiltPages.every((built) => built < pages().length)).toBe(true);
+    expect(pageBuilds.mock.calls.every(([built]) => built.length < pages().length)).toBe(true);
+    expect(result.current.caret).toBeNull();
+    expect(result.current.error).toBeNull();
+    expect(sourceVersionOf(result.current.queries)).toBe('main-v1');
+    expect(revisionPreviewKeyOf(result.current.queries)).toBe(revisionPreviewKey(PREVIEW));
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test('worker-open main fallback builds distant pages, releases them at idle and rebuilds on return', async () => {
+  const fixture = await renderMainFallbackFixture();
+  const { result, frameBuilds, pageBuilds, releases, windows, host, hits } = fixture;
+  try {
+    const pages = () => result.current.frame!.displayList.pages;
+    await idleUntil(() => pages().slice(0, 7).every((page) => !page.unbuilt));
+    const identities = result.current.frame!.pages.map((page) => page.pageId);
+    const firstPrimitives = pages()[0]!.primitives;
+    await act(async () => result.current.setDisplayWindow(30, 34));
+    expect(windows).toHaveBeenLastCalledWith(30, 34);
+    await waitFor(() => expect(pages().slice(30, 34).every((page) => !page.unbuilt)).toBe(true));
+    expect(pageBuilds.mock.calls.map(([built]) => built)).toContainEqual([30, 31, 32, 33]);
+    expect(releases).not.toHaveBeenCalled();
+    await idleUntil(() => pages().slice(0, 7).every((page) => page.unbuilt));
+    expect(pages().slice(28, 36).every((page) => !page.unbuilt)).toBe(true);
+    expect(pages().every((page, index) => (index >= 22 && index < 40) || page.unbuilt)).toBe(true);
+    expect(releases.mock.calls[0]![0]).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    expect(result.current.frame!.pages.map((page) => page.pageId)).toEqual(identities);
+    expect(result.current.caret).toBeNull();
+    result.current.queries!.hitTestRegions(30, 10, 10);
+    expect(hits).toHaveBeenLastCalledWith(30, 10, 10);
+    expect(sourceVersionOf(result.current.queries)).toBe('main-v1');
+    expect(revisionPreviewKeyOf(result.current.queries)).toBe(revisionPreviewKey(PREVIEW));
+
+    await act(async () => result.current.setDisplayWindow(0, 5));
+    await waitFor(() => expect(pages().slice(0, 5).every((page) => !page.unbuilt)).toBe(true));
+    expect(pageBuilds.mock.calls.map(([built]) => built)).toContainEqual([0, 1, 2, 3, 4]);
+    expect(pages()[0]!.primitives).toEqual(firstPrimitives);
+    await idleUntil(() => pages().slice(28, 36).every((page) => page.unbuilt));
+    expect(pages().slice(0, 7).every((page) => !page.unbuilt)).toBe(true);
+    expect(result.current.shownFrameEngine()).toBe(host);
+    expect(frameBuilds).toHaveBeenCalledTimes(1);
+    expect(EngineWorker.spawned).toBe(1);
+    expect(result.current.error).toBeNull();
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test('worker-open main page builds wait for the relayout after an edit', async () => {
+  const fixture = await renderMainFallbackFixture();
+  const { result, rerender, mainLayout, updateListeners, frameBuilds, pageBuilds, releases } = fixture;
+  try {
+    const pages = () => result.current.frame!.displayList.pages;
+    await idleUntil(() => pages().slice(0, 7).every((page) => !page.unbuilt));
+    const frame = result.current.frame;
+    const queries = result.current.queries;
+    pageBuilds.mockClear();
+    await act(async () => {
+      for (const listener of updateListeners) listener(new Uint8Array());
+      result.current.setDisplayWindow(30, 34);
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      runIdleCallbacks();
+    });
+    expect(pageBuilds).not.toHaveBeenCalled();
+    expect(releases).not.toHaveBeenCalled();
+    expect(result.current.frame).toBe(frame);
+    expect(result.current.queries).toBe(queries);
+    expect(sourceVersionOf(result.current.queries)).toBe('main-v1');
+    expect(await result.current.resolveQueries()).toBeNull();
+    expect(pages().slice(30, 34).every((page) => page.unbuilt)).toBe(true);
+
+    const layout = { ...mainLayout };
+    stampSourceVersion(layout, 'main-v2');
+    stampRevisionPreviewKey(layout, revisionPreviewKey(PREVIEW));
+    await act(async () => rerender({ layout }));
+    await waitFor(() => expect(pages().slice(30, 34).every((page) => !page.unbuilt)).toBe(true));
+    await idleUntil(() => pages().slice(28, 36).every((page) => !page.unbuilt));
+    expect(frameBuilds).toHaveBeenCalledTimes(2);
+    expect(pageBuilds.mock.calls.map(([built]) => built)).toContainEqual([28, 29, 34, 35]);
+    expect(sourceVersionOf(result.current.queries)).toBe('main-v2');
+    expect(result.current.error).toBeNull();
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test('worker-open main release keeps the caret page', async () => {
+  const fixture = await renderMainFallbackFixture();
+  const { result, host, releases } = fixture;
+  const caret = spyOn(host, 'residentCaretSnapshot').mockImplementation(() => ({
+    frameEpoch: result.current.frame!.frameEpoch,
+    caretRect: {
+      pageIndex: 2,
+      pageId: result.current.frame!.pages[2]!.pageId.toString(),
+      x: 10,
+      y: 10,
+      height: 12,
+    },
+  }));
+  try {
+    const pages = () => result.current.frame!.displayList.pages;
+    const released = [0, 1, 3, 4, 5, 6];
+    await idleUntil(() => pages().slice(0, 7).every((page) => !page.unbuilt));
+    await act(async () => result.current.setDisplayWindow(30, 34));
+    await waitFor(() => expect(pages().slice(30, 34).every((page) => !page.unbuilt)).toBe(true));
+    await idleUntil(() => released.every((index) => pages()[index]!.unbuilt));
+    expect(pages()[2]!.unbuilt).toBeFalsy();
+    expect(releases.mock.calls[0]![0]).toEqual(released);
+    expect(releases.mock.calls.every(([indices]) => !indices.includes(2))).toBe(true);
+    expect(result.current.caret).toBeNull();
+    expect(result.current.error).toBeNull();
+  } finally {
+    caret.mockRestore();
+    fixture.dispose();
+  }
+});
+
+test('main fallback without worker-open still builds every page', async () => {
+  const fixture = await renderMainFallbackFixture(false);
+  const { result, frameBuiltPages, pageBuilds, releases, windows, retention, incremental } = fixture;
+  try {
+    expect(result.current.displayList!.pages).toHaveLength(40);
+    expect(frameBuiltPages).toEqual([40]);
+    expect(result.current.displayList!.pages.every((page) => !page.unbuilt)).toBe(true);
+    await act(async () => {
+      result.current.setDisplayWindow(30, 34);
+      runIdleCallbacks();
+    });
+    expect(pageBuilds).not.toHaveBeenCalled();
+    expect(releases).not.toHaveBeenCalled();
+    expect(windows).not.toHaveBeenCalled();
+    expect(retention).not.toHaveBeenCalled();
+    expect(incremental).not.toHaveBeenCalled();
+    expect(result.current.error).toBeNull();
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test('worker-open main fallback settles the document through the shared page batches', async () => {
+  const fixture = await renderMainFallbackFixture(true, 24);
+  const { result, frameBuilds, pageBuilds, releases } = fixture;
+  try {
+    const pages = () => result.current.frame!.displayList.pages;
+    await idleUntil(() => pages().slice(0, 7).every((page) => !page.unbuilt));
+    const window = await result.current.settledDisplayList(null, null, 'window');
+    expect(window.pages.slice(7).every((page) => page.unbuilt)).toBe(true);
+    pageBuilds.mockClear();
+    let settled: Awaited<ReturnType<typeof result.current.settledDisplayList>> | undefined;
+    await act(async () => {
+      settled = await result.current.settledDisplayList(null, null, 'document');
+      expect(releases).not.toHaveBeenCalled();
+    });
+    expect(settled!.pages).toHaveLength(200);
+    expect(settled!.pages.every((page) => !page.unbuilt)).toBe(true);
+    expect(pageBuilds.mock.calls[0]![0]).toHaveLength(128);
+    expect(pageBuilds.mock.calls.every(([built]) => built.length <= 128)).toBe(true);
+    expect(frameBuilds).toHaveBeenCalledTimes(1);
+    await idleUntil(() => pages().slice(13).every((page) => page.unbuilt));
+    expect(releases).toHaveBeenCalledTimes(1);
+    expect(result.current.error).toBeNull();
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test.each(['build', 'release'] as const)('a failed main page %s reports the main engine error', async (kind) => {
+  const fixture = await renderMainFallbackFixture();
+  const { result, pageBuilds, releases, host, errors } = fixture;
+  try {
+    const failure = new Error(`main page ${kind} failed`);
+    await idleUntil(() => result.current.displayList!.pages.slice(0, 7).every((page) => !page.unbuilt));
+    const target = kind === 'build' ? pageBuilds : releases;
+    target.mockImplementation(() => { throw failure; });
+    errors.mockClear();
+    await act(async () => result.current.setDisplayWindow(30, 34));
+    await waitFor(async () => {
+      await act(async () => runIdleCallbacks());
+      expect(result.current.error).toBe(failure);
+    });
+    expect(errors).toHaveBeenCalledWith('[CanvasRenderer] Building display pages failed', failure);
+    expect(result.current.errorEngine).toBe(host);
+    expect(result.current.loading).toBe(false);
+    expect(result.current.frame).not.toBeNull();
+    expect(result.current.shownFrameEngine()).toBe(host);
+    expect(EngineWorker.spawned).toBe(1);
+    await expect(result.current.settledDisplayList(null)).rejects.toBe(failure);
+  } finally {
+    fixture.dispose();
   }
 });
 

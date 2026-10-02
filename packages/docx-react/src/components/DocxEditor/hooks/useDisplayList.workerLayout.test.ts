@@ -1,11 +1,12 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { LayoutSelectionGate, type ResidentMeasurementConfig } from '@betteroffice/docx/layout';
 import { decodeFrameDelta, loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
+import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import {
   preloadDocxEngine,
   proposalSetIdentity,
@@ -18,6 +19,7 @@ import {
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import type {
+  ResidentEngineWorkerHostModule,
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
@@ -30,6 +32,14 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, renderHook, waitFor } = await import('@testing-library/react');
 const originalWorker = globalThis.Worker;
+const editModule = new WebAssembly.Module(
+  new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+);
+let compileModule: ReturnType<typeof spyOn<typeof wasm, 'editWasmModule'>>;
+
+beforeEach(() => {
+  compileModule = spyOn(wasm, 'editWasmModule').mockResolvedValue(editModule);
+});
 
 beforeAll(() =>
   preloadEditWasm(
@@ -44,6 +54,7 @@ beforeAll(() =>
 afterEach(() => {
   cleanup();
   takePreloadedResidentEngineWorker()?.destroy();
+  compileModule.mockRestore();
   globalThis.Worker = originalWorker;
 });
 
@@ -64,14 +75,19 @@ class FakeWorker {
   onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror = null;
-  posted: ResidentEngineWorkerRequest[] = [];
+  posted: (ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule)[] = [];
   terminated = false;
   constructor() {
     FakeWorker.last = this;
     FakeWorker.instances.push(this);
   }
-  postMessage(request: ResidentEngineWorkerRequest): void {
+  postMessage(request: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule): void {
     this.posted.push(request);
+  }
+  requestAt(index: number): ResidentEngineWorkerRequest {
+    const message = this.posted.at(index)!;
+    if (!('id' in message)) throw new Error('Expected a worker request');
+    return message;
   }
   reply(response: ResidentEngineWorkerResponse): void {
     this.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
@@ -171,11 +187,13 @@ test('unresolved fonts warm once and the first layout adopts the still-warming w
     });
     expect(FakeWorker.last).toBe(spare);
     expect(FakeWorker.instances.length - initialWorkers).toBe(1);
-    expect(spare.posted.map((request) => request.type)).toEqual(['warm', 'bootstrap']);
+    expect(spare.posted.map((request) => request.type)).toEqual(['warm', 'editModule', 'bootstrap']);
+    expect(spare.posted[0]).toEqual({ id: 1, type: 'warm', hostModule: true });
+    expect(spare.posted[1]).toEqual({ type: 'editModule', module: editModule });
     await act(async () => {
-      spare.reply({ id: spare.posted[0].id, ok: true });
+      spare.reply({ id: spare.requestAt(0).id, ok: true });
       spare.reply({
-        id: spare.posted[1].id,
+        id: spare.requestAt(2).id,
         ok: true,
         frame: source.frame.slice().buffer,
         caret: { frameEpoch: 1, caretRect: null },
@@ -214,7 +232,7 @@ test('session change and unmount release a font-deferred spare before another ed
         expect(fresh).not.toBe(spare);
         expect(fresh.posted.map((request) => request.type)).toEqual(['bootstrap']);
         fresh.reply({
-          id: fresh.posted[0].id,
+          id: fresh.requestAt(0).id,
           ok: true,
           frame: second.frame.slice().buffer,
           caret: { frameEpoch: 1, caretRect: null },
@@ -268,7 +286,7 @@ test('a font-deferred spare the first layout does not adopt is released', async 
       });
       act(() => hook.result.current.runLayoutPipeline({ onHost: ending === 'onHost' }));
       if (ending !== 'preflight') expect(hook.result.current.layout?.pages.length).toBeGreaterThan(0);
-      expect(spare.posted.map((request) => request.type)).toEqual(['warm']);
+      expect(spare.posted.map((request) => request.type)).toEqual(['warm', 'editModule']);
       expect(source.adopted).toEqual([]);
       await waitFor(() => expect(spare.terminated).toBe(true));
       expect(takePreloadedResidentEngineWorker()).toBeNull();
@@ -340,14 +358,14 @@ test('workerFor adopts the spare once and the next session spawns fresh', async 
   const warming = preloadDocxEngine();
   const spare = FakeWorker.last!;
   expect(spare.posted.map((request) => request.type)).toEqual(['warm']);
-  spare.reply({ id: spare.posted[0].id, ok: true });
+  spare.reply({ id: spare.requestAt(0).id, ok: true });
   await warming;
   const hook = renderHook(() =>
     useRustDisplayList(null, undefined, undefined, undefined, null)
   );
   const reply = (worker: FakeWorker, source: typeof first): void => {
     worker.reply({
-      id: worker.posted.at(-1)!.id,
+      id: worker.requestAt(-1).id,
       ok: true,
       frame: source.frame.slice().buffer,
       caret: { frameEpoch: 1, caretRect: null },
@@ -359,7 +377,7 @@ test('workerFor adopts the spare once and the next session spawns fresh', async 
   try {
     const firstLayout = hook.result.current.layoutInWorker(first.engine, REQUEST);
     expect(FakeWorker.last).toBe(spare);
-    expect(spare.posted.map((request) => request.type)).toEqual(['warm', 'bootstrap']);
+    expect(spare.posted.map((request) => request.type)).toEqual(['warm', 'editModule', 'bootstrap']);
     reply(spare, first);
     expect(await firstLayout).not.toBeNull();
 
@@ -374,7 +392,7 @@ test('workerFor adopts the spare once and the next session spawns fresh', async 
 
     const warmingReplacement = preloadDocxEngine();
     const unusedSpare = FakeWorker.last!;
-    unusedSpare.reply({ id: unusedSpare.posted[0].id, ok: true });
+    unusedSpare.reply({ id: unusedSpare.requestAt(0).id, ok: true });
     await warmingReplacement;
     const replacementLayout = hook.result.current.layoutInWorker(first.engine, REQUEST);
     const replacement = FakeWorker.last!;
@@ -397,7 +415,7 @@ test('two display hooks cannot adopt the same spare', async () => {
   const second = setup();
   const warming = preloadDocxEngine();
   const spare = FakeWorker.last!;
-  spare.reply({ id: spare.posted[0].id, ok: true });
+  spare.reply({ id: spare.requestAt(0).id, ok: true });
   await warming;
   const firstHook = renderHook(() => useRustDisplayList(null));
   const secondHook = renderHook(() => useRustDisplayList(null));
@@ -408,7 +426,7 @@ test('two display hooks cannot adopt the same spare', async () => {
     expect(fresh).not.toBe(spare);
     for (const [worker, source] of [[spare, first], [fresh, second]] as const) {
       worker.reply({
-        id: worker.posted.at(-1)!.id,
+        id: worker.requestAt(-1).id,
         ok: true,
         frame: source.frame.slice().buffer,
         caret: { frameEpoch: 1, caretRect: null },
@@ -450,7 +468,7 @@ test('a worker-run layout arrives with its frame and needs no second worker pass
     expect(worker.posted[0]).toMatchObject({ type: 'bootstrap', extras: '' });
     expect(worker.posted[0]).toHaveProperty('layoutExtras', '{}');
     worker.reply({
-      id: worker.posted[0].id,
+      id: worker.requestAt(0).id,
       ok: true,
       frame: frame.slice().buffer,
       caret: { frameEpoch: 1, caretRect: null },
@@ -487,14 +505,14 @@ test('a worker-opened document reuses its worker for the first layout', async ()
     const opening = result.current.openInWorker(engine, Uint8Array.of(1, 2, 3), 'digest', 7);
     const worker = FakeWorker.last!;
     expect(worker.posted[0]).toMatchObject({ type: 'open', digest: 'digest', generation: '7' });
-    worker.reply({ id: worker.posted[0].id, ok: true, hostJson: '{}', stateVector: Uint8Array.of(9).buffer });
+    worker.reply({ id: worker.requestAt(0).id, ok: true, hostJson: '{}', stateVector: Uint8Array.of(9).buffer });
     const opened = await opening;
     expect(opened?.hostJson).toBe('{}');
     const pending = result.current.layoutInWorker(engine, REQUEST);
     expect(FakeWorker.last).toBe(worker);
     expect(worker.posted[1]).toMatchObject({ type: 'bootstrap', opened: true });
     worker.reply({
-      id: worker.posted[1].id,
+      id: worker.requestAt(1).id,
       ok: true,
       frame: frame.slice().buffer,
       caret: { frameEpoch: 1, caretRect: null },
@@ -508,11 +526,11 @@ test('a worker-opened document reuses its worker for the first layout', async ()
     expect(worker.posted.map((request) => request.type)).toEqual(['open', 'bootstrap']);
     const encoded = opened!.encodeState();
     await waitFor(() => expect(worker.posted[2]?.type).toBe('encodeState'));
-    worker.reply({ id: worker.posted[2].id, ok: true, state: Uint8Array.of(4, 5).buffer });
+    worker.reply({ id: worker.requestAt(2).id, ok: true, state: Uint8Array.of(4, 5).buffer });
     expect(await encoded).toEqual(Uint8Array.of(4, 5));
     const count = opened!.revisionCount();
     await waitFor(() => expect(worker.posted[3]?.type).toBe('revisionCount'));
-    worker.reply({ id: worker.posted[3].id, ok: true, revisionCount: 1 });
+    worker.reply({ id: worker.requestAt(3).id, ok: true, revisionCount: 1 });
     expect(await count).toBe(1);
     unmount();
   } finally {
@@ -531,11 +549,11 @@ test('sync recovery rejects a cached layout frame from the old owner of the same
   try {
     const opening = result.current.openInWorker(engine, Uint8Array.of(1));
     const old = FakeWorker.last!;
-    old.reply({ id: old.posted[0].id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0) });
+    old.reply({ id: old.requestAt(0).id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0) });
     const opened = await opening;
     const first = result.current.layoutInWorker(engine, REQUEST);
     old.reply({
-      id: old.posted[1].id, ok: true, frame: frame.slice().buffer,
+      id: old.requestAt(1).id, ok: true, frame: frame.slice().buffer,
       caret: { frameEpoch: 1, caretRect: null }, selection: null, layoutRevision: 1, layoutJson,
     });
     const cached = await first!;
@@ -550,7 +568,7 @@ test('sync recovery rejects a cached layout frame from the old owner of the same
     expect(current.posted[0]).toMatchObject({ type: 'bootstrap' });
     expect(current.posted[0]).not.toHaveProperty('opened');
     current.reply({
-      id: current.posted[0].id, ok: true, frame: frame.slice().buffer,
+      id: current.requestAt(0).id, ok: true, frame: frame.slice().buffer,
       caret: { frameEpoch: 1, caretRect: null }, selection: null, layoutRevision: 2, layoutJson,
     });
     await next;
@@ -598,7 +616,7 @@ test('a retained worker query facade forwards within a document load but never t
     const publish = async (worker: FakeWorker, frame: Uint8Array, frameEpoch: number) => {
       await act(async () => {
         worker.reply({
-          id: worker.posted.at(-1)!.id,
+          id: worker.requestAt(-1).id,
           ok: true,
           frame: frame.slice().buffer,
           caret: { frameEpoch, caretRect: null },
@@ -709,7 +727,7 @@ test('releasing ends forwarding from a superseded worker query facade', async ()
     const publish = async (frame: Uint8Array, frameEpoch: number) => {
       await act(async () => {
         worker.reply({
-          id: worker.posted.at(-1)!.id,
+          id: worker.requestAt(-1).id,
           ok: true,
           frame: frame.slice().buffer,
           caret: { frameEpoch, caretRect: null },
@@ -807,7 +825,7 @@ test("a snapshot rebuilt after the next document starts loading keeps its own do
     const publish = async (worker: FakeWorker, frame: Uint8Array, frameEpoch: number) => {
       await act(async () => {
         worker.reply({
-          id: worker.posted.at(-1)!.id,
+          id: worker.requestAt(-1).id,
           ok: true,
           frame: frame.slice().buffer,
           caret: { frameEpoch, caretRect: null },
@@ -906,7 +924,7 @@ test('a new layout of the shown document after the next one starts loading keeps
     const publish = async (worker: FakeWorker, frame: Uint8Array, frameEpoch: number) => {
       await act(async () => {
         worker.reply({
-          id: worker.posted.at(-1)!.id,
+          id: worker.requestAt(-1).id,
           ok: true,
           frame: frame.slice().buffer,
           caret: { frameEpoch, caretRect: null },
@@ -1034,7 +1052,7 @@ test('input that answers after the next document replaced its worker publishes n
     const workerA = FakeWorker.last!;
     await act(async () => {
       workerA.reply({
-        id: workerA.posted.at(-1)!.id,
+        id: workerA.requestAt(-1).id,
         ok: true,
         frame: documentA.frame.slice().buffer,
         caret: { frameEpoch: 1, caretRect: null },
@@ -1058,7 +1076,7 @@ test('input that answers after the next document replaced its worker publishes n
       }
       expect(workerA.posted.at(-1)).toMatchObject({ type: 'applyInput', expectedFrameEpoch: 1 });
     });
-    const inputRequest = workerA.posted.at(-1)!;
+    const inputRequest = workerA.requestAt(-1);
     const inputFrameA = documentA.native.apply_input('!', 1);
     inputs = {
       ...JSON.parse(documentB.native.retained_kernel_inputs_json()),
@@ -1096,7 +1114,7 @@ test('input that answers after the next document replaced its worker publishes n
 
     await act(async () => {
       workerB.reply({
-        id: workerB.posted.at(-1)!.id,
+        id: workerB.requestAt(-1).id,
         ok: true,
         frame: documentB.frame.slice().buffer,
         caret: { frameEpoch: 1, caretRect: null },
@@ -1125,7 +1143,7 @@ test('input that answers after the next document replaced its worker publishes n
       expect(workerB.posted.at(-1)).toMatchObject({ type: 'applyInput', expectedFrameEpoch: 1 });
       const inputFrameB = documentB.native.apply_input('!', 1);
       workerB.reply({
-        id: workerB.posted.at(-1)!.id,
+        id: workerB.requestAt(-1).id,
         ok: true,
         frame: inputFrameB.slice().buffer,
         caret: { frameEpoch: 2, caretRect: null },
@@ -1175,7 +1193,7 @@ test('input a replaced worker rejects publishes nothing of its document', async 
     const workerA = FakeWorker.last!;
     await act(async () => {
       workerA.reply({
-        id: workerA.posted.at(-1)!.id,
+        id: workerA.requestAt(-1).id,
         ok: true,
         frame: documentA.frame.slice().buffer,
         caret: { frameEpoch: 1, caretRect: null },
@@ -1223,7 +1241,7 @@ test('input a replaced worker rejects publishes nothing of its document', async 
 
     await act(async () => {
       workerB.reply({
-        id: workerB.posted.at(-1)!.id,
+        id: workerB.requestAt(-1).id,
         ok: true,
         frame: documentB.frame.slice().buffer,
         caret: { frameEpoch: 1, caretRect: null },
@@ -1287,7 +1305,7 @@ test('a failed worker input replays on the host and rejoins its query line', asy
     const worker = FakeWorker.last!;
     await act(async () => {
       worker.reply({
-        id: worker.posted.at(-1)!.id,
+        id: worker.requestAt(-1).id,
         ok: true,
         frame: document.frame.slice().buffer,
         caret: { frameEpoch: 1, caretRect: null },
@@ -1310,7 +1328,7 @@ test('a failed worker input replays on the host and rejoins its query line', asy
     expect(worker.posted.at(-1)).toMatchObject({ type: 'buildFrame', expectedFrameEpoch: 1 });
     await act(async () => {
       worker.reply({
-        id: worker.posted.at(-1)!.id,
+        id: worker.requestAt(-1).id,
         ok: true,
         frame: nextFrame.slice().buffer,
         caret: { frameEpoch: 2, caretRect: null },
@@ -1412,7 +1430,7 @@ test('after a worker layout the host dropped, the next one paints the current te
     const worker = () => FakeWorker.last!;
     const pass = async (built: { frame: Uint8Array; layoutJson: string }) => {
       const pending = result.current.layoutInWorker(engine, REQUEST)!;
-      const request = worker().posted.at(-1)!;
+      const request = worker().requestAt(-1);
       const epoch = decodeFrameDelta(built.frame.slice().buffer).frameEpoch;
       worker().reply({
         id: request.id,
@@ -1471,7 +1489,7 @@ test.each([[false, false], [true, false], [true, true]])(
       const first = hook.result.current.layoutInWorker(engine, REQUEST)!;
       const worker = FakeWorker.last!;
       worker.reply({
-        id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+        id: worker.requestAt(0).id, ok: true, frame: frame.slice().buffer,
         caret: { frameEpoch: 1, caretRect: null }, selection: null,
         layoutRevision: 1, layoutJson,
       });
@@ -1503,10 +1521,10 @@ test.each([[false, false], [true, false], [true, true]])(
         expect(authority.holdsWorkerState()).toBe(true);
       }
       const older = hook.result.current.layoutInWorker(engine, REQUEST)!;
-      const olderRequest = worker.posted.at(-1)!;
+      const olderRequest = worker.requestAt(-1);
       const olderFrame = native.build_display_list_frame('{}', 0);
       const newer = hook.result.current.layoutInWorker(engine, REQUEST)!;
-      const newerRequest = worker.posted.at(-1)!;
+      const newerRequest = worker.requestAt(-1);
       const newerFrame = native.build_display_list_frame('{}', 0);
       expect(olderRequest.type).toBe('sync');
       expect(newerRequest.type).toBe('sync');
@@ -1580,7 +1598,7 @@ test('a frame built for other display extras is not adopted', async () => {
     const pending = result.current.layoutInWorker(engine, REQUEST);
     const worker = FakeWorker.last!;
     worker.reply({
-      id: worker.posted[0].id,
+      id: worker.requestAt(0).id,
       ok: true,
       frame: frame.slice().buffer,
       caret: { frameEpoch: 1, caretRect: null },
@@ -1611,7 +1629,7 @@ test('a reply without a layout hands the pass back to the main thread', async ()
       const pending = result.current.layoutInWorker(engine, REQUEST);
       const worker = FakeWorker.last!;
       worker.reply({
-        id: worker.posted[0].id,
+        id: worker.requestAt(0).id,
         ok: true,
         frame: frame.slice().buffer,
         caret: { frameEpoch: 1, caretRect: null },
@@ -1642,7 +1660,7 @@ test('a provisional layout paints first and settles only once the full layout fo
     const worker = FakeWorker.last!;
     expect(worker.posted[0]).toMatchObject({ type: 'bootstrap', provisionalPages: 3 });
     worker.reply({
-      id: worker.posted[0].id,
+      id: worker.requestAt(0).id,
       ok: true,
       frame: frame.slice().buffer,
       caret: { frameEpoch: 1, caretRect: null },
@@ -1663,7 +1681,7 @@ test('a provisional layout paints first and settles only once the full layout fo
     await act(async () => {
       void result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
     });
-    worker.reply({ id: worker.posted[1].id, ok: true });
+    worker.reply({ id: worker.requestAt(1).id, ok: true });
     await waitFor(() => expect(worker.posted).toHaveLength(3));
     expect(worker.posted.map((request) => request.type)).toEqual([
       'bootstrap',
@@ -1679,7 +1697,7 @@ test('a provisional layout paints first and settles only once the full layout fo
     expect(settled).toBe(false);
 
     worker.reply({
-      id: worker.posted[2].id,
+      id: worker.requestAt(2).id,
       ok: true,
       frame: fullFrame.slice().buffer,
       caret: { frameEpoch: 2, caretRect: null },
@@ -1746,7 +1764,7 @@ test('a proposal prefix and completion reuse unchanged pages after an intervenin
     const first = hook.result.current.layoutInWorker(engine, request)!;
     const worker = FakeWorker.last!;
     worker.reply({
-      id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+      id: worker.requestAt(0).id, ok: true, frame: frame.slice().buffer,
       caret: { frameEpoch: initialEpoch, caretRect: null }, selection: null, layoutRevision: 1, layoutJson,
     });
     const opened = (await act(() => first))!;
@@ -1764,7 +1782,7 @@ test('a proposal prefix and completion reuse unchanged pages after an intervenin
     const prefixFrame = native.build_display_list_frame('{}', initialEpoch);
     const prefixEpoch = decodeFrameDelta(prefixFrame).frameEpoch;
     worker.reply({
-      id: worker.posted[1].id, ok: true, frame: prefixFrame.slice().buffer,
+      id: worker.requestAt(1).id, ok: true, frame: prefixFrame.slice().buffer,
       caret: { frameEpoch: prefixEpoch, caretRect: null }, selection: null,
       layoutRevision: 2, layoutJson: prefixJson, layoutProvisional: true,
     });
@@ -1785,7 +1803,7 @@ test('a proposal prefix and completion reuse unchanged pages after an intervenin
     const visibleFrame = native.build_display_pages_frame(Uint32Array.of(3), prefixEpoch);
     const visibleEpoch = decodeFrameDelta(visibleFrame).frameEpoch;
     await act(async () => worker.reply({
-      id: worker.posted[2].id, ok: true, frame: visibleFrame.slice().buffer,
+      id: worker.requestAt(2).id, ok: true, frame: visibleFrame.slice().buffer,
       caret: { frameEpoch: visibleEpoch, caretRect: null }, selection: null, layoutRevision: 2,
     }));
     const visible = hook.result.current.displayList!.pages[3];
@@ -1793,7 +1811,7 @@ test('a proposal prefix and completion reuse unchanged pages after an intervenin
       const attaching = hook.result.current.attachOffscreenCanvases(
         [], [], 1, 1, { color: '#000', width: 2 }
       );
-      worker.reply({ id: worker.posted[3].id, ok: true });
+      worker.reply({ id: worker.requestAt(3).id, ok: true });
       expect(await attaching).toBe(true);
     });
     await waitFor(() => expect(worker.posted[4]).toMatchObject({
@@ -1805,7 +1823,7 @@ test('a proposal prefix and completion reuse unchanged pages after an intervenin
     const completedFrame = native.build_display_list_frame('{}', prefixEpoch);
     expect(decodeFrameDelta(completedFrame).full).toBe(true);
     worker.reply({
-      id: worker.posted[4].id, ok: true, frame: completedFrame.slice().buffer,
+      id: worker.requestAt(4).id, ok: true, frame: completedFrame.slice().buffer,
       caret: { frameEpoch: decodeFrameDelta(completedFrame).frameEpoch, caretRect: null },
       selection: null, layoutRevision: 2, layoutJson: completeJson,
     });
@@ -1868,7 +1886,7 @@ test('with worker open, a provisional layout names its engine until the rest is 
     const pending = result.current.layoutInWorker(engine, REQUEST);
     const worker = FakeWorker.last!;
     worker.reply({
-      id: worker.posted[0].id,
+      id: worker.requestAt(0).id,
       ok: true,
       frame: frame.slice().buffer,
       caret: { frameEpoch: 1, caretRect: null },
@@ -1888,7 +1906,7 @@ test('with worker open, a provisional layout names its engine until the rest is 
     await act(async () => {
       void result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
     });
-    worker.reply({ id: worker.posted[1].id, ok: true });
+    worker.reply({ id: worker.requestAt(1).id, ok: true });
     await waitFor(() => expect(worker.posted).toHaveLength(3));
     expect(worker.posted[2]).toMatchObject({ type: 'completeLayout' });
     expect(result.current.pendingCompletion).toBeNull();
@@ -1923,7 +1941,7 @@ test('an older surface timeout cannot supersede the newer provisional completion
     const first = hook.result.current.layoutInWorker(engine, REQUEST)!;
     const worker = FakeWorker.last!;
     worker.reply({
-      id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+      id: worker.requestAt(0).id, ok: true, frame: frame.slice().buffer,
       caret: { frameEpoch: 1, caretRect: null }, selection: null,
       layoutRevision: 1, layoutJson, layoutProvisional: true,
     });
@@ -1934,7 +1952,7 @@ test('an older surface timeout cannot supersede the newer provisional completion
     const nextFrame = native.build_display_list_frame('{}', 1);
     expect(worker.posted[1]).toMatchObject({ type: 'sync', snapshot: { layoutRevision: 2 } });
     worker.reply({
-      id: worker.posted[1].id, ok: true, frame: nextFrame.slice().buffer,
+      id: worker.requestAt(1).id, ok: true, frame: nextFrame.slice().buffer,
       caret: { frameEpoch: 2, caretRect: null }, selection: null,
       layoutRevision: 2, layoutJson, layoutProvisional: true,
     });
@@ -1945,7 +1963,7 @@ test('an older surface timeout cannot supersede the newer provisional completion
       const attaching = hook.result.current.attachOffscreenCanvases(
         [], [], 1, 1, { color: '#000', width: 2 }
       );
-      worker.reply({ id: worker.posted[2].id, ok: true });
+      worker.reply({ id: worker.requestAt(2).id, ok: true });
       expect(await attaching).toBe(true);
     });
     expect(worker.posted[3]).toMatchObject({
@@ -1959,7 +1977,7 @@ test('an older surface timeout cannot supersede the newer provisional completion
     expect(await older.complete).toBeNull();
     const fullFrame = native.build_display_list_frame('{}', 2);
     worker.reply({
-      id: worker.posted[3].id, ok: true, frame: fullFrame.slice().buffer,
+      id: worker.requestAt(3).id, ok: true, frame: fullFrame.slice().buffer,
       caret: { frameEpoch: 3, caretRect: null }, selection: null,
       layoutRevision: 2, layoutJson,
     });
@@ -1988,7 +2006,7 @@ test('a worker-authoritative relayout covers the visible prefix and completes it
     const first = result.current.layoutInWorker(engine, REQUEST);
     const worker = FakeWorker.last!;
     worker.reply({
-      id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+      id: worker.requestAt(0).id, ok: true, frame: frame.slice().buffer,
       caret: { frameEpoch: 1, caretRect: null }, selection: null,
       layoutRevision: 1, layoutJson,
     });
@@ -2001,7 +2019,7 @@ test('a worker-authoritative relayout covers the visible prefix and completes it
     });
     const nextFrame = native.build_display_list_frame('{}', 1);
     worker.reply({
-      id: worker.posted[1].id, ok: true, frame: nextFrame.slice().buffer,
+      id: worker.requestAt(1).id, ok: true, frame: nextFrame.slice().buffer,
       caret: { frameEpoch: 2, caretRect: null }, selection: null,
       layoutRevision: 2, layoutJson, layoutProvisional: true,
     });
@@ -2010,13 +2028,13 @@ test('a worker-authoritative relayout covers the visible prefix and completes it
     await act(async () => {
       void result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
     });
-    worker.reply({ id: worker.posted[2].id, ok: true });
+    worker.reply({ id: worker.requestAt(2).id, ok: true });
     await waitFor(() => expect(worker.posted[3]).toMatchObject({
       type: 'completeLayout', expectedFrameEpoch: 2, sliceBlocks: 64,
     }));
     const completedFrame = native.build_display_list_frame('{}', 2);
     worker.reply({
-      id: worker.posted[3].id, ok: true, frame: completedFrame.slice().buffer,
+      id: worker.requestAt(3).id, ok: true, frame: completedFrame.slice().buffer,
       caret: { frameEpoch: 3, caretRect: null }, selection: null,
       layoutRevision: 2, layoutJson,
     });
@@ -2149,11 +2167,11 @@ test('a rejected completion after reload preserves the new session frame, querie
     );
     const opening = result.current.openInWorker(engine, Uint8Array.of(1));
     const oldWorker = FakeWorker.last!;
-    oldWorker.reply({ id: oldWorker.posted[0]!.id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0) });
+    oldWorker.reply({ id: oldWorker.requestAt(0).id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0) });
     const opened = (await opening)!;
     const layout = result.current.layoutInWorker(engine, REQUEST)!;
     oldWorker.reply({
-      id: oldWorker.posted[1]!.id,
+      id: oldWorker.requestAt(1).id,
       ok: true,
       frame: frame.slice().buffer,
       caret: { frameEpoch: 1, caretRect: null },
@@ -2167,7 +2185,7 @@ test('a rejected completion after reload preserves the new session frame, querie
     await waitFor(() => expect(result.current.frame).not.toBeNull());
     await act(async () => {
       const attaching = result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
-      oldWorker.reply({ id: oldWorker.posted.at(-1)!.id, ok: true });
+      oldWorker.reply({ id: oldWorker.requestAt(-1).id, ok: true });
       await attaching;
     });
     await waitFor(() => expect(deferred.reject).not.toBeNull());
@@ -2181,7 +2199,7 @@ test('a rejected completion after reload preserves the new session frame, querie
     const replacement = result.current.layoutInWorker(next, REQUEST)!;
     const newWorker = FakeWorker.last!;
     newWorker.reply({
-      id: newWorker.posted[0]!.id,
+      id: newWorker.requestAt(0).id,
       ok: true,
       frame: frame.slice().buffer,
       caret: { frameEpoch: 1, caretRect: null },
