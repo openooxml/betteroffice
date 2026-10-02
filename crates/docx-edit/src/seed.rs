@@ -5262,12 +5262,17 @@ fn seed_lowered(
         mut read,
         ..
     } = lowered;
-    let stories_empty = {
+    let scan_sequences = context.opaque_sequences.is_empty() && {
         let txn = document.yrs_doc().transact();
         txn.get_map(crate::STORIES)
             .expect("stories root is declared by EditingDoc::new")
             .len(&txn)
             == 0
+            && txn
+                .get_map(crate::identity::SESSION)
+                .expect("session root is declared by EditingDoc::new")
+                .get(&txn, OPAQUE_SEQUENCES)
+                .is_none()
     };
     document
         .create_empty_stories(
@@ -5297,7 +5302,7 @@ fn seed_lowered(
             layout_tokens,
         )?,
     };
-    let seeded = stories_empty
+    let seeded = scan_sequences
         .then(|| seeded_sequence_fields(batches.iter().flat_map(|(_, ops)| ops)))
         .flatten();
     let ctx = EditCtx::local(String::new(), String::new());
