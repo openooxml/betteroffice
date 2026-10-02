@@ -1726,8 +1726,8 @@ export function useRustDisplayList(
       const last = windowOnly
         ? Math.min(pages.length, end + WORKER_OPEN_BUILD_MARGIN_PAGES)
         : pages.length;
-      const deferred = deferredPageBuildsRef.current.get(worker.engine);
-      const deferredPages = deferred?.client === worker.client &&
+      const deferred = worker ? deferredPageBuildsRef.current.get(worker.engine) : undefined;
+      const deferredPages = deferred && deferred.client === worker?.client &&
         deferred.layoutEpoch === frame.layoutEpoch
         ? deferred.pages
         : undefined;
@@ -1922,17 +1922,19 @@ export function useRustDisplayList(
                       line
                     )
                   : { displayList: nextFrame.displayList, frame: nextFrame, queries: null, caret };
-              const deferred = deferredPageBuildsRef.current.get(worker.engine);
-              const deferredPages = deferred?.client === worker.client &&
-                deferred.layoutEpoch === nextFrame.layoutEpoch
-                ? deferred.pages
-                : new Set<number>();
-              for (const index of batch) {
-                if (nextFrame.displayList.pages[index]?.unbuilt) deferredPages.add(index);
+              if (worker) {
+                const deferred = deferredPageBuildsRef.current.get(worker.engine);
+                const deferredPages = deferred?.client === worker.client &&
+                  deferred.layoutEpoch === nextFrame.layoutEpoch
+                  ? deferred.pages
+                  : new Set<number>();
+                for (const index of batch) {
+                  if (nextFrame.displayList.pages[index]?.unbuilt) deferredPages.add(index);
+                }
+                deferredPageBuildsRef.current.set(worker.engine, {
+                  client: worker.client, layoutEpoch: nextFrame.layoutEpoch, pages: deferredPages,
+                });
               }
-              deferredPageBuildsRef.current.set(worker.engine, {
-                client: worker.client, layoutEpoch: nextFrame.layoutEpoch, pages: deferredPages,
-              });
               snapshotRef.current = nextSnapshot;
               publishQuerySnapshot(nextSnapshot, contentEpochRef.current);
               if (background) startTransition(() => setSnapshot(nextSnapshot));

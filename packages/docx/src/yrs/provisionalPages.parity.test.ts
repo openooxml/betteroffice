@@ -5,7 +5,10 @@ import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
 import { applyFrameDelta, decodeFrameDelta, type RetainedFrame } from '../layout/render/frameDelta';
-import { encodeDisplayListFrameExtras } from '../layout/render/rustDisplayList';
+import {
+  encodeDisplayListFrameExtras,
+  type DisplayListBuildInputs,
+} from '../layout/render/rustDisplayList';
 import { preloadEditWasm } from '../wasm/edit';
 import { decodeDocxHostJson, type YrsResidentWorkerSnapshot } from './index';
 import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
@@ -26,7 +29,8 @@ beforeAll(async () => {
   const modules: Record<string, string> = {
     './residentEngineSession':
       'export const createResidentEngineSession = async () => testHarness.session;',
-    './wasm/index': 'export const preloadEditWasm = async () => {};',
+    './wasm/index':
+      'export const preloadEditWasm = async () => {}; export const preloadEditWasmFrom = async () => {};',
     '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => [];',
   };
   const result = await Bun.build({
@@ -140,7 +144,7 @@ for (const path of ['bootstrap', 'sync', 'no-window'] as const) {
       cold.setDisplayWindow(0, path === 'no-window' ? 2 ** 32 - 1 : 6);
       cold.setDisplayRetainBuiltPages(false);
       cold.setWindowedIncrementalBuilds(true);
-      const extras = encodeDisplayListFrameExtras({ fontChains });
+      const extras = encodeDisplayListFrameExtras({ fontChains } as DisplayListBuildInputs);
       const full = applyFrameDelta(null, decodeFrameDelta(cold.buildDisplayListFrame(extras, 0)));
       expect(full.displayList.pages.length).toBeGreaterThan(6);
 
