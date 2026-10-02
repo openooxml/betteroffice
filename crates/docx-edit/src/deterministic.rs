@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Number, Value};
 use yrs::any::{F64_MAX_SAFE_INTEGER, F64_MIN_SAFE_INTEGER};
-use yrs::block::HAS_PARENT_SUB;
+use yrs::block::{BLOCK_GC_REF_NUMBER, BLOCK_ITEM_DELETED_REF_NUMBER, HAS_PARENT_SUB};
 use yrs::encoding::write::Write;
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
@@ -90,6 +90,8 @@ struct CountingEncoderV1 {
     info: u8,
     unstable_json: bool,
     root_sequence: bool,
+    tombstone_len: u64,
+    deleted_len: u64,
 }
 
 impl Write for CountingEncoderV1 {
@@ -114,6 +116,7 @@ impl Encoder for CountingEncoderV1 {
     }
 
     fn write_ds_len(&mut self, len: u32) {
+        self.deleted_len += u64::from(len);
         self.write_var(len);
     }
 
@@ -145,6 +148,9 @@ impl Encoder for CountingEncoderV1 {
     }
 
     fn write_len(&mut self, len: u32) {
+        if self.info == BLOCK_GC_REF_NUMBER || self.info & 0x1F == BLOCK_ITEM_DELETED_REF_NUMBER {
+            self.tombstone_len += u64::from(len);
+        }
         self.write_var(len);
     }
 
@@ -165,7 +171,8 @@ impl Encoder for CountingEncoderV1 {
     }
 }
 
-/// Returns None for pending data, unstable JSON values, or root sequence content.
+/// Returns None for pending data, unstable JSON values, root sequence content, or deleted content
+/// a fork would collect.
 pub(crate) fn fork_state_len_v1<T: ReadTxn>(txn: &T) -> Option<usize> {
     let store = txn.store();
     if store.pending_update().is_some() || store.pending_ds().is_some() {
@@ -173,7 +180,10 @@ pub(crate) fn fork_state_len_v1<T: ReadTxn>(txn: &T) -> Option<usize> {
     }
     let mut encoder = CountingEncoderV1::default();
     txn.encode_state_as_update(&StateVector::default(), &mut encoder);
-    (!encoder.unstable_json && !encoder.root_sequence).then_some(encoder.len)
+    (!encoder.unstable_json
+        && !encoder.root_sequence
+        && encoder.tombstone_len == encoder.deleted_len)
+        .then_some(encoder.len)
 }
 
 pub(crate) fn encode_state_as_update_v1<T: ReadTxn>(
@@ -269,6 +279,10 @@ fn encode_any<W: Write>(any: &Any, encoder: &mut W) {
 }
 
 fn json_stable_fast(any: &Any) -> bool {
+    json_stable_fast_at(any, 0)
+}
+
+fn json_stable_fast_at(any: &Any, depth: usize) -> bool {
     match any {
         Any::Null | Any::Bool(_) => true,
         Any::String(value) => value
@@ -279,8 +293,12 @@ fn json_stable_fast(any: &Any) -> bool {
                 && value.trunc() == *value
                 && (*value != 0.0 || !value.is_sign_negative())
         }
-        Any::Array(values) => values.iter().all(json_stable_fast),
-        Any::Map(values) => values.values().all(json_stable_fast),
+        Any::Array(values) => {
+            depth < 32 && values.iter().all(|v| json_stable_fast_at(v, depth + 1))
+        }
+        Any::Map(values) => {
+            depth < 32 && values.values().all(|v| json_stable_fast_at(v, depth + 1))
+        }
         _ => false,
     }
 }
@@ -563,6 +581,36 @@ mod tests {
             let txn = doc.yrs_doc().transact();
             assert_eq!(text.len(&txn), 0);
             assert_eq!(fork_state_len_v1(&txn), None);
+        }
+    }
+
+    #[test]
+    fn retained_deleted_content_has_no_fork_length() {
+        let ctx = EditCtx::local("Ann", "2026-09-24T12:00:00Z");
+        for tracked in [false, true] {
+            let doc = EditingDoc::new(901);
+            doc.create_story("body", "ABX", "Normal", "left").unwrap();
+            let history = tracked.then(|| doc.undo_manager());
+            doc.delete_range(&ctx, StoryRange::new("body", 2, 3))
+                .unwrap();
+            if tracked {
+                assert_eq!(history.unwrap().undo_depth(), 1);
+                assert_eq!(fork_state_len_v1(&doc.yrs_doc().transact()), None);
+            } else {
+                assert_len(&doc);
+            }
+        }
+    }
+
+    #[test]
+    fn deeply_nested_json_takes_the_exact_proof() {
+        let nest =
+            |depth: usize| (0..depth).fold(Any::Null, |inner, _| Any::Array(Arc::from([inner])));
+        assert!(json_stable_fast(&nest(32)));
+        for (depth, stable) in [(33, true), (128, false)] {
+            let value = nest(depth);
+            assert!(!json_stable_fast(&value));
+            assert_json_stability(&value, stable);
         }
     }
 

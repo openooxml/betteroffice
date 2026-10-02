@@ -3331,16 +3331,24 @@ mod direct_tests {
             replica.encode_state_as_update_v1()
         );
         direct.set_direct_batches(true);
-        let epochs = [direct.committed_epoch(), replica.committed_epoch()];
+        let revisions = [
+            direct.stories_changed_since(0).0,
+            replica.stories_changed_since(0).0,
+        ];
         let steps = [BatchStep::Edit(&step)];
         let a = apply_text_steps(&direct, &steps, &UndoSession::new(), MAX_STAGING_BYTES).unwrap();
         let b = apply_text_steps(&replica, &steps, &UndoSession::new(), MAX_STAGING_BYTES).unwrap();
         assert!(a.applied);
         assert_eq!(normalized(&a), normalized(&b));
         assert_eq!(a.changed_stories, b.changed_stories);
+        assert!(!a.changed_stories.is_empty());
         assert_eq!(
-            direct.stories_changed_since(epochs[0]).1,
-            replica.stories_changed_since(epochs[1]).1
+            direct.stories_changed_since(revisions[0]).1,
+            a.changed_stories
+        );
+        assert_eq!(
+            replica.stories_changed_since(revisions[1]).1,
+            b.changed_stories
         );
         assert_eq!(direct.direct_batches_applied(), 0);
         assert_eq!(replica.direct_batches_applied(), 0);
@@ -3509,6 +3517,18 @@ mod direct_tests {
         assert_eq!(
             direct.id_counter.load(Ordering::Relaxed),
             replica.id_counter.load(Ordering::Relaxed)
+        );
+        let direct = document();
+        let replica = document();
+        direct.set_direct_batches(true);
+        let a = apply_text_steps(&direct, &steps, &UndoSession::new(), n + 1).unwrap();
+        let b = apply_text_steps(&replica, &steps, &UndoSession::new(), n + 1).unwrap();
+        assert!(a.applied);
+        assert_eq!(normalized(&a), normalized(&b));
+        assert_eq!(direct.direct_batches_applied(), 1);
+        assert_eq!(
+            direct.story_segments("body").unwrap(),
+            replica.story_segments("body").unwrap()
         );
     }
 
@@ -3956,7 +3976,7 @@ mod direct_tests {
 
     #[test]
     fn unstable_following_paragraph_format_uses_replica_path_for_plain_delete() {
-        let [direct, replica] = [(), ()].map(|_| {
+        let state = {
             let doc = EditingDoc::new(9001);
             doc.seed_story(
                 "body",
@@ -3983,8 +4003,59 @@ mod direct_tests {
                     HashMap::from([("bold".into(), Any::Number(f64::INFINITY))]),
                 );
             }
+            doc.encode_state_as_update_v1()
+        };
+        let [direct, replica] = [(), ()].map(|_| {
+            let doc = EditingDoc::new(9001);
+            doc.apply_update_v1(&state).unwrap();
             doc
         });
+        let paragraph = direct.paragraphs("body").unwrap()[0].para_id.clone();
+        assert_replica_fallback_docs(
+            direct,
+            replica,
+            EditStep::new(EditOperation::DeleteText {
+                target: TextTarget::Range(text_range("body", &paragraph, 1, &paragraph, 2)),
+            }),
+        );
+    }
+
+    #[test]
+    fn retained_deleted_text_uses_replica_path() {
+        let state = {
+            let doc = EditingDoc::new(9001);
+            doc.seed_story(
+                "body",
+                &["ABX", "C"].map(|text| crate::SeedParagraph {
+                    text: text.to_owned(),
+                    p_style: "Normal".to_owned(),
+                    alignment: "left".to_owned(),
+                }),
+            )
+            .unwrap();
+            doc.encode_state_as_update_v1()
+        };
+        let [direct, replica] = [(), ()].map(|_| {
+            let doc = EditingDoc::new(9001);
+            doc.apply_update_v1(&state).unwrap();
+            doc
+        });
+        let histories = [&direct, &replica].map(|doc| {
+            let history = doc.undo_manager();
+            doc.delete_range(&EditCtx::local("User", DATE), StoryRange::new("body", 2, 3))
+                .unwrap();
+            let mut txn = doc.yrs_doc().transact_mut();
+            let story = story_ref(&txn, "body").unwrap();
+            let italic = HashMap::from([("italic".into(), Any::Bool(true))]);
+            story.format(&mut txn, 0, 2, italic.clone());
+            story.format(&mut txn, 3, 1, italic);
+            history
+        });
+        assert_eq!(histories[0].undo_depth(), 1);
+        assert_eq!(
+            deterministic::fork_state_len_v1(&direct.yrs_doc().transact()),
+            None
+        );
         let paragraph = direct.paragraphs("body").unwrap()[0].para_id.clone();
         assert_replica_fallback_docs(
             direct,
