@@ -3020,6 +3020,8 @@ test('a worker that fails while a layout request waits keeps the request path ro
   const errorLog = spyOn(console, 'error').mockImplementation(() => {});
   const { result, unmount } = renderHook(useHarness, { initialProps });
   try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    act(() => result.current.pipeline.runLayoutPipeline());
     await act(async () => { await received('bootstrap'); });
     await failIdleWorker(workers[0], 'worker lost mid-load');
     await waitFor(() => expect(result.current.renderer.frame).not.toBeNull());
