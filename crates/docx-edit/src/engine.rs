@@ -11178,6 +11178,56 @@ mod tests {
     }
 
     #[test]
+    fn preview_decision_after_a_page_frame_sends_a_cold_window() {
+        for (local, retain) in [(false, false), (true, false), (false, true), (true, true)] {
+            let (engine, mut request, extras, revision) = preview_display_fixture(" new", false);
+            engine.set_local_lowering(local);
+            engine.set_display_retain_built_pages(retain);
+            engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap();
+            let mut mirror = HashMap::new();
+            let mut epoch = 0;
+            let bytes = engine.build_display_list_frame(&extras, epoch).unwrap();
+            let shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+            assert!(shown.pages.len() >= 8);
+            assert!(shown.pages[1].unbuilt);
+            request["renderEnv"]["revisionPreview"] = json!({revision.clone(): "rejected"});
+            engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap();
+            assert!(engine.pagination.borrow().preview_only_pass);
+            assert!(engine.pagination.borrow().last_incremental);
+            let bytes = engine.build_display_pages_frame(&[1], epoch).unwrap();
+            assert!(!bytes.is_empty());
+            let shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+            {
+                let layout_epoch = engine.pagination.borrow().layout_epoch;
+                let display = engine.display.borrow();
+                assert_eq!(display.encoded_layout_epoch, layout_epoch);
+                assert_eq!(display.list_layout_epoch, layout_epoch.wrapping_sub(1));
+            }
+            let cold = cold_preview_display_list(&engine, &request, &extras, &shown);
+            let before = engine.stats();
+            let bytes = engine.build_display_list_frame(&extras, epoch).unwrap();
+            let decided = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+            assert_eq!(
+                engine.stats().incremental_display_builds,
+                before.incremental_display_builds + 1
+            );
+            assert_eq!(decided.pages.len(), cold.pages.len());
+            for (index, (page, expected)) in decided.pages.iter().zip(&cold.pages).enumerate() {
+                assert_eq!(
+                    page, expected,
+                    "page {index}, local lowering {local}, retain {retain}"
+                );
+            }
+            assert_eq!(decided, cold, "local lowering {local}, retain {retain}");
+            docx_layout::clear_measure_fonts();
+        }
+    }
+
+    #[test]
     fn preview_only_pass_tracks_completed_layouts() {
         let (engine, mut request, extras, revision) = preview_display_fixture(" new", false);
         engine
