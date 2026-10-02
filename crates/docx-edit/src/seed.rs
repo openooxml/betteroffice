@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 use serde::de::{MapAccess, SeqAccess, Visitor};
@@ -294,7 +294,7 @@ impl SourceMetadata {
         let paragraph = json!({ "type": "paragraph", "formatting": formatting, "content": [] });
         let attrs = paragraph_attrs(&paragraph, &self.styles, &[], &[], None);
         let run = marks_to_attrs(&formatting_to_marks(
-            paragraph_style_formatting(&paragraph, &self.styles, None).as_ref(),
+            paragraph_style_formatting(&paragraph, &self.styles, None).as_deref(),
         ));
         Ok(StyledParagraph {
             properties: payload(para_attrs_to_ppr(attrs))?,
@@ -313,7 +313,7 @@ impl SourceMetadata {
         let paragraph = json!({ "type": "paragraph", "formatting": formatting, "content": [] });
         let style = paragraph_style_formatting(&paragraph, &self.styles, None);
         let run_style = self.styles.run_style_own(string(field(control, "styleId")));
-        let inherited = merge_text_formatting(style.as_ref(), run_style.as_ref());
+        let inherited = merge_text_formatting(style.as_deref(), run_style);
         let merged = merge_text_formatting(inherited.as_ref(), control);
         payload(marks_to_attrs(&formatting_to_marks(merged.as_ref())))
     }
@@ -388,7 +388,7 @@ impl SourceMetadata {
     /// strike, vertical alignment and hidden state.
     pub(crate) fn same_run_marks(&self, left: Option<&str>, right: Option<&str>) -> bool {
         let marks = |style_id: Option<&str>| {
-            let (_, run) = self.styles.resolve_paragraph_style(style_id);
+            let style = self.styles.resolve_paragraph_style(style_id);
             [
                 "bold",
                 "italic",
@@ -397,7 +397,11 @@ impl SourceMetadata {
                 "vertAlign",
                 "hidden",
             ]
-            .map(|key| field(run.as_ref(), key).cloned().unwrap_or(Value::Null))
+            .map(|key| {
+                field(style.run.as_deref(), key)
+                    .cloned()
+                    .unwrap_or(Value::Null)
+            })
         };
         marks(left) == marks(right)
     }
@@ -544,6 +548,66 @@ struct StyleResolver {
     default_table: Option<String>,
     default_character: Option<String>,
     table_paragraph_formatting: Option<Value>,
+    memo: StyleMemo,
+}
+
+struct ResolvedParagraphStyle {
+    paragraph: Option<Value>,
+    run: Option<Arc<Value>>,
+    default_run: Option<Arc<Value>>,
+}
+
+/// Maximum approximate retained value size across both style memos.
+const STYLE_MEMO_BYTES: usize = 4 << 20;
+
+/// Approximate fixed cost charged for every memo entry.
+const STYLE_MEMO_ENTRY_BYTES: usize = 64;
+
+/// Paragraph styles grouped by exact lookup result.
+#[derive(Default)]
+struct ParagraphStyleMemo {
+    absent: Option<Arc<ResolvedParagraphStyle>>,
+    undefined: Option<Arc<ResolvedParagraphStyle>>,
+    styles: HashMap<String, Arc<ResolvedParagraphStyle>>,
+}
+
+/// Run styles grouped by exact lookup result.
+#[derive(Default)]
+struct RunStyleMemo {
+    unstyled: Option<Option<Arc<Value>>>,
+    styles: HashMap<String, Option<Arc<Value>>>,
+}
+
+/// Style memos sharing one retained value budget.
+#[derive(Default)]
+struct MemoState {
+    paragraphs: ParagraphStyleMemo,
+    runs: RunStyleMemo,
+    bytes: usize,
+}
+
+#[derive(Default)]
+struct StyleMemo {
+    state: Mutex<MemoState>,
+}
+
+impl Clone for StyleMemo {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+/// Estimates JSON storage from nodes, strings, and object keys.
+fn approx_bytes(value: &Value) -> usize {
+    32 + match value {
+        Value::String(value) => value.len(),
+        Value::Array(values) => values.iter().map(approx_bytes).sum(),
+        Value::Object(values) => values
+            .iter()
+            .map(|(key, value)| key.len() + approx_bytes(value))
+            .sum(),
+        _ => 0,
+    }
 }
 
 fn object(value: Option<&Value>) -> Option<&Map<String, Value>> {
@@ -1087,7 +1151,78 @@ impl StyleResolver {
         id.and_then(|id| self.style(id))
     }
 
-    fn resolve_paragraph_style(&self, style_id: Option<&str>) -> (Option<Value>, Option<Value>) {
+    fn set_table_paragraph_formatting(&mut self, formatting: Option<Value>) -> Option<Value> {
+        let previous = std::mem::replace(&mut self.table_paragraph_formatting, formatting);
+        self.memo = StyleMemo::default();
+        previous
+    }
+
+    fn restore_table_paragraph_formatting(&mut self, state: Option<Value>) {
+        self.table_paragraph_formatting = state;
+        self.memo = StyleMemo::default();
+    }
+
+    fn resolve_paragraph_style(&self, style_id: Option<&str>) -> Arc<ResolvedParagraphStyle> {
+        let defined_id = style_id.filter(|id| self.style(id).is_some());
+        let mut memo = self
+            .memo
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let cached = match (style_id, defined_id) {
+            (None, _) => memo.paragraphs.absent.as_ref(),
+            (_, Some(id)) => memo.paragraphs.styles.get(id),
+            _ => memo.paragraphs.undefined.as_ref(),
+        };
+        if let Some(cached) = cached {
+            return Arc::clone(cached);
+        }
+        let (paragraph, run) = self.resolve_paragraph_style_uncached(style_id);
+        let run = run.map(Arc::new);
+        let default_character = self
+            .default_style("character")
+            .and_then(|style| field(Some(style), "rPr"));
+        let default_run = if default_character.is_some() {
+            merge_text_formatting(run.as_deref(), default_character).map(Arc::new)
+        } else {
+            run.clone()
+        };
+        let shared_default = default_character.is_none();
+        let size = STYLE_MEMO_ENTRY_BYTES
+            + defined_id.map_or(0, str::len)
+            + [
+                paragraph.as_ref(),
+                run.as_deref(),
+                default_run.as_deref().filter(|_| !shared_default),
+            ]
+            .into_iter()
+            .flatten()
+            .map(approx_bytes)
+            .sum::<usize>();
+        let resolved = Arc::new(ResolvedParagraphStyle {
+            paragraph,
+            run,
+            default_run,
+        });
+        if memo.bytes + size <= STYLE_MEMO_BYTES {
+            memo.bytes += size;
+            match (style_id, defined_id) {
+                (None, _) => memo.paragraphs.absent = Some(Arc::clone(&resolved)),
+                (_, Some(id)) => {
+                    memo.paragraphs
+                        .styles
+                        .insert(id.to_owned(), Arc::clone(&resolved));
+                }
+                _ => memo.paragraphs.undefined = Some(Arc::clone(&resolved)),
+            }
+        }
+        resolved
+    }
+
+    fn resolve_paragraph_style_uncached(
+        &self,
+        style_id: Option<&str>,
+    ) -> (Option<Value>, Option<Value>) {
         let mut paragraph = merge_paragraph_formatting(
             field(self.doc_defaults.as_ref(), "pPr"),
             self.table_paragraph_formatting.as_ref(),
@@ -1120,7 +1255,37 @@ impl StyleResolver {
         (paragraph, run)
     }
 
-    fn resolve_run_style(&self, style_id: Option<&str>) -> Option<Value> {
+    fn resolve_run_style(&self, style_id: Option<&str>) -> Option<Arc<Value>> {
+        let defined_id = style_id.filter(|id| self.style(id).is_some());
+        let mut memo = self
+            .memo
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let cached = match defined_id {
+            Some(id) => memo.runs.styles.get(id),
+            None => memo.runs.unstyled.as_ref(),
+        };
+        if let Some(cached) = cached {
+            return cached.clone();
+        }
+        let resolved = self.resolve_run_style_uncached(style_id).map(Arc::new);
+        let size = STYLE_MEMO_ENTRY_BYTES
+            + defined_id.map_or(0, str::len)
+            + resolved.as_deref().map_or(0, approx_bytes);
+        if memo.bytes + size <= STYLE_MEMO_BYTES {
+            memo.bytes += size;
+            match defined_id {
+                Some(id) => {
+                    memo.runs.styles.insert(id.to_owned(), resolved.clone());
+                }
+                None => memo.runs.unstyled = Some(resolved.clone()),
+            }
+        }
+        resolved
+    }
+
+    fn resolve_run_style_uncached(&self, style_id: Option<&str>) -> Option<Value> {
         let mut result = field(self.doc_defaults.as_ref(), "rPr").cloned();
         result = merge_text_formatting(
             result.as_ref(),
@@ -1133,11 +1298,10 @@ impl StyleResolver {
         result
     }
 
-    fn run_style_own(&self, style_id: Option<&str>) -> Option<Value> {
+    fn run_style_own(&self, style_id: Option<&str>) -> Option<&Value> {
         style_id
             .and_then(|id| self.style(id))
             .and_then(|style| field(Some(style), "rPr"))
-            .cloned()
     }
 }
 
@@ -1429,7 +1593,7 @@ fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolv
     let formatting = field(Some(run), "formatting");
     let style_id = string(field(formatting, "styleId"));
     let run_style = styles.run_style_own(style_id);
-    let inherited = merge_text_formatting(style_formatting, run_style.as_ref());
+    let inherited = merge_text_formatting(style_formatting, run_style);
     let merged = merge_text_formatting(inherited.as_ref(), formatting);
     let mut marks = formatting_to_marks(merged.as_ref());
     let hyperlink_style = style_id.is_some_and(is_hyperlink_style_name)
@@ -1440,7 +1604,7 @@ fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolv
     if hyperlink_style {
         for (property, name) in [("color", "textColor"), ("underline", "underline")] {
             if field(formatting, property).is_none()
-                && field(run_style.as_ref(), property).is_some()
+                && field(run_style, property).is_some()
                 && let Some(mark) = marks.iter_mut().find(|mark| mark.name == name)
             {
                 mark.attrs
@@ -2444,13 +2608,16 @@ fn paragraph_style_formatting(
     paragraph: &Value,
     styles: &StyleResolver,
     extra: Option<&Value>,
-) -> Option<Value> {
+) -> Option<Arc<Value>> {
     let style_id = string(field(field(Some(paragraph), "formatting"), "styleId"));
     let style = styles
         .enabled
-        .then(|| styles.resolve_paragraph_style(style_id).1)
+        .then(|| styles.resolve_paragraph_style(style_id).run.clone())
         .flatten();
-    merge_text_formatting(style.as_ref(), extra)
+    if object(extra).is_none() {
+        return style;
+    }
+    merge_text_formatting(style.as_deref(), extra).map(Arc::new)
 }
 
 /// Note number marks carry no story unit, so the run boundary cache is the only
@@ -2560,7 +2727,7 @@ fn resolved_text_formatting(formatting: Option<&Value>, styles: &StyleResolver) 
     let style = formatting
         .and_then(|formatting| string(field(Some(formatting), "styleId")))
         .and_then(|style_id| styles.resolve_run_style(Some(style_id)));
-    merge_text_formatting(style.as_ref(), formatting)
+    merge_text_formatting(style.as_deref(), formatting)
 }
 
 fn paragraph_attrs(
@@ -2585,30 +2752,55 @@ fn paragraph_attrs(
     } else {
         (None, None)
     };
-    let mut attrs = map_from_value(json!({
-        "paraId": nullish(field(Some(paragraph), "paraId")),
-        "textId": nullish(field(Some(paragraph), "textId")),
-        "styleId": style_id,
-        "numPr": nullish(field(formatting, "numPr")),
-        "numPrFromStyle": nullish(field(formatting, "numPrFromStyle")),
-        "listNumFmt": nullish(field(list, "numFmt")),
-        "listIsBullet": nullish(field(list, "isBullet")),
-        "listMarker": nullish(field(list, "marker")),
-        "listMarkerHidden": truthy(field(list, "markerHidden")).then(|| field(list, "markerHidden").cloned()).flatten(),
-        "listMarkerFontFamily": string(field(list, "markerFontFamily")).filter(|value| !value.is_empty()),
-        "listMarkerFontSize": number(field(list, "markerFontSize")).filter(|value| *value != 0.0),
-        "listMarkerBold": nullish(field(list, "markerBold")),
-        "listMarkerItalic": nullish(field(list, "markerItalic")),
-        "listMarkerColor": nullish(field(list, "markerColor")),
-        "listMarkerSuffix": string(field(list, "markerSuffix")).filter(|value| !value.is_empty()),
-        "listLevelNumFmts": truthy(field(list, "levelNumFmts")).then(|| field(list, "levelNumFmts").cloned()).flatten(),
-        "listAbstractNumId": nullish(field(list, "abstractNumId")),
-        "listStartOverride": nullish(field(list, "startOverride")),
-        "_originalFormatting": nullish(formatting)
-    }));
+    let mut attrs = JsonObject::new();
+    for (key, value) in [
+        ("paraId", field(Some(paragraph), "paraId")),
+        ("textId", field(Some(paragraph), "textId")),
+        ("numPr", field(formatting, "numPr")),
+        ("numPrFromStyle", field(formatting, "numPrFromStyle")),
+        ("listNumFmt", field(list, "numFmt")),
+        ("listIsBullet", field(list, "isBullet")),
+        ("listMarker", field(list, "marker")),
+        (
+            "listMarkerHidden",
+            field(list, "markerHidden").filter(|value| truthy(Some(value))),
+        ),
+        ("listMarkerBold", field(list, "markerBold")),
+        ("listMarkerItalic", field(list, "markerItalic")),
+        ("listMarkerColor", field(list, "markerColor")),
+        (
+            "listLevelNumFmts",
+            field(list, "levelNumFmts").filter(|value| truthy(Some(value))),
+        ),
+        ("listAbstractNumId", field(list, "abstractNumId")),
+        ("listStartOverride", field(list, "startOverride")),
+        ("_originalFormatting", formatting),
+    ] {
+        if let Some(value) = value.filter(|value| !value.is_null()) {
+            attrs.insert(key.to_owned(), drop_nulls(value.clone()));
+        }
+    }
+    for (key, value) in [
+        ("styleId", style_id),
+        (
+            "listMarkerFontFamily",
+            string(field(list, "markerFontFamily")).filter(|value| !value.is_empty()),
+        ),
+        (
+            "listMarkerSuffix",
+            string(field(list, "markerSuffix")).filter(|value| !value.is_empty()),
+        ),
+    ] {
+        if let Some(value) = value {
+            attrs.insert(key.to_owned(), Value::String(value.to_owned()));
+        }
+    }
+    if let Some(size) = number(field(list, "markerFontSize")).filter(|value| *value != 0.0) {
+        attrs.insert("listMarkerFontSize".to_owned(), json!(size));
+    }
     if styles.enabled {
-        let (style_ppr, resolved_run) = styles.resolve_paragraph_style(style_id);
-        let style_ppr_ref = style_ppr.as_ref();
+        let style = styles.resolve_paragraph_style(style_id);
+        let style_ppr_ref = style.paragraph.as_ref();
         for key in STYLE_FALLBACK_KEYS {
             attrs.insert(
                 key.to_owned(),
@@ -2660,18 +2852,11 @@ fn paragraph_attrs(
             .cloned()
             .unwrap_or(Value::Bool(false)),
         );
-        let default_character = styles
-            .default_style("character")
-            .and_then(|style| field(Some(style), "rPr"));
-        let style_rpr = if default_character.is_some() {
-            merge_text_formatting(resolved_run.as_ref(), default_character)
-        } else {
-            resolved_run
-        };
         let direct = resolved_text_formatting(field(formatting, "runProperties"), styles);
         attrs.insert(
             "defaultTextFormatting".to_owned(),
-            merge_text_formatting(style_rpr.as_ref(), direct.as_ref()).unwrap_or(Value::Null),
+            merge_text_formatting(style.default_run.as_deref(), direct.as_ref())
+                .unwrap_or(Value::Null),
         );
         if field(formatting, "numPr").is_none()
             && field(style_ppr_ref, "numPr").is_some()
@@ -3247,7 +3432,7 @@ fn paragraph_units(
             }
             "run" => {
                 let run_units =
-                    run_to_units(content, style_formatting.as_ref(), styles, &[], source);
+                    run_to_units(content, style_formatting.as_deref(), styles, &[], source);
                 if let Some(run_boundaries) = &mut boundaries {
                     if let Some(boundary) = run_boundary(content, &run_units, source) {
                         run_boundaries.push(boundary);
@@ -3262,7 +3447,7 @@ fn paragraph_units(
                 opaque_sequences.extend(hyperlink_sequence_names(content));
                 let linked = hyperlink_to_units(
                     content,
-                    style_formatting.as_ref(),
+                    style_formatting.as_deref(),
                     styles,
                     &[],
                     source,
@@ -3274,7 +3459,7 @@ fn paragraph_units(
                 boundaries = None;
                 units.extend(field_to_units(
                     content,
-                    style_formatting.as_ref(),
+                    style_formatting.as_deref(),
                     styles,
                     source,
                     unit_counts.len(),
@@ -3287,7 +3472,7 @@ fn paragraph_units(
                     "sdt",
                     sdt_payload(
                         content,
-                        style_formatting.as_ref(),
+                        style_formatting.as_deref(),
                         styles,
                         source,
                         &mut opaque_sequences,
@@ -3300,7 +3485,7 @@ fn paragraph_units(
                 boundaries = None;
                 units.extend(tracked_to_units(
                     content,
-                    style_formatting.as_ref(),
+                    style_formatting.as_deref(),
                     styles,
                     source,
                     &mut opaque_sequences,
@@ -4793,11 +4978,13 @@ fn visit_story(
                 context.plans[plan_index]
                     .units
                     .push(embed_unit("table", payload, &[], 1));
-                let previous_table_formatting = context.styles.table_paragraph_formatting.take();
+                let previous_table_state = context.styles.set_table_paragraph_formatting(None);
                 let sources = source_cells(block);
                 for (row_index, row) in table.rows.into_iter().enumerate() {
                     for (cell_index, cell) in row.cells.into_iter().enumerate() {
-                        context.styles.table_paragraph_formatting = cell.paragraph_formatting;
+                        context
+                            .styles
+                            .set_table_paragraph_formatting(cell.paragraph_formatting);
                         let source_cell = sources
                             .get(row_index)
                             .and_then(|cells| cells.get(cell_index))
@@ -4833,7 +5020,9 @@ fn visit_story(
                         );
                     }
                 }
-                context.styles.table_paragraph_formatting = previous_table_formatting;
+                context
+                    .styles
+                    .restore_table_paragraph_formatting(previous_table_state);
                 last_kind = Some("table");
             }
             _ => {
@@ -6853,6 +7042,389 @@ mod tests {
         assert_eq!(properties["listMarkerColor"], json!({"rgb":"000000"}));
         assert_eq!(properties["listMarkerFontFamily"], json!("Times New Roman"));
         assert_eq!(properties["listMarkerFontSize"], json!(12.0));
+    }
+
+    #[test]
+    fn paragraph_and_run_formatting_preserve_uncached_resolution() {
+        let definitions = json!({
+            "docDefaults": { "pPr": { "alignment": "left" }, "rPr": { "bold": false } },
+            "styles": [
+                { "styleId": "Normal", "type": "paragraph", "default": true,
+                    "pPr": { "spaceAfter": 120 }, "rPr": { "bold": true } },
+                { "styleId": "Body", "type": "paragraph", "rPr": { "italic": true } },
+                { "styleId": "body", "type": "paragraph", "rPr": { "italic": false } },
+                { "styleId": "Character", "type": "character", "default": true,
+                    "rPr": { "fontFamily": { "asciiTheme": "minorHAnsi" } } },
+                { "styleId": "Accent", "type": "character",
+                    "rPr": { "fontFamily": { "ascii": "Example" }, "bold": false } }
+            ]
+        });
+        let extras = [
+            Value::Null,
+            json!(false),
+            json!(5),
+            json!("extra"),
+            json!([null, {}]),
+            json!({}),
+            json!({ "bold": false, "fontFamily": { "ascii": "Direct" } }),
+        ];
+        let assert_formatting = |styles: &StyleResolver, style_id: Option<&str>| {
+            let paragraph = json!({ "formatting": { "styleId": style_id }, "content": [] });
+            let (ppr, run) = styles.resolve_paragraph_style_uncached(style_id);
+            let inherited_run = styles.enabled.then_some(run.as_ref()).flatten();
+            for extra in std::iter::once(None).chain(extras.iter().map(Some)) {
+                let actual = paragraph_style_formatting(&paragraph, styles, extra);
+                let expected = merge_text_formatting(inherited_run, extra);
+                assert_eq!(actual.as_deref(), expected.as_ref());
+            }
+            let attrs = paragraph_attrs(&paragraph, styles, &[], &[], None);
+            if styles.enabled {
+                for key in STYLE_FALLBACK_KEYS {
+                    assert_eq!(
+                        attrs.get(key),
+                        Some(field(ppr.as_ref(), key).unwrap_or(&Value::Null))
+                    );
+                }
+                let character = styles
+                    .default_style("character")
+                    .and_then(|style| field(Some(style), "rPr"));
+                let expected = merge_text_formatting(run.as_ref(), character);
+                assert_eq!(
+                    attrs.get("defaultTextFormatting"),
+                    Some(expected.as_ref().unwrap_or(&Value::Null))
+                );
+            }
+            let formatting = json!({ "styleId": style_id, "color": { "rgb": "123456" } });
+            let run = style_id.and_then(|id| styles.resolve_run_style_uncached(Some(id)));
+            assert_eq!(
+                resolved_text_formatting(Some(&formatting), styles),
+                merge_text_formatting(run.as_ref(), Some(&formatting))
+            );
+            assert_eq!(
+                styles.resolve_run_style(style_id).as_deref(),
+                styles.resolve_run_style_uncached(style_id).as_ref()
+            );
+            let memo = styles.memo.state.lock().unwrap();
+            assert!(memo.bytes <= STYLE_MEMO_BYTES);
+            assert!(memo.paragraphs.styles.len() <= styles.styles.len());
+            assert!(memo.runs.styles.len() <= styles.styles.len());
+        };
+        for styles in [
+            StyleResolver::new(Some(&definitions)),
+            StyleResolver::new(Some(&json!({}))),
+            StyleResolver::new(None),
+        ] {
+            for _ in 0..2 {
+                for style_id in [
+                    None,
+                    Some(""),
+                    Some("Missing"),
+                    Some("Normal"),
+                    Some("Body"),
+                    Some("body"),
+                    Some("Character"),
+                    Some("Accent"),
+                ] {
+                    assert_formatting(&styles, style_id);
+                }
+            }
+        }
+        let styles = StyleResolver::new(Some(&json!({})));
+        let absent = styles.resolve_paragraph_style(None);
+        let undefined = styles.resolve_paragraph_style(Some("Missing"));
+        assert_eq!(
+            absent.paragraph,
+            Some(json!({ "spaceAfter": 160, "lineSpacing": 259, "lineSpacingRule": "auto" }))
+        );
+        assert_eq!(undefined.paragraph, None);
+        assert!(!Arc::ptr_eq(&absent, &undefined));
+        assert!(Arc::ptr_eq(
+            &undefined,
+            &styles.resolve_paragraph_style(Some("AnotherMissing"))
+        ));
+
+        let font_name = "x".repeat(64 << 10);
+        let mut definitions = json!({
+            "docDefaults": {
+                "pPr": { "alignment": "left", "runProperties": { "fontFamily": { "ascii": font_name } } },
+                "rPr": { "bold": false, "fontFamily": { "ascii": font_name } }
+            },
+            "styles": [
+                { "styleId": "Character", "type": "character", "default": true,
+                    "rPr": { "italic": true } }
+            ]
+        });
+        definitions["styles"]
+            .as_array_mut()
+            .unwrap()
+            .extend((0..200).map(|index| {
+                json!({
+                    "styleId": format!("Defined{index}"), "type": "paragraph",
+                    "pPr": { "spaceAfter": index }, "rPr": { "bold": index % 2 == 0 }
+                })
+            }));
+        let mut styles = StyleResolver::new(Some(&definitions));
+        let mut style_ids = Vec::new();
+        for index in 0..500 {
+            style_ids.push(format!("Undefined{index}"));
+            if index < 200 {
+                style_ids.push(format!("Defined{index}"));
+            }
+        }
+        assert_formatting(&styles, None);
+        assert!(Arc::ptr_eq(
+            &styles.resolve_run_style(None).unwrap(),
+            &styles.resolve_run_style(Some("Undefined0")).unwrap()
+        ));
+        for _ in 0..2 {
+            for style_id in &style_ids {
+                assert_formatting(&styles, Some(style_id));
+            }
+        }
+        {
+            let memo = styles.memo.state.lock().unwrap();
+            assert!(memo.bytes > STYLE_MEMO_BYTES / 2);
+            assert!(memo.paragraphs.absent.is_some());
+            assert!(memo.paragraphs.undefined.is_some());
+            assert!(memo.runs.unstyled.is_some());
+            assert!(memo.paragraphs.styles.len() < 200);
+            assert!(memo.runs.styles.len() < 200);
+        }
+        let cloned = styles.clone();
+        assert_eq!(cloned.memo.state.lock().unwrap().bytes, 0);
+        let previous = styles.set_table_paragraph_formatting(Some(json!({ "alignment": "right" })));
+        assert_eq!(previous, None);
+        assert_eq!(styles.memo.state.lock().unwrap().bytes, 0);
+        assert_formatting(&styles, Some("Defined0"));
+        let outer = styles.set_table_paragraph_formatting(Some(json!({ "alignment": "center" })));
+        assert_eq!(outer, Some(json!({ "alignment": "right" })));
+        assert_eq!(styles.memo.state.lock().unwrap().bytes, 0);
+        assert_formatting(&styles, Some("Defined0"));
+        styles.restore_table_paragraph_formatting(outer);
+        assert_eq!(styles.memo.state.lock().unwrap().bytes, 0);
+        assert_formatting(&styles, Some("Defined0"));
+        styles.restore_table_paragraph_formatting(previous);
+        assert_eq!(styles.memo.state.lock().unwrap().bytes, 0);
+        assert_formatting(&styles, Some("Defined0"));
+    }
+
+    #[test]
+    fn style_memo_bounds_empty_styles_with_long_ids() {
+        let ids = (0..5000)
+            .map(|index| format!("{index:0>1024}"))
+            .collect::<Vec<_>>();
+        let definitions = json!({
+            "styles": ids
+                .iter()
+                .map(|id| json!({ "styleId": id, "type": "paragraph" }))
+                .collect::<Vec<_>>()
+        });
+        let styles = StyleResolver::new(Some(&definitions));
+        for id in &ids {
+            let resolved = styles.resolve_paragraph_style(Some(id));
+            let (paragraph, run) = styles.resolve_paragraph_style_uncached(Some(id));
+            assert_eq!(resolved.paragraph, paragraph);
+            assert_eq!(resolved.run.as_deref(), run.as_ref());
+            assert_eq!(
+                styles.resolve_run_style(Some(id)).as_deref(),
+                styles.resolve_run_style_uncached(Some(id)).as_ref()
+            );
+        }
+        let memo = styles.memo.state.lock().unwrap();
+        assert!(memo.bytes <= STYLE_MEMO_BYTES);
+        assert!(memo.paragraphs.styles.len() + memo.runs.styles.len() < ids.len());
+    }
+
+    #[test]
+    fn table_cell_paragraph_styles_preserve_body_and_nested_table_formatting() {
+        let paragraph = |id| {
+            fixture::para(
+                id,
+                &format!(
+                    r#"<w:pPr><w:pStyle w:val="Shared"/></w:pPr>{}"#,
+                    fixture::run("Same")
+                ),
+            )
+        };
+        let nested = format!(
+            r#"<w:tbl><w:tblPr><w:tblStyle w:val="Inner"/></w:tblPr><w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>"#,
+            paragraph("10000004")
+        );
+        let table = format!(
+            r#"<w:tbl><w:tblPr><w:tblStyle w:val="Cells"/><w:tblLook w:val="0780"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{}{}{nested}{}</w:tc><w:tc>{}{}</w:tc></w:tr></w:tbl>"#,
+            paragraph("10000002"),
+            paragraph("10000003"),
+            paragraph("10000005"),
+            paragraph("10000006"),
+            paragraph("10000007")
+        );
+        let styles = format!(
+            r#"<w:styles {}><w:docDefaults><w:pPrDefault><w:pPr><w:jc w:val="left"/><w:spacing w:before="10"/><w:ind w:right="80"/></w:pPr></w:pPrDefault><w:rPrDefault><w:rPr><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:pPr><w:spacing w:after="100"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Shared"><w:basedOn w:val="Normal"/><w:rPr><w:b/></w:rPr></w:style><w:style w:type="character" w:default="1" w:styleId="DefaultCharacter"><w:rPr><w:i/></w:rPr></w:style><w:style w:type="table" w:styleId="Cells"><w:pPr><w:ind w:right="240"/></w:pPr><w:tblStylePr w:type="firstCol"><w:pPr><w:jc w:val="center"/><w:spacing w:before="200"/></w:pPr></w:tblStylePr><w:tblStylePr w:type="lastCol"><w:pPr><w:jc w:val="right"/><w:spacing w:before="400"/></w:pPr></w:tblStylePr></w:style><w:style w:type="table" w:styleId="Inner"><w:pPr><w:jc w:val="both"/><w:spacing w:before="600"/><w:ind w:right="600"/></w:pPr></w:style></w:styles>"#,
+            fixture::namespaces()
+        );
+        let body = format!("{}{table}{}", paragraph("10000001"), paragraph("10000008"));
+        let bytes = fixture::Package::new(&body).styles(&styles).bytes();
+        let lowered = lower_docx(parse_docx_for_edit(&bytes).unwrap(), None).unwrap();
+        let actual: BTreeMap<_, Vec<_>> = lowered
+            .context
+            .plans
+            .iter()
+            .map(|plan| {
+                let attrs = plan
+                    .units
+                    .iter()
+                    .filter_map(|unit| match &unit.content {
+                        UnitContent::Embed { kind, payload } if kind == "pilcrow" => {
+                            Some(value_from_map(payload))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                (plan.story_id.clone(), attrs)
+            })
+            .collect();
+        let expected = |alignment, before, right, id| {
+            json!({
+                "paraId": id,
+                "sourceParaId": id,
+                "alignment": alignment,
+                "spaceBefore": before,
+                "spaceAfter": 100.0,
+                "indentRight": right,
+                "hangingIndent": false,
+                "defaultTextFormatting": { "fontSize": 22.0, "bold": true, "italic": true },
+                "pStyle": "Shared",
+                "_originalFormatting": { "styleId": "Shared" },
+                "_originalRunBoundaries": [{
+                    "text": "Same",
+                    "marksKey": r#"bold:{}|fontSize:{"size":22,"sizeCs":null}"#
+                }]
+            })
+        };
+        assert_eq!(
+            actual,
+            BTreeMap::from([
+                (
+                    "body".to_owned(),
+                    vec![
+                        expected("left", 10.0, 80.0, "10000001"),
+                        expected("left", 10.0, 80.0, "10000008"),
+                    ],
+                ),
+                (
+                    "body:t0:r0c0".to_owned(),
+                    vec![
+                        expected("center", 200.0, 240.0, "10000002"),
+                        expected("center", 200.0, 240.0, "10000003"),
+                        expected("center", 200.0, 240.0, "10000005"),
+                    ],
+                ),
+                (
+                    "body:t0:r0c0:t0:r0c0".to_owned(),
+                    vec![expected("both", 600.0, 600.0, "10000004")],
+                ),
+                (
+                    "body:t0:r0c1".to_owned(),
+                    vec![
+                        expected("right", 400.0, 240.0, "10000006"),
+                        expected("right", 400.0, 240.0, "10000007"),
+                    ],
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn paragraph_attrs_preserve_list_values_and_recursive_null_removal() {
+        let paragraph = json!({
+            "paraId": "12345678",
+            "textId": "ABCDEF01",
+            "formatting": {
+                "styleId": "List",
+                "numPr": { "numId": 5, "ilvl": null, "nested": { "keep": 1, "omit": null } },
+                "numPrFromStyle": { "numId": 5, "ilvl": null },
+                "nested": { "omit": null, "items": [null, { "keep": false, "omit": null }] },
+                "omit": null
+            },
+            "listRendering": {
+                "numFmt": "decimal",
+                "isBullet": false,
+                "marker": "5.",
+                "markerHidden": true,
+                "markerFontFamily": "Example",
+                "markerFontSize": 12,
+                "markerBold": false,
+                "markerItalic": true,
+                "markerColor": { "rgb": "123456", "themeColor": null },
+                "markerSuffix": "tab",
+                "levelNumFmts": ["decimal", null, { "format": "bullet", "omit": null }],
+                "abstractNumId": 0,
+                "startOverride": 5
+            },
+            "content": []
+        });
+        let actual = paragraph_attrs(&paragraph, &StyleResolver::new(None), &[], &[], None);
+        let expected: JsonObject = serde_json::from_str(
+            r#"{
+            "paraId": "12345678",
+            "textId": "ABCDEF01",
+            "styleId": "List",
+            "numPr": { "numId": 5, "nested": { "keep": 1 } },
+            "numPrFromStyle": { "numId": 5 },
+            "listNumFmt": "decimal",
+            "listIsBullet": false,
+            "listMarker": "5.",
+            "listMarkerHidden": true,
+            "listMarkerFontFamily": "Example",
+            "listMarkerFontSize": 12.0,
+            "listMarkerBold": false,
+            "listMarkerItalic": true,
+            "listMarkerColor": { "rgb": "123456" },
+            "listMarkerSuffix": "tab",
+            "listLevelNumFmts": ["decimal", null, { "format": "bullet" }],
+            "listAbstractNumId": 0,
+            "listStartOverride": 5,
+            "_originalFormatting": {
+                "styleId": "List",
+                "numPr": { "numId": 5, "nested": { "keep": 1 } },
+                "numPrFromStyle": { "numId": 5 },
+                "nested": { "items": [null, { "keep": false }] }
+            },
+            "alignment": null,
+            "spaceBefore": null,
+            "spaceAfter": null,
+            "spaceBeforeLines": null,
+            "spaceAfterLines": null,
+            "beforeAutospacing": null,
+            "afterAutospacing": null,
+            "lineSpacing": null,
+            "lineSpacingRule": null,
+            "indentRight": null,
+            "borders": null,
+            "shading": null,
+            "tabs": null,
+            "pageBreakBefore": null,
+            "keepNext": null,
+            "keepLines": null,
+            "widowControl": null,
+            "snapToGrid": null,
+            "autoSpaceDE": null,
+            "autoSpaceDN": null,
+            "outlineLevel": null,
+            "bidi": null,
+            "spacingExplicit": null,
+            "indentLeft": null,
+            "indentFirstLine": null,
+            "hangingIndent": false,
+            "defaultTextFormatting": null
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            serde_json::to_string(&actual).unwrap(),
+            serde_json::to_string(&expected).unwrap()
+        );
     }
 
     use super::*;
