@@ -20,11 +20,31 @@ fn seeded(bytes: &[u8]) -> EditingDoc {
 
 fn build_aliased_room(doc: &EditingDoc, bytes: &[u8]) {
     seed_from_docx_with_generation(doc, bytes, "aliases").unwrap();
-    let groups = docx_parse::parse_docx_s9_wire(bytes, Default::default())
+    let parts = ooxml_opc::unzip_parts(bytes).unwrap();
+    let limits = docx_parse::ParseLimits::default();
+    let mut budget = docx_parse::ParseBudget::new(&limits);
+    let relationships_path = "word/_rels/document.xml.rels";
+    let relationships_xml = &parts
+        .iter()
+        .find(|(path, _)| path == relationships_path)
         .unwrap()
-        .document
-        .package
-        .header_footer_aliases;
+        .1;
+    let relationships =
+        docx_parse::parse_relationships(relationships_xml, relationships_path, &mut budget).unwrap();
+    let (_, _, groups) = docx_parse::parse_related_header_footers_with_aliases(
+        &parts,
+        &relationships,
+        None,
+        None,
+        None,
+        None,
+        &Default::default(),
+        &Default::default(),
+        &mut Default::default(),
+        &mut budget,
+        &mut docx_parse::paragraph::HexIdAllocator::from_sha256(&"0".repeat(64)).unwrap(),
+    )
+    .unwrap();
     for group in &groups {
         for alias in group.relationship_ids.iter().skip(1) {
             let root = format!("hf:{alias}");

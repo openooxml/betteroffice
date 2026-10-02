@@ -119,7 +119,6 @@ function decodeS9Package(value: unknown): DocxPackage {
   const wirePackage = objectAt(value, 'wire.document.package');
   const optional = [
     'styles',
-    'headerFooterAliases',
     'headerEntries',
     'footerEntries',
     'footnotes',
@@ -136,7 +135,6 @@ function decodeS9Package(value: unknown): DocxPackage {
       'numbering',
       'settings',
       'fontTable',
-      'headerFooterAliases',
       'headerEntries',
       'footerEntries',
       'footnotes',
@@ -177,22 +175,6 @@ function decodeS9Package(value: unknown): DocxPackage {
       (entry, path) => objectAt(entry, path) as unknown as Chart
     ),
   };
-  if (wirePackage.headerFooterAliases !== undefined) {
-    const path = 'wire.document.package.headerFooterAliases';
-    const groups = decodeObjectArray<Record<string, unknown>>(wirePackage.headerFooterAliases, path);
-    groups.forEach((group, index) => {
-      const entryPath = `${path}[${index}]`;
-      exactKeys(group, ['isHeader', 'partPath', 'relationshipIds'], entryPath);
-      if (typeof group.isHeader !== 'boolean') {
-        throw new TypeError(`${entryPath}.isHeader must be a boolean`);
-      }
-      stringAt(group.partPath, `${entryPath}.partPath`);
-      const relationshipIds = stringArrayAt(group.relationshipIds, `${entryPath}.relationshipIds`);
-      if (relationshipIds.length < 2 || relationshipIds.some((id) => id.length === 0)) {
-        throw new TypeError(`${entryPath}.relationshipIds must contain at least two non-empty ids`);
-      }
-    });
-  }
   if (wirePackage.styles !== undefined) {
     pkg.styles = objectAt(
       wirePackage.styles,

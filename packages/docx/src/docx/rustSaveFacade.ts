@@ -3,7 +3,8 @@
 import type { BlockContent, Document, HeaderFooter, Hyperlink, Image, Run } from '../types/document';
 import { visitTrackedControlContent } from '../utils/trackedControlContent';
 import { preloadParseWasm, writeDocxS13Wire } from './parseWasm';
-import { collectParts, headerFooterFilename, headerFooterPartKey, partText } from './rezip/parts';
+import { isWrittenByCanonical } from './headerFooterAliasProjection';
+import { collectParts, headerFooterFilename, partText } from './rezip/parts';
 import { preloadOpcWasm, unzipContainer } from './wasm';
 
 export interface RustSaveOptions {
@@ -52,19 +53,11 @@ export interface RustParagraphIds {
 }
 
 function headerFooterSaveEntries(
-  entries: Map<string, HeaderFooter> | undefined,
-  relationships: Document['package']['relationships']
+  entries: Map<string, HeaderFooter> | undefined
 ): Array<[string, HeaderFooter]> {
-  const contents = new Map<string, Set<BlockContent[]>>();
-  return [...(entries ?? [])].filter(([rId, part]) => {
-    const key = headerFooterPartKey(relationships?.get(rId)?.target);
-    if (key === undefined) return true;
-    const partContents = contents.get(key) ?? new Set<BlockContent[]>();
-    if (partContents.has(part.content)) return false;
-    partContents.add(part.content);
-    contents.set(key, partContents);
-    return true;
-  });
+  return entries
+    ? [...entries].filter(([, part]) => !isWrittenByCanonical(part, entries))
+    : [];
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -96,8 +89,8 @@ export async function writeDocumentWithRust(
   const request = {
     determinism: fixed,
     document: pkg.document,
-    headerEntries: headerFooterSaveEntries(pkg.headers, pkg.relationships),
-    footerEntries: headerFooterSaveEntries(pkg.footers, pkg.relationships),
+    headerEntries: headerFooterSaveEntries(pkg.headers),
+    footerEntries: headerFooterSaveEntries(pkg.footers),
     footnotes: pkg.footnotes ?? [],
     endnotes: pkg.endnotes ?? [],
     footnoteSeparators: pkg.footnoteSeparators ?? [],

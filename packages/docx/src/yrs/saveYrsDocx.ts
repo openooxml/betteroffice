@@ -1,7 +1,11 @@
 /** Session save that reports where each saved paragraph can be found after reopening. */
 
 import type { RepackOptions } from '../docx/rezip';
-import { headerFooterPartKey } from '../docx/rezip/parts';
+import {
+  headerFooterAliasOf,
+  isWrittenByCanonical,
+  markHeaderFooterAlias,
+} from '../docx/headerFooterAliasProjection';
 import { type RustParagraphIds, writeDocumentWithRust } from '../docx/rustSaveFacade';
 import type { Comment, Paragraph } from '../types/content';
 import type { BlockContent, Document } from '../types/document';
@@ -40,20 +44,13 @@ export interface DocxSavedDocument {
 
 function storyBlocks(document: Document): BlockContent[][] {
   const pkg = document.package;
-  const contents = new Map<string, Set<BlockContent[]>>();
-  const headerFooterBlocks = [
-    ...(pkg.headers ?? []),
-    ...(pkg.footers ?? []),
-  ].flatMap(([rId, part]) => {
-    const key = headerFooterPartKey(pkg.relationships?.get(rId)?.target);
-    if (key !== undefined) {
-      const partContents = contents.get(key) ?? new Set<BlockContent[]>();
-      if (partContents.has(part.content)) return [];
-      partContents.add(part.content);
-      contents.set(key, partContents);
-    }
-    return [part.content];
-  });
+  const headerFooterBlocks = [pkg.headers, pkg.footers].flatMap((entries) =>
+    entries
+      ? [...entries].flatMap(([, part]) =>
+          isWrittenByCanonical(part, entries) ? [] : [part.content]
+        )
+      : []
+  );
   return [
     pkg.document.content,
     ...headerFooterBlocks,
@@ -201,18 +198,22 @@ function mapStoryParagraphs(
   document: Document,
   map: (paragraph: Paragraph) => Paragraph | null
 ): Document {
-  const contents = new Map<BlockContent[], BlockContent[]>();
   const withContent = <T extends { content: BlockContent[] }>(owner: T): T => {
-    let content = contents.get(owner.content);
-    if (!content) {
-      content = mapParagraphs(owner.content, map);
-      contents.set(owner.content, content);
-    }
+    const content = mapParagraphs(owner.content, map);
     return content === owner.content ? owner : { ...owner, content };
   };
   const pkg = document.package;
   const parts = (stories: typeof pkg.headers) =>
-    stories && new Map([...stories].map(([id, part]) => [id, withContent(part)] as const));
+    stories && new Map(
+      [...stories].map(([id, part]) => {
+        const projected = withContent(part);
+        const canonicalRId = headerFooterAliasOf(part);
+        if (projected !== part && canonicalRId !== undefined) {
+          markHeaderFooterAlias(projected, canonicalRId);
+        }
+        return [id, projected] as const;
+      })
+    );
   return {
     ...document,
     package: {

@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { computeAnchorPositionsFromYrs } from '../layout/render/displayListAnchors';
 import type { DisplayListQueries } from '../layout/render/displayListQueries';
 import { createYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
-import type { BlockContent, Document } from '../types/document';
+import type { BlockContent, Document, HeaderFooter, RelationshipMap } from '../types/document';
 import * as editWasm from '../wasm/edit';
 import {
   createYrsInputPositionMap,
@@ -19,8 +19,7 @@ import {
 } from '../yrs';
 import { headerFooterStory, sessionInternals } from '../yrs/sessionInternals';
 import { parseDocx, repackDocx } from './index';
-import { collectParts, headerFooterPartKey, rezipPartsToArrayBuffer, toBytes } from './rezip/parts';
-import { decodeS9EnvelopeValue } from './rustParseFacade';
+import { collectParts, rezipPartsToArrayBuffer, toBytes } from './rezip/parts';
 import { unzipContainer } from './wasm';
 
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
@@ -111,6 +110,24 @@ function expectSameParts(actual: Uint8Array, expected: Uint8Array): void {
   for (const name of Object.keys(b)) expect(a[name]).toEqual(b[name]);
 }
 
+function headerContent(text: string): BlockContent[] {
+  return [{
+    type: 'paragraph', formatting: {},
+    content: [{ type: 'run', formatting: {}, content: [{ type: 'text', text }] }],
+  }];
+}
+
+function userHeaderDocument(
+  parts: Map<string, Uint8Array>,
+  headers: Map<string, HeaderFooter>,
+  relationships: RelationshipMap
+): Document {
+  return {
+    package: { document: { content: [] }, headers, relationships },
+    originalBuffer: rezipPartsToArrayBuffer(parts),
+  };
+}
+
 describe('header/footer aliases', () => {
   test('repackages distinct header parts that share a content array', async () => {
     const parts = new Map(Object.entries(unzipContainer(fixture('header2.xml'))));
@@ -135,14 +152,88 @@ describe('header/footer aliases', () => {
     }
   });
 
-  test('compares header/footer targets with resolved paths and exact case', () => {
-    for (const target of ['header1.xml', './header1.xml', '/word/header1.xml', 'bands/../header1.xml']) {
-      expect(headerFooterPartKey(target)).toBe('word/header1.xml');
-    }
-    expect(headerFooterPartKey('../header1.xml')).toBe('header1.xml');
-    expect(headerFooterPartKey('Header1.xml')).toBe('word/Header1.xml');
-    expect(headerFooterPartKey(undefined)).toBeUndefined();
-    expect(headerFooterPartKey('')).toBeUndefined();
+  for (const shared of [false, true]) {
+    test(`repackages distinct parts outside word with ${shared ? 'shared' : 'distinct'} content arrays`, async () => {
+      const parts = new Map(Object.entries(unzipContainer(fixture('/word/header1.xml'))));
+      parts.set('stories/document.xml', parts.get('word/document.xml')!);
+      parts.delete('word/document.xml');
+      parts.set('stories/_rels/document.xml.rels', parts.get('word/_rels/document.xml.rels')!);
+      parts.delete('word/_rels/document.xml.rels');
+      parts.set('stories/header1.xml', parts.get('word/header1.xml')!.slice());
+      parts.set('_rels/.rels', toBytes(
+        new TextDecoder().decode(parts.get('_rels/.rels'))
+          .replace('word/document.xml', 'stories/document.xml')
+      ));
+      parts.set('[Content_Types].xml', toBytes(
+        new TextDecoder().decode(parts.get('[Content_Types].xml'))
+          .replace('/word/document.xml', '/stories/document.xml')
+          .replace('</Types>', `<Override PartName="/stories/header1.xml" ContentType="${WORD}.header+xml"/></Types>`)
+      ));
+      const first = headerContent('First edited header');
+      const second = shared ? first : headerContent('Second edited header');
+      const document = userHeaderDocument(parts, new Map([
+        ['rId7', { type: 'header', hdrFtrType: 'default', content: first }],
+        ['rId9', { type: 'header', hdrFtrType: 'default', content: second }],
+      ]), new Map([
+        ['rId7', { id: 'rId7', type: `${R}/header`, target: 'header1.xml' }],
+        ['rId9', { id: 'rId9', type: `${R}/header`, target: '/word/header1.xml' }],
+      ]));
+      const saved = new Uint8Array(await repackDocx(document, { updateModifiedDate: false }));
+      for (const [path, text] of [
+        ['stories/header1.xml', 'First edited header'],
+        ['word/header1.xml', shared ? 'First edited header' : 'Second edited header'],
+      ]) {
+        expect(xml(saved, path)).toContain(text);
+        expect(xml(saved, path)).not.toContain('Shared</w:t>');
+      }
+    });
+  }
+
+  test('repackages a later header watermark equally with shared and distinct content arrays', async () => {
+    const parts = new Map(Object.entries(unzipContainer(fixture())));
+    const save = async (shared: boolean) => {
+      const first = headerContent('Edited header');
+      const document = userHeaderDocument(parts, new Map([
+        ['rId7', { type: 'header', hdrFtrType: 'default', content: first }],
+        ['rId9', {
+          type: 'header', hdrFtrType: 'default',
+          content: shared ? first : headerContent('Edited header'),
+          watermark: {
+            kind: 'text', text: 'Later watermark', font: 'Calibri', color: '#C0C0C0',
+            semitransparent: true, layout: 'diagonal',
+          },
+          customRootBindings: [{ name: 'xmlns:custom', value: 'urn:custom-header' }],
+        }],
+      ]), new Map([
+        ['rId7', { id: 'rId7', type: `${R}/header`, target: 'header1.xml' }],
+        ['rId9', { id: 'rId9', type: `${R}/header`, target: 'header1.xml' }],
+      ]));
+      return new Uint8Array(await repackDocx(document, { updateModifiedDate: false }));
+    };
+    const distinct = xml(await save(false), 'word/header1.xml');
+    const shared = xml(await save(true), 'word/header1.xml');
+    expect(distinct).toContain('Later watermark');
+    expect(distinct).toContain('xmlns:custom="urn:custom-header"');
+    expect(shared).toBe(distinct);
+  });
+
+  test('repackages an internal header after an external one with shared content', async () => {
+    const parts = new Map(Object.entries(unzipContainer(fixture())));
+    parts.set('word/_rels/document.xml.rels', toBytes(
+      new TextDecoder().decode(parts.get('word/_rels/document.xml.rels'))
+        .replace('Id="rId7"', 'Id="rId7" TargetMode="External"')
+    ));
+    const content = headerContent('Edited internal header');
+    const document = userHeaderDocument(parts, new Map([
+      ['rId7', { type: 'header', hdrFtrType: 'default', content }],
+      ['rId9', { type: 'header', hdrFtrType: 'default', content }],
+    ]), new Map([
+      ['rId7', { id: 'rId7', type: `${R}/header`, target: 'header1.xml', targetMode: 'External' }],
+      ['rId9', { id: 'rId9', type: `${R}/header`, target: 'header1.xml' }],
+    ]));
+    const saved = new Uint8Array(await repackDocx(document, { updateModifiedDate: false }));
+    expect(xml(saved, 'word/header1.xml')).toContain('Edited internal header');
+    expect(xml(saved, 'word/header1.xml')).not.toContain('Shared</w:t>');
   });
 
   for (const footer of [false, true]) {
@@ -424,28 +515,4 @@ describe('header/footer aliases', () => {
     aliased.openDocx(fixture(), true);
     expect(headerFooterStory(aliased, 'rId9')).toBe('hf:rId9');
   });
-});
-
-function wire(groups: unknown): unknown {
-  return {
-    wireVersion: 1,
-    document: { package: {
-      document: { content: [] }, theme: {}, numbering: {}, settings: {}, fontTable: {},
-      relationshipEntries: [], mediaEntries: [], chartEntries: [], headerFooterAliases: groups,
-    } },
-    embeddedFontParts: [],
-  };
-}
-
-test('validates alias wire shape without extending the public package', () => {
-  const group = { isHeader: true, partPath: 'word/header1.xml', relationshipIds: ['rId7', 'rId9'] };
-  const { document } = decodeS9EnvelopeValue(wire([group]), new ArrayBuffer(0));
-  expect('headerFooterAliases' in document.package).toBe(false);
-  for (const groups of [
-    {}, [null], [{ ...group, isHeader: 'true' }], [{ ...group, partPath: 7 }],
-    [{ ...group, relationshipIds: ['rId7'] }], [{ ...group, relationshipIds: ['rId7', ''] }],
-    [{ ...group, relationshipIds: ['rId7', 9] }], [{ ...group, extra: true }],
-  ]) {
-    expect(() => decodeS9EnvelopeValue(wire(groups), new ArrayBuffer(0))).toThrow(TypeError);
-  }
 });

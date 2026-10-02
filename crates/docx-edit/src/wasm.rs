@@ -1297,7 +1297,6 @@ fn thin_docx_envelope(envelope: &docx_parse::S9WireEnvelope) -> docx_parse::S9Wi
                 font_table: package.font_table.clone(),
                 header_entries: thin_header_footer(&package.header_entries),
                 footer_entries: thin_header_footer(&package.footer_entries),
-                header_footer_aliases: package.header_footer_aliases.clone(),
                 footnotes: thin_notes(&package.footnotes),
                 endnotes: thin_notes(&package.endnotes),
                 footnote_separators: None,
@@ -4927,7 +4926,7 @@ mod tests {
     }
 
     #[test]
-    fn docx_open_reports_aliases_without_activating_them() {
+    fn docx_open_keeps_aliases_inactive() {
         let bytes = crate::seed::header_footer_alias_fixture::package(
             &[("rId7", "header1.xml"), ("rId9", "./header1.xml")],
             &[],
@@ -4948,9 +4947,10 @@ mod tests {
                     .contains_key(&txn, "hfAliases")
             );
             drop(txn);
-            assert_eq!(
-                result["envelope"]["document"]["package"]["headerFooterAliases"][0]["relationshipIds"],
-                json!(["rId7", "rId9"])
+            assert!(
+                result["envelope"]["document"]["package"]
+                    .get("headerFooterAliases")
+                    .is_none()
             );
             if seed {
                 assert!(session.engine.doc().paragraphs("hf:rId7").is_ok());

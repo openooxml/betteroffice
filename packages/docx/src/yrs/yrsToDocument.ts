@@ -2,6 +2,7 @@
 
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
 
+import { markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
 import { headerFooterStory } from './sessionInternals';
 import { createStyleResolver, type StyleResolver } from '../styles';
 import { hasTrackedControlContent } from '../utils/trackedControlContent';
@@ -2690,12 +2691,12 @@ function projectStories(
     headers = new Map(
       [...headers].map(([rId, part]) => {
         const storyId = headerFooterStory(session, rId);
-        return [
-          rId,
-          context.storyIds.has(storyId) && shouldProjectHeaderFooter(storyId)
-            ? { ...part, content: projectHeaderFooter(storyId) }
-            : part,
-        ];
+        if (!context.storyIds.has(storyId) || !shouldProjectHeaderFooter(storyId)) {
+          return [rId, part];
+        }
+        const projected = { ...part, content: projectHeaderFooter(storyId) };
+        if (storyId !== `hf:${rId}`) markHeaderFooterAlias(projected, storyId.slice(3));
+        return [rId, projected];
       })
     );
   }
@@ -2709,12 +2710,12 @@ function projectStories(
     footers = new Map(
       [...footers].map(([rId, part]) => {
         const storyId = headerFooterStory(session, rId);
-        return [
-          rId,
-          context.storyIds.has(storyId) && shouldProjectHeaderFooter(storyId)
-            ? { ...part, content: projectHeaderFooter(storyId) }
-            : part,
-        ];
+        if (!context.storyIds.has(storyId) || !shouldProjectHeaderFooter(storyId)) {
+          return [rId, part];
+        }
+        const projected = { ...part, content: projectHeaderFooter(storyId) };
+        if (storyId !== `hf:${rId}`) markHeaderFooterAlias(projected, storyId.slice(3));
+        return [rId, projected];
       })
     );
   }
