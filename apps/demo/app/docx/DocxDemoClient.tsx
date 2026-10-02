@@ -73,7 +73,8 @@ export function DocxDemoClient() {
     room,
     createProvider,
   );
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [editorError, setEditorError] = useState<string | null>(null);
   const [compact, setCompact] = useState(false);
   const [reviewPlugin, setReviewPlugin] = useState<DocxPlugin | null>(null);
   const [reviewEnabled, setReviewEnabled] = useState(false);
@@ -127,7 +128,7 @@ export function DocxDemoClient() {
         });
       })
       .catch((e: unknown) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+        if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
       });
     return () => {
       cancelled = true;
@@ -168,11 +169,12 @@ export function DocxDemoClient() {
         const buffer = await file.arrayBuffer();
         if (sequence !== openSequence.current) return;
         leaveRoom();
-        setError(null);
+        setLoadError(null);
+        setEditorError(null);
         setSource({ id: sequence, buffer, name: file.name, seed: null });
       } catch (cause) {
         if (sequence !== openSequence.current) return;
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setEditorError(cause instanceof Error ? cause.message : String(cause));
       }
     },
     [leaveRoom],
@@ -260,39 +262,57 @@ export function DocxDemoClient() {
         className="flex min-h-0 flex-1 flex-col *:min-h-0 *:flex-1"
         data-testid="docx-demo-stage"
       >
-        {error ? (
+        {loadError ? (
           <p className="m-auto text-mute" role="alert">
-            Failed to load the demo document: {error}
+            Failed to load the demo document: {loadError}
           </p>
         ) : source && session.status !== "loading" ? (
-          <DocxEditor
-            key={source.id}
-            documentBuffer={source.buffer}
-            collaboration={collaboration}
-            documentName={source.name}
-            onOpen={handleOpen}
-            onError={(cause) => setError(cause.message)}
-            plugins={plugins}
-            pluginGrants={pluginGrants}
-            onPluginError={(failure) =>
-              console.error(
-                `Plugin ${failure.pluginId} failed (${failure.phase})`,
-                failure.error,
-              )
-            }
-            toolbar={
-              compact ? (
-                <CompactToolbar
-                  onShare={() =>
-                    void navigator.clipboard?.writeText(window.location.href)
-                  }
-                />
-              ) : undefined
-            }
-            showToolbar
-            showRuler
-            showZoomControl
-          />
+          <div className="relative flex min-h-0 flex-1 flex-col">
+            {editorError && (
+              <div
+                className="absolute left-1/2 top-3 z-30 flex max-w-[min(90vw,48rem)] -translate-x-1/2 items-center gap-3 rounded-md border border-hairline bg-white px-3 py-2 text-sm text-fg shadow-lg"
+                role="alert"
+              >
+                <span className="min-w-0 break-words">Editor error: {editorError}</span>
+                <button
+                  type="button"
+                  className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded border border-hairline px-2 text-mute hover:bg-surface hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                  onClick={() => setEditorError(null)}
+                  aria-label="Dismiss editor error"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+            <DocxEditor
+              key={source.id}
+              documentBuffer={source.buffer}
+              collaboration={collaboration}
+              documentName={source.name}
+              onOpen={handleOpen}
+              onError={(cause) => setEditorError(cause.message)}
+              plugins={plugins}
+              pluginGrants={pluginGrants}
+              onPluginError={(failure) =>
+                console.error(
+                  `Plugin ${failure.pluginId} failed (${failure.phase})`,
+                  failure.error,
+                )
+              }
+              toolbar={
+                compact ? (
+                  <CompactToolbar
+                    onShare={() =>
+                      void navigator.clipboard?.writeText(window.location.href)
+                    }
+                  />
+                ) : undefined
+              }
+              showToolbar
+              showRuler
+              showZoomControl
+            />
+          </div>
         ) : (
           <DocumentLoading />
         )}
