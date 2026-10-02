@@ -6,7 +6,7 @@
  */
 
 import { useState, useRef, useEffect, useCallback, useId } from 'react';
-import type { CSSProperties, ReactNode } from 'react';
+import type { CSSProperties, KeyboardEvent, ReactNode } from 'react';
 import { MaterialSymbol } from './MaterialSymbol';
 
 export interface MenuItem {
@@ -21,6 +21,7 @@ export interface MenuItem {
   customContent?: ReactNode;
   /** Submenu content that appears to the right on hover */
   submenuContent?: (closeMenu: () => void) => ReactNode;
+  submenuRole?: 'menu' | 'group';
 }
 
 export interface MenuSeparator {
@@ -113,9 +114,12 @@ const submenuPanelStyle: CSSProperties = {
 export function MenuDropdown({ label, items, disabled, showChevron = false }: MenuDropdownProps) {
   const menuId = useId();
   const [isOpen, setIsOpen] = useState(false);
-  const [hoveredSubmenu, setHoveredSubmenu] = useState<string | null>(null);
+  const [openSubmenuLabel, setOpenSubmenuLabel] = useState<string | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const focusFirstMenuItem = useRef(false);
+  const focusSubmenu = useRef(false);
+  const [focusRequest, setFocusRequest] = useState(0);
   const [dropdownPos, setDropdownPos] = useState<{ top: number; left: number }>({
     top: 0,
     left: 0,
@@ -123,8 +127,14 @@ export function MenuDropdown({ label, items, disabled, showChevron = false }: Me
 
   const closeMenu = useCallback(() => {
     setIsOpen(false);
-    setHoveredSubmenu(null);
+    setOpenSubmenuLabel(null);
   }, []);
+
+  const openSubmenu = (submenuLabel: string) => {
+    focusSubmenu.current = true;
+    setOpenSubmenuLabel(submenuLabel);
+    setFocusRequest((request) => request + 1);
+  };
 
   // Calculate position when opening
   useEffect(() => {
@@ -132,6 +142,29 @@ export function MenuDropdown({ label, items, disabled, showChevron = false }: Me
     const rect = triggerRef.current.getBoundingClientRect();
     setDropdownPos({ top: rect.bottom + 2, left: rect.left });
   }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen || !focusFirstMenuItem.current) return;
+    focusFirstMenuItem.current = false;
+    dropdownRef.current
+      ?.querySelector<HTMLElement>(
+        '[role="menuitem"]:not([aria-disabled="true"]):not(:disabled)'
+      )
+      ?.focus();
+  }, [isOpen, focusRequest]);
+
+  useEffect(() => {
+    if (!openSubmenuLabel || !focusSubmenu.current) return;
+    focusSubmenu.current = false;
+    const panel = Array.from(
+      dropdownRef.current?.querySelectorAll<HTMLElement>('[data-submenu-label]') ?? []
+    ).find((element) => element.dataset.submenuLabel === openSubmenuLabel);
+    panel
+      ?.querySelector<HTMLElement>(
+        '[role="gridcell"][tabindex="0"], [role="menuitem"]:not([aria-disabled="true"]):not(:disabled)'
+      )
+      ?.focus();
+  }, [openSubmenuLabel, focusRequest]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -148,8 +181,11 @@ export function MenuDropdown({ label, items, disabled, showChevron = false }: Me
       }
     }
 
-    function handleEscape(e: KeyboardEvent) {
-      if (e.key === 'Escape') closeMenu();
+    function handleEscape(e: globalThis.KeyboardEvent) {
+      if (e.key === 'Escape') {
+        closeMenu();
+        triggerRef.current?.focus();
+      }
     }
 
     // Close on scroll of any ancestor (dropdown position would be stale)
@@ -174,11 +210,63 @@ export function MenuDropdown({ label, items, disabled, showChevron = false }: Me
     closeMenu();
   };
 
+  const handleMenuKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.target instanceof Element && event.target.closest('[role="menu"]') !== event.currentTarget) {
+      return;
+    }
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      closeMenu();
+      triggerRef.current?.focus();
+      return;
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const menuItems = Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]')
+    ).filter(
+      (item) =>
+        item.closest('[role="menu"]') === event.currentTarget &&
+        item.getAttribute('aria-disabled') !== 'true' &&
+        !item.hasAttribute('disabled')
+    );
+    if (menuItems.length === 0) return;
+    const active =
+      event.target instanceof Element
+        ? event.target.closest<HTMLElement>('[role="menuitem"]')
+        : null;
+    const currentIndex = menuItems.indexOf(active as HTMLElement);
+    const index =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? menuItems.length - 1
+          : event.key === 'ArrowDown'
+            ? (currentIndex + 1 + menuItems.length) % menuItems.length
+            : (currentIndex <= 0 ? menuItems.length : currentIndex) - 1;
+    menuItems[index]?.focus();
+  };
+
   return (
     <div style={{ position: 'relative' }}>
       <button
         ref={triggerRef}
         type="button"
+        role="menuitem"
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        aria-controls={menuId}
+        onKeyDown={(event) => {
+          if (!disabled && (event.key === 'ArrowRight' || event.key === 'ArrowDown')) {
+            event.preventDefault();
+            focusFirstMenuItem.current = true;
+            setFocusRequest((request) => request + 1);
+            setIsOpen(true);
+          } else if (!isOpen && (event.key === 'Enter' || event.key === ' ')) {
+            focusFirstMenuItem.current = true;
+            setFocusRequest((request) => request + 1);
+          }
+        }}
         onClick={() => !disabled && setIsOpen(!isOpen)}
         onMouseDown={(e) => e.preventDefault()}
         disabled={disabled}
@@ -191,6 +279,9 @@ export function MenuDropdown({ label, items, disabled, showChevron = false }: Me
       {isOpen && (
         <div
           ref={dropdownRef}
+          id={menuId}
+          role="menu"
+          aria-label={label}
           data-docx-escape-layer="true"
           style={{
             position: 'fixed',
@@ -205,6 +296,7 @@ export function MenuDropdown({ label, items, disabled, showChevron = false }: Me
             minWidth: 200,
           }}
           onMouseDown={(e) => e.preventDefault()}
+          onKeyDown={handleMenuKeyDown}
         >
           {items.map((entry, i) => {
             if (isSeparator(entry)) {
@@ -220,20 +312,38 @@ export function MenuDropdown({ label, items, disabled, showChevron = false }: Me
             }
 
             const hasSubmenu = !!item.submenuContent;
-            const isSubmenuOpen = hoveredSubmenu === item.label;
+            const isSubmenuOpen = openSubmenuLabel === item.label;
             const reason = item.disabled ? item.description : undefined;
             const reasonId = reason ? `${menuId}-${i}` : undefined;
+            const submenuId = `${menuId}-submenu-${i}`;
 
             return (
               <div
                 key={item.label}
                 style={{ position: 'relative' }}
-                onMouseEnter={() => hasSubmenu && setHoveredSubmenu(item.label)}
-                onMouseLeave={() => hasSubmenu && setHoveredSubmenu(null)}
+                onMouseEnter={() => hasSubmenu && setOpenSubmenuLabel(item.label)}
+                onMouseLeave={() => hasSubmenu && setOpenSubmenuLabel(null)}
               >
                 <button
                   type="button"
+                  role="menuitem"
+                  aria-haspopup={
+                    hasSubmenu ? (item.submenuRole === 'group' ? 'grid' : 'menu') : undefined
+                  }
+                  aria-expanded={hasSubmenu ? isSubmenuOpen : undefined}
+                  aria-controls={hasSubmenu ? submenuId : undefined}
                   style={item.disabled ? menuItemDisabledStyle : menuItemStyle}
+                  onKeyDown={(event) => {
+                    if (
+                      hasSubmenu &&
+                      !item.disabled &&
+                      (event.key === 'ArrowRight' || event.key === 'Enter' || event.key === ' ')
+                    ) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      openSubmenu(item.label);
+                    }
+                  }}
                   onClick={() => handleItemClick(item)}
                   onMouseDown={(e) => e.preventDefault()}
                   onMouseOver={(e) => {
@@ -265,7 +375,23 @@ export function MenuDropdown({ label, items, disabled, showChevron = false }: Me
                   )}
                 </button>
                 {hasSubmenu && isSubmenuOpen && (
-                  <div style={submenuPanelStyle} onMouseDown={(e) => e.preventDefault()}>
+                  <div
+                    id={submenuId}
+                    role={item.submenuRole ?? 'menu'}
+                    aria-label={item.label}
+                    data-submenu-label={item.label}
+                    style={submenuPanelStyle}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onKeyDown={(event) => {
+                      if (event.key !== 'ArrowLeft') return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setOpenSubmenuLabel(null);
+                      event.currentTarget.parentElement
+                        ?.querySelector<HTMLButtonElement>('button[aria-haspopup]')
+                        ?.focus();
+                    }}
+                  >
                     {item.submenuContent!(closeMenu)}
                   </div>
                 )}
