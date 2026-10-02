@@ -3,4 +3,4 @@
 "@betteroffice/docx-react": patch
 ---
 
-With the opt-in `experimentalWorkerOpen`, "Page X of N" shows the document's saved page count until layout finishes, as in Word.
+With `experimentalWorkerOpen`, "Page X of N" shows the saved page count until layout finishes.

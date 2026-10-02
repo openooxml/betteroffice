@@ -2,4 +2,4 @@
 "@betteroffice/docx-react": patch
 ---
 
-With `experimentalWorkerOpen`, text, Enter, paste, IME input and Backspace typed while an editable document is still loading apply in order once it is ready.
+With `experimentalWorkerOpen`, typing while an editable document loads is applied once it is ready.

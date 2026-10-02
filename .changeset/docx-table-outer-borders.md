@@ -3,4 +3,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-Bordered tables now have the same height as in Word, so the content after them sits where Word places it.
+Tables lay out closer to Word: autofit column widths, floating tables across pages, partial cell margins, bordered table height and vertical text in merged cells.

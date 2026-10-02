@@ -3,4 +3,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-Typing in long documents responds faster.
+Typing responds faster in long documents.

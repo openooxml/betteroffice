@@ -3,4 +3,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-The first-page preview from `previewFirstPage` parses only the start of the document body it shows, so it opens faster on long documents.
+The first page shows sooner on long documents.

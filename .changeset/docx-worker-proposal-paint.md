@@ -3,4 +3,4 @@
 "@betteroffice/docx-react": patch
 ---
 
-With `experimentalWorkerOpen`, host proposals in a read-only editor paint sooner, and pages outside the viewport build during idle time.
+With `experimentalWorkerOpen`, host proposals appear and decisions apply faster.

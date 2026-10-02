@@ -4,4 +4,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-Picture outlines from Word documents now paint, with theme colours and Word's default line width.
+Paragraphs lay out closer to Word: words across formatting runs, list numbers wider than their indent, `w:start`/`w:end` indents and bordered hanging indents. Picture outlines now paint.

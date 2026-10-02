@@ -3,4 +3,4 @@
 "@betteroffice/docx-react": patch
 ---
 
-With `experimentalWorkerOpen`, a read-only editor serves host proposals, plugin overlays and navigation from the worker without loading the document on the main thread. New `getParagraphIdentities` and `resolveParagraphAnchors` on the editor ref. Meanwhile, synchronous ref members that need the document throw the new `DocxReplicaNotReadyError`.
+With `experimentalWorkerOpen`, read-only editors serve proposals, overlays, navigation and `search()` from the worker. New ref methods `getParagraphIdentities` and `resolveParagraphAnchors`; synchronous members that need the document throw `DocxReplicaNotReadyError` until it loads.

@@ -3,4 +3,4 @@
 "@betteroffice/docx-react": patch
 ---
 
-Saving a document again after adding a reply comment now writes the reply's comment range once, so repeated saves produce the same comment markup.
+Repeated saves after adding a reply comment produce the same markup.
