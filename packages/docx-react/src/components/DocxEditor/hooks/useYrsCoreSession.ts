@@ -1,12 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LayoutBlock } from '@betteroffice/docx/layout/pagination';
-import type {
-  Document,
-  Endnote,
-  Footnote,
-  HeaderFooter,
-  Section,
-} from '@betteroffice/docx/types/document';
+import type { Document } from '@betteroffice/docx/types/document';
 import type {
   YrsDocxHost,
   YrsInputPositionMap,
@@ -14,6 +8,7 @@ import type {
   YrsRenderEnv,
   YrsSession,
 } from '@betteroffice/docx/yrs';
+import { dirtyProjectionStory, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
 import type { DocxEditorCollaborationOptions } from '../types';
 import type { OpenInWorker, OpenPreviewInWorker, WorkerOpenedDocument } from './useDisplayList';
 import { markLayoutQueued } from '../internals/layoutProvenance';
@@ -31,6 +26,8 @@ import {
   registeredWorkerProposalAuthority,
   workerProposalFailure,
 } from '../internals/workerProposalAuthority';
+
+export { dirtyProjectionStory, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
 
 type YrsFacadeModule = typeof import('@betteroffice/docx/yrs');
 
@@ -142,73 +139,6 @@ const REPLICA_OPEN_WAIT_MS = 5000;
  */
 const FULL_OPEN_TIMEOUT_MS = 10_000;
 
-function mergeHeaderFooterMaps(
-  full: Map<string, HeaderFooter> | undefined,
-  host: Map<string, HeaderFooter> | undefined
-): Map<string, HeaderFooter> | undefined {
-  if (host === undefined) return undefined;
-  return new Map(
-    [...host].map(([relationshipId, metadata]) => {
-      const existing = full?.get(relationshipId);
-      return [relationshipId, existing ? { ...metadata, content: existing.content } : metadata];
-    })
-  );
-}
-
-function mergeNotes<T extends Footnote | Endnote>(
-  full: T[] | undefined,
-  host: T[] | undefined
-): T[] | undefined {
-  if (host === undefined) return undefined;
-  return host.map((metadata) => {
-    const existing = full?.find((note) => note.id === metadata.id);
-    return existing ? { ...existing, ...metadata, content: existing.content } : metadata;
-  });
-}
-
-function mergeSections(
-  full: Section[] | undefined,
-  host: Section[] | undefined
-): Section[] | undefined {
-  if (host === undefined) return undefined;
-  return host.map((metadata, index) => {
-    const existing =
-      full?.find((section) => section.id !== undefined && section.id === metadata.id) ??
-      full?.[index];
-    return existing ? { ...metadata, content: existing.content } : metadata;
-  });
-}
-
-export function mergeDocxHostMetadata(full: Document, host: Document): Document {
-  const fullPackage = full.package;
-  const hostPackage = host.package;
-  return {
-    ...full,
-    contractVersion: host.contractVersion ?? full.contractVersion,
-    originalBuffer: full.originalBuffer ?? host.originalBuffer,
-    warnings: host.warnings,
-    package: {
-      ...fullPackage,
-      contractVersion: hostPackage.contractVersion ?? fullPackage.contractVersion,
-      styles: hostPackage.styles,
-      theme: hostPackage.theme,
-      settings: hostPackage.settings,
-      fontTable: hostPackage.fontTable,
-      relationships: hostPackage.relationships,
-      headers: mergeHeaderFooterMaps(fullPackage.headers, hostPackage.headers),
-      footers: mergeHeaderFooterMaps(fullPackage.footers, hostPackage.footers),
-      footnotes: mergeNotes(fullPackage.footnotes, hostPackage.footnotes),
-      endnotes: mergeNotes(fullPackage.endnotes, hostPackage.endnotes),
-      document: {
-        ...fullPackage.document,
-        sections: mergeSections(fullPackage.document.sections, hostPackage.document.sections),
-        finalSectionProperties: hostPackage.document.finalSectionProperties,
-        comments: hostPackage.document.comments,
-      },
-    },
-  };
-}
-
 /** A display-only session of the first pages of `bytes`, or null when it cannot open. */
 async function openPreview(
   yrs: YrsFacadeModule,
@@ -312,13 +242,6 @@ export function warmCompatibilityBase(
   } catch (error) {
     console.error('[yrs] failed to warm the save projection base', error);
   }
-}
-
-/** Story a direct-input edit dirties: the hf/note root it sits in, everything else the body. */
-export function dirtyProjectionStory(activeStory: string): string {
-  return ['hf:', 'fn:', 'en:'].some((prefix) => activeStory.startsWith(prefix))
-    ? activeStory.split(':', 2).join(':')
-    : 'body';
 }
 
 /**

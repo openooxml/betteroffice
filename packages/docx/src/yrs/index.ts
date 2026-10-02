@@ -133,6 +133,13 @@ export {
   type DocxSessionSave,
 } from './saveYrsDocx';
 export { sessionSourcePackage } from './sessionInternals';
+export {
+  adoptEditorSave,
+  dirtyProjectionStory,
+  mergeDocxHostMetadata,
+  saveEditorDocument,
+  type EditorSaveRecord,
+} from './editorSave';
 export { editorSaveKeys } from './editorSaveKeys';
 export * from './yrsPositionProjection';
 export * from './proposalGeometry';
