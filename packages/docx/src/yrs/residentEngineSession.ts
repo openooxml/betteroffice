@@ -110,6 +110,7 @@ export async function createResidentEngineSession(
   }>();
 
   const geometrySpans = new Map<string, { revision: number; spans: YrsParagraphLength[] }>();
+  const geometryOutlines = new Map<string, { version: string; outline: YrsPositionOutline | null }>();
 
   const geometryStory = (story: string) => {
     let cached = geometryStories.get(story);
@@ -206,9 +207,14 @@ export async function createResidentEngineSession(
     storySegments: (story) => geometryStory(story).segments,
     positionOutline: (root) => {
       if (LONE_SURROGATE.test(root)) return null;
-      const outline = JSON.parse(session.geometry_position_outline_json(root)) as
+      const version = session.version();
+      const cached = geometryOutlines.get(root);
+      if (cached?.version === version) return cached.outline;
+      const parsed = JSON.parse(session.geometry_position_outline_json(root)) as
         YrsPositionOutline | 'legacy';
-      return outline === 'legacy' ? null : outline;
+      const outline = parsed === 'legacy' ? null : parsed;
+      geometryOutlines.set(root, { version, outline });
+      return outline;
     },
     locateParagraph: (story, paraId) =>
       JSON.parse(session.locate_paragraph(story, paraId)) as YrsParagraphSpan,

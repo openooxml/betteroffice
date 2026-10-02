@@ -1139,13 +1139,16 @@ function asciiProposalFontsUnchanged(
     stories.set(story, paragraphs);
   }
   for (const [story, targets] of stories) {
+    const found = new Map<string, number>();
     const spans = engine.geometryReader.paragraphSpans(story);
-    const indices: number[] = [];
-    for (const target of targets) {
-      const matches = spans.flatMap(({ paraId }, index) => (paraId === target ? [index] : []));
-      if (matches.length !== 1) return false;
-      indices.push(matches[0]!);
+    for (let index = 0; index < spans.length; index += 1) {
+      const { paraId } = spans[index]!;
+      if (!targets.has(paraId)) continue;
+      if (found.has(paraId)) return false;
+      found.set(paraId, index);
     }
+    if (found.size !== targets.size) return false;
+    const indices = [...found.values()];
     for (const unit of engine.paragraphSegments(story, indices)) {
       let ascii = true;
       let existingText = false;
