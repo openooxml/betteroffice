@@ -1718,7 +1718,7 @@ test('a provisional layout paints first and settles only once the full layout fo
   }
 });
 
-test('a proposal prefix and completion reuse unchanged pages after an intervening visible build', async () => {
+test('a proposal layout is whole and reuses unchanged pages after an intervening visible build', async () => {
   let request = JSON.stringify({
     ...JSON.parse(REQUEST),
     regions: { sections: [{ sectionId: 'main', properties: {
@@ -1775,64 +1775,36 @@ test('a proposal prefix and completion reuse unchanged pages after an intervenin
       revisionPreview: { proposed: 'accepted' },
     } });
     const proposal = hook.result.current.layoutInWorker(engine, proposalRequest)!;
-    expect(worker.posted[1]).toMatchObject({ type: 'sync', provisionalPages: 3 });
-    const prefixJson = native.layout_document_with_regions_prefix_retained_json(proposalRequest, 5);
+    expect(worker.posted[1]).toMatchObject({ type: 'sync' });
+    expect(worker.posted[1]).not.toHaveProperty('provisionalPages');
+    const proposalJson = native.layout_document_with_regions_retained_json(proposalRequest);
     native.set_display_window(0, 1);
     native.set_windowed_incremental_builds(true);
-    const prefixFrame = native.build_display_list_frame('{}', initialEpoch);
-    const prefixEpoch = decodeFrameDelta(prefixFrame).frameEpoch;
+    const proposalFrame = native.build_display_list_frame('{}', initialEpoch);
+    const proposalEpoch = decodeFrameDelta(proposalFrame).frameEpoch;
     worker.reply({
-      id: worker.requestAt(1).id, ok: true, frame: prefixFrame.slice().buffer,
-      caret: { frameEpoch: prefixEpoch, caretRect: null }, selection: null,
-      layoutRevision: 2, layoutJson: prefixJson, layoutProvisional: true,
+      id: worker.requestAt(1).id, ok: true, frame: proposalFrame.slice().buffer,
+      caret: { frameEpoch: proposalEpoch, caretRect: null }, selection: null,
+      layoutRevision: 2, layoutJson: proposalJson,
     });
-    const prefix = (await act(() => proposal))!;
-    await act(async () => hook.rerender({ layout: prefix.layout, source: engine }));
+    const laidOut = (await act(() => proposal))!;
+    expect(laidOut.complete).toBeUndefined();
+    expect(laidOut.layout.partial).toBeUndefined();
+    await act(async () => hook.rerender({ layout: laidOut.layout, source: engine }));
     expect(hook.result.current.displayList!.pages[0]).toBe(unchanged);
     let settled = false;
     void hook.result.current.settledDisplayList(null, null).then(() => { settled = true; });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 30));
-      runIdle();
-    });
-    expect(worker.posted.filter((entry) => entry.type === 'buildPages')).toEqual([]);
-    expect(settled).toBe(false);
 
     act(() => hook.result.current.setDisplayWindow(3, 4));
     await waitFor(() => expect(worker.posted[2]).toMatchObject({ type: 'buildPages', pages: [3] }));
-    const visibleFrame = native.build_display_pages_frame(Uint32Array.of(3), prefixEpoch);
+    const visibleFrame = native.build_display_pages_frame(Uint32Array.of(3), proposalEpoch);
     const visibleEpoch = decodeFrameDelta(visibleFrame).frameEpoch;
     await act(async () => worker.reply({
       id: worker.requestAt(2).id, ok: true, frame: visibleFrame.slice().buffer,
       caret: { frameEpoch: visibleEpoch, caretRect: null }, selection: null, layoutRevision: 2,
     }));
     const visible = hook.result.current.displayList!.pages[3];
-    await act(async () => {
-      const attaching = hook.result.current.attachOffscreenCanvases(
-        [], [], 1, 1, { color: '#000', width: 2 }
-      );
-      worker.reply({ id: worker.requestAt(3).id, ok: true });
-      expect(await attaching).toBe(true);
-    });
-    await waitFor(() => expect(worker.posted[4]).toMatchObject({
-      type: 'completeLayout', expectedFrameEpoch: prefixEpoch,
-    }));
-    const completeJson = native.layout_document_with_regions_retained_json(proposalRequest);
-    native.set_display_window(3, 4);
-    native.set_windowed_incremental_builds(false);
-    const completedFrame = native.build_display_list_frame('{}', prefixEpoch);
-    expect(decodeFrameDelta(completedFrame).full).toBe(true);
-    worker.reply({
-      id: worker.requestAt(4).id, ok: true, frame: completedFrame.slice().buffer,
-      caret: { frameEpoch: decodeFrameDelta(completedFrame).frameEpoch, caretRect: null },
-      selection: null, layoutRevision: 2, layoutJson: completeJson,
-    });
-    const complete = (await prefix.complete)!;
-    await act(async () => hook.rerender({ layout: complete.layout, source: engine }));
-    expect(hook.result.current.displayList!.pages[0]).toBe(unchanged);
-    expect(hook.result.current.displayList!.pages[3]).toBe(visible);
-    expect(worker.posted.filter((entry) => entry.type === 'buildFrame')).toEqual([]);
-    let answered = 5;
+    let answered = 3;
     for (let round = 0; round < 100 && !settled; round += 1) {
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
@@ -1850,16 +1822,92 @@ test('a proposal prefix and completion reuse unchanged pages after an intervenin
       });
     }
     expect(settled).toBe(true);
-    const builds = worker.posted.filter((entry) => entry.type === 'buildPages');
-    const builtPages = builds.flatMap((entry) => entry.pages);
+    expect(hook.result.current.displayList!.pages[0]).toBe(unchanged);
+    expect(hook.result.current.displayList!.pages[3]).toBe(visible);
+    const types = worker.posted.map((entry) => ('type' in entry ? entry.type : null));
+    expect(types).not.toContain('completeLayout');
+    expect(types).not.toContain('buildFrame');
+    const builtPages = worker.posted.flatMap((entry) => (entry.type === 'buildPages' ? entry.pages : []));
     expect(new Set(builtPages).size).toBe(builtPages.length);
     expect(builtPages).not.toContain(0);
-    expect(builds).toHaveLength(2);
     expect(hook.result.current.error).toBeNull();
   } finally {
     hook.unmount();
     globalThis.requestIdleCallback = originalIdle;
     globalThis.cancelIdleCallback = originalCancelIdle;
+    native.free();
+  }
+});
+
+test('with worker open, decisions after a font re-send lay out the whole document', async () => {
+  const font = new Uint8Array(readFileSync(resolve(
+    import.meta.dir, '../../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
+  )));
+  let request = JSON.stringify({
+    ...JSON.parse(REQUEST),
+    regions: { sections: [{ sectionId: 'main', properties: {
+      pageWidth: 4320, pageHeight: 2880,
+      marginTop: 300, marginRight: 300, marginBottom: 300, marginLeft: 300,
+    } }] },
+  });
+  const sentence = 'Decision pages. '.repeat(20);
+  const { native, engine, paraId } = setup(9399, sentence.repeat(40), request);
+  for (let index = 39; index > 0; index -= 1) {
+    native.split_paragraph('body', paraId, index * sentence.length);
+  }
+  const fontId = native.register_measure_font(font);
+  request = JSON.stringify({ ...JSON.parse(request), measurement: {
+    ...JSON.parse(request).measurement,
+    fontChains: { 'calibri|0|0': [fontId] }, authoritativeShaping: true,
+  } });
+  const layoutJson = native.layout_document_with_regions_retained_json(request);
+  const pages = (JSON.parse(layoutJson) as { layout: Layout }).layout.pages.length;
+  expect(pages).toBeGreaterThan(6);
+  native.reset_frame_base();
+  const frame = native.build_display_list_frame('{}', 0);
+  let epoch = decodeFrameDelta(frame).frameEpoch;
+  const snapshot = engine.residentWorkerSnapshot.bind(engine);
+  engine.residentWorkerSnapshot = (options) => ({ ...snapshot(options)!, workerAuthoritative: true });
+  const hook = renderHook(
+    ({ layout, source }) => useRustDisplayList(layout, undefined, undefined, undefined, source),
+    { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+  );
+  try {
+    act(() => hook.result.current.setDisplayWindow(0, 1));
+    const first = hook.result.current.layoutInWorker(engine, request)!;
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.requestAt(0).id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: epoch, caretRect: null }, selection: null, layoutRevision: 1, layoutJson,
+    });
+    const opened = (await act(() => first))!;
+    await act(async () => hook.rerender({ layout: opened.layout, source: engine }));
+    // A snapshot with a new fonts revision makes the worker register its fonts again.
+    native.clear_measure_fonts();
+    expect(native.register_measure_font(font)).toBe(fontId);
+    for (const [index, proposed] of ['accepted', 'proposed', 'accepted'].entries()) {
+      const decision = JSON.stringify({ ...JSON.parse(request), renderEnv: { revisionPreview: { proposed } } });
+      const pass = hook.result.current.layoutInWorker(engine, decision)!;
+      const sent = worker.posted.at(-1) as Extract<ResidentEngineWorkerRequest, { type: 'sync' }>;
+      expect(sent.type).toBe('sync');
+      const json = sent.provisionalPages === undefined
+        ? native.layout_document_with_regions_retained_json(decision)
+        : native.layout_document_with_regions_prefix_retained_json(decision, sent.provisionalPages);
+      const built = native.build_display_list_frame('{}', epoch);
+      epoch = decodeFrameDelta(built).frameEpoch;
+      worker.reply({
+        id: sent.id, ok: true, frame: built.slice().buffer,
+        caret: { frameEpoch: epoch, caretRect: null }, selection: null,
+        layoutRevision: index + 2, layoutJson: json,
+        ...((JSON.parse(json) as { provisional?: boolean }).provisional ? { layoutProvisional: true } : {}),
+      });
+      const laidOut = (await act(() => pass))!;
+      expect(laidOut.layout.partial).toBeUndefined();
+      expect(laidOut.layout.pages).toHaveLength(pages);
+      await act(async () => hook.rerender({ layout: laidOut.layout, source: engine }));
+    }
+  } finally {
+    hook.unmount();
     native.free();
   }
 });
@@ -1995,7 +2043,7 @@ test('an older surface timeout cannot supersede the newer provisional completion
   }
 });
 
-test('a worker-authoritative relayout covers the visible prefix and completes it separately', async () => {
+test('a worker-authoritative relayout lays out the whole document in one request', async () => {
   const { native, layoutJson, frame, engine } = setup();
   const snapshot = engine.residentWorkerSnapshot.bind(engine);
   engine.residentWorkerSnapshot = (options) => ({
@@ -2014,31 +2062,19 @@ test('a worker-authoritative relayout covers the visible prefix and completes it
     act(() => result.current.setDisplayWindow(4, 6));
     const next = result.current.layoutInWorker(engine, REQUEST);
     expect(worker.posted[1]).toMatchObject({
-      type: 'sync', provisionalPages: 6, displayWindow: [4, 6],
-      snapshot: { workerAuthoritative: true },
+      type: 'sync', displayWindow: [4, 6], snapshot: { workerAuthoritative: true },
     });
+    expect(worker.posted[1]).not.toHaveProperty('provisionalPages');
     const nextFrame = native.build_display_list_frame('{}', 1);
     worker.reply({
       id: worker.requestAt(1).id, ok: true, frame: nextFrame.slice().buffer,
       caret: { frameEpoch: 2, caretRect: null }, selection: null,
-      layoutRevision: 2, layoutJson, layoutProvisional: true,
-    });
-    const prefix = await act(() => next!);
-    expect(prefix!.complete).toBeInstanceOf(Promise);
-    await act(async () => {
-      void result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
-    });
-    worker.reply({ id: worker.requestAt(2).id, ok: true });
-    await waitFor(() => expect(worker.posted[3]).toMatchObject({
-      type: 'completeLayout', expectedFrameEpoch: 2, sliceBlocks: 64,
-    }));
-    const completedFrame = native.build_display_list_frame('{}', 2);
-    worker.reply({
-      id: worker.requestAt(3).id, ok: true, frame: completedFrame.slice().buffer,
-      caret: { frameEpoch: 3, caretRect: null }, selection: null,
       layoutRevision: 2, layoutJson,
     });
-    expect(await prefix!.complete).not.toBeNull();
+    const relayout = await act(() => next!);
+    expect(relayout!.complete).toBeUndefined();
+    await act(() => new Promise((resolve) => setTimeout(resolve, 300)));
+    expect(worker.posted.some((entry) => 'type' in entry && entry.type === 'completeLayout')).toBe(false);
     unmount();
   } finally {
     native.free();

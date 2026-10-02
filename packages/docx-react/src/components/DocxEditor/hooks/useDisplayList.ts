@@ -2226,15 +2226,9 @@ export function useRustDisplayList(
         displayWindow: workerPreviewEnginesRef.current.has(hostEngine)
           ? WORKER_PREVIEW_DISPLAY_WINDOW
           : displayWindowRef.current,
-        ...(bootstrapping || snapshot.workerAuthoritative
-          ? {
-              provisionalPages: bootstrapping
-                ? PROVISIONAL_LAYOUT_PAGES
-                : Math.max(PROVISIONAL_LAYOUT_PAGES, displayWindowRef.current[1]),
-            }
-          : {}),
         ...(bootstrapping
           ? {
+              provisionalPages: PROVISIONAL_LAYOUT_PAGES,
               heapLimitBytes: workerHeapLimitRef.current,
               ...bootstrapFrameEpoch(hostEngine),
             }
