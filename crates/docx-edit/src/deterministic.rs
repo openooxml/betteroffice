@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Number, Value};
 use yrs::any::{F64_MAX_SAFE_INTEGER, F64_MIN_SAFE_INTEGER};
+use yrs::block::HAS_PARENT_SUB;
 use yrs::encoding::write::Write;
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
@@ -86,6 +87,9 @@ impl Encoder for DeterministicEncoderV1 {
 #[derive(Default)]
 struct CountingEncoderV1 {
     len: usize,
+    info: u8,
+    unstable_json: bool,
+    root_sequence: bool,
 }
 
 impl Write for CountingEncoderV1 {
@@ -127,10 +131,12 @@ impl Encoder for CountingEncoderV1 {
     }
 
     fn write_info(&mut self, info: u8) {
+        self.info = info;
         self.write_u8(info);
     }
 
     fn write_parent_info(&mut self, is_y_key: bool) {
+        self.root_sequence |= is_y_key && self.info & HAS_PARENT_SUB == 0;
         self.write_var(u32::from(is_y_key));
     }
 
@@ -147,7 +153,11 @@ impl Encoder for CountingEncoderV1 {
     }
 
     fn write_json(&mut self, any: &Any) {
-        self.write_string(&serde_json::to_string(&json_value(any)).unwrap());
+        let json = serde_json::to_string(&json_value(any)).unwrap();
+        self.write_string(&json);
+        if !self.unstable_json && !json_stable_fast(any) && !json_stable(any, &json) {
+            self.unstable_json = true;
+        }
     }
 
     fn write_key(&mut self, key: &str) {
@@ -155,14 +165,15 @@ impl Encoder for CountingEncoderV1 {
     }
 }
 
-pub(crate) fn encoded_state_len_v1<T: ReadTxn>(txn: &T) -> Option<usize> {
+/// Returns None for pending data, unstable JSON values, or root sequence content.
+pub(crate) fn fork_state_len_v1<T: ReadTxn>(txn: &T) -> Option<usize> {
     let store = txn.store();
     if store.pending_update().is_some() || store.pending_ds().is_some() {
         return None;
     }
     let mut encoder = CountingEncoderV1::default();
     txn.encode_state_as_update(&StateVector::default(), &mut encoder);
-    Some(encoder.len)
+    (!encoder.unstable_json && !encoder.root_sequence).then_some(encoder.len)
 }
 
 pub(crate) fn encode_state_as_update_v1<T: ReadTxn>(
@@ -257,11 +268,25 @@ fn encode_any<W: Write>(any: &Any, encoder: &mut W) {
     }
 }
 
-pub(crate) fn json_stable(any: &Any) -> bool {
-    let Ok(json) = serde_json::to_string(&json_value(any)) else {
-        return false;
-    };
-    let Ok(round_trip) = Any::from_json(&json) else {
+fn json_stable_fast(any: &Any) -> bool {
+    match any {
+        Any::Null | Any::Bool(_) => true,
+        Any::String(value) => value
+            .chars()
+            .all(|ch| !ch.is_control() && ch != '"' && ch != '\\'),
+        Any::Number(value) => {
+            value.abs() < 2_147_483_648.0
+                && value.trunc() == *value
+                && (*value != 0.0 || !value.is_sign_negative())
+        }
+        Any::Array(values) => values.iter().all(json_stable_fast),
+        Any::Map(values) => values.values().all(json_stable_fast),
+        _ => false,
+    }
+}
+
+fn json_stable(any: &Any, json: &str) -> bool {
+    let Ok(round_trip) = Any::from_json(json) else {
         return false;
     };
     let mut original = Vec::new();
@@ -304,7 +329,7 @@ fn json_value(any: &Any) -> Value {
 mod tests {
     use std::sync::Arc;
 
-    use yrs::{Text, Transact};
+    use yrs::{Map, Text, Transact};
 
     use super::*;
     use crate::{
@@ -314,9 +339,17 @@ mod tests {
     fn assert_len(doc: &EditingDoc) {
         let txn = doc.yrs_doc().transact();
         assert_eq!(
-            encoded_state_len_v1(&txn),
+            fork_state_len_v1(&txn),
             Some(encode_state_as_update_v1(&txn, &StateVector::default()).len()),
         );
+    }
+
+    fn assert_json_stability(value: &Any, stable: bool) {
+        let json = serde_json::to_string(&json_value(value)).unwrap();
+        assert_eq!(json_stable(value, &json), stable, "{value:?}");
+        let mut encoder = CountingEncoderV1::default();
+        encoder.write_json(value);
+        assert_eq!(!encoder.unstable_json, stable, "{value:?}");
     }
 
     #[test]
@@ -326,33 +359,45 @@ mod tests {
             (Any::Bool(true), true),
             (Any::Bool(false), true),
             (Any::from("text 😀"), true),
+            (Any::from("\"quoted\" \\ slash\n\t\u{0}"), true),
             (Any::Number(0.5), true),
             (Any::Number(12.0), true),
+            (Any::Number(0.0), true),
             (Any::Number(-0.0), true),
+            (Any::Number(2_147_483_647.0), true),
+            (Any::Number(-2_147_483_647.0), true),
+            (Any::Number(2_147_483_648.0), true),
+            (Any::Number(-2_147_483_648.0), true),
             (Any::Number(f64::NAN), false),
+            (Any::Number(f64::INFINITY), false),
+            (Any::Number(f64::NEG_INFINITY), false),
             (Any::Number((1_u64 << 60) as f64), false),
             (Any::BigInt(7), false),
             (Any::Buffer(Arc::from([0, 127, 255])), false),
             (Any::Undefined, false),
         ] {
-            assert_eq!(json_stable(&value), stable, "{value:?}");
+            assert_json_stability(&value, stable);
         }
         for (member, stable) in [
+            (Any::from("text 😀"), true),
+            (Any::Number(12.0), true),
             (Any::Number(0.5), true),
+            (Any::from("\"quoted\" \\ slash\n"), true),
             (Any::BigInt(7), false),
             (Any::Buffer(Arc::from([1, 2])), false),
             (Any::Undefined, false),
             (Any::Number(f64::NAN), false),
+            (Any::Number(f64::INFINITY), false),
         ] {
             let array = Any::Array(Arc::from([Any::Null, member]));
             let map = Any::Map(Arc::new(std::collections::HashMap::from([
                 ("z".to_owned(), Any::Bool(true)),
                 ("a".to_owned(), array.clone()),
             ])));
-            assert_eq!(json_stable(&array), stable, "{array:?}");
-            assert_eq!(json_stable(&map), stable, "{map:?}");
+            assert_json_stability(&array, stable);
+            assert_json_stability(&map, stable);
             let nested = Any::Array(Arc::from([map]));
-            assert_eq!(json_stable(&nested), stable, "{nested:?}");
+            assert_json_stability(&nested, stable);
         }
     }
 
@@ -421,6 +466,104 @@ mod tests {
             );
         }
         assert_len(&doc);
+    }
+
+    #[test]
+    fn unstable_format_values_have_no_fork_length_in_any_story_or_paragraph() {
+        for value in [
+            Any::Number(f64::INFINITY),
+            Any::BigInt(7),
+            Any::Buffer(Arc::from([1, 2, 3])),
+        ] {
+            for (story_id, index) in [("body", 0), ("body", 3), ("header", 0)] {
+                let doc = EditingDoc::new(901);
+                doc.seed_story(
+                    "body",
+                    &["AB", "CD"].map(|text| crate::SeedParagraph {
+                        text: text.to_owned(),
+                        p_style: "Normal".to_owned(),
+                        alignment: "left".to_owned(),
+                    }),
+                )
+                .unwrap();
+                doc.create_story("header", "Header", "Normal", "left")
+                    .unwrap();
+                assert_len(&doc);
+                {
+                    let mut txn = doc.yrs_doc().transact_mut();
+                    crate::story_ref(&txn, story_id).unwrap().format(
+                        &mut txn,
+                        index,
+                        1,
+                        std::collections::HashMap::from([("opaque".into(), value.clone())]),
+                    );
+                }
+                assert_eq!(fork_state_len_v1(&doc.yrs_doc().transact()), None);
+            }
+        }
+    }
+
+    #[test]
+    fn unstable_embeds_have_no_fork_length() {
+        for value in [
+            Any::Number(f64::INFINITY),
+            Any::BigInt(7),
+            Any::Buffer(Arc::from([1, 2, 3])),
+        ] {
+            let doc = EditingDoc::new(901);
+            doc.create_story("body", "AB", "Normal", "left").unwrap();
+            doc.create_story("header", "Header", "Normal", "left")
+                .unwrap();
+            {
+                let mut txn = doc.yrs_doc().transact_mut();
+                crate::story_ref(&txn, "header")
+                    .unwrap()
+                    .insert_embed(&mut txn, 0, value);
+            }
+            assert_eq!(fork_state_len_v1(&doc.yrs_doc().transact()), None);
+        }
+    }
+
+    #[test]
+    fn non_json_map_values_preserve_exact_fork_lengths() {
+        let doc = EditingDoc::new(901);
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            let comments = txn.get_map(crate::COMMENTS).unwrap();
+            for (key, value) in [
+                ("number", Any::Number(f64::INFINITY)),
+                ("integer", Any::BigInt(7)),
+                ("buffer", Any::Buffer(Arc::from([1, 2, 3]))),
+            ] {
+                comments.insert(&mut txn, key, value);
+            }
+        }
+        assert_len(&doc);
+    }
+
+    #[test]
+    fn declared_root_sequences_have_no_fork_length_even_after_deletion() {
+        for formatted in [false, true] {
+            let doc = EditingDoc::new(901);
+            doc.create_story("body", "AB", "Normal", "left").unwrap();
+            let text = doc.yrs_doc().get_or_insert_text(crate::COMMENTS);
+            assert_len(&doc);
+            if formatted {
+                text.insert_with_attributes(
+                    &mut doc.yrs_doc().transact_mut(),
+                    0,
+                    "root text",
+                    std::collections::HashMap::from([("bold".into(), Any::Bool(true))]),
+                );
+            } else {
+                text.insert(&mut doc.yrs_doc().transact_mut(), 0, "root text");
+            }
+            assert_eq!(fork_state_len_v1(&doc.yrs_doc().transact()), None);
+            text.remove_range(&mut doc.yrs_doc().transact_mut(), 0, 9);
+            let txn = doc.yrs_doc().transact();
+            assert_eq!(text.len(&txn), 0);
+            assert_eq!(fork_state_len_v1(&txn), None);
+        }
     }
 
     #[test]
@@ -493,7 +636,7 @@ mod tests {
                 .pending_update()
                 .is_some()
         );
-        assert_eq!(encoded_state_len_v1(&pending.yrs_doc().transact()), None);
+        assert_eq!(fork_state_len_v1(&pending.yrs_doc().transact()), None);
 
         let known = peer.encode_state_vector_v1();
         peer.delete_range(&EditCtx::local("", ""), StoryRange::new("body", 0, 2))
@@ -503,7 +646,7 @@ mod tests {
             .apply_update_v1(&peer.encode_diff_v1(&known).unwrap())
             .unwrap();
         assert!(pending.yrs_doc().transact().store().pending_ds().is_some());
-        assert_eq!(encoded_state_len_v1(&pending.yrs_doc().transact()), None);
+        assert_eq!(fork_state_len_v1(&pending.yrs_doc().transact()), None);
     }
 
     #[test]

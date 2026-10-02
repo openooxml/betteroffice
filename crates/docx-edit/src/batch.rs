@@ -699,7 +699,6 @@ fn direct_admissible<T: ReadTxn>(doc: &EditingDoc, txn: &T, steps: &[Planned]) -
         return false;
     }
     let mut snapshots = HashMap::new();
-    let mut checked = BTreeSet::new();
     for planned in steps {
         let effect = match &planned.effect {
             Some(Effect::Insert { at, .. }) => Some((*at, *at, true)),
@@ -725,31 +724,12 @@ fn direct_admissible<T: ReadTxn>(doc: &EditingDoc, txn: &T, steps: &[Planned]) -
         let mut first = 0;
         let mut contained = effect.is_none();
         for mark in chunks.iter() {
-            let crate::ops::ChunkKind::Pilcrow(map) = &mark.kind else {
+            let crate::ops::ChunkKind::Pilcrow(_) = &mark.kind else {
                 continue;
             };
             let contains = effect
                 .is_some_and(|(start, end, _)| first <= start && start <= end && end <= mark.start);
             contained |= contains;
-            let touched = contains
-                || crate::map_string(map, txn, crate::PARA_ID)
-                    .is_some_and(|id| planned.touched.contains(&id));
-            if touched
-                && checked.insert((planned.story.as_str(), mark.start))
-                && chunks
-                    .iter()
-                    .filter(|chunk| {
-                        chunk.end() > first.saturating_sub(1) && chunk.start < mark.end()
-                    })
-                    .any(|chunk| {
-                        chunk
-                            .attrs
-                            .values()
-                            .any(|value| !deterministic::json_stable(value))
-                    })
-            {
-                return false;
-            }
             first = mark.end();
         }
         if !contained {
@@ -2770,7 +2750,7 @@ impl EditingDoc {
         {
             let direct_len =
                 if matches!(capture, Capture::Direct) && direct_admissible(self, &txn, &steps) {
-                    deterministic::encoded_state_len_v1(&txn)
+                    deterministic::fork_state_len_v1(&txn)
                 } else {
                     None
                 };
@@ -3342,22 +3322,40 @@ mod direct_tests {
         for doc in [&direct, &replica] {
             prepare(doc);
         }
+        assert_replica_fallback_docs(direct, replica, step);
+    }
+
+    fn assert_replica_fallback_docs(direct: EditingDoc, replica: EditingDoc, step: EditStep) {
         assert_eq!(
             direct.encode_state_as_update_v1(),
             replica.encode_state_as_update_v1()
         );
         direct.set_direct_batches(true);
+        let epochs = [direct.committed_epoch(), replica.committed_epoch()];
         let steps = [BatchStep::Edit(&step)];
         let a = apply_text_steps(&direct, &steps, &UndoSession::new(), MAX_STAGING_BYTES).unwrap();
         let b = apply_text_steps(&replica, &steps, &UndoSession::new(), MAX_STAGING_BYTES).unwrap();
         assert!(a.applied);
         assert_eq!(normalized(&a), normalized(&b));
+        assert_eq!(a.changed_stories, b.changed_stories);
+        assert_eq!(
+            direct.stories_changed_since(epochs[0]).1,
+            replica.stories_changed_since(epochs[1]).1
+        );
         assert_eq!(direct.direct_batches_applied(), 0);
         assert_eq!(replica.direct_batches_applied(), 0);
-        assert_eq!(
-            direct.story_segments("body").unwrap(),
-            replica.story_segments("body").unwrap()
-        );
+        let story_ids: Vec<_> = {
+            let txn = direct.yrs_doc().transact();
+            let stories = txn.get_map(crate::STORIES).unwrap();
+            stories.keys(&txn).map(str::to_owned).collect()
+        };
+        for story_id in story_ids {
+            assert_eq!(
+                direct.story_segments(&story_id).unwrap(),
+                replica.story_segments(&story_id).unwrap(),
+                "story {story_id}"
+            );
+        }
         assert_eq!(
             direct.encode_state_as_update_v1(),
             replica.encode_state_as_update_v1()
@@ -3369,10 +3367,21 @@ mod direct_tests {
     }
 
     #[test]
-    fn formatted_root_text_uses_replica_path() {
+    fn formatted_declared_root_sequence_uses_replica_path() {
         assert_replica_fallback(
             |doc| {
-                let text = doc.yrs_doc().get_or_insert_text("formatted");
+                doc.create_story_with_paragraph_id("header", "h", "Header", "Normal", "left")
+                    .unwrap();
+                {
+                    let mut txn = doc.yrs_doc().transact_mut();
+                    story_ref(&txn, "header").unwrap().format(
+                        &mut txn,
+                        0,
+                        0,
+                        HashMap::from([("bold".into(), Any::Bool(true))]),
+                    );
+                }
+                let text = doc.yrs_doc().get_or_insert_text(crate::COMMENTS);
                 text.insert_with_attributes(
                     &mut doc.yrs_doc().transact_mut(),
                     0,
@@ -3458,7 +3467,7 @@ mod direct_tests {
         assert_eq!(base, replica.encode_state_as_update_v1());
         let n = base.len();
         assert_eq!(
-            deterministic::encoded_state_len_v1(&direct.yrs_doc().transact()),
+            deterministic::fork_state_len_v1(&direct.yrs_doc().transact()),
             Some(n)
         );
         direct.set_direct_batches(true);
@@ -3946,50 +3955,44 @@ mod direct_tests {
     }
 
     #[test]
-    fn admission_checks_attributes_through_the_paragraph_marks() {
-        for (index, admitted) in [(0, true), (3, false), (4, false), (6, false), (7, false)] {
+    fn unstable_following_paragraph_format_uses_replica_path_for_plain_delete() {
+        let [direct, replica] = [(), ()].map(|_| {
             let doc = EditingDoc::new(9001);
             doc.seed_story(
                 "body",
-                &[
-                    crate::SeedParagraph {
-                        text: "one".to_owned(),
-                        p_style: "Normal".to_owned(),
-                        alignment: "left".to_owned(),
-                    },
-                    crate::SeedParagraph {
-                        text: "two".to_owned(),
-                        p_style: "Normal".to_owned(),
-                        alignment: "left".to_owned(),
-                    },
-                ],
+                &["AB", "C"].map(|text| crate::SeedParagraph {
+                    text: text.to_owned(),
+                    p_style: "Normal".to_owned(),
+                    alignment: "left".to_owned(),
+                }),
             )
             .unwrap();
             {
                 let mut txn = doc.yrs_doc().transact_mut();
-                story_ref(&txn, "body").unwrap().format(
+                let story = story_ref(&txn, "body").unwrap();
+                story.format(
                     &mut txn,
-                    index,
+                    0,
+                    2,
+                    HashMap::from([("italic".into(), Any::Bool(true))]),
+                );
+                story.format(
+                    &mut txn,
+                    3,
                     1,
-                    HashMap::from([("opaque".into(), Any::Buffer(Arc::from([1, 2])))]),
+                    HashMap::from([("bold".into(), Any::Number(f64::INFINITY))]),
                 );
             }
-            let plan = raw_plan(
-                &doc,
-                Effect::Replace {
-                    start: 5,
-                    end: 6,
-                    text: "x".to_owned(),
-                    ctx: EditCtx::local("", ""),
-                },
-                Shape::Replacement { start: 5, len: 1 },
-            );
-            assert_eq!(
-                direct_admissible(&doc, &doc.yrs_doc().transact(), &plan.steps),
-                admitted,
-                "attribute at {index}"
-            );
-        }
+            doc
+        });
+        let paragraph = direct.paragraphs("body").unwrap()[0].para_id.clone();
+        assert_replica_fallback_docs(
+            direct,
+            replica,
+            EditStep::new(EditOperation::DeleteText {
+                target: TextTarget::Range(text_range("body", &paragraph, 1, &paragraph, 2)),
+            }),
+        );
     }
 
     #[test]
