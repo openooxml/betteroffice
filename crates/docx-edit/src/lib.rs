@@ -78,6 +78,7 @@ mod ctx;
 mod deterministic;
 mod fingerprint;
 mod format;
+mod geometry;
 mod heading;
 mod identity;
 mod inline_content;
@@ -115,6 +116,10 @@ pub use engine::{EngineSession, EngineStats, RegionLayoutProgress};
 pub use format::{
     ColorPatch, FontFamilyPatch, FormatPolicy, HYPERLINK, InlineFormatDelta, Patch, SimpleFormat,
     StrikePatch, UnderlinePatch, highlight_color_name,
+};
+pub use geometry::{
+    GeometryEndpoint, GeometryParagraphOutline, GeometryPositionOutline, GeometryRange,
+    GeometryRead, GeometrySentinel, GeometryStoryOutline, OwnedRevisionRange,
 };
 pub use identity::{
     AnchorResolution, AnchorUnsupported, ParagraphAnchor, ParagraphIdAssignment,
