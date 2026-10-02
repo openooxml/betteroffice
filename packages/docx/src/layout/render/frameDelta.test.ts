@@ -6,6 +6,7 @@ import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../../docx/rezi
 import { createEditSession, preloadEditWasm } from '../../wasm/edit';
 import * as layoutWasm from '../../wasm/layout';
 import {
+  applyFrameChain,
   applyFrameDelta,
   applyFrameDeltaOwned,
   decodeFrameDelta,
@@ -77,6 +78,36 @@ it('a recovery upsert reuses only a page with matching identity, content and pri
     });
     expect(updated.displayList.pages[0]).not.toBe(page.page);
     expect(updated.damagedPageIds.size).toBe(1);
+  }
+});
+
+it('a frame chain damages a removed page that is re-added without retaining its removal', () => {
+  const page: WireObject = {
+    entries: [['pageIndex', 0], ['width', 10], ['height', 20], ['primitives', []]],
+  };
+  for (const owned of [false, true]) {
+    const base = applyFrameDelta(null, decodeFrameDelta(encodeSinglePageFrame(page)));
+    const { frame } = applyFrameChain(base, [
+      encodeSinglePageFrame(null, 2), encodeSinglePageFrame(page, 3),
+    ], owned);
+    expect(frame.pages.map((page) => page.pageId)).toEqual([1n]);
+    expect([...frame.removedPageIds]).toEqual([]);
+    expect([...frame.damagedPageIds]).toEqual([1n]);
+  }
+});
+
+it('a frame chain removes a damaged page without retaining its damage', () => {
+  const page: WireObject = {
+    entries: [['pageIndex', 0], ['width', 10], ['height', 20], ['primitives', []]],
+  };
+  for (const owned of [false, true]) {
+    const base = applyFrameDelta(null, decodeFrameDelta(encodeSinglePageFrame(page)));
+    const { frame } = applyFrameChain(base, [
+      encodeSinglePageFrame(page, 2), encodeSinglePageFrame(null, 3),
+    ], owned);
+    expect(frame.pages).toEqual([]);
+    expect([...frame.damagedPageIds]).toEqual([]);
+    expect([...frame.removedPageIds]).toEqual([1n]);
   }
 });
 
@@ -1015,8 +1046,7 @@ interface WireObject {
   entries: [string, WireValue][];
 }
 
-/** One full frame holding a single page whose payload is `page`. */
-function encodeSinglePageFrame(page: WireObject): Uint8Array {
+function encodeSinglePageFrame(page: WireObject | null, frameEpoch = 1): Uint8Array {
   const strings: string[] = [];
   const stringId = (value: string): number => {
     const index = strings.indexOf(value);
@@ -1057,7 +1087,7 @@ function encodeSinglePageFrame(page: WireObject): Uint8Array {
     }
   };
   const payload: number[] = [];
-  encode(payload, page);
+  if (page) encode(payload, page);
 
   const table: number[] = [];
   u32(table, strings.length);
@@ -1075,20 +1105,22 @@ function encodeSinglePageFrame(page: WireObject): Uint8Array {
   view.setUint16(4, FRAME_DELTA_VERSION, true);
   view.setUint16(6, 80, true);
   view.setUint32(8, total, true);
-  view.setUint32(12, 1, true);
+  view.setUint32(12, frameEpoch === 1 ? 1 : 0, true);
   view.setBigUint64(16, 1n, true);
   view.setBigUint64(24, 1n, true);
-  view.setBigUint64(32, 1n, true);
-  view.setUint32(48, 1, true);
+  view.setBigUint64(32, BigInt(frameEpoch), true);
+  view.setBigUint64(40, BigInt(frameEpoch - 1), true);
+  view.setUint32(48, page ? 1 : 0, true);
   view.setUint32(52, 1, true);
   view.setUint32(56, 80, true);
   view.setUint32(60, stringsOffset, true);
   view.setUint32(64, table.length, true);
   view.setUint32(68, dataOffset, true);
-  bytes[80] = 1;
+  bytes[80] = page ? 1 : 2;
   view.setBigUint64(88, 1n, true);
-  view.setUint32(80 + 28, dataOffset, true);
-  view.setUint32(80 + 32, dataOffset, true);
+  view.setBigUint64(96, BigInt(frameEpoch), true);
+  view.setUint32(80 + 28, page ? dataOffset : 0, true);
+  view.setUint32(80 + 32, page ? dataOffset : 0, true);
   view.setUint32(80 + 36, payload.length, true);
   bytes.set(table, stringsOffset);
   bytes.set(payload, dataOffset);

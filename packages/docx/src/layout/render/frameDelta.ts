@@ -466,6 +466,9 @@ export function applyFrameChain(
     for (const id of frame.damagedPageIds) damagedPageIds.add(id);
     for (const id of frame.removedPageIds) removedPageIds.add(id);
   }
+  const pageIds = new Set(frame!.pages.map((page) => page.pageId));
+  for (const id of removedPageIds) if (pageIds.has(id)) removedPageIds.delete(id);
+  for (const id of damagedPageIds) if (!pageIds.has(id)) damagedPageIds.delete(id);
   return { frame: { ...frame!, damagedPageIds, removedPageIds }, delta: delta! };
 }
 

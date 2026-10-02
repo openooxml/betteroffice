@@ -127,6 +127,13 @@ async function fixture() {
   const main = await createResidentEngineSession();
   const engine = await createResidentEngineSession();
   const w = worker(engine);
+  const builtPages = new Set<number>();
+  const buildPages = engine.buildDisplayPagesFrame;
+  engine.buildDisplayPagesFrame = (pages, expected) => {
+    const frame = buildPages(pages, expected);
+    for (const page of pages) builtPages.add(page);
+    return frame;
+  };
   try {
     const bytes = syntheticDocx();
     const host = decodeDocxHostJson(main.openDocx(bytes), bytes);
@@ -178,9 +185,29 @@ async function fixture() {
         }));
       },
       async full() {
-        return applyFrameDelta(null, frameReply(await w.send({
-          type: 'buildPages', pages: [], expectedFrameEpoch: 0, paintCaret: false,
-        })).delta);
+        const fresh = await createResidentEngineSession();
+        try {
+          fresh.loadState(main.encodeState());
+          expect(fresh.registerFont(FONT)).toBe(font);
+          fresh.setDisplayWindow(0, 2);
+          fresh.setDisplayRetainBuiltPages(true);
+          fresh.setWindowedIncrementalBuilds(true);
+          fresh.layoutDocumentWithRegionsRetainedJson(layoutInput);
+          const headersFooters = fresh.retainedHeadersFootersJson();
+          const freshExtras = encodeDisplayListFrameExtras({
+            fontChains,
+            ...(headersFooters === undefined ? {} : { headersFooters: JSON.parse(headersFooters) }),
+          } as DisplayListBuildInputs);
+          const selection = main.selection();
+          if (selection) fresh.setSelection(selection.anchor, selection.head);
+          fresh.buildDisplayListFrame(freshExtras, 0);
+          fresh.setWindowedIncrementalBuilds(false);
+          return applyFrameDelta(null, decodeFrameDelta(
+            fresh.buildDisplayPagesFrame([...builtPages].sort((left, right) => left - right), 0)
+          ));
+        } finally {
+          fresh.destroy();
+        }
       },
       destroy() {
         w.setFrameChainLimits();
@@ -198,6 +225,26 @@ async function fixture() {
 function expectPages(frame: RetainedFrame, full: RetainedFrame): void {
   expect(frame.displayList.pages).toEqual(full.displayList.pages);
 }
+
+test('the full oracle detects a worker retaining pre-edit content', async () => {
+  const f = await fixture();
+  const loadState = f.engine.loadState;
+  try {
+    f.engine.loadState = () => {};
+    f.edit('Fresh ');
+    const reply = await f.sync(f.base.frameEpoch, true);
+    const applied = applyFrameChain(f.base, reply.frames, false).frame;
+    const full = await f.full();
+    expect(applied.displayList.pages).not.toEqual(full.displayList.pages);
+    const text = full.displayList.pages[0]!.primitives.map((primitive) =>
+      primitive.kind === 'text' || primitive.kind === 'glyphRun' ? primitive.text : ''
+    ).join('');
+    expect(text).toContain('Fresh ');
+  } finally {
+    f.engine.loadState = loadState;
+    f.destroy();
+  }
+});
 
 test('a page build the client never applied reaches it as a chain ahead of the next sync frame', async () => {
   for (const chained of [true, undefined]) {

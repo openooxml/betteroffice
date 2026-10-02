@@ -434,6 +434,7 @@ export function useRustDisplayList(
   const [presentedEngine, setPresentedEngine] = useState<unknown>(null);
   const [snapshot, setSnapshot] = useState<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
   const snapshotRef = useRef<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
+  const workerFrameOwnersRef = useRef(new WeakMap<RetainedFrame, WorkerLayoutFrame['owner']>());
   const queryEpochGateRef = useRef<DisplayListQueryEpochGate | null>(null);
   if (!queryEpochGateRef.current) queryEpochGateRef.current = new DisplayListQueryEpochGate();
   const queryEpochGate = queryEpochGateRef.current;
@@ -565,6 +566,15 @@ export function useRustDisplayList(
       owner.engine === hostEngine &&
       owner.load === documentLoadsRef.current,
     []
+  );
+  const canReplayWorkerFrame = useCallback(
+    (frame: RetainedFrame | null, owner: WorkerLayoutFrame['owner']): boolean =>
+      frame !== null &&
+      frame === snapshotRef.current.frame &&
+      isCurrentWorker(owner.engine, owner) &&
+      frameEngineRef.current === owner.engine &&
+      workerFrameOwnersRef.current.get(frame) === owner,
+    [isCurrentWorker]
   );
   // The engines whose worker ran out of memory, each with the failure once its
   // replacement did too. Weak, so a replaced document's session is not kept.
@@ -1102,6 +1112,7 @@ export function useRustDisplayList(
         ) {
           return null;
         }
+        const frameChain = canReplayWorkerFrame(currentFrame, worker);
         const line = sourceLine(worker.engine);
         const selection = worker.engine.selection();
         if (!selection) return null;
@@ -1122,7 +1133,7 @@ export function useRustDisplayList(
                   false,
                   paintCaret,
                   displayWindowRef.current,
-                  true
+                  frameChain
                 )
               : await worker.client.applyDelete(
                   operation.direction,
@@ -1132,7 +1143,7 @@ export function useRustDisplayList(
                   paintCaret,
                   operation.count,
                   displayWindowRef.current,
-                  true
+                  frameChain
                 );
           if (result.applied) {
             try {
@@ -1187,6 +1198,7 @@ export function useRustDisplayList(
           return { frameEpoch: null, caretSynchronized: false, deletedUnits: result.deletedUnits };
         }
         const { frame: nextFrame } = applyFrameChain(previous.frame, result.pageFrames ?? [result.frame], true);
+        workerFrameOwnersRef.current.set(nextFrame, worker);
         mainFrameRef.current = null;
         const caret = residentCaretForSelection(
           result.caret,
@@ -1275,6 +1287,7 @@ export function useRustDisplayList(
     [
       adoptHostEngine,
       applyPaintedCaretReply,
+      canReplayWorkerFrame,
       markSettled,
       isCurrentWorker,
       paintedCaretMachine,
@@ -1877,7 +1890,9 @@ export function useRustDisplayList(
               frame.frameEpoch,
               false
             )
-          : worker.client.buildPages(batch, frame.frameEpoch, paintCaret, background, true)
+          : worker.client.buildPages(
+              batch, frame.frameEpoch, paintCaret, background, canReplayWorkerFrame(frame, worker)
+            )
         : (async () => {
             setMainFrameDisplayWindow(targetEngine);
             const bytes = release.length > 0
@@ -1959,7 +1974,9 @@ export function useRustDisplayList(
                 finish();
                 return;
               }
-              attach(applyFrameChain(previous, result.pageFrames ?? [result.frame], true).frame);
+              const { frame: nextFrame } = applyFrameChain(previous, result.pageFrames ?? [result.frame], true);
+              if (worker) workerFrameOwnersRef.current.set(nextFrame, worker);
+              attach(nextFrame);
             } catch (error) {
               finish();
               failed(error);
@@ -1978,7 +1995,12 @@ export function useRustDisplayList(
               for (const id of nextFrame.removedPageIds) removedPageIds.add(id);
               yield;
             }
-            return { ...nextFrame, damagedPageIds, removedPageIds };
+            const pageIds = new Set(nextFrame.pages.map((page) => page.pageId));
+            for (const id of removedPageIds) if (pageIds.has(id)) removedPageIds.delete(id);
+            for (const id of damagedPageIds) if (!pageIds.has(id)) damagedPageIds.delete(id);
+            const frame = { ...nextFrame, damagedPageIds, removedPageIds };
+            if (worker) workerFrameOwnersRef.current.set(frame, worker);
+            return frame;
           }
           const steps = decodePages();
           const decode = (deadline: Pick<IdleDeadline, 'timeRemaining'>): void => {
@@ -2021,6 +2043,7 @@ export function useRustDisplayList(
     },
     [
       applyPaintedCaretReply,
+      canReplayWorkerFrame,
       dropWorker,
       isCurrentWorker,
       mainPageBuildEngine,
@@ -2243,7 +2266,9 @@ export function useRustDisplayList(
         paintedCaretMachine.shouldPaint(performance.now());
       const reply = bootstrapping
         ? worker.bootstrap(snapshot, '', options)
-        : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, { ...options, frameChain: true });
+        : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, {
+            ...options, frameChain: canReplayWorkerFrame(previousFrame, owner),
+          });
       // A worker out of memory runs the pass again in a fresh worker; once
       // that one runs out too, the pass rejects and nothing lays out here.
       const unavailable = (
@@ -2379,6 +2404,7 @@ export function useRustDisplayList(
     [
       bootstrapFrameEpoch,
       canLayoutInWorker,
+      canReplayWorkerFrame,
       dropWorker,
       handedOverPreview,
       ensureRebuildableReplica,
@@ -2778,7 +2804,7 @@ export function useRustDisplayList(
                   previousFrame?.frameEpoch ?? 0,
                   paintCaret,
                   displayWindowRef.current,
-                  true
+                  canReplayWorkerFrame(previousFrame, owner)
                 )
               : bootstrapping
                 ? worker.bootstrap(snapshot, extras, {
@@ -2793,7 +2819,7 @@ export function useRustDisplayList(
                 : worker.sync(snapshot, extras, previousFrame?.frameEpoch ?? 0, paintCaret, {
                     ...sent(),
                     displayWindow: displayWindowRef.current,
-                    frameChain: true,
+                    frameChain: canReplayWorkerFrame(previousFrame, owner),
                   });
         return workerFrame
           .then((result) => {
@@ -2801,6 +2827,7 @@ export function useRustDisplayList(
               throw new SupersededPreviewError();
             }
             const { frame: nextFrame } = applyFrameChain(previousFrame, result.pageFrames ?? [result.frame], false);
+            workerFrameOwnersRef.current.set(nextFrame, owner);
             return {
               displayList: nextFrame.displayList,
               frame: nextFrame,
@@ -2854,6 +2881,7 @@ export function useRustDisplayList(
           // The worker ran this layout and built its frame in the same pass.
           const { result } = prebuilt;
           const { frame: nextFrame } = applyFrameChain(appliesTo, result.pageFrames ?? [result.frame], false);
+          workerFrameOwnersRef.current.set(nextFrame, prebuilt.owner);
           pending = Promise.resolve({
             displayList: nextFrame.displayList,
             frame: nextFrame,
@@ -2959,6 +2987,7 @@ export function useRustDisplayList(
   }, [
     adoptHostEngine,
     bootstrapFrameEpoch,
+    canReplayWorkerFrame,
     ensureRebuildableReplica,
     failWorkerDocument,
     layout,

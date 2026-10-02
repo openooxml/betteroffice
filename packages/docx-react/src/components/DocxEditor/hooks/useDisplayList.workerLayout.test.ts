@@ -581,6 +581,152 @@ test('sync recovery rejects a cached layout frame from the old owner of the same
   }
 });
 
+test('a worker disables replay over a colliding main-thread base until its frame is adopted', async () => {
+  const { native, engine, adopted } = setup();
+  const main = createEditSession(9302);
+  main.load(native.encode_state());
+  const layoutJson = main.layout_document_with_regions_retained_json(REQUEST);
+  const inputs = {
+    ...JSON.parse(main.retained_kernel_inputs_json()), ...JSON.parse(layoutJson),
+  };
+  let enabled = false;
+  Object.assign(engine, {
+    residentLayoutInWorker: () => false,
+    residentWorkerProbe: () => enabled ? { layoutRevision: adopted.length } : null,
+    buildDisplayListFrame: (extras: string, expected: number) =>
+      main.build_display_list_frame(extras, expected),
+  });
+  const overrides = { getInputs: () => inputs };
+  const hook = renderHook(
+    ({ layout, resolved }) => useRustDisplayList(layout, overrides, undefined, resolved, engine),
+    {
+      initialProps: {
+        layout: inputs.layout as Layout, resolved: undefined as ReadonlySet<number> | undefined,
+      },
+    }
+  );
+  const syncReply = spyOn(ResidentEngineWorkerClient.prototype, 'sync');
+  try {
+    await waitFor(() => {
+      if (hook.result.current.error) throw hook.result.current.error;
+      expect(hook.result.current.frame?.frameEpoch).toBe(1);
+    });
+    const bootstrap = hook.result.current.layoutInWorker(engine, REQUEST)!;
+    const worker = FakeWorker.last!;
+    native.reset_frame_base();
+    const initialFrame = native.build_display_list_frame('{}', 1);
+    await act(async () => {
+      worker.reply({
+        id: worker.requestAt(-1).id, ok: true, frame: initialFrame.slice().buffer,
+        caret: { frameEpoch: 2, caretRect: null }, selection: null,
+        layoutRevision: 1, layoutJson,
+      });
+      await bootstrap;
+      hook.rerender({ layout: inputs.layout, resolved: new Set([7]) });
+    });
+    await waitFor(() => {
+      if (hook.result.current.error) throw hook.result.current.error;
+      expect(hook.result.current.frame?.frameEpoch).toBe(2);
+    });
+    expect(hook.result.current.workerSurfacesActive).toBe(false);
+    const unseen = native.build_display_list_frame('{}', 2);
+    enabled = true;
+    const sync = hook.result.current.layoutInWorker(engine, REQUEST)!;
+    const request = worker.requestAt(-1);
+    expect(request).toMatchObject({ type: 'sync', expectedFrameEpoch: 2, frameChain: false });
+    if (request.type !== 'sync') throw new Error('Expected a sync request');
+    const frame = native.build_display_list_frame(
+      '{"resolvedCommentIds":[7]}', request.frameChain ? 3 : request.expectedFrameEpoch
+    );
+    worker.reply({
+      id: request.id, ok: true, frame: frame.slice().buffer,
+      ...(request.frameChain ? { pageFrames: [unseen.slice().buffer, frame.slice().buffer] } : {}),
+      caret: { frameEpoch: 4, caretRect: null }, selection: null,
+      layoutRevision: 2, layoutJson,
+    });
+    const computation = (await sync)!;
+    const reply = syncReply.mock.results.at(-1)!;
+    if (reply.type !== 'return') throw new Error('Expected a sync reply');
+    expect((await reply.value).pageFrames).toBeUndefined();
+    await act(async () => {
+      hook.rerender({ layout: computation.layout, resolved: new Set([7]) });
+    });
+    await waitFor(() => {
+      if (hook.result.current.error) throw hook.result.current.error;
+      expect(hook.result.current.frame?.frameEpoch).toBe(4);
+      expect(hook.result.current.workerSurfacesActive).toBe(true);
+    });
+    const next = hook.result.current.layoutInWorker(engine, REQUEST)!;
+    expect(worker.posted.at(-1)).toMatchObject({ type: 'sync', expectedFrameEpoch: 4, frameChain: true });
+    const delta = native.build_display_list_frame('{"resolvedCommentIds":[7]}', 4);
+    worker.reply({
+      id: worker.requestAt(-1).id, ok: true, frame: delta.slice().buffer,
+      caret: { frameEpoch: 5, caretRect: null }, selection: null,
+      layoutRevision: 3, layoutJson,
+    });
+    await next;
+  } finally {
+    syncReply.mockRestore();
+    hook.unmount();
+    main.free();
+    native.free();
+  }
+});
+
+test('a replacement worker cannot replay onto the previous worker frame of the same host', async () => {
+  const first = setup();
+  const other = setup(9302);
+  const hook = renderHook(
+    ({ layout, source }) => useRustDisplayList(layout, undefined, undefined, undefined, source),
+    { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+  );
+  const pass = async (source: typeof first, frame: Uint8Array) => {
+    const pending = hook.result.current.layoutInWorker(source.engine, REQUEST)!;
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.requestAt(-1).id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: decodeFrameDelta(frame).frameEpoch, caretRect: null }, selection: null,
+      layoutRevision: source.adopted.length, layoutJson: source.layoutJson,
+    });
+    return { worker, computation: (await pending)! };
+  };
+  const syncReply = spyOn(ResidentEngineWorkerClient.prototype, 'sync');
+  try {
+    const initial = await pass(first, first.frame);
+    await act(async () => {
+      hook.rerender({ layout: initial.computation.layout, source: first.engine });
+    });
+    await waitFor(() => expect(hook.result.current.frame?.frameEpoch).toBe(1));
+    const previous = hook.result.current.frame;
+    await pass(other, other.native.build_display_list_frame('{}', 0));
+    first.native.reset_frame_base();
+    const replacement = await pass(first, first.native.build_display_list_frame('{}', 1));
+    expect(replacement.worker).not.toBe(initial.worker);
+    expect(hook.result.current.frame).toBe(previous);
+    const next = hook.result.current.layoutInWorker(first.engine, REQUEST)!;
+    const request = replacement.worker.requestAt(-1);
+    expect(request).toMatchObject({
+      type: 'sync', expectedFrameEpoch: 1, frameChain: false,
+    });
+    if (request.type !== 'sync') throw new Error('Expected a sync request');
+    const frame = first.native.build_display_list_frame('{}', request.expectedFrameEpoch);
+    replacement.worker.reply({
+      id: request.id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: decodeFrameDelta(frame).frameEpoch, caretRect: null }, selection: null,
+      layoutRevision: first.adopted.length, layoutJson: first.layoutJson,
+    });
+    await next;
+    const reply = syncReply.mock.results.at(-1)!;
+    if (reply.type !== 'return') throw new Error('Expected a sync reply');
+    expect((await reply.value).pageFrames).toBeUndefined();
+  } finally {
+    syncReply.mockRestore();
+    hook.unmount();
+    first.native.free();
+    other.native.free();
+  }
+});
+
 test('a retained worker query facade forwards within a document load but never to the next document', async () => {
   const requestB = JSON.stringify({
     ...JSON.parse(REQUEST),
