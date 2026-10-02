@@ -137,6 +137,7 @@ function worker() {
     retainBuiltPages: [] as boolean[],
     windowedIncrementalBuilds: [] as boolean[],
     directBatches: [] as boolean[],
+    previewDecisionCheckpoints: [] as boolean[],
     rasterized: [] as number[],
     buffers: [] as Surface[],
     releaseCalls: [] as Array<{ pages: number[]; expectedFrameEpoch: number }>,
@@ -163,6 +164,9 @@ function worker() {
       },
       directBatchesApplied() {
         return 0;
+      },
+      setPreviewDecisionCheckpoints(enabled: boolean) {
+        harness.previewDecisionCheckpoints.push(enabled);
       },
       clearFonts() {},
       layoutDocumentJson() {},
@@ -1085,6 +1089,7 @@ describe('resident worker layout ownership', () => {
       '{"headersFooters":{"parts":[]},"fontChains":{"a|0|0":[1]},"resolvedCommentIds":[4]}',
     ]);
     expect(w.harness.directBatches).toEqual([]);
+    expect(w.harness.previewDecisionCheckpoints).toEqual([]);
 
     const plain = await w.send({
       type: 'sync',
@@ -2959,6 +2964,7 @@ describe('resident worker opening', () => {
     expect(opened.ok && opened.hostJson).toBe('{"host":1}');
     expect(opened.ok && opened.stateVector).toBeDefined();
     expect(w.harness.directBatches).toEqual([true]);
+    expect(w.harness.previewDecisionCheckpoints).toEqual([true]);
     expect(opened.memory).toEqual(w.harness.memories);
     const requirements = await w.send({ type: 'fontRequirements', layoutInput: '{"request":1}' });
     expect(requirements.ok && requirements.requirementsJson).toBe('[{"key":"a"}]');
@@ -3053,6 +3059,7 @@ describe('resident worker opening', () => {
     expect(preview.ok && preview.hostJson).toBe('{"host":"preview"}');
     expect(preview.ok && preview.stateVector).toBeDefined();
     expect(w.harness.directBatches).toEqual([]);
+    expect(w.harness.previewDecisionCheckpoints).toEqual([]);
     const framed = await w.send(bootstrap);
     expect(framed.ok && framed.layoutJson).toBe(provisional);
     // A second preview never replaces the first.
@@ -3062,6 +3069,7 @@ describe('resident worker opening', () => {
     const opened = await w.send({ type: 'open', bytes: new Uint8Array([3]).buffer, digest: 'abc' });
     expect(opened.ok && opened.hostJson).toBe('{"host":1}');
     expect(w.harness.directBatches).toEqual([true]);
+    expect(w.harness.previewDecisionCheckpoints).toEqual([true]);
     const full = await w.send({ ...bootstrap, expectedFrameEpoch: 1 });
     expect(full.ok && full.layoutJson).toBe(provisional);
     expect(calls).toEqual([

@@ -259,7 +259,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     const opening = await createResidentEngineSession(request.heapLimitBytes);
     let hostJson: string | null;
     try {
-      if (request.previewBlocks === undefined) opening.setDirectBatches(true);
+      if (request.previewBlocks === undefined) {
+        opening.setDirectBatches(true);
+        opening.setPreviewDecisionCheckpoints(true);
+      }
       hostJson =
         request.previewBlocks === undefined
           ? opening.openDocx(new Uint8Array(request.bytes), request.digest, request.generation)
