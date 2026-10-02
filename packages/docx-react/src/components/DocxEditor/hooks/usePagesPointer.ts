@@ -421,7 +421,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       if (!replicaPending?.()) return false;
       if (position != null) {
         pendingGestureRef.current = {
-          kind: detail === 3 ? 'paragraph' : detail === 2 ? 'word' : 'caret',
+          kind: detail >= 3 ? 'paragraph' : detail === 2 ? 'word' : 'caret',
           anchor: position,
           head: position,
           epoch: inputEpochRef.current,
@@ -713,6 +713,12 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
   const handleMouseUp = useCallback(
     (e: MouseEvent) => {
       const wasDragging = isDraggingRef.current || yrsCellDraggingRef.current;
+      // the release applies a queued drag frame now, so it cannot land after a multi-click's selection
+      if (dragRafRef.current != null) {
+        cancelAnimationFrame(dragRafRef.current);
+        dragRafRef.current = null;
+        dragExtendRef.current(e.clientX, e.clientY);
+      }
       if (isDraggingRef.current && pendingGestureRef.current) {
         const position = getPositionFromMouse(e.clientX, e.clientY);
         if (position != null) updatePendingGestureHead(position);
@@ -978,6 +984,9 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         }
       }
 
+      if (e.detail > 1 && pending?.epoch === inputEpochRef.current && pending.kind !== 'link') {
+        pending.kind = e.detail >= 3 ? 'paragraph' : 'word';
+      }
       const pmPos = getPositionFromMouse(e.clientX, e.clientY);
       const target = pmPos != null ? resolveTarget(pmPos) : null;
       if (!target) return;
@@ -985,7 +994,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         clearPendingGesture();
         yrsInputRef.current?.selectWordAtDisplay(target.displayPosition, target.story);
         focusInput();
-      } else if (e.detail === 3) {
+      } else if (e.detail >= 3) {
         clearPendingGesture();
         yrsInputRef.current?.selectParagraphAtDisplay(target.displayPosition, target.story);
         focusInput();

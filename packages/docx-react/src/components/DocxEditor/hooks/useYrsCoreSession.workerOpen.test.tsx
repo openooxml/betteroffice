@@ -2901,6 +2901,160 @@ test('a document read OOM before proposals reopens the source document once', as
   }
 }, 15_000);
 
+async function failIdleWorker(worker: InProcessResidentWorker, message: string): Promise<void> {
+  await act(async () => {
+    worker.onerror?.({ message } as ErrorEvent);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+test('a worker that fails while idle after load is replaced once and keeps painting and reading', async () => {
+  const { workers, posted } = installWorker();
+  const { result, unmount } = await openWorkerProposals();
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    expect(workers).toHaveLength(1);
+    await failIdleWorker(workers[0], 'worker lost');
+    await waitFor(() => expect(workers).toHaveLength(2));
+    await waitFor(() => expect(posted.filter((request) => request.type === 'bootstrap')).toHaveLength(2));
+    await waitFor(() => expect(result.current.renderer.workerSurfacesActive).toBe(true));
+    await waitFor(() => expect(result.current.renderer.queries?.isReady()).toBe(true));
+    expect(result.current.renderer.frame).not.toBeNull();
+    expect(result.current.renderer.queries!.pageCount()).toBeGreaterThan(0);
+    const read = await result.current.ref.current!.readParagraphs({ view: 'accepted' });
+    expect(read).toMatchObject({ ok: true });
+    if (!read.ok) throw new Error(read.failure.message);
+    expect(read.paragraphs).toHaveLength(205);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(2);
+    const api = result.current.ref.current!;
+    const paragraph = (await api.getParagraphIdentities()).paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    const proposals = await api.getProposals();
+    await act(async () => {
+      expect(await api.proposeChanges({
+        expectVersion: proposals.version,
+        proposals: [{
+          id: 'after-recovery', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Recovered ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.renderer.error).toBeNull();
+    expect(result.current.errors).toEqual([]);
+    expect(errorLog).not.toHaveBeenCalled();
+    expect(warning.mock.calls.map(([message]) => message)).toContain(
+      '[CanvasRenderer] Resident engine worker failed; starting a fresh worker'
+    );
+  } finally {
+    unmount();
+    warning.mockRestore();
+    errorLog.mockRestore();
+  }
+}, 15_000);
+
+test('a replacement worker that fails while idle too fails the document once', async () => {
+  const { workers } = installWorker();
+  const { result, unmount } = await openWorkerProposals();
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    await failIdleWorker(workers[0], 'worker lost');
+    await waitFor(() => expect(result.current.renderer.workerSurfacesActive).toBe(true));
+    expect(workers).toHaveLength(2);
+    await failIdleWorker(workers[1], 'worker lost again');
+    await waitFor(() => expect(result.current.renderer.error).not.toBeNull());
+    const failure = result.current.renderer.error!;
+    expect(failure.message).toContain('worker lost again');
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(workers).toHaveLength(2);
+    expect(errorLog.mock.calls.filter(([, error]) => error === failure)).toEqual([
+      ['[CanvasRenderer] Resident engine worker failed again', failure],
+    ]);
+    expect(result.current.errors).toEqual([failure]);
+    expect(result.current.mainOpens).toEqual([]);
+  } finally {
+    unmount();
+    warning.mockRestore();
+    errorLog.mockRestore();
+  }
+}, 15_000);
+
+test('a worker holding committed proposals that fails while idle fails the document without a fresh worker', async () => {
+  const { workers, posted } = installWorker();
+  const { result, unmount } = await openWorkerProposals();
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const api = result.current.ref.current!;
+    const identities = await api.getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    const initial = await api.getProposals();
+    await act(async () => {
+      expect(await api.proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'held-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Held ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    const held = await api.getProposals();
+    await waitFor(() => expect(sourceVersionOf(result.current.renderer.queries)).toBe(held.version));
+    await failIdleWorker(workers[0], 'worker lost');
+    await waitFor(() => expect(result.current.renderer.error).not.toBeNull());
+    const failure = result.current.renderer.error!;
+    expect(failure.message).toContain('worker lost');
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    await expect(api.getProposals()).rejects.toBe(failure);
+    expect(workers).toHaveLength(1);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.errors).toEqual([failure]);
+    expect(errorLog.mock.calls.filter(([, error]) => error === failure)).toEqual([
+      ['[CanvasRenderer] Resident engine worker holding proposals failed', failure],
+    ]);
+    expect(warning.mock.calls.some(([message]) => String(message).includes('starting a fresh worker'))).toBe(false);
+  } finally {
+    unmount();
+    warning.mockRestore();
+    errorLog.mockRestore();
+  }
+}, 15_000);
+
+test('a worker that fails while a layout request waits keeps the request path routing', async () => {
+  const { workers, posted, received } = installWorker({ holdReply: (request) => request.type === 'bootstrap' });
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  const { result, unmount } = renderHook(useHarness, { initialProps });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await act(async () => { await received('bootstrap'); });
+    await failIdleWorker(workers[0], 'worker lost mid-load');
+    await waitFor(() => expect(result.current.renderer.frame).not.toBeNull());
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(workers).toHaveLength(1);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
+    expect(errorLog.mock.calls.map(([message]) => message)).toContain(
+      '[CanvasRenderer] Resident engine worker unavailable; laying out on the main thread'
+    );
+    expect(warning.mock.calls.some(([message]) => String(message).includes('starting a fresh worker'))).toBe(false);
+    expect(result.current.renderer.error).toBeNull();
+  } finally {
+    unmount();
+    warning.mockRestore();
+    errorLog.mockRestore();
+  }
+}, 15_000);
+
 test('an OOM during the first proposal starts a fresh worker instead of failing the document', async () => {
   const options: Parameters<typeof installWorker>[0] = {};
   const { workers, posted } = installWorker(options);

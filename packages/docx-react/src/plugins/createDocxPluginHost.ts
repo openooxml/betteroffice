@@ -79,6 +79,8 @@ export interface DocxPluginHost {
   geometryChanged(): void;
   /** The pages now show `layout`'s pixels; repeats its `layout-change` if it is still current. */
   layoutPresented(layout: DocxPluginLayout): void;
+  /** Geometry for the shown `layout` exists now; repeats its `layout-change` if none carried it. */
+  geometryPresented(layout: DocxPluginLayout): void;
   activations(): readonly DocxPluginActivation[];
   subscribe(listener: () => void): () => void;
   /** The restricted command store an activation's React contributions see. */
@@ -152,6 +154,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     readOnly: false,
     selection: EMPTY_SELECTION,
     layout: null as DocxPluginLayout | null,
+    geometryLayout: null as DocxPluginLayout | null,
   };
   const activationScopes = new WeakMap<object, DocxCommandScope>();
   const identities = new WeakMap<object, number>();
@@ -264,6 +267,14 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   });
 
   const notify = (event: DocxPluginEvent): void => runtime.notify(event);
+  const hasGeometry = (): boolean => {
+    const geometry = access.geometry();
+    return !!geometry && sameLayout(geometry.layout, state.layout);
+  };
+  const notifyLayout = (generation: string): void => {
+    if (hasGeometry()) state.geometryLayout = state.layout;
+    notify({ type: 'layout-change', generation, layout: state.layout });
+  };
 
   const documentChanged = (): void => {
     const generation = runtime.generation();
@@ -421,8 +432,9 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
           : null;
       if (sameLayout(layout, state.layout)) return;
       state.layout = layout;
+      state.geometryLayout = null;
       const generation = runtime.generation();
-      if (generation) notify({ type: 'layout-change', generation, layout });
+      if (generation) notifyLayout(generation);
     },
 
     layoutId: () => (runtime.generation() === null ? null : state.layout?.id ?? null),
@@ -432,7 +444,18 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     layoutPresented(layout) {
       const generation = runtime.generation();
       if (!generation || !state.layout || !sameLayout(layout, state.layout)) return;
-      notify({ type: 'layout-change', generation, layout: state.layout });
+      notifyLayout(generation);
+    },
+
+    geometryPresented(layout) {
+      const generation = runtime.generation();
+      if (
+        !generation ||
+        !sameLayout(layout, state.layout) ||
+        !hasGeometry() ||
+        sameLayout(state.geometryLayout, state.layout)
+      ) return;
+      notifyLayout(generation);
     },
 
     activations: () => runtime.activations(),
