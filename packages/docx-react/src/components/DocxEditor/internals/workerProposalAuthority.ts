@@ -294,7 +294,7 @@ export function registerWorkerProposalAuthority(
         entry.batch = new Map();
         queueMicrotask(() => resolveAnchorTargets(entry));
       }
-      entry.batch.set(key, target);
+      entry.batch.set(key, JSON.parse(key) as NonProposalTarget);
       return undefined;
     },
     holdsWorkerState: () => holdsState || mutating > 0,

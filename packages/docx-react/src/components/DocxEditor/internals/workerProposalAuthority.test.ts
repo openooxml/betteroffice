@@ -164,6 +164,26 @@ test('anchor targets batch misses in call order and cache worker values by JSON 
   expect(h.worker.documentRead).toHaveBeenCalledTimes(1);
 });
 
+test('anchor targets send the value requested even when the caller mutates the object before the batch', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  const values: ProposalGeometryTarget[] = [
+    { ok: true, ranges: [{ from: 1, to: 2 }], paragraph: 0 },
+    { ok: true, ranges: [{ from: 5, to: 9 }], paragraph: 3 },
+  ];
+  h.worker.documentRead.mockImplementationOnce(async () => ({ version: 'worker-1', value: values }) as never);
+  const target: { kind: 'revision'; revisionId: string } = { kind: 'revision', revisionId: 'r1' };
+  expect(h.authority.anchorTarget(target)).toBeUndefined();
+  target.revisionId = 'r2';
+  expect(h.authority.anchorTarget(target)).toBeUndefined();
+  await new Promise((done) => setTimeout(done, 0));
+  expect(h.worker.documentRead.mock.calls[0]![0]).toEqual<{
+    kind: 'anchorTargets'; targets: (typeof target)[];
+  }>({ kind: 'anchorTargets', targets: [{ kind: 'revision', revisionId: 'r1' }, { kind: 'revision', revisionId: 'r2' }] });
+  expect(h.authority.anchorTarget({ kind: 'revision', revisionId: 'r1' })).toEqual(values[0]);
+  expect(h.authority.anchorTarget({ kind: 'revision', revisionId: 'r2' })).toEqual(values[1]);
+});
+
 test('anchor targets discard a mismatched read version and request the target again', async () => {
   const h = harness();
   await h.authority.initialize();
