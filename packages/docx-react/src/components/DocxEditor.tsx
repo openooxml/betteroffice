@@ -43,6 +43,7 @@ import type { BundledFontProvider } from '@betteroffice/docx/layout';
 import {
   createYrsSidebarProjection,
   extractTrackedChangesFromYrs,
+  loadRustDisplayListQueryEngine,
   yrsIdToNumericId,
   type TrackedChangesResult,
 } from '@betteroffice/docx/layout/render';
@@ -1242,6 +1243,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const workerProposals = modeReadOnly && !collaboration;
   // A viewer session holds no document here: selection, copy and point reads go to the worker.
   const viewerSession = Boolean(experimentalWorkerOpen) && workerProposals;
+  // Hit testing answers from the first painted page once the query engine has loaded.
+  useEffect(() => {
+    if (viewerSession) void loadRustDisplayListQueryEngine().catch(() => {});
+  }, [viewerSession]);
   const workerContentChangeRef = useRef<() => void>(() => {});
   const workerRevisionsRef = useRef<() => void>(() => {});
   const yrsCore = useYrsCoreSession(

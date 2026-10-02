@@ -47,6 +47,8 @@ interface ViewerSelection extends DocxDisplayRange {
   token: number;
   /** The worker version of the layout the positions belong to. */
   version: string;
+  /** Made on a display-only preview, whose first pages the document lays out the same. */
+  preview: boolean;
 }
 
 export interface ViewerInputProps {
@@ -87,7 +89,7 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
     null
   );
   const settledRangeRef = useRef<{ range: DocxTextRange; version: string } | null>(null);
-  const carryRef = useRef<string | null>(null);
+  const documentRef = useRef(documentKey);
   const reprojectingRef = useRef<string | null>(null);
   const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const primedRef = useRef<string | null>(null);
@@ -128,7 +130,12 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
 
   const setSelection = useCallback(
     (range: DocxDisplayRange, version: string, token = ++tokenRef.current): void => {
-      selectionRef.current = { ...range, token, version };
+      selectionRef.current = {
+        ...range,
+        token,
+        version,
+        preview: documentRef.current?.isDisplayOnly() ?? false,
+      };
       settledRangeRef.current = null;
       onChangeRef.current();
       scheduleSettle();
@@ -184,14 +191,11 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
     readUnit(0, 'story', version, ++tokenRef.current);
   }, [readUnit]);
 
-  const documentRef = useRef(documentKey);
   useEffect(() => {
     const previous = documentRef.current;
     if (previous === documentKey) return;
     documentRef.current = documentKey;
-    const selection = selectionRef.current;
-    carryRef.current = previous?.isDisplayOnly() && selection ? selection.version : null;
-    if (!carryRef.current) {
+    if (!previous?.isDisplayOnly()) {
       selectionRef.current = null;
       settledRangeRef.current = null;
       textRef.current = null;
@@ -204,9 +208,12 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
     const selection = selectionRef.current;
     const version = presentedWorkerVersion(queries);
     if (!selection || version === null || selection.version === version) return;
-    if (carryRef.current === selection.version) {
-      carryRef.current = null;
-      selectionRef.current = { ...selection, version };
+    if (selection.preview) {
+      selectionRef.current = {
+        ...selection,
+        version,
+        preview: documentRef.current?.isDisplayOnly() ?? false,
+      };
       textRef.current = null;
       onChangeRef.current();
       scheduleSettle();
