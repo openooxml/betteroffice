@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { createResidentEngineSession } from '../residentEngineSession';
+import { createResidentEngineSession, type ResidentEngineSession } from '../residentEngineSession';
 import { preloadEditWasm, preloadEditWasmFrom } from '../wasm/index';
 import type { ResidentEngineWorkerPort } from '../residentEngineWorkerClient';
 import type {
@@ -12,6 +12,7 @@ import type {
 export interface InProcessResidentWorker extends ResidentEngineWorkerPort {
   /** Request types posted to the worker, in order. */
   readonly requests: (ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule)['type'][];
+  readonly sessions: ResidentEngineSession[];
   /** Holds the worker's replies until `release`. */
   hold(): void;
   release(): void;
@@ -19,7 +20,7 @@ export interface InProcessResidentWorker extends ResidentEngineWorkerPort {
 
 const STUBS: Record<string, string> = {
   './residentEngineSession':
-    'export const createResidentEngineSession = () => testHarness.createSession();',
+    'export const createResidentEngineSession = (heapLimitBytes) => testHarness.createSession(heapLimitBytes);',
   './wasm/index': `
     export const preloadEditWasm = () => testHarness.preload();
     export const preloadEditWasmFrom = (source) => testHarness.preloadFrom(source);
@@ -37,7 +38,7 @@ const STUBS: Record<string, string> = {
  * Bundles the worker module, with canvas output stubbed, and returns a factory that starts one
  * in-process worker per call. Messages cross with structured-clone semantics, asynchronously.
  */
-export async function residentWorkerFactory(): Promise<() => InProcessResidentWorker> {
+export async function residentWorkerFactory(): Promise<(clientId?: number) => InProcessResidentWorker> {
   const result = await Bun.build({
     entrypoints: [resolve(import.meta.dir, '../residentEngineWorker.ts')],
     target: 'bun',
@@ -66,7 +67,7 @@ export async function residentWorkerFactory(): Promise<() => InProcessResidentWo
     'testHarness',
     await result.outputs[0].text()
   ) as (scope: unknown, canvas: unknown, harness: unknown) => void;
-  return () => {
+  return (clientId) => {
     let held: ResidentEngineWorkerResponse[] | null = null;
     const scope = {
       onmessage: null as ((event: {
@@ -88,6 +89,7 @@ export async function residentWorkerFactory(): Promise<() => InProcessResidentWo
       onerror: null,
       onmessageerror: null,
       requests: [],
+      sessions: [],
       postMessage(message) {
         worker.requests.push(message.type);
         const data = structuredClone(message);
@@ -104,7 +106,11 @@ export async function residentWorkerFactory(): Promise<() => InProcessResidentWo
       },
     };
     start(scope, class {}, {
-      createSession: createResidentEngineSession,
+      createSession: async (heapLimitBytes?: number) => {
+        const session = await createResidentEngineSession(heapLimitBytes, clientId);
+        worker.sessions.push(session);
+        return session;
+      },
       preload: preloadEditWasm,
       preloadFrom: preloadEditWasmFrom,
     });

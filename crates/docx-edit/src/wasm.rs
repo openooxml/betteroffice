@@ -1825,6 +1825,16 @@ impl EditSession {
         self.engine.set_local_lowering(enabled);
     }
 
+    /// Apply admitted paragraph-local text batches directly. Off by default.
+    pub fn set_direct_batches(&self, enabled: bool) {
+        self.engine.doc().set_direct_batches(enabled);
+    }
+
+    /// The number of text batches applied directly to the live document.
+    pub fn direct_batches_applied(&self) -> f64 {
+        self.engine.doc().direct_batches_applied() as f64
+    }
+
     /// Limit incremental rebuilds to the display window and caret pages. Off by default.
     pub fn set_windowed_incremental_builds(&self, enabled: bool) {
         let _fonts = self.fonts.enter();
