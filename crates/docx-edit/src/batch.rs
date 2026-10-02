@@ -699,6 +699,7 @@ fn direct_admissible<T: ReadTxn>(doc: &EditingDoc, txn: &T, steps: &[Planned]) -
         return false;
     }
     let mut snapshots = HashMap::new();
+    let mut removals = HashMap::new();
     for planned in steps {
         let effect = match &planned.effect {
             Some(Effect::Insert { at, .. }) => Some((*at, *at, true)),
@@ -720,6 +721,24 @@ fn direct_admissible<T: ReadTxn>(doc: &EditingDoc, txn: &T, steps: &[Planned]) -
                 || chunk.end() != story.len(txn)
         }) {
             return false;
+        }
+        if let Some(
+            Effect::Replace {
+                start, end, ctx, ..
+            }
+            | Effect::Delete { start, end, ctx },
+        ) = &planned.effect
+            && start < end
+            && (!ctx.is_suggesting()
+                || chunks.iter().any(|chunk| {
+                    chunk.start < *end && *start < chunk.end() && chunk.attr_active(crate::INS)
+                }))
+        {
+            let count = removals.entry(planned.story.as_str()).or_insert(0_u32);
+            *count += 1;
+            if *count > 1 {
+                return false;
+            }
         }
         let mut first = 0;
         let mut contained = effect.is_none();
@@ -3322,10 +3341,10 @@ mod direct_tests {
         for doc in [&direct, &replica] {
             prepare(doc);
         }
-        assert_replica_fallback_docs(direct, replica, step);
+        assert_replica_fallback_docs(direct, replica, vec![step]);
     }
 
-    fn assert_replica_fallback_docs(direct: EditingDoc, replica: EditingDoc, step: EditStep) {
+    fn assert_replica_fallback_docs(direct: EditingDoc, replica: EditingDoc, steps: Vec<EditStep>) {
         assert_eq!(
             direct.encode_state_as_update_v1(),
             replica.encode_state_as_update_v1()
@@ -3335,20 +3354,19 @@ mod direct_tests {
             direct.stories_changed_since(0).0,
             replica.stories_changed_since(0).0,
         ];
-        let steps = [BatchStep::Edit(&step)];
+        let steps: Vec<_> = steps.iter().map(BatchStep::Edit).collect();
         let a = apply_text_steps(&direct, &steps, &UndoSession::new(), MAX_STAGING_BYTES).unwrap();
         let b = apply_text_steps(&replica, &steps, &UndoSession::new(), MAX_STAGING_BYTES).unwrap();
         assert!(a.applied);
         assert_eq!(normalized(&a), normalized(&b));
         assert_eq!(a.changed_stories, b.changed_stories);
+        let changed = direct.stories_changed_since(revisions[0]).1;
+        assert_eq!(changed, replica.stories_changed_since(revisions[1]).1);
         assert!(!a.changed_stories.is_empty());
-        assert_eq!(
-            direct.stories_changed_since(revisions[0]).1,
+        assert!(
             a.changed_stories
-        );
-        assert_eq!(
-            replica.stories_changed_since(revisions[1]).1,
-            b.changed_stories
+                .iter()
+                .all(|story| changed.contains(story))
         );
         assert_eq!(direct.direct_batches_applied(), 0);
         assert_eq!(replica.direct_batches_applied(), 0);
@@ -3974,72 +3992,105 @@ mod direct_tests {
         ));
     }
 
-    #[test]
-    fn unstable_following_paragraph_format_uses_replica_path_for_plain_delete() {
-        let state = {
-            let doc = EditingDoc::new(9001);
-            doc.seed_story(
-                "body",
-                &["AB", "C"].map(|text| crate::SeedParagraph {
-                    text: text.to_owned(),
+    fn seeded_pair(paragraphs: &[&str], prepare: impl Fn(&EditingDoc)) -> [EditingDoc; 2] {
+        let seed = EditingDoc::new(9001);
+        seed.seed_story(
+            "body",
+            &paragraphs
+                .iter()
+                .map(|text| crate::SeedParagraph {
+                    text: (*text).to_owned(),
                     p_style: "Normal".to_owned(),
                     alignment: "left".to_owned(),
-                }),
-            )
-            .unwrap();
-            {
-                let mut txn = doc.yrs_doc().transact_mut();
-                let story = story_ref(&txn, "body").unwrap();
-                story.format(
-                    &mut txn,
-                    0,
-                    2,
-                    HashMap::from([("italic".into(), Any::Bool(true))]),
-                );
-                story.format(
-                    &mut txn,
-                    3,
-                    1,
-                    HashMap::from([("bold".into(), Any::Number(f64::INFINITY))]),
-                );
-            }
-            doc.encode_state_as_update_v1()
-        };
-        let [direct, replica] = [(), ()].map(|_| {
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let state = seed.encode_state_as_update_v1();
+        [(), ()].map(|_| {
             let doc = EditingDoc::new(9001);
             doc.apply_update_v1(&state).unwrap();
+            prepare(&doc);
             doc
+        })
+    }
+
+    fn format_body(doc: &EditingDoc, ranges: &[(u32, u32, &str, Any)]) {
+        let mut txn = doc.yrs_doc().transact_mut();
+        let story = story_ref(&txn, "body").unwrap();
+        for (start, len, key, value) in ranges {
+            story.format(
+                &mut txn,
+                *start,
+                *len,
+                HashMap::from([((*key).into(), value.clone())]),
+            );
+        }
+    }
+
+    fn delete_in(paragraph: &str, start: u32, end: u32) -> EditStep {
+        EditStep::new(EditOperation::DeleteText {
+            target: TextTarget::Range(text_range("body", paragraph, start, paragraph, end)),
+        })
+    }
+
+    #[test]
+    fn unstable_following_paragraph_format_uses_replica_path_for_plain_delete() {
+        let [direct, replica] = seeded_pair(&["AB", "C"], |doc| {
+            format_body(
+                doc,
+                &[
+                    (0, 2, "italic", Any::Bool(true)),
+                    (3, 1, "bold", Any::Number(f64::INFINITY)),
+                ],
+            );
         });
+        assert_eq!(
+            deterministic::fork_state_len_v1(&direct.yrs_doc().transact()),
+            None
+        );
+        let paragraph = direct.paragraphs("body").unwrap()[0].para_id.clone();
+        assert_replica_fallback_docs(direct, replica, vec![delete_in(&paragraph, 1, 2)]);
+    }
+
+    #[test]
+    fn second_removal_in_a_story_uses_replica_path() {
+        let [direct, replica] = seeded_pair(&["ABYX", "C"], |doc| {
+            format_body(
+                doc,
+                &[
+                    (0, 2, "italic", Any::Bool(true)),
+                    (5, 1, "italic", Any::Bool(true)),
+                ],
+            );
+        });
+        assert!(deterministic::fork_state_len_v1(&direct.yrs_doc().transact()).is_some());
         let paragraph = direct.paragraphs("body").unwrap()[0].para_id.clone();
         assert_replica_fallback_docs(
             direct,
             replica,
-            EditStep::new(EditOperation::DeleteText {
-                target: TextTarget::Range(text_range("body", &paragraph, 1, &paragraph, 2)),
-            }),
+            vec![delete_in(&paragraph, 3, 4), delete_in(&paragraph, 1, 3)],
+        );
+        let [direct, replica] = seeded_pair(&["ABYX", "C"], |doc| {
+            format_body(doc, &[(0, 2, "italic", Any::Bool(true))]);
+        });
+        direct.set_direct_batches(true);
+        let paragraph = direct.paragraphs("body").unwrap()[0].para_id.clone();
+        let step = delete_in(&paragraph, 1, 3);
+        let steps = [BatchStep::Edit(&step)];
+        let a = apply_text_steps(&direct, &steps, &UndoSession::new(), MAX_STAGING_BYTES).unwrap();
+        let b = apply_text_steps(&replica, &steps, &UndoSession::new(), MAX_STAGING_BYTES).unwrap();
+        assert_eq!(normalized(&a), normalized(&b));
+        assert_eq!(direct.direct_batches_applied(), 1);
+        assert_eq!(
+            direct.story_segments("body").unwrap(),
+            replica.story_segments("body").unwrap()
         );
     }
 
     #[test]
     fn retained_deleted_text_uses_replica_path() {
-        let state = {
-            let doc = EditingDoc::new(9001);
-            doc.seed_story(
-                "body",
-                &["ABX", "C"].map(|text| crate::SeedParagraph {
-                    text: text.to_owned(),
-                    p_style: "Normal".to_owned(),
-                    alignment: "left".to_owned(),
-                }),
-            )
-            .unwrap();
-            doc.encode_state_as_update_v1()
-        };
-        let [direct, replica] = [(), ()].map(|_| {
-            let doc = EditingDoc::new(9001);
-            doc.apply_update_v1(&state).unwrap();
-            doc
-        });
+        let [direct, replica] = seeded_pair(&["ABX", "C"], |_| {});
         let histories = [&direct, &replica].map(|doc| {
             let history = doc.undo_manager();
             doc.delete_range(&EditCtx::local("User", DATE), StoryRange::new("body", 2, 3))
@@ -4060,9 +4111,9 @@ mod direct_tests {
         assert_replica_fallback_docs(
             direct,
             replica,
-            EditStep::new(EditOperation::DeleteText {
+            vec![EditStep::new(EditOperation::DeleteText {
                 target: TextTarget::Range(text_range("body", &paragraph, 1, &paragraph, 2)),
-            }),
+            })],
         );
     }
 
