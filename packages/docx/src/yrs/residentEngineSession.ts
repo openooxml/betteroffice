@@ -77,6 +77,10 @@ export type ResidentEngineSession = Pick<
   layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
   /** Limit incremental rebuilds to the display window and caret pages. Off by default. */
   setWindowedIncrementalBuilds(enabled: boolean): void;
+  /** @internal */
+  setDirectBatches(enabled: boolean): void;
+  /** @internal */
+  directBatchesApplied(): number;
   /** Parses and seeds a DOCX; returns the host metadata JSON the main thread decodes. */
   openDocx(bytes: Uint8Array, digest?: string, generation?: string): string;
   /** Opens a display-only preview of the first `blocks` body blocks; null when it refuses. */
@@ -92,11 +96,12 @@ export type ResidentEngineSession = Pick<
 };
 
 export async function createResidentEngineSession(
-  heapLimitBytes?: number
+  heapLimitBytes?: number,
+  clientId = randomClientId()
 ): Promise<ResidentEngineSession> {
   await preloadEditWasm();
   setEditWasmHeapLimit(heapLimitBytes);
-  const session = createEditSession(randomClientId());
+  const session = createEditSession(clientId);
   session.set_local_lowering(true);
   const listeners = new Set<
     (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
@@ -314,6 +319,8 @@ export async function createResidentEngineSession(
     setDisplayWindow: (start, end) => session.set_display_window(start, end),
     setDisplayRetainBuiltPages: (retain) => session.set_display_retain_built_pages(retain),
     setWindowedIncrementalBuilds: (enabled) => session.set_windowed_incremental_builds(enabled),
+    setDirectBatches: (enabled) => session.set_direct_batches(enabled),
+    directBatchesApplied: () => session.direct_batches_applied(),
     buildDisplayPagesFrame: (pages, expectedFrameEpoch) =>
       session.build_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch),
     releaseDisplayPagesFrame: (pages, expectedFrameEpoch) => {
