@@ -1,9 +1,12 @@
 import type {
   YrsEngineApplyProfile,
+  YrsLoc,
   YrsResidentCaretSnapshot,
   YrsResidentWorkerSnapshot,
   YrsSelection,
+  YrsStickyPosition,
 } from './index';
+import type { ResidentSearchResult } from './residentSearch';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 import type {
@@ -44,6 +47,8 @@ export type ResidentDocumentRead =
   | { kind: 'paragraphIdentities' }
   | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
   | { kind: 'readParagraphs'; request: DocxReadParagraphsRequest }
+  | { kind: 'searchText'; query: string; caseSensitive: boolean; carry?: YrsStickyPosition | null }
+  | { kind: 'stickyAnchors'; locs: YrsLoc[]; version: string }
   | { kind: 'navigationTarget'; story: string; paraId: string };
 
 /** @internal */
@@ -52,10 +57,21 @@ export interface ResidentDocumentReadValues {
   resolveParagraphAnchors: { results: DocxParagraphAnchorResult[] };
   readParagraphs: DocxReadParagraphsResult;
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
+  searchText: ResidentSearchResult;
+  stickyAnchors: Array<YrsStickyPosition | null>;
 }
 
+/** How long a warm waits for the host's compiled module before loading the engine itself. */
+export const RESIDENT_HOST_MODULE_WAIT_MS = 10_000;
+
+/** @internal */
+export type ResidentEngineWorkerHostModule = {
+  type: 'editModule';
+  module: WebAssembly.Module | null;
+};
+
 export type ResidentEngineWorkerRequest =
-  | { id: number; type: 'warm' }
+  | { id: number; type: 'warm'; hostModule?: true }
   | {
       id: number;
       type: 'bootstrap';

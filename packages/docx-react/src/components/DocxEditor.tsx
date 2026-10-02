@@ -1966,6 +1966,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     pushDocument,
     partEditTarget,
     setPartEditTarget,
+    readOnly,
   });
 
   // Container styles - using overflow: auto so sticky toolbar works

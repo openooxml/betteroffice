@@ -9,6 +9,8 @@ import type {
   YrsSelection,
   YrsSession,
   YrsStorySegment,
+  YrsTextMatch,
+  YrsLoc,
 } from './index';
 import type {
   CollaborationTextInsertion,
@@ -53,6 +55,9 @@ export type ResidentEngineSession = Pick<
   | 'residentDeletedUnits'
   | 'resumeRegionLayout'
   | 'selection'
+  | 'searchText'
+  | 'encodeStickyPosition'
+  | 'resolveStickyPosition'
   | 'setDisplayRetainBuiltPages'
   | 'setDisplayWindow'
   | 'setSelection'
@@ -282,6 +287,31 @@ export async function createResidentEngineSession(
   return {
     proposalEngine,
     geometryReader,
+    searchText: (query, options = {}) => {
+      if (!query) return [];
+      const limit = options.limit ?? Number.POSITIVE_INFINITY;
+      if ((!Number.isSafeInteger(limit) && limit !== Number.POSITIVE_INFINITY) || limit < 0) {
+        throw new RangeError('search limit must be a non-negative safe integer');
+      }
+      return JSON.parse(session.search_text(
+        query,
+        options.caseSensitive ?? false,
+        Number.isFinite(limit) ? Math.min(limit, 0xffffffff) : undefined
+      )) as YrsTextMatch[];
+    },
+    encodeStickyPosition: (loc) => ({
+      story: loc.story,
+      encoded: session.encode_sticky_position(loc.story, loc.paraId, loc.offset),
+    }),
+    resolveStickyPosition: (position) => {
+      try {
+        return JSON.parse(
+          session.resolve_sticky_position(position.story, position.encoded)
+        ) as YrsLoc;
+      } catch {
+        return null;
+      }
+    },
     paragraphIdentities: () =>
       JSON.parse(session.paragraph_identities()) as DocxParagraphIdentitySnapshot,
     storiesChangedSince: (since) =>

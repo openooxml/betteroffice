@@ -1,10 +1,13 @@
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { applyFrameDeltaOwned, decodeFrameDelta } from '../layout/render/frameDelta';
 import { createResidentEngineSession } from './residentEngineSession';
 import { proposalRevisionPreview } from './proposals';
+import { createYrsSession } from './index';
+import { readResidentSearch } from './residentSearch';
+import { createYrsPositionProjection, yrsLocToProjectedDisplayPosition } from './yrsPositionProjection';
 import { preloadEditWasm } from './wasm/index';
 import type { DecodedFrameDelta, FramePageOperation } from '../layout/render/frameDelta';
 import type { DisplayPage } from '../layout/render/displayList';
@@ -15,12 +18,14 @@ import type {
   YrsResidentCaretRect,
   YrsResidentWorkerSnapshot,
 } from './index';
-import type {
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerRequestWithoutId,
-  ResidentEngineWorkerResponse,
-  ResidentDocumentRead,
-  ResidentProposalOperation,
+import {
+  RESIDENT_HOST_MODULE_WAIT_MS,
+  type ResidentEngineWorkerHostModule,
+  type ResidentEngineWorkerRequest,
+  type ResidentEngineWorkerRequestWithoutId,
+  type ResidentEngineWorkerResponse,
+  type ResidentDocumentRead,
+  type ResidentProposalOperation,
 } from './residentEngineWorkerProtocol';
 
 let startWorker: (scope: unknown, canvas: unknown, harness: unknown) => void;
@@ -35,7 +40,10 @@ beforeAll(async () => {
         (testHarness.heapLimits ??= []).push(heapLimitBytes);
         return testHarness.session;
       };`,
-    './wasm/index': 'export const preloadEditWasm = () => testHarness.preload();',
+    './wasm/index': `
+      export const preloadEditWasm = () => testHarness.preload();
+      export const preloadEditWasmFrom = (source) => testHarness.preloadFrom(source);
+    `,
     '../layout/render/glyphCache':
       'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; } }',
     '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.memories;',
@@ -92,7 +100,8 @@ function worker() {
   const answered: number[] = [];
   const surfaces = new Map<string, Surface>();
   const scope = {
-    onmessage: (_event: { data: ResidentEngineWorkerRequest }) => {},
+    onmessage: (_event: { data: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule }) => {},
+    onmessageerror: null as (() => void) | null,
     postMessage(reply: ResidentEngineWorkerResponse) {
       answered.push(reply.id);
       replies.get(reply.id)?.(reply);
@@ -105,7 +114,12 @@ function worker() {
     wasmReady: false,
     failWarm: null as Error | null,
     preloadBlock: null as Promise<void> | null,
-    async preload(): Promise<void> {
+    preloadInputs: [] as (WebAssembly.Module | undefined)[],
+    async preloadFrom(source: Promise<WebAssembly.Module | null>): Promise<void> {
+      await harness.preload((await source) ?? undefined);
+    },
+    async preload(input?: WebAssembly.Module): Promise<void> {
+      harness.preloadInputs.push(input);
       await harness.preloadBlock;
       if (harness.failWarm) {
         const error = harness.failWarm;
@@ -285,6 +299,7 @@ function worker() {
     };
   }
   return {
+    scope,
     harness,
     surfaces,
     answered,
@@ -371,29 +386,35 @@ function deferred() {
   return { promise, resolve };
 }
 
-test('a background page batch yields between slices and returns their ordered frames once', async () => {
-  const w = worker();
-  await w.bootstrap(9);
-  const calls: number[][] = [];
-  Object.assign(w.harness.session, {
-    buildDisplayPagesFrame(pages: number[]) {
-      calls.push(pages);
-      const bytes = w.harness.session.applyInput();
-      w.harness.delta = { ...w.harness.delta!, pageCount: 9 };
-      return bytes;
-    },
-  });
-  const response = await w.send({
-    type: 'buildPages', pages: Array.from({ length: 9 }, (_, index) => index),
-    expectedFrameEpoch: 1, paintCaret: false, background: true,
-  });
-  expect(response.ok).toBe(true);
-  expect(calls).toEqual([[0, 1, 2, 3], [4, 5, 6, 7], [8]]);
-  if (!response.ok) throw new Error(response.error);
-  expect(response.pageFrames?.map((frame) => new Uint8Array(frame)[0])).toEqual([2, 3, 4]);
-  expect(response.caret?.frameEpoch).toBe(4);
-  expect(w.answered).toEqual([1, 2]);
-});
+test.each([false, true])(
+  'a background page batch yields and returns ordered frames once with editModule=%s',
+  async (hostModule) => {
+    const w = worker();
+    await w.bootstrap(9);
+    const calls: number[][] = [];
+    Object.assign(w.harness.session, {
+      buildDisplayPagesFrame(pages: number[]) {
+        calls.push(pages);
+        const bytes = w.harness.session.applyInput();
+        w.harness.delta = { ...w.harness.delta!, pageCount: 9 };
+        if (hostModule && calls.length === 1) {
+          w.scope.onmessage({ data: { type: 'editModule', module: null } });
+        }
+        return bytes;
+      },
+    });
+    const response = await w.send({
+      type: 'buildPages', pages: Array.from({ length: 9 }, (_, index) => index),
+      expectedFrameEpoch: 1, paintCaret: false, background: true,
+    });
+    expect(response.ok).toBe(true);
+    expect(calls).toEqual([[0, 1, 2, 3], [4, 5, 6, 7], [8]]);
+    if (!response.ok) throw new Error(response.error);
+    expect(response.pageFrames?.map((frame) => new Uint8Array(frame)[0])).toEqual([2, 3, 4]);
+    expect(response.caret?.frameEpoch).toBe(4);
+    expect(w.answered).toEqual([1, 2]);
+  }
+);
 
 test('a visible page request supersedes the remaining background slices', async () => {
   const w = worker();
@@ -568,11 +589,184 @@ describe('resident display page release', () => {
 });
 
 describe('resident worker warmup', () => {
+  const timers = new Map<number, { callback: () => void; ms: number }>();
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  let nextTimer = 1;
+
+  beforeEach(() => {
+    timers.clear();
+    globalThis.setTimeout = ((callback: () => void, ms: number) => {
+      const id = nextTimer++;
+      timers.set(id, { callback, ms });
+      return id;
+    }) as unknown as typeof setTimeout;
+    globalThis.clearTimeout = ((id: number) => {
+      timers.delete(id);
+    }) as unknown as typeof clearTimeout;
+  });
+
+  afterEach(() => {
+    globalThis.setTimeout = realSetTimeout;
+    globalThis.clearTimeout = realClearTimeout;
+  });
+
+  function advanceTimers(ms: number): void {
+    for (const [id, timer] of [...timers]) {
+      timer.ms -= ms;
+      if (timer.ms > 0) continue;
+      timers.delete(id);
+      timer.callback();
+    }
+  }
+
+  function armedBudgets(): number[] {
+    return [...timers.values()].map((timer) => timer.ms);
+  }
+
+  test('waits for the host module outside the request queue and does not answer it', async () => {
+    const w = worker();
+    const module = new WebAssembly.Module(
+      new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+    );
+    const warm = w.send({ type: 'warm', hostModule: true });
+    const bootstrap = w.bootstrap();
+    await Promise.resolve();
+    expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
+    advanceTimers(RESIDENT_HOST_MODULE_WAIT_MS - 1);
+    await Promise.resolve();
+    expect(w.harness.preloadInputs).toEqual([]);
+    expect(w.harness.initializations).toBe(0);
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect(w.answered).toEqual([]);
+    w.scope.onmessage({ data: { type: 'editModule', module } });
+    expect((await warm).ok).toBe(true);
+    expect((await bootstrap).ok).toBe(true);
+    expect(w.harness.preloadInputs).toEqual([module, undefined]);
+    expect(w.harness.initializations).toBe(1);
+    expect(w.answered).toEqual([1, 2]);
+    expect(armedBudgets()).toEqual([]);
+    advanceTimers(1);
+    w.scope.onmessage({ data: { type: 'editModule', module: null } });
+    expect((await w.send({ type: 'warm', hostModule: true })).ok).toBe(true);
+    expect(w.harness.preloadInputs).toEqual([module, undefined, module]);
+    expect(w.answered).toEqual([1, 2, 3]);
+  });
+
+  test('waits for a fresh host module after a failed warm', async () => {
+    const w = worker();
+    const bytes = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    const moduleA = new WebAssembly.Module(bytes);
+    const moduleB = new WebAssembly.Module(bytes);
+    w.harness.failWarm = new Error('init failed');
+    const warm = w.send({ type: 'warm', hostModule: true });
+    await Promise.resolve();
+    expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
+    const firstTimers = [...timers.keys()];
+    w.scope.onmessage({ data: { type: 'editModule', module: moduleA } });
+    const failed = await warm;
+    expect(failed).toMatchObject({ id: 1, ok: false, error: 'init failed' });
+    expect(failed).not.toHaveProperty('terminal');
+    expect(w.harness.preloadInputs).toEqual([moduleA]);
+    expect(w.harness.initializations).toBe(0);
+    expect(w.answered).toEqual([1]);
+    expect(armedBudgets()).toEqual([]);
+
+    const retry = w.send({ type: 'warm', hostModule: true });
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
+    expect([...timers.keys()]).not.toEqual(firstTimers);
+    advanceTimers(RESIDENT_HOST_MODULE_WAIT_MS - 1);
+    await Promise.resolve();
+    expect(w.harness.preloadInputs).toEqual([moduleA]);
+    expect(w.harness.initializations).toBe(0);
+    expect(w.answered).toEqual([1]);
+
+    w.scope.onmessage({ data: { type: 'editModule', module: moduleB } });
+    expect(await retry).toMatchObject({ id: 2, ok: true });
+    expect(w.harness.preloadInputs).toEqual([moduleA, moduleB]);
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect(w.answered).toEqual([1, 2]);
+    expect(armedBudgets()).toEqual([]);
+  });
+
+  test('falls back to the asset preload when the host sends null', async () => {
+    const w = worker();
+    const warm = w.send({ type: 'warm', hostModule: true });
+    await Promise.resolve();
+    expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
+    w.scope.onmessage({ data: { type: 'editModule', module: null } });
+    expect((await warm).ok).toBe(true);
+    expect(w.harness.preloadInputs).toEqual([undefined]);
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect(w.answered).toEqual([1]);
+    expect(armedBudgets()).toEqual([]);
+  });
+
+  test('falls back at once when the host sends a value that is not a module', async () => {
+    const w = worker();
+    const warm = w.send({ type: 'warm', hostModule: true });
+    await Promise.resolve();
+    expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
+    expect(w.harness.preloadInputs).toEqual([]);
+    expect(w.answered).toEqual([]);
+    w.scope.onmessage({ data: { type: 'editModule', module: {} as WebAssembly.Module } });
+    expect((await warm).ok).toBe(true);
+    expect(w.harness.preloadInputs).toEqual([undefined]);
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect(w.answered).toEqual([1]);
+    expect(armedBudgets()).toEqual([]);
+  });
+
+  test('falls back at once when the host module message cannot be received', async () => {
+    const w = worker();
+    const warm = w.send({ type: 'warm', hostModule: true });
+    await Promise.resolve();
+    expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
+    w.scope.onmessageerror?.();
+    expect((await warm).ok).toBe(true);
+    expect(w.harness.preloadInputs).toEqual([undefined]);
+    expect(w.answered).toEqual([1]);
+    expect(armedBudgets()).toEqual([]);
+  });
+
+  test('falls back after the host module wait expires and ignores late modules', async () => {
+    const w = worker();
+    const module = new WebAssembly.Module(
+      new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+    );
+    const warm = w.send({ type: 'warm', hostModule: true });
+    await Promise.resolve();
+    expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
+    advanceTimers(RESIDENT_HOST_MODULE_WAIT_MS - 1);
+    await Promise.resolve();
+    expect(w.harness.preloadInputs).toEqual([]);
+    expect(w.harness.initializations).toBe(0);
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect(w.answered).toEqual([]);
+    advanceTimers(1);
+    w.scope.onmessage({ data: { type: 'editModule', module } });
+    expect((await warm).ok).toBe(true);
+    expect(w.harness.preloadInputs).toEqual([undefined]);
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect(w.answered).toEqual([1]);
+    expect(armedBudgets()).toEqual([]);
+    w.scope.onmessage({ data: { type: 'editModule', module } });
+    expect((await w.send({ type: 'warm', hostModule: true })).ok).toBe(true);
+    expect(w.harness.preloadInputs).toEqual([undefined, undefined]);
+    expect(w.answered).toEqual([1, 2]);
+  });
+
   test('initializes wasm without creating a session, then bootstraps a frame', async () => {
     const w = worker();
     expect(await w.send({ type: 'warm' })).toMatchObject({ ok: true });
     expect(w.harness.initializations).toBe(1);
     expect(w.harness.sessionsCreated).toBe(0);
+    expect(w.harness.preloadInputs).toEqual([undefined]);
     expect(await w.build([])).toMatchObject({
       ok: false,
       error: 'Resident engine worker is not initialized',
@@ -1839,7 +2033,7 @@ describe('worker proposals during sliced completion', () => {
     import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
   )))));
 
-  async function proposalWorker() {
+  async function proposalWorker(extraBody = '') {
     const parts: PartsMap = new Map();
     parts.set('[Content_Types].xml', toBytes(
       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
@@ -1848,7 +2042,7 @@ describe('worker proposals during sliced completion', () => {
       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'
     ));
     const body = Array.from({ length: 40 }, (_, index) =>
-      `<w:p w14:paraId="${(index + 1).toString(16).padStart(8, '0')}"><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>Paragraph ${index + 1}</w:t></w:r></w:p>`
+      `<w:p w14:paraId="${(index + 1).toString(16).padStart(8, '0')}"><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>Paragraph ${index + 1}</w:t></w:r></w:p>${index === 0 ? extraBody : ''}`
     ).join('');
     parts.set('word/document.xml', toBytes(
       `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>${body}<w:sectPr/></w:body></w:document>`
@@ -2203,6 +2397,132 @@ describe('worker proposals during sliced completion', () => {
       expect(calls.filter((call) => call === 'begin')).toHaveLength(1);
       await expectFullLayout(completed);
     } finally {
+      engine.destroy();
+    }
+  });
+
+  test('search reads match main display ranges and carry anchors without restarting background layout', async () => {
+    const extraBody = '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr>' +
+      '<w:tc><w:tcPr/><w:p w14:paraId="00000100"><w:r><w:t>Paragraph cell</w:t></w:r></w:p></w:tc>' +
+      '<w:tc><w:tcPr/><w:p w14:paraId="00000101"><w:r><w:t>PARAGRAPH cell</w:t></w:r></w:p></w:tc>' +
+      '</w:tr></w:tbl><w:sdt><w:sdtPr><w:id w:val="100"/></w:sdtPr><w:sdtContent>' +
+      '<w:p w14:paraId="00000102"><w:r><w:t>Paragraph boxed</w:t></w:r></w:p>' +
+      '</w:sdtContent></w:sdt>';
+    const { w, engine, calls, onResume, complete, expectFullLayout } = await proposalWorker(extraBody);
+    const main = await createYrsSession();
+    try {
+      main.loadState(engine.encodeState());
+      const projection = createYrsPositionProjection(main, 'body');
+      const expected = main.searchText('paragraph').filter((hit) =>
+        hit.story === 'body' || hit.story.startsWith('body:')
+      ).map((hit) => ({
+        story: hit.story, paraId: hit.paraId, start: hit.start,
+        displayFrom: yrsLocToProjectedDisplayPosition(main, () => projection, {
+          story: hit.story, paraId: hit.paraId, offset: hit.start,
+        })!,
+        displayTo: yrsLocToProjectedDisplayPosition(main, () => projection, {
+          story: hit.story, paraId: hit.paraId, offset: hit.end,
+        })!,
+      })).sort((a, b) => a.displayFrom! - b.displayFrom!);
+      const read = { kind: 'searchText', query: 'paragraph', caseSensitive: false } as const;
+      let pending!: Promise<ResidentEngineWorkerResponse>;
+      const order: string[] = [];
+      onResume.push(() => {
+        pending = w.send({ type: 'documentRead', read }).then((reply) => {
+          order.push('search');
+          return reply;
+        });
+      });
+      const completed = await complete().then((reply) => { order.push('complete'); return reply; });
+      const reply = await pending;
+      expect(reply.ok).toBe(true);
+      if (!reply.ok || !reply.read) throw new Error('expected search read');
+      const value = reply.read.value as ReturnType<typeof readResidentSearch>;
+      expect(value).toEqual(readResidentSearch({ ...engine.geometryReader, ...engine }, 'paragraph', false));
+      expect(value.matches).toEqual(expected);
+      expect(value.matches).toHaveLength(43);
+      expect(value.matches.slice(0, 5).map(({ paraId }) => paraId)).toEqual([
+        '00000001', '00000100', '00000101', '00000102', '00000002',
+      ]);
+      expect(value.matches.every((match) => !('anchor' in match))).toBe(true);
+      expect(value.carried).toBe(0);
+      expect(reply.read.version).toBe(engine.proposalEngine.version());
+      expect(order).toEqual(['search', 'complete']);
+      expect(calls.filter((call) => call === 'begin')).toHaveLength(1);
+      await expectFullLayout(completed);
+      const anchors = async (indices: number[]) => {
+        const locs = indices.map((index) => {
+          const match = value.matches[index];
+          return { story: match.story, paraId: match.paraId, offset: match.start };
+        });
+        const answer = await w.send({ type: 'documentRead', read: {
+          kind: 'stickyAnchors', locs, version: reply.read!.version,
+        } });
+        expect(answer.ok).toBe(true);
+        if (!answer.ok || !answer.read) throw new Error('expected sticky anchor read');
+        const sticky = answer.read.value as Array<ReturnType<typeof engine.encodeStickyPosition> | null>;
+        expect(answer.read.version).toBe(engine.proposalEngine.version());
+        expect(sticky).toHaveLength(locs.length);
+        sticky.forEach((anchor, index) => {
+          expect(anchor).not.toBeNull();
+          expect(anchor).toEqual(engine.encodeStickyPosition(locs[index]));
+          expect(engine.resolveStickyPosition(anchor!)).toEqual(locs[index]);
+          expect(main.resolveStickyPosition(anchor!)).toEqual(locs[index]);
+        });
+        return sticky;
+      };
+      const [firstAnchor, cellAnchor, lastAnchor] = await anchors([0, 2, value.matches.length - 1]);
+      const validLoc = { story: 'body', paraId: '00000001', offset: 0 };
+      const invalid = await w.send({ type: 'documentRead', read: {
+        kind: 'stickyAnchors', version: reply.read.version, locs: [
+          { story: 'missing', paraId: 'missing', offset: 0 }, validLoc,
+        ],
+      } });
+      expect(invalid).toMatchObject({
+        ok: true, read: { value: [null, engine.encodeStickyPosition(validLoc)] },
+      });
+      const search = async (caseSensitive: boolean, carry = cellAnchor) => {
+        const answer = await w.send({ type: 'documentRead', read: {
+          ...read, query: 'Paragraph', caseSensitive, carry,
+        } });
+        expect(answer.ok).toBe(true);
+        if (!answer.ok || !answer.read) throw new Error('expected search read');
+        return answer.read.value as ReturnType<typeof readResidentSearch>;
+      };
+      expect((await search(false)).carried).toBe(2);
+      const sensitive = await search(true);
+      expect(sensitive.matches).toHaveLength(42);
+      expect(sensitive.matches.some(({ paraId }) => paraId === '00000101')).toBe(false);
+      expect(sensitive.carried).toBe(2);
+      expect(engine.proposalEngine.applyEdits({
+        expectVersion: engine.proposalEngine.version(),
+        steps: [{
+          op: 'replaceText', target: { kind: 'paragraph', story: 'body', paraId: '00000001' },
+          text: 'Changed 1',
+        }],
+      }).ok).toBe(true);
+      main.loadState(engine.encodeState());
+      expect(engine.proposalEngine.version()).not.toBe(reply.read.version);
+      await anchors([0, 2]);
+      const after = await search(false, firstAnchor);
+      expect(after.matches).toHaveLength(42);
+      expect(after.carried).toBe(0);
+      expect(after.matches[after.carried].paraId).toBe('00000100');
+      expect((await search(false, lastAnchor)).carried).toBe(41);
+      expect(engine.proposalEngine.applyEdits({
+        expectVersion: engine.proposalEngine.version(),
+        steps: [{
+          op: 'replaceText', target: { kind: 'paragraph', story: 'body', paraId: '00000028' },
+          text: 'Changed tail',
+        }],
+      }).ok).toBe(true);
+      const last = await search(false, lastAnchor);
+      expect(last.matches).toHaveLength(41);
+      expect(last.carried).toBe(40);
+      const empty = await w.send({ type: 'documentRead', read: { ...read, query: '' } });
+      expect(empty).toMatchObject({ ok: true, read: { value: { matches: [], carried: -1 } } });
+    } finally {
+      main.destroy();
       engine.destroy();
     }
   });

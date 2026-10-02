@@ -156,7 +156,7 @@ function withDeadline(ready: Promise<void>, timeoutMs: number | undefined): Prom
 
 const WORKER_PROPOSAL_ACCESS: ReadonlySet<keyof DocxEditorRef> = new Set([
   'proposeChanges', 'setProposalStates', 'withdrawProposals', 'getProposals',
-  'readParagraphs', 'getParagraphIdentities', 'resolveParagraphAnchors',
+  'readParagraphs', 'getParagraphIdentities', 'resolveParagraphAnchors', 'search',
 ]);
 
 function gateReplicaAccess(
