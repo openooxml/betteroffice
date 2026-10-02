@@ -175,14 +175,14 @@ function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
   switch (request.type) {
     case 'applyInput':
     case 'applyDelete':
-      return { lane: 'input', userInput: true, mutates: true, run };
+      return { lane: 'input', userInput: true, holdsIdleTasks: true, mutates: true, run };
     case 'applyUpdate':
       return { lane: 'collab', userInput: true, mutates: true, run };
     case 'proposal':
       if (request.operation.kind === 'snapshot') return { lane: 'interactive', run };
       return {
         lane: 'input', mutates: true,
-        ...(request.operation.kind === 'setStates' ? { userInput: true } : {}), run,
+        ...(request.operation.kind === 'setStates' ? { userInput: true, holdsIdleTasks: true } : {}), run,
       };
     case 'open':
     case 'bootstrap':
@@ -205,7 +205,7 @@ function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
         lane: 'interactive', reframes: true, key: 'pages', run,
         ...(request.background ? {
           replaceableBy: 'pages',
-          supersede: () => reply({ id: request.id, ok: true, pageBuildSuperseded: true }),
+          supersede: () => replyDropped({ id: request.id, ok: true, pageBuildSuperseded: true }),
         } : {}),
       };
     case 'buildFrame':
@@ -225,6 +225,12 @@ async function runRequest(request: ResidentEngineWorkerRequest): Promise<void> {
   } catch (error) {
     replyFailure(request.id, error);
   }
+}
+
+/** Answers a request that will not run; after a trap, as the trap's failure. */
+function replyDropped(response: ResidentEngineWorkerResponse & { ok: true }): void {
+  if (trap) replyFailure(response.id, trap);
+  else reply(response);
 }
 
 function replyFailure(id: number, error: unknown): void {
@@ -1095,7 +1101,7 @@ function supersedeBackgroundPageBuild(): void {
   const build = backgroundPageBuild;
   if (!build) return;
   backgroundPageBuild = null;
-  reply({ id: build.request.id, ok: true, pageBuildSuperseded: true });
+  replyDropped({ id: build.request.id, ok: true, pageBuildSuperseded: true });
 }
 
 async function backgroundPageSlice(build: BackgroundPageBuild, budgetMs: number): Promise<boolean> {
@@ -1207,7 +1213,7 @@ async function completionSlice(completion: SlicedCompletion, budgetMs: number): 
 function supersedeSlicedCompletion(): void {
   const completion = slicedCompletion;
   slicedCompletion = null;
-  if (completion) reply({ id: completion.id, ok: true });
+  if (completion) replyDropped({ id: completion.id, ok: true });
 }
 
 /**

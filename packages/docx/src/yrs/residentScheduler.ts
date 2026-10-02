@@ -1,8 +1,9 @@
 /**
  * The resident worker's request scheduler. Messages are classified into lanes
- * and run one unit at a time, highest lane first, with a turn of the event loop
- * after every unit so messages that arrived meanwhile are classified before the
- * next one.
+ * and run one unit at a time, highest lane first. Before a unit that a later
+ * message could overtake (a reorderable unit or a background slice), the
+ * scheduler yields a turn of the event loop so messages that arrived meanwhile
+ * are classified first; any other unit starts at once.
  *
  * Foreground messages keep their arrival order: a unit overtakes an earlier one
  * of another lane only when that one is `reorderable` (it detects staleness and
@@ -28,8 +29,13 @@ export const INPUT_ACTIVE_MS = 1000;
 export interface SchedulerMessage {
   lane: ForegroundLane;
   run(): Promise<void> | void;
-  /** User input: it selects the input slice budget and starts `idleAfterInputMs` holds. */
+  /** User input: it selects the input slice budget. */
   userInput?: boolean;
+  /**
+   * Also restarts `idleAfterInputMs` holds. Leave it unset for input that can
+   * stream without a pause and gets no reply, such as collaboration updates.
+   */
+  holdsIdleTasks?: boolean;
   /** A later unit of a higher lane may run first; this one then detects that itself. */
   reorderable?: boolean;
   /** Changes the document: bumps the scheduler version before it runs. */
@@ -80,7 +86,11 @@ export interface PureTask<Input = unknown, Result = unknown> {
   transfer?: Transferable[];
   compute(input: Input): Result;
   install(result: Result): Promise<void> | void;
-  /** The result went stale before install, or install failed. */
+  /**
+   * The result went stale before install, install failed, or the executor
+   * failed after `transfer` detached the input (an executor failure otherwise
+   * computes here).
+   */
   cancel?(reason?: unknown): void;
 }
 
@@ -129,6 +139,7 @@ export function createResidentScheduler(host: SchedulerHost): ResidentScheduler 
   let version = 0;
   let generation = 0;
   let lastInputAt = Number.NEGATIVE_INFINITY;
+  let lastHoldAt = Number.NEGATIVE_INFINITY;
   let running = false;
   let pumpQueued = false;
   let cancelTimer: (() => void) | null = null;
@@ -136,10 +147,10 @@ export function createResidentScheduler(host: SchedulerHost): ResidentScheduler 
   const budget = (): number =>
     host.now() - lastInputAt < INPUT_ACTIVE_MS ? INPUT_SLICE_MS : IDLE_SLICE_MS;
 
-  function wake(): void {
+  function wake(now = false): void {
     if (running || pumpQueued) return;
     pumpQueued = true;
-    host.turn(() => {
+    (now ? queueMicrotask : host.turn)(() => {
       pumpQueued = false;
       void pump();
     });
@@ -157,22 +168,27 @@ export function createResidentScheduler(host: SchedulerHost): ResidentScheduler 
     return false;
   }
 
-  /** The next foreground units to run as one: a collab head takes the collab units right behind it. */
-  function pickForeground(): QueuedMessage[] | null {
+  function nextForeground(): QueuedMessage | null {
     for (const lane of FOREGROUND_LANES) {
       const head = lanes[lane][0];
-      if (!head || blocked(head)) continue;
-      const units = [lanes[lane].shift()!];
-      if (lane === 'collab') {
-        while (lanes.collab[0] && !blocked(lanes.collab[0])) units.push(lanes.collab.shift()!);
-      }
-      return units;
+      if (head && !blocked(head)) return head;
     }
     return null;
   }
 
+  /** The next foreground units to run as one: a collab head takes the collab units right behind it. */
+  function pickForeground(): QueuedMessage[] | null {
+    const head = nextForeground();
+    if (!head) return null;
+    const units = [lanes[head.lane].shift()!];
+    if (head.lane === 'collab') {
+      while (lanes.collab[0] && !blocked(lanes.collab[0])) units.push(lanes.collab.shift()!);
+    }
+    return units;
+  }
+
   function readyAt(task: SchedulerTask): number {
-    return task.idleAfterInputMs === undefined ? Number.NEGATIVE_INFINITY : lastInputAt + task.idleAfterInputMs;
+    return task.idleAfterInputMs === undefined ? Number.NEGATIVE_INFINITY : lastHoldAt + task.idleAfterInputMs;
   }
 
   async function runForeground(units: QueuedMessage[]): Promise<void> {
@@ -193,23 +209,20 @@ export function createResidentScheduler(host: SchedulerHost): ResidentScheduler 
     const index = background.findIndex((task) => readyAt(task) <= now);
     if (index < 0) return false;
     const [task] = background.splice(index, 1);
-    if (task.version !== version || task.generation !== generation) {
-      if ((task.onStale?.() ?? 'cancel') === 'cancel') {
-        task.cancel?.();
-        return true;
-      }
-      task.version = version;
-      task.generation = generation;
-    }
-    let step: TaskStep;
     try {
-      step = await task.run(budget());
+      if (task.version !== version || task.generation !== generation) {
+        if ((task.onStale?.() ?? 'cancel') === 'cancel') {
+          task.cancel?.();
+          return true;
+        }
+        task.version = version;
+        task.generation = generation;
+      }
+      if ((await task.run(budget())) === 'yield') background.push(task);
     } catch (error) {
       if (task.fail) task.fail(error);
       else host.failed?.(error);
-      return true;
     }
-    if (step === 'yield') background.push(task);
     return true;
   }
 
@@ -236,10 +249,16 @@ export function createResidentScheduler(host: SchedulerHost): ResidentScheduler 
       } else if (background.length > 0) {
         ran = await runBackground();
       }
+    } catch (error) {
+      ran = true;
+      host.failed?.(error);
     } finally {
       running = false;
     }
-    if (ran) wake();
+    // A later message cannot overtake a unit that is not reorderable.
+    const next = ran ? nextForeground() : null;
+    if (next) wake(!next.reorderable);
+    else if (ran && background.length > 0) wake();
     else armTimer();
   }
 
@@ -270,16 +289,22 @@ export function createResidentScheduler(host: SchedulerHost): ResidentScheduler 
   return {
     submit(message) {
       if (message.userInput) lastInputAt = host.now();
+      if (message.holdsIdleTasks) lastHoldAt = host.now();
       if (message.key !== undefined) {
         const lane = lanes[message.lane];
         for (let index = lane.length - 1; index >= 0; index -= 1) {
-          if (lane[index]!.replaceableBy === message.key) lane.splice(index, 1)[0]!.supersede?.();
+          if (lane[index]!.replaceableBy !== message.key) continue;
+          try {
+            lane.splice(index, 1)[0]!.supersede?.();
+          } catch (error) {
+            host.failed?.(error);
+          }
         }
       }
       lanes[message.lane].push({ ...message, seq: seq++ });
       cancelTimer?.();
       cancelTimer = null;
-      wake();
+      wake(true);
     },
     schedule,
     dispatch<Input, Result>(task: PureTask<Input, Result>) {
@@ -301,9 +326,13 @@ export function createResidentScheduler(host: SchedulerHost): ResidentScheduler 
         local();
         return;
       }
+      const transfers = (pure.transfer?.length ?? 0) > 0;
       host.executor
         .run<unknown, unknown>({ kind: pure.kind, input: pure.input, transfer: pure.transfer })
-        .then((result) => settle(pure, result), local);
+        .then(
+          (result) => settle(pure, result),
+          (error) => (transfers ? pure.cancel?.(error) : local())
+        );
     },
     budget,
     get version() {

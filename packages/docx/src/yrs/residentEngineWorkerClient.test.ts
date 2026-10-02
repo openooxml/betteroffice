@@ -160,6 +160,20 @@ test('pending proposal and navigation reads keep background page builds waiting'
   client.destroy();
 });
 
+test('a version-checked read reports a superseded answer apart from a read value', async () => {
+  const { worker, client } = setup();
+  const read = () => client.documentReadAt({ kind: 'navigationTarget', story: 'body', paraId: 'p1' }, 'v1');
+  const current = read();
+  expect(worker.posted.at(-1)).toMatchObject({ type: 'documentRead', expectVersion: 'v1' });
+  worker.reply({ id: worker.lastId(), ok: true, read: { version: 'v1', value: 'missing-target' } });
+  expect(await current).toEqual({ status: 'ok', version: 'v1', value: 'missing-target' });
+  const stale = read();
+  worker.reply({ id: worker.lastId(), ok: true, superseded: true });
+  expect(await stale).toEqual({ status: 'superseded' });
+  expect(client.hasFailed()).toBe(false);
+  client.destroy();
+});
+
 test('a superseded background build completes without failing the worker', async () => {
   const { worker, client } = setup();
   const pending = client.buildPages([5, 6, 7, 8, 9], 1, false, true);

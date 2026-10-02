@@ -405,17 +405,28 @@ export class ResidentEngineWorkerClient {
     return response.read as { version: string; value: ResidentDocumentReadValues[K] };
   }
 
-  /** @internal */
+  /**
+   * Reads the document at `expectVersion`. A later message may run first; the
+   * read then answers `superseded` when the document moved on meanwhile.
+   * @internal
+   */
   async documentReadAt<K extends ResidentDocumentRead['kind']>(
     read: ResidentDocumentRead & { kind: K },
     expectVersion: string
-  ): Promise<{ version: string; value: ResidentDocumentReadValues[K] } | null> {
+  ): Promise<
+    | { status: 'ok'; version: string; value: ResidentDocumentReadValues[K] }
+    | { status: 'superseded' }
+  > {
     const response = await this.request({ type: 'documentRead', read, expectVersion });
-    if (response.superseded) return null;
+    if (response.superseded) return { status: 'superseded' };
     if (!response.read) {
       throw new ResidentWorkerFailureError('Resident engine worker omitted the document read');
     }
-    return response.read as { version: string; value: ResidentDocumentReadValues[K] };
+    const { version, value } = response.read as {
+      version: string;
+      value: ResidentDocumentReadValues[K];
+    };
+    return { status: 'ok', version, value };
   }
 
   /** @internal */

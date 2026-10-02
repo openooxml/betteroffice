@@ -464,6 +464,37 @@ test('a document read between background page slices leaves the complete batch i
   expect(w.answered).toEqual([1, 3, 2]);
 });
 
+test.each(['cancelled as stale', 'replaced while queued'])(
+  'a background page build %s after a trap is answered with the trap',
+  async (variant) => {
+    const w = worker();
+    await w.bootstrap(9);
+    w.harness.now = () => 0;
+    Object.assign(w.harness.session, {
+      proposalEngine: { version: () => 'current' },
+      paragraphIdentities: () => {
+        throw new WebAssembly.RuntimeError('unreachable');
+      },
+    });
+    const build = () => w.send({
+      type: 'buildPages', pages: Array.from({ length: 9 }, (_, index) => index),
+      expectedFrameEpoch: 1, paintCaret: false, background: true,
+    });
+    const read = () => w.send({ type: 'documentRead', read: { kind: 'paragraphIdentities' } });
+    const replies = variant === 'cancelled as stale'
+      ? [build(), read(), w.send({ type: 'applyUpdate', update: new Uint8Array([1]), selection: null })]
+      : (() => {
+          const trapped = read();
+          const queued = build();
+          return [trapped, queued, trapped.then(build)];
+        })();
+    for (const reply of await Promise.all(replies)) {
+      expect(!reply.ok && reply.terminal).toBe(true);
+    }
+    expect(new Set(w.answered).size).toBe(w.answered.length);
+  }
+);
+
 test('document reads skip stale versions and read the current version', async () => {
   const w = worker();
   await w.bootstrap();
@@ -2194,40 +2225,21 @@ describe('sliced layout completion', () => {
     expect(calls).not.toContain('whole');
   });
 
-  test('the completion resumes only after input has been idle for 300 ms', async () => {
+  test('a collaboration update restarts the completion without holding it for idle input', async () => {
     const { w, calls, onResume, bootstrap } = steppedWorker();
     await bootstrap();
-    const observed = deferred();
-    const resumeTimes: number[] = [];
-    const resume = (w.harness.session as unknown as {
-      resumeRegionLayout: (blocks: number) => { layoutJson?: string };
-    }).resumeRegionLayout;
-    Object.assign(w.harness.session, {
-      resumeRegionLayout: (blocks: number) => {
-        resumeTimes.push(performance.now());
-        return resume(blocks);
-      },
-    });
     let inputAt = 0;
     onResume.push(() => {
       inputAt = performance.now();
       void w.send({ type: 'applyUpdate', update: new Uint8Array([1]), selection: null });
-      void w.send({ type: 'revisionCount' }).then(() => observed.resolve());
     });
-    let finished = false;
-    const completion = w.send({
+    const completed = await w.send({
       type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 4,
-    }).then((reply) => { finished = true; return reply; });
-    await observed.promise;
-    const afterInput = [...calls];
-    expect(afterInput).toEqual(['begin', 'resume:4', 'update']);
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(calls).toEqual(afterInput);
-    expect(finished).toBe(false);
-    const completed = await completion;
-    expect(resumeTimes[1]! - inputAt).toBeGreaterThanOrEqual(295);
+    });
+    expect(performance.now() - inputAt).toBeLessThan(290);
     expect(completed.ok && completed.layoutJson).toBe(full);
     expect(completed).toHaveProperty('frame');
+    expect(calls.slice(0, 3)).toEqual(['begin', 'resume:4', 'update']);
     expect(calls.filter((call) => call === 'begin')).toHaveLength(2);
     expect(calls).not.toContain('whole');
     expect(new Set(w.answered).size).toBe(w.answered.length);

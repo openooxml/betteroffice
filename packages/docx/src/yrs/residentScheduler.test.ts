@@ -134,21 +134,40 @@ test('background slices yield to foreground units queued before and during a sli
   expect(scheduler.pending()).toEqual({ foreground: 0, background: 0 });
 });
 
-test('adjacent collab units share a turn and stop at an earlier unit of another lane', async () => {
+test('adjacent collab units run as one unit and stop at an earlier unit of another lane', async () => {
   const host = fakeHost();
   const order: string[] = [];
   const unit = (name: string) => () => { order.push(name); };
   host.scheduler.submit({ lane: 'collab', run: unit('a') });
   host.scheduler.submit({ lane: 'collab', run: unit('b') });
-  host.scheduler.submit({ lane: 'interactive', run: unit('read') });
+  host.scheduler.submit({ lane: 'interactive', reorderable: true, run: unit('read') });
+  host.scheduler.submit({ lane: 'interactive', run: unit('barrier') });
   host.scheduler.submit({ lane: 'collab', run: unit('c') });
-  await host.turn();
+  await microtasks();
   expect(order).toEqual(['a', 'b']);
-  expect(host.turnCount).toBe(1);
+  expect(host.turnCount).toBe(0);
   await host.turn();
-  expect(order).toEqual(['a', 'b', 'read']);
+  expect(order).toEqual(['a', 'b', 'read', 'barrier', 'c']);
+});
+
+test('units run without a turn unless a later message could overtake the next one', async () => {
+  const host = fakeHost();
+  const order: string[] = [];
+  const unit = (name: string) => () => { order.push(name); };
+  host.scheduler.submit({ lane: 'interactive', run: unit('first') });
+  host.scheduler.submit({ lane: 'input', run: unit('second') });
+  await microtasks();
+  expect(order).toEqual(['first', 'second']);
+  host.scheduler.submit({ lane: 'interactive', run: unit('third') });
+  host.scheduler.submit({ lane: 'interactive', reorderable: true, run: unit('read') });
+  await microtasks();
+  expect(order).toEqual(['first', 'second', 'third']);
+  host.scheduler.submit({ lane: 'input', run: unit('input') });
+  await host.turn();
+  expect(order).toEqual(['first', 'second', 'third', 'input']);
   await host.flush();
-  expect(order).toEqual(['a', 'b', 'read', 'c']);
+  expect(order).toEqual(['first', 'second', 'third', 'input', 'read']);
+  expect(host.turnCount).toBe(2);
 });
 
 test('a later key supersedes a replaceable queued unit', async () => {
@@ -215,7 +234,7 @@ test('idle holds wake by timer and new input postpones the next slice', async ()
   const order: string[] = [];
   let slices = 0;
   const input = () => host.scheduler.submit({
-    lane: 'input', userInput: true, run: () => { order.push('input'); },
+    lane: 'input', userInput: true, holdsIdleTasks: true, run: () => { order.push('input'); },
   });
   input();
   host.scheduler.schedule({
@@ -247,6 +266,27 @@ test('idle holds wake by timer and new input postpones the next slice', async ()
   host.advance(1);
   await host.flush();
   expect(order).toEqual(['input', 'input', 'slice:1', 'input', 'slice:2']);
+  expect(host.timerCount).toBe(0);
+});
+
+test('input that does not hold idle tasks selects the input budget without postponing them', async () => {
+  const host = fakeHost();
+  const budgets: number[] = [];
+  host.scheduler.submit({ lane: 'input', userInput: true, holdsIdleTasks: true, run: () => {} });
+  host.scheduler.schedule({
+    kind: 'completion', version: 0, generation: 0, idleAfterInputMs: 300,
+    run: (budget) => {
+      budgets.push(budget);
+      return budgets.length < 2 ? 'yield' : 'done';
+    },
+  });
+  await host.flush();
+  for (let step = 0; step < 3; step += 1) {
+    host.advance(100);
+    host.scheduler.submit({ lane: 'collab', userInput: true, run: () => {} });
+    await host.flush();
+  }
+  expect(budgets).toEqual([INPUT_SLICE_MS, INPUT_SLICE_MS]);
   expect(host.timerCount).toBe(0);
 });
 
@@ -338,6 +378,22 @@ test('executor rejection falls back to local compute in a background unit', asyn
   expect(order).toEqual(['foreground', 'compute:3', 'install:6']);
 });
 
+test('an executor that fails after taking a transfer cancels instead of computing locally', async () => {
+  const fake = fakeExecutor();
+  const { scheduler, flush } = fakeHost(fake.executor);
+  const order: string[] = [];
+  const failure = new Error('executor failed');
+  scheduler.dispatch({
+    kind: 'pure', version: 0, generation: 0, input: 3, transfer: [new ArrayBuffer(1)],
+    compute: () => { order.push('compute'); return 0; },
+    install: () => { order.push('install'); },
+    cancel: (reason) => { order.push(reason === failure ? 'cancel' : 'other'); },
+  });
+  fake.result.reject(failure);
+  await flush();
+  expect(order).toEqual(['cancel']);
+});
+
 test('without an executor pure work computes locally after foreground units', async () => {
   const { scheduler, flush } = fakeHost();
   const order: string[] = [];
@@ -373,4 +429,33 @@ test('foreground failures report through the host and task failures use their fa
   expect(failures).toEqual([foregroundError]);
   expect(taskFailures).toEqual([taskError]);
   expect(order).toEqual(['later', 'task']);
+});
+
+test('a throwing supersede or stale cancel is reported and the queue keeps running', async () => {
+  const { scheduler, flush, failures } = fakeHost();
+  const supersedeError = new Error('supersede failed');
+  const cancelError = new Error('cancel failed');
+  const taskFailures: unknown[] = [];
+  const order: string[] = [];
+  scheduler.submit({ lane: 'input', mutates: true, run: () => { order.push('input'); } });
+  scheduler.submit({
+    lane: 'interactive', key: 'pages', replaceableBy: 'pages',
+    run: () => { order.push('replaced'); },
+    supersede: () => { throw supersedeError; },
+  });
+  scheduler.submit({ lane: 'interactive', key: 'pages', run: () => { order.push('latest'); } });
+  scheduler.schedule({
+    kind: 'stale', version: 0, generation: 0,
+    cancel: () => { throw cancelError; },
+    fail: (error) => taskFailures.push(error),
+    run: () => { order.push('stale'); return 'done'; },
+  });
+  scheduler.schedule({
+    kind: 'later', version: 0, generation: 0, onStale: () => 'continue',
+    run: () => { order.push('later'); return 'done'; },
+  });
+  await flush();
+  expect(failures).toEqual([supersedeError]);
+  expect(taskFailures).toEqual([cancelError]);
+  expect(order).toEqual(['input', 'latest', 'later']);
 });
