@@ -46,6 +46,10 @@ function resolvePosition(
     return null;
   }
   const target = projection.targetAt(position);
+  const structural = projection.structuralPositionAt(position);
+  if (structural?.boundary === 'blockStart' || structural?.boundary === 'blockEnd') {
+    return { target, loc: structural.loc };
+  }
   const map = index.inputMap(target.story);
   const loc = map ? displayPositionToYrsLoc(map, target.displayPosition) : null;
   return loc ? { target, loc } : null;
@@ -157,7 +161,8 @@ export function resolveSelectionText(
   const start = resolvePosition(index, rootStory, from);
   const end = resolvePosition(index, rootStory, to);
   if (!start || !end) return null;
-  const sticky = stickyEnds(index, anchor <= head ? start.loc : end.loc, anchor <= head ? end.loc : start.loc);
+  const sticky = stickyEnds(index, rootStory, anchor, head,
+    anchor <= head ? start.loc : end.loc, anchor <= head ? end.loc : start.loc);
   if (start.loc.story === end.loc.story) {
     const story = start.loc.story;
     const startOffset = acceptedOffsetOf(reader, start.loc);
@@ -202,13 +207,16 @@ export function resolveSelectionText(
 
 function stickyEnds(
   index: DisplayPositionIndex,
+  rootStory: string,
+  anchorPosition: number,
+  headPosition: number,
   anchor: YrsLoc,
   head: YrsLoc
 ): DocxDisplaySelectionText['sticky'] {
   try {
     return {
-      anchor: index.reader.encodeStickyPosition(anchor),
-      head: index.reader.encodeStickyPosition(head),
+      anchor: index.stickyAt(anchorPosition, anchor, rootStory),
+      head: index.stickyAt(headPosition, head, rootStory),
     };
   } catch {
     return null;
@@ -236,17 +244,14 @@ export function resolveStickyPositions(
 ): DocxDisplayRange | null {
   const reader = index.reader;
   if (reader.version() !== expectVersion) return null;
-  let anchorLoc: YrsLoc | null;
-  let headLoc: YrsLoc | null;
+  let anchorPosition: number | null;
+  let headPosition: number | null;
   try {
-    anchorLoc = reader.resolveStickyPosition(anchor);
-    headLoc = reader.resolveStickyPosition(head);
+    anchorPosition = index.positionOfSticky(anchor, rootStory);
+    headPosition = index.positionOfSticky(head, rootStory);
   } catch {
     return null;
   }
-  if (!anchorLoc || !headLoc) return null;
-  const anchorPosition = index.positionOf(anchorLoc, rootStory);
-  const headPosition = index.positionOf(headLoc, rootStory);
   return anchorPosition === null || headPosition === null
     ? null
     : { anchor: anchorPosition, head: headPosition };

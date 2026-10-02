@@ -1,14 +1,17 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, test } from 'bun:test';
+import { createElement, createRef } from 'react';
 import type { DisplayListQueries, DisplayListRegionHit } from '@betteroffice/docx/layout/render';
-import type { YrsSession } from '@betteroffice/docx/yrs';
+import type { ResidentDocumentRead, ResidentEngineWorkerClient, YrsSession } from '@betteroffice/docx/yrs';
+import { ViewerInput } from '../ViewerInput';
+import { stampWorkerFrameVersion } from '../internals/layoutProvenance';
 import type { YrsInputRef } from '../YrsInput';
 import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
 import { usePagesPointer, type UsePagesPointerOptions } from './usePagesPointer';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, renderHook } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, renderHook } = await import('@testing-library/react');
 
 const PAGE = { width: 800, height: 1000 };
 const HEADER_BOTTOM = 80;
@@ -110,6 +113,50 @@ afterAll(async () => {
 });
 
 const canvasOf = () => host.firstElementChild as HTMLCanvasElement;
+
+test('P1-6: a pending viewer bookmark cannot override a newer keyboard selection', async () => {
+  const linked = fakeQueries();
+  linked.isReady = () => true;
+  linked.visualLineAtPosition = (position) => ({ from: 1, to: 80, position }) as unknown as
+    ReturnType<DisplayListQueries['visualLineAtPosition']>;
+  (linked.displayList.pages[0] as { primitives: unknown[] }).primitives = [{
+    kind: 'text', text: 'linked text', x: 0, baselineY: 410, width: 800,
+    font: '400 16px Calibri', color: '#000000', docStart: 1, docEnd: 80, href: '#target',
+  }];
+  stampWorkerFrameVersion(linked, 'A', false);
+  const pending: Array<{ request: ResidentDocumentRead; resolve(value: { version: string; value: unknown }): void }> = [];
+  const read = ((request: ResidentDocumentRead) => new Promise((resolve) => {
+    pending.push({ request, resolve });
+  })) as ResidentEngineWorkerClient['documentRead'];
+  const ref = createRef<YrsInputRef>();
+  const input = render(createElement(ViewerInput, {
+    ref, read, story: 'body', queries: linked, document: { isDisplayOnly: () => false },
+    onSelectionChange: () => {},
+  }));
+  const scrolled: number[] = [];
+  const { opts } = options({
+    viewerSelection: true,
+    yrsSession: null,
+    yrsInputRef: ref,
+    displayListQueries: linked,
+    getYrsPositionProjection: () => null,
+    scrollToPositionImpl: (position) => { scrolled.push(position); },
+    resolveBookmarkPosition: async (name) => (await read({
+      kind: 'bookmarkPosition', story: 'body', name, expectVersion: 'A',
+    })).value,
+  });
+  renderHook(() => usePagesPointer(opts));
+  mouse('mousedown', 200, 405, canvasOf(), 1);
+  mouse('mouseup', 200, 405, window, 1);
+  mouse('click', 200, 405, canvasOf(), 1);
+  const bookmark = pending.find((entry) => entry.request.kind === 'bookmarkPosition');
+  expect(bookmark).toBeDefined();
+  fireEvent.keyDown(input.getByTestId('yrs-input'), { key: 'ArrowRight', shiftKey: true });
+  expect(ref.current!.displaySelection()).toEqual({ anchor: 20, head: 21 });
+  await act(async () => { bookmark!.resolve({ version: 'A', value: 60 }); });
+  expect(ref.current!.displaySelection()).toEqual({ anchor: 20, head: 21 });
+  expect(scrolled).toEqual([]);
+});
 
 test('a read-only press places the caret and a drag extends the selection', async () => {
   const { opts, selections, focused } = options();

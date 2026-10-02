@@ -267,6 +267,7 @@ export type ResidentEngineWorkerResponse = (
       layoutRevision?: number;
       /** The document version the frame lays out. */
       documentVersion?: string;
+      documentPreview?: boolean;
       /** Characters an applyDelete removed. */
       deletedUnits?: number;
       /** The worker replica's yrs state vector after this operation, so the

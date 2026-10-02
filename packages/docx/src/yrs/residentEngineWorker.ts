@@ -1363,6 +1363,7 @@ async function replyFrame(
   precedingPageFrames: Uint8Array[] = []
 ): Promise<void> {
   const documentVersion = session?.proposalEngine.version();
+  const documentPreview = previewing;
   applyWorkerFrame(bytes);
   const limit = provisionalFinalPages;
   if (session && limit !== null && retainedFrame) {
@@ -1427,6 +1428,7 @@ async function replyFrame(
       replayedPages,
       layoutRevision,
       ...(documentVersion === undefined ? {} : { documentVersion }),
+      ...(documentPreview ? { documentPreview: true } : {}),
       ...(deletedUnits === undefined ? {} : { deletedUnits }),
       ...(stateVector ? { stateVector } : {}),
       ...(layoutJson !== undefined ? { layoutJson } : {}),

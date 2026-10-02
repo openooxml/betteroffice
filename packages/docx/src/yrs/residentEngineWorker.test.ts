@@ -3055,6 +3055,7 @@ describe('resident worker opening', () => {
     expect(w.harness.directBatches).toEqual([]);
     const framed = await w.send(bootstrap);
     expect(framed.ok && framed.layoutJson).toBe(provisional);
+    expect(framed.ok && framed.documentPreview).toBe(true);
     // A second preview never replaces the first.
     const again = await w.send({ type: 'open', bytes: new Uint8Array([1, 2]).buffer, previewBlocks: 200 });
     expect(again.ok).toBe(false);
@@ -3064,6 +3065,7 @@ describe('resident worker opening', () => {
     expect(w.harness.directBatches).toEqual([true]);
     const full = await w.send({ ...bootstrap, expectedFrameEpoch: 1 });
     expect(full.ok && full.layoutJson).toBe(provisional);
+    expect(full.ok && full.documentPreview).toBeUndefined();
     expect(calls).toEqual([
       'preview:1,2:200',
       'font',

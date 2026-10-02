@@ -147,7 +147,8 @@ import {
   readViewerPositionAtClientPoint,
   ViewerPointPositions,
 } from './internals/pointPosition';
-import { presentedWorkerVersion } from './internals/layoutProvenance';
+import { isPresented, onPresented, presentedWorkerVersion } from './internals/layoutProvenance';
+import { readAt } from './internals/viewerReads';
 
 export { DEFAULT_PAGE_WIDTH };
 
@@ -824,13 +825,39 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     viewerDocumentReadRef.current = viewerDocumentRead;
     const viewerQueriesRef = useRef(displayListQueries);
     viewerQueriesRef.current = displayListQueries;
+    const viewerFrameListenersRef = useRef(new Set<() => void>());
+    useEffect(() => {
+      for (const listener of viewerFrameListenersRef.current) listener();
+    }, [displayListQueries]);
+    useEffect(() => onPresented(() => {
+      for (const listener of viewerFrameListenersRef.current) listener();
+    }), []);
+    const awaitViewerFrame = useCallback((previous: DisplayListQueries | null | undefined, timeoutMs: number): Promise<DisplayListQueries | null> =>
+      new Promise((resolve) => {
+        const listeners = viewerFrameListenersRef.current;
+        const finish = (queries: DisplayListQueries | null): void => {
+          clearTimeout(timer);
+          listeners.delete(check);
+          resolve(queries);
+        };
+        const check = (): void => {
+          const queries = viewerQueriesRef.current;
+          const nextVersion = presentedWorkerVersion(queries);
+          if (queries && nextVersion !== null && queries !== previous && isPresented(canvasHostRef?.current, queries.displayList)) {
+            finish(queries);
+          }
+        };
+        const timer = setTimeout(() => finish(null), timeoutMs);
+        listeners.add(check);
+        check();
+      }), [canvasHostRef]);
     const [viewerPointPositions] = useState(() => new ViewerPointPositions());
     const resolveViewerBookmark = useCallback(async (name: string): Promise<number | null> => {
       const read = viewerDocumentReadRef.current;
       const expectVersion = presentedWorkerVersion(viewerQueriesRef.current);
       if (!read || expectVersion === null) return null;
-      const reply = await read({ kind: 'bookmarkPosition', story: 'body', name, expectVersion });
-      return reply.version === expectVersion &&
+      const reply = await readAt(read, { kind: 'bookmarkPosition', story: 'body', name, expectVersion });
+      return reply.status === 'ok' &&
         presentedWorkerVersion(viewerQueriesRef.current) === expectVersion
         ? reply.value
         : null;
@@ -1974,7 +2001,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
               zoom,
               clientX,
               clientY,
-              () => viewerQueriesRef.current
+              () => viewerQueriesRef.current,
+              awaitViewerFrame
             )
           : positionAtClientPoint(
               {

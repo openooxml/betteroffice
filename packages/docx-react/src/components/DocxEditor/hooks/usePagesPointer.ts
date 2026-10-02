@@ -234,13 +234,15 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     pendingGestureCleanupRef.current = null;
   }, []);
   const bumpInputEpoch = useCallback(() => {
-    inputEpochRef.current += 1;
+    inputEpochRef.current = viewerSelection && yrsInputRef.current?.beginGesture
+      ? yrsInputRef.current.beginGesture()
+      : inputEpochRef.current + 1;
     if (pendingGestureRef.current) {
       isDraggingRef.current = false;
       dragAnchorRef.current = null;
       clearPendingGesture();
     }
-  }, [clearPendingGesture]);
+  }, [clearPendingGesture, viewerSelection, yrsInputRef]);
   const inputEpoch = useCallback(() => inputEpochRef.current, []);
   // A key at the hidden input follows a pending gesture; any other key in the editor replaces it.
   const handleEditorKeyDown = useCallback(
@@ -389,11 +391,14 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
   );
 
   const setTextSelection = useCallback(
-    (anchor: number, head = anchor): void => {
+    (anchor: number, head = anchor, gesture?: number): void => {
       const input = yrsInputRef.current;
       const anchorTarget = resolveTarget(anchor);
       const headTarget = resolveTarget(head);
       if (!input || !anchorTarget || !headTarget || anchorTarget.story !== headTarget.story) return;
+      if (viewerSelection && input.beginGesture && gesture === undefined) {
+        gesture = inputEpochRef.current = input.beginGesture();
+      }
       if (
         yrsSession &&
         anchorTarget.cell &&
@@ -402,13 +407,13 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       ) {
         yrsSession.setCellSelection({ anchor: anchorTarget.cell, head: headTarget.cell });
       }
-      input.setSelectionFromDisplay(
-        anchorTarget.displayPosition,
-        headTarget.displayPosition,
-        anchorTarget.story
-      );
+      if (viewerSelection) {
+        input.setSelectionFromDisplay(anchorTarget.displayPosition, headTarget.displayPosition, anchorTarget.story, gesture);
+      } else {
+        input.setSelectionFromDisplay(anchorTarget.displayPosition, headTarget.displayPosition, anchorTarget.story);
+      }
     },
-    [resolveTarget, yrsInputRef, yrsSession]
+    [resolveTarget, viewerSelection, yrsInputRef, yrsSession]
   );
 
   const focusInput = useCallback(() => yrsInputRef.current?.focus(), [yrsInputRef]);
@@ -419,11 +424,11 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       yrsCellDraggingRef.current = false;
       isDraggingRef.current = true;
       dragAnchorRef.current = position;
-      if (!replicaPending?.()) setTextSelection(position);
+      if (!replicaPending?.()) setTextSelection(position, position, viewerSelection ? inputEpochRef.current : undefined);
       focusInput();
       if (!partEdit) setIsFocused(true);
     },
-    [focusInput, partEdit, replicaPending, resolveTarget, setIsFocused, setTextSelection]
+    [focusInput, partEdit, replicaPending, resolveTarget, setIsFocused, setTextSelection, viewerSelection]
   );
 
   const beginPendingGesture = useCallback(
@@ -678,9 +683,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   dragExtendRef.current = (cx, cy) => {
     if (!isDraggingRef.current || dragAnchorRef.current == null) return;
+    if (viewerSelection && yrsInputRef.current?.isGestureCurrent?.(inputEpochRef.current) === false) return;
     const pmPos = getPositionFromMouse(cx, cy);
     if (pmPos == null || updatePendingGestureHead(pmPos) || extendCellSelection(pmPos)) return;
-    setTextSelection(dragAnchorRef.current, pmPos);
+    setTextSelection(dragAnchorRef.current, pmPos, viewerSelection ? inputEpochRef.current : undefined);
   };
 
   const dragRafRef = useRef<number | null>(null);
@@ -706,9 +712,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         dragRafRef.current = null;
         const point = pendingDragPointRef.current;
         if (!point || dragAnchorRef.current == null) return;
+        if (viewerSelection && yrsInputRef.current?.isGestureCurrent?.(inputEpochRef.current) === false) return;
         const pmPos = getPositionFromMouse(point.x, point.y);
         if (pmPos == null || extendCellSelection(pmPos)) return;
-        setTextSelection(dragAnchorRef.current, pmPos);
+        setTextSelection(dragAnchorRef.current, pmPos, viewerSelection ? inputEpochRef.current : undefined);
       });
     },
     [
@@ -717,6 +724,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       setTextSelection,
       updateDragScroll,
       updatePendingGestureHead,
+      viewerSelection,
+      yrsInputRef,
     ]
   );
 
@@ -928,6 +937,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
           (projection || replicaPending?.() || resolveBookmarkPosition || !href.startsWith('#'))
         ) {
           e.preventDefault();
+          if (viewerSelection) bumpInputEpoch();
           const linkPosition = getPositionFromMouse(e.clientX, e.clientY);
           if (href.startsWith('#') && replicaPending?.()) {
             if (linkPosition != null) {
@@ -946,16 +956,19 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
           if (pendingGestureRef.current?.kind !== 'caret' || !replicaPending?.()) {
             clearPendingGesture();
           }
-          if (linkPosition != null) setTextSelection(linkPosition);
+          if (linkPosition != null) setTextSelection(linkPosition, linkPosition,
+            viewerSelection ? inputEpochRef.current : undefined);
           if (href.startsWith('#')) {
             const bookmarkName = href.slice(1);
             if (!projection) {
               const epoch = inputEpochRef.current;
               void resolveBookmarkPosition?.(bookmarkName)
                 .then((targetPos) => {
-                  if (targetPos == null || epoch !== inputEpochRef.current) return;
+                  if (targetPos == null || (viewerSelection && yrsInputRef.current?.isGestureCurrent
+                    ? !yrsInputRef.current.isGestureCurrent(epoch)
+                    : epoch !== inputEpochRef.current)) return;
                   scrollToPositionImpl(targetPos);
-                  setTextSelection(targetPos + 1);
+                  setTextSelection(targetPos + 1, targetPos + 1, viewerSelection ? epoch : undefined);
                 })
                 .catch(() => {});
               return;
@@ -1016,10 +1029,12 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       if (!target) return;
       if (e.detail === 2) {
         clearPendingGesture();
+        if (viewerSelection && yrsInputRef.current?.beginGesture) inputEpochRef.current = yrsInputRef.current.beginGesture();
         yrsInputRef.current?.selectWordAtDisplay(target.displayPosition, target.story);
         focusInput();
       } else if (e.detail >= 3) {
         clearPendingGesture();
+        if (viewerSelection && yrsInputRef.current?.beginGesture) inputEpochRef.current = yrsInputRef.current.beginGesture();
         yrsInputRef.current?.selectParagraphAtDisplay(target.displayPosition, target.story);
         focusInput();
       }
@@ -1027,6 +1042,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     [
       canvasHostRef,
       canvasOverlayTarget,
+      bumpInputEpoch,
       clearPendingGesture,
       displayListQueries,
       focusInput,
@@ -1047,6 +1063,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       setTextSelection,
       yrsInputRef,
       yrsRootStory,
+      viewerSelection,
     ]
   );
 

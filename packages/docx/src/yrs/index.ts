@@ -179,6 +179,7 @@ export interface YrsLoc {
 export interface YrsStickyPosition {
   story: string;
   encoded: Uint8Array;
+  displayBoundary?: 'blockStart' | 'blockEnd' | 'paragraphStart' | 'paragraphEnd';
 }
 
 /** A paragraph-addressed position without the story (used inside {@link YrsStoryRange}). */

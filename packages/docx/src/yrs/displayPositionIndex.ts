@@ -1,4 +1,4 @@
-import type { YrsLoc, YrsSession } from './index';
+import type { YrsLoc, YrsSession, YrsStickyPosition } from './index';
 import { createYrsInputPositionMap, type YrsInputPositionMap } from './inputPositionMap';
 import {
   createYrsPositionProjection,
@@ -70,5 +70,19 @@ export class DisplayPositionIndex {
       rootStory,
       (story) => this.inputMap(story)
     );
+  }
+
+  stickyAt(position: number, loc: YrsLoc, rootStory: string): YrsStickyPosition {
+    const structural = this.projection(rootStory)?.structuralPositionAt(position);
+    const sticky = this.reader.encodeStickyPosition(structural?.loc ?? loc);
+    return structural ? { ...sticky, displayBoundary: structural.boundary } : sticky;
+  }
+
+  positionOfSticky(sticky: YrsStickyPosition, rootStory: string): number | null {
+    const loc = this.reader.resolveStickyPosition(sticky);
+    if (!loc) return null;
+    return sticky.displayBoundary
+      ? (this.projection(rootStory)?.positionForStructuralLoc(loc, sticky.displayBoundary) ?? null)
+      : this.positionOf(loc, rootStory);
   }
 }

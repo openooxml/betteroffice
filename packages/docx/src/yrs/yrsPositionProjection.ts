@@ -1,4 +1,4 @@
-import type { YrsCellLoc, YrsLoc, YrsSession, YrsStorySegment } from './index';
+import type { YrsCellLoc, YrsLoc, YrsSession, YrsStickyPosition, YrsStorySegment } from './index';
 import type { PointPosition } from '../plugin-api';
 import {
   createYrsInputPositionMap,
@@ -138,6 +138,11 @@ export class YrsPositionProjection {
   private readonly stories = new Map<string, StoryProjection>();
   private readonly nodes = new Map<number, YrsProjectedNode>();
   private readonly tables: YrsProjectedTable[] = [];
+  private readonly structuralPositions: Array<{
+    position: number;
+    loc: YrsLoc;
+    boundary: NonNullable<YrsStickyPosition['displayBoundary']>;
+  }> = [];
   private readonly source: YrsStorySegmentSource;
   private readonly paragraphsById = new Map<
     StoryProjection,
@@ -225,6 +230,18 @@ export class YrsPositionProjection {
     );
   }
 
+  structuralPositionAt(position: number) {
+    return this.structuralPositions.find((entry) => entry.position === position &&
+      (entry.boundary === 'blockStart' || entry.boundary === 'blockEnd')) ??
+      this.structuralPositions.find((entry) => entry.position === position) ?? null;
+  }
+
+  positionForStructuralLoc(loc: YrsLoc, boundary: YrsStickyPosition['displayBoundary']): number | null {
+    return this.structuralPositions.find((entry) => entry.boundary === boundary &&
+      entry.loc.story === loc.story && entry.loc.paraId === loc.paraId && entry.loc.offset === loc.offset
+    )?.position ?? null;
+  }
+
   /** First paragraph for each paraId. */
   private paragraphIndex(
     story: StoryProjection
@@ -287,6 +304,7 @@ export class YrsPositionProjection {
     let paragraphStart = 0;
     let inputStart = 0;
     let tableIndex = 0;
+    let blocks: Array<{ start: number; size: number; offset: number }> = [];
     for (const segment of segments) {
       if (segment.kind === 'text') {
         inlineLength += segment.text.length;
@@ -303,6 +321,17 @@ export class YrsPositionProjection {
           story: storyId,
         };
         this.nodes.set(start, node);
+        for (const block of blocks) {
+          this.structuralPositions.push(
+            { position: block.start, loc: { story: storyId, paraId: segment.paraId, offset: block.offset }, boundary: 'blockStart' },
+            { position: block.start + block.size, loc: { story: storyId, paraId: segment.paraId, offset: block.offset + 1 }, boundary: 'blockEnd' }
+          );
+        }
+        this.structuralPositions.push(
+          { position: start, loc: { story: storyId, paraId: segment.paraId, offset: leading }, boundary: 'paragraphStart' },
+          { position: start + nodeSize, loc: { story: storyId, paraId: segment.paraId, offset: leading + inlineLength }, boundary: 'paragraphEnd' }
+        );
+        blocks = [];
         story.paragraphs.push({
           paraId: segment.paraId,
           displayStart: paragraphStart,
@@ -323,6 +352,7 @@ export class YrsPositionProjection {
         story.tables.push(table);
         this.tables.push(table);
         this.nodes.set(table.start, table);
+        blocks.push({ start: table.start, size: table.nodeSize, offset: leading });
         tableIndex += 1;
         cursor += table.nodeSize;
         paragraphStart = cursor;
@@ -341,6 +371,7 @@ export class YrsPositionProjection {
           story: storyId,
         };
         this.nodes.set(start, node);
+        blocks.push({ start, size: node.nodeSize, offset: leading });
         cursor += node.nodeSize;
         paragraphStart = cursor;
         leading += 1;
@@ -358,6 +389,7 @@ export class YrsPositionProjection {
           story: storyId,
         };
         this.nodes.set(node.start, node);
+        blocks.push({ start: node.start, size: node.nodeSize, offset: leading });
         cursor += 1;
         paragraphStart = cursor;
         leading += 1;

@@ -56,6 +56,7 @@ import { CARET_PAINT_IDLE_MS, PaintedCaretMachine } from '../paintedCaret';
 import {
   isLayoutQueued,
   isSupersededLayout,
+  presentedWorkerFrame,
   readSessionVersion,
   revisionPreviewKey,
   revisionPreviewKeyOf,
@@ -325,7 +326,7 @@ type DisplayPagesFrame = Pick<ResidentEngineWorkerFrame, 'frame' | 'pageFrames'>
   Partial<
     Pick<
       ResidentEngineWorkerFrame,
-      'caret' | 'selection' | 'caretPainted' | 'layoutRevision' | 'documentVersion'
+      'caret' | 'selection' | 'caretPainted' | 'layoutRevision' | 'documentVersion' | 'documentPreview'
     >
   >;
 
@@ -384,6 +385,7 @@ interface BuiltDisplay {
   previewKey?: string | null;
   /** The worker document version a worker frame lays out. */
   workerVersion?: string;
+  workerPreview?: boolean;
 }
 
 // A replacement worker's frames follow the frame on screen.
@@ -1261,7 +1263,8 @@ export function useRustDisplayList(
           readSessionVersion(worker.engine),
           workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
           line,
-          result.documentVersion ?? null
+          result.documentVersion ?? null,
+          result.documentPreview ?? false
         );
         // Supersede an older async compatibility build before publishing the
         // frame produced by the edit transaction.
@@ -1978,7 +1981,10 @@ export function useRustDisplayList(
                       line,
                       worker
                         ? (result.documentVersion ?? workerFrameVersionOf(previous.queries))
-                        : null
+                        : null,
+                      !!worker && (result.documentVersion === undefined
+                        ? (presentedWorkerFrame(previous.queries)?.preview ?? false)
+                        : (result.documentPreview ?? false))
                     )
                   : { displayList: nextFrame.displayList, frame: nextFrame, queries: null, caret };
               if (worker) {
@@ -2869,6 +2875,7 @@ export function useRustDisplayList(
               caretPainted: result.caretPainted,
               previewKey: workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
               ...(result.documentVersion === undefined ? {} : { workerVersion: result.documentVersion }),
+              workerPreview: result.documentPreview ?? false,
             };
           })
           .catch((error) => {
@@ -2920,6 +2927,7 @@ export function useRustDisplayList(
             provisional: prebuilt.provisional,
             previewKey: workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
             ...(result.documentVersion === undefined ? {} : { workerVersion: result.documentVersion }),
+            workerPreview: result.documentPreview ?? false,
           });
         } else {
           pending = handedOverPreviewFrame
@@ -2955,7 +2963,8 @@ export function useRustDisplayList(
             : sourceVersion,
           result.previewKey === undefined ? previewKey : result.previewKey,
           line,
-          result.workerVersion ?? null
+          result.workerVersion ?? null,
+          result.workerPreview ?? false
         );
         snapshotRef.current = nextSnapshot;
         provisionalPageFrameRef.current = result.provisional === true;
@@ -3203,13 +3212,14 @@ function createRustDisplayListSnapshot(
   sourceVersion: string | null,
   previewKey: string | null,
   line: object,
-  workerVersion: string | null = null
+  workerVersion: string | null = null,
+  workerPreview = false
 ): RustDisplayListSnapshot {
   const residentQueries = residentDisplayListQueryEngine(engine);
   const queries = createDisplayListQueries(displayList, residentQueries, previous.queries, line);
   stampSourceVersion(queries, sourceVersion);
-  stampWorkerFrameVersion(queries, workerVersion);
-  stampWorkerFrameVersion(displayList, workerVersion);
+  stampWorkerFrameVersion(queries, workerVersion, workerPreview);
+  stampWorkerFrameVersion(displayList, workerVersion, workerPreview);
   if (previewKey !== null) stampRevisionPreviewKey(queries, previewKey);
   return { displayList, frame, queries, caret };
 }

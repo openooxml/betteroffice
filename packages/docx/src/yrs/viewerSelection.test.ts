@@ -6,6 +6,7 @@ import { preloadEditWasm } from '../wasm/edit';
 import { DisplayPositionIndex } from './displayPositionIndex';
 import { resolveYrsPointPosition } from './pointPosition';
 import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
+import { createProposalRegistry } from './proposals';
 import {
   resolveBookmarkPosition,
   resolveStickyPositions,
@@ -52,6 +53,33 @@ beforeAll(async () => {
 
 afterAll(() => resident.destroy());
 
+async function withDocument(body: string, check: (resident: ResidentEngineSession, index: DisplayPositionIndex) => void) {
+  const resident = await createResidentEngineSession();
+  try {
+    resident.openDocx(docx(body));
+    const index = new DisplayPositionIndex({
+      ...resident.geometryReader,
+      selectionText: resident.selectionText,
+      encodeStickyPosition: resident.encodeStickyPosition,
+      resolveStickyPosition: resident.resolveStickyPosition,
+    });
+    check(resident, index);
+  } finally {
+    resident.destroy();
+  }
+}
+
+const TABLE = `<w:tbl><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>` +
+  `<w:tr>${cell(p('00000003', r('A1')))}${cell(p('00000004', r('B1')))}</w:tr></w:tbl>`;
+
+function editElsewhere(resident: ResidentEngineSession) {
+  const result = resident.proposalEngine.applyEdits({
+    expectVersion: resident.geometryReader.version(),
+    steps: [{ op: 'insertText', target: { kind: 'paragraph', story: 'body', paraId: '00000008' }, at: 'end', text: '!' }],
+  });
+  expect(result.ok).toBe(true);
+}
+
 function cellStory(paraId: string): string {
   for (const story of resident.geometryReader.storyIds()) {
     if (resident.geometryReader.paragraphs(story).some((paragraph) => paragraph.paraId === paraId)) {
@@ -76,6 +104,79 @@ function at(paraId: string, offset: number): number {
 }
 
 describe('viewer selection reads', () => {
+  test('P1-5: captured select-all keeps a leading table after an unrelated edit', async () => {
+    await withDocument(TABLE + p('00000007', r('Tail')) + p('00000008', r('Elsewhere')), (resident, index) => {
+      const version = resident.geometryReader.version();
+      const all = resolveSelectionUnit(index, 'body', 0, 'story', version)!;
+      const before = resolveSelectionText(index, 'body', all.anchor, all.head, version)!;
+      expect(before.text).toBe('A1\tB1\nTail\nElsewhere');
+      editElsewhere(resident);
+      const next = resident.geometryReader.version();
+      expect(next).not.toBe(version);
+      const mapped = resolveStickyPositions(index, 'body', before.sticky!.anchor, before.sticky!.head, next)!;
+      expect(mapped.anchor).toBe(0);
+      expect(resolveSelectionText(index, 'body', mapped.anchor, mapped.head, next)?.text).toStartWith('A1\tB1\nTail');
+    });
+  });
+
+  test('P1-5: a drag anchored before a leading table keeps that boundary after an edit', async () => {
+    await withDocument(TABLE + p('00000007', r('Tail')) + p('00000008', r('Elsewhere')), (resident, index) => {
+      const version = resident.geometryReader.version();
+      const head = index.positionOf({ story: 'body', paraId: '00000007', offset: 5 }, 'body')!;
+      const before = resolveSelectionText(index, 'body', 0, head, version)!;
+      expect(before.text).toBe('A1\tB1\nTail');
+      editElsewhere(resident);
+      const next = resident.geometryReader.version();
+      const mapped = resolveStickyPositions(index, 'body', before.sticky!.anchor, before.sticky!.head, next)!;
+      expect(mapped).toEqual({ anchor: 0, head });
+      expect(resolveSelectionText(index, 'body', mapped.anchor, mapped.head, next)?.text).toBe(before.text);
+    });
+  });
+
+  test('structural ends before and after a table follow its changing display size', async () => {
+    await withDocument(p('00000001', r('Intro')) + TABLE + p('00000007', r('Tail')) + p('00000008', r('Elsewhere')), (resident, index) => {
+      const version = resident.geometryReader.version();
+      const table = index.projection('body')!.tableAtStart(7)!;
+      const before = resolveSelectionText(index, 'body', table.start, table.start + table.nodeSize, version)!;
+      const story = table.cells[0]!.story;
+      const result = resident.proposalEngine.applyEdits({
+        expectVersion: version,
+        steps: [{ op: 'insertText', target: { kind: 'paragraph', story, paraId: '00000003' }, at: 'end', text: ' more' }],
+      });
+      expect(result.ok).toBe(true);
+      const next = resident.geometryReader.version();
+      const mapped = resolveStickyPositions(index, 'body', before.sticky!.anchor, before.sticky!.head, next)!;
+      const currentTable = index.projection('body')!.tableAtStart(7)!;
+      expect(mapped).toEqual({ anchor: currentTable.start, head: currentTable.start + currentTable.nodeSize });
+      expect(currentTable.nodeSize).toBeGreaterThan(table.nodeSize);
+      expect(resolveSelectionText(index, 'body', mapped.anchor, mapped.head, next)?.text).toBe('A1 more\tB1\n');
+    });
+  });
+
+  test('a proposal decision without a document version change preserves display positions and selection text', async () => {
+    await withDocument(p('00000001', r('Alpha beta')), (resident, index) => {
+      const registry = createProposalRegistry(resident.proposalEngine);
+      const proposed = registry.propose({ expectVersion: resident.geometryReader.version(), proposals: [{
+        id: 'replace',
+        paragraph: { kind: 'persisted', story: { kind: 'body', partUri: '/word/document.xml' }, paraId: '00000001' },
+        suggest: { author: 'A', date: '2026-10-01T00:00:00Z' },
+        op: 'replaceText', search: 'Alpha', replaceWith: 'Omega',
+      }] });
+      if (!proposed.ok) throw new Error(proposed.failure.message);
+      const version = resident.geometryReader.version();
+      const all = resolveSelectionUnit(index, 'body', 0, 'story', version)!;
+      const before = resolveSelectionText(index, 'body', all.anchor, all.head, version);
+      const decided = registry.setStates({
+        expectVersion: version, expectPreviewVersion: proposed.snapshot.previewVersion,
+        changes: [{ id: 'replace', state: 'rejected' }],
+      });
+      expect(decided.ok).toBe(true);
+      expect(resident.geometryReader.version()).toBe(version);
+      expect(resolveSelectionUnit(index, 'body', 0, 'story', version)).toEqual(all);
+      expect(resolveSelectionText(index, 'body', all.anchor, all.head, version)?.text).toBe(before?.text);
+    });
+  });
+
   test('a word and a paragraph expand around a display position', () => {
     const version = resident.geometryReader.version();
     expect(resolveSelectionUnit(index, 'body', at('00000001', 7), 'word', version)).toEqual({

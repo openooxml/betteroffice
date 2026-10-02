@@ -12,25 +12,41 @@ export function sourceVersionOf(target: object | null | undefined): string | nul
   return target ? (sourceVersions.get(target) ?? null) : null;
 }
 
-const workerFrameVersions = new WeakMap<object, string>();
+export interface WorkerFrameProvenance {
+  version: string;
+  preview: boolean;
+}
+
+const workerFrames = new WeakMap<object, WorkerFrameProvenance>();
 
 /** Records the worker document version a worker frame's display list and queries show. */
-export function stampWorkerFrameVersion(target: object, version: string | null | undefined): void {
-  if (version != null) workerFrameVersions.set(target, version);
+export function stampWorkerFrameVersion(
+  target: object,
+  version: string | null | undefined,
+  preview = false
+): void {
+  if (version != null) workerFrames.set(target, { version, preview });
 }
 
 /** The worker document version `target` shows, or null for a frame the worker did not lay out. */
 export function workerFrameVersionOf(target: object | null | undefined): string | null {
-  return target ? (workerFrameVersions.get(target) ?? null) : null;
+  return target ? (workerFrames.get(target)?.version ?? null) : null;
+}
+
+/** The provenance of the presented worker frame. */
+export function presentedWorkerFrame(
+  queries: { readonly displayList: object } | null | undefined
+): WorkerFrameProvenance | null {
+  return queries
+    ? (workerFrames.get(queries) ?? workerFrames.get(queries.displayList) ?? null)
+    : null;
 }
 
 /** The worker document version the frame `queries` query lays out, or null. */
 export function presentedWorkerVersion(
   queries: { readonly displayList: object } | null | undefined
 ): string | null {
-  return queries
-    ? (workerFrameVersionOf(queries) ?? workerFrameVersionOf(queries.displayList))
-    : null;
+  return presentedWorkerFrame(queries)?.version ?? null;
 }
 
 const supersededLayouts = new WeakSet<object>();
