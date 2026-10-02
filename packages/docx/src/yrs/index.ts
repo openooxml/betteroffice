@@ -68,7 +68,7 @@ import type {
   DocxSnapshotLayoutMap,
 } from './pagedExport';
 import { preparedDigests, randomClientId, wrapSession } from './yrsSessionFacade';
-export { decodeDocxHostJson, wrapOpenedEditSession } from './yrsSessionFacade';
+export { decodeDocxHostJson } from './yrsSessionFacade';
 
 export * from './edits';
 export * from './contentControls';
