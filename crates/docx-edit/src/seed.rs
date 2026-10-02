@@ -22,6 +22,8 @@ use crate::structured::source::{
 use crate::structured::{BreakType, Revision, RevisionKind, StoryKind};
 use crate::{EditCtx, EditingDoc, RawOp};
 
+mod ordered;
+
 type JsonObject = BTreeMap<String, Value>;
 
 /// Marks state seeded with sequence metadata. State written before sequence numbering
@@ -5140,10 +5142,16 @@ fn lower_docx_with(
     let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
     collect_fonts_from_value(&parsed, &mut referenced_fonts);
     let source_json = if payloads && needs_source_json(&parsed) {
-        let serialized =
-            serde_json::to_string(&envelope.document).map_err(|error| error.to_string())?;
-        let ordered: OrderedValue =
-            serde_json::from_str(&serialized).map_err(|error| error.to_string())?;
+        let ordered = match ordered::ordered_value(&envelope.document) {
+            Some(ordered) => ordered,
+            None => {
+                let serialized =
+                    serde_json::to_string(&envelope.document).map_err(|error| error.to_string())?;
+                let ordered: OrderedValue =
+                    serde_json::from_str(&serialized).map_err(|error| error.to_string())?;
+                ordered
+            }
+        };
         let mut values = BTreeMap::new();
         ordered.collect_source_json(&mut values);
         values
