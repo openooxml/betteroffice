@@ -25,7 +25,11 @@ import {
   workerOpenReplicaPending,
   workerOpenReplicaStarted,
 } from '../internals/workerOpenReplica';
-import { registerWorkerOpenSave, takeWorkerOpenSave } from '../internals/workerOpenSave';
+import {
+  registerWorkerOpenSave,
+  takeWorkerOpenSave,
+  type WorkerOpenSave,
+} from '../internals/workerOpenSave';
 import {
   beginWorkerProposalHandover,
   registerWorkerProposalAuthority,
@@ -344,6 +348,8 @@ export function useYrsCoreSession(
   // Asks the worker whether the document has tracked changes, once per session.
   const revisionQueryRef = useRef<(() => void) | null>(null);
   const workerLaidOutRef = useRef<(() => void) | null>(null);
+  /** The worker's save of a worker-opened session; it takes saves once the worker has drawn a frame. */
+  const workerSaverRef = useRef<{ session: YrsSession; save: WorkerOpenSave } | null>(null);
   // An on-demand replica loads once wanted and past the point main's automatic load waits for.
   const replicaGateRef = useRef<{ reached: boolean; wanted: boolean } | null>(null);
   const requestReplicaRef = useRef<(() => void) | null>(null);
@@ -695,7 +701,7 @@ export function useYrsCoreSession(
               },
               { active: () => hydrateOnDemandRef.current, request }
             );
-            registerWorkerOpenSave(next, (comments) => {
+            const save: WorkerOpenSave = (comments) => {
               const host = documentRef.current;
               if (!host) return null;
               return worker
@@ -711,7 +717,8 @@ export function useYrsCoreSession(
                   registeredWorkerProposalAuthority(next)?.resync();
                   return saved;
                 });
-            });
+            };
+            workerSaverRef.current = { session: next, save };
             if (workerOpenRef.current?.workerProposals) {
               let laidOut = new Promise<void>((resolve) => {
                 workerLaidOutRef.current = resolve;
@@ -834,6 +841,7 @@ export function useYrsCoreSession(
       revisionQueryRef.current = null;
       workerLaidOutRef.current?.();
       workerLaidOutRef.current = null;
+      workerSaverRef.current = null;
       replicaGateRef.current = null;
       requestReplicaRef.current = null;
       if (replicaWaitTimerRef.current !== null) clearTimeout(replicaWaitTimerRef.current);
@@ -879,6 +887,9 @@ export function useYrsCoreSession(
       (handoffFrom && options?.shownEngine !== session)
     ) return;
     workerLaidOutRef.current?.();
+    if (workerSaverRef.current?.session === session) {
+      registerWorkerOpenSave(session, workerSaverRef.current.save);
+    }
     const authority = registeredWorkerProposalAuthority(session);
     if (authority) {
       void authority.initialize().catch((error) => {

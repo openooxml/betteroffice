@@ -7,9 +7,12 @@ import { wrapOpenedEditSession } from './index';
 import type { EditSession } from './wasm/index';
 import { yrsToDocument } from './yrsToDocument';
 
-/** The saves of one opened document so far, and the bytes the last one wrote. @internal */
+/**
+ * The saves of one opened document so far, and the last one's projection: the
+ * base the next save projects from, as the editor's cached projection is. @internal
+ */
 export interface ResidentSaveRecord extends EditorSaveRecord {
-  original?: ArrayBuffer;
+  base?: Document;
 }
 
 /**
@@ -28,11 +31,11 @@ export async function saveResidentDocument(
   record: ResidentSaveRecord
 ): Promise<ArrayBuffer> {
   const session = wrapOpenedEditSession(raw, clientId, source, hostJson);
-  const materialized = session.materializeDocx();
-  if (!materialized?.originalBuffer) throw new Error('The resident worker holds no opened package');
-  const base = record.original ? { ...materialized, originalBuffer: record.original } : materialized;
+  const base = record.base ?? session.materializeDocx();
+  if (!base?.originalBuffer) throw new Error('The resident worker holds no opened package');
   const projected = yrsToDocument(session, mergeDocxHostMetadata(base, host));
   const buffer = await saveEditorDocument(session, projected, comments, record);
-  record.original = buffer;
+  projected.originalBuffer = buffer;
+  record.base = projected;
   return buffer;
 }

@@ -36,7 +36,6 @@ import {
   requestOnDemandWorkerOpenReplica,
   requestWorkerOpenReplica,
   workerOpenReplicaOnDemand,
-  workerOpenReplicaStarted,
 } from '../internals/workerOpenReplica';
 import { workerOpenSave } from '../internals/workerOpenSave';
 import {
@@ -161,9 +160,9 @@ const WORKER_PROPOSAL_ACCESS: ReadonlySet<keyof DocxEditorRef> = new Set([
   'readParagraphs', 'getParagraphIdentities', 'resolveParagraphAnchors', 'search',
 ]);
 
-/** An on-demand replica nothing has asked for yet; flushing input leaves it unloaded. */
+/** An on-demand replica nothing has asked for while the worker saves; flushing input leaves it unloaded. */
 function unrequestedReplica(session: YrsSession): boolean {
-  return workerOpenReplicaOnDemand(session) && !workerOpenReplicaStarted(session);
+  return workerOpenReplicaOnDemand(session) && workerOpenSave(session) !== null;
 }
 
 function gateReplicaAccess(

@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, it, setSystemTime } from 'bun:test';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
@@ -6,6 +6,7 @@ import type { Comment } from '../types/content';
 import type { Document } from '../types/document';
 import { applyFrameDeltaOwned, decodeFrameDelta } from '../layout/render/frameDelta';
 import { preloadEditWasm } from '../wasm/edit';
+import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
 import {
   adoptEditorSave,
@@ -44,10 +45,19 @@ const LAYOUT = JSON.stringify({
 
 let startWorker: () => InProcessResidentWorker;
 beforeAll(async () => {
+  // Saves stamp docProps/core.xml with the current time.
+  setSystemTime(new Date('2026-10-02T12:00:00Z'));
   await preloadEditWasm(
     new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')))
   );
+  await preloadOpcWasm(
+    new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm')))
+  );
   startWorker = await residentWorkerFactory();
+});
+
+afterAll(() => {
+  setSystemTime();
 });
 
 const owned: Array<{ destroy(): void }> = [];
@@ -55,14 +65,24 @@ afterEach(() => {
   for (const session of owned.splice(0)) session.destroy();
 });
 
-/** Where two packages first differ; null when they are byte-identical. */
+/** The first part where two packages differ, and where; null when they are byte-identical. */
 function difference(actual: Uint8Array, expected: Uint8Array): string | null {
-  const length = Math.min(actual.length, expected.length);
-  let at = 0;
-  while (at < length && actual[at] === expected[at]) at += 1;
-  return at === length && actual.length === expected.length
-    ? null
-    : `byte ${at} of ${actual.length} vs ${expected.length}`;
+  if (actual.length === expected.length && actual.every((byte, at) => byte === expected[at])) return null;
+  const a = unzipContainer(actual);
+  const b = unzipContainer(expected);
+  const names = [...new Set([...Object.keys(a), ...Object.keys(b)])].sort();
+  for (const name of names) {
+    const x = a[name];
+    const y = b[name];
+    if (!x || !y) return `${name}: ${x ? 'only in actual' : 'only in expected'}`;
+    if (x.length === y.length && x.every((byte, at) => byte === y[at])) continue;
+    let at = 0;
+    while (at < x.length && x[at] === y[at]) at += 1;
+    if (process.env.WORKER_SAVE_NUMBERS_ONLY) return `part ${names.indexOf(name)} at ${at}`;
+    const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes.subarray(Math.max(0, at - 80), at + 80));
+    return `${name} at ${at}:\n  actual   ${text(x)}\n  expected ${text(y)}`;
+  }
+  return `zip container only (${actual.length} vs ${expected.length} bytes)`;
 }
 
 function documents(): string[] {
@@ -302,13 +322,14 @@ describe('worker save', () => {
     expect(difference(await workerSave(opened), first)).toBeNull();
     const late = await hydrate(opened);
     const record = opened.record;
-    adoptEditorSave(late.session, record.full ? { full: true } : { full: false, saved: record.original });
+    const saved = record.base?.originalBuffer;
+    adoptEditorSave(late.session, record.full ? { full: true } : { full: false, saved });
     const materialized = late.session.materializeDocx();
     if (!materialized) throw new Error('the replica has no package');
     replicaEdit(late, opened.host);
     const projected = yrsToDocument(
       late.session,
-      mergeDocxHostMetadata({ ...materialized, originalBuffer: record.original }, opened.host)
+      mergeDocxHostMetadata({ ...materialized, originalBuffer: saved }, opened.host)
     );
     const lateSave = new Uint8Array(await saveEditorDocument(late.session, projected, hostComments(opened)));
     expect(difference(lateSave, second)).toBeNull();
