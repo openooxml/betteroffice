@@ -40,6 +40,8 @@ export interface ResidentEngineWorkerFrame {
   replayMs: number;
   replayedPages: number;
   layoutRevision: number;
+  /** The worker document version the frame lays out. */
+  documentVersion?: string;
   /** Characters an applyDelete removed. */
   deletedUnits: number;
   /** The region layout the worker ran, when the request handed it the layout. */
@@ -866,6 +868,7 @@ function frameResult(
     replayMs: response.replayMs ?? 0,
     replayedPages: response.replayedPages ?? 0,
     layoutRevision: response.layoutRevision ?? 0,
+    ...(response.documentVersion === undefined ? {} : { documentVersion: response.documentVersion }),
     deletedUnits: response.deletedUnits ?? 0,
     ...(response.layoutJson !== undefined ? { layoutJson: response.layoutJson } : {}),
     ...(response.layoutProvisional ? { layoutProvisional: true } : {}),

@@ -16,6 +16,14 @@ import {
 } from './proposals';
 import { computeProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
 import { readResidentSearch } from './residentSearch';
+import { DisplayPositionIndex } from './displayPositionIndex';
+import { resolveYrsPointPosition } from './pointPosition';
+import {
+  resolveBookmarkPosition,
+  resolveRangePosition,
+  resolveSelectionText,
+  resolveSelectionUnit,
+} from './viewerSelection';
 import { hasCachedYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import {
   presentOffscreenPageBackBuffer,
@@ -50,6 +58,20 @@ const scope = self as unknown as DedicatedWorkerGlobalScope;
 let resolveHostEditModule: (module: WebAssembly.Module | null) => void;
 let hostEditModule = nextHostEditModule();
 let session: ResidentEngineSession | null = null;
+let positionIndex: { session: ResidentEngineSession; index: DisplayPositionIndex } | null = null;
+
+function displayPositionIndex(current: ResidentEngineSession): DisplayPositionIndex {
+  if (positionIndex?.session !== current) {
+    positionIndex = {
+      session: current,
+      index: new DisplayPositionIndex({
+        ...current.geometryReader,
+        selectionText: current.selectionText,
+      }),
+    };
+  }
+  return positionIndex.index;
+}
 let proposals: DocxProposalRegistry | null = null;
 let lastProposalMirrorVersion: string | null = null;
 let fontRequirements: {
@@ -509,6 +531,47 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           request.read.query,
           request.read.caseSensitive,
           request.read.carry
+        );
+        break;
+      case 'pointPosition':
+        value = resolveYrsPointPosition(
+          displayPositionIndex(session),
+          request.read.hit,
+          request.read.expectVersion
+        );
+        break;
+      case 'selectionUnit':
+        value = resolveSelectionUnit(
+          displayPositionIndex(session),
+          request.read.story,
+          request.read.position,
+          request.read.unit,
+          request.read.expectVersion
+        );
+        break;
+      case 'selectionText':
+        value = resolveSelectionText(
+          displayPositionIndex(session),
+          request.read.story,
+          request.read.anchor,
+          request.read.head,
+          request.read.expectVersion
+        );
+        break;
+      case 'bookmarkPosition':
+        value = resolveBookmarkPosition(
+          displayPositionIndex(session),
+          request.read.story,
+          request.read.name,
+          request.read.expectVersion
+        );
+        break;
+      case 'rangePosition':
+        value = resolveRangePosition(
+          displayPositionIndex(session),
+          request.read.story,
+          request.read.range,
+          request.read.expectVersion
         );
         break;
       case 'stickyAnchors': {
@@ -1243,6 +1306,7 @@ function destroySession(keepSurfaces = false): void {
   session?.destroy();
   lastProposalMirrorVersion = null;
   session = null;
+  positionIndex = null;
   openedDocument = null;
   previewing = false;
   previewFinalPages = null;
@@ -1295,6 +1359,7 @@ async function replyFrame(
   deletedUnits?: number,
   precedingPageFrames: Uint8Array[] = []
 ): Promise<void> {
+  const documentVersion = session?.proposalEngine.version();
   applyWorkerFrame(bytes);
   const limit = provisionalFinalPages;
   if (session && limit !== null && retainedFrame) {
@@ -1358,6 +1423,7 @@ async function replyFrame(
       replayMs,
       replayedPages,
       layoutRevision,
+      ...(documentVersion === undefined ? {} : { documentVersion }),
       ...(deletedUnits === undefined ? {} : { deletedUnits }),
       ...(stateVector ? { stateVector } : {}),
       ...(layoutJson !== undefined ? { layoutJson } : {}),

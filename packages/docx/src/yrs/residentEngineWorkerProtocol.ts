@@ -6,6 +6,14 @@ import type {
   YrsSelection,
   YrsStickyPosition,
 } from './index';
+import type { PointPosition } from '../plugin-api';
+import type { DocxTextRange } from './edits';
+import type { DocxResolvedPointPosition } from './pointPosition';
+import type {
+  DocxDisplayRange,
+  DocxDisplaySelectionText,
+  DocxSelectionUnit,
+} from './viewerSelection';
 import type { ResidentSearchResult } from './residentSearch';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
@@ -49,7 +57,18 @@ export type ResidentDocumentRead =
   | { kind: 'readParagraphs'; request: DocxReadParagraphsRequest }
   | { kind: 'searchText'; query: string; caseSensitive: boolean; carry?: YrsStickyPosition | null }
   | { kind: 'stickyAnchors'; locs: YrsLoc[]; version: string }
-  | { kind: 'navigationTarget'; story: string; paraId: string };
+  | { kind: 'navigationTarget'; story: string; paraId: string }
+  | { kind: 'pointPosition'; hit: PointPosition; expectVersion: string }
+  | {
+      kind: 'selectionUnit';
+      story: string;
+      position: number;
+      unit: DocxSelectionUnit;
+      expectVersion: string;
+    }
+  | { kind: 'selectionText'; story: string; anchor: number; head: number; expectVersion: string }
+  | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string }
+  | { kind: 'rangePosition'; story: string; range: DocxTextRange; expectVersion: string };
 
 /** @internal */
 export interface ResidentDocumentReadValues {
@@ -59,6 +78,11 @@ export interface ResidentDocumentReadValues {
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
   searchText: ResidentSearchResult;
   stickyAnchors: Array<YrsStickyPosition | null>;
+  pointPosition: DocxResolvedPointPosition | null;
+  selectionUnit: DocxDisplayRange | null;
+  selectionText: DocxDisplaySelectionText | null;
+  bookmarkPosition: number | null;
+  rangePosition: DocxDisplayRange | null;
 }
 
 /** How long a warm waits for the host's compiled module before loading the engine itself. */
@@ -236,6 +260,8 @@ export type ResidentEngineWorkerResponse = (
       replayMs?: number;
       replayedPages?: number;
       layoutRevision?: number;
+      /** The document version the frame lays out. */
+      documentVersion?: string;
       /** Characters an applyDelete removed. */
       deletedUnits?: number;
       /** The worker replica's yrs state vector after this operation, so the

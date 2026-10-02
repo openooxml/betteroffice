@@ -15,7 +15,7 @@ import {
   type DisplayListTableRegion,
 } from '@betteroffice/docx/layout/render';
 import { sanitizeHref } from '@betteroffice/docx/utils';
-import type { YrsCellLoc, YrsSession } from '@betteroffice/docx/yrs';
+import type { YrsCellLoc, YrsPointerProjectionTarget, YrsSession } from '@betteroffice/docx/yrs';
 
 import type { YrsInputRef } from '../YrsInput';
 import { useDragAutoScroll } from '../../../hooks/useDragAutoScroll';
@@ -56,6 +56,13 @@ export interface UsePagesPointerOptions {
   yrsInputRef: React.RefObject<YrsInputRef | null>;
   yrsSession: YrsSession | null;
   yrsRootStory: string;
+  /**
+   * A viewer session: the input holds the selection in the presented frame's display positions,
+   * so gestures address them directly and wait on no document copy.
+   */
+  viewerSelection?: boolean;
+  /** A viewer session's bookmark lookup, in body display positions. */
+  resolveBookmarkPosition?: (name: string) => Promise<number | null>;
   getYrsPositionProjection: (rootStory: string) => YrsPositionProjection | null;
   applyYrsCommand: (command: YrsEditorCommand) => boolean;
   syncYrsInputState: (docChanged: boolean) => boolean;
@@ -186,6 +193,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     yrsInputRef,
     yrsSession,
     yrsRootStory,
+    viewerSelection = false,
+    resolveBookmarkPosition,
     getYrsPositionProjection,
     applyYrsCommand,
     syncYrsInputState,
@@ -371,11 +380,12 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
   );
 
   const resolveTarget = useCallback(
-    (position: number) => {
+    (position: number): YrsPointerProjectionTarget | null => {
+      if (viewerSelection) return { story: yrsRootStory, displayPosition: position };
       const projection = getYrsPositionProjection(yrsRootStory);
       return projection ? projection.targetAt(position) : null;
     },
-    [getYrsPositionProjection, yrsRootStory]
+    [getYrsPositionProjection, viewerSelection, yrsRootStory]
   );
 
   const setTextSelection = useCallback(
@@ -881,7 +891,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       // selection remains keyboard-ready even when the canvas host is outside
       // PagedEditor's React subtree.
       focusInput();
-      const projection = getYrsPositionProjection(yrsRootStory);
+      const projection = viewerSelection ? null : getYrsPositionProjection(yrsRootStory);
       const queries = displayListQueries;
       const host = canvasHostRef?.current ?? pagesContainerRef.current;
       const point = resolveCanvasHit(e.clientX, e.clientY, false);
@@ -913,7 +923,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
             )
           : null;
         const href = sanitizeHref(displayHit?.href ?? '');
-        if (href && (projection || replicaPending?.() || !href.startsWith('#'))) {
+        if (
+          href &&
+          (projection || replicaPending?.() || resolveBookmarkPosition || !href.startsWith('#'))
+        ) {
           e.preventDefault();
           const linkPosition = getPositionFromMouse(e.clientX, e.clientY);
           if (href.startsWith('#') && replicaPending?.()) {
@@ -936,7 +949,18 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
           if (linkPosition != null) setTextSelection(linkPosition);
           if (href.startsWith('#')) {
             const bookmarkName = href.slice(1);
-            const targetPos = projection!.bookmarkPosition(bookmarkName);
+            if (!projection) {
+              const epoch = inputEpochRef.current;
+              void resolveBookmarkPosition?.(bookmarkName)
+                .then((targetPos) => {
+                  if (targetPos == null || epoch !== inputEpochRef.current) return;
+                  scrollToPositionImpl(targetPos);
+                  setTextSelection(targetPos + 1);
+                })
+                .catch(() => {});
+              return;
+            }
+            const targetPos = projection.bookmarkPosition(bookmarkName);
             if (targetPos != null) {
               scrollToPositionImpl(targetPos);
               setTextSelection(targetPos + 1);
@@ -1030,10 +1054,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     (e: React.MouseEvent) => {
       if (!onContextMenu) return;
       e.preventDefault();
-      const projection = getYrsPositionProjection(yrsRootStory);
-      if (!projection) return;
+      const projection = viewerSelection ? null : getYrsPositionProjection(yrsRootStory);
+      if (!projection && !viewerSelection) return;
       const readImageNodeAt = (pos: number): ImageInfo | null => {
-        const node = projection.nodeAt(pos);
+        const node = projection?.nodeAt(pos);
         if (node?.kind !== 'image') return null;
         return {
           pos,

@@ -25,6 +25,7 @@ import {
   type YrsInputRef,
   type YrsStoredFormatting,
 } from './YrsInput';
+import { ViewerInput } from './ViewerInput';
 import { CanvasSelectionOverlay } from './overlays/CanvasSelectionOverlay';
 import { RemotePresenceOverlay } from './overlays/RemotePresenceOverlay';
 import { CanvasCellSelectionOverlay } from './overlays/CanvasCellSelectionOverlay';
@@ -72,6 +73,7 @@ import {
   type YrsRenderEnv,
   type YrsResidentCaretSnapshot,
   type YrsSession,
+  type ResidentEngineWorkerClient,
 } from '@betteroffice/docx/yrs';
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import { resolveImageLayoutAttrs } from '@betteroffice/docx/docx';
@@ -140,7 +142,12 @@ import { SidebarRevisionReads } from './internals/sidebarRevisionReads';
 import { storySegmentSource, YrsStorySegmentCache } from './internals/yrsStorySegmentCache';
 import { partEditStory, type NoteEdit, type PartEdit } from './partEdit';
 import type { DocxEditorCollaborationOptions, DocxPointPosition } from './types';
-import { positionAtClientPoint } from './internals/pointPosition';
+import {
+  positionAtClientPoint,
+  readViewerPositionAtClientPoint,
+  ViewerPointPositions,
+} from './internals/pointPosition';
+import { presentedWorkerVersion } from './internals/layoutProvenance';
 
 export { DEFAULT_PAGE_WIDTH };
 
@@ -204,6 +211,11 @@ export interface PagedEditorProps {
   firstPageFooterContent?: HeaderFooter | null;
   /** Whether the editor is read-only. */
   readOnly?: boolean;
+  /**
+   * A viewer session's reads of the document the resident worker holds. The session holds no
+   * document on this thread: selection, copy and point reads go to the worker.
+   */
+  viewerDocumentRead?: ResidentEngineWorkerClient['documentRead'];
   /** Gap between pages in pixels. */
   pageGap?: number;
   /** Zoom level (1 = 100%). */
@@ -379,6 +391,8 @@ export interface PagedEditorRef {
   deleteSelection(): void;
   /** Select the full active Yrs story. */
   selectAll(): void;
+  /** A viewer session's selected text, read from the document worker; null elsewhere. */
+  readSelectedText(): Promise<string> | null;
   /** Get the current display-position selection. */
   getSelectionRange(): { from: number; to: number } | null;
   /**
@@ -393,6 +407,11 @@ export interface PagedEditorRef {
    * version; retry after {@link flushPendingInput} or on the next frame.
    */
   getPositionAtPoint(clientX: number, clientY: number): DocxPointPosition | null;
+  /**
+   * The text under a client point, read through the document's owner: the worker in a viewer
+   * session. Null outside text or when the painted layout changes version before the answer.
+   */
+  readPositionAtPoint(clientX: number, clientY: number): Promise<DocxPointPosition | null>;
   /** Live authoritative yrs session. */
   getYrsSession(): YrsSession | null;
   /** Commits accepted input and selection; waits for active IME composition. */
@@ -497,6 +516,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       firstPageHeaderContent,
       firstPageFooterContent,
       readOnly = false,
+      viewerDocumentRead,
       pageGap = DEFAULT_PAGE_GAP,
       zoom = 1,
       showHiddenText = false,
@@ -781,6 +801,29 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     });
     const updateSelectionOverlayRef = useRef(updateSelectionOverlay);
     updateSelectionOverlayRef.current = updateSelectionOverlay;
+    const handleViewerSelectionChange = useCallback(() => {
+      if (yrsInputRef.current?.displaySelection()) {
+        updateSelectionOverlayRef.current();
+      } else {
+        setSelectionRects((current) => (current.length === 0 ? current : []));
+        setCaretPosition((current) => (current === null ? current : null));
+      }
+    }, [setCaretPosition, setSelectionRects]);
+    const viewerDocumentReadRef = useRef(viewerDocumentRead);
+    viewerDocumentReadRef.current = viewerDocumentRead;
+    const viewerQueriesRef = useRef(displayListQueries);
+    viewerQueriesRef.current = displayListQueries;
+    const [viewerPointPositions] = useState(() => new ViewerPointPositions());
+    const resolveViewerBookmark = useCallback(async (name: string): Promise<number | null> => {
+      const read = viewerDocumentReadRef.current;
+      const expectVersion = presentedWorkerVersion(viewerQueriesRef.current);
+      if (!read || expectVersion === null) return null;
+      const reply = await read({ kind: 'bookmarkPosition', story: 'body', name, expectVersion });
+      return reply.version === expectVersion &&
+        presentedWorkerVersion(viewerQueriesRef.current) === expectVersion
+        ? reply.value
+        : null;
+    }, []);
 
     // Route body focus to the yrs textarea input surface.
     const focusBodyInput = useCallback((): void => {
@@ -1492,16 +1535,21 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     } = usePagesPointer({
       pagesContainerRef,
       yrsInputRef,
-      yrsSession: yrsCore.session!,
+      yrsSession: viewerDocumentRead ? null : yrsCore.session!,
       yrsRootStory: activeYrsRootStory,
+      viewerSelection: viewerDocumentRead !== undefined,
+      resolveBookmarkPosition: viewerDocumentRead ? resolveViewerBookmark : undefined,
       getYrsPositionProjection,
       applyYrsCommand,
       syncYrsInputState,
       readOnly,
-      replicaPending: () =>
-        !!yrsCore.experimentalWorkerOpen && !(yrsCore.replicaReadyRef?.current ?? yrsCore.replicaReady),
-      replicaReady: yrsCore.replicaReady,
-      requestReplica: yrsCore.requestReplica,
+      replicaPending: viewerDocumentRead
+        ? undefined
+        : () =>
+            !!yrsCore.experimentalWorkerOpen &&
+            !(yrsCore.replicaReadyRef?.current ?? yrsCore.replicaReady),
+      replicaReady: viewerDocumentRead ? true : yrsCore.replicaReady,
+      requestReplica: viewerDocumentRead ? undefined : yrsCore.requestReplica,
       partEdit,
       displayListQueries,
       canvasHostRef,
@@ -1884,18 +1932,50 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       getYrsPositionProjection: () => getYrsPositionProjection('body'),
       displayPositionToYrsLoc,
       getPositionAtPoint: (clientX, clientY) =>
-        positionAtClientPoint(
+        viewerDocumentRead
+          ? viewerPointPositions.positionAt(
+              viewerDocumentRead,
+              canvasHostRef?.current,
+              displayListQueries,
+              zoom,
+              clientX,
+              clientY
+            )
+          : positionAtClientPoint(
           {
             getYrsSession: () => yrsCore.session,
             displayPositionToYrsLoc,
             hasPendingInput: () => yrsInputRef.current?.hasPendingInput() ?? false,
           },
-          canvasHostRef?.current,
-          displayListQueries,
-          zoom,
-          clientX,
-          clientY
-        ),
+            canvasHostRef?.current,
+            displayListQueries,
+            zoom,
+            clientX,
+            clientY
+          ),
+      readPositionAtPoint: async (clientX, clientY) =>
+        viewerDocumentRead
+          ? readViewerPositionAtClientPoint(
+              viewerDocumentRead,
+              canvasHostRef?.current,
+              displayListQueries,
+              zoom,
+              clientX,
+              clientY,
+              () => viewerQueriesRef.current
+            )
+          : positionAtClientPoint(
+              {
+                getYrsSession: () => yrsCore.session,
+                displayPositionToYrsLoc,
+                hasPendingInput: () => yrsInputRef.current?.hasPendingInput() ?? false,
+              },
+              canvasHostRef?.current,
+              displayListQueries,
+              zoom,
+              clientX,
+              clientY
+            ),
     });
 
     usePagedEditorCommandBridge({
@@ -1961,43 +2041,55 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         onMouseDown={handleContainerMouseDown}
       >
         {/* Hidden textarea input surface that writes directly to yrs. */}
-        <YrsInput
-          ref={yrsInputRef}
-          enabled
-          readOnly={readOnly || (!!partEdit && activeYrsRootStory === 'body')}
-          replicaReadyRef={yrsCore.experimentalWorkerOpen ? yrsCore.replicaReadyRef : undefined}
-          requestReplica={yrsCore.experimentalWorkerOpen ? yrsCore.requestReplica : undefined}
-          inputEpoch={inputEpoch}
-          applyPendingSelection={applyPendingSelection}
-          seedSelection={!yrsCore.hydrateOnDemand}
-          session={yrsCore.session}
-          story={activeYrsRootStory}
-          isSuggesting={isSuggesting}
-          author={author}
-          inputPositionMap={yrsInputPositionMap}
-          displayPositionToLoc={yrsDisplayPositionToLoc}
-          resolveDisplayTarget={resolveYrsDisplayTarget}
-          locToDisplayPosition={yrsLocToDisplayPosition}
-          nextParagraphStyleId={(styleId) => yrsStyleResolver?.getNextStyleId(styleId) ?? null}
-          displayListQueries={activeYrsRootStory === 'body' ? displayListQueries : null}
-          resolveDisplayListQueries={
-            activeYrsRootStory === 'body' ? resolveDisplayListQueries : undefined
-          }
-          displayListFrameEpoch={displayListFrameEpoch}
-          residentCaret={residentCaret}
-          residentCaretAuthoritative={residentCaretAuthoritative}
-          layoutUpdateOrigin={layoutUpdateOrigin}
-          canvasHostRef={canvasHostRef ?? pagesContainerRef}
-          onStateChange={handleYrsStateChange}
-          onDirectInput={publishYrsDirectInput}
-          applyResidentInput={applyResidentInput}
-          applyResidentDelete={applyResidentDelete}
-          onFocusChange={setIsFocused}
-          onPendingInputChange={notifyStateListeners}
-          onCaretInput={activeYrsRootStory === 'body' ? onCaretInput : undefined}
-          onCaretInputDispatched={activeYrsRootStory === 'body' ? onCaretInputDispatched : undefined}
-          onCaretInterrupt={handleLocalCaretInterrupt}
-        />
+        {viewerDocumentRead ? (
+          <ViewerInput
+            ref={yrsInputRef}
+            read={viewerDocumentRead}
+            story={activeYrsRootStory}
+            queries={displayListQueries ?? null}
+            document={yrsCore.session}
+            onSelectionChange={handleViewerSelectionChange}
+            onFocusChange={setIsFocused}
+          />
+        ) : (
+          <YrsInput
+            ref={yrsInputRef}
+            enabled
+            readOnly={readOnly || (!!partEdit && activeYrsRootStory === 'body')}
+            replicaReadyRef={yrsCore.experimentalWorkerOpen ? yrsCore.replicaReadyRef : undefined}
+            requestReplica={yrsCore.experimentalWorkerOpen ? yrsCore.requestReplica : undefined}
+            inputEpoch={inputEpoch}
+            applyPendingSelection={applyPendingSelection}
+            seedSelection={!yrsCore.hydrateOnDemand}
+            session={yrsCore.session}
+            story={activeYrsRootStory}
+            isSuggesting={isSuggesting}
+            author={author}
+            inputPositionMap={yrsInputPositionMap}
+            displayPositionToLoc={yrsDisplayPositionToLoc}
+            resolveDisplayTarget={resolveYrsDisplayTarget}
+            locToDisplayPosition={yrsLocToDisplayPosition}
+            nextParagraphStyleId={(styleId) => yrsStyleResolver?.getNextStyleId(styleId) ?? null}
+            displayListQueries={activeYrsRootStory === 'body' ? displayListQueries : null}
+            resolveDisplayListQueries={
+              activeYrsRootStory === 'body' ? resolveDisplayListQueries : undefined
+            }
+            displayListFrameEpoch={displayListFrameEpoch}
+            residentCaret={residentCaret}
+            residentCaretAuthoritative={residentCaretAuthoritative}
+            layoutUpdateOrigin={layoutUpdateOrigin}
+            canvasHostRef={canvasHostRef ?? pagesContainerRef}
+            onStateChange={handleYrsStateChange}
+            onDirectInput={publishYrsDirectInput}
+            applyResidentInput={applyResidentInput}
+            applyResidentDelete={applyResidentDelete}
+            onFocusChange={setIsFocused}
+            onPendingInputChange={notifyStateListeners}
+            onCaretInput={activeYrsRootStory === 'body' ? onCaretInput : undefined}
+            onCaretInputDispatched={activeYrsRootStory === 'body' ? onCaretInputDispatched : undefined}
+            onCaretInterrupt={handleLocalCaretInterrupt}
+          />
+        )}
 
         <div ref={viewportLayoutRef} style={{ display: 'contents' }}>
           <div

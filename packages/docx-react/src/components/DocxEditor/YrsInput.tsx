@@ -80,6 +80,8 @@ export interface YrsInputRef {
   insertText(text: string): void;
   deleteSelection(): void;
   selectAll(): void;
+  /** The selection's plain text, for an input whose document lives in the worker. */
+  readSelectedText?(): Promise<string> | null;
 }
 
 export type YrsStoredFormattingAction =

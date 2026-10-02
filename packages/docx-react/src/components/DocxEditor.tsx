@@ -522,6 +522,13 @@ export interface DocxEditorRef {
    * version; retry after {@link flushPendingInput} or on the next frame.
    */
   getPositionAtPoint: (clientX: number, clientY: number) => DocxPointPosition | null;
+  /**
+   * {@link getPositionAtPoint} as a read that waits for its answer: in a read-only
+   * `experimentalWorkerOpen` editor the document worker resolves the point, without loading the
+   * document on the main thread. Null outside text or when the painted pages change version
+   * before the answer.
+   */
+  readPositionAtPoint: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>;
   /** Save the document to a buffer. */
   save: () => Promise<ArrayBuffer | null>;
   /** Set zoom level */
@@ -1233,6 +1240,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   useDocxEnginePrewarmOnBytes(experimentalPrewarm, yrsSeedBytes);
   // A read-only worker-open document keeps host proposals in the worker until the replica loads.
   const workerProposals = modeReadOnly && !collaboration;
+  // A viewer session holds no document here: selection, copy and point reads go to the worker.
+  const viewerSession = Boolean(experimentalWorkerOpen) && workerProposals;
   const workerContentChangeRef = useRef<() => void>(() => {});
   const workerRevisionsRef = useRef<() => void>(() => {});
   const yrsCore = useYrsCoreSession(
@@ -2218,13 +2227,13 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // A tap asks through its gesture, the input for itself.
   useEffect(() => {
     const content = editorContentRef.current;
-    if (!replicaPending || !content) return;
+    if (!replicaPending || !content || viewerSession) return;
     const onPointer = (event: PointerEvent) => {
       if (pagePressNeedsReplica(event)) requestReplica();
     };
     content.addEventListener('pointerdown', onPointer, true);
     return () => content.removeEventListener('pointerdown', onPointer, true);
-  }, [replicaPending, requestReplica]);
+  }, [replicaPending, requestReplica, viewerSession]);
 
   // Reserve 2× the left-edge allowance so the centered page clears whatever
   // outline UI is showing, without forcing a shift on wide viewports.
@@ -2555,6 +2564,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               onBodyClick={handleBodyClick}
               zoom={state.zoom}
               readOnly={readOnly}
+              viewerDocumentRead={viewerSession ? canvasRenderer.readWorkerDocument : undefined}
               showHiddenText={showHiddenText}
               isSuggesting={editingMode === 'suggesting'}
               author={author}
