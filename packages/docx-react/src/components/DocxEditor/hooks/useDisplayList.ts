@@ -2,6 +2,7 @@ import { startTransition, useCallback, useEffect, useMemo, useRef, useState } fr
 import {
   buildRustDisplayList,
   buildRustDisplayFrame,
+  applyFrameChain,
   applyFrameDelta,
   applyFrameDeltaOwned,
   createCanvasImageResolver,
@@ -1120,7 +1121,8 @@ export function useRustDisplayList(
                   currentFrame.frameEpoch,
                   false,
                   paintCaret,
-                  displayWindowRef.current
+                  displayWindowRef.current,
+                  true
                 )
               : await worker.client.applyDelete(
                   operation.direction,
@@ -1129,7 +1131,8 @@ export function useRustDisplayList(
                   false,
                   paintCaret,
                   operation.count,
-                  displayWindowRef.current
+                  displayWindowRef.current,
+                  true
                 );
           if (result.applied) {
             try {
@@ -1183,7 +1186,7 @@ export function useRustDisplayList(
           // Superseded: a newer frame's reply owns the painted-caret verdict.
           return { frameEpoch: null, caretSynchronized: false, deletedUnits: result.deletedUnits };
         }
-        const nextFrame = applyFrameDeltaOwned(previous.frame, delta);
+        const { frame: nextFrame } = applyFrameChain(previous.frame, result.pageFrames ?? [result.frame], true);
         mainFrameRef.current = null;
         const caret = residentCaretForSelection(
           result.caret,
@@ -1874,7 +1877,7 @@ export function useRustDisplayList(
               frame.frameEpoch,
               false
             )
-          : worker.client.buildPages(batch, frame.frameEpoch, paintCaret, background)
+          : worker.client.buildPages(batch, frame.frameEpoch, paintCaret, background, true)
         : (async () => {
             setMainFrameDisplayWindow(targetEngine);
             const bytes = release.length > 0
@@ -1956,7 +1959,7 @@ export function useRustDisplayList(
                 finish();
                 return;
               }
-              attach(applyFrameDeltaOwned(previous, delta));
+              attach(applyFrameChain(previous, result.pageFrames ?? [result.frame], true).frame);
             } catch (error) {
               finish();
               failed(error);
@@ -2240,7 +2243,7 @@ export function useRustDisplayList(
         paintedCaretMachine.shouldPaint(performance.now());
       const reply = bootstrapping
         ? worker.bootstrap(snapshot, '', options)
-        : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, options);
+        : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, { ...options, frameChain: true });
       // A worker out of memory runs the pass again in a fresh worker; once
       // that one runs out too, the pass rejects and nothing lays out here.
       const unavailable = (
@@ -2774,7 +2777,8 @@ export function useRustDisplayList(
                   extras,
                   previousFrame?.frameEpoch ?? 0,
                   paintCaret,
-                  displayWindowRef.current
+                  displayWindowRef.current,
+                  true
                 )
               : bootstrapping
                 ? worker.bootstrap(snapshot, extras, {
@@ -2789,14 +2793,14 @@ export function useRustDisplayList(
                 : worker.sync(snapshot, extras, previousFrame?.frameEpoch ?? 0, paintCaret, {
                     ...sent(),
                     displayWindow: displayWindowRef.current,
+                    frameChain: true,
                   });
         return workerFrame
           .then((result) => {
             if (recoveredEngine(hostEngine) && !isCurrentWorker(hostEngine, owner)) {
               throw new SupersededPreviewError();
             }
-            const delta = decodeFrameDelta(result.frame);
-            const nextFrame = applyFrameDelta(previousFrame, delta);
+            const { frame: nextFrame } = applyFrameChain(previousFrame, result.pageFrames ?? [result.frame], false);
             return {
               displayList: nextFrame.displayList,
               frame: nextFrame,
@@ -2849,7 +2853,7 @@ export function useRustDisplayList(
         ) {
           // The worker ran this layout and built its frame in the same pass.
           const { result } = prebuilt;
-          const nextFrame = applyFrameDelta(appliesTo, delta);
+          const { frame: nextFrame } = applyFrameChain(appliesTo, result.pageFrames ?? [result.frame], false);
           pending = Promise.resolve({
             displayList: nextFrame.displayList,
             frame: nextFrame,

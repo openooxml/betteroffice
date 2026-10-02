@@ -95,6 +95,7 @@ export {
 } from './rustDisplayList';
 
 export {
+  applyFrameChain,
   applyFrameDelta,
   applyFrameDeltaOwned,
   decodeFrameDelta,

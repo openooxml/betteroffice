@@ -523,7 +523,8 @@ export class ResidentEngineWorkerClient {
     extras: string,
     expectedFrameEpoch: number,
     paintCaret = false,
-    options: ResidentEngineWorkerLayoutOptions & ResidentEngineWorkerSnapshotOptions = {}
+    options: ResidentEngineWorkerLayoutOptions &
+      ResidentEngineWorkerSnapshotOptions & { frameChain?: boolean } = {}
   ): Promise<ResidentEngineWorkerFrame> {
     const fontsRevision = snapshot.fontsRevision;
     const pending = this.request(
@@ -532,6 +533,7 @@ export class ResidentEngineWorkerClient {
         snapshot,
         extras,
         expectedFrameEpoch,
+        ...(options.frameChain !== undefined ? { frameChain: options.frameChain } : {}),
         paintCaret,
         ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
         ...(options.provisionalPages !== undefined
@@ -577,13 +579,15 @@ export class ResidentEngineWorkerClient {
     extras: string,
     expectedFrameEpoch: number,
     paintCaret = false,
-    displayWindow?: [number, number]
+    displayWindow?: [number, number],
+    frameChain?: boolean
   ): Promise<ResidentEngineWorkerFrame> {
     const result = frameResult(
       await this.request({
         type: 'buildFrame',
         extras,
         expectedFrameEpoch,
+        ...(frameChain !== undefined ? { frameChain } : {}),
         paintCaret,
         ...(displayWindow
           ? { displayWindow, ...(this.retainBuiltPages ? { retainBuiltPages: true } : {}) }
@@ -595,20 +599,22 @@ export class ResidentEngineWorkerClient {
 
   /** Build unbuilt display pages; the reply frame carries them. */
   buildPages(
-    pages: number[], expectedFrameEpoch: number, paintCaret?: boolean
+    pages: number[], expectedFrameEpoch: number, paintCaret?: boolean, background?: false, frameChain?: boolean
   ): Promise<ResidentEngineWorkerFrame>;
   /** @internal */
   buildPages(
-    pages: number[], expectedFrameEpoch: number, paintCaret: boolean, background: boolean
+    pages: number[], expectedFrameEpoch: number, paintCaret: boolean, background: boolean, frameChain?: boolean
   ): Promise<ResidentEngineWorkerFrame | null>;
   async buildPages(
     pages: number[],
     expectedFrameEpoch: number,
     paintCaret = false,
-    background = false
+    background = false,
+    frameChain?: boolean
   ): Promise<ResidentEngineWorkerFrame | null> {
     const response = await this.request({
       type: 'buildPages', pages, expectedFrameEpoch, paintCaret,
+      ...(frameChain !== undefined ? { frameChain } : {}),
       ...(background ? { background: true } : {}),
     });
     return background && response.pageBuildSuperseded ? null : frameResult(response);
@@ -634,7 +640,8 @@ export class ResidentEngineWorkerClient {
     expectedFrameEpoch: number,
     profile = false,
     paintCaret = false,
-    displayWindow?: [number, number]
+    displayWindow?: [number, number],
+    frameChain?: boolean
   ): Promise<ResidentEngineWorkerApplyResult | { applied: false }> {
     if (!this.ready) return { applied: false };
     try {
@@ -644,6 +651,7 @@ export class ResidentEngineWorkerClient {
           text,
           selection,
           expectedFrameEpoch,
+          ...(frameChain !== undefined ? { frameChain } : {}),
           profile,
           paintCaret,
           ...(displayWindow
@@ -665,7 +673,8 @@ export class ResidentEngineWorkerClient {
     profile = false,
     paintCaret = false,
     count = 1,
-    displayWindow?: [number, number]
+    displayWindow?: [number, number],
+    frameChain?: boolean
   ): Promise<ResidentEngineWorkerApplyResult | { applied: false }> {
     if (!this.ready) return { applied: false };
     try {
@@ -676,6 +685,7 @@ export class ResidentEngineWorkerClient {
           count,
           selection,
           expectedFrameEpoch,
+          ...(frameChain !== undefined ? { frameChain } : {}),
           profile,
           paintCaret,
           ...(displayWindow

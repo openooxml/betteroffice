@@ -124,6 +124,7 @@ export type ResidentEngineWorkerRequest =
       snapshot: YrsResidentWorkerSnapshot;
       extras: string;
       expectedFrameEpoch: number;
+      frameChain?: boolean;
       paintCaret: boolean;
       /**
        * Display extras without the header/footer payload. When present, the
@@ -140,6 +141,7 @@ export type ResidentEngineWorkerRequest =
       type: 'buildPages';
       pages: number[];
       expectedFrameEpoch: number;
+      frameChain?: boolean;
       paintCaret: boolean;
       background?: boolean;
     }
@@ -166,6 +168,7 @@ export type ResidentEngineWorkerRequest =
       type: 'buildFrame';
       extras: string;
       expectedFrameEpoch: number;
+      frameChain?: boolean;
       paintCaret: boolean;
       displayWindow?: [number, number];
       retainBuiltPages?: boolean;
@@ -176,6 +179,7 @@ export type ResidentEngineWorkerRequest =
       text: string;
       selection: YrsSelection;
       expectedFrameEpoch: number;
+      frameChain?: boolean;
       profile: boolean;
       paintCaret: boolean;
       displayWindow?: [number, number];
@@ -188,6 +192,7 @@ export type ResidentEngineWorkerRequest =
       count: number;
       selection: YrsSelection;
       expectedFrameEpoch: number;
+      frameChain?: boolean;
       profile: boolean;
       paintCaret: boolean;
       displayWindow?: [number, number];

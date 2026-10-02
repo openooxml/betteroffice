@@ -182,6 +182,32 @@ test('sliced page replies preserve the ordered frames for idle adoption', async 
   client.destroy();
 });
 
+test('frame chain flags are forwarded only when supplied', async () => {
+  const { worker, client } = setup();
+  const bootstrap = client.bootstrap(snapshot, '');
+  worker.reply(frameReply(worker.lastId()));
+  await bootstrap;
+  const requests = [
+    (frameChain?: boolean) => client.sync(snapshot, '', 1, false, { frameChain }),
+    (frameChain?: boolean) => client.buildFrame('', 1, false, undefined, frameChain),
+    (frameChain?: boolean) => client.buildPages([5], 1, false, false, frameChain),
+    (frameChain?: boolean) => client.buildPages([5, 6, 7, 8, 9], 1, false, true, frameChain),
+    (frameChain?: boolean) => client.applyInput('a', selection, 1, false, false, undefined, frameChain),
+    (frameChain?: boolean) => client.applyDelete('backward', selection, 1, false, false, 1, undefined, frameChain),
+  ];
+  for (const send of requests) {
+    for (const frameChain of [undefined, false, true]) {
+      const pending = send(frameChain);
+      const request = worker.posted.at(-1)!;
+      if (frameChain === undefined) expect(request).not.toHaveProperty('frameChain');
+      else expect(request).toHaveProperty('frameChain', frameChain);
+      worker.reply(frameReply(worker.lastId()));
+      await pending;
+    }
+  }
+  client.destroy();
+});
+
 test('identical font requirement reads share one request until another request is posted', async () => {
   const { worker, client } = setup();
   const first = client.fontRequirements('{"a":1}');

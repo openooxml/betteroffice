@@ -86,6 +86,23 @@ let layoutRevision = 0;
 let fontsRevision = -1;
 let operations = Promise.resolve();
 let retainedFrame: RetainedFrame | null = null;
+let frameChain: { base: number; epoch: number; bytes: Uint8Array }[] = [];
+let frameChainBytes = 0;
+const FRAME_CHAIN_LIMIT_BYTES = 32 * 1024 * 1024;
+const FRAME_CHAIN_LIMIT_FRAMES = 256;
+let frameChainLimitBytes = FRAME_CHAIN_LIMIT_BYTES;
+let frameChainLimitFrames = FRAME_CHAIN_LIMIT_FRAMES;
+
+/** @internal */
+export function setFrameChainLimits(
+  bytes = FRAME_CHAIN_LIMIT_BYTES,
+  frames = FRAME_CHAIN_LIMIT_FRAMES
+): void {
+  frameChainLimitBytes = bytes;
+  frameChainLimitFrames = frames;
+  if (frameChainBytes > bytes || frameChain.length > frames) clearFrameChain();
+}
+
 let glyphCache: GlyphCache | null = null;
 const offscreenCanvases = new Map<string, OffscreenCanvas>();
 const offscreenBackBuffers = new Map<string, OffscreenCanvas>();
@@ -204,6 +221,7 @@ function trapped(id: number, error: WebAssembly.RuntimeError): void {
   if (trappedIds.has(id)) return;
   trappedIds.add(id);
   trap = error;
+  clearFrameChain();
   const failed = editFailedAllocationBytes();
   reply({
     id,
@@ -282,6 +300,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'bootstrap') {
+    chainedFrameBase(request.expectedFrameEpoch, false);
     if (!request.opened) {
       destroySession(request.keepSurfaces === true);
       // The worker is a genuine yrs peer. Reusing the main replica's client id
@@ -526,6 +545,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'sync') {
+    const base = chainedFrameBase(request.expectedFrameEpoch, request.frameChain);
     unsubscribe?.();
     unsubscribe = null;
     previewFinalPages = null;
@@ -551,7 +571,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     const started = performance.now();
     const frame = session.buildDisplayListFrame(
       frameExtras(request.extras, request.layoutExtras, layoutJson),
-      request.expectedFrameEpoch
+      base.expected
     );
     await replyFrame(
       request.id,
@@ -563,11 +583,14 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       false,
       request.paintCaret,
       request.layoutExtras === undefined ? undefined : (layoutJson ?? undefined),
-      provisional
+      provisional,
+      undefined,
+      base.prefix
     );
     return;
   }
   if (request.type === 'buildPages') {
+    const base = chainedFrameBase(request.expectedFrameEpoch, request.frameChain);
     const limit = previewFinalPages === null
       ? provisionalFinalPages
       : Math.min(previewFinalPages, provisionalFinalPages ?? previewFinalPages);
@@ -575,8 +598,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     if (request.background && pages.length > BACKGROUND_SLICE_PAGES) {
       const build: BackgroundPageBuild = {
         request: pages === request.pages ? request : { ...request, pages },
-        owner: session, frameEpoch: request.expectedFrameEpoch,
-        frames: [], offset: 0, started: performance.now(), engineMs: 0,
+        owner: session, frameEpoch: base.expected,
+        frames: [...base.prefix], offset: 0, started: performance.now(), engineMs: 0,
       };
       backgroundPageBuild = build;
       scheduleBackgroundPageSlice(build);
@@ -586,7 +609,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     // Pages of the provisional frame build between steps, as before a completion.
     pendingUpdates = [];
     const started = performance.now();
-    const frame = session.buildDisplayPagesFrame(pages, request.expectedFrameEpoch);
+    const frame = session.buildDisplayPagesFrame(pages, base.expected);
     await replyFrame(
       request.id,
       frame,
@@ -595,11 +618,16 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       undefined,
       started,
       false,
-      request.paintCaret
+      request.paintCaret,
+      undefined,
+      false,
+      undefined,
+      base.prefix
     );
     return;
   }
   if (request.type === 'releasePages') {
+    chainedFrameBase(request.expectedFrameEpoch, false);
     if (
       !retainedFrame ||
       retainedFrame.frameEpoch !== request.expectedFrameEpoch ||
@@ -632,6 +660,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'completeLayout') {
+    chainedFrameBase(request.expectedFrameEpoch, false);
     setFrameDisplayWindow(session);
     if (incompleteLayout && request.sliceBlocks) {
       supersedeSlicedCompletion();
@@ -652,10 +681,11 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'buildFrame') {
     if (!incompleteLayout?.workerAuthoritative) await completeProvisionalLayout();
+    const base = chainedFrameBase(request.expectedFrameEpoch, request.frameChain);
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     pendingUpdates = [];
     const started = performance.now();
-    const frame = session.buildDisplayListFrame(request.extras, request.expectedFrameEpoch);
+    const frame = session.buildDisplayListFrame(request.extras, base.expected);
     await replyFrame(
       request.id,
       frame,
@@ -664,7 +694,11 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       undefined,
       started,
       false,
-      request.paintCaret
+      request.paintCaret,
+      undefined,
+      false,
+      undefined,
+      base.prefix
     );
     return;
   }
@@ -707,6 +741,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   await completeProvisionalLayout();
+  const base = chainedFrameBase(request.expectedFrameEpoch, request.frameChain);
   fontRequirements = null;
   // The edit replaces the pagination a cached completion's frame would paint.
   completedLayout = null;
@@ -720,21 +755,21 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         ? request.profile
           ? session.applyDeleteProfiled(
               request.direction,
-              request.expectedFrameEpoch,
+              base.expected,
               request.count
             )
           : {
               frame: session.applyDelete(
                 request.direction,
-                request.expectedFrameEpoch,
+                base.expected,
                 request.count
               ),
               profile: undefined,
             }
         : request.profile
-          ? session.applyInputProfiled(request.text, request.expectedFrameEpoch)
+          ? session.applyInputProfiled(request.text, base.expected)
           : {
-              frame: session.applyInput(request.text, request.expectedFrameEpoch),
+              frame: session.applyInput(request.text, base.expected),
               profile: undefined,
             };
     await replyFrame(
@@ -748,7 +783,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       request.paintCaret,
       undefined,
       false,
-      request.type === 'applyDelete' ? session.residentDeletedUnits() : undefined
+      request.type === 'applyDelete' ? session.residentDeletedUnits() : undefined,
+      base.prefix
     );
   } catch (error) {
     if (trap) throw trap;
@@ -1253,6 +1289,7 @@ function destroySession(keepSurfaces = false): void {
   incompleteLayout = null;
   completedLayout = null;
   retainedFrame = null;
+  clearFrameChain();
   glyphCache = null;
   offscreenBackBuffers.clear();
   pendingOffscreenPageIds.clear();
@@ -1275,9 +1312,48 @@ function forgetOffscreenPagePixels(pageId: string): void {
   }
 }
 
-function applyWorkerFrame(bytes: Uint8Array): void {
-  retainedFrame = applyFrameDeltaOwned(retainedFrame, decodeFrameDelta(bytes));
+function applyWorkerFrame(bytes: Uint8Array): boolean {
+  const delta = decodeFrameDelta(bytes);
+  retainedFrame = applyFrameDeltaOwned(retainedFrame, delta);
+  if (delta.full) {
+    clearFrameChain();
+  } else {
+    frameChain.push({ base: delta.baseFrameEpoch, epoch: delta.frameEpoch, bytes: bytes.slice() });
+    frameChainBytes += bytes.byteLength;
+    if (frameChainBytes > frameChainLimitBytes || frameChain.length > frameChainLimitFrames) {
+      clearFrameChain();
+    }
+  }
   for (const pageId of retainedFrame.damagedPageIds) pendingOffscreenPageIds.add(pageId.toString());
+  return delta.full;
+}
+
+function clearFrameChain(): void {
+  frameChain = [];
+  frameChainBytes = 0;
+}
+
+function chainedFrameBase(
+  expected: number,
+  chain: boolean | undefined
+): { expected: number; prefix: Uint8Array[] } {
+  frameChain = frameChain.filter((entry) => {
+    if (entry.epoch > expected) return true;
+    frameChainBytes -= entry.bytes.byteLength;
+    return false;
+  });
+  if (!chain || !retainedFrame || expected === retainedFrame.frameEpoch) {
+    return { expected, prefix: [] };
+  }
+  if (
+    frameChain.length === 0 ||
+    frameChain[0]!.base !== expected ||
+    frameChain.some((entry, index) => index > 0 && entry.base !== frameChain[index - 1]!.epoch) ||
+    frameChain[frameChain.length - 1]!.epoch !== retainedFrame.frameEpoch
+  ) {
+    return { expected, prefix: [] };
+  }
+  return { expected: retainedFrame.frameEpoch, prefix: frameChain.map((entry) => entry.bytes.slice()) };
 }
 
 async function replyFrame(
@@ -1294,7 +1370,7 @@ async function replyFrame(
   deletedUnits?: number,
   precedingPageFrames: Uint8Array[] = []
 ): Promise<void> {
-  applyWorkerFrame(bytes);
+  let full = applyWorkerFrame(bytes);
   const limit = provisionalFinalPages;
   if (session && limit !== null && retainedFrame) {
     const pages = retainedFrame.displayList.pages
@@ -1304,7 +1380,7 @@ async function replyFrame(
       const released = session.releaseDisplayPagesFrame(pages, retainedFrame.frameEpoch);
       if (released === null) throw new Error('Provisional display pages could not be released');
       bytes = session.buildDisplayPagesFrame([], 0);
-      applyWorkerFrame(bytes);
+      full = applyWorkerFrame(bytes);
     }
   }
   const caret = session?.residentCaretSnapshot();
@@ -1338,7 +1414,7 @@ async function replyFrame(
   const { replayedPages, caretPainted } = await replayOffscreen(false);
   const replayMs = performance.now() - replayStarted;
   const frame = exactBuffer(bytes);
-  const pageFrames = precedingPageFrames.map(exactBuffer);
+  const pageFrames = full ? [] : precedingPageFrames.map(exactBuffer);
   const updateBuffers = updates.map(exactBuffer);
   const stateVector = session ? exactBuffer(session.encodeStateVector()) : undefined;
   reply(
@@ -1496,5 +1572,6 @@ function reply(response: ResidentEngineWorkerResponse, transfer: Transferable[] 
   // A trap the raster painted past fails the request that would succeed, and
   // every request waiting on it, through the paths that answer failures.
   if (trap && response.ok) throw trap;
+  if (!response.ok && response.terminal) clearFrameChain();
   scope.postMessage({ ...response, memory: wasmModuleMemories() }, transfer);
 }

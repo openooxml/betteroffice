@@ -447,6 +447,28 @@ export function applyFrameDeltaOwned(
   return applyFrameDeltaInternal(previous, delta, true);
 }
 
+export function applyFrameChain(
+  base: RetainedFrame | null,
+  frames: readonly Uint8Array[],
+  owned: boolean
+): { frame: RetainedFrame; delta: DecodedFrameDelta } {
+  if (frames.length === 0) invalid('frame chain is empty');
+  let frame = base;
+  let delta: DecodedFrameDelta;
+  const damagedPageIds = new Set<bigint>();
+  const removedPageIds = new Set<bigint>();
+  for (let index = 0; index < frames.length; index += 1) {
+    delta = decodeFrameDelta(frames[index]!);
+    if (index < frames.length - 1 && frame && !delta.full && delta.frameEpoch <= frame.frameEpoch) {
+      continue;
+    }
+    frame = owned ? applyFrameDeltaOwned(frame, delta) : applyFrameDelta(frame, delta);
+    for (const id of frame.damagedPageIds) damagedPageIds.add(id);
+    for (const id of frame.removedPageIds) removedPageIds.add(id);
+  }
+  return { frame: { ...frame!, damagedPageIds, removedPageIds }, delta: delta! };
+}
+
 function applyFrameDeltaInternal(
   previous: RetainedFrame | null,
   delta: DecodedFrameDelta,
