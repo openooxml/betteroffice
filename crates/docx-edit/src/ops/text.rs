@@ -319,33 +319,46 @@ impl EditingDoc {
     ) -> OpResult<Receipt> {
         validate_text(text)?;
         let mut txn = self.transact_for(ctx);
-        let story = story_ref(&txn, &at.story)?;
-        check_position(&story, &txn, at.index)?;
+        self.insert_text_observed_in(&mut txn, ctx, at, text, policy, observe)
+    }
+
+    pub(crate) fn insert_text_observed_in(
+        &self,
+        txn: &mut TransactionMut<'_>,
+        ctx: &EditCtx,
+        at: Position,
+        text: &str,
+        policy: FormatPolicy,
+        observe: impl FnOnce(&Attrs),
+    ) -> OpResult<Receipt> {
+        validate_text(text)?;
+        let story = story_ref(txn, &at.story)?;
+        check_position(&story, txn, at.index)?;
         if text.is_empty() {
-            let range = loc_range_in_txn(&at.story, &story, &txn, at.index, at.index)?;
+            let range = loc_range_in_txn(&at.story, &story, txn, at.index, at.index)?;
             return Ok(Receipt {
                 range: Some(range),
                 ..Receipt::default()
             });
         }
-        crate::identity::promote_at(self, &mut txn, &at.story, &story, at.index);
-        let chunks = boundary_chunks(&story, &txn, at.index);
+        crate::identity::promote_at(self, txn, &at.story, &story, at.index);
+        let chunks = boundary_chunks(&story, txn, at.index);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
                 .or_else(|| {
-                    adjacent_paragraph_change_revision_id(&chunks, at.index, &txn, &ctx.author)
+                    adjacent_paragraph_change_revision_id(&chunks, at.index, txn, &ctx.author)
                 })
                 .unwrap_or_else(|| self.next_id())
         });
-        let formatting = insertion_attrs(&chunks, at.index, &policy, &txn);
+        let formatting = insertion_attrs(&chunks, at.index, &policy, txn);
         let ins = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
         let attrs = stamped_attrs(formatting, ins);
         observe(&attrs);
-        story.insert_with_attributes(&mut txn, at.index, text, attrs);
+        story.insert_with_attributes(txn, at.index, text, attrs);
         let end = at.index + utf16_len(text);
-        let range = loc_range_in_txn(&at.story, &story, &txn, at.index, end)?;
+        let range = loc_range_in_txn(&at.story, &story, txn, at.index, end)?;
         Ok(Receipt {
             new_para_ids: Vec::new(),
             revision_ids: revision_id.into_iter().collect(),
@@ -360,11 +373,24 @@ impl EditingDoc {
             return Err(OpError::EmptyRange);
         }
         let mut txn = self.transact_for(ctx);
-        let story = story_ref(&txn, &range.story)?;
-        check_range(&story, &txn, range.start, len)?;
+        self.delete_range_in(&mut txn, ctx, range)
+    }
+
+    pub(crate) fn delete_range_in(
+        &self,
+        txn: &mut TransactionMut<'_>,
+        ctx: &EditCtx,
+        range: StoryRange,
+    ) -> OpResult<Receipt> {
+        let len = crate::format::range_len(&range)?;
+        if len == 0 {
+            return Err(OpError::EmptyRange);
+        }
+        let story = story_ref(txn, &range.story)?;
+        check_range(&story, txn, range.start, len)?;
         let chunks = snapshot_range(
             &story,
-            &txn,
+            txn,
             range.start.saturating_sub(1),
             range.end.saturating_add(1),
         );
@@ -375,21 +401,14 @@ impl EditingDoc {
         });
         let result_end = if let Some(id) = revision_id.as_ref() {
             let revision = revision_value(id, &ctx.revision_author());
-            let outcome = suggest_delete(
-                &mut txn,
-                &story,
-                ctx,
-                &revision,
-                range.start,
-                range.end,
-                &chunks,
-            );
+            let outcome =
+                suggest_delete(txn, &story, ctx, &revision, range.start, range.end, &chunks);
             range.end - outcome.removed
         } else {
-            plain_delete(&mut txn, &story, range.start, range.end, &chunks, false);
+            plain_delete(txn, &story, range.start, range.end, &chunks, false);
             range.start
         };
-        let loc_range = loc_range_in_txn(&range.story, &story, &txn, range.start, result_end)?;
+        let loc_range = loc_range_in_txn(&range.story, &story, txn, range.start, result_end)?;
         Ok(Receipt {
             new_para_ids: Vec::new(),
             revision_ids: revision_id.into_iter().collect(),
@@ -421,18 +440,33 @@ impl EditingDoc {
             return Err(OpError::EmptyRange);
         }
         let mut txn = self.transact_for(ctx);
-        let story = story_ref(&txn, &range.story)?;
-        check_range(&story, &txn, range.start, len)?;
+        self.replace_range_placed_in(&mut txn, ctx, range, text)
+    }
+
+    pub(crate) fn replace_range_placed_in(
+        &self,
+        txn: &mut TransactionMut<'_>,
+        ctx: &EditCtx,
+        range: StoryRange,
+        text: &str,
+    ) -> OpResult<(Receipt, u32)> {
+        validate_text(text)?;
+        let len = crate::format::range_len(&range)?;
+        if len == 0 && text.is_empty() {
+            return Err(OpError::EmptyRange);
+        }
+        let story = story_ref(txn, &range.story)?;
+        check_range(&story, txn, range.start, len)?;
         let chunks = snapshot_range(
             &story,
-            &txn,
+            txn,
             range.start.saturating_sub(1),
             range.end.saturating_add(1),
         );
-        let after = after_struck_text(&story, &txn, ctx, &range, len, &chunks);
+        let after = after_struck_text(&story, txn, ctx, &range, len, &chunks);
         let mut at = after.unwrap_or(range.start);
         if !text.is_empty() {
-            crate::identity::promote_at(self, &mut txn, &range.story, &story, at);
+            crate::identity::promote_at(self, txn, &range.story, &story, at);
         }
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, range.start, INS, &ctx.author)
@@ -458,28 +492,21 @@ impl EditingDoc {
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect()
             })
-            .unwrap_or_else(|| insertion_attrs(&chunks, range.start, &FormatPolicy::Inherit, &txn));
+            .unwrap_or_else(|| insertion_attrs(&chunks, range.start, &FormatPolicy::Inherit, txn));
 
         let revision = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
         if len > 0 {
             if let Some(revision) = revision.as_ref() {
-                let outcome = suggest_delete(
-                    &mut txn,
-                    &story,
-                    ctx,
-                    revision,
-                    range.start,
-                    range.end,
-                    &chunks,
-                );
+                let outcome =
+                    suggest_delete(txn, &story, ctx, revision, range.start, range.end, &chunks);
                 if after.is_some() {
                     at -= outcome.removed;
                 }
             } else {
                 plain_delete(
-                    &mut txn,
+                    txn,
                     &story,
                     range.start,
                     range.end,
@@ -489,10 +516,10 @@ impl EditingDoc {
             }
         }
         if !text.is_empty() {
-            story.insert_with_attributes(&mut txn, at, text, stamped_attrs(formatting, revision));
+            story.insert_with_attributes(txn, at, text, stamped_attrs(formatting, revision));
         }
         let end = at + utf16_len(text);
-        let loc_range = loc_range_in_txn(&range.story, &story, &txn, at, end)?;
+        let loc_range = loc_range_in_txn(&range.story, &story, txn, at, end)?;
         Ok((
             Receipt {
                 new_para_ids: Vec::new(),
