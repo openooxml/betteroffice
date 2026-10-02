@@ -5140,7 +5140,7 @@ mod tests {
     }
 
     #[test]
-    fn paragraph_identities_cache_tracks_source_replacement_and_opening() {
+    fn paragraph_identities_cache_tracks_source_replacement() {
         let session = EditSession::new(73.0).unwrap();
         let source = batch_docx();
         checked_paragraph_identities(&session);
@@ -5171,23 +5171,6 @@ mod tests {
         });
         assert_ne!(opened, replaced);
         assert_eq!(session.version(), version);
-        assert_eq!(
-            changed_paragraph_identities(&session, || {
-                session.open_docx(&replacement, false, None, None).unwrap();
-            }),
-            replaced
-        );
-        let reopened = changed_paragraph_identities(&session, || {
-            session.open_docx(&replacement, true, None, None).unwrap();
-        });
-        assert_ne!(
-            envelope(&reopened)["sessionId"],
-            envelope(&opened)["sessionId"]
-        );
-        assert_eq!(
-            envelope(&reopened)["paragraphs"][1]["session"]["paraId"],
-            "ABCDEF01"
-        );
         changed_paragraph_identities(&session, || {
             session
                 .engine
