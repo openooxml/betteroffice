@@ -2193,6 +2193,30 @@ function carryParagraphIdentities(
     return carried;
   });
 }
+
+/**
+ * `blocks` with paragraphs of their own, in table cells too, each still the
+ * session paragraph it was projected from: a save edits these, not the
+ * projection the next one reuses. @internal
+ */
+export function ownProjectedParagraphs(blocks: readonly BlockContent[]): BlockContent[] {
+  return blocks.map((block) => {
+    if (block.type === 'paragraph') {
+      const own: Paragraph = { ...block };
+      const sessionKey = projectedBlocks.get(block)?.sessionKey;
+      if (sessionKey) projectedBlocks.set(own, { sessionKey });
+      return own;
+    }
+    if (block.type !== 'table') return block;
+    return {
+      ...block,
+      rows: block.rows.map((row) => ({
+        ...row,
+        cells: row.cells.map((cell) => ({ ...cell, content: ownProjectedParagraphs(cell.content) })),
+      })),
+    };
+  });
+}
 const sessionProjectionMemos = new WeakMap<YrsSession, SessionProjectionMemo>();
 
 function sessionProjectionMemo(session: YrsSession): SessionProjectionMemo {
