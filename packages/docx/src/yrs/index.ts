@@ -14,10 +14,8 @@
  * from its offset space). Story-global indices never cross this boundary.
  */
 
-import type { EditSession } from './wasm/index';
 import type { Document } from '../types/document';
 import type { CompatibilityFlags } from '../docx/settingsParser';
-import { editorSaveKeys } from './editorSaveKeys';
 import type {
   DocxParagraphAnchor,
   DocxParagraphAnchorResult,
