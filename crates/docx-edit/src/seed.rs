@@ -7238,12 +7238,12 @@ mod tests {
                 "spaceAfter": 100.0,
                 "indentRight": right,
                 "hangingIndent": false,
-                "defaultTextFormatting": { "fontSize": 11.0, "bold": true, "italic": true },
+                "defaultTextFormatting": { "fontSize": 22.0, "bold": true, "italic": true },
                 "pStyle": "Shared",
                 "_originalFormatting": { "styleId": "Shared" },
                 "_originalRunBoundaries": [{
                     "text": "Same",
-                    "marksKey": r#"bold:{}|fontSize:{"size":11,"sizeCs":null}"#
+                    "marksKey": r#"bold:{}|fontSize:{"size":22,"sizeCs":null}"#
                 }]
             })
         };
