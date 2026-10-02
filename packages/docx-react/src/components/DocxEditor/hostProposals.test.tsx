@@ -320,7 +320,7 @@ test('allowHostProposals admits only the proposal methods in a read-only editor'
           story: 'body',
           paraId: paragraph.paraId,
         },
-        suggest: { author: 'Atira', date: '2026-09-29T00:00:00Z' },
+        suggest: { author: 'Assistant', date: '2026-09-29T00:00:00Z' },
         op: 'replaceText',
         search: word,
         replaceWith: 'XYZ',
@@ -380,7 +380,7 @@ test('allowHostProposals admits only the proposal methods in a read-only editor'
     ref.current!.withdrawProposals({ expectVersion: session.version(), ids: ['p1'] })
   );
   expect(withdrawn).toMatchObject({ ok: true, snapshot: { previewVersion: 2, proposals: [] } });
-  expect(session.listRevisions().filter((revision) => revision.author === 'Atira')).toEqual([]);
+  expect(session.listRevisions().filter((revision) => revision.author === 'Assistant')).toEqual([]);
   expect(
     session.paragraphs('body').find((candidate) => candidate.paraId === paragraph.paraId)!.text
   ).toStartWith('XYZ');
@@ -409,7 +409,7 @@ test("proposals' tracked changes do not open the comments sidebar; the user's st
   const session = ref.current!.getEditorRef()!.getYrsSession()!;
   const paragraphs = session.paragraphs('body').filter((candidate) => candidate.text.length >= 3);
   const [first, second] = paragraphs;
-  const suggest = { author: 'Atira', date: '2026-09-29T00:00:00Z' };
+  const suggest = { author: 'Assistant', date: '2026-09-29T00:00:00Z' };
   const sessionId = session.paragraphIdentities().sessionId;
   const proposed = await act(() =>
     ref.current!.proposeChanges({
