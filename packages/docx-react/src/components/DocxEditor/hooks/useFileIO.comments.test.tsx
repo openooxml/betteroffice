@@ -78,18 +78,19 @@ afterAll(async () => {
 
 /**
  * Saves `times` through the editor's Save, projecting the session with its
- * host's comments as the editor does; each save's bytes.
+ * host's comments as the editor does, each time from its last projection;
+ * each save's bytes.
  */
 async function editorSave(
   live: YrsSession,
   comments: Comment[],
   times = 1
 ): Promise<Uint8Array[]> {
-  const base = live.materializeDocx()!;
+  let projected = live.materializeDocx()!;
   const editor = {
     getYrsSession: () => live,
     flushPendingInput: async () => {},
-    getDocument: () => yrsToDocument(live, base),
+    getDocument: () => (projected = yrsToDocument(live, projected)),
   } as unknown as PagedEditorRef;
   const saved: ArrayBuffer[] = [];
   const errors: Error[] = [];
@@ -119,8 +120,12 @@ async function editorSave(
   return saved.map((buffer) => new Uint8Array(buffer));
 }
 
+function bodyXml(bytes: Uint8Array): string {
+  return new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
+}
+
 function markers(bytes: Uint8Array, id: number): string[] {
-  const xml = new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
+  const xml = bodyXml(bytes);
   return [
     ...xml.matchAll(new RegExp(`<w:comment(RangeStart|RangeEnd|Reference) w:id="${id}"/>`, 'g')),
   ].map((match) => match[1]!);
@@ -158,6 +163,36 @@ test('the editor Save writes the range of a comment added inside a hyperlink', a
   const [bytes] = await editorSave(live, [...comments, added]);
   expect(markers(bytes!, 2)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
   expect(anchored(await open(bytes!, 8), '2')).toBe('See the');
+});
+
+test('the editor Save writes the range of a host reply once, save after save', async () => {
+  const live = await open(
+    new Uint8Array(
+      readFileSync(
+        resolve(
+          import.meta.dir,
+          '../../../../../docx/src/yrs/__fixtures__/comment-ranges/structure.docx'
+        )
+      )
+    ),
+    13
+  );
+  const comments = live.materializeDocx()!.package.document.comments!;
+  const parent = comments.find((comment) => comment.parentId === undefined)!;
+  const reply: Comment = {
+    id: Math.max(...comments.map(({ id }) => id)) + 1,
+    author: 'Host',
+    date: '2026-09-29T12:00:00Z',
+    content: parent.content,
+    parentId: parent.id,
+  };
+  const [first, ...later] = await editorSave(live, [...comments, reply], 3);
+  for (const bytes of [first!, ...later]) {
+    for (const { id } of [...comments, reply]) {
+      expect(markers(bytes, id)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+    }
+  }
+  for (const bytes of later) expect(bodyXml(bytes)).toBe(bodyXml(first!));
 });
 
 test('the editor Save writes a reanchored comment once, where it now is', async () => {
@@ -199,7 +234,7 @@ for (const [where, paraId, text] of [
     expect(result.ok).toBe(true);
     for (const bytes of await editorSave(live, [...comments, added], 2)) {
       expect(markers(bytes, 2)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
-      const xml = new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
+      const xml = bodyXml(bytes);
       const paragraph = xml.match(new RegExp(`<w:p [^>]*${paraId}.*?</w:p>`))![0];
       expect(paragraph).toContain('<w:commentRangeStart w:id="2"/>');
       expect(paragraph).toContain('<w:commentRangeEnd w:id="2"/>');

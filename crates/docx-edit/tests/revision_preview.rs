@@ -628,9 +628,10 @@ fn a_changed_preview_rebuilds_the_retained_frame() {
         engine
             .layout_document_with_regions_json(&layout_request(env, font))
             .unwrap();
-        assert!(
-            engine.stats().incremental_pagination_calls > incremental,
-            "a preview change keeps the pagination checkpoints"
+        assert_eq!(
+            engine.stats().incremental_pagination_calls,
+            incremental,
+            "a preview change paginates afresh"
         );
         engine.build_display_list_frame("{}", epoch).unwrap();
         assert!(engine.stats().frame_epoch > epoch);
@@ -741,7 +742,10 @@ fn a_changed_preview_refreshes_positions_in_an_identical_later_block() {
     let initial = engine.stats();
     let request = layout_request(&rejected, font);
     engine.layout_document_with_regions_json(&request).unwrap();
-    assert!(engine.stats().incremental_pagination_calls > initial.incremental_pagination_calls);
+    assert_eq!(
+        engine.stats().incremental_pagination_calls,
+        initial.incremental_pagination_calls
+    );
     engine
         .build_display_list_frame("{}", initial.frame_epoch)
         .unwrap();
@@ -796,7 +800,7 @@ fn a_resident_edit_after_a_preview_only_preflight_lays_out_the_retained_request(
 }
 
 #[test]
-fn a_preview_decision_paginates_incrementally_as_a_fresh_layout_would() {
+fn a_preview_decision_paginates_afresh_as_a_fresh_layout_would() {
     let font = docx_layout::register_measure_font(FONT).unwrap();
     let filler = |range: std::ops::Range<usize>| -> String {
         range
@@ -842,12 +846,15 @@ fn a_preview_decision_paginates_incrementally_as_a_fresh_layout_would() {
             )
         };
         let before = engine.stats();
-        let incremental = layout(&engine, &ids, &env(&ids));
+        let decided = layout(&engine, &ids, &env(&ids));
         let after = engine.stats();
-        assert!(after.incremental_pagination_calls > before.incremental_pagination_calls);
-        assert!(after.pagination_blocks_placed - before.pagination_blocks_placed < blocks);
+        assert_eq!(
+            after.incremental_pagination_calls,
+            before.incremental_pagination_calls
+        );
+        assert!(after.pagination_blocks_placed - before.pagination_blocks_placed >= blocks);
         let (fresh, fresh_ids) = proposals_in(&bytes);
-        assert_eq!(incremental, layout(&fresh, &fresh_ids, &env(&fresh_ids)));
+        assert_eq!(decided, layout(&fresh, &fresh_ids, &env(&fresh_ids)));
     }
 }
 
@@ -886,7 +893,10 @@ fn a_decision_that_only_moves_a_paragraphs_positions_lays_it_out_again() {
     let decided = preview(&[("1", Rejected), ("2", Accepted), ("3", Accepted)]);
     let before = engine.stats();
     let incremental = pass(&engine, &decided);
-    assert!(engine.stats().incremental_pagination_calls > before.incremental_pagination_calls);
+    assert_eq!(
+        engine.stats().incremental_pagination_calls,
+        before.incremental_pagination_calls
+    );
     let fresh = EngineSession::new(75111);
     seed_from_docx(fresh.doc(), &bytes).unwrap();
     let expected = pass(&fresh, &decided);
@@ -1072,10 +1082,13 @@ fn a_preview_change_reads_revisions_in_a_story_without_paragraphs() {
         .unwrap();
     let request = layout_request(&preview(&[("1", Accepted)]), font);
     let before = engine.stats();
-    let incremental = engine.layout_document_with_regions_json(&request).unwrap();
-    assert!(engine.stats().incremental_pagination_calls > before.incremental_pagination_calls);
+    let decided = engine.layout_document_with_regions_json(&request).unwrap();
     assert_eq!(
-        incremental,
+        engine.stats().incremental_pagination_calls,
+        before.incremental_pagination_calls
+    );
+    assert_eq!(
+        decided,
         seeded()
             .layout_document_with_regions_json(&request)
             .unwrap()
