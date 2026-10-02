@@ -1700,6 +1700,7 @@ export function useRustDisplayList(
 
   const buildUnbuiltPages = useCallback(
     (idle = false): void => {
+      const workerOpen = workerOpenEnabledRef.current;
       pageBuildTimerRef.current = null;
       const mainEngine = mainPageBuildEngine();
       // A main-engine frame of an older content epoch waits for the frame of its relayout.
@@ -1721,7 +1722,7 @@ export function useRustDisplayList(
       const settling = settleWaitersRef.current.size > 0;
       const windowOnly = settling
         ? ![...settleWaitersRef.current.values()].includes('document')
-        : workerOpenEnabledRef.current;
+        : workerOpen;
       const first = windowOnly ? Math.max(0, start - WORKER_OPEN_BUILD_MARGIN_PAGES) : 0;
       const last = windowOnly
         ? Math.min(pages.length, end + WORKER_OPEN_BUILD_MARGIN_PAGES)
@@ -1743,7 +1744,7 @@ export function useRustDisplayList(
       // Pages the worker has built for a background request come back as a
       // whole-document frame to a request based on the display's older frame.
       const supersedingBackground =
-        workerOpenEnabledRef.current &&
+        workerOpen &&
         !background && release.length === 0 && inFlight?.kind === 'build' && inFlight.background;
       if (inFlight) {
         if (inFlight.kind === 'release') return;
@@ -1806,7 +1807,10 @@ export function useRustDisplayList(
       };
       const build: PageBuildInFlight = release.length > 0
         ? { kind: 'release' }
-        : { kind: 'build', background, cancel: () => attachment?.cancel(), promote: () => promote() };
+        : {
+            kind: 'build', background: background && workerOpen,
+            cancel: () => attachment?.cancel(), promote: () => promote(),
+          };
       pageBuildInFlightRef.current = build;
       const buildBase = frame;
       const dispatchedEpoch = contentEpochRef.current;
@@ -1816,12 +1820,14 @@ export function useRustDisplayList(
         : !unmountedRef.current && mainPageBuildEngine() === targetEngine;
       const current = (): boolean =>
         targetCurrent() &&
-        pageBuildInFlightRef.current === build &&
-        generationRef.current === dispatchedGeneration &&
+        ((worker && !workerOpen) || generationRef.current === dispatchedGeneration) &&
         frameEngineRef.current === targetEngine &&
-        ((worker && build.kind === 'release') ||
-          (contentEpochRef.current === dispatchedEpoch && !worker?.client.frameRequestPending())) &&
-        (!background || snapshotRef.current.frame?.frameEpoch === buildBase.frameEpoch);
+        (!workerOpen || (
+          pageBuildInFlightRef.current === build &&
+          ((worker && build.kind === 'release') ||
+            (contentEpochRef.current === dispatchedEpoch && !worker?.client.frameRequestPending())) &&
+          (!background || snapshotRef.current.frame?.frameEpoch === buildBase.frameEpoch)
+        ));
       const finish = (): void => {
         if (pageBuildInFlightRef.current !== build) return;
         pageBuildInFlightRef.current = null;
@@ -1874,7 +1880,7 @@ export function useRustDisplayList(
               frame.frameEpoch,
               false
             )
-          : worker.client.buildPages(batch, frame.frameEpoch, paintCaret, background)
+          : worker.client.buildPages(batch, frame.frameEpoch, paintCaret, background && workerOpen)
         : (async () => {
             setMainFrameDisplayWindow(targetEngine);
             const bytes = release.length > 0
@@ -1937,7 +1943,7 @@ export function useRustDisplayList(
               }
               snapshotRef.current = nextSnapshot;
               publishQuerySnapshot(nextSnapshot, contentEpochRef.current);
-              if (background) startTransition(() => setSnapshot(nextSnapshot));
+              if (background && workerOpen) startTransition(() => setSnapshot(nextSnapshot));
               else setSnapshot(nextSnapshot);
               if (worker) applyPaintedCaretReply(Boolean(result.caretPainted && caret?.caretRect), paintToken);
             } catch (error) {
@@ -1948,7 +1954,7 @@ export function useRustDisplayList(
             finish();
             for (const waiter of [...settleWaitersRef.current.keys()]) waiter();
           };
-          if (!background) {
+          if (!background || !workerOpen) {
             try {
               const previous = snapshotRef.current.frame;
               const delta = decodeFrameDelta(result.frame);
