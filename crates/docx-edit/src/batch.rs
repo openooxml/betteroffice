@@ -13,7 +13,7 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use yrs::updates::decoder::Decode;
-use yrs::{ReadTxn, StateVector, Transact, Update};
+use yrs::{ReadTxn, StateVector, Text, Transact, TransactionMut, Update};
 
 use crate::content_controls::{
     ContentControlSelector, ControlRecord, ControlValue, Site, ValueUnavailable, content_items,
@@ -673,6 +673,63 @@ struct Plan {
     epoch: u64,
     source: EditSource,
     steps: Vec<Planned>,
+    direct: bool,
+}
+
+#[derive(Clone, Copy)]
+enum Capture {
+    None,
+    Replica,
+    Direct,
+}
+
+fn direct_admissible<T: ReadTxn>(doc: &EditingDoc, txn: &T, steps: &[Planned]) -> bool {
+    if steps.iter().any(|planned| planned.companion)
+        || !steps.iter().any(|planned| planned.effect.is_some())
+    {
+        return false;
+    }
+    let mut paragraphs = HashMap::new();
+    for planned in steps {
+        let (start, end, inserts) = match &planned.effect {
+            Some(Effect::Insert { at, .. }) => (*at, *at, true),
+            Some(Effect::Replace {
+                start, end, text, ..
+            }) => (*start, *end, !text.is_empty()),
+            Some(Effect::Delete { start, end, .. }) => (*start, *end, false),
+            None => continue,
+            _ => return false,
+        };
+        let Ok(story) = story_ref(txn, &planned.story) else {
+            return false;
+        };
+        let marks = paragraphs
+            .entry(planned.story.as_str())
+            .or_insert_with(|| crate::pilcrows(&story, txn));
+        if marks
+            .last()
+            .is_none_or(|(index, _)| index.checked_add(1) != Some(story.len(txn)))
+        {
+            return false;
+        }
+        let mut first = 0;
+        let contained = marks.iter().any(|(index, _)| {
+            let contains = first <= start && start <= end && end <= *index;
+            first = index + 1;
+            contains
+        });
+        if !contained {
+            return false;
+        }
+        if inserts
+            && [start, end].into_iter().any(|index| {
+                crate::identity::would_promote_at(doc, txn, &planned.story, &story, index)
+            })
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// The captured base state a batch stages against.
@@ -2313,22 +2370,7 @@ fn execute(stage: &EditingDoc, steps: &[Planned]) -> EditResult<Vec<Option<Execu
             _ => {}
         }
     }
-    let mut order: Vec<usize> = (0..steps.len())
-        .filter(|slot| {
-            steps[*slot]
-                .effect
-                .as_ref()
-                .is_some_and(|effect| effect.shifting_start().is_some())
-        })
-        .collect();
-    order.sort_by_key(|slot| {
-        std::cmp::Reverse(
-            steps[*slot]
-                .effect
-                .as_ref()
-                .and_then(Effect::shifting_start),
-        )
-    });
+    let order = execution_order(steps);
     for slot in order {
         let planned = &steps[slot];
         let story = planned.story.as_str();
@@ -2385,6 +2427,93 @@ fn execute(stage: &EditingDoc, steps: &[Planned]) -> EditResult<Vec<Option<Execu
             Some(Effect::Style(_) | Effect::Control(_)) | None => continue,
         }
         outcome.delta = i64::from(stage.story_len(story)?) - i64::from(before);
+        executed[slot] = Some(outcome);
+    }
+    Ok(executed)
+}
+
+fn execution_order(steps: &[Planned]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..steps.len())
+        .filter(|slot| {
+            steps[*slot]
+                .effect
+                .as_ref()
+                .is_some_and(|effect| effect.shifting_start().is_some())
+        })
+        .collect();
+    order.sort_by_key(|slot| {
+        std::cmp::Reverse(
+            steps[*slot]
+                .effect
+                .as_ref()
+                .and_then(Effect::shifting_start),
+        )
+    });
+    order
+}
+
+fn changed_stories(steps: &[Planned], executed: &[Option<Executed>]) -> Vec<String> {
+    steps
+        .iter()
+        .zip(executed)
+        .filter(|(_, outcome)| outcome.is_some())
+        .flat_map(|(planned, _)| {
+            std::iter::once(planned.story.clone()).chain(planned.also_changes.clone())
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn execute_direct(
+    doc: &EditingDoc,
+    txn: &mut TransactionMut<'_>,
+    steps: &[Planned],
+) -> EditResult<Vec<Option<Executed>>> {
+    let mut executed: Vec<Option<Executed>> = steps.iter().map(|_| None).collect();
+    for slot in execution_order(steps) {
+        let planned = &steps[slot];
+        let story = planned.story.as_str();
+        let text_ref =
+            story_ref(txn, story).map_err(|error| staging_error(planned.index, error))?;
+        let before = text_ref.len(txn);
+        let mut outcome = Executed::default();
+        let fail = |error: crate::OpError| staging_error(planned.index, error);
+        match planned.effect.as_ref() {
+            Some(Effect::Insert { at, text, ctx }) => {
+                let receipt = doc
+                    .insert_text_observed_in(
+                        txn,
+                        ctx,
+                        Position::new(story, *at),
+                        text,
+                        FormatPolicy::Inherit,
+                        |_| {},
+                    )
+                    .map_err(fail)?;
+                outcome.revision_ids = receipt.revision_ids;
+            }
+            Some(Effect::Replace {
+                start,
+                end,
+                text,
+                ctx,
+            }) => {
+                let (receipt, at) = doc
+                    .replace_range_placed_in(txn, ctx, StoryRange::new(story, *start, *end), text)
+                    .map_err(fail)?;
+                outcome.revision_ids = receipt.revision_ids;
+                outcome.inserted_offset = at - start;
+            }
+            Some(Effect::Delete { start, end, ctx }) => {
+                let receipt = doc
+                    .delete_range_in(txn, ctx, StoryRange::new(story, *start, *end))
+                    .map_err(fail)?;
+                outcome.revision_ids = receipt.revision_ids;
+            }
+            _ => return Err(staging_error(planned.index, "effect was not admitted")),
+        }
+        outcome.delta = i64::from(text_ref.len(txn)) - i64::from(before);
         executed[slot] = Some(outcome);
     }
     Ok(executed)
@@ -2516,7 +2645,11 @@ impl EditingDoc {
             &request.expect_version,
             request.source,
             &steps,
-            capture,
+            if capture {
+                Capture::Replica
+            } else {
+                Capture::None
+            },
             MAX_STAGING_BYTES,
         )
     }
@@ -2526,7 +2659,7 @@ impl EditingDoc {
         expect_version: &DocumentVersion,
         edit_source: EditSource,
         steps: &[BatchStep<'_>],
-        capture: bool,
+        capture: Capture,
         staging_limit: usize,
     ) -> Result<(Plan, Option<Base>), EditRefusal> {
         let nonce = self.version_nonce.load(Ordering::Relaxed);
@@ -2597,22 +2730,37 @@ impl EditingDoc {
                 ),
             ));
         }
-        let base = if capture && steps.iter().any(|planned| planned.effect.is_some()) {
-            let update = deterministic::encode_state_as_update_v1(&txn, &StateVector::default());
-            if update.len() > staging_limit {
-                return Err(refusal(
-                    version,
-                    failure(
-                        EditFailureCode::LimitExceeded,
-                        format!("batches stage documents of at most {staging_limit} bytes"),
-                        None,
-                    ),
-                ));
+        let mut direct = false;
+        let base = if !matches!(capture, Capture::None)
+            && steps.iter().any(|planned| planned.effect.is_some())
+        {
+            let direct_len =
+                if matches!(capture, Capture::Direct) && direct_admissible(self, &txn, &steps) {
+                    deterministic::encoded_state_len_v1(&txn)
+                } else {
+                    None
+                };
+            if direct_len.is_some_and(|len| len <= staging_limit) {
+                direct = true;
+                None
+            } else {
+                let update =
+                    deterministic::encode_state_as_update_v1(&txn, &StateVector::default());
+                if update.len() > staging_limit {
+                    return Err(refusal(
+                        version,
+                        failure(
+                            EditFailureCode::LimitExceeded,
+                            format!("batches stage documents of at most {staging_limit} bytes"),
+                            None,
+                        ),
+                    ));
+                }
+                Some(Base {
+                    update,
+                    state_vector: txn.state_vector(),
+                })
             }
-            Some(Base {
-                update,
-                state_vector: txn.state_vector(),
-            })
         } else {
             None
         };
@@ -2623,6 +2771,7 @@ impl EditingDoc {
                 epoch,
                 source: edit_source,
                 steps,
+                direct,
             },
             base,
         ))
@@ -2703,11 +2852,20 @@ impl EditingDoc {
                 "the undo history belongs to another document".to_owned(),
             ));
         }
+        let capture =
+            if self.direct_batches.load(Ordering::Relaxed) && history_mode == EditHistory::None {
+                Capture::Direct
+            } else {
+                Capture::Replica
+            };
         let (plan, base) =
-            match self.plan_steps(expect_version, edit_source, steps, true, staging_limit) {
+            match self.plan_steps(expect_version, edit_source, steps, capture, staging_limit) {
                 Ok(planned) => planned,
                 Err(refusal) => return Ok(Err(refusal)),
             };
+        if plan.direct {
+            return self.apply_direct(plan, history);
+        }
         let Some(base) = base else {
             let txn = self.yrs_doc().transact();
             let mut views = Views::committed(self, &txn);
@@ -2772,22 +2930,50 @@ impl EditingDoc {
         }))
     }
 
+    fn apply_direct(
+        &self,
+        plan: Plan,
+        history: &UndoSession,
+    ) -> EditResult<Result<EditApplication, EditRefusal>> {
+        if let Err(refusal) = self.check_commit(&plan) {
+            return Ok(Err(refusal));
+        }
+        history.add_undo_barrier();
+        let (changed_stories, receipts) = {
+            let mut txn = self.yrs_doc().transact_mut_with(HOST_ORIGIN);
+            if self.epoch.load(Ordering::Relaxed) != plan.epoch
+                || self.version_nonce.load(Ordering::Relaxed) != plan.nonce
+            {
+                drop(txn);
+                return Ok(Err(stale(self.version())));
+            }
+            // Match adoption's non-local formatting cleanup.
+            txn.apply_update(Update::new())
+                .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+            let executed = execute_direct(self, &mut txn, &plan.steps)?;
+            let changed_stories = changed_stories(&plan.steps, &executed);
+            let mut views = Views::uncommitted(self, &txn);
+            let receipts = receipts(&mut views, &plan.steps, &executed);
+            (changed_stories, receipts)
+        };
+        history.add_undo_barrier();
+        self.direct_batches_applied.fetch_add(1, Ordering::Relaxed);
+        Ok(Ok(EditApplication {
+            base_version: plan.base_version,
+            version: self.version(),
+            applied: true,
+            source: plan.source,
+            changed_stories,
+            receipts,
+        }))
+    }
+
     /// Executes a plan on a private [`EditingDoc::fork`], validates the staged stories, and
     /// rehearses the resulting update against the base.
     fn stage(&self, plan: &Plan, base: Base) -> EditResult<Result<Staged, EditRefusal>> {
         let stage = self.fork(&base.update)?;
         let executed = execute(&stage, &plan.steps)?;
-        let changed_stories: Vec<String> = plan
-            .steps
-            .iter()
-            .zip(&executed)
-            .filter(|(_, outcome)| outcome.is_some())
-            .flat_map(|(planned, _)| {
-                std::iter::once(planned.story.clone()).chain(planned.also_changes.clone())
-            })
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        let changed_stories = changed_stories(&plan.steps, &executed);
         if let Err(failure) = validate_stage(&stage, &executed, &changed_stories) {
             return Ok(Err(refusal(plan.base_version.clone(), failure)));
         }
@@ -3036,4 +3222,614 @@ fn rehearse(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod direct_tests {
+    use std::sync::Arc;
+
+    use yrs::{Any, Map};
+
+    use super::*;
+
+    const DATE: &str = "2026-09-24T12:00:00Z";
+
+    fn document() -> EditingDoc {
+        let doc = EditingDoc::new(9001);
+        doc.create_story_with_paragraph_id("body", "p", "Alpha beta gamma", "Normal", "left")
+            .unwrap();
+        doc
+    }
+
+    fn step() -> EditStep {
+        EditStep::new(EditOperation::ReplaceText {
+            target: TextTarget::Range(text_range("body", "p", 6, "p", 10)),
+            text: "BETA".to_owned(),
+        })
+    }
+
+    fn normalized<T: Serialize>(outcome: &T) -> Value {
+        let mut value = serde_json::to_value(outcome).unwrap();
+        for key in ["baseVersion", "version"] {
+            if value.get(key).is_some() {
+                value[key] = Value::String("version".to_owned());
+            }
+        }
+        value
+    }
+
+    #[test]
+    fn exact_staging_bound_preserves_refusals_and_admits_at_limit() {
+        let direct = document();
+        let replica = document();
+        let base = direct.encode_state_as_update_v1();
+        assert_eq!(base, replica.encode_state_as_update_v1());
+        let n = base.len();
+        assert_eq!(
+            deterministic::encoded_state_len_v1(&direct.yrs_doc().transact()),
+            Some(n)
+        );
+        direct.set_direct_batches(true);
+        let direct_history = UndoSession::new();
+        let replica_history = UndoSession::new();
+        let step = step();
+        let steps = [BatchStep::Edit(&step)];
+        let updates = Arc::new(AtomicU64::new(0));
+        let observed = Arc::clone(&updates);
+        let _sub = direct
+            .yrs_doc()
+            .observe_update_v1(move |_, _| {
+                observed.fetch_add(1, Ordering::Relaxed);
+            })
+            .unwrap();
+        let a = direct
+            .apply_steps(
+                &direct.version(),
+                EditSource::Host,
+                EditHistory::None,
+                &steps,
+                &direct_history,
+                n - 1,
+            )
+            .unwrap()
+            .unwrap_err();
+        let b = replica
+            .apply_steps(
+                &replica.version(),
+                EditSource::Host,
+                EditHistory::None,
+                &steps,
+                &replica_history,
+                n - 1,
+            )
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(a.failure.code, EditFailureCode::LimitExceeded);
+        assert_eq!(
+            a.failure.message,
+            format!("batches stage documents of at most {} bytes", n - 1)
+        );
+        assert_eq!(normalized(&a), normalized(&b));
+        assert_eq!(base, direct.encode_state_as_update_v1());
+        assert_eq!(base, replica.encode_state_as_update_v1());
+        assert_eq!(direct.direct_batches_applied(), 0);
+        assert_eq!(updates.load(Ordering::Relaxed), 0);
+        let a = direct
+            .apply_steps(
+                &direct.version(),
+                EditSource::Host,
+                EditHistory::None,
+                &steps,
+                &direct_history,
+                n,
+            )
+            .unwrap()
+            .unwrap();
+        let b = replica
+            .apply_steps(
+                &replica.version(),
+                EditSource::Host,
+                EditHistory::None,
+                &steps,
+                &replica_history,
+                n,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(a.applied);
+        assert_eq!(normalized(&a), normalized(&b));
+        assert_eq!(direct.direct_batches_applied(), 1);
+        assert_eq!(replica.direct_batches_applied(), 0);
+        assert_eq!(updates.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            direct.story_segments("body").unwrap(),
+            replica.story_segments("body").unwrap()
+        );
+        assert_eq!(
+            direct.id_counter.load(Ordering::Relaxed),
+            replica.id_counter.load(Ordering::Relaxed)
+        );
+    }
+
+    #[test]
+    fn rich_replacement_uses_replica_path() {
+        let direct = document();
+        let replica = document();
+        assert_eq!(
+            direct.encode_state_as_update_v1(),
+            replica.encode_state_as_update_v1()
+        );
+        direct.set_direct_batches(true);
+        let rich = RichReplacement {
+            story: "body".to_owned(),
+            paragraph: 0,
+            start: 6,
+            end: 10,
+            expect: EditGuard {
+                text: "beta".to_owned(),
+            },
+            runs: vec![RichRun {
+                text: "BETA".to_owned(),
+                attrs: std::collections::BTreeMap::from([("bold".to_owned(), Any::Bool(true))]),
+            }],
+            suggest: EditSuggestion {
+                author: "Ann".to_owned(),
+                date: DATE.to_owned(),
+            },
+        };
+        let steps = [BatchStep::Rich(&rich)];
+        let a = direct
+            .apply_steps(
+                &direct.version(),
+                EditSource::Host,
+                EditHistory::None,
+                &steps,
+                &UndoSession::new(),
+                MAX_STAGING_BYTES,
+            )
+            .unwrap()
+            .unwrap();
+        let b = replica
+            .apply_steps(
+                &replica.version(),
+                EditSource::Host,
+                EditHistory::None,
+                &steps,
+                &UndoSession::new(),
+                MAX_STAGING_BYTES,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(a.applied);
+        assert_eq!(direct.direct_batches_applied(), 0);
+        assert_eq!(normalized(&a), normalized(&b));
+        assert_eq!(
+            direct.story_segments("body").unwrap(),
+            replica.story_segments("body").unwrap()
+        );
+    }
+
+    #[test]
+    fn synthetic_promotion_uses_replica_path() {
+        fn synthetic() -> EditingDoc {
+            let doc = EditingDoc::new(9001);
+            doc.create_story_with_paragraph_id("body", "p", "", "Normal", "left")
+                .unwrap();
+            {
+                let mut txn = doc.yrs_doc().transact_mut();
+                let story = story_ref(&txn, "body").unwrap();
+                let mark = crate::pilcrows(&story, &txn).pop().unwrap().1;
+                mark.insert(
+                    &mut txn,
+                    crate::identity::PARA_ORIGIN,
+                    crate::identity::SYNTHETIC,
+                );
+            }
+            doc.forget_seen();
+            doc
+        }
+        let direct = synthetic();
+        let replica = synthetic();
+        assert_eq!(
+            direct.encode_state_as_update_v1(),
+            replica.encode_state_as_update_v1()
+        );
+        {
+            let txn = direct.yrs_doc().transact();
+            let story = story_ref(&txn, "body").unwrap();
+            assert!(crate::identity::would_promote_at(
+                &direct, &txn, "body", &story, 0
+            ));
+        }
+        direct.set_direct_batches(true);
+        let step = EditStep::new(EditOperation::InsertText {
+            target: TextTarget::Range(text_range("body", "p", 0, "p", 0)),
+            at: TargetEdge::Start,
+            text: "text".to_owned(),
+        });
+        let a = direct
+            .apply_steps(
+                &direct.version(),
+                EditSource::Host,
+                EditHistory::None,
+                &[BatchStep::Edit(&step)],
+                &UndoSession::new(),
+                MAX_STAGING_BYTES,
+            )
+            .unwrap()
+            .unwrap();
+        let b = replica
+            .apply_steps(
+                &replica.version(),
+                EditSource::Host,
+                EditHistory::None,
+                &[BatchStep::Edit(&step)],
+                &UndoSession::new(),
+                MAX_STAGING_BYTES,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(direct.direct_batches_applied(), 0);
+        assert_eq!(normalized(&a), normalized(&b));
+        assert_eq!(
+            direct.story_segments("body").unwrap(),
+            replica.story_segments("body").unwrap()
+        );
+        assert_eq!(
+            direct.paragraph_identities().paragraphs,
+            replica.paragraph_identities().paragraphs
+        );
+        let txn = direct.yrs_doc().transact();
+        let story = story_ref(&txn, "body").unwrap();
+        assert!(!crate::identity::would_promote_at(
+            &direct, &txn, "body", &story, 4
+        ));
+    }
+
+    fn raw_plan(doc: &EditingDoc, effect: Effect, shape: Shape) -> Plan {
+        Plan {
+            base_version: doc.version(),
+            nonce: doc.version_nonce.load(Ordering::Relaxed),
+            epoch: doc.epoch.load(Ordering::Relaxed),
+            source: EditSource::Host,
+            direct: true,
+            steps: vec![Planned {
+                index: 0,
+                story: "body".to_owned(),
+                target: EditTarget::Range(text_range("body", "p", 0, "p", 5)),
+                claims: Vec::new(),
+                touched: vec!["p".to_owned()],
+                exclusive: false,
+                effect: Some(effect),
+                shape,
+                removed: Vec::new(),
+                new_paragraph_count: 0,
+                suggest: true,
+                control: None,
+                also_changes: None,
+                companion: false,
+            }],
+        }
+    }
+
+    fn raw_replica(doc: &EditingDoc, plan: Plan, history: &UndoSession) -> EditApplication {
+        let base = Base {
+            update: doc.encode_state_as_update_v1(),
+            state_vector: doc.yrs_doc().transact().state_vector(),
+        };
+        let staged = doc.stage(&plan, base).unwrap().unwrap();
+        let receipts = {
+            let txn = staged.stage.yrs_doc().transact();
+            receipts(
+                &mut Views::new(&staged.stage, &txn),
+                &plan.steps,
+                &staged.executed,
+            )
+        };
+        history.add_undo_barrier();
+        doc.yrs_doc()
+            .transact_mut_with(HOST_ORIGIN)
+            .apply_update(Update::decode_v1(&staged.update).unwrap())
+            .unwrap();
+        history.add_undo_barrier();
+        doc.id_counter.store(
+            staged.stage.id_counter.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        EditApplication {
+            base_version: plan.base_version,
+            version: doc.version(),
+            applied: true,
+            source: plan.source,
+            changed_stories: staged.changed_stories,
+            receipts,
+        }
+    }
+
+    fn raw_export(doc: &EditingDoc) -> Vec<u8> {
+        use serde_json::json;
+
+        let bytes = ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/document.xml".to_owned(), br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/></w:body></w:document>"#.to_vec()),
+        ]).unwrap();
+        let mut paragraphs = Vec::new();
+        let mut runs = Vec::new();
+        for segment in doc.story_segments("body").unwrap() {
+            match segment.content {
+                crate::SegmentContent::Text(text) => {
+                    let run = json!({"type": "run", "content": [{"type": "text", "text": text, "preserveSpace": true}]});
+                    let revision = ["ins", "del"].into_iter().find_map(|key| {
+                        let Any::Map(revision) = segment.attributes.get(key)? else {
+                            return None;
+                        };
+                        let Any::String(id) = revision.get("id")? else {
+                            return None;
+                        };
+                        let mut metadata = String::new();
+                        Any::Map(Arc::clone(revision)).to_json(&mut metadata);
+                        let mut info: Value = serde_json::from_str(&metadata).unwrap();
+                        info["id"] = json!(id.rsplit(':').next().unwrap().parse::<u32>().unwrap());
+                        Some((key, info))
+                    });
+                    runs.push(if let Some((key, info)) = revision {
+                        json!({"type": if key == "ins" { "insertion" } else { "deletion" }, "info": info, "content": [run]})
+                    } else { run });
+                }
+                crate::SegmentContent::Pilcrow(_) => {
+                    paragraphs
+                        .push(json!({"type": "paragraph", "content": std::mem::take(&mut runs)}));
+                }
+                _ => panic!("unexpected export embed"),
+            }
+        }
+        let request: docx_parse::serializer::S13SaveRequest = serde_json::from_value(json!({
+            "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+            "document": {"content": paragraphs}, "relationshipEntries": [],
+            "options": {"updateModifiedDate": false},
+        }))
+        .unwrap();
+        docx_parse::serializer::write_docx_s13(request, &bytes).unwrap()
+    }
+
+    #[test]
+    fn direct_executor_reuses_revisions_and_removes_owned_insertions() {
+        for deleting in [false, true] {
+            let direct = document();
+            let replica = document();
+            let ctx = EditCtx::local("Ann", DATE).suggesting();
+            let mut previous = Vec::new();
+            for doc in [&direct, &replica] {
+                let split = doc
+                    .split_paragraph(
+                        &EditCtx::local("", ""),
+                        doc.paragraph_mark_position("p").unwrap(),
+                    )
+                    .unwrap();
+                doc.insert_text(
+                    &EditCtx::local("", ""),
+                    doc.paragraph_mark_position(&split.second_para_id).unwrap(),
+                    "Other",
+                    FormatPolicy::Inherit,
+                )
+                .unwrap();
+                previous = doc
+                    .insert_text(
+                        &ctx,
+                        Position::new("body", 0),
+                        "owned",
+                        FormatPolicy::Inherit,
+                    )
+                    .unwrap()
+                    .revision_ids;
+            }
+            let direct_history = UndoSession::new();
+            let replica_history = UndoSession::new();
+            for (doc, history) in [(&direct, &direct_history), (&replica, &replica_history)] {
+                history.track(doc);
+                doc.insert_text(
+                    &EditCtx::local("User", DATE),
+                    doc.paragraph_mark_position("p").unwrap(),
+                    "!",
+                    FormatPolicy::Inherit,
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                direct.encode_state_as_update_v1(),
+                replica.encode_state_as_update_v1()
+            );
+            let base = direct.encode_state_as_update_v1();
+            let before_len = direct.story_len("body").unwrap();
+            let peer = EditingDoc::new(9002);
+            peer.apply_update_v1(&base).unwrap();
+            let known = peer.encode_state_vector_v1();
+            let counts = [Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0))];
+            let _subs: Vec<_> = [&direct, &replica]
+                .into_iter()
+                .zip(&counts)
+                .map(|(doc, count)| {
+                    let count = Arc::clone(count);
+                    doc.yrs_doc()
+                        .observe_update_v1(move |_, _| {
+                            count.fetch_add(1, Ordering::Relaxed);
+                        })
+                        .unwrap()
+                })
+                .collect();
+            direct.set_direct_batches(true);
+            let plan = |doc| {
+                if deleting {
+                    raw_plan(
+                        doc,
+                        Effect::Delete {
+                            start: 0,
+                            end: 5,
+                            ctx: ctx.clone(),
+                        },
+                        Shape::Raw { start: 0, len: 0 },
+                    )
+                } else {
+                    raw_plan(
+                        doc,
+                        Effect::Insert {
+                            at: 5,
+                            text: "next".to_owned(),
+                            ctx: ctx.clone(),
+                        },
+                        Shape::Raw { start: 5, len: 4 },
+                    )
+                }
+            };
+            assert!(direct_admissible(
+                &direct,
+                &direct.yrs_doc().transact(),
+                &plan(&direct).steps
+            ));
+            let a = direct
+                .apply_direct(plan(&direct), &direct_history)
+                .unwrap()
+                .unwrap();
+            let b = raw_replica(&replica, plan(&replica), &replica_history);
+            assert_eq!(direct.direct_batches_applied(), 1);
+            assert_eq!(replica.direct_batches_applied(), 0);
+            assert_eq!(normalized(&a), normalized(&b));
+            assert_eq!(counts[0].load(Ordering::Relaxed), 1);
+            assert_eq!(counts[1].load(Ordering::Relaxed), 1);
+            assert_eq!(raw_export(&direct), raw_export(&replica));
+            if deleting {
+                assert_eq!(
+                    direct.paragraphs("body").unwrap()[0].text,
+                    "Alpha beta gamma!"
+                );
+                assert_eq!(direct.story_len("body").unwrap(), before_len - 5);
+            } else {
+                assert_eq!(a.receipts[0].revision_ids, previous);
+            }
+            assert_eq!(
+                direct.id_counter.load(Ordering::Relaxed),
+                replica.id_counter.load(Ordering::Relaxed)
+            );
+            assert_eq!(
+                direct.story_segments("body").unwrap(),
+                replica.story_segments("body").unwrap()
+            );
+            assert_eq!(
+                direct.paragraph_identities().paragraphs,
+                replica.paragraph_identities().paragraphs
+            );
+            assert!(direct_history.undo());
+            assert!(replica_history.undo());
+            assert_eq!(
+                direct.story_segments("body").unwrap(),
+                replica.story_segments("body").unwrap()
+            );
+            assert_eq!(raw_export(&direct), raw_export(&replica));
+            assert!(direct_history.redo());
+            assert!(replica_history.redo());
+            assert_eq!(
+                direct.story_segments("body").unwrap(),
+                replica.story_segments("body").unwrap()
+            );
+            assert_eq!(raw_export(&direct), raw_export(&replica));
+            for paragraph in peer.paragraphs("body").unwrap() {
+                peer.insert_text(
+                    &EditCtx::local("Peer", DATE),
+                    peer.paragraph_mark_position(&paragraph.para_id).unwrap(),
+                    " remote",
+                    FormatPolicy::Inherit,
+                )
+                .unwrap();
+            }
+            let remote = peer.encode_diff_v1(&known).unwrap();
+            direct.apply_update_v1(&remote).unwrap();
+            replica.apply_update_v1(&remote).unwrap();
+            assert_eq!(
+                direct.story_segments("body").unwrap(),
+                replica.story_segments("body").unwrap()
+            );
+            assert_eq!(raw_export(&direct), raw_export(&replica));
+            assert_eq!(
+                counts[0].load(Ordering::Relaxed),
+                counts[1].load(Ordering::Relaxed)
+            );
+        }
+    }
+
+    #[test]
+    fn admission_requires_paragraph_bounds_and_rejects_companions() {
+        let doc = EditingDoc::new(9001);
+        doc.seed_story(
+            "body",
+            &[
+                crate::SeedParagraph {
+                    text: "one".to_owned(),
+                    p_style: "Normal".to_owned(),
+                    alignment: "left".to_owned(),
+                },
+                crate::SeedParagraph {
+                    text: "two".to_owned(),
+                    p_style: "Normal".to_owned(),
+                    alignment: "left".to_owned(),
+                },
+            ],
+        )
+        .unwrap();
+        let txn = doc.yrs_doc().transact();
+        for (start, end, admitted) in [
+            (0, 3, true),
+            (3, 3, true),
+            (4, 7, true),
+            (0, 4, false),
+            (2, 5, false),
+            (7, 8, false),
+        ] {
+            let plan = raw_plan(
+                &doc,
+                Effect::Replace {
+                    start,
+                    end,
+                    text: "x".to_owned(),
+                    ctx: EditCtx::local("", ""),
+                },
+                Shape::Replacement { start, len: 1 },
+            );
+            assert_eq!(direct_admissible(&doc, &txn, &plan.steps), admitted);
+        }
+        let mut plan = raw_plan(
+            &doc,
+            Effect::Insert {
+                at: 1,
+                text: "x".to_owned(),
+                ctx: EditCtx::local("", ""),
+            },
+            Shape::Raw { start: 1, len: 1 },
+        );
+        plan.steps[0].companion = true;
+        assert!(!direct_admissible(&doc, &txn, &plan.steps));
+        plan.steps[0].companion = false;
+        plan.steps[0].story = "missing".to_owned();
+        assert!(!direct_admissible(&doc, &txn, &plan.steps));
+        drop(txn);
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            story_ref(&txn, "body").unwrap().insert(&mut txn, 8, "tail");
+        }
+        plan.steps[0].story = "body".to_owned();
+        assert!(!direct_admissible(
+            &doc,
+            &doc.yrs_doc().transact(),
+            &plan.steps
+        ));
+    }
+
+    #[test]
+    fn forks_leave_the_direct_switch_off() {
+        let doc = document();
+        doc.set_direct_batches(true);
+        let fork = doc.fork(&doc.encode_state_as_update_v1()).unwrap();
+        assert!(!fork.direct_batches.load(Ordering::Relaxed));
+        assert_eq!(fork.direct_batches_applied(), 0);
+    }
 }
