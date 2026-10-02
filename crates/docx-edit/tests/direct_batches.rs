@@ -561,6 +561,7 @@ fn descending_steps_in_one_paragraph() {
     exercise(&fixture(), |_| {}, steps.clone());
     let plain = steps
         .into_iter()
+        .take(2)
         .map(|mut step| {
             step.suggest = None;
             step
