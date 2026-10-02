@@ -626,41 +626,54 @@ fn ordered_json(entries: &[(String, Value)]) -> String {
         }
         output.push_str(&serde_json::to_string(key).unwrap());
         output.push(':');
-        output.push_str(&js_json(value));
+        js_json_into(value, &mut output);
     }
     output.push('}');
     output
 }
 
 fn js_json(value: &Value) -> String {
+    let mut out = String::new();
+    js_json_into(value, &mut out);
+    out
+}
+
+/// Appends JSON with JavaScript number formatting.
+fn js_json_into(value: &Value, out: &mut String) {
     match value {
-        Value::Null => "null".to_owned(),
-        Value::Bool(value) => value.to_string(),
+        Value::Null => out.push_str("null"),
+        Value::Bool(value) => out.push_str(&value.to_string()),
         Value::Number(value) => {
             let value = value.as_f64().unwrap_or_default();
             if value == 0.0 {
-                "0".to_owned()
+                out.push('0');
             } else {
-                ryu_js::Buffer::new().format(value).to_owned()
+                out.push_str(ryu_js::Buffer::new().format(value));
             }
         }
-        Value::String(value) => serde_json::to_string(value).unwrap(),
-        Value::Array(values) => format!(
-            "[{}]",
-            values.iter().map(js_json).collect::<Vec<_>>().join(",")
-        ),
-        Value::Object(values) => format!(
-            "{{{}}}",
-            values
-                .iter()
-                .map(|(key, value)| format!(
-                    "{}:{}",
-                    serde_json::to_string(key).unwrap(),
-                    js_json(value)
-                ))
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
+        Value::String(value) => out.push_str(&serde_json::to_string(value).unwrap()),
+        Value::Array(values) => {
+            out.push('[');
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                js_json_into(value, out);
+            }
+            out.push(']');
+        }
+        Value::Object(values) => {
+            out.push('{');
+            for (index, (key, value)) in values.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(key).unwrap());
+                out.push(':');
+                js_json_into(value, out);
+            }
+            out.push('}');
+        }
     }
 }
 
@@ -682,38 +695,47 @@ impl OrderedValue {
     }
 
     fn js_json(&self) -> String {
+        let mut out = String::new();
+        self.js_json_into(&mut out);
+        out
+    }
+
+    /// Appends JSON in source order with JavaScript number formatting.
+    fn js_json_into(&self, out: &mut String) {
         match self {
-            Self::Null => "null".to_owned(),
-            Self::Bool(value) => value.to_string(),
+            Self::Null => out.push_str("null"),
+            Self::Bool(value) => out.push_str(&value.to_string()),
             Self::Number(value) => {
                 let value = value.as_f64().unwrap_or_default();
                 if value == 0.0 {
-                    "0".to_owned()
+                    out.push('0');
                 } else {
-                    ryu_js::Buffer::new().format(value).to_owned()
+                    out.push_str(ryu_js::Buffer::new().format(value));
                 }
             }
-            Self::String(value) => serde_json::to_string(value).unwrap(),
-            Self::Array(values) => format!(
-                "[{}]",
-                values
-                    .iter()
-                    .map(Self::js_json)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
-            Self::Object(entries) => format!(
-                "{{{}}}",
-                entries
-                    .iter()
-                    .map(|(key, value)| format!(
-                        "{}:{}",
-                        serde_json::to_string(key).unwrap(),
-                        value.js_json()
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
+            Self::String(value) => out.push_str(&serde_json::to_string(value).unwrap()),
+            Self::Array(values) => {
+                out.push('[');
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    value.js_json_into(out);
+                }
+                out.push(']');
+            }
+            Self::Object(entries) => {
+                out.push('{');
+                for (index, (key, value)) in entries.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&serde_json::to_string(key).unwrap());
+                    out.push(':');
+                    value.js_json_into(out);
+                }
+                out.push('}');
+            }
         }
     }
 
@@ -801,23 +823,33 @@ fn strip_source_ordinals(value: &mut Value) {
     }
 }
 
-fn drop_nulls(value: Value) -> Value {
+/// Removes object nulls recursively while retaining array nulls.
+fn drop_nulls_in_place(value: &mut Value) {
     match value {
-        Value::Array(values) => Value::Array(values.into_iter().map(drop_nulls).collect()),
-        Value::Object(values) => Value::Object(
-            values
-                .into_iter()
-                .filter(|(_, value)| !value.is_null())
-                .map(|(key, value)| (key, drop_nulls(value)))
-                .collect(),
-        ),
-        value => value,
+        Value::Array(values) => values.iter_mut().for_each(drop_nulls_in_place),
+        Value::Object(values) => {
+            values.retain(|_, value| !value.is_null());
+            values.values_mut().for_each(drop_nulls_in_place);
+        }
+        _ => {}
     }
 }
 
+fn drop_nulls(mut value: Value) -> Value {
+    drop_nulls_in_place(&mut value);
+    value
+}
+
 fn map_from_value(value: Value) -> JsonObject {
-    match drop_nulls(value) {
-        Value::Object(value) => value.into_iter().collect(),
+    match value {
+        Value::Object(values) => values
+            .into_iter()
+            .filter(|(_, value)| !value.is_null())
+            .map(|(key, mut value)| {
+                drop_nulls_in_place(&mut value);
+                (key, value)
+            })
+            .collect(),
         _ => JsonObject::new(),
     }
 }
@@ -1790,30 +1822,64 @@ fn drawing_marks(marks: &[Mark]) -> Vec<Mark> {
         .collect()
 }
 
+/// Returns nonempty text emitted by a run content node.
+fn run_content_text(content: &Value) -> Option<&str> {
+    string(field(Some(content), "text")).filter(|text| !text.is_empty())
+}
+
+/// Whether a run break emits an inline unit.
+fn run_content_is_text_wrapping_break(content: &Value) -> bool {
+    string(field(Some(content), "breakType")).is_none_or(|kind| kind == "textWrapping")
+}
+
+/// Parses a run symbol's Unicode scalar value.
+fn run_content_symbol_char(content: &Value) -> Option<char> {
+    string(field(Some(content), "char"))
+        .and_then(|value| u32::from_str_radix(value, 16).ok())
+        .and_then(char::from_u32)
+}
+
+/// Counts emitted units without lowering a run content node.
+fn run_content_unit_count(content: &Value) -> usize {
+    match string(field(Some(content), "type")).unwrap_or_default() {
+        "text" => usize::from(run_content_text(content).is_some()),
+        "break" => usize::from(run_content_is_text_wrapping_break(content)),
+        "symbol" => usize::from(run_content_symbol_char(content).is_some()),
+        "footnoteRef" | "endnoteRef" => usize::from(field(Some(content), "id").is_some()),
+        "tab" | "softHyphen" | "noBreakHyphen" | "commentReference" | "drawing"
+        | "horizontalRule" | "shape" | "chart" => 1,
+        _ => 0,
+    }
+}
+
+/// Measures emitted UTF-16 text and single-width embeds without lowering.
+fn run_content_width(content: &Value) -> u32 {
+    match string(field(Some(content), "type")).unwrap_or_default() {
+        "text" => run_content_text(content).map(utf16_len).unwrap_or_default(),
+        "symbol" => run_content_symbol_char(content)
+            .map(|codepoint| codepoint.len_utf16() as u32)
+            .unwrap_or_default(),
+        _ => run_content_unit_count(content) as u32,
+    }
+}
+
 fn run_content_to_units(
     content: &Value,
     marks: &[Mark],
     source: &BTreeMap<String, String>,
 ) -> Vec<InlineUnit> {
     match string(field(Some(content), "type")).unwrap_or_default() {
-        "text" => string(field(Some(content), "text"))
-            .filter(|text| !text.is_empty())
+        "text" => run_content_text(content)
             .map(|text| vec![text_unit(text.to_owned(), marks)])
             .unwrap_or_default(),
         "tab" => vec![text_unit("\t".to_owned(), marks)],
-        "break"
-            if string(field(Some(content), "breakType"))
-                .is_none_or(|kind| kind == "textWrapping") =>
-        {
+        "break" if run_content_is_text_wrapping_break(content) => {
             vec![embed_unit("break", JsonObject::new(), marks, 1)]
         }
         "softHyphen" => vec![text_unit("\u{00ad}".to_owned(), marks)],
         "noBreakHyphen" => vec![text_unit("\u{2011}".to_owned(), marks)],
         "symbol" => {
-            let Some(codepoint) = string(field(Some(content), "char"))
-                .and_then(|value| u32::from_str_radix(value, 16).ok())
-                .and_then(char::from_u32)
-            else {
+            let Some(codepoint) = run_content_symbol_char(content) else {
                 return vec![];
             };
             let font = string(field(Some(content), "font"))
@@ -2847,7 +2913,6 @@ fn run_breaks(
     start: usize,
     place: BreakPlace,
     revision: Option<&Revision>,
-    source: &BTreeMap<String, String>,
     output: &mut Vec<FlowBreak>,
 ) -> usize {
     let mut offset = 0;
@@ -2860,7 +2925,7 @@ fn run_breaks(
                 revision: revision.cloned(),
                 control_offset: None,
             }),
-            None => offset += run_content_to_units(content, &[], source).len(),
+            None => offset += run_content_unit_count(content),
         }
     }
     offset
@@ -2886,7 +2951,7 @@ fn control_break_offsets(
         for item in array(field(Some(run), "content")) {
             match break_kind(item) {
                 Some(_) => offsets.push(vec![at]),
-                None => at += units_width(&run_content_to_units(item, &[], source)),
+                None => at += run_content_width(item),
             }
         }
         at
@@ -2982,7 +3047,7 @@ fn content_breaks(
         let mut found = Vec::new();
         for child in array(field(Some(content), key)) {
             if string(field(Some(child), "type")) == Some("run") {
-                run_breaks(child, start, BreakPlace::Field, None, source, &mut found);
+                run_breaks(child, start, BreakPlace::Field, None, &mut found);
             }
         }
         output.extend(found.into_iter().map(|found| FlowBreak {
@@ -2992,20 +3057,14 @@ fn content_breaks(
     };
     match string(field(Some(content), "type")).unwrap_or_default() {
         "run" => {
-            run_breaks(content, start, BreakPlace::Paragraph, None, source, output);
+            run_breaks(content, start, BreakPlace::Paragraph, None, output);
         }
         "hyperlink" => {
             let mut offset = 0;
             for child in array(field(Some(content), "children")) {
                 if string(field(Some(child), "type")) == Some("run") {
-                    offset += run_breaks(
-                        child,
-                        start + offset,
-                        BreakPlace::Paragraph,
-                        None,
-                        source,
-                        output,
-                    );
+                    offset +=
+                        run_breaks(child, start + offset, BreakPlace::Paragraph, None, output);
                 }
             }
         }
@@ -3048,7 +3107,6 @@ fn content_breaks(
                         start + offset,
                         BreakPlace::Paragraph,
                         Some(&revision),
-                        source,
                         output,
                     );
                 } else if in_control
@@ -3262,7 +3320,7 @@ fn paragraph_units(
             let kind = string(field(Some(content), "type")).unwrap_or_default();
             let (unit, in_control) = match kind {
                 "inlineSdt" => (units.len() - 1, true),
-                "run" => (start + run_prefix_units(content, source), false),
+                "run" => (start + run_prefix_units(content), false),
                 "rawXml" => (start, false),
                 _ => (units.len(), false),
             };
@@ -3286,11 +3344,11 @@ fn paragraph_units(
 }
 
 /// Units a run seeds before its first unmodelled drawing.
-fn run_prefix_units(run: &Value, source: &BTreeMap<String, String>) -> usize {
+fn run_prefix_units(run: &Value) -> usize {
     array(field(Some(run), "content"))
         .iter()
         .take_while(|item| string(field(Some(item), "type")) != Some("opaqueDrawing"))
-        .map(|item| run_content_to_units(item, &[], source).len())
+        .map(run_content_unit_count)
         .sum()
 }
 
@@ -3582,12 +3640,10 @@ struct CellOptions<'a> {
     table_bidi: bool,
 }
 
-fn structural_attrs(attrs: JsonObject, skipped: &[&str]) -> JsonObject {
+fn structural_attrs(mut attrs: JsonObject, skipped: &[&str]) -> JsonObject {
+    attrs.retain(|key, value| !skipped.contains(&key.as_str()) && !value.is_null());
+    attrs.values_mut().for_each(drop_nulls_in_place);
     attrs
-        .into_iter()
-        .filter(|(key, value)| !skipped.contains(&key.as_str()) && !value.is_null())
-        .map(|(key, value)| (key, drop_nulls(value)))
-        .collect()
 }
 
 fn project_cell(cell: &Value, options: CellOptions<'_>) -> ProjectedCell {
@@ -4719,15 +4775,13 @@ fn visit_story(
                     })
                     .collect();
                 let tbl_pr = structural_attrs(table.attrs.clone(), &["columnWidths"]);
-                let grid = table
+                let mut grid = table
                     .attrs
                     .get("columnWidths")
                     .and_then(Value::as_array)
                     .cloned()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(drop_nulls)
-                    .collect::<Vec<_>>();
+                    .unwrap_or_default();
+                grid.iter_mut().for_each(drop_nulls_in_place);
                 let mut payload = map_from_value(json!({
                     "tblPr": value_from_map(&tbl_pr),
                     "grid": grid,
@@ -6983,6 +7037,152 @@ mod tests {
                 matches!(run, docx_layout::types::Run::Image(image)
                     if image.src == src && image.width == 96.0 && image.height == 48.0)
             }));
+        }
+    }
+
+    /// Run measurements match lowering for every content branch.
+    #[test]
+    fn run_content_measurements_match_lowering() {
+        let contents = json!([
+            null,
+            {},
+            {"type": "unknown"},
+            {"type": "text"},
+            {"type": "text", "text": null},
+            {"type": "text", "text": 5},
+            {"type": "text", "text": ""},
+            {"type": "text", "text": "plain text"},
+            {"type": "text", "text": "a😀b"},
+            {"type": "tab"},
+            {"type": "break"},
+            {"type": "break", "breakType": null},
+            {"type": "break", "breakType": 5},
+            {"type": "break", "breakType": "textWrapping"},
+            {"type": "break", "breakType": "page"},
+            {"type": "break", "breakType": "column"},
+            {"type": "break", "breakType": "unknown"},
+            {"type": "softHyphen"},
+            {"type": "noBreakHyphen"},
+            {"type": "symbol"},
+            {"type": "symbol", "char": ""},
+            {"type": "symbol", "char": "invalid"},
+            {"type": "symbol", "char": "D800"},
+            {"type": "symbol", "char": "110000"},
+            {"type": "symbol", "char": "100000000"},
+            {"type": "symbol", "char": "0000"},
+            {"type": "symbol", "char": "0041", "font": "Symbol"},
+            {"type": "symbol", "char": "1f600"},
+            {"type": "commentReference"},
+            {"type": "commentReference", "id": null},
+            {"type": "commentReference", "id": "1"},
+            {"type": "drawing"},
+            {"type": "drawing", "image": {"src": "image.png"}},
+            {"type": "horizontalRule"},
+            {"type": "horizontalRule", "rule": {"width": 5}},
+            {"type": "shape"},
+            {"type": "shape", "shape": {"type": "shape", "z": 1}},
+            {"type": "chart"},
+            {"type": "chart", "chart": {"type": "chart", "z": 2}},
+            {"type": "footnoteRef"},
+            {"type": "footnoteRef", "id": null},
+            {"type": "footnoteRef", "id": "12"},
+            {"type": "footnoteRef", "id": 12},
+            {"type": "endnoteRef"},
+            {"type": "endnoteRef", "id": null},
+            {"type": "endnoteRef", "id": "12"},
+            {"type": "endnoteRef", "id": false}
+        ]);
+        let marks = [mark("bold", vec![]), mark("hidden", vec![])];
+        for source in [
+            BTreeMap::new(),
+            BTreeMap::from([
+                (
+                    r#"{"type":"shape","z":1}"#.to_owned(),
+                    r#"{"z":1,"type":"shape"}"#.to_owned(),
+                ),
+                (
+                    r#"{"type":"chart","z":2}"#.to_owned(),
+                    r#"{"z":2,"type":"chart"}"#.to_owned(),
+                ),
+            ]),
+        ] {
+            for marks in [&[][..], marks.as_slice()] {
+                for content in array(Some(&contents)) {
+                    let units = run_content_to_units(content, marks, &source);
+                    assert_eq!(run_content_unit_count(content), units.len(), "{content}");
+                    assert_eq!(
+                        run_content_width(content),
+                        units.iter().map(unit_width).sum::<u32>(),
+                        "{content}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// JSON writers preserve escaping, number formatting, and entry order.
+    #[test]
+    fn json_writers_preserve_exact_text() {
+        let value = json!({
+            "array": [null, true, false, -0.0, 0, 1e21, 0.1, 5, {
+                "a": "\"\\\n\r\t\u{0008}\u{000c}\u{0000}😀",
+                "b": [[], {}]
+            }],
+            "key\"\\\n": "escaped"
+        });
+        assert_eq!(
+            js_json(&value),
+            r#"{"array":[null,true,false,0,0,1e+21,0.1,5,{"a":"\"\\\n\r\t\b\f\u0000😀","b":[[],{}]}],"key\"\\\n":"escaped"}"#
+        );
+        let entries = ordered_object([
+            ("z", json!([5, {"a": 0.1, "b": null}])),
+            ("a\"\\\n", json!("\"\\\n")),
+            ("null", Value::Null),
+        ]);
+        assert_eq!(
+            ordered_json(&entries),
+            r#"{"z":[5,{"a":0.1,"b":null}],"a\"\\\n":"\"\\\n","null":null}"#
+        );
+        let ordered: OrderedValue = serde_json::from_str(
+            r#"{"z":[null,true,false,-0.0,0,1e21,0.1,5,{"b":[],"a":"\"\\\n"}],"a":{}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ordered.js_json(),
+            r#"{"z":[null,true,false,0,0,1e+21,0.1,5,{"b":[],"a":"\"\\\n"}],"a":{}}"#
+        );
+    }
+
+    /// Object nulls disappear while array nulls and empty containers remain.
+    #[test]
+    fn map_from_value_preserves_array_nulls() {
+        let value = json!({
+            "a": null,
+            "b": {
+                "a": null,
+                "b": [null, {"a": null, "b": 0}, [null, {"a": null, "b": false}]]
+            },
+            "c": [null, {}, []],
+            "d": {},
+            "e": []
+        });
+        assert_eq!(
+            value_from_map(&map_from_value(value)),
+            json!({
+                "b": {"b": [null, {"b": 0}, [null, {"b": false}]]},
+                "c": [null, {}, []],
+                "d": {},
+                "e": []
+            })
+        );
+        for value in [
+            Value::Null,
+            json!(false),
+            json!(5),
+            json!("text"),
+            json!([null, {"a": null}]),
+        ] {
+            assert_eq!(map_from_value(value), JsonObject::new());
         }
     }
 
