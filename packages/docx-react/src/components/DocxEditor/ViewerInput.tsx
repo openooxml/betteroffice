@@ -40,6 +40,8 @@ const STYLE: CSSProperties = {
 
 /** A settled selection's text is read this long after it last changed. */
 const SETTLE_MS = 60;
+/** How many settle periods a copy waits for its selection to land on the presented frame. */
+const TEXT_RETRIES = 100;
 
 const MOVE_KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'];
 
@@ -291,12 +293,19 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
 
   /** The selection's text, once a select-all or unit read still on its way has landed. */
   const selectedText = useCallback((): Promise<string> | null => {
-    const textOf = (): Promise<string> => {
+    // A selection on the preview, or one a new version maps on, reads once it lands on the frame.
+    const textOf = async (attempt = 0): Promise<string> => {
       const selection = selectionRef.current;
-      if (!selection || selection.anchor === selection.head || selection.version !== presented()) {
-        return Promise.resolve('');
+      if (!selection || selection.anchor === selection.head) return '';
+      if (selection.version === presented()) {
+        const value = await capture(selection).read;
+        if (value) return value.text;
       }
-      return capture(selection).read.then((value) => value?.text ?? '');
+      const settled =
+        !selection.preview && selection.version === presented() && selectionRef.current === selection;
+      if (attempt >= TEXT_RETRIES || settled) return '';
+      await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+      return textOf(attempt + 1);
     };
     const pending = pendingRef.current;
     if (pending) return pending.then(textOf);
