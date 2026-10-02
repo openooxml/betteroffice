@@ -73,6 +73,11 @@ let openedDocument: { heapLimitBytes?: number } | null = null;
 let previewing = false;
 /** Pages of a cut preview's layout that match the whole document's; null for a whole document. */
 let previewFinalPages: number | null = null;
+let provisionalFinalPages: number | null = null;
+let provisionalDisplayWindow: {
+  window: [number, number];
+  retainBuiltPages: boolean;
+} | null = null;
 let unsubscribe: (() => void) | null = null;
 let pendingUpdates: Uint8Array[] = [];
 let layoutRevision = 0;
@@ -295,6 +300,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     unsubscribe?.();
     unsubscribe = null;
     previewFinalPages = null;
+    clearProvisionalFinalPages();
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     const { layoutJson, provisional } = hydrate(
       request.snapshot,
@@ -302,7 +308,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       request.layoutExtras !== undefined,
       request.opened !== true
     );
-    if (previewFinalPages !== null) {
+    if (previewFinalPages !== null || provisionalFinalPages !== null) {
       setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     }
     if (provisional) {
@@ -523,13 +529,14 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     unsubscribe?.();
     unsubscribe = null;
     previewFinalPages = null;
+    clearProvisionalFinalPages();
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     const { layoutJson, provisional } = hydrate(
       request.snapshot,
       request.provisionalPages,
       request.layoutExtras !== undefined
     );
-    if (previewFinalPages !== null) {
+    if (previewFinalPages !== null || provisionalFinalPages !== null) {
       setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     }
     if (provisional) {
@@ -561,7 +568,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'buildPages') {
-    const limit = previewFinalPages;
+    const limit = previewFinalPages === null
+      ? provisionalFinalPages
+      : Math.min(previewFinalPages, provisionalFinalPages ?? previewFinalPages);
     const pages = limit === null ? request.pages : request.pages.filter((index) => index < limit);
     if (request.background && pages.length > BACKGROUND_SLICE_PAGES) {
       const build: BackgroundPageBuild = {
@@ -773,6 +782,7 @@ function hydrate(
   if (!session) throw new Error('Resident engine worker is not initialized');
   supersedeSlicedCompletion();
   incompleteLayout = null;
+  clearProvisionalFinalPages();
   completedLayout = null;
   if (loadState && !snapshot.workerAuthoritative) {
     fontRequirements = null;
@@ -829,6 +839,9 @@ function hydrate(
     provisionalPages,
     pageCount
   );
+  provisionalFinalPages = provisional && snapshot.partialDocument !== true
+    ? provisionalPages ?? null
+    : null;
   return { layoutJson, provisional };
 }
 
@@ -896,10 +909,25 @@ function setFrameDisplayWindow(
     return;
   }
   if (window) {
-    engine.setDisplayWindow(...window);
-    engine.setDisplayRetainBuiltPages(retainBuiltPages === true);
+    if (provisionalFinalPages !== null) {
+      provisionalDisplayWindow = { window, retainBuiltPages: retainBuiltPages === true };
+      engine.setDisplayWindow(...finalPreviewDisplayWindow(window, provisionalFinalPages));
+      engine.setDisplayRetainBuiltPages(false);
+    } else {
+      engine.setDisplayWindow(...window);
+      engine.setDisplayRetainBuiltPages(retainBuiltPages === true);
+    }
   }
   engine.setWindowedIncrementalBuilds(window !== undefined);
+}
+
+function clearProvisionalFinalPages(): void {
+  provisionalFinalPages = null;
+  if (session && provisionalDisplayWindow) {
+    session.setDisplayWindow(...provisionalDisplayWindow.window);
+    session.setDisplayRetainBuiltPages(provisionalDisplayWindow.retainBuiltPages);
+  }
+  provisionalDisplayWindow = null;
 }
 
 /**
@@ -926,6 +954,7 @@ async function completeProvisionalLayout(): Promise<void> {
       layoutJson: layoutJson ?? session.layoutDocumentWithRegionsRetainedJson(layoutInput),
       headersFootersJson: session.retainedHeadersFootersJson(),
     };
+    clearProvisionalFinalPages();
     if (waiting) {
       await replyCompletedLayout(waiting.id, waiting.expectedFrameEpoch, waiting.paintCaret);
     }
@@ -1098,6 +1127,7 @@ async function completionSlice(completion: SlicedCompletion): Promise<void> {
   }
   const { layoutInput: _input, ...request } = incompleteLayout;
   incompleteLayout = null;
+  clearProvisionalFinalPages();
   slicedCompletion = null;
   completedLayout = {
     ...request,
@@ -1211,6 +1241,7 @@ function destroySession(keepSurfaces = false): void {
   openedDocument = null;
   previewing = false;
   previewFinalPages = null;
+  clearProvisionalFinalPages();
   pendingUpdates = [];
   layoutRevision = 0;
   fontsRevision = -1;
@@ -1260,6 +1291,18 @@ async function replyFrame(
   precedingPageFrames: Uint8Array[] = []
 ): Promise<void> {
   applyWorkerFrame(bytes);
+  const limit = provisionalFinalPages;
+  if (session && limit !== null && retainedFrame) {
+    const pages = retainedFrame.displayList.pages
+      .filter((page) => page.pageIndex >= limit && !page.unbuilt)
+      .map((page) => page.pageIndex);
+    if (pages.length > 0) {
+      const released = session.releaseDisplayPagesFrame(pages, retainedFrame.frameEpoch);
+      if (released === null) throw new Error('Provisional display pages could not be released');
+      bytes = session.buildDisplayPagesFrame([], 0);
+      applyWorkerFrame(bytes);
+    }
+  }
   const caret = session?.residentCaretSnapshot();
   if (!caret || !retainedFrame || !residentCaretSnapshotForFrame(caret, retainedFrame)) {
     throw new Error('Resident caret snapshot does not match the produced frame');

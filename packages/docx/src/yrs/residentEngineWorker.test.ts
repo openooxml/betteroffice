@@ -1359,6 +1359,216 @@ describe('resident worker layout ownership', () => {
   });
 });
 
+describe('resident worker whole-document provisional pages', () => {
+  const snapshot: YrsResidentWorkerSnapshot = {
+    clientId: 1,
+    state: new Uint8Array(),
+    fontsRevision: 0,
+    fonts: [],
+    renderInputs: [],
+    measureInputs: [],
+    layoutInput: '{}',
+    layoutWithRegions: true,
+    layoutRevision: 1,
+    selection: null,
+  };
+  const provisional = JSON.stringify({ layout: { pages: [0, 1, 2, 3, 4, 5] }, provisional: true });
+  const full = JSON.stringify({ layout: { pages: [0, 1, 2, 3, 4, 5, 6] } });
+
+  function provisionalWorker(prefixComplete = false) {
+    const w = worker();
+    let epoch = 0;
+    const built: number[][] = [];
+    const calls: string[] = [];
+    const frameWindows: Array<[number, number] | undefined> = [];
+    const frame = (isFull: boolean) => {
+      epoch += 1;
+      w.harness.delta = {
+        protocolVersion: 1,
+        full: isFull,
+        frameEpoch: epoch,
+        baseFrameEpoch: isFull ? 0 : epoch - 1,
+        docEpoch: epoch,
+        layoutEpoch: epoch,
+        pageCount: 0,
+        operations: [],
+        bytes: new Uint8Array(),
+      };
+      return new Uint8Array([0]);
+    };
+    Object.assign(w.harness.session, {
+      layoutDocumentWithRegionsPrefixRetainedJson: (_input: string, pages: number) => {
+        calls.push(`prefix:${pages}`);
+        return prefixComplete ? full : provisional;
+      },
+      layoutDocumentWithRegionsRetainedJson: () => {
+        calls.push('full');
+        return full;
+      },
+      beginRegionLayout: () => ({ measuredBlocks: 0, bodyBlocks: 10 }),
+      resumeRegionLayout: () => ({ measuredBlocks: 10, bodyBlocks: 10, layoutJson: full }),
+      residentCaretSnapshot: () => ({ frameEpoch: epoch, caretRect: null }),
+      buildDisplayListFrame: () => {
+        frameWindows.push(w.harness.displayWindows.at(-1));
+        return frame(true);
+      },
+      buildDisplayPagesFrame: (pages: number[]) => {
+        built.push(pages);
+        return frame(false);
+      },
+      applyInput: () => {
+        calls.push('input');
+        frameWindows.push(w.harness.displayWindows.at(-1));
+        return frame(true);
+      },
+    });
+    return { w, built, calls, frameWindows, epoch: () => epoch };
+  }
+
+  test('bootstrap builds only exact prefix pages and restores the window on completion', async () => {
+    const { w, built, calls, frameWindows, epoch } = provisionalWorker();
+    const bootstrap = await w.send({
+      type: 'bootstrap', snapshot, provisionalPages: 3, displayWindow: [0, 6],
+      retainBuiltPages: true, extras: '', layoutExtras: '{}', expectedFrameEpoch: 0,
+    });
+    expect(bootstrap.ok && bootstrap.layoutProvisional).toBe(true);
+    expect(frameWindows).toEqual([[0, 3]]);
+    expect(w.harness.retainBuiltPages.at(-1)).toBe(false);
+    for (const background of [false, true]) {
+      const reply = await w.send({
+        type: 'buildPages', pages: [2, 3, 4, 5], background,
+        expectedFrameEpoch: epoch(), paintCaret: false,
+      });
+      expect(reply.ok).toBe(true);
+    }
+    expect(built).toEqual([[2], [2]]);
+    const completed = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: epoch(), paintCaret: false,
+    });
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(frameWindows).toEqual([[0, 3], [0, 6]]);
+    expect(w.harness.retainBuiltPages.at(-1)).toBe(true);
+    await w.send({ type: 'buildPages', pages: [4], expectedFrameEpoch: epoch(), paintCaret: false });
+    expect(built.at(-1)).toEqual([4]);
+    expect(calls).toEqual(['prefix:3', 'full']);
+  });
+
+  test('worker-authoritative sync limits the prefix until sliced completion', async () => {
+    const { w, built, calls, frameWindows, epoch } = provisionalWorker();
+    await w.bootstrap();
+    const synced = await w.send({
+      type: 'sync', snapshot: { ...snapshot, workerAuthoritative: true },
+      provisionalPages: 3, displayWindow: [0, 6], retainBuiltPages: true,
+      extras: '', layoutExtras: '{}', expectedFrameEpoch: epoch(), paintCaret: false,
+    });
+    expect(synced.ok && synced.layoutProvisional).toBe(true);
+    expect(frameWindows.at(-1)).toEqual([0, 3]);
+    expect(w.harness.retainBuiltPages.at(-1)).toBe(false);
+    await w.send({
+      type: 'buildPages', pages: [2, 3, 4, 5], expectedFrameEpoch: epoch(), paintCaret: false,
+    });
+    expect(built).toEqual([[2]]);
+    const completed = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: epoch(), paintCaret: false, sliceBlocks: 8,
+    });
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(frameWindows.at(-1)).toEqual([0, 6]);
+    expect(w.harness.retainBuiltPages.at(-1)).toBe(true);
+    await w.send({ type: 'buildPages', pages: [4], expectedFrameEpoch: epoch(), paintCaret: false });
+    expect(built.at(-1)).toEqual([4]);
+    expect(calls).toEqual(['prefix:3']);
+  });
+
+  test('a complete whole-document prefix is not clamped', async () => {
+    const { w, built, frameWindows, epoch } = provisionalWorker(true);
+    const bootstrap = await w.send({
+      type: 'bootstrap', snapshot, provisionalPages: 3, displayWindow: [0, 6],
+      retainBuiltPages: true, extras: '', layoutExtras: '{}', expectedFrameEpoch: 0,
+    });
+    expect(bootstrap.ok && bootstrap.layoutProvisional).toBeUndefined();
+    expect(frameWindows).toEqual([[0, 6]]);
+    expect(w.harness.retainBuiltPages.at(-1)).toBe(true);
+    await w.send({
+      type: 'buildPages', pages: [2, 3, 4, 5], expectedFrameEpoch: epoch(), paintCaret: false,
+    });
+    expect(built).toEqual([[2, 3, 4, 5]]);
+  });
+
+  test('background slices build only the requested pages below the provisional limit', async () => {
+    const { w, built, epoch } = provisionalWorker();
+    await w.send({
+      type: 'bootstrap', snapshot, provisionalPages: 6, displayWindow: [0, 10],
+      extras: '', expectedFrameEpoch: 0,
+    });
+    const reply = await w.send({
+      type: 'buildPages', pages: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], background: true,
+      expectedFrameEpoch: epoch(), paintCaret: false,
+    });
+    expect(reply.ok).toBe(true);
+    expect(built).toEqual([[0, 1, 2, 3], [4, 5]]);
+  });
+
+  test('worker-authoritative buildFrame keeps the limit and preserves an omitted window', async () => {
+    const { w, built, calls, frameWindows, epoch } = provisionalWorker();
+    await w.send({
+      type: 'bootstrap', snapshot: { ...snapshot, workerAuthoritative: true },
+      provisionalPages: 3, displayWindow: [0, 6], extras: '', expectedFrameEpoch: 0,
+    });
+    await w.send({
+      type: 'buildFrame', displayWindow: [1, 6], retainBuiltPages: true,
+      extras: '', expectedFrameEpoch: epoch(), paintCaret: false,
+    });
+    expect(frameWindows.at(-1)).toEqual([1, 3]);
+    expect(w.harness.retainBuiltPages.at(-1)).toBe(false);
+    await w.send({ type: 'buildFrame', extras: '', expectedFrameEpoch: epoch(), paintCaret: false });
+    expect(frameWindows.at(-1)).toEqual([1, 3]);
+    expect(w.harness.windowedIncrementalBuilds.at(-1)).toBe(false);
+    expect(calls).toEqual(['prefix:3']);
+    await w.send({
+      type: 'completeLayout', expectedFrameEpoch: epoch(), paintCaret: false,
+    });
+    expect(frameWindows.at(-1)).toEqual([1, 6]);
+    await w.send({ type: 'buildPages', pages: [4], expectedFrameEpoch: epoch(), paintCaret: false });
+    expect(built.at(-1)).toEqual([4]);
+  });
+
+  test('sync and bootstrap replace the provisional limit with a complete layout', async () => {
+    const { w, built, frameWindows, epoch } = provisionalWorker();
+    for (const type of ['sync', 'bootstrap'] as const) {
+      await w.send({
+        type: 'bootstrap', snapshot, provisionalPages: 3, displayWindow: [0, 6],
+        extras: '', expectedFrameEpoch: 0,
+      });
+      const reply = await w.send({
+        type, snapshot, displayWindow: [0, 6], extras: '',
+        expectedFrameEpoch: epoch(), paintCaret: false,
+      });
+      expect(reply.ok).toBe(true);
+      expect(frameWindows.at(-1)).toEqual([0, 6]);
+      await w.send({ type: 'buildPages', pages: [4], expectedFrameEpoch: epoch(), paintCaret: false });
+      expect(built.at(-1)).toEqual([4]);
+    }
+  });
+
+  test('input completes the layout and lifts the limit before building its frame', async () => {
+    const { w, built, calls, frameWindows, epoch } = provisionalWorker();
+    await w.send({
+      type: 'bootstrap', snapshot: { ...snapshot, workerAuthoritative: true },
+      provisionalPages: 3, displayWindow: [0, 6], extras: '', expectedFrameEpoch: 0,
+    });
+    const loc = { story: 'header1', paraId: '1', offset: 0 };
+    const reply = await w.send({
+      type: 'applyInput', text: 'x', selection: { anchor: loc, head: loc },
+      expectedFrameEpoch: epoch(), profile: false, paintCaret: false,
+    });
+    expect(reply.ok).toBe(true);
+    expect(calls).toEqual(['prefix:3', 'full', 'input']);
+    expect(frameWindows.at(-1)).toEqual([0, 6]);
+    await w.send({ type: 'buildPages', pages: [4], expectedFrameEpoch: epoch(), paintCaret: false });
+    expect(built.at(-1)).toEqual([4]);
+  });
+});
+
 describe('resident worker revision counts', () => {
   test('revisionCount excludes revisions created by worker proposals', async () => {
     const w = worker();
