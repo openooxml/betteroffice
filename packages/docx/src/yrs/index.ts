@@ -108,7 +108,7 @@ export {
   type WasmModuleMemory,
 } from '../wasm/loadWasmAsset';
 export { documentToYrs } from './documentToYrs';
-export { yrsToDocument } from './yrsToDocument';
+export { ownProjectedParagraphs, yrsToDocument } from './yrsToDocument';
 export * from './paragraphIdentity';
 export {
   proposalRevisionPreview,

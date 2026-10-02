@@ -992,7 +992,7 @@ describe('DocxEditor plugins', () => {
               story: paragraph.story,
               paraId: paragraph.paraId,
             },
-            suggest: { author: 'Atira', date: '2026-09-29T00:00:00Z' },
+            suggest: { author: 'Assistant', date: '2026-09-29T00:00:00Z' },
             op: 'replaceText',
             search: word,
             replaceWith: 'XYZ',
