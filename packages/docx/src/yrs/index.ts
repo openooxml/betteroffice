@@ -1575,13 +1575,7 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
 /** A lone UTF-16 surrogate, which crossing into Wasm would turn into U+FFFD. */
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
-type HeaderFooterAliasSession = EditSession & {
-  set_header_footer_aliases(json: string): void;
-  header_footer_aliases_json(): string;
-};
-
-function wrapSession(rawSession: EditSession, clientId: number): YrsSession {
-  const session = rawSession as HeaderFooterAliasSession;
+function wrapSession(session: EditSession, clientId: number): YrsSession {
   const listeners = new Map<
     number,
     (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
