@@ -75,6 +75,7 @@ export const editsession_finish_compared_docx_json: (a: number, b: number, c: nu
 export const editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
 export const editsession_format_text_target_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_has_story: (a: number, b: number, c: number) => number;
+export const editsession_header_footer_aliases_json: (a: number) => [number, number];
 export const editsession_headings_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_history_stories: (a: number) => [number, number];
 export const editsession_insert_column: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -152,6 +153,7 @@ export const editsession_set_content_control_value: (a: number, b: number, c: nu
 export const editsession_set_content_control_value_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
 export const editsession_set_display_retain_built_pages: (a: number, b: number) => void;
 export const editsession_set_display_window: (a: number, b: number, c: number) => void;
+export const editsession_set_header_footer_aliases: (a: number, b: number, c: number) => [number, number];
 export const editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
 export const editsession_set_image_geometry: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_set_image_geometry_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];

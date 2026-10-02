@@ -298,7 +298,7 @@ export function DocxEditorPagedArea({
 
   // Live Yrs selection inside that part, captured on every selection change.
   const [partSelection, setPartSelection] = useState<{ from: number; to: number } | null>(null);
-  const partStory = partEditStory(partEdit);
+  const partStory = partEditStory(partEdit, yrsCore.session);
   // Cleared during render, not in an effect: the click that opens a note
   // publishes its caret from a child effect, which React flushes first, and an
   // effect here would then wipe the very selection that click asked for.
@@ -455,7 +455,7 @@ export function DocxEditorPagedArea({
         onSelectionChange={onPagedSelectionChange}
         onYrsSelectionChange={onYrsSelectionChange}
         onYrsPartSelectionChange={(part, selection) => {
-          if (partEditStory(part) === partStory) setPartSelection(selection);
+          if (partEditStory(part, yrsCore.session) === partStory) setPartSelection(selection);
         }}
         onRenderedDomContextReady={onRenderedDomContextReady}
         pluginOverlays={pluginOverlays}

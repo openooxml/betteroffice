@@ -4,6 +4,8 @@ import type { editorSaveKeys } from './editorSaveKeys';
 import type { YrsSession } from './index';
 
 export interface YrsSessionInternals {
+  headerFooterAliases(): ReadonlyMap<string, string>;
+  setHeaderFooterAliases(json: string): void;
   sourcePackage(): { buffer: ArrayBuffer; keys: ReturnType<typeof editorSaveKeys> } | null;
   /** Compares two DOCX packages into the empty session; bridge JSON. */
   compareDocx(original: Uint8Array, revised: Uint8Array, options: string): string;
@@ -30,4 +32,18 @@ export function sessionInternals(session: object): YrsSessionInternals {
   const internals = registry.get(session);
   if (!internals) throw new Error('the session was not created by createYrsSession');
   return internals;
+}
+
+/** @internal */
+export function headerFooterStory(session: object | null | undefined, rId: string): string {
+  const canonical = session && registry.get(session)?.headerFooterAliases().get(rId);
+  return `hf:${canonical || rId}`;
+}
+
+export function headerFooterDisplayRIds(session: object, rId: string): string[] {
+  const aliases = registry.get(session)?.headerFooterAliases();
+  const canonical = aliases?.get(rId) ?? rId;
+  return [canonical, ...[...(aliases ?? [])].flatMap(([alias, owner]) =>
+    owner === canonical ? [alias] : []
+  )];
 }

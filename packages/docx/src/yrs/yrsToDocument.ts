@@ -2,6 +2,8 @@
 
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
 
+import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
+import { headerFooterStory } from './sessionInternals';
 import { createStyleResolver, type StyleResolver } from '../styles';
 import { hasTrackedControlContent } from '../utils/trackedControlContent';
 import { isRawXml } from '../types/content/rawXml';
@@ -52,6 +54,7 @@ import type {
   Comment,
   Footnote,
   Endnote,
+  HeaderFooter,
 } from '../types/document';
 import type { YrsSession } from './index';
 
@@ -2060,9 +2063,13 @@ function collectBaseParagraphs(
   return paragraphs;
 }
 
-function collectBaseStories(document: Document): Map<string, readonly BlockContent[]> {
+function collectBaseStories(
+  session: YrsSession,
+  document: Document
+): Map<string, readonly BlockContent[]> {
   const stories = new Map<string, readonly BlockContent[]>();
   const visit = (storyId: string, blocks: readonly BlockContent[]): void => {
+    if (stories.has(storyId)) return;
     stories.set(storyId, blocks);
     let tableIndex = 0;
     let sdtIndex = 0;
@@ -2082,8 +2089,12 @@ function collectBaseStories(document: Document): Map<string, readonly BlockConte
   };
 
   visit('body', document.package.document.content);
-  for (const [rId, part] of document.package.headers ?? []) visit(`hf:${rId}`, part.content);
-  for (const [rId, part] of document.package.footers ?? []) visit(`hf:${rId}`, part.content);
+  for (const [rId, part] of document.package.headers ?? []) {
+    visit(headerFooterStory(session, rId), part.content);
+  }
+  for (const [rId, part] of document.package.footers ?? []) {
+    visit(headerFooterStory(session, rId), part.content);
+  }
   for (const note of document.package.footnotes ?? []) visit(`fn:${note.id}`, note.content);
   for (const note of document.package.endnotes ?? []) visit(`en:${note.id}`, note.content);
   return stories;
@@ -2282,7 +2293,7 @@ class SaveContext {
     private readonly revisionIds?: RevisionIds
   ) {
     this.storyIds = new Set(session.storyIds());
-    this.baseStories = collectBaseStories(base);
+    this.baseStories = collectBaseStories(session, base);
     this.baseParagraphs = collectBaseParagraphs(this.baseStories);
     this.comments = commentRanges(session, base.package.document.comments, commentIds);
     this.memo = sessionProjectionMemo(session);
@@ -2654,41 +2665,56 @@ function projectStories(
     ? context.storyToBlocks('body')
     : base.package.document.content;
 
-  let headers = base.package.headers;
-  if (
-    headers &&
-    (options.storyIds === undefined || [...headers.keys()].some((rId) => shouldProject(`hf:${rId}`)))
-  ) {
-    headers = new Map(
-      [...headers].map(([rId, part]) => {
-        const storyId = `hf:${rId}`;
-        return [
-          rId,
-          context.storyIds.has(storyId) && shouldProject(storyId)
-            ? { ...part, content: context.storyToBlocks(storyId) }
-            : part,
-        ];
-      })
-    );
-  }
+  const selectedHeaderFooterStories = new Set(
+    [...(base.package.headers?.keys() ?? []), ...(base.package.footers?.keys() ?? [])]
+      .filter((rId) => shouldProject(`hf:${rId}`))
+      .map((rId) => headerFooterStory(session, rId))
+  );
+  const shouldProjectHeaderFooter = (storyId: string): boolean =>
+    shouldProject(storyId) || selectedHeaderFooterStories.has(storyId);
 
-  let footers = base.package.footers;
-  if (
-    footers &&
-    (options.storyIds === undefined || [...footers.keys()].some((rId) => shouldProject(`hf:${rId}`)))
-  ) {
-    footers = new Map(
-      [...footers].map(([rId, part]) => {
-        const storyId = `hf:${rId}`;
-        return [
-          rId,
-          context.storyIds.has(storyId) && shouldProject(storyId)
-            ? { ...part, content: context.storyToBlocks(storyId) }
-            : part,
-        ];
+  const headerFooterContents = new Map<string, BlockContent[]>();
+  const projectHeaderFooter = (storyId: string): BlockContent[] => {
+    let content = headerFooterContents.get(storyId);
+    if (!content) {
+      content = context.storyToBlocks(storyId);
+      headerFooterContents.set(storyId, content);
+    }
+    return content;
+  };
+
+  const canonicalFor = (rId: string, storyId: string): string | undefined =>
+    storyId === `hf:${rId}` ? undefined : storyId.slice(3);
+  const projectHeaderFooters = (
+    entries: Map<string, HeaderFooter> | undefined
+  ): Map<string, HeaderFooter> | undefined => {
+    if (!entries) return entries;
+    const routes = [...entries].map(
+      ([rId, part]) => [rId, part, headerFooterStory(session, rId)] as const
+    );
+    const project =
+      options.storyIds === undefined ||
+      routes.some(([, , storyId]) => shouldProjectHeaderFooter(storyId));
+    const remark = routes.some(
+      ([rId, part, storyId]) => headerFooterAliasOf(part) !== canonicalFor(rId, storyId)
+    );
+    if (!project && !remark) return entries;
+    return new Map(
+      routes.map(([rId, part, storyId]) => {
+        const canonical = canonicalFor(rId, storyId);
+        const next =
+          context.storyIds.has(storyId) && shouldProjectHeaderFooter(storyId)
+            ? { ...part, content: projectHeaderFooter(storyId) }
+            : headerFooterAliasOf(part) === canonical
+              ? part
+              : { ...part };
+        if (canonical !== undefined) markHeaderFooterAlias(next, canonical);
+        return [rId, next];
       })
     );
-  }
+  };
+  const headers = projectHeaderFooters(base.package.headers);
+  const footers = projectHeaderFooters(base.package.footers);
 
   const projectNotes = <T extends Footnote | Endnote>(
     notes: T[] | undefined,

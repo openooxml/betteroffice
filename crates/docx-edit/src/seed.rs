@@ -5880,6 +5880,112 @@ pub(crate) fn seed_stories(document: &EditingDoc, bytes: &[u8]) -> Result<(), St
 pub(crate) mod fixture;
 
 #[cfg(test)]
+#[path = "../tests/support/header_footer_alias_fixture.rs"]
+pub(crate) mod header_footer_alias_fixture;
+
+#[cfg(test)]
+mod header_footer_alias_tests {
+    use super::*;
+
+    fn main_seed(doc: &EditingDoc, bytes: &[u8]) -> Vec<String> {
+        let envelope = parse_docx_for_edit(bytes).unwrap();
+        let mut lowered = lower_docx(envelope, None).unwrap();
+        let stories = lowered
+            .context
+            .plans
+            .iter()
+            .map(|plan| plan.story_id.clone())
+            .collect::<Vec<_>>();
+        doc.create_empty_stories(&stories).unwrap();
+        let mut deletes = Vec::new();
+        let mut batches = Vec::new();
+        for plan in lowered.context.plans {
+            let (story, mut ops, _) = seed_plan(plan, lowered.script_fonts.as_mut()).unwrap();
+            deletes.push((story.clone(), vec![ops.remove(0)]));
+            batches.push((story, ops));
+        }
+        let ctx = EditCtx::local("", "");
+        doc.apply_raw_story_batches(deletes, &ctx).unwrap();
+        doc.apply_raw_seed_batches(batches, &ctx).unwrap();
+        seed_opaque_sequences(doc, &lowered.context.opaque_sequences);
+        doc.begin_opening(Some("singleton"));
+        stories
+    }
+
+    #[test]
+    fn packages_match_main_state_story_order_and_paragraph_allocation() {
+        for (headers, footers) in [
+            (vec![("rId7", "header1.xml")], vec![]),
+            (
+                vec![("rId7", "header1.xml"), ("rId9", "./header1.xml")],
+                vec![("rId11", "footer1.xml"), ("rId13", "./footer1.xml")],
+            ),
+            (
+                vec![("rId9", "header2.xml"), ("rId7", "header1.xml")],
+                vec![("rId11", "footer1.xml")],
+            ),
+        ] {
+            let bytes = header_footer_alias_fixture::package(&headers, &footers);
+            let doc = EditingDoc::new(41);
+            seed_from_docx_with_generation(&doc, &bytes, "singleton").unwrap();
+            let baseline = EditingDoc::new(41);
+            let order = main_seed(&baseline, &bytes);
+            let expected_order: Vec<_> = std::iter::once("body".to_owned())
+                .chain(
+                    headers
+                        .iter()
+                        .chain(&footers)
+                        .map(|(id, _)| format!("hf:{id}")),
+                )
+                .collect();
+            assert_eq!(order, expected_order);
+            assert_eq!(
+                doc.encode_state_as_update_v1(),
+                baseline.encode_state_as_update_v1()
+            );
+            assert!(doc.header_footer_aliases().is_empty());
+            let txn = doc.yrs_doc().transact();
+            assert!(
+                !txn.get_map(crate::identity::SESSION)
+                    .unwrap()
+                    .contains_key(&txn, "hfAliases")
+            );
+            let stories: BTreeSet<_> = txn
+                .get_map(crate::STORIES)
+                .unwrap()
+                .keys(&txn)
+                .map(str::to_owned)
+                .collect();
+            let expected: BTreeSet<_> = std::iter::once("body".to_owned())
+                .chain(
+                    headers
+                        .iter()
+                        .chain(&footers)
+                        .map(|(id, _)| crate::header_footer::story_id(id)),
+                )
+                .collect();
+            assert_eq!(stories, expected);
+            drop(txn);
+            for story in stories {
+                let ids = |document: &EditingDoc| {
+                    document
+                        .paragraphs(&story)
+                        .unwrap()
+                        .into_iter()
+                        .map(|paragraph| paragraph.para_id)
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(ids(&doc), ids(&baseline));
+            }
+            assert_eq!(
+                doc.create_story("next", "", "Normal", "left").unwrap(),
+                baseline.create_story("next", "", "Normal", "left").unwrap()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     fn assert_pins_match_story(doc: &EditingDoc, provenance: &Provenance) {
         let txn = doc.yrs_doc().transact();

@@ -2254,6 +2254,25 @@ impl EditSession {
         self.engine.doc().begin_opening(generation.as_deref());
     }
 
+    /// Declares header/footer alias groups before host-side seeding.
+    pub fn set_header_footer_aliases(&self, json: &str) -> Result<(), JsValue> {
+        self.engine
+            .doc()
+            .set_header_footer_aliases(json)
+            .map_err(js_err)
+    }
+
+    /// Returns active alias-to-canonical relationship ids as a JSON object.
+    pub fn header_footer_aliases_json(&self) -> String {
+        let aliases: BTreeMap<_, _> = self
+            .engine
+            .doc()
+            .header_footer_aliases()
+            .into_iter()
+            .collect();
+        serde_json::to_string(&aliases).expect("header/footer aliases serialize")
+    }
+
     /// Unions seeded opaque sequence names into document state.
     pub fn seed_opaque_sequences(&self, names_json: &str) -> Result<(), JsValue> {
         let names: Vec<String> = serde_json::from_str(names_json).map_err(js_err)?;
@@ -4874,6 +4893,71 @@ mod tests {
     use super::*;
     use crate::{EditCtx, RawOp};
 
+    #[test]
+    fn header_footer_alias_exports_seed_and_follow_legacy_updates() {
+        let session = EditSession::new(41.0).unwrap();
+        let before = session.engine.doc().encode_state_as_update_v1();
+        session.set_header_footer_aliases("[]").unwrap();
+        assert_eq!(session.engine.doc().encode_state_as_update_v1(), before);
+        assert_eq!(session.header_footer_aliases_json(), "{}");
+        let groups = json!([{
+            "isHeader": true, "partPath": "word/header1.xml", "relationshipIds": ["rId7", "rId9"]
+        }]);
+        session
+            .set_header_footer_aliases(&groups.to_string())
+            .unwrap();
+        session
+            .engine
+            .doc()
+            .create_story("hf:rId7", "Header", "Normal", "left")
+            .unwrap();
+        assert_eq!(session.header_footer_aliases_json(), r#"{"rId9":"rId7"}"#);
+        let peer = EditingDoc::new(42);
+        peer.apply_update_v1(&session.engine.doc().encode_state_as_update_v1())
+            .unwrap();
+        peer.create_story("hf:rId9:t0:r0c0", "Legacy", "Normal", "left")
+            .unwrap();
+        session
+            .engine
+            .doc()
+            .apply_update_v1(&peer.encode_state_as_update_v1())
+            .unwrap();
+        assert_eq!(session.header_footer_aliases_json(), "{}");
+    }
+
+    #[test]
+    fn docx_open_keeps_aliases_inactive() {
+        let bytes = crate::seed::header_footer_alias_fixture::package(
+            &[("rId7", "header1.xml"), ("rId9", "./header1.xml")],
+            &[],
+        );
+        for seed in [true, false] {
+            let session = EditSession::new(41.0).unwrap();
+            let result: Value = serde_json::from_str(
+                &session
+                    .open_docx(&bytes, seed, Some("aliases".to_owned()), None)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(session.header_footer_aliases_json(), "{}");
+            let txn = session.engine.doc().yrs_doc().transact();
+            assert!(
+                !txn.get_map(crate::identity::SESSION)
+                    .unwrap()
+                    .contains_key(&txn, "hfAliases")
+            );
+            drop(txn);
+            assert!(
+                result["envelope"]["document"]["package"]
+                    .get("headerFooterAliases")
+                    .is_none()
+            );
+            if seed {
+                assert!(session.engine.doc().paragraphs("hf:rId7").is_ok());
+                assert!(session.engine.doc().paragraphs("hf:rId9").is_ok());
+            }
+        }
+    }
     #[test]
     fn seeded_docx_retains_original_images_for_materialization_and_save() {
         let image_bytes = vec![1, 2, 3, 4];

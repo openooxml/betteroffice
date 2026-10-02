@@ -132,7 +132,7 @@ export {
   type DocxSavedParagraph,
   type DocxSessionSave,
 } from './saveYrsDocx';
-export { sessionSourcePackage } from './sessionInternals';
+export { headerFooterStory, sessionSourcePackage } from './sessionInternals';
 export { editorSaveKeys } from './editorSaveKeys';
 export * from './yrsPositionProjection';
 export * from './proposalGeometry';
@@ -1618,7 +1618,34 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   let docxSource: Uint8Array | null = null;
   let docxSourceKeys: ReturnType<typeof editorSaveKeys> | null = null;
 
+  let readCacheRevision = 0;
+  let cachedHeaderFooterAliases: {
+    revision: number;
+    aliases: ReadonlyMap<string, string>;
+  } | null = null;
+  const headerFooterAliases = (): ReadonlyMap<string, string> => {
+    if (!cachedHeaderFooterAliases || cachedHeaderFooterAliases.revision !== readCacheRevision) {
+      let aliases = new Map<string, string>();
+      if (!destroyed) {
+        try {
+          const value: unknown = JSON.parse(session.header_footer_aliases_json());
+          if (
+            value !== null &&
+            typeof value === 'object' &&
+            Object.getPrototypeOf(value) === Object.prototype &&
+            Object.values(value).every((entry) => typeof entry === 'string')
+          ) {
+            aliases = new Map(Object.entries(value) as Array<[string, string]>);
+          }
+        } catch {}
+      }
+      cachedHeaderFooterAliases = { revision: readCacheRevision, aliases };
+    }
+    return cachedHeaderFooterAliases.aliases;
+  };
+
   const invalidateReadCaches = (): void => {
+    readCacheRevision += 1;
     cachedSelection = undefined;
     cachedSelectionContext = null;
   };
@@ -1704,6 +1731,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     if (observing) return;
     session.set_update_observer((update: Uint8Array, origin: number) => {
       if (origin !== 0 && origin !== 1) return;
+      readCacheRevision += 1;
       pendingUpdates.push({
         update: update.slice(),
         origin: origin === 0 ? 'local' : 'remote',
@@ -2749,6 +2777,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     destroy: () => {
       if (destroyed) return;
       destroyed = true;
+      invalidateReadCaches();
       resetMedia();
       listeners.clear();
       proposals.destroy();
@@ -2759,6 +2788,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   };
 
   registerSessionInternals(facade, {
+    headerFooterAliases,
+    setHeaderFooterAliases: (json) => mutate(() => session.set_header_footer_aliases(json)),
     sourcePackage: () =>
       docxSource && docxSourceKeys
         ? { buffer: docxSourceBuffer(docxSource), keys: docxSourceKeys }

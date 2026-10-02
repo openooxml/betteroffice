@@ -647,7 +647,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     if (
       pending.session !== yrsSession ||
       pending.story !== yrsRootStory ||
-      pending.story !== partEditStory(partEdit)
+      pending.story !== partEditStory(partEdit, yrsSession)
     ) {
       return;
     }

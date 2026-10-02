@@ -458,6 +458,10 @@ export class EditSession {
      */
     has_story(story: string): boolean;
     /**
+     * Returns active alias-to-canonical relationship ids as a JSON object.
+     */
+    header_footer_aliases_json(): string;
+    /**
      * The headings of `story` in document order, classified as the structured export
      * classifies them: `[{"paraId","heading":{"outlineLevel","source"}}]`.
      */
@@ -976,6 +980,10 @@ export class EditSession {
      * until [`Self::build_display_pages_frame`] builds them.
      */
     set_display_window(start: number, end: number): void;
+    /**
+     * Declares header/footer alias groups before host-side seeding.
+     */
+    set_header_footer_aliases(json: string): void;
     /**
      * Sets or clears the hyperlink attribute over `[start, end)`.
      * `hyperlink_json` is `{"href", "tooltip"?, "rId"?}` or `null` to unlink.
@@ -1578,6 +1586,7 @@ export interface InitOutput {
     readonly editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_format_text_target_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_has_story: (a: number, b: number, c: number) => number;
+    readonly editsession_header_footer_aliases_json: (a: number) => [number, number];
     readonly editsession_headings_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_history_stories: (a: number) => [number, number];
     readonly editsession_insert_column: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -1655,6 +1664,7 @@ export interface InitOutput {
     readonly editsession_set_content_control_value_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_set_display_retain_built_pages: (a: number, b: number) => void;
     readonly editsession_set_display_window: (a: number, b: number, c: number) => void;
+    readonly editsession_set_header_footer_aliases: (a: number, b: number, c: number) => [number, number];
     readonly editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_set_image_geometry: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_set_image_geometry_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];

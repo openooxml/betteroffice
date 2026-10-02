@@ -1,8 +1,9 @@
 /** Typed TypeScript boundary for the Rust package writer. */
 
-import type { BlockContent, Document, Hyperlink, Image, Run } from '../types/document';
+import type { BlockContent, Document, HeaderFooter, Hyperlink, Image, Run } from '../types/document';
 import { visitTrackedControlContent } from '../utils/trackedControlContent';
 import { preloadParseWasm, writeDocxS13Wire } from './parseWasm';
+import { isWrittenByCanonical } from './headerFooterAliasProjection';
 import { collectParts, headerFooterFilename, partText } from './rezip/parts';
 import { preloadOpcWasm, unzipContainer } from './wasm';
 
@@ -51,6 +52,14 @@ export interface RustParagraphIds {
   splicedParts?: Array<{ part: string; sha256: string; paragraphs: number[]; changed: number[] }>;
 }
 
+function headerFooterSaveEntries(
+  entries: Map<string, HeaderFooter> | undefined
+): Array<[string, HeaderFooter]> {
+  return entries
+    ? [...entries].filter(([, part]) => !isWrittenByCanonical(part, entries))
+    : [];
+}
+
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes).buffer);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
@@ -80,8 +89,8 @@ export async function writeDocumentWithRust(
   const request = {
     determinism: fixed,
     document: pkg.document,
-    headerEntries: [...(pkg.headers?.entries() ?? [])],
-    footerEntries: [...(pkg.footers?.entries() ?? [])],
+    headerEntries: headerFooterSaveEntries(pkg.headers),
+    footerEntries: headerFooterSaveEntries(pkg.footers),
     footnotes: pkg.footnotes ?? [],
     endnotes: pkg.endnotes ?? [],
     footnoteSeparators: pkg.footnoteSeparators ?? [],
