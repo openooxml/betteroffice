@@ -1,5 +1,17 @@
 # @betteroffice/rust-crates
 
+## 0.4.2
+
+### Patch Changes
+
+- 08c4763: Paragraphs lay out closer to Word: words across formatting runs, list numbers wider than their indent, `w:start`/`w:end` indents and bordered hanging indents. Picture outlines now paint.
+- 9c21cb8: Accepting, rejecting or undoing a proposal no longer stalls for up to 1.5 s on large documents, and tracked replacements apply faster.
+- 4e6a9e4: The first page shows sooner on long documents.
+- dcbc90b: Documents open faster.
+- ac0a55f: Tables lay out closer to Word: autofit column widths, floating tables across pages, partial cell margins, bordered table height and vertical text in merged cells.
+- 1037096: Long documents finish layout sooner.
+- ed29b59: Typing responds faster in long documents.
+
 ## 0.4.1
 
 ### Patch Changes

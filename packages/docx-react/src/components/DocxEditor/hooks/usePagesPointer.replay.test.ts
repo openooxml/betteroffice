@@ -212,6 +212,41 @@ test.each([2, 3])('a %s-click handled after the replica lands consumes the pendi
   expect(selections).toEqual([]);
 });
 
+test.each([
+  [2, 'loaded'],
+  [3, 'loaded'],
+  [4, 'loaded'],
+  [2, 'loading'],
+  [3, 'loading'],
+  [4, 'loading'],
+])('a %i-click that moves during its last press keeps its selection (%s replica)', async (detail, replica) => {
+  const loaded = replica === 'loaded';
+  const { opts, projection, selections, words, paragraphs } = options(
+    loaded ? { replicaPending: () => false } : {}
+  );
+  if (loaded) opts.getYrsPositionProjection = () => projection;
+  const view = renderHook(() => usePagesPointer(opts));
+
+  for (let press = 1; press <= detail; press++) {
+    const x = press === detail ? 230 : 200;
+    mouse('mousedown', 200, 400, press);
+    if (press === detail) mouse('mousemove', x);
+    mouse('mouseup', x, 400, press);
+    mouse('click', x, 400, press);
+  }
+  const settled = selections.length;
+  await act(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  expect(selections.length).toBe(settled);
+  if (!loaded) {
+    opts.replicaReady = true;
+    view.rerender();
+    expect(selections).toEqual([]);
+  }
+  const [chosen, other] = detail === 2 ? [words, paragraphs] : [paragraphs, words];
+  expect(chosen.at(-1)).toEqual([loaded ? 23 : 20, 'body']);
+  if (!loaded) expect(other).toEqual([]);
+});
+
 test('a recorded gesture asks for the replica', () => {
   const requestReplica = mock(() => {});
   const { opts } = options({ requestReplica });

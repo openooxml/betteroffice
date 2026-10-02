@@ -10,8 +10,8 @@ use yrs::{Any, Array as _, Map as YrsMap, Out, ReadTxn, Text as _, Transact};
 
 use crate::control_source::safety_key;
 use crate::identity::{
-    PARA_ORIGIN, SOURCE_PARA_ID, SYNTHETIC, SeededParagraph, SourceIndex, SourcePackage,
-    SourcePartInput, SourceStoryKind,
+    OOXML_PARA_ID, PARA_ORIGIN, SOURCE_PARA_ID, SYNTHETIC, SeededParagraph, SourceIndex,
+    SourcePackage, SourcePartInput, SourceStoryKind,
 };
 use crate::script_fonts::ScriptFontUse;
 use crate::structured::source::{
@@ -32,13 +32,19 @@ pub(crate) const OPAQUE_SEQUENCES: &str = "opaqueSequences";
 /// document gave its stories and session: replicas that seeded it before still converge.
 const SEQUENCE_METADATA_CLIENT: u64 = 0x1_0000_05e9;
 
-pub(crate) fn seed_opaque_sequences(document: &EditingDoc, names: &[String]) {
+pub(crate) fn seed_opaque_sequences(document: &EditingDoc, names: &[String], seeded: Option<bool>) {
     let mut txn = document.transact_for(&EditCtx::system(""));
     let session = txn
         .get_map(crate::identity::SESSION)
         .expect("session root is declared by EditingDoc::new");
     let previous = session.get(&txn, OPAQUE_SEQUENCES);
-    if previous.is_none() && names.is_empty() && !holds_sequence_fields(&txn) {
+    if let Some(seeded) = seeded {
+        debug_assert_eq!(seeded, holds_sequence_fields(&txn));
+    }
+    if previous.is_none()
+        && names.is_empty()
+        && !seeded.unwrap_or_else(|| holds_sequence_fields(&txn))
+    {
         return;
     }
     let mut opaque_sequences: BTreeSet<String> = names.iter().cloned().collect();
@@ -107,6 +113,41 @@ fn holds_sequence_fields<T: ReadTxn>(txn: &T) -> bool {
         }
     }
     false
+}
+
+/// Whether the embed values a fresh seed writes hold a string with SEQ, as
+/// [`holds_sequence_fields`] reads them back; `None` for ops a seed never writes.
+fn seeded_sequence_fields<'a>(ops: impl IntoIterator<Item = &'a RawOp>) -> Option<bool> {
+    let mut found = false;
+    for op in ops {
+        match op {
+            RawOp::InsertEmbed { kind, payload, .. } if !found => {
+                let pilcrow = kind == crate::PILCROW_KIND;
+                let mut values: Vec<&Any> = payload
+                    .iter()
+                    .filter(|(key, _)| {
+                        !pilcrow
+                            || !matches!(key.as_str(), OOXML_PARA_ID | SOURCE_PARA_ID | PARA_ORIGIN)
+                    })
+                    .map(|(_, value)| value)
+                    .collect();
+                found =
+                    !payload.iter().any(|(key, _)| key == crate::KIND_KEY) && kind.contains("SEQ");
+                while !found && let Some(value) = values.pop() {
+                    match value {
+                        Any::String(text) => found = text.contains("SEQ"),
+                        Any::Array(items) => values.extend(items.iter()),
+                        Any::Map(entries) => values.extend(entries.values()),
+                        _ => {}
+                    }
+                }
+            }
+            RawOp::Insert { .. } | RawOp::Format { .. } | RawOp::InsertEmbed { .. } => {}
+            RawOp::SetComment { .. } | RawOp::RemoveComment { .. } => {}
+            RawOp::Delete { .. } | RawOp::SetEmbedAttr { .. } => return None,
+        }
+    }
+    Some(found)
 }
 
 /// A parsed node's `w:p` occurrence in its part: read for identity, never seeded.
@@ -5464,6 +5505,18 @@ fn seed_lowered(
         mut read,
         ..
     } = lowered;
+    let scan_sequences = context.opaque_sequences.is_empty() && {
+        let txn = document.yrs_doc().transact();
+        txn.get_map(crate::STORIES)
+            .expect("stories root is declared by EditingDoc::new")
+            .len(&txn)
+            == 0
+            && txn
+                .get_map(crate::identity::SESSION)
+                .expect("session root is declared by EditingDoc::new")
+                .get(&txn, OPAQUE_SEQUENCES)
+                .is_none()
+    };
     document
         .create_empty_stories(
             &context
@@ -5492,6 +5545,9 @@ fn seed_lowered(
             layout_tokens,
         )?,
     };
+    let seeded = scan_sequences
+        .then(|| seeded_sequence_fields(batches.iter().flat_map(|(_, ops)| ops)))
+        .flatten();
     let ctx = EditCtx::local(String::new(), String::new());
     document
         .apply_raw_story_batches(deletes, &ctx)
@@ -5499,7 +5555,7 @@ fn seed_lowered(
     let ranges = document
         .apply_raw_seed_batches(batches, &ctx)
         .map_err(|error| error.to_string())?;
-    seed_opaque_sequences(document, &context.opaque_sequences);
+    seed_opaque_sequences(document, &context.opaque_sequences, seeded);
     document.set_media_sources(sources);
     read.pin(document, &ranges);
     read.comment_writes = CommentWrites::watch(document);
@@ -6334,7 +6390,7 @@ mod tests {
         original
             .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
             .unwrap();
-        seed_opaque_sequences(&original, &lowered.context.opaque_sequences);
+        seed_opaque_sequences(&original, &lowered.context.opaque_sequences, None);
 
         let split = EditingDoc::new(1);
         let lowered = lower_docx(parse_docx_for_edit(bytes).unwrap(), None).unwrap();
@@ -6349,9 +6405,13 @@ mod tests {
     fn opaque_sequence_names_accumulate_in_document_state() {
         let doc = EditingDoc::new(1);
         let empty = doc.encode_state_vector_v1();
-        seed_opaque_sequences(&doc, &[]);
+        seed_opaque_sequences(&doc, &[], None);
         assert_eq!(doc.encode_state_vector_v1(), empty);
-        seed_opaque_sequences(&doc, &["table".into(), "figure".into(), "table".into()]);
+        seed_opaque_sequences(
+            &doc,
+            &["table".into(), "figure".into(), "table".into()],
+            None,
+        );
         {
             let txn = doc.yrs_doc().transact();
             assert_eq!(txn.state_vector().get(&doc.yrs_doc().client_id()), 0);
@@ -6361,10 +6421,14 @@ mod tests {
                 1
             );
         }
-        seed_opaque_sequences(&doc, &["other".into(), "figure".into()]);
+        seed_opaque_sequences(&doc, &["other".into(), "figure".into()], None);
         let before = doc.encode_state_vector_v1();
-        seed_opaque_sequences(&doc, &[]);
-        seed_opaque_sequences(&doc, &["table".into(), "figure".into(), "other".into()]);
+        seed_opaque_sequences(&doc, &[], None);
+        seed_opaque_sequences(
+            &doc,
+            &["table".into(), "figure".into(), "other".into()],
+            None,
+        );
         assert_eq!(doc.encode_state_vector_v1(), before);
         doc.begin_opening(Some("opening"));
         let txn = doc.yrs_doc().transact();
@@ -6376,6 +6440,96 @@ mod tests {
                 ["figure", "other", "table"].map(Any::from).to_vec().into()
             )))
         );
+    }
+
+    #[test]
+    fn fresh_seeds_mark_sequence_strings_in_embed_values() {
+        for (label, content, present) in [
+            ("no sequence", fixture::run("Ordinary text"), false),
+            (
+                "field instruction",
+                r#"<w:fldSimple w:instr=" SEQ Figure "><w:r><w:t>1</w:t></w:r></w:fldSimple>"#
+                    .to_owned(),
+                true,
+            ),
+            (
+                "image description",
+                fixture::image("rIdImage", "SEQUENCE"),
+                true,
+            ),
+            (
+                "plain text",
+                format!(
+                    r#"{}<w:hyperlink w:anchor="top">{}</w:hyperlink>"#,
+                    fixture::run("SEQ"),
+                    fixture::run("Link")
+                ),
+                false,
+            ),
+            ("run boundary payload", fixture::run("SEQ"), true),
+        ] {
+            let bytes = fixture::Package::new(&fixture::para("00000001", &content))
+                .rel("rIdImage", "image", "media/image1.png")
+                .bytes();
+            let document = EditingDoc::new(1);
+            crate::seed_from_docx(&document, &bytes).unwrap();
+            let txn = document.yrs_doc().transact();
+            assert_eq!(
+                txn.get_map(crate::identity::SESSION)
+                    .unwrap()
+                    .get(&txn, OPAQUE_SEQUENCES),
+                present.then(|| Out::Any(Any::Array(Vec::new().into()))),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn sequence_marker_reads_final_image_data_urls() {
+        let mut parts = fixture::Package::new(&fixture::para(
+            "00000001",
+            &fixture::image("rIdImage", "Picture"),
+        ))
+        .rel("rIdImage", "image", "media/image1.png")
+        .parts();
+        parts
+            .iter_mut()
+            .find(|(path, _)| path == "word/media/image1.png")
+            .unwrap()
+            .1
+            .extend_from_slice(b"HD\0");
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        let document = EditingDoc::new(1);
+        crate::seed_from_docx(&document, &bytes).unwrap();
+        let txn = document.yrs_doc().transact();
+        assert_eq!(
+            txn.get_map(crate::identity::SESSION)
+                .unwrap()
+                .get(&txn, OPAQUE_SEQUENCES),
+            Some(Out::Any(Any::Array(Vec::new().into())))
+        );
+    }
+
+    #[test]
+    fn sequence_marker_keeps_existing_stories_in_the_walk() {
+        let bytes =
+            fixture::Package::new(&fixture::para("00000001", &fixture::run("Ordinary text")))
+                .bytes();
+        for (style, present) in [("Normal", false), ("SEQUENCE", true)] {
+            let document = EditingDoc::new(1);
+            document
+                .create_story("existing", "", style, "left")
+                .unwrap();
+            crate::seed_from_docx(&document, &bytes).unwrap();
+            let txn = document.yrs_doc().transact();
+            assert_eq!(
+                txn.get_map(crate::identity::SESSION)
+                    .unwrap()
+                    .get(&txn, OPAQUE_SEQUENCES),
+                present.then(|| Out::Any(Any::Array(Vec::new().into()))),
+                "{style}"
+            );
+        }
     }
 
     #[test]

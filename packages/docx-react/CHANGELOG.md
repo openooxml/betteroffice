@@ -1,5 +1,42 @@
 # @betteroffice/docx-react
 
+## 0.4.2
+
+### Patch Changes
+
+- 953cf7d: Double- and triple-click keep their selection when the pointer moves slightly.
+- 3f09227: Plugin page overlays stay mounted while pages build in the background.
+- 08c4763: Paragraphs lay out closer to Word: words across formatting runs, list numbers wider than their indent, `w:start`/`w:end` indents and bordered hanging indents. Picture outlines now paint.
+- 195380d: While a long document lays out, pages that are not final yet show as placeholders instead of partial content.
+- 260ba19: Read-only mode no longer opens header, footer or note editing.
+- 4f10593: Repeated saves after adding a reply comment produce the same markup.
+- ba93cf9: With `experimentalWorkerOpen`, read-only editors serve proposals, overlays, navigation and `search()` from the worker. New ref methods `getParagraphIdentities` and `resolveParagraphAnchors`; synchronous members that need the document throw `DocxReplicaNotReadyError` until it loads.
+- 380dfac: Saving keeps what you didn't edit as it was, including inherited formatting, link targets and rich comments.
+- 3b421e7: With `experimentalWorkerOpen`, layout stays in the worker after a synchronous ref call during load (a one-time warning names it), and a worker that fails after load is replaced; a repeated failure reaches `onError`.
+- 5ff39d2: With `experimentalWorkerOpen`, "Page X of N" shows the saved page count until layout finishes.
+- 864355f: With `experimentalWorkerOpen`, only pages near the viewport are prepared, so memory stays bounded on long documents; `whenLayoutComplete` also waits for the visible pages.
+- 02c5459: With `experimentalWorkerOpen`, typing while an editable document loads is applied once it is ready.
+- a0ea217: With `experimentalWorkerOpen`, the `previewFirstPage` preview runs in the worker and shows only final pages; `onFirstPagePainted` waits for one.
+- bbfdeb2: With `experimentalWorkerOpen`, host proposals appear and decisions apply faster.
+- Updated dependencies [08c4763]
+- Updated dependencies [9c21cb8]
+- Updated dependencies [4e6a9e4]
+- Updated dependencies [195380d]
+- Updated dependencies [4f10593]
+- Updated dependencies [ba93cf9]
+- Updated dependencies [380dfac]
+- Updated dependencies [dcbc90b]
+- Updated dependencies [4b5f430]
+- Updated dependencies [ac0a55f]
+- Updated dependencies [4797db4]
+- Updated dependencies [1037096]
+- Updated dependencies [5ff39d2]
+- Updated dependencies [ed29b59]
+- Updated dependencies [a0ea217]
+- Updated dependencies [bbfdeb2]
+  - @betteroffice/docx@0.4.2
+  - @betteroffice/docx-i18n@0.4.2
+
 ## 0.4.1
 
 ### Patch Changes
