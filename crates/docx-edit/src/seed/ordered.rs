@@ -11,6 +11,7 @@ use serde::ser::{
 use super::{OrderedValue, SOURCE_ORDINAL};
 
 const MAX_DIRECT_DEPTH: u32 = 100;
+const MAX_PREALLOCATED_BYTES: usize = 1024 * 1024;
 
 /// Builds an ordered JSON value, returning `None` when unsupported.
 pub(super) fn ordered_value<T: Serialize + ?Sized>(value: &T) -> Option<OrderedValue> {
@@ -37,6 +38,10 @@ impl serde::ser::Error for Error {
 fn float_value<T: Serialize>(value: T) -> Result<OrderedValue, Error> {
     let token = serde_json::to_string(&value).map_err(|_| Error)?;
     serde_json::from_str(&token).map_err(|_| Error)
+}
+
+fn preallocated<T>(len: usize) -> Vec<T> {
+    Vec::with_capacity(len.min(MAX_PREALLOCATED_BYTES / std::mem::size_of::<T>().max(1)))
 }
 
 fn variant_value(variant: &'static str, value: OrderedValue) -> OrderedValue {
@@ -236,7 +241,10 @@ impl serde::Serializer for ValueSerializer {
         ))
     }
 
-    fn serialize_struct(self, _name: &'static str, len: usize) -> Result<ObjectSerializer, Error> {
+    fn serialize_struct(self, name: &'static str, len: usize) -> Result<ObjectSerializer, Error> {
+        if name.starts_with("$serde_json::private::") {
+            return Err(Error);
+        }
         Ok(ObjectSerializer::new(len, None, self.nested(1)?.depth))
     }
 
@@ -268,7 +276,7 @@ struct ArraySerializer {
 impl ArraySerializer {
     fn new(len: usize, variant: Option<&'static str>, depth: u32) -> Self {
         Self {
-            values: Vec::with_capacity(len),
+            values: preallocated(len),
             variant,
             depth,
         }
@@ -351,7 +359,7 @@ struct ObjectSerializer {
 impl ObjectSerializer {
     fn new(len: usize, variant: Option<&'static str>, depth: u32) -> Self {
         Self {
-            entries: Vec::with_capacity(len),
+            entries: preallocated(len),
             key: None,
             variant,
             depth,
@@ -612,7 +620,7 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
 
     use serde::Serialize;
-    use serde::ser::SerializeMap;
+    use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
     use serde_json::{Map, Value, json};
 
     use super::super::source_ordered_value;
@@ -778,6 +786,48 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["z", "a", "z"]
         );
+    }
+
+    struct PrivateNumber;
+
+    impl Serialize for PrivateNumber {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut number = serializer.serialize_struct("$serde_json::private::Number", 1)?;
+            number.serialize_field("$serde_json::private::Number", "1")?;
+            number.end()
+        }
+    }
+
+    #[test]
+    fn serde_json_private_structs_take_the_round_trip() {
+        assert!(ordered_value(&PrivateNumber).is_none());
+        assert_source_round_trip(&PrivateNumber);
+    }
+
+    struct OversizedHints;
+
+    impl Serialize for OversizedHints {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut sequence = serializer.serialize_seq(Some(usize::MAX))?;
+            sequence.serialize_element(&OversizedMap)?;
+            sequence.end()
+        }
+    }
+
+    struct OversizedMap;
+
+    impl Serialize for OversizedMap {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut map = serializer.serialize_map(Some(usize::MAX))?;
+            map.serialize_entry("a", &1)?;
+            map.end()
+        }
+    }
+
+    #[test]
+    fn length_hints_preallocate_a_bounded_capacity() {
+        assert!(ordered_value(&OversizedHints).is_some());
+        assert_source_round_trip(&OversizedHints);
     }
 
     #[derive(Serialize)]
