@@ -4281,6 +4281,18 @@ impl EditSession {
         .to_string())
     }
 
+    pub fn geometry_position_outline_json(&self, root: &str) -> Result<String, JsValue> {
+        serde_json::to_string(&self.engine.doc().geometry_position_outline(root)).map_err(js_err)
+    }
+
+    pub fn proposal_revision_ranges_json(&self, ids_json: &str) -> Result<String, JsValue> {
+        let ids = match serde_json::from_str::<Vec<String>>(ids_json) {
+            Ok(ids) => ids,
+            Err(_) => return Ok("\"legacy\"".to_owned()),
+        };
+        serde_json::to_string(&self.engine.doc().owned_revision_ranges(&ids)).map_err(js_err)
+    }
+
     /// Every pending tracked change across all stories, in deterministic
     /// story-then-position order:
     /// `[{"revisionId","author","date","kind","story","preview",

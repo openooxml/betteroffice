@@ -175,6 +175,113 @@ test('pages away from the viewport build in batches while the main thread idles'
   }
 });
 
+test('default-mode idle page builds attach immediately without background work', async () => {
+  const { engine, inputs, host } = lazyFixture(100);
+  const overrides = { getInputs: () => inputs };
+  const hook = renderHook(() => useRustDisplayList(
+    inputs.layout as Layout, overrides, undefined, undefined, host
+  ));
+  try {
+    await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    const before = hook.result.current.frame!;
+    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    await act(async () => runIdleCallbacks());
+    const builds = worker.posted.filter((request) => request.type === 'buildPages');
+    expect(builds).toHaveLength(1);
+    expect(builds[0]!.background).toBeUndefined();
+    expect(builds[0]!.pages).toHaveLength(16);
+    expect(hook.result.current.frame!.frameEpoch).toBe(before.frameEpoch + 1);
+    expect(builds[0]!.pages.every(
+      (index) => !hook.result.current.displayList!.pages[index]!.unbuilt
+    )).toBe(true);
+    expect(hook.result.current.error).toBeNull();
+  } finally {
+    hook.unmount();
+    engine.free();
+  }
+});
+
+test.each([
+  ['advances the default-mode frame', false],
+  ['leaves the worker-open frame unchanged', true],
+] as const)('a page-build reply after a keystroke %s', async (_, workerOpen) => {
+  const { engine, inputs, host } = lazyFixture(100);
+  const updateListeners = new Set<(update: Uint8Array) => void>();
+  Object.assign(host, {
+    onUpdate: (listener: (update: Uint8Array) => void) => {
+      updateListeners.add(listener);
+      return () => updateListeners.delete(listener);
+    },
+  });
+  const overrides = { getInputs: () => inputs };
+  const hook = renderHook(() => useRustDisplayList(
+    inputs.layout as Layout, overrides, undefined, undefined, host,
+    undefined, undefined, undefined, workerOpen
+  ));
+  try {
+    await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    const before = hook.result.current.frame!;
+    worker.holdPageBuilds = true;
+    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    await act(async () => runIdleCallbacks());
+    expect(worker.heldPageBuilds).toHaveLength(1);
+    const build = worker.posted.find((request) => request.type === 'buildPages')!;
+    expect(build.background).toBe(workerOpen ? true : undefined);
+    const replyEpoch = JSON.parse(engine.resident_caret_snapshot_json()).frameEpoch as number;
+    expect(replyEpoch).toBeGreaterThan(before.frameEpoch);
+    expect(build.pages.every((index) => before.displayList.pages[index]!.unbuilt)).toBe(true);
+    expect(updateListeners.size).toBeGreaterThan(0);
+    await act(async () => {
+      for (const listener of updateListeners) listener(new Uint8Array());
+      worker.releasePageBuilds();
+    });
+    const adoptedEpoch = workerOpen ? before.frameEpoch : replyEpoch;
+    expect(hook.result.current.frame!.frameEpoch).toBe(adoptedEpoch);
+    expect(build.pages.every(
+      (index) => Boolean(hook.result.current.displayList!.pages[index]!.unbuilt) === workerOpen
+    )).toBe(true);
+    if (workerOpen) expect(hook.result.current.frame).toBe(before);
+    else expect(hook.result.current.queries).toBeNull();
+
+    // Answer sync through the fake's existing frame builder.
+    const postMessage = worker.postMessage.bind(worker);
+    worker.postMessage = (request) => {
+      postMessage(request.type === 'sync' ? { ...request, type: 'buildFrame' } : request);
+      worker.posted[worker.posted.length - 1] = request;
+    };
+    Object.assign(host, { residentWorkerProbe: () => ({ layoutRevision: 2 }) });
+    const requestsBeforeRelayout = worker.posted.length;
+    await act(async () => {
+      inputs.layout = { ...inputs.layout };
+      hook.rerender();
+    });
+    await waitFor(() => {
+      expect(hook.result.current.frame!.frameEpoch).toBeGreaterThan(adoptedEpoch);
+      expect(hook.result.current.queries).not.toBeNull();
+    });
+    expect(worker.posted.slice(requestsBeforeRelayout).find(
+      (request) => 'expectedFrameEpoch' in request
+    )).toMatchObject({ type: 'sync', expectedFrameEpoch: adoptedEpoch });
+
+    const { paraId } = JSON.parse(engine.paragraphs('body'))[0] as { paraId: string };
+    engine.set_selection('body', paraId, 1, paraId, 1);
+    const requestsBeforeInput = worker.posted.length;
+    const typingEpoch = hook.result.current.frame!.frameEpoch;
+    await act(async () => {
+      expect(await hook.result.current.applyInput('Next ')).not.toBeNull();
+    });
+    expect(worker.posted.slice(requestsBeforeInput).filter(
+      (request) => request.type === 'applyInput'
+    )).toEqual([expect.objectContaining({ expectedFrameEpoch: typingEpoch })]);
+    expect(hook.result.current.error).toBeNull();
+  } finally {
+    hook.unmount();
+    engine.free();
+  }
+});
+
 test('background posting waits for idle budget and yields to a pending visible request', async () => {
   const { engine, inputs, host } = lazyFixture(100);
   const overrides = { getInputs: () => inputs };
@@ -237,7 +344,7 @@ test('worker-open idle builds stop after the viewport margin', async () => {
   }
 });
 
-test('a visible request attaches a background reply awaiting idle attachment before building', async () => {
+test('a visible request waits for a default-mode idle reply before building', async () => {
   const { engine, inputs, host } = lazyFixture(100);
   const overrides = { getInputs: () => inputs };
   const hook = renderHook(() => useRustDisplayList(
@@ -247,6 +354,7 @@ test('a visible request attaches a background reply awaiting idle attachment bef
     await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
     const worker = EngineWorker.last!;
     const builds = () => worker.posted.filter((entry) => entry.type === 'buildPages');
+    worker.holdPageBuilds = true;
     await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
     const before = hook.result.current.frame!;
     await act(async () => runIdleCallbacks());
@@ -256,7 +364,13 @@ test('a visible request attaches a background reply awaiting idle attachment bef
     const target = before.pages.find((page) =>
       page.page.unbuilt && !builds()[0]!.pages.includes(page.pageIndex)
     )!.pageIndex;
-    act(() => hook.result.current.setDisplayWindow(target, target + 1));
+    await act(async () => {
+      hook.result.current.setDisplayWindow(target, target + 1);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(builds()).toHaveLength(1);
+    worker.holdPageBuilds = false;
+    await act(async () => worker.releasePageBuilds());
     await waitFor(() => expect(hook.result.current.displayList!.pages[target]!.unbuilt).toBeFalsy());
     expect(builds()).toHaveLength(2);
     expect(builds()[1]!.pages).toEqual([target]);
@@ -270,11 +384,12 @@ test('a visible request attaches a background reply awaiting idle attachment bef
   }
 });
 
-test('a settle wait promotes a background reply awaiting idle attachment', async () => {
+test('a settle wait promotes a worker-open background reply awaiting idle attachment', async () => {
   const { engine, inputs, host } = lazyFixture(100);
   const overrides = { getInputs: () => inputs };
   const hook = renderHook(() => useRustDisplayList(
-    inputs.layout as Layout, overrides, undefined, undefined, host
+    inputs.layout as Layout, overrides, undefined, undefined, host,
+    undefined, undefined, undefined, true
   ));
   try {
     await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
@@ -332,11 +447,12 @@ test('worker-open window settling leaves far pages unbuilt while document settli
   }
 });
 
-test('sliced background frames publish atomically from idle without replacing visible pages', async () => {
+test('worker-open background frames publish atomically from idle without replacing visible pages', async () => {
   const { engine, inputs, host } = lazyFixture(100);
   const overrides = { getInputs: () => inputs };
   const hook = renderHook(() => useRustDisplayList(
-    inputs.layout as Layout, overrides, undefined, undefined, host
+    inputs.layout as Layout, overrides, undefined, undefined, host,
+    undefined, undefined, undefined, true
   ));
   try {
     await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
@@ -354,8 +470,8 @@ test('sliced background frames publish atomically from idle without replacing vi
       await act(async () => runIdleCallbacks());
     }
     const after = hook.result.current.frame!;
-    expect(after.frameEpoch).toBe(before.frameEpoch + 4);
-    expect(after.damagedPageIds.size).toBe(16);
+    expect(after.frameEpoch).toBe(before.frameEpoch + 1);
+    expect(after.damagedPageIds.size).toBe(2);
     for (let index = 0; index < 5; index += 1) {
       expect(after.displayList.pages[index]).toBe(before.displayList.pages[index]);
     }

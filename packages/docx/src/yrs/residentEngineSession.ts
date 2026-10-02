@@ -23,6 +23,7 @@ import type {
 } from './paragraphIdentity';
 import type { ProposalGeometryReader, ProposalGeometryRevision } from './proposalGeometry';
 import type { DocxProposalSession } from './proposals';
+import type { YrsPositionOutline } from './yrsPositionProjection';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
 
@@ -68,6 +69,8 @@ export type ResidentEngineSession = Pick<
   proposalEngine: DocxProposalSession;
   /** @internal */
   geometryReader: ProposalGeometryReader;
+  /** @internal The segments of the story's paragraphs at `indices`, each ending with its pilcrow. */
+  paragraphSegments(story: string, indices: readonly number[]): YrsStorySegment[][];
   /** @internal */
   paragraphIdentities(): DocxParagraphIdentitySnapshot;
   /** The region layout of only as much of the body as fills `pages` pages. */
@@ -104,8 +107,10 @@ export async function createResidentEngineSession(
   const geometryStories = new Map<string, {
     revision: number;
     segments: YrsStorySegment[];
-    spans?: YrsParagraphLength[];
   }>();
+
+  const geometrySpans = new Map<string, { revision: number; spans: YrsParagraphLength[] }>();
+  const geometryOutlines = new Map<string, { version: string; outline: YrsPositionOutline | null }>();
 
   const geometryStory = (story: string) => {
     let cached = geometryStories.get(story);
@@ -187,106 +192,52 @@ export async function createResidentEngineSession(
     paragraphs: (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],
     paragraphIdCount: (story, paraId) => session.paragraph_id_count(story, paraId),
     paragraphSpans: (story) => {
-      const cached = geometryStory(story);
-      if (!cached.spans) {
-        cached.spans = [];
-        let length = 0;
-        for (const segment of cached.segments) {
-          if (segment.kind === 'pilcrow') {
-            cached.spans.push({ paraId: segment.paraId, length });
-            length = 0;
-          } else {
-            length += segment.kind === 'text' ? segment.text.length : 1;
-          }
-        }
+      const cached = geometrySpans.get(story);
+      const changes = JSON.parse(
+        session.stories_changed_since(cached?.revision ?? Number.MAX_SAFE_INTEGER)
+      ) as { revision: number; stories: string[] };
+      if (cached && !changes.stories.includes(story)) {
+        cached.revision = changes.revision;
+        return cached.spans;
       }
-      return cached.spans;
+      const spans = JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[];
+      geometrySpans.set(story, { revision: changes.revision, spans });
+      return spans;
     },
     storySegments: (story) => geometryStory(story).segments,
+    positionOutline: (root) => {
+      if (LONE_SURROGATE.test(root)) return null;
+      const version = session.version();
+      const cached = geometryOutlines.get(root);
+      if (cached?.version === version) return cached.outline;
+      const parsed = JSON.parse(session.geometry_position_outline_json(root)) as
+        YrsPositionOutline | 'legacy';
+      const outline = parsed === 'legacy' ? null : parsed;
+      geometryOutlines.set(root, { version, outline });
+      return outline;
+    },
     locateParagraph: (story, paraId) =>
       JSON.parse(session.locate_paragraph(story, paraId)) as YrsParagraphSpan,
     listRevisions: () => JSON.parse(session.list_revisions()) as YrsRevisionInfo[],
     resolveParagraphAnchor: proposalEngine.resolveParagraphAnchor,
     findText: proposalEngine.findText,
     proposalRevisions: (ids) => {
-      const owned = new Set(ids);
-      const revisions: ProposalGeometryRevision[] = [];
-      const fallback = () =>
-        geometryReader.listRevisions().filter(({ revisionId }) => owned.has(revisionId));
-      for (const story of session.story_ids().sort()) {
-        let offset = 0;
-        const paragraphs = new Set<string>();
-        let changes: Array<{
-          revisionId: string;
-          kind: 'insertion' | 'deletion';
-          start: number;
-          end: number;
-        }> = [];
-        const previous = new Map<string, (typeof changes)[number]>();
-        for (const segment of geometryStory(story).segments) {
-          if (segment.kind === 'pilcrow') {
-            if (hasRevisionProperties(segment.properties) || paragraphs.has(segment.paraId)) {
-              return fallback();
-            }
-            paragraphs.add(segment.paraId);
-            for (const change of changes.sort((a, b) => a.start - b.start)) {
-              revisions.push({
-                revisionId: change.revisionId,
-                kind: change.kind,
-                story,
-                range: {
-                  story,
-                  start: { paraId: segment.paraId, offset: change.start },
-                  end: { paraId: segment.paraId, offset: change.end },
-                },
-              });
-            }
-            offset = 0;
-            changes = [];
-            previous.clear();
-            continue;
-          }
-          if (segment.kind === 'embed' && hasRevisionProperties(segment.payload)) {
-            return fallback();
-          }
-          const length = segment.kind === 'text' ? segment.text.length : 1;
-          for (const [key, kind] of [['ins', 'insertion'], ['del', 'deletion']] as const) {
-            const value = segment.attributes[key];
-            if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
-            const attributes = value as Record<string, unknown>;
-            const info = attributes.info;
-            const stamp = info && typeof info === 'object' && !Array.isArray(info)
-              ? info as Record<string, unknown>
-              : attributes;
-            const id = 'id' in stamp ? stamp.id : stamp.revisionId;
-            if (typeof id !== 'string' && !(typeof id === 'number' && Number.isFinite(id))) {
-              continue;
-            }
-            const revisionId = String(id);
-            if (!owned.has(revisionId)) {
-              previous.delete(kind);
-              continue;
-            }
-            const last = previous.get(kind);
-            if (last?.revisionId === revisionId && last.end === offset) {
-              last.end += length;
-            } else {
-              const change = { revisionId, kind, start: offset, end: offset + length };
-              changes.push(change);
-              previous.set(kind, change);
-            }
-          }
-          offset += length;
-        }
-        if (changes.length > 0) return fallback();
+      const result = JSON.parse(session.proposal_revision_ranges_json(JSON.stringify(ids))) as
+        ProposalGeometryRevision[] | 'fallback' | 'legacy';
+      if (Array.isArray(result)) return result;
+      if (result === 'fallback') {
+        const owned = new Set(ids);
+        return geometryReader.listRevisions().filter(({ revisionId }) => owned.has(revisionId));
       }
-      return revisions;
+      return readLegacyProposalRevisions(geometryReader, ids);
     },
   };
 
   return {
     proposalEngine,
     geometryReader,
+    paragraphSegments: (story, indices) =>
+      JSON.parse(session.story_segment_units(story, Uint32Array.from(indices))) as YrsStorySegment[][],
     searchText: (query, options = {}) => {
       if (!query) return [];
       const limit = options.limit ?? Number.POSITIVE_INFINITY;
@@ -423,6 +374,84 @@ export async function createResidentEngineSession(
       session.free();
     },
   };
+}
+
+export function readLegacyProposalRevisions(
+  reader: ProposalGeometryReader,
+  ids: readonly string[]
+): ProposalGeometryRevision[] {
+  const owned = new Set(ids);
+  const revisions: ProposalGeometryRevision[] = [];
+  const fallback = () =>
+    reader.listRevisions().filter(({ revisionId }) => owned.has(revisionId));
+  for (const story of reader.storyIds().sort()) {
+    let offset = 0;
+    const paragraphs = new Set<string>();
+    let changes: Array<{
+      revisionId: string;
+      kind: 'insertion' | 'deletion';
+      start: number;
+      end: number;
+    }> = [];
+    const previous = new Map<string, (typeof changes)[number]>();
+    for (const segment of reader.storySegments(story)) {
+      if (segment.kind === 'pilcrow') {
+        if (hasRevisionProperties(segment.properties) || paragraphs.has(segment.paraId)) {
+          return fallback();
+        }
+        paragraphs.add(segment.paraId);
+        for (const change of changes.sort((a, b) => a.start - b.start)) {
+          revisions.push({
+            revisionId: change.revisionId,
+            kind: change.kind,
+            story,
+            range: {
+              story,
+              start: { paraId: segment.paraId, offset: change.start },
+              end: { paraId: segment.paraId, offset: change.end },
+            },
+          });
+        }
+        offset = 0;
+        changes = [];
+        previous.clear();
+        continue;
+      }
+      if (segment.kind === 'embed' && hasRevisionProperties(segment.payload)) {
+        return fallback();
+      }
+      const length = segment.kind === 'text' ? segment.text.length : 1;
+      for (const [key, kind] of [['ins', 'insertion'], ['del', 'deletion']] as const) {
+        const value = segment.attributes[key];
+        if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+        const attributes = value as Record<string, unknown>;
+        const info = attributes.info;
+        const stamp = info && typeof info === 'object' && !Array.isArray(info)
+          ? info as Record<string, unknown>
+          : attributes;
+        const id = 'id' in stamp ? stamp.id : stamp.revisionId;
+        if (typeof id !== 'string' && !(typeof id === 'number' && Number.isFinite(id))) {
+          continue;
+        }
+        const revisionId = String(id);
+        if (!owned.has(revisionId)) {
+          previous.delete(kind);
+          continue;
+        }
+        const last = previous.get(kind);
+        if (last?.revisionId === revisionId && last.end === offset) {
+          last.end += length;
+        } else {
+          const change = { revisionId, kind, start: offset, end: offset + length };
+          changes.push(change);
+          previous.set(kind, change);
+        }
+      }
+      offset += length;
+    }
+    if (changes.length > 0) return fallback();
+  }
+  return revisions;
 }
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
