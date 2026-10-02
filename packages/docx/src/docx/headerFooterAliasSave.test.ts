@@ -385,12 +385,13 @@ describe('header/footer aliases', () => {
     session.insertText({ story: 'hf:rId9', paraId: alias.paraId, offset: 6 }, ' legacy');
     for (const storyIds of [undefined, new Set(['hf:rId9'])]) {
       const projected = yrsToDocument(session, document, { storyIds });
-      expect(headerText(projected, 'rId7')).toBe('Shared');
       expect(headerText(projected, 'rId9')).toBe('Shared legacy');
       expect(projected.package.headers!.get('rId7')!.content)
         .not.toBe(projected.package.headers!.get('rId9')!.content);
       if (storyIds) {
         expect(projected.package.headers!.get('rId7')).toBe(document.package.headers!.get('rId7'));
+      } else {
+        expect(headerText(projected, 'rId7')).toBe('Shared');
       }
     }
   });
