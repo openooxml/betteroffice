@@ -2927,6 +2927,21 @@ test('a worker that fails while idle after load is replaced once and keeps paint
     if (!read.ok) throw new Error(read.failure.message);
     expect(read.paragraphs).toHaveLength(205);
     expect(posted.filter((request) => request.type === 'open')).toHaveLength(2);
+    const api = result.current.ref.current!;
+    const paragraph = (await api.getParagraphIdentities()).paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    const proposals = await api.getProposals();
+    await act(async () => {
+      expect(await api.proposeChanges({
+        expectVersion: proposals.version,
+        proposals: [{
+          id: 'after-recovery', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Recovered ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
     expect(result.current.mainOpens).toEqual([]);
     expect(result.current.renderer.error).toBeNull();
     expect(result.current.errors).toEqual([]);
@@ -2959,7 +2974,7 @@ test('a replacement worker that fails while idle too fails the document once', a
     expect(errorLog.mock.calls.filter(([, error]) => error === failure)).toEqual([
       ['[CanvasRenderer] Resident engine worker failed again', failure],
     ]);
-    expect(result.current.errors.filter((error) => error !== failure)).toEqual([]);
+    expect(result.current.errors).toEqual([failure]);
     expect(result.current.mainOpens).toEqual([]);
   } finally {
     unmount();
@@ -3002,7 +3017,7 @@ test('a worker holding committed proposals that fails while idle fails the docum
     expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
     expect(result.current.mainOpens).toEqual([]);
-    expect(result.current.errors.filter((error) => error !== failure)).toEqual([]);
+    expect(result.current.errors).toEqual([failure]);
     expect(errorLog.mock.calls.filter(([, error]) => error === failure)).toEqual([
       ['[CanvasRenderer] Resident engine worker holding proposals failed', failure],
     ]);

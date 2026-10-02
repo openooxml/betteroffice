@@ -1034,7 +1034,9 @@ export function useRustDisplayList(
     setTimeout(() => {
       const owner = workerRef.current;
       if (unmountedRef.current || owner?.client !== client || workerFailureRef.current.has(owner.engine)) return;
-      if (replaceOutOfMemoryWorker(owner.engine, owner, failure) === 'retry') requestLayoutRef.current?.();
+      if (replaceOutOfMemoryWorker(owner.engine, owner, failure) !== 'retry') return;
+      registeredWorkerProposalAuthority(owner.engine)?.restart();
+      requestLayoutRef.current?.();
     }, 0);
   };
 
