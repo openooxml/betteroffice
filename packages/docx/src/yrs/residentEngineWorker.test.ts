@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
@@ -18,12 +18,14 @@ import type {
   YrsResidentCaretRect,
   YrsResidentWorkerSnapshot,
 } from './index';
-import type {
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerRequestWithoutId,
-  ResidentEngineWorkerResponse,
-  ResidentDocumentRead,
-  ResidentProposalOperation,
+import {
+  RESIDENT_HOST_MODULE_WAIT_MS,
+  type ResidentEngineWorkerHostModule,
+  type ResidentEngineWorkerRequest,
+  type ResidentEngineWorkerRequestWithoutId,
+  type ResidentEngineWorkerResponse,
+  type ResidentDocumentRead,
+  type ResidentProposalOperation,
 } from './residentEngineWorkerProtocol';
 
 let startWorker: (scope: unknown, canvas: unknown, harness: unknown) => void;
@@ -38,7 +40,10 @@ beforeAll(async () => {
         (testHarness.heapLimits ??= []).push(heapLimitBytes);
         return testHarness.session;
       };`,
-    './wasm/index': 'export const preloadEditWasm = () => testHarness.preload();',
+    './wasm/index': `
+      export const preloadEditWasm = () => testHarness.preload();
+      export const preloadEditWasmFrom = (source) => testHarness.preloadFrom(source);
+    `,
     '../layout/render/glyphCache':
       'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; } }',
     '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.memories;',
@@ -95,7 +100,8 @@ function worker() {
   const answered: number[] = [];
   const surfaces = new Map<string, Surface>();
   const scope = {
-    onmessage: (_event: { data: ResidentEngineWorkerRequest }) => {},
+    onmessage: (_event: { data: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule }) => {},
+    onmessageerror: null as (() => void) | null,
     postMessage(reply: ResidentEngineWorkerResponse) {
       answered.push(reply.id);
       replies.get(reply.id)?.(reply);
@@ -108,7 +114,12 @@ function worker() {
     wasmReady: false,
     failWarm: null as Error | null,
     preloadBlock: null as Promise<void> | null,
-    async preload(): Promise<void> {
+    preloadInputs: [] as (WebAssembly.Module | undefined)[],
+    async preloadFrom(source: Promise<WebAssembly.Module | null>): Promise<void> {
+      await harness.preload((await source) ?? undefined);
+    },
+    async preload(input?: WebAssembly.Module): Promise<void> {
+      harness.preloadInputs.push(input);
       await harness.preloadBlock;
       if (harness.failWarm) {
         const error = harness.failWarm;
@@ -288,6 +299,7 @@ function worker() {
     };
   }
   return {
+    scope,
     harness,
     surfaces,
     answered,
@@ -374,29 +386,35 @@ function deferred() {
   return { promise, resolve };
 }
 
-test('a background page batch yields between slices and returns their ordered frames once', async () => {
-  const w = worker();
-  await w.bootstrap(9);
-  const calls: number[][] = [];
-  Object.assign(w.harness.session, {
-    buildDisplayPagesFrame(pages: number[]) {
-      calls.push(pages);
-      const bytes = w.harness.session.applyInput();
-      w.harness.delta = { ...w.harness.delta!, pageCount: 9 };
-      return bytes;
-    },
-  });
-  const response = await w.send({
-    type: 'buildPages', pages: Array.from({ length: 9 }, (_, index) => index),
-    expectedFrameEpoch: 1, paintCaret: false, background: true,
-  });
-  expect(response.ok).toBe(true);
-  expect(calls).toEqual([[0, 1, 2, 3], [4, 5, 6, 7], [8]]);
-  if (!response.ok) throw new Error(response.error);
-  expect(response.pageFrames?.map((frame) => new Uint8Array(frame)[0])).toEqual([2, 3, 4]);
-  expect(response.caret?.frameEpoch).toBe(4);
-  expect(w.answered).toEqual([1, 2]);
-});
+test.each([false, true])(
+  'a background page batch yields and returns ordered frames once with editModule=%s',
+  async (hostModule) => {
+    const w = worker();
+    await w.bootstrap(9);
+    const calls: number[][] = [];
+    Object.assign(w.harness.session, {
+      buildDisplayPagesFrame(pages: number[]) {
+        calls.push(pages);
+        const bytes = w.harness.session.applyInput();
+        w.harness.delta = { ...w.harness.delta!, pageCount: 9 };
+        if (hostModule && calls.length === 1) {
+          w.scope.onmessage({ data: { type: 'editModule', module: null } });
+        }
+        return bytes;
+      },
+    });
+    const response = await w.send({
+      type: 'buildPages', pages: Array.from({ length: 9 }, (_, index) => index),
+      expectedFrameEpoch: 1, paintCaret: false, background: true,
+    });
+    expect(response.ok).toBe(true);
+    expect(calls).toEqual([[0, 1, 2, 3], [4, 5, 6, 7], [8]]);
+    if (!response.ok) throw new Error(response.error);
+    expect(response.pageFrames?.map((frame) => new Uint8Array(frame)[0])).toEqual([2, 3, 4]);
+    expect(response.caret?.frameEpoch).toBe(4);
+    expect(w.answered).toEqual([1, 2]);
+  }
+);
 
 test('a visible page request supersedes the remaining background slices', async () => {
   const w = worker();
@@ -571,11 +589,184 @@ describe('resident display page release', () => {
 });
 
 describe('resident worker warmup', () => {
+  const timers = new Map<number, { callback: () => void; ms: number }>();
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  let nextTimer = 1;
+
+  beforeEach(() => {
+    timers.clear();
+    globalThis.setTimeout = ((callback: () => void, ms: number) => {
+      const id = nextTimer++;
+      timers.set(id, { callback, ms });
+      return id;
+    }) as unknown as typeof setTimeout;
+    globalThis.clearTimeout = ((id: number) => {
+      timers.delete(id);
+    }) as unknown as typeof clearTimeout;
+  });
+
+  afterEach(() => {
+    globalThis.setTimeout = realSetTimeout;
+    globalThis.clearTimeout = realClearTimeout;
+  });
+
+  function advanceTimers(ms: number): void {
+    for (const [id, timer] of [...timers]) {
+      timer.ms -= ms;
+      if (timer.ms > 0) continue;
+      timers.delete(id);
+      timer.callback();
+    }
+  }
+
+  function armedBudgets(): number[] {
+    return [...timers.values()].map((timer) => timer.ms);
+  }
+
+  test('waits for the host module outside the request queue and does not answer it', async () => {
+    const w = worker();
+    const module = new WebAssembly.Module(
+      new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+    );
+    const warm = w.send({ type: 'warm', hostModule: true });
+    const bootstrap = w.bootstrap();
+    await Promise.resolve();
+    expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
+    advanceTimers(RESIDENT_HOST_MODULE_WAIT_MS - 1);
+    await Promise.resolve();
+    expect(w.harness.preloadInputs).toEqual([]);
+    expect(w.harness.initializations).toBe(0);
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect(w.answered).toEqual([]);
+    w.scope.onmessage({ data: { type: 'editModule', module } });
+    expect((await warm).ok).toBe(true);
+    expect((await bootstrap).ok).toBe(true);
+    expect(w.harness.preloadInputs).toEqual([module, undefined]);
+    expect(w.harness.initializations).toBe(1);
+    expect(w.answered).toEqual([1, 2]);
+    expect(armedBudgets()).toEqual([]);
+    advanceTimers(1);
+    w.scope.onmessage({ data: { type: 'editModule', module: null } });
+    expect((await w.send({ type: 'warm', hostModule: true })).ok).toBe(true);
+    expect(w.harness.preloadInputs).toEqual([module, undefined, module]);
+    expect(w.answered).toEqual([1, 2, 3]);
+  });
+
+  test('waits for a fresh host module after a failed warm', async () => {
+    const w = worker();
+    const bytes = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    const moduleA = new WebAssembly.Module(bytes);
+    const moduleB = new WebAssembly.Module(bytes);
+    w.harness.failWarm = new Error('init failed');
+    const warm = w.send({ type: 'warm', hostModule: true });
+    await Promise.resolve();
+    expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
+    const firstTimers = [...timers.keys()];
+    w.scope.onmessage({ data: { type: 'editModule', module: moduleA } });
+    const failed = await warm;
+    expect(failed).toMatchObject({ id: 1, ok: false, error: 'init failed' });
+    expect(failed).not.toHaveProperty('terminal');
+    expect(w.harness.preloadInputs).toEqual([moduleA]);
+    expect(w.harness.initializations).toBe(0);
+    expect(w.answered).toEqual([1]);
+    expect(armedBudgets()).toEqual([]);
+
+    const retry = w.send({ type: 'warm', hostModule: true });
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
+    expect([...timers.keys()]).not.toEqual(firstTimers);
+    advanceTimers(RESIDENT_HOST_MODULE_WAIT_MS - 1);
+    await Promise.resolve();
+    expect(w.harness.preloadInputs).toEqual([moduleA]);
+    expect(w.harness.initializations).toBe(0);
+    expect(w.answered).toEqual([1]);
+
+    w.scope.onmessage({ data: { type: 'editModule', module: moduleB } });
+    expect(await retry).toMatchObject({ id: 2, ok: true });
+    expect(w.harness.preloadInputs).toEqual([moduleA, moduleB]);
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect(w.answered).toEqual([1, 2]);
+    expect(armedBudgets()).toEqual([]);
+  });
+
+  test('falls back to the asset preload when the host sends null', async () => {
+    const w = worker();
+    const warm = w.send({ type: 'warm', hostModule: true });
+    await Promise.resolve();
+    expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
+    w.scope.onmessage({ data: { type: 'editModule', module: null } });
+    expect((await warm).ok).toBe(true);
+    expect(w.harness.preloadInputs).toEqual([undefined]);
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect(w.answered).toEqual([1]);
+    expect(armedBudgets()).toEqual([]);
+  });
+
+  test('falls back at once when the host sends a value that is not a module', async () => {
+    const w = worker();
+    const warm = w.send({ type: 'warm', hostModule: true });
+    await Promise.resolve();
+    expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
+    expect(w.harness.preloadInputs).toEqual([]);
+    expect(w.answered).toEqual([]);
+    w.scope.onmessage({ data: { type: 'editModule', module: {} as WebAssembly.Module } });
+    expect((await warm).ok).toBe(true);
+    expect(w.harness.preloadInputs).toEqual([undefined]);
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect(w.answered).toEqual([1]);
+    expect(armedBudgets()).toEqual([]);
+  });
+
+  test('falls back at once when the host module message cannot be received', async () => {
+    const w = worker();
+    const warm = w.send({ type: 'warm', hostModule: true });
+    await Promise.resolve();
+    expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
+    w.scope.onmessageerror?.();
+    expect((await warm).ok).toBe(true);
+    expect(w.harness.preloadInputs).toEqual([undefined]);
+    expect(w.answered).toEqual([1]);
+    expect(armedBudgets()).toEqual([]);
+  });
+
+  test('falls back after the host module wait expires and ignores late modules', async () => {
+    const w = worker();
+    const module = new WebAssembly.Module(
+      new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+    );
+    const warm = w.send({ type: 'warm', hostModule: true });
+    await Promise.resolve();
+    expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
+    advanceTimers(RESIDENT_HOST_MODULE_WAIT_MS - 1);
+    await Promise.resolve();
+    expect(w.harness.preloadInputs).toEqual([]);
+    expect(w.harness.initializations).toBe(0);
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect(w.answered).toEqual([]);
+    advanceTimers(1);
+    w.scope.onmessage({ data: { type: 'editModule', module } });
+    expect((await warm).ok).toBe(true);
+    expect(w.harness.preloadInputs).toEqual([undefined]);
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect(w.answered).toEqual([1]);
+    expect(armedBudgets()).toEqual([]);
+    w.scope.onmessage({ data: { type: 'editModule', module } });
+    expect((await w.send({ type: 'warm', hostModule: true })).ok).toBe(true);
+    expect(w.harness.preloadInputs).toEqual([undefined, undefined]);
+    expect(w.answered).toEqual([1, 2]);
+  });
+
   test('initializes wasm without creating a session, then bootstraps a frame', async () => {
     const w = worker();
     expect(await w.send({ type: 'warm' })).toMatchObject({ ok: true });
     expect(w.harness.initializations).toBe(1);
     expect(w.harness.sessionsCreated).toBe(0);
+    expect(w.harness.preloadInputs).toEqual([undefined]);
     expect(await w.build([])).toMatchObject({
       ok: false,
       error: 'Resident engine worker is not initialized',
@@ -1165,6 +1356,216 @@ describe('resident worker layout ownership', () => {
     expect(afterEdit.ok && afterEdit.frame).toBeUndefined();
     expect(afterEdit.ok && afterEdit.layoutJson).toBeUndefined();
     expect(extras).toHaveLength(framesBefore);
+  });
+});
+
+describe('resident worker whole-document provisional pages', () => {
+  const snapshot: YrsResidentWorkerSnapshot = {
+    clientId: 1,
+    state: new Uint8Array(),
+    fontsRevision: 0,
+    fonts: [],
+    renderInputs: [],
+    measureInputs: [],
+    layoutInput: '{}',
+    layoutWithRegions: true,
+    layoutRevision: 1,
+    selection: null,
+  };
+  const provisional = JSON.stringify({ layout: { pages: [0, 1, 2, 3, 4, 5] }, provisional: true });
+  const full = JSON.stringify({ layout: { pages: [0, 1, 2, 3, 4, 5, 6] } });
+
+  function provisionalWorker(prefixComplete = false) {
+    const w = worker();
+    let epoch = 0;
+    const built: number[][] = [];
+    const calls: string[] = [];
+    const frameWindows: Array<[number, number] | undefined> = [];
+    const frame = (isFull: boolean) => {
+      epoch += 1;
+      w.harness.delta = {
+        protocolVersion: 1,
+        full: isFull,
+        frameEpoch: epoch,
+        baseFrameEpoch: isFull ? 0 : epoch - 1,
+        docEpoch: epoch,
+        layoutEpoch: epoch,
+        pageCount: 0,
+        operations: [],
+        bytes: new Uint8Array(),
+      };
+      return new Uint8Array([0]);
+    };
+    Object.assign(w.harness.session, {
+      layoutDocumentWithRegionsPrefixRetainedJson: (_input: string, pages: number) => {
+        calls.push(`prefix:${pages}`);
+        return prefixComplete ? full : provisional;
+      },
+      layoutDocumentWithRegionsRetainedJson: () => {
+        calls.push('full');
+        return full;
+      },
+      beginRegionLayout: () => ({ measuredBlocks: 0, bodyBlocks: 10 }),
+      resumeRegionLayout: () => ({ measuredBlocks: 10, bodyBlocks: 10, layoutJson: full }),
+      residentCaretSnapshot: () => ({ frameEpoch: epoch, caretRect: null }),
+      buildDisplayListFrame: () => {
+        frameWindows.push(w.harness.displayWindows.at(-1));
+        return frame(true);
+      },
+      buildDisplayPagesFrame: (pages: number[]) => {
+        built.push(pages);
+        return frame(false);
+      },
+      applyInput: () => {
+        calls.push('input');
+        frameWindows.push(w.harness.displayWindows.at(-1));
+        return frame(true);
+      },
+    });
+    return { w, built, calls, frameWindows, epoch: () => epoch };
+  }
+
+  test('bootstrap builds only exact prefix pages and restores the window on completion', async () => {
+    const { w, built, calls, frameWindows, epoch } = provisionalWorker();
+    const bootstrap = await w.send({
+      type: 'bootstrap', snapshot, provisionalPages: 3, displayWindow: [0, 6],
+      retainBuiltPages: true, extras: '', layoutExtras: '{}', expectedFrameEpoch: 0,
+    });
+    expect(bootstrap.ok && bootstrap.layoutProvisional).toBe(true);
+    expect(frameWindows).toEqual([[0, 3]]);
+    expect(w.harness.retainBuiltPages.at(-1)).toBe(false);
+    for (const background of [false, true]) {
+      const reply = await w.send({
+        type: 'buildPages', pages: [2, 3, 4, 5], background,
+        expectedFrameEpoch: epoch(), paintCaret: false,
+      });
+      expect(reply.ok).toBe(true);
+    }
+    expect(built).toEqual([[2], [2]]);
+    const completed = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: epoch(), paintCaret: false,
+    });
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(frameWindows).toEqual([[0, 3], [0, 6]]);
+    expect(w.harness.retainBuiltPages.at(-1)).toBe(true);
+    await w.send({ type: 'buildPages', pages: [4], expectedFrameEpoch: epoch(), paintCaret: false });
+    expect(built.at(-1)).toEqual([4]);
+    expect(calls).toEqual(['prefix:3', 'full']);
+  });
+
+  test('worker-authoritative sync limits the prefix until sliced completion', async () => {
+    const { w, built, calls, frameWindows, epoch } = provisionalWorker();
+    await w.bootstrap();
+    const synced = await w.send({
+      type: 'sync', snapshot: { ...snapshot, workerAuthoritative: true },
+      provisionalPages: 3, displayWindow: [0, 6], retainBuiltPages: true,
+      extras: '', layoutExtras: '{}', expectedFrameEpoch: epoch(), paintCaret: false,
+    });
+    expect(synced.ok && synced.layoutProvisional).toBe(true);
+    expect(frameWindows.at(-1)).toEqual([0, 3]);
+    expect(w.harness.retainBuiltPages.at(-1)).toBe(false);
+    await w.send({
+      type: 'buildPages', pages: [2, 3, 4, 5], expectedFrameEpoch: epoch(), paintCaret: false,
+    });
+    expect(built).toEqual([[2]]);
+    const completed = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: epoch(), paintCaret: false, sliceBlocks: 8,
+    });
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(frameWindows.at(-1)).toEqual([0, 6]);
+    expect(w.harness.retainBuiltPages.at(-1)).toBe(true);
+    await w.send({ type: 'buildPages', pages: [4], expectedFrameEpoch: epoch(), paintCaret: false });
+    expect(built.at(-1)).toEqual([4]);
+    expect(calls).toEqual(['prefix:3']);
+  });
+
+  test('a complete whole-document prefix is not clamped', async () => {
+    const { w, built, frameWindows, epoch } = provisionalWorker(true);
+    const bootstrap = await w.send({
+      type: 'bootstrap', snapshot, provisionalPages: 3, displayWindow: [0, 6],
+      retainBuiltPages: true, extras: '', layoutExtras: '{}', expectedFrameEpoch: 0,
+    });
+    expect(bootstrap.ok && bootstrap.layoutProvisional).toBeUndefined();
+    expect(frameWindows).toEqual([[0, 6]]);
+    expect(w.harness.retainBuiltPages.at(-1)).toBe(true);
+    await w.send({
+      type: 'buildPages', pages: [2, 3, 4, 5], expectedFrameEpoch: epoch(), paintCaret: false,
+    });
+    expect(built).toEqual([[2, 3, 4, 5]]);
+  });
+
+  test('background slices build only the requested pages below the provisional limit', async () => {
+    const { w, built, epoch } = provisionalWorker();
+    await w.send({
+      type: 'bootstrap', snapshot, provisionalPages: 6, displayWindow: [0, 10],
+      extras: '', expectedFrameEpoch: 0,
+    });
+    const reply = await w.send({
+      type: 'buildPages', pages: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], background: true,
+      expectedFrameEpoch: epoch(), paintCaret: false,
+    });
+    expect(reply.ok).toBe(true);
+    expect(built).toEqual([[0, 1, 2, 3], [4, 5]]);
+  });
+
+  test('worker-authoritative buildFrame keeps the limit and preserves an omitted window', async () => {
+    const { w, built, calls, frameWindows, epoch } = provisionalWorker();
+    await w.send({
+      type: 'bootstrap', snapshot: { ...snapshot, workerAuthoritative: true },
+      provisionalPages: 3, displayWindow: [0, 6], extras: '', expectedFrameEpoch: 0,
+    });
+    await w.send({
+      type: 'buildFrame', displayWindow: [1, 6], retainBuiltPages: true,
+      extras: '', expectedFrameEpoch: epoch(), paintCaret: false,
+    });
+    expect(frameWindows.at(-1)).toEqual([1, 3]);
+    expect(w.harness.retainBuiltPages.at(-1)).toBe(false);
+    await w.send({ type: 'buildFrame', extras: '', expectedFrameEpoch: epoch(), paintCaret: false });
+    expect(frameWindows.at(-1)).toEqual([1, 3]);
+    expect(w.harness.windowedIncrementalBuilds.at(-1)).toBe(false);
+    expect(calls).toEqual(['prefix:3']);
+    await w.send({
+      type: 'completeLayout', expectedFrameEpoch: epoch(), paintCaret: false,
+    });
+    expect(frameWindows.at(-1)).toEqual([1, 6]);
+    await w.send({ type: 'buildPages', pages: [4], expectedFrameEpoch: epoch(), paintCaret: false });
+    expect(built.at(-1)).toEqual([4]);
+  });
+
+  test('sync and bootstrap replace the provisional limit with a complete layout', async () => {
+    const { w, built, frameWindows, epoch } = provisionalWorker();
+    for (const type of ['sync', 'bootstrap'] as const) {
+      await w.send({
+        type: 'bootstrap', snapshot, provisionalPages: 3, displayWindow: [0, 6],
+        extras: '', expectedFrameEpoch: 0,
+      });
+      const reply = await w.send({
+        type, snapshot, displayWindow: [0, 6], extras: '',
+        expectedFrameEpoch: epoch(), paintCaret: false,
+      });
+      expect(reply.ok).toBe(true);
+      expect(frameWindows.at(-1)).toEqual([0, 6]);
+      await w.send({ type: 'buildPages', pages: [4], expectedFrameEpoch: epoch(), paintCaret: false });
+      expect(built.at(-1)).toEqual([4]);
+    }
+  });
+
+  test('input completes the layout and lifts the limit before building its frame', async () => {
+    const { w, built, calls, frameWindows, epoch } = provisionalWorker();
+    await w.send({
+      type: 'bootstrap', snapshot: { ...snapshot, workerAuthoritative: true },
+      provisionalPages: 3, displayWindow: [0, 6], extras: '', expectedFrameEpoch: 0,
+    });
+    const loc = { story: 'header1', paraId: '1', offset: 0 };
+    const reply = await w.send({
+      type: 'applyInput', text: 'x', selection: { anchor: loc, head: loc },
+      expectedFrameEpoch: epoch(), profile: false, paintCaret: false,
+    });
+    expect(reply.ok).toBe(true);
+    expect(calls).toEqual(['prefix:3', 'full', 'input']);
+    expect(frameWindows.at(-1)).toEqual([0, 6]);
+    await w.send({ type: 'buildPages', pages: [4], expectedFrameEpoch: epoch(), paintCaret: false });
+    expect(built.at(-1)).toEqual([4]);
   });
 });
 

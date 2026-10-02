@@ -33,6 +33,7 @@ const state = createWasmModuleState({
   assetUrl: () => new URL('./generated/edit/docx_edit_bg.wasm', import.meta.url),
   initAsync: wasmInit,
   initSync,
+  shareModule: true,
   heap: () =>
     wasm_heap_counted()
       ? {
@@ -46,6 +47,16 @@ const state = createWasmModuleState({
 /** Load + instantiate the editing-core wasm (browser path). Idempotent. */
 export function preloadEditWasm(input?: WasmAsyncInput): Promise<void> {
   return state.preload(input);
+}
+
+/** @internal */
+export function editWasmModule(): Promise<WebAssembly.Module | null> {
+  return state.sharedModule();
+}
+
+/** @internal */
+export function preloadEditWasmFrom(source: Promise<WebAssembly.Module | null>): Promise<void> {
+  return state.preloadFrom(source);
 }
 
 /**

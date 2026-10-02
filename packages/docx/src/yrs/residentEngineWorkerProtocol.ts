@@ -61,8 +61,17 @@ export interface ResidentDocumentReadValues {
   stickyAnchors: Array<YrsStickyPosition | null>;
 }
 
+/** How long a warm waits for the host's compiled module before loading the engine itself. */
+export const RESIDENT_HOST_MODULE_WAIT_MS = 10_000;
+
+/** @internal */
+export type ResidentEngineWorkerHostModule = {
+  type: 'editModule';
+  module: WebAssembly.Module | null;
+};
+
 export type ResidentEngineWorkerRequest =
-  | { id: number; type: 'warm' }
+  | { id: number; type: 'warm'; hostModule?: true }
   | {
       id: number;
       type: 'bootstrap';

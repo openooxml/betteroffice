@@ -1,11 +1,13 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { StrictMode } from 'react';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import * as yrs from '@betteroffice/docx/yrs';
+import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import type {
+  ResidentEngineWorkerHostModule,
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
@@ -17,19 +19,32 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, render, renderHook, waitFor } = await import('@testing-library/react');
 const originalWorker = globalThis.Worker;
+const editModule = new WebAssembly.Module(
+  new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+);
+let compileModule: ReturnType<typeof spyOn<typeof wasm, 'editWasmModule'>>;
+
+beforeEach(() => {
+  compileModule = spyOn(wasm, 'editWasmModule').mockResolvedValue(editModule);
+});
 
 class FakeWorker {
   static instances: FakeWorker[] = [];
   onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror = null;
-  posted: ResidentEngineWorkerRequest[] = [];
+  posted: (ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule)[] = [];
   terminated = false;
   constructor() {
     FakeWorker.instances.push(this);
   }
-  postMessage(request: ResidentEngineWorkerRequest): void {
+  postMessage(request: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule): void {
     this.posted.push(request);
+  }
+  requestAt(index: number): ResidentEngineWorkerRequest {
+    const message = this.posted.at(index)!;
+    if (!('id' in message)) throw new Error('Expected a worker request');
+    return message;
   }
   reply(response: ResidentEngineWorkerResponse): void {
     this.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
@@ -62,6 +77,7 @@ beforeAll(async () => {
 afterEach(() => {
   cleanup();
   yrs.takePreloadedResidentEngineWorker()?.destroy();
+  compileModule.mockRestore();
   globalThis.Worker = originalWorker;
   FakeWorker.instances = [];
 });
@@ -94,8 +110,12 @@ test('an opted-in editor warms on mount once in StrictMode and releases an unuse
   const worker = FakeWorker.instances[0];
   expect(worker.posted.map((request) => request.type)).toEqual(['warm']);
   await act(async () => {
-    worker.reply({ id: worker.posted[0].id, ok: true });
+    worker.reply({ id: worker.requestAt(0).id, ok: true });
   });
+  expect(worker.posted).toEqual([
+    { id: 1, type: 'warm', hostModule: true },
+    { type: 'editModule', module: editModule },
+  ]);
   expect(worker.terminated).toBe(false);
   editor.unmount();
   await waitFor(() => expect(worker.terminated).toBe(true));
@@ -124,7 +144,7 @@ test('byte arrival retries warm in parallel with the main-thread open', async ()
   try {
     const worker = FakeWorker.instances[0];
     await act(async () => {
-      worker.reply({ id: worker.posted[0].id, ok: false, error: 'init failed' });
+      worker.reply({ id: worker.requestAt(0).id, ok: false, error: 'init failed' });
     });
     expect(worker.terminated).toBe(false);
     hook.rerender({
@@ -133,15 +153,22 @@ test('byte arrival retries warm in parallel with the main-thread open', async ()
       ),
     });
     expect(FakeWorker.instances).toHaveLength(1);
-    expect(worker.posted.map((request) => request.type)).toEqual(['warm', 'warm']);
+    expect(
+      worker.posted.filter((message) => 'id' in message).map((request) => request.type)
+    ).toEqual(['warm', 'warm']);
     await waitFor(() => {
       expect(errors).toEqual([]);
       expect(hook.result.current.session).not.toBeNull();
     });
     expect(preparedWorkers).toEqual([1]);
-    expect(worker.posted.map((request) => request.type)).toEqual(['warm', 'warm']);
+    expect(worker.posted).toEqual([
+      { id: 1, type: 'warm', hostModule: true },
+      { type: 'editModule', module: editModule },
+      { id: 2, type: 'warm', hostModule: true },
+      { type: 'editModule', module: editModule },
+    ]);
     await act(async () => {
-      worker.reply({ id: worker.posted[1].id, ok: true });
+      worker.reply({ id: worker.requestAt(2).id, ok: true });
     });
     expect(worker.terminated).toBe(false);
   } finally {

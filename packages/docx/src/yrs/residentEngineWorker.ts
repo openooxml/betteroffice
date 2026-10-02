@@ -6,7 +6,7 @@ import {
   type ResidentEngineSession,
 } from './residentEngineSession';
 import { finalPreviewDisplayWindow, finalPreviewPageCount } from './previewDisplayWindow';
-import { preloadEditWasm } from './wasm/index';
+import { preloadEditWasm, preloadEditWasmFrom } from './wasm/index';
 import {
   createProposalRegistry,
   proposalRevisionPreview,
@@ -34,9 +34,11 @@ import {
   encodeDisplayListFrameExtras,
   type DisplayListBuildInputs,
 } from '../layout/render/rustDisplayList';
-import type {
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+import {
+  RESIDENT_HOST_MODULE_WAIT_MS,
+  type ResidentEngineWorkerHostModule,
+  type ResidentEngineWorkerRequest,
+  type ResidentEngineWorkerResponse,
 } from './residentEngineWorkerProtocol';
 import {
   residentCaretDeviceRect,
@@ -45,6 +47,8 @@ import {
 } from './residentCaret';
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
+let resolveHostEditModule: (module: WebAssembly.Module | null) => void;
+let hostEditModule = nextHostEditModule();
 let session: ResidentEngineSession | null = null;
 let proposals: DocxProposalRegistry | null = null;
 let lastProposalMirrorVersion: string | null = null;
@@ -69,6 +73,11 @@ let openedDocument: { heapLimitBytes?: number } | null = null;
 let previewing = false;
 /** Pages of a cut preview's layout that match the whole document's; null for a whole document. */
 let previewFinalPages: number | null = null;
+let provisionalFinalPages: number | null = null;
+let provisionalDisplayWindow: {
+  window: [number, number];
+  retainBuiltPages: boolean;
+} | null = null;
 let unsubscribe: (() => void) | null = null;
 let pendingUpdates: Uint8Array[] = [];
 let layoutRevision = 0;
@@ -141,9 +150,24 @@ const BACKGROUND_SLICE_PAGES = 4;
 let handlingId = 0;
 const trappedIds = new Set<number>();
 
-scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
-  enqueue(() => handle(event.data), event.data.id);
+scope.onmessage = (
+  event: MessageEvent<ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule>
+) => {
+  const message = event.data;
+  if (message.type === 'editModule') {
+    // The queued warm waits for this message.
+    resolveHostEditModule(message.module instanceof WebAssembly.Module ? message.module : null);
+    return;
+  }
+  enqueue(() => handle(message), message.id);
 };
+scope.onmessageerror = () => resolveHostEditModule(null);
+
+function nextHostEditModule(): Promise<WebAssembly.Module | null> {
+  return new Promise((resolve) => {
+    resolveHostEditModule = resolve;
+  });
+}
 
 /** `current` drops an operation whose request was answered while it waited. */
 function enqueue(
@@ -197,10 +221,21 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   supersedeBackgroundPageBuild();
   if (request.type === 'warm') {
     try {
-      await preloadEditWasm();
+      if (request.hostModule) {
+        const timer = setTimeout(() => resolveHostEditModule(null), RESIDENT_HOST_MODULE_WAIT_MS);
+        await preloadEditWasmFrom(
+          hostEditModule.then((module) => {
+            clearTimeout(timer);
+            return module;
+          })
+        );
+      } else {
+        await preloadEditWasm();
+      }
       reply({ id: request.id, ok: true });
     } catch (error) {
       // No session exists yet, so a failed load is retried by the next request.
+      if (request.hostModule) hostEditModule = nextHostEditModule();
       reply({
         id: request.id,
         ok: false,
@@ -265,6 +300,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     unsubscribe?.();
     unsubscribe = null;
     previewFinalPages = null;
+    clearProvisionalFinalPages();
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     const { layoutJson, provisional } = hydrate(
       request.snapshot,
@@ -272,7 +308,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       request.layoutExtras !== undefined,
       request.opened !== true
     );
-    if (previewFinalPages !== null) {
+    if (previewFinalPages !== null || provisionalFinalPages !== null) {
       setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     }
     if (provisional) {
@@ -493,13 +529,14 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     unsubscribe?.();
     unsubscribe = null;
     previewFinalPages = null;
+    clearProvisionalFinalPages();
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     const { layoutJson, provisional } = hydrate(
       request.snapshot,
       request.provisionalPages,
       request.layoutExtras !== undefined
     );
-    if (previewFinalPages !== null) {
+    if (previewFinalPages !== null || provisionalFinalPages !== null) {
       setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     }
     if (provisional) {
@@ -531,7 +568,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'buildPages') {
-    const limit = previewFinalPages;
+    const limit = previewFinalPages === null
+      ? provisionalFinalPages
+      : Math.min(previewFinalPages, provisionalFinalPages ?? previewFinalPages);
     const pages = limit === null ? request.pages : request.pages.filter((index) => index < limit);
     if (request.background && pages.length > BACKGROUND_SLICE_PAGES) {
       const build: BackgroundPageBuild = {
@@ -743,6 +782,7 @@ function hydrate(
   if (!session) throw new Error('Resident engine worker is not initialized');
   supersedeSlicedCompletion();
   incompleteLayout = null;
+  clearProvisionalFinalPages();
   completedLayout = null;
   if (loadState && !snapshot.workerAuthoritative) {
     fontRequirements = null;
@@ -799,6 +839,9 @@ function hydrate(
     provisionalPages,
     pageCount
   );
+  provisionalFinalPages = provisional && snapshot.partialDocument !== true
+    ? provisionalPages ?? null
+    : null;
   return { layoutJson, provisional };
 }
 
@@ -866,10 +909,25 @@ function setFrameDisplayWindow(
     return;
   }
   if (window) {
-    engine.setDisplayWindow(...window);
-    engine.setDisplayRetainBuiltPages(retainBuiltPages === true);
+    if (provisionalFinalPages !== null) {
+      provisionalDisplayWindow = { window, retainBuiltPages: retainBuiltPages === true };
+      engine.setDisplayWindow(...finalPreviewDisplayWindow(window, provisionalFinalPages));
+      engine.setDisplayRetainBuiltPages(false);
+    } else {
+      engine.setDisplayWindow(...window);
+      engine.setDisplayRetainBuiltPages(retainBuiltPages === true);
+    }
   }
   engine.setWindowedIncrementalBuilds(window !== undefined);
+}
+
+function clearProvisionalFinalPages(): void {
+  provisionalFinalPages = null;
+  if (session && provisionalDisplayWindow) {
+    session.setDisplayWindow(...provisionalDisplayWindow.window);
+    session.setDisplayRetainBuiltPages(provisionalDisplayWindow.retainBuiltPages);
+  }
+  provisionalDisplayWindow = null;
 }
 
 /**
@@ -896,6 +954,7 @@ async function completeProvisionalLayout(): Promise<void> {
       layoutJson: layoutJson ?? session.layoutDocumentWithRegionsRetainedJson(layoutInput),
       headersFootersJson: session.retainedHeadersFootersJson(),
     };
+    clearProvisionalFinalPages();
     if (waiting) {
       await replyCompletedLayout(waiting.id, waiting.expectedFrameEpoch, waiting.paintCaret);
     }
@@ -1068,6 +1127,7 @@ async function completionSlice(completion: SlicedCompletion): Promise<void> {
   }
   const { layoutInput: _input, ...request } = incompleteLayout;
   incompleteLayout = null;
+  clearProvisionalFinalPages();
   slicedCompletion = null;
   completedLayout = {
     ...request,
@@ -1185,6 +1245,7 @@ function destroySession(keepSurfaces = false): void {
   openedDocument = null;
   previewing = false;
   previewFinalPages = null;
+  clearProvisionalFinalPages();
   pendingUpdates = [];
   layoutRevision = 0;
   fontsRevision = -1;
@@ -1234,6 +1295,18 @@ async function replyFrame(
   precedingPageFrames: Uint8Array[] = []
 ): Promise<void> {
   applyWorkerFrame(bytes);
+  const limit = provisionalFinalPages;
+  if (session && limit !== null && retainedFrame) {
+    const pages = retainedFrame.displayList.pages
+      .filter((page) => page.pageIndex >= limit && !page.unbuilt)
+      .map((page) => page.pageIndex);
+    if (pages.length > 0) {
+      const released = session.releaseDisplayPagesFrame(pages, retainedFrame.frameEpoch);
+      if (released === null) throw new Error('Provisional display pages could not be released');
+      bytes = session.buildDisplayPagesFrame([], 0);
+      applyWorkerFrame(bytes);
+    }
+  }
   const caret = session?.residentCaretSnapshot();
   if (!caret || !retainedFrame || !residentCaretSnapshotForFrame(caret, retainedFrame)) {
     throw new Error('Resident caret snapshot does not match the produced frame');
