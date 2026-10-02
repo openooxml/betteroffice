@@ -68,14 +68,18 @@ async function fontsLoadedFor(
   act_: (
     accept: (session?: ReturnType<typeof updateSource>, options?: { preview: boolean }) => void,
     asked: string[]
-  ) => void | Promise<void> = (accept) => accept(updateSource())
+  ) => void | Promise<void> = (accept) => accept(updateSource()),
+  nativeFonts: Pick<
+    Parameters<typeof useDocumentLoader>[0],
+    'workerOpen' | 'measurementFontProvider'
+  > = {}
 ): Promise<string[]> {
   const fontScope = createFontLoadScope();
   const asked: string[] = [];
   fontScope.loadFontsWithMapping = async (families) => {
     asked.push(...new Set(families.map((family) => family.trim())));
   };
-  const options = loaderOptions(fontScope);
+  const options = { ...loaderOptions(fontScope), ...nativeFonts };
   const { result } = renderHook(() => useDocumentLoader(options));
   act(() => {
     void result.current.loadBuffer(new ArrayBuffer(4));
@@ -182,4 +186,54 @@ test('the fonts skipped at open load once, after the document first changes', as
   });
   expect(loadCount(replaced, 'Batang')).toBe(1);
   expect(loadCount(replaced, '바탕')).toBe(1);
+});
+
+async function fontChainsPrefetchedFor(workerOpen: boolean, preview = false) {
+  const calls: string[] = [];
+  await fontsLoadedFor(
+    ['Batang', '바탕'],
+    (accept) => accept(updateSource(), preview ? { preview: true } : undefined),
+    {
+      workerOpen,
+      measurementFontProvider: {
+        resolve(family, bold, italic) {
+          calls.push(`metric ${family} ${Number(bold)} ${Number(italic)}`);
+          return async () => new ArrayBuffer(8);
+        },
+        resolveLastResort(family, bold, italic, office) {
+          calls.push(`last ${family} ${Number(bold)} ${Number(italic)} ${office}`);
+          return async () => new ArrayBuffer(8);
+        },
+      },
+    }
+  );
+  return calls;
+}
+
+test('with worker-open, accepting the full document prefetches the chains of the fonts it uses', async () => {
+  const calls = await fontChainsPrefetchedFor(true);
+  await waitFor(() =>
+    expect(calls).toEqual(
+      expect.arrayContaining([
+        'metric Calibri 0 0',
+        'last Calibri 0 0 word',
+        'metric Calibri 1 0',
+        'last Calibri 1 0 word',
+        'metric Calibri 0 1',
+        'last Calibri 0 1 word',
+        'metric Calibri 1 1',
+        'last Calibri 1 1 word',
+      ])
+    )
+  );
+  expect(calls.join('\n')).not.toContain('Batang');
+  expect(calls.join('\n')).not.toContain('바탕');
+});
+
+test('a preview acceptance prefetches no font chains', async () => {
+  expect(await fontChainsPrefetchedFor(true, true)).toEqual([]);
+});
+
+test('without worker-open, accepting a document prefetches no font chains', async () => {
+  expect(await fontChainsPrefetchedFor(false)).toEqual([]);
 });
