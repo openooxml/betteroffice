@@ -30,7 +30,8 @@ fn build_aliased_room(doc: &EditingDoc, bytes: &[u8]) {
         .unwrap()
         .1;
     let relationships =
-        docx_parse::parse_relationships(relationships_xml, relationships_path, &mut budget).unwrap();
+        docx_parse::parse_relationships(relationships_xml, relationships_path, &mut budget)
+            .unwrap();
     let (_, _, groups) = docx_parse::parse_related_header_footers_with_aliases(
         &parts,
         &relationships,
