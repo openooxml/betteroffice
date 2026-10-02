@@ -3363,8 +3363,8 @@ mod direct_tests {
             replica.encode_state_as_update_v1()
         );
         assert_eq!(
-            direct.encode_state_vector_v1(),
-            replica.encode_state_vector_v1()
+            yrs::StateVector::decode_v1(&direct.encode_state_vector_v1()).unwrap(),
+            yrs::StateVector::decode_v1(&replica.encode_state_vector_v1()).unwrap()
         );
     }
 

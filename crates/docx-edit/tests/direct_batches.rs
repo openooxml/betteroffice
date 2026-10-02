@@ -9,6 +9,7 @@ use docx_edit::{
 };
 use docx_parse::serializer::{S13SaveRequest, write_docx_s13};
 use serde_json::{Value, json};
+use yrs::updates::decoder::Decode;
 use yrs::{Any, DeepObservable, Map, Origin, ReadTxn, Transact};
 
 const NS: &str = concat!(
@@ -84,6 +85,10 @@ fn p(id: &str, content: &str) -> String {
 
 fn r(text: &str) -> String {
     format!(r#"<w:r><w:t xml:space="preserve">{text}</w:t></w:r>"#)
+}
+
+fn state_vector(doc: &EditingDoc) -> yrs::StateVector {
+    yrs::StateVector::decode_v1(&doc.encode_state_vector_v1()).unwrap()
 }
 
 fn open(bytes: &[u8]) -> EditingDoc {
@@ -469,16 +474,7 @@ fn exercise(bytes: &[u8], prepare: impl Fn(&EditingDoc), steps: Vec<EditStep>) -
     assert_eq!(direct.direct_batches_applied(), 1);
     assert_eq!(replica.direct_batches_applied(), 0);
     assert_eq!(normalized(&result_direct), normalized(&result_replica));
-    let state_direct = direct.encode_state_as_update_v1();
-    let state_replica = replica.encode_state_as_update_v1();
-    eprintln!(
-        "direct/replica deterministic state byte equality: {}",
-        state_direct == state_replica
-    );
-    assert_eq!(
-        direct.encode_state_vector_v1(),
-        replica.encode_state_vector_v1()
-    );
+    assert_eq!(state_vector(&direct), state_vector(&replica));
     assert_eq!(updates_direct.signature(), updates_replica.signature());
     assert_eq!(updates_direct.events.lock().unwrap().len(), 1);
     assert_eq!(
@@ -839,10 +835,7 @@ fn direct_and_replica_peers_converge() {
     for update in a {
         replica.apply_update_v1(&update).unwrap();
     }
-    assert_eq!(
-        direct.encode_state_vector_v1(),
-        replica.encode_state_vector_v1()
-    );
+    assert_eq!(state_vector(&direct), state_vector(&replica));
     assert_stories(&direct, &replica);
     assert_export(&direct, &replica, &bytes);
 }
