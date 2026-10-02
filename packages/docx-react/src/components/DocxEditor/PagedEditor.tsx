@@ -516,7 +516,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       firstPageHeaderContent,
       firstPageFooterContent,
       readOnly = false,
-      viewerDocumentRead,
+      viewerDocumentRead: viewerDocumentReadProp,
       pageGap = DEFAULT_PAGE_GAP,
       zoom = 1,
       showHiddenText = false,
@@ -573,6 +573,12 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       canvasOverlayTarget = null,
       commandBridgeRef,
     } = props;
+    // A viewer whose document fell back to this thread selects through the copy it holds here.
+    const viewerDocumentRead =
+      viewerDocumentReadProp &&
+      !(displayListQueries && presentedWorkerVersion(displayListQueries) === null && yrsCore.replicaReady)
+        ? viewerDocumentReadProp
+        : undefined;
     const yrsStyleResolver = useMemo(() => (styles ? createStyleResolver(styles) : null), [styles]);
 
     // Resolve the scroll container: prefer parent-provided ref, fallback to own container
@@ -1905,6 +1911,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
 
     // Imperative-handle setup — exposes PagedEditorRef + mirrors via onReady.
     usePagedEditorRefApi({
+      viewerSelection: viewerDocumentRead !== undefined,
       bumpInputEpoch,
       inputEpoch,
       readerSurface: getScrollContainer,

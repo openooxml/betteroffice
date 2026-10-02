@@ -7,7 +7,6 @@ import type {
   YrsStickyPosition,
 } from './index';
 import type { PointPosition } from '../plugin-api';
-import type { DocxTextRange } from './edits';
 import type { DocxResolvedPointPosition } from './pointPosition';
 import type {
   DocxDisplayRange,
@@ -68,7 +67,13 @@ export type ResidentDocumentRead =
     }
   | { kind: 'selectionText'; story: string; anchor: number; head: number; expectVersion: string }
   | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string }
-  | { kind: 'rangePosition'; story: string; range: DocxTextRange; expectVersion: string };
+  | {
+      kind: 'stickyPosition';
+      story: string;
+      anchor: YrsStickyPosition;
+      head: YrsStickyPosition;
+      expectVersion: string;
+    };
 
 /** @internal */
 export interface ResidentDocumentReadValues {
@@ -82,7 +87,7 @@ export interface ResidentDocumentReadValues {
   selectionUnit: DocxDisplayRange | null;
   selectionText: DocxDisplaySelectionText | null;
   bookmarkPosition: number | null;
-  rangePosition: DocxDisplayRange | null;
+  stickyPosition: DocxDisplayRange | null;
 }
 
 /** How long a warm waits for the host's compiled module before loading the engine itself. */

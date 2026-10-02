@@ -1,11 +1,10 @@
 import type { DocxTextRange } from './edits';
-import type { YrsCellLoc, YrsLoc } from './index';
+import type { YrsCellLoc, YrsLoc, YrsStickyPosition } from './index';
 import { displayPositionToYrsLoc } from './inputPositionMap';
 import type { YrsPointerProjectionTarget } from './yrsPositionProjection';
 import { findWordBoundaries } from '../utils/textSelection';
 import { DisplayPositionIndex } from './displayPositionIndex';
 import { acceptedOffsetOf } from './pointPosition';
-import { textRangeToRaw } from './proposalGeometry';
 import {
   storyOffsetForLoc,
   storyPlainText,
@@ -28,6 +27,8 @@ export interface DocxDisplaySelectionText {
   text: string;
   /** The accepted-view range, or null when the selection spans stories. */
   range: DocxTextRange | null;
+  /** Its anchor and head as positions that follow later edits. */
+  sticky: { anchor: YrsStickyPosition; head: YrsStickyPosition } | null;
 }
 
 interface ResolvedPosition {
@@ -74,16 +75,8 @@ export function resolveSelectionUnit(
 ): DocxDisplayRange | null {
   if (index.reader.version() !== expectVersion) return null;
   if (unit === 'story') {
-    const map = index.inputMap(rootStory);
-    const first = map?.paragraphs[0];
-    const last = map?.paragraphs[map.paragraphs.length - 1];
-    if (!first || !last) return null;
-    const anchor = index.positionOf({ story: rootStory, paraId: first.paraId, offset: 0 }, rootStory);
-    const head = index.positionOf(
-      { story: rootStory, paraId: last.paraId, offset: last.length },
-      rootStory
-    );
-    return anchor === null || head === null ? null : { anchor, head };
+    const projection = index.projection(rootStory);
+    return projection && projection.size > 0 ? { anchor: 0, head: projection.size } : null;
   }
   const resolved = resolvePosition(index, rootStory, position);
   if (!resolved) return null;
@@ -164,6 +157,7 @@ export function resolveSelectionText(
   const start = resolvePosition(index, rootStory, from);
   const end = resolvePosition(index, rootStory, to);
   if (!start || !end) return null;
+  const sticky = stickyEnds(index, anchor <= head ? start.loc : end.loc, anchor <= head ? end.loc : start.loc);
   if (start.loc.story === end.loc.story) {
     const story = start.loc.story;
     const startOffset = acceptedOffsetOf(reader, start.loc);
@@ -184,6 +178,7 @@ export function resolveSelectionText(
               end: { paraId: end.loc.paraId, offset: endOffset },
               view: 'accepted',
             },
+      sticky,
     };
   }
   const startCell = start.target.cell;
@@ -197,12 +192,27 @@ export function resolveSelectionText(
       left: Math.min(startCell.column, endCell.column),
       right: Math.max(startCell.column, endCell.column),
     }).join('\n');
-    return { text, range: null };
+    return { text, range: null, sticky };
   }
   const startOffset = rootStoryOffset(index, rootStory, start, from, 'start');
   const endOffset = rootStoryOffset(index, rootStory, end, to, 'end');
   if (startOffset === null || endOffset === null) return null;
-  return { text: storyPlainText(reader, rootStory, startOffset, endOffset), range: null };
+  return { text: storyPlainText(reader, rootStory, startOffset, endOffset), range: null, sticky };
+}
+
+function stickyEnds(
+  index: DisplayPositionIndex,
+  anchor: YrsLoc,
+  head: YrsLoc
+): DocxDisplaySelectionText['sticky'] {
+  try {
+    return {
+      anchor: index.reader.encodeStickyPosition(anchor),
+      head: index.reader.encodeStickyPosition(head),
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** @internal The display position of bookmark `name` in root story `rootStory`, or null. */
@@ -216,18 +226,28 @@ export function resolveBookmarkPosition(
   return index.projection(rootStory)?.bookmarkPosition(name) ?? null;
 }
 
-/** @internal The display positions a text range covers in the layout of `expectVersion`. */
-export function resolveRangePosition(
+/** @internal Where sticky selection ends taken in an earlier version fall in the layout of `expectVersion`. */
+export function resolveStickyPositions(
   index: DisplayPositionIndex,
   rootStory: string,
-  range: DocxTextRange,
+  anchor: YrsStickyPosition,
+  head: YrsStickyPosition,
   expectVersion: string
 ): DocxDisplayRange | null {
   const reader = index.reader;
-  if (reader.version() !== expectVersion || !reader.hasStory(range.story)) return null;
-  const raw = textRangeToRaw(reader.storySegments(range.story), range);
-  if (!raw.ok) return null;
-  const anchor = index.positionOf(raw.range.start, rootStory);
-  const head = index.positionOf(raw.range.end, rootStory);
-  return anchor === null || head === null ? null : { anchor, head };
+  if (reader.version() !== expectVersion) return null;
+  let anchorLoc: YrsLoc | null;
+  let headLoc: YrsLoc | null;
+  try {
+    anchorLoc = reader.resolveStickyPosition(anchor);
+    headLoc = reader.resolveStickyPosition(head);
+  } catch {
+    return null;
+  }
+  if (!anchorLoc || !headLoc) return null;
+  const anchorPosition = index.positionOf(anchorLoc, rootStory);
+  const headPosition = index.positionOf(headLoc, rootStory);
+  return anchorPosition === null || headPosition === null
+    ? null
+    : { anchor: anchorPosition, head: headPosition };
 }

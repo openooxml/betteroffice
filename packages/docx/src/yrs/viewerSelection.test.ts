@@ -8,7 +8,7 @@ import { resolveYrsPointPosition } from './pointPosition';
 import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
 import {
   resolveBookmarkPosition,
-  resolveRangePosition,
+  resolveStickyPositions,
   resolveSelectionText,
   resolveSelectionUnit,
 } from './viewerSelection';
@@ -42,7 +42,12 @@ beforeAll(async () => {
   preloadEditWasm(new Uint8Array(readFileSync(WASM)));
   resident = await createResidentEngineSession();
   resident.openDocx(docx(BODY));
-  index = new DisplayPositionIndex({ ...resident.geometryReader, selectionText: resident.selectionText });
+  index = new DisplayPositionIndex({
+    ...resident.geometryReader,
+    selectionText: resident.selectionText,
+    encodeStickyPosition: resident.encodeStickyPosition,
+    resolveStickyPosition: resident.resolveStickyPosition,
+  });
 });
 
 afterAll(() => resident.destroy());
@@ -89,17 +94,18 @@ describe('viewer selection reads', () => {
 
   test('select-all spans the body story', () => {
     const version = resident.geometryReader.version();
-    const after = 'After the table.';
-    expect(resolveSelectionUnit(index, 'body', 0, 'story', version)).toEqual({
-      anchor: at('00000001', 0),
-      head: at('00000007', lead('00000007', after) + after.length),
-    });
+    const all = resolveSelectionUnit(index, 'body', 0, 'story', version)!;
+    expect(all.anchor).toBeLessThan(at('00000001', 0));
+    expect(all.head).toBeGreaterThanOrEqual(at('00000007', lead('00000007', 'After the table.') + 16));
+    expect(resolveSelectionText(index, 'body', all.anchor, all.head, version)?.text).toBe(
+      'Alpha beta gamma.\nSecond gone line\nA1\tB1\nA2\tB2\nAfter the table.'
+    );
   });
 
   test('a range reads as clipboard text with its accepted-view range', () => {
     const version = resident.geometryReader.version();
     const text = resolveSelectionText(index, 'body', at('00000002', 13), at('00000001', 6), version);
-    expect(text).toEqual({
+    expect(text).toMatchObject({
       text: 'beta gamma.\nSecond gone l',
       range: {
         story: 'body',
@@ -112,16 +118,16 @@ describe('viewer selection reads', () => {
 
   test('cells of one table read as tab-separated rows, and a range into a table takes the whole table', () => {
     const version = resident.geometryReader.version();
-    expect(resolveSelectionText(index, 'body', at('00000003', 1), at('00000006', 1), version)).toEqual({
+    expect(resolveSelectionText(index, 'body', at('00000003', 1), at('00000006', 1), version)).toMatchObject({
       text: 'A1\tB1\nA2\tB2',
       range: null,
     });
-    expect(resolveSelectionText(index, 'body', at('00000002', 7), at('00000004', 1), version)).toEqual({
+    expect(resolveSelectionText(index, 'body', at('00000002', 7), at('00000004', 1), version)).toMatchObject({
       text: 'gone line\nA1\tB1\nA2\tB2\n',
       range: null,
     });
     const after = lead('00000007', 'After the table.');
-    expect(resolveSelectionText(index, 'body', at('00000002', 7), at('00000007', after + 5), version)).toEqual({
+    expect(resolveSelectionText(index, 'body', at('00000002', 7), at('00000007', after + 5), version)).toMatchObject({
       text: 'gone line\nA1\tB1\nA2\tB2\nAfter',
       range: {
         story: 'body',
@@ -132,7 +138,7 @@ describe('viewer selection reads', () => {
     });
   });
 
-  test('a hit resolves to its accepted-view offset, and a range maps back to its display positions', () => {
+  test('a hit resolves to its accepted-view offset', () => {
     const version = resident.geometryReader.version();
     const hit = { position: at('00000002', 13), pageIndex: 0, region: 'body' as const };
     expect(resolveYrsPointPosition(index, hit, version)).toEqual({
@@ -146,16 +152,39 @@ describe('viewer selection reads', () => {
         view: 'accepted',
       },
     });
-    const selected = resolveSelectionText(index, 'body', at('00000001', 6), at('00000002', 13), version);
-    expect(resolveRangePosition(index, 'body', selected!.range!, version)).toEqual({
-      anchor: at('00000001', 6),
-      head: at('00000002', 13),
-    });
   });
 
   test('bookmarks resolve to their paragraph', () => {
     const version = resident.geometryReader.version();
     expect(resolveBookmarkPosition(index, 'body', 'target', version)).toBe(at('00000002', 0) - 1);
+  });
+
+  test('a selection follows its text through a later edit', () => {
+    const version = resident.geometryReader.version();
+    const before = resolveSelectionText(index, 'body', at('00000001', 11), at('00000001', 16), version)!;
+    expect(before.text).toBe('gamma');
+    const edited = resident.proposalEngine.applyEdits({
+      expectVersion: version,
+      steps: [{
+        op: 'insertText',
+        target: {
+          kind: 'range',
+          story: 'body',
+          start: { paraId: '00000001', offset: 0 },
+          end: { paraId: '00000001', offset: 0 },
+          view: 'accepted',
+        },
+        at: 'start',
+        text: 'Omega ',
+      }],
+    });
+    expect(edited.ok).toBe(true);
+    const next = resident.geometryReader.version();
+    expect(next).not.toBe(version);
+    expect(resolveStickyPositions(index, 'body', before.sticky!.anchor, before.sticky!.head, version)).toBeNull();
+    const moved = resolveStickyPositions(index, 'body', before.sticky!.anchor, before.sticky!.head, next)!;
+    expect(moved).toEqual({ anchor: at('00000001', 17), head: at('00000001', 22) });
+    expect(resolveSelectionText(index, 'body', moved.anchor, moved.head, next)?.text).toBe('gamma');
   });
 
   test('a read for another version answers null', () => {

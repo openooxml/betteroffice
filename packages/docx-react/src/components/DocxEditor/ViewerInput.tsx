@@ -13,7 +13,6 @@ import type {
   DocxDisplayRange,
   DocxDisplaySelectionText,
   DocxSelectionUnit,
-  DocxTextRange,
   ResidentEngineWorkerClient,
 } from '@betteroffice/docx/yrs';
 import type { YrsDisplaySelection, YrsInputRef } from './YrsInput';
@@ -42,13 +41,23 @@ const STYLE: CSSProperties = {
 /** A settled selection's text is read this long after it last changed. */
 const SETTLE_MS = 60;
 
+const MOVE_KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'];
+
 interface ViewerSelection extends DocxDisplayRange {
-  /** Bumped on every change; a reply for an older value is dropped. */
-  token: number;
+  /** The gesture that made it; a unit reply for an older gesture is dropped. */
+  gesture: number;
+  /** Bumped on every change; text read for an older revision is not this selection's. */
+  revision: number;
   /** The worker version of the layout the positions belong to. */
   version: string;
   /** Made on a display-only preview, whose first pages the document lays out the same. */
   preview: boolean;
+}
+
+interface Capture {
+  revision: number;
+  read: Promise<DocxDisplaySelectionText | null>;
+  value?: DocxDisplaySelectionText | null;
 }
 
 export interface ViewerInputProps {
@@ -78,65 +87,71 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
 ) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const selectionRef = useRef<ViewerSelection | null>(null);
-  const tokenRef = useRef(0);
+  const gestureRef = useRef(0);
+  const revisionRef = useRef(0);
+  const captureRef = useRef<Capture | null>(null);
+  const pendingRef = useRef<Promise<void> | null>(null);
+  const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const goalXRef = useRef<number | undefined>(undefined);
+  const primedRef = useRef<string | null>(null);
   const queriesRef = useRef(queries);
   queriesRef.current = queries;
   const readRef = useRef(read);
   readRef.current = read;
   const onChangeRef = useRef(onSelectionChange);
   onChangeRef.current = onSelectionChange;
-  const textRef = useRef<{ token: number; text: Promise<DocxDisplaySelectionText | null> } | null>(
-    null
-  );
-  const settledRangeRef = useRef<{ range: DocxTextRange; version: string } | null>(null);
   const documentRef = useRef(documentKey);
-  const reprojectingRef = useRef<string | null>(null);
-  const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const primedRef = useRef<string | null>(null);
-  const resolvedTextRef = useRef<{ token: number; text: string } | null>(null);
+  const reprojectRef = useRef<() => void>(() => {});
 
   const presented = (): string | null => presentedWorkerVersion(queriesRef.current);
 
-  const readText = useCallback((selection: ViewerSelection) => {
-    const pending = readRef
-      .current({
-        kind: 'selectionText',
-        story,
-        anchor: selection.anchor,
-        head: selection.head,
-        expectVersion: selection.version,
-      })
-      .then((reply) => (reply.version === selection.version ? reply.value : null))
-      .catch(() => null);
-    textRef.current = { token: selection.token, text: pending };
-    void pending.then((value) => {
-      if (!value || selectionRef.current?.token !== selection.token) return;
-      resolvedTextRef.current = { token: selection.token, text: value.text };
-      if (value.range) settledRangeRef.current = { range: value.range, version: selection.version };
-    });
-    return pending;
-  }, [story]);
+  const capture = useCallback(
+    (selection: ViewerSelection): Capture => {
+      const current = captureRef.current;
+      if (current?.revision === selection.revision) return current;
+      const next: Capture = {
+        revision: selection.revision,
+        read: readRef
+          .current({
+            kind: 'selectionText',
+            story,
+            anchor: selection.anchor,
+            head: selection.head,
+            expectVersion: selection.version,
+          })
+          .then((reply) => (reply.version === selection.version ? reply.value : null))
+          .catch(() => null),
+      };
+      captureRef.current = next;
+      void next.read.then((value) => {
+        next.value = value;
+        // The document may have moved on while the text was read.
+        if (selectionRef.current?.revision === selection.revision) reprojectRef.current();
+      });
+      return next;
+    },
+    [story]
+  );
 
   const scheduleSettle = useCallback(() => {
     if (settleTimerRef.current !== null) clearTimeout(settleTimerRef.current);
     settleTimerRef.current = setTimeout(() => {
       settleTimerRef.current = null;
       const selection = selectionRef.current;
-      if (selection && selection.anchor !== selection.head && textRef.current?.token !== selection.token) {
-        void readText(selection);
-      }
+      if (selection && selection.version === presented()) capture(selection);
     }, SETTLE_MS);
-  }, [readText]);
+  }, [capture]);
 
   const setSelection = useCallback(
-    (range: DocxDisplayRange, version: string, token = ++tokenRef.current): void => {
+    (range: DocxDisplayRange, version: string, gesture: number): void => {
       selectionRef.current = {
-        ...range,
-        token,
+        anchor: range.anchor,
+        head: range.head,
+        gesture,
+        revision: ++revisionRef.current,
         version,
         preview: documentRef.current?.isDisplayOnly() ?? false,
       };
-      settledRangeRef.current = null;
       onChangeRef.current();
       scheduleSettle();
     },
@@ -147,49 +162,108 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
     (anchor: number, head: number): number | null => {
       const version = presented();
       if (version === null) return null;
-      tokenRef.current += 1;
-      setSelection({ anchor, head }, version, tokenRef.current);
-      return tokenRef.current;
+      const gesture = ++gestureRef.current;
+      goalXRef.current = undefined;
+      setSelection({ anchor, head }, version, gesture);
+      return gesture;
     },
     [setSelection]
   );
 
   const readUnit = useCallback(
-    (position: number, unit: DocxSelectionUnit, version: string, token: number): void => {
-      void readRef
+    (position: number, unit: DocxSelectionUnit, version: string, gesture: number): Promise<void> =>
+      readRef
         .current({ kind: 'selectionUnit', story, position, unit, expectVersion: version })
         .then((reply) => {
           const current = selectionRef.current;
-          if (!reply.value || reply.version !== version || tokenRef.current !== token) return;
+          if (!reply.value || reply.version !== version || gestureRef.current !== gesture) return;
           if (current?.anchor === reply.value.anchor && current.head === reply.value.head) return;
-          setSelection(reply.value, version, token);
+          setSelection(reply.value, version, gesture);
         })
-        .catch(() => {});
-    },
+        .catch(() => {}),
     [setSelection, story]
   );
+
+  const track = useCallback((pending: Promise<void>): void => {
+    pendingRef.current = pending;
+    void pending.finally(() => {
+      if (pendingRef.current === pending) pendingRef.current = null;
+    });
+  }, []);
 
   // The caret lands at once; the presented pages widen it, and the worker settles the unit.
   const expand = useCallback(
     (position: number, unit: 'word' | 'paragraph'): void => {
-      const token = select(position, position);
+      const gesture = select(position, position);
       const version = selectionRef.current?.version;
-      if (token === null || !version) return;
-      const queries = queriesRef.current;
-      if (queries && story === 'body') {
-        const local = displayListSelectionUnit(queries, position, unit);
-        if (local) setSelection(local, version, token);
+      if (gesture === null || !version) return;
+      const shown = queriesRef.current;
+      if (shown && story === 'body') {
+        const local = displayListSelectionUnit(shown, position, unit);
+        if (local) setSelection(local, version, gesture);
       }
-      readUnit(position, unit, version, token);
+      track(readUnit(position, unit, version, gesture));
     },
-    [readUnit, select, setSelection, story]
+    [readUnit, select, setSelection, story, track]
   );
 
   const selectAll = useCallback((): void => {
     const version = presented();
     if (version === null) return;
-    readUnit(0, 'story', version, ++tokenRef.current);
-  }, [readUnit]);
+    goalXRef.current = undefined;
+    track(readUnit(0, 'story', version, ++gestureRef.current));
+  }, [readUnit, track]);
+
+  const drop = (): void => {
+    selectionRef.current = null;
+    onChangeRef.current();
+  };
+
+  // A selection from another version maps onto the presented frame through its sticky ends.
+  const reproject = useCallback((): void => {
+    const selection = selectionRef.current;
+    const version = presented();
+    if (!selection || version === null || selection.version === version) return;
+    if (selection.preview) {
+      setSelection(selection, version, selection.gesture);
+      return;
+    }
+    const captured = captureRef.current;
+    if (captured?.revision !== selection.revision || captured.value === undefined) return;
+    const sticky = captured.value?.sticky;
+    if (!sticky) {
+      drop();
+      return;
+    }
+    const revision = selection.revision;
+    void readRef
+      .current({
+        kind: 'stickyPosition',
+        story,
+        anchor: sticky.anchor,
+        head: sticky.head,
+        expectVersion: version,
+      })
+      .then((reply) => {
+        if (selectionRef.current?.revision !== revision || reply.version !== presented()) return;
+        if (reply.value) setSelection(reply.value, reply.version, selection.gesture);
+        else drop();
+      })
+      .catch(() => {});
+  }, [setSelection, story]);
+  reprojectRef.current = reproject;
+
+  useEffect(() => {
+    const selection = selectionRef.current;
+    if (!selection || selection.version === presentedWorkerVersion(queries)) return;
+    // Hidden until it maps onto this frame; one never captured cannot follow the change.
+    onChangeRef.current();
+    if (!selection.preview && captureRef.current?.revision !== selection.revision) {
+      selectionRef.current = null;
+      return;
+    }
+    reproject();
+  }, [queries, reproject]);
 
   useEffect(() => {
     const previous = documentRef.current;
@@ -197,47 +271,10 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
     documentRef.current = documentKey;
     if (!previous?.isDisplayOnly()) {
       selectionRef.current = null;
-      settledRangeRef.current = null;
-      textRef.current = null;
+      captureRef.current = null;
       onChangeRef.current();
     }
   }, [documentKey]);
-
-  // A frame of another version hides the selection until it maps onto that frame.
-  useEffect(() => {
-    const selection = selectionRef.current;
-    const version = presentedWorkerVersion(queries);
-    if (!selection || version === null || selection.version === version) return;
-    if (selection.preview) {
-      selectionRef.current = {
-        ...selection,
-        version,
-        preview: documentRef.current?.isDisplayOnly() ?? false,
-      };
-      textRef.current = null;
-      onChangeRef.current();
-      scheduleSettle();
-      return;
-    }
-    onChangeRef.current();
-    const settled = settledRangeRef.current;
-    if (!settled || settled.version !== selection.version || reprojectingRef.current === version) {
-      return;
-    }
-    reprojectingRef.current = version;
-    const token = selection.token;
-    void readRef
-      .current({ kind: 'rangePosition', story, range: settled.range, expectVersion: version })
-      .then((reply) => {
-        if (!reply.value || reply.version !== version || selectionRef.current?.token !== token) return;
-        setSelection(reply.value, version, token);
-        settledRangeRef.current = { range: settled.range, version };
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (reprojectingRef.current === version) reprojectingRef.current = null;
-      });
-  }, [queries, scheduleSettle, setSelection, story]);
 
   useEffect(
     () => () => {
@@ -252,39 +289,48 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
     return { anchor: selection.anchor, head: selection.head };
   }, []);
 
+  /** The selection's text, once a select-all or unit read still on its way has landed. */
   const selectedText = useCallback((): Promise<string> | null => {
+    const textOf = (): Promise<string> => {
+      const selection = selectionRef.current;
+      if (!selection || selection.anchor === selection.head || selection.version !== presented()) {
+        return Promise.resolve('');
+      }
+      return capture(selection).read.then((value) => value?.text ?? '');
+    };
+    const pending = pendingRef.current;
+    if (pending) return pending.then(textOf);
     const selection = selectionRef.current;
-    if (!selection || selection.anchor === selection.head || selection.version !== presented()) {
-      return null;
-    }
-    const pending =
-      textRef.current?.token === selection.token ? textRef.current.text : readText(selection);
-    return pending.then((value) => value?.text ?? '');
-  }, [readText]);
+    return selection && selection.anchor !== selection.head ? textOf() : null;
+  }, [capture]);
 
   const copy = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
       const textarea = textareaRef.current;
-      const pending = selectedText();
-      if (!textarea || pending === null) return;
-      const resolved =
-        resolvedTextRef.current?.token === selectionRef.current?.token
-          ? resolvedTextRef.current!.text
-          : null;
-      if (resolved) {
-        primedRef.current = resolved;
-        textarea.value = resolved;
+      const selection = selectionRef.current;
+      const captured = captureRef.current;
+      const ready =
+        !pendingRef.current &&
+        selection &&
+        selection.version === presented() &&
+        captured?.revision === selection.revision
+          ? captured.value?.text
+          : undefined;
+      if (textarea && ready) {
+        primedRef.current = ready;
+        textarea.value = ready;
         textarea.select();
         setTimeout(() => {
-          if (primedRef.current === resolved) primedRef.current = null;
-          if (textarea.value === resolved) textarea.value = '';
+          if (primedRef.current === ready) primedRef.current = null;
+          if (textarea.value === ready) textarea.value = '';
         });
         return;
       }
+      const pending = selectedText();
       const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined;
-      if (!clipboard) return;
+      if (!pending || !clipboard) return;
       event.preventDefault();
-      const text = Promise.resolve(pending).then((value) => {
+      const text = pending.then((value) => {
         if (!value) throw new Error('Nothing is selected to copy');
         return value;
       });
@@ -301,6 +347,43 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
     [selectedText]
   );
 
+  /** Moves the head over the presented frame's lines; false when there is nothing to move. */
+  const move = useCallback(
+    (key: string, extend: boolean): boolean => {
+      const selection = selectionRef.current;
+      const shown = queriesRef.current;
+      if (!selection || !shown?.isReady() || selection.version !== presented()) return false;
+      const from = Math.min(selection.anchor, selection.head);
+      const to = Math.max(selection.anchor, selection.head);
+      let head = selection.head;
+      let goalX: number | undefined;
+      if ((key === 'ArrowLeft' || key === 'ArrowRight') && !extend && from !== to) {
+        head = key === 'ArrowLeft' ? from : to;
+      } else if (key === 'ArrowLeft' || key === 'ArrowRight') {
+        const step = key === 'ArrowLeft' ? -1 : 1;
+        for (let next = head + step, tries = 0; next >= 0 && tries < 4; next += step, tries += 1) {
+          if (shown.visualLineAtPosition(next)) {
+            head = next;
+            break;
+          }
+        }
+      } else if (key === 'ArrowUp' || key === 'ArrowDown') {
+        const moved = shown.verticalMove(head, key === 'ArrowUp' ? 'up' : 'down', goalXRef.current);
+        if (!moved) return true;
+        head = moved.position;
+        goalX = moved.goalX;
+      } else {
+        const line = shown.visualLineAtPosition(head);
+        if (!line) return true;
+        head = key === 'Home' ? line.from : line.to;
+      }
+      setSelection({ anchor: extend ? selection.anchor : head, head }, selection.version, ++gestureRef.current);
+      goalXRef.current = goalX;
+      return true;
+    },
+    [setSelection]
+  );
+
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
       const mod = event.metaKey || event.ctrlKey;
@@ -310,9 +393,11 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
         selectAll();
       } else if (mod && key === 'c' && !event.shiftKey && !event.altKey) {
         copy(event);
+      } else if (!mod && !event.altKey && MOVE_KEYS.includes(event.key) && move(event.key, event.shiftKey)) {
+        event.preventDefault();
       }
     },
-    [copy, selectAll]
+    [copy, move, selectAll]
   );
 
   const handleCopy = useCallback((event: React.ClipboardEvent<HTMLTextAreaElement>) => {

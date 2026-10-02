@@ -20,7 +20,7 @@ import { DisplayPositionIndex } from './displayPositionIndex';
 import { resolveYrsPointPosition } from './pointPosition';
 import {
   resolveBookmarkPosition,
-  resolveRangePosition,
+  resolveStickyPositions,
   resolveSelectionText,
   resolveSelectionUnit,
 } from './viewerSelection';
@@ -67,6 +67,8 @@ function displayPositionIndex(current: ResidentEngineSession): DisplayPositionIn
       index: new DisplayPositionIndex({
         ...current.geometryReader,
         selectionText: current.selectionText,
+        encodeStickyPosition: current.encodeStickyPosition,
+        resolveStickyPosition: current.resolveStickyPosition,
       }),
     };
   }
@@ -566,11 +568,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           request.read.expectVersion
         );
         break;
-      case 'rangePosition':
-        value = resolveRangePosition(
+      case 'stickyPosition':
+        value = resolveStickyPositions(
           displayPositionIndex(session),
           request.read.story,
-          request.read.range,
+          request.read.anchor,
+          request.read.head,
           request.read.expectVersion
         );
         break;

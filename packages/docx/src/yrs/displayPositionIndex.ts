@@ -9,7 +9,14 @@ import {
 /** @internal What resolving display positions against the live document reads. */
 export type DisplayPositionReader = Pick<
   YrsSession,
-  'version' | 'hasStory' | 'storySegments' | 'paragraphSpans' | 'locateParagraph' | 'selectionText'
+  | 'version'
+  | 'hasStory'
+  | 'storySegments'
+  | 'paragraphSpans'
+  | 'locateParagraph'
+  | 'selectionText'
+  | 'encodeStickyPosition'
+  | 'resolveStickyPosition'
 >;
 
 /**

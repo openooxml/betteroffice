@@ -97,6 +97,8 @@ interface RefApiInputs {
   displayPositionToYrsLocRef: React.MutableRefObject<PagedEditorRef['displayPositionToYrsLoc']>;
   getPositionAtPointRef: React.MutableRefObject<PagedEditorRef['getPositionAtPoint']>;
   readPositionAtPointRef: React.MutableRefObject<PagedEditorRef['readPositionAtPoint']>;
+  /** The input holds the selection in root display positions, with no document here. */
+  viewerSelectionRef: React.MutableRefObject<boolean>;
 }
 
 function storyOffsetToLoc(session: YrsSession, story: string, offset: number): YrsLoc | null {
@@ -145,9 +147,14 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     displayPositionToYrsLocRef,
     getPositionAtPointRef,
     readPositionAtPointRef,
+    viewerSelectionRef,
   } = inputs;
 
   const setDisplaySelection = (anchor: number, head = anchor): void => {
+    if (viewerSelectionRef.current) {
+      yrsInputRef.current?.setSelectionFromDisplay(anchor, head);
+      return;
+    }
     const session = yrsSessionRef.current;
     const projection = getYrsPositionProjectionRef.current();
     if (!session || !projection) return;
@@ -272,6 +279,12 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     },
     highlightRange: (from, to) => {
       bumpInputEpochRef.current?.();
+      if (viewerSelectionRef.current) {
+        if (!Number.isFinite(from) || !Number.isFinite(to) || from < 0 || from > to) return;
+        setDisplaySelection(from, to);
+        scrollToPositionImpl(from, true);
+        return;
+      }
       const highlight = (): void => {
         const projection = getYrsPositionProjectionRef.current();
         if (!projection || !Number.isFinite(from) || !Number.isFinite(to) || from < 0 || from > to)
@@ -371,6 +384,7 @@ export interface UsePagedEditorRefApiOptions {
   displayPositionToYrsLoc: PagedEditorRef['displayPositionToYrsLoc'];
   getPositionAtPoint: PagedEditorRef['getPositionAtPoint'];
   readPositionAtPoint?: PagedEditorRef['readPositionAtPoint'];
+  viewerSelection?: boolean;
 }
 
 export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
@@ -402,6 +416,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     displayPositionToYrsLoc,
     getPositionAtPoint,
     readPositionAtPoint = async (clientX, clientY) => getPositionAtPoint(clientX, clientY),
+    viewerSelection = false,
   } = opts;
   const bumpInputEpochRef = useRef(bumpInputEpoch);
   bumpInputEpochRef.current = bumpInputEpoch;
@@ -422,6 +437,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   const displayPositionToYrsLocRef = useRef(displayPositionToYrsLoc);
   const getPositionAtPointRef = useRef(getPositionAtPoint);
   const readPositionAtPointRef = useRef(readPositionAtPoint);
+  const viewerSelectionRef = useRef(viewerSelection);
   documentFromYrsRef.current = documentFromYrs;
   yrsSessionRef.current = yrsSession;
   yrsLocToDisplayPositionRef.current = yrsLocToDisplayPosition;
@@ -433,6 +449,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   displayPositionToYrsLocRef.current = displayPositionToYrsLoc;
   getPositionAtPointRef.current = getPositionAtPoint;
   readPositionAtPointRef.current = readPositionAtPoint;
+  viewerSelectionRef.current = viewerSelection;
 
   const inputs = {
     bumpInputEpochRef,
@@ -459,6 +476,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     displayPositionToYrsLocRef,
     getPositionAtPointRef,
     readPositionAtPointRef,
+    viewerSelectionRef,
   };
 
   useImperativeHandle(ref, () => buildRefApi(inputs), [
