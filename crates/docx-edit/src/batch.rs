@@ -684,7 +684,7 @@ enum Capture {
 }
 
 fn direct_admissible<T: ReadTxn>(doc: &EditingDoc, txn: &T, steps: &[Planned]) -> bool {
-    if txn.root_refs().any(|(name, root)| {
+    if txn.root_refs().any(|(name, _)| {
         ![
             crate::STORIES,
             crate::COMMENTS,
@@ -693,7 +693,6 @@ fn direct_admissible<T: ReadTxn>(doc: &EditingDoc, txn: &T, steps: &[Planned]) -
             crate::identity::SESSION,
         ]
         .contains(&name)
-            || !matches!(root, yrs::Out::YMap(_))
     }) || steps.iter().any(|planned| planned.companion)
         || !steps.iter().any(|planned| planned.effect.is_some())
     {
@@ -3426,10 +3425,10 @@ mod direct_tests {
     }
 
     #[test]
-    fn admission_rejects_extra_roots_and_non_map_schema_roots() {
-        for root in ["extra", crate::identity::SESSION] {
+    fn admission_rejects_undeclared_roots() {
+        for root in ["map", "text"] {
             let doc = document();
-            if root == "extra" {
+            if root == "map" {
                 doc.yrs_doc().get_or_insert_map(root);
             } else {
                 doc.yrs_doc().get_or_insert_text(root);
@@ -3652,16 +3651,16 @@ mod direct_tests {
             staged.stage.id_counter.load(Ordering::Relaxed),
             Ordering::Relaxed,
         );
-        let outcome = Ok(EditApplication {
+        let application = EditApplication {
             base_version: plan.base_version,
             version: doc.version(),
             applied: true,
             source: plan.source,
             changed_stories: staged.changed_stories,
             receipts,
-        });
-        assert_versions(doc, &base_version, epoch, &outcome);
-        outcome.unwrap()
+        };
+        assert_versions(doc, &base_version, epoch, &Ok(application.clone()));
+        application
     }
 
     fn raw_export(doc: &EditingDoc) -> Vec<u8> {
@@ -3714,35 +3713,37 @@ mod direct_tests {
     #[test]
     fn direct_executor_reuses_revisions_and_removes_owned_insertions() {
         for deleting in [false, true] {
-            let direct = document();
-            let replica = document();
+            let seed = document();
             let ctx = EditCtx::local("Ann", DATE).suggesting();
-            let mut previous = Vec::new();
-            for doc in [&direct, &replica] {
-                let split = doc
-                    .split_paragraph(
-                        &EditCtx::local("", ""),
-                        doc.paragraph_mark_position("p").unwrap(),
-                        None,
-                    )
-                    .unwrap();
-                doc.insert_text(
+            let split = seed
+                .split_paragraph(
                     &EditCtx::local("", ""),
-                    doc.paragraph_mark_position(&split.second_para_id).unwrap(),
-                    "Other",
-                    FormatPolicy::Inherit,
+                    seed.paragraph_mark_position("p").unwrap(),
+                    None,
                 )
                 .unwrap();
-                previous = doc
-                    .insert_text(
-                        &ctx,
-                        Position::new("body", 0),
-                        "owned",
-                        FormatPolicy::Inherit,
-                    )
-                    .unwrap()
-                    .revision_ids;
-            }
+            seed.insert_text(
+                &EditCtx::local("", ""),
+                seed.paragraph_mark_position(&split.second_para_id).unwrap(),
+                "Other",
+                FormatPolicy::Inherit,
+            )
+            .unwrap();
+            let previous = seed
+                .insert_text(
+                    &ctx,
+                    Position::new("body", 0),
+                    "owned",
+                    FormatPolicy::Inherit,
+                )
+                .unwrap()
+                .revision_ids;
+            let state = seed.encode_state_as_update_v1();
+            let [direct, replica] = [(), ()].map(|_| {
+                let doc = EditingDoc::new(9001);
+                doc.apply_update_v1(&state).unwrap();
+                doc
+            });
             let direct_history = UndoSession::new();
             let replica_history = UndoSession::new();
             for (doc, history) in [(&direct, &direct_history), (&replica, &replica_history)] {

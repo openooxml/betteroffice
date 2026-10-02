@@ -390,10 +390,10 @@ fn export(doc: &EditingDoc, bytes: &[u8]) -> Vec<u8> {
     for story in story_ids(doc) {
         for segment in doc.story_segments(&story).unwrap() {
             for key in ["ins", "del"] {
-                if let Some(Any::Map(revision)) = segment.attributes.get(key) {
-                    if let Some(Any::String(id)) = revision.get("id") {
-                        revisions.insert((id.to_string(), key.to_owned()));
-                    }
+                if let Some(Any::Map(revision)) = segment.attributes.get(key)
+                    && let Some(Any::String(id)) = revision.get("id")
+                {
+                    revisions.insert((id.to_string(), key.to_owned()));
                 }
             }
         }
