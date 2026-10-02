@@ -257,6 +257,20 @@ fn encode_any<W: Write>(any: &Any, encoder: &mut W) {
     }
 }
 
+pub(crate) fn json_stable(any: &Any) -> bool {
+    let Ok(json) = serde_json::to_string(&json_value(any)) else {
+        return false;
+    };
+    let Ok(round_trip) = Any::from_json(&json) else {
+        return false;
+    };
+    let mut original = Vec::new();
+    let mut decoded = Vec::new();
+    encode_any(any, &mut original);
+    encode_any(&round_trip, &mut decoded);
+    original == decoded
+}
+
 fn json_value(any: &Any) -> Value {
     match any {
         Any::Null | Any::Undefined => Value::Null,
@@ -303,6 +317,43 @@ mod tests {
             encoded_state_len_v1(&txn),
             Some(encode_state_as_update_v1(&txn, &StateVector::default()).len()),
         );
+    }
+
+    #[test]
+    fn json_stability_matches_deterministic_any_bytes() {
+        for (value, stable) in [
+            (Any::Null, true),
+            (Any::Bool(true), true),
+            (Any::Bool(false), true),
+            (Any::from("text 😀"), true),
+            (Any::Number(0.5), true),
+            (Any::Number(12.0), true),
+            (Any::Number(-0.0), true),
+            (Any::Number(f64::NAN), false),
+            (Any::Number((1_u64 << 60) as f64), false),
+            (Any::BigInt(7), false),
+            (Any::Buffer(Arc::from([0, 127, 255])), false),
+            (Any::Undefined, false),
+        ] {
+            assert_eq!(json_stable(&value), stable, "{value:?}");
+        }
+        for (member, stable) in [
+            (Any::Number(0.5), true),
+            (Any::BigInt(7), false),
+            (Any::Buffer(Arc::from([1, 2])), false),
+            (Any::Undefined, false),
+            (Any::Number(f64::NAN), false),
+        ] {
+            let array = Any::Array(Arc::from([Any::Null, member]));
+            let map = Any::Map(Arc::new(std::collections::HashMap::from([
+                ("z".to_owned(), Any::Bool(true)),
+                ("a".to_owned(), array.clone()),
+            ])));
+            assert_eq!(json_stable(&array), stable, "{array:?}");
+            assert_eq!(json_stable(&map), stable, "{map:?}");
+            let nested = Any::Array(Arc::from([map]));
+            assert_eq!(json_stable(&nested), stable, "{nested:?}");
+        }
     }
 
     #[test]

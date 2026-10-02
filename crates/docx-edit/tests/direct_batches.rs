@@ -1,13 +1,11 @@
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use docx_edit::{
-    EditApplication, EditCtx, EditFailureCode, EditHistory, EditOperation, EditRequest, EditSource,
-    EditStep, EditSuggestion, EditTextView, EditingDoc, FormatPolicy, ParagraphInput,
-    ParagraphTarget, SearchScope, SegmentContent, TargetEdge, TextPosition, TextRange, TextTarget,
-    UndoSession, seed_from_docx_with_generation,
+    EditApplication, EditCtx, EditFailureCode, EditHistory, EditOperation, EditRefusal,
+    EditRequest, EditSource, EditStep, EditSuggestion, EditTextView, EditingDoc, FormatPolicy,
+    ParagraphInput, ParagraphTarget, SearchScope, SegmentContent, TargetEdge, TextPosition,
+    TextRange, TextTarget, UndoSession, seed_from_docx_with_generation,
 };
 use docx_parse::serializer::{S13SaveRequest, write_docx_s13};
 use serde_json::{Value, json};
@@ -172,9 +170,32 @@ fn request(doc: &EditingDoc, steps: Vec<EditStep>, history: EditHistory) -> Edit
 }
 
 fn apply(doc: &EditingDoc, undo: &UndoSession, steps: Vec<EditStep>) -> EditApplication {
-    doc.apply_edits(&request(doc, steps, EditHistory::None), undo)
-        .unwrap()
-        .unwrap()
+    apply_request(doc, &request(doc, steps, EditHistory::None), undo).unwrap()
+}
+
+fn apply_request(
+    doc: &EditingDoc,
+    request: &EditRequest,
+    undo: &UndoSession,
+) -> Result<EditApplication, EditRefusal> {
+    let base_version = doc.version();
+    let epoch = doc.committed_epoch();
+    let outcome = doc.apply_edits(request, undo).unwrap();
+    let applied = match &outcome {
+        Ok(result) => {
+            assert_eq!(result.base_version, base_version);
+            assert_eq!(result.version, doc.version());
+            assert_eq!(result.version != base_version, result.applied);
+            result.applied
+        }
+        Err(refusal) => {
+            assert_eq!(refusal.version, base_version);
+            assert_eq!(refusal.version, doc.version());
+            false
+        }
+    };
+    assert_eq!(doc.committed_epoch() - epoch, u64::from(applied));
+    outcome
 }
 
 fn normalized<T: serde::Serialize>(outcome: &T) -> Value {
@@ -236,25 +257,26 @@ struct Observed {
 }
 
 struct Updates {
-    events: Rc<RefCell<Vec<Observed>>>,
+    events: Arc<Mutex<Vec<Observed>>>,
     _deep: yrs::Subscription,
     _updates: yrs::Subscription,
 }
 
 impl Updates {
     fn new(doc: &EditingDoc) -> Self {
-        let touched = Rc::new(RefCell::new(BTreeSet::new()));
-        let seen = Rc::clone(&touched);
+        let touched = Arc::new(Mutex::new(BTreeSet::new()));
+        let seen = Arc::clone(&touched);
         let stories = doc.yrs_doc().transact().get_map("stories").unwrap();
         let deep = stories.observe_deep(move |txn, events| {
             for event in events.iter() {
                 match event.path().front() {
                     Some(yrs::types::PathSegment::Key(story)) => {
-                        seen.borrow_mut().insert(story.to_string());
+                        seen.lock().unwrap().insert(story.to_string());
                     }
                     None => {
                         if let yrs::types::Event::Map(event) = event {
-                            seen.borrow_mut()
+                            seen.lock()
+                                .unwrap()
                                 .extend(event.keys(txn).keys().map(|id| id.to_string()));
                         }
                     }
@@ -262,14 +284,14 @@ impl Updates {
                 }
             }
         });
-        let events = Rc::new(RefCell::new(Vec::new()));
-        let captured = Rc::clone(&events);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
         let updates = doc
             .yrs_doc()
             .observe_update_v1(move |txn, event| {
-                captured.borrow_mut().push(Observed {
+                captured.lock().unwrap().push(Observed {
                     update: event.update.clone(),
-                    stories: std::mem::take(&mut *touched.borrow_mut()),
+                    stories: std::mem::take(&mut *touched.lock().unwrap()),
                     origin: txn.origin().cloned(),
                 });
             })
@@ -283,7 +305,8 @@ impl Updates {
 
     fn signature(&self) -> Vec<BTreeSet<String>> {
         self.events
-            .borrow()
+            .lock()
+            .unwrap()
             .iter()
             .map(|event| event.stories.clone())
             .collect()
@@ -446,14 +469,24 @@ fn exercise(bytes: &[u8], prepare: impl Fn(&EditingDoc), steps: Vec<EditStep>) -
     assert_eq!(direct.direct_batches_applied(), 1);
     assert_eq!(replica.direct_batches_applied(), 0);
     assert_eq!(normalized(&result_direct), normalized(&result_replica));
-    assert_eq!(updates_direct.signature(), updates_replica.signature());
-    assert_eq!(updates_direct.events.borrow().len(), 1);
+    let state_direct = direct.encode_state_as_update_v1();
+    let state_replica = replica.encode_state_as_update_v1();
+    eprintln!(
+        "direct/replica deterministic state byte equality: {}",
+        state_direct == state_replica
+    );
     assert_eq!(
-        updates_direct.events.borrow()[0].origin,
+        direct.encode_state_vector_v1(),
+        replica.encode_state_vector_v1()
+    );
+    assert_eq!(updates_direct.signature(), updates_replica.signature());
+    assert_eq!(updates_direct.events.lock().unwrap().len(), 1);
+    assert_eq!(
+        updates_direct.events.lock().unwrap()[0].origin,
         Some(Origin::from("host"))
     );
     assert_eq!(
-        updates_direct.events.borrow()[0].stories,
+        updates_direct.events.lock().unwrap()[0].stories,
         result_direct
             .changed_stories
             .iter()
@@ -572,20 +605,18 @@ fn existing_suggestions_keep_their_planning_refusals() {
         let base = direct.encode_state_as_update_v1();
         assert_eq!(base, replica.encode_state_as_update_v1());
         direct.set_direct_batches(true);
-        let a = direct
-            .apply_edits(
-                &request(&direct, vec![step.clone()], EditHistory::None),
-                &UndoSession::new(),
-            )
-            .unwrap()
-            .unwrap_err();
-        let b = replica
-            .apply_edits(
-                &request(&replica, vec![step], EditHistory::None),
-                &UndoSession::new(),
-            )
-            .unwrap()
-            .unwrap_err();
+        let a = apply_request(
+            &direct,
+            &request(&direct, vec![step.clone()], EditHistory::None),
+            &UndoSession::new(),
+        )
+        .unwrap_err();
+        let b = apply_request(
+            &replica,
+            &request(&replica, vec![step], EditHistory::None),
+            &UndoSession::new(),
+        )
+        .unwrap_err();
         assert_eq!(a.failure.code, EditFailureCode::TrackedRevisionConflict);
         assert_eq!(normalized(&a), normalized(&b));
         assert_eq!(direct.direct_batches_applied(), 0);
@@ -695,17 +726,18 @@ fn separate_histories_and_structural_operations_use_replicas() {
             replica.encode_state_as_update_v1()
         );
         direct.set_direct_batches(true);
-        let a = direct
-            .apply_edits(
-                &request(&direct, vec![step.clone()], history),
-                &UndoSession::new(),
-            )
-            .unwrap()
-            .unwrap();
-        let b = replica
-            .apply_edits(&request(&replica, vec![step], history), &UndoSession::new())
-            .unwrap()
-            .unwrap();
+        let a = apply_request(
+            &direct,
+            &request(&direct, vec![step.clone()], history),
+            &UndoSession::new(),
+        )
+        .unwrap();
+        let b = apply_request(
+            &replica,
+            &request(&replica, vec![step], history),
+            &UndoSession::new(),
+        )
+        .unwrap();
         assert!(a.applied);
         assert_eq!(direct.direct_batches_applied(), 0);
         assert_eq!(normalized(&a), normalized(&b));
@@ -739,14 +771,8 @@ fn refusals_preserve_state_and_match() {
         let before = direct.encode_state_as_update_v1();
         let updates_a = Updates::new(&direct);
         let updates_b = Updates::new(&replica);
-        let a = direct
-            .apply_edits(&a, &UndoSession::new())
-            .unwrap()
-            .unwrap_err();
-        let b = replica
-            .apply_edits(&b, &UndoSession::new())
-            .unwrap()
-            .unwrap_err();
+        let a = apply_request(&direct, &a, &UndoSession::new()).unwrap_err();
+        let b = apply_request(&replica, &b, &UndoSession::new()).unwrap_err();
         assert_eq!(
             a.failure.code,
             if stale {
@@ -759,8 +785,8 @@ fn refusals_preserve_state_and_match() {
         assert_eq!(direct.direct_batches_applied(), 0);
         assert_eq!(before, direct.encode_state_as_update_v1());
         assert_eq!(before, replica.encode_state_as_update_v1());
-        assert!(updates_a.events.borrow().is_empty());
-        assert!(updates_b.events.borrow().is_empty());
+        assert!(updates_a.events.lock().unwrap().is_empty());
+        assert!(updates_b.events.lock().unwrap().is_empty());
     }
 }
 
@@ -795,13 +821,15 @@ fn direct_and_replica_peers_converge() {
     assert_eq!(replica.direct_batches_applied(), 0);
     let a: Vec<_> = updates_a
         .events
-        .borrow()
+        .lock()
+        .unwrap()
         .iter()
         .map(|event| event.update.clone())
         .collect();
     let b: Vec<_> = updates_b
         .events
-        .borrow()
+        .lock()
+        .unwrap()
         .iter()
         .map(|event| event.update.clone())
         .collect();
@@ -839,6 +867,6 @@ fn noop_batches_leave_direct_counter_and_events_unchanged() {
     assert_eq!(direct.direct_batches_applied(), 0);
     assert_eq!(base, direct.encode_state_as_update_v1());
     assert_eq!(base, replica.encode_state_as_update_v1());
-    assert!(updates_direct.events.borrow().is_empty());
-    assert!(updates_replica.events.borrow().is_empty());
+    assert!(updates_direct.events.lock().unwrap().is_empty());
+    assert!(updates_replica.events.lock().unwrap().is_empty());
 }

@@ -659,7 +659,8 @@ impl EditingDoc {
         self.metadata.lock().unwrap().clone()
     }
 
-    pub(crate) fn committed_epoch(&self) -> u64 {
+    #[doc(hidden)]
+    pub fn committed_epoch(&self) -> u64 {
         self.epoch.load(Ordering::Relaxed)
     }
 

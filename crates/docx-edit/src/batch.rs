@@ -684,44 +684,79 @@ enum Capture {
 }
 
 fn direct_admissible<T: ReadTxn>(doc: &EditingDoc, txn: &T, steps: &[Planned]) -> bool {
-    if steps.iter().any(|planned| planned.companion)
+    if txn.root_refs().any(|(name, root)| {
+        ![
+            crate::STORIES,
+            crate::COMMENTS,
+            crate::identity::PARAGRAPH_IDS,
+            crate::identity::SOURCE_PARAGRAPH_IDS,
+            crate::identity::SESSION,
+        ]
+        .contains(&name)
+            || !matches!(root, yrs::Out::YMap(_))
+    }) || steps.iter().any(|planned| planned.companion)
         || !steps.iter().any(|planned| planned.effect.is_some())
     {
         return false;
     }
-    let mut paragraphs = HashMap::new();
+    let mut snapshots = HashMap::new();
+    let mut checked = BTreeSet::new();
     for planned in steps {
-        let (start, end, inserts) = match &planned.effect {
-            Some(Effect::Insert { at, .. }) => (*at, *at, true),
+        let effect = match &planned.effect {
+            Some(Effect::Insert { at, .. }) => Some((*at, *at, true)),
             Some(Effect::Replace {
                 start, end, text, ..
-            }) => (*start, *end, !text.is_empty()),
-            Some(Effect::Delete { start, end, .. }) => (*start, *end, false),
-            None => continue,
+            }) => Some((*start, *end, !text.is_empty())),
+            Some(Effect::Delete { start, end, .. }) => Some((*start, *end, false)),
+            None => None,
             _ => return false,
         };
         let Ok(story) = story_ref(txn, &planned.story) else {
             return false;
         };
-        let marks = paragraphs
+        let chunks = snapshots
             .entry(planned.story.as_str())
-            .or_insert_with(|| crate::pilcrows(&story, txn));
-        if marks
-            .last()
-            .is_none_or(|(index, _)| index.checked_add(1) != Some(story.len(txn)))
-        {
+            .or_insert_with(|| doc.chunk_snapshot(&planned.story, &story, txn));
+        if chunks.last().is_none_or(|chunk| {
+            !matches!(chunk.kind, crate::ops::ChunkKind::Pilcrow(_))
+                || chunk.end() != story.len(txn)
+        }) {
             return false;
         }
         let mut first = 0;
-        let contained = marks.iter().any(|(index, _)| {
-            let contains = first <= start && start <= end && end <= *index;
-            first = index + 1;
-            contains
-        });
+        let mut contained = effect.is_none();
+        for mark in chunks.iter() {
+            let crate::ops::ChunkKind::Pilcrow(map) = &mark.kind else {
+                continue;
+            };
+            let contains = effect
+                .is_some_and(|(start, end, _)| first <= start && start <= end && end <= mark.start);
+            contained |= contains;
+            let touched = contains
+                || crate::map_string(map, txn, crate::PARA_ID)
+                    .is_some_and(|id| planned.touched.contains(&id));
+            if touched
+                && checked.insert((planned.story.as_str(), mark.start))
+                && chunks
+                    .iter()
+                    .filter(|chunk| {
+                        chunk.end() > first.saturating_sub(1) && chunk.start < mark.end()
+                    })
+                    .any(|chunk| {
+                        chunk
+                            .attrs
+                            .values()
+                            .any(|value| !deterministic::json_stable(value))
+                    })
+            {
+                return false;
+            }
+            first = mark.end();
+        }
         if !contained {
             return false;
         }
-        if inserts
+        if let Some((start, end, true)) = effect
             && [start, end].into_iter().any(|index| {
                 crate::identity::would_promote_at(doc, txn, &planned.story, &story, index)
             })
@@ -3258,6 +3293,164 @@ mod direct_tests {
         value
     }
 
+    fn assert_versions(
+        doc: &EditingDoc,
+        base_version: &DocumentVersion,
+        epoch: u64,
+        outcome: &Result<EditApplication, EditRefusal>,
+    ) {
+        let applied = match outcome {
+            Ok(result) => {
+                assert_eq!(&result.base_version, base_version);
+                assert_eq!(result.version, doc.version());
+                assert_eq!(&result.version != base_version, result.applied);
+                result.applied
+            }
+            Err(refusal) => {
+                assert_eq!(&refusal.version, base_version);
+                assert_eq!(refusal.version, doc.version());
+                false
+            }
+        };
+        assert_eq!(doc.committed_epoch() - epoch, u64::from(applied));
+    }
+
+    fn apply_text_steps(
+        doc: &EditingDoc,
+        steps: &[BatchStep<'_>],
+        history: &UndoSession,
+        staging_limit: usize,
+    ) -> Result<EditApplication, EditRefusal> {
+        let base_version = doc.version();
+        let epoch = doc.committed_epoch();
+        let outcome = doc
+            .apply_steps(
+                &base_version,
+                EditSource::Host,
+                EditHistory::None,
+                steps,
+                history,
+                staging_limit,
+            )
+            .unwrap();
+        assert_versions(doc, &base_version, epoch, &outcome);
+        outcome
+    }
+
+    fn assert_replica_fallback(prepare: impl Fn(&EditingDoc), step: EditStep) {
+        let direct = document();
+        let replica = document();
+        for doc in [&direct, &replica] {
+            prepare(doc);
+        }
+        assert_eq!(
+            direct.encode_state_as_update_v1(),
+            replica.encode_state_as_update_v1()
+        );
+        direct.set_direct_batches(true);
+        let steps = [BatchStep::Edit(&step)];
+        let a = apply_text_steps(&direct, &steps, &UndoSession::new(), MAX_STAGING_BYTES).unwrap();
+        let b = apply_text_steps(&replica, &steps, &UndoSession::new(), MAX_STAGING_BYTES).unwrap();
+        assert!(a.applied);
+        assert_eq!(normalized(&a), normalized(&b));
+        assert_eq!(direct.direct_batches_applied(), 0);
+        assert_eq!(replica.direct_batches_applied(), 0);
+        assert_eq!(
+            direct.story_segments("body").unwrap(),
+            replica.story_segments("body").unwrap()
+        );
+        assert_eq!(
+            direct.encode_state_as_update_v1(),
+            replica.encode_state_as_update_v1()
+        );
+        assert_eq!(
+            direct.encode_state_vector_v1(),
+            replica.encode_state_vector_v1()
+        );
+    }
+
+    #[test]
+    fn formatted_root_text_uses_replica_path() {
+        assert_replica_fallback(
+            |doc| {
+                let text = doc.yrs_doc().get_or_insert_text("formatted");
+                text.insert_with_attributes(
+                    &mut doc.yrs_doc().transact_mut(),
+                    0,
+                    "root text",
+                    HashMap::from([("bold".into(), Any::Bool(true))]),
+                );
+                doc.format_range(
+                    &EditCtx::local("", ""),
+                    StoryRange::new("body", 0, 5),
+                    &crate::InlineFormatDelta {
+                        bold: crate::Patch::Set(true),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            },
+            step(),
+        );
+    }
+
+    #[test]
+    fn unstable_format_values_use_replica_path() {
+        for value in [Any::Buffer(Arc::from([1, 2, 3])), Any::BigInt(7)] {
+            assert_replica_fallback(
+                |doc| {
+                    doc.insert_text(
+                        &EditCtx::local("", ""),
+                        Position::new("body", 0),
+                        "marked",
+                        FormatPolicy::Explicit(std::collections::BTreeMap::from([(
+                            "opaque".to_owned(),
+                            value.clone(),
+                        )])),
+                    )
+                    .unwrap();
+                    assert!(
+                        doc.story_segments("body")
+                            .unwrap()
+                            .iter()
+                            .any(|segment| { segment.attributes.get("opaque") == Some(&value) })
+                    );
+                },
+                EditStep::new(EditOperation::InsertText {
+                    target: TextTarget::Range(text_range("body", "p", 6, "p", 6)),
+                    at: TargetEdge::Start,
+                    text: "next".to_owned(),
+                }),
+            );
+        }
+    }
+
+    #[test]
+    fn admission_rejects_extra_roots_and_non_map_schema_roots() {
+        for root in ["extra", crate::identity::SESSION] {
+            let doc = document();
+            if root == "extra" {
+                doc.yrs_doc().get_or_insert_map(root);
+            } else {
+                doc.yrs_doc().get_or_insert_text(root);
+            }
+            let plan = raw_plan(
+                &doc,
+                Effect::Insert {
+                    at: 1,
+                    text: "x".to_owned(),
+                    ctx: EditCtx::local("", ""),
+                },
+                Shape::Raw { start: 1, len: 1 },
+            );
+            assert!(!direct_admissible(
+                &doc,
+                &doc.yrs_doc().transact(),
+                &plan.steps
+            ));
+        }
+    }
+
     #[test]
     fn exact_staging_bound_preserves_refusals_and_admits_at_limit() {
         let direct = document();
@@ -3282,28 +3475,8 @@ mod direct_tests {
                 observed.fetch_add(1, Ordering::Relaxed);
             })
             .unwrap();
-        let a = direct
-            .apply_steps(
-                &direct.version(),
-                EditSource::Host,
-                EditHistory::None,
-                &steps,
-                &direct_history,
-                n - 1,
-            )
-            .unwrap()
-            .unwrap_err();
-        let b = replica
-            .apply_steps(
-                &replica.version(),
-                EditSource::Host,
-                EditHistory::None,
-                &steps,
-                &replica_history,
-                n - 1,
-            )
-            .unwrap()
-            .unwrap_err();
+        let a = apply_text_steps(&direct, &steps, &direct_history, n - 1).unwrap_err();
+        let b = apply_text_steps(&replica, &steps, &replica_history, n - 1).unwrap_err();
         assert_eq!(a.failure.code, EditFailureCode::LimitExceeded);
         assert_eq!(
             a.failure.message,
@@ -3314,28 +3487,8 @@ mod direct_tests {
         assert_eq!(base, replica.encode_state_as_update_v1());
         assert_eq!(direct.direct_batches_applied(), 0);
         assert_eq!(updates.load(Ordering::Relaxed), 0);
-        let a = direct
-            .apply_steps(
-                &direct.version(),
-                EditSource::Host,
-                EditHistory::None,
-                &steps,
-                &direct_history,
-                n,
-            )
-            .unwrap()
-            .unwrap();
-        let b = replica
-            .apply_steps(
-                &replica.version(),
-                EditSource::Host,
-                EditHistory::None,
-                &steps,
-                &replica_history,
-                n,
-            )
-            .unwrap()
-            .unwrap();
+        let a = apply_text_steps(&direct, &steps, &direct_history, n).unwrap();
+        let b = apply_text_steps(&replica, &steps, &replica_history, n).unwrap();
         assert!(a.applied);
         assert_eq!(normalized(&a), normalized(&b));
         assert_eq!(direct.direct_batches_applied(), 1);
@@ -3378,28 +3531,8 @@ mod direct_tests {
             },
         };
         let steps = [BatchStep::Rich(&rich)];
-        let a = direct
-            .apply_steps(
-                &direct.version(),
-                EditSource::Host,
-                EditHistory::None,
-                &steps,
-                &UndoSession::new(),
-                MAX_STAGING_BYTES,
-            )
-            .unwrap()
-            .unwrap();
-        let b = replica
-            .apply_steps(
-                &replica.version(),
-                EditSource::Host,
-                EditHistory::None,
-                &steps,
-                &UndoSession::new(),
-                MAX_STAGING_BYTES,
-            )
-            .unwrap()
-            .unwrap();
+        let a = apply_text_steps(&direct, &steps, &UndoSession::new(), MAX_STAGING_BYTES).unwrap();
+        let b = apply_text_steps(&replica, &steps, &UndoSession::new(), MAX_STAGING_BYTES).unwrap();
         assert!(a.applied);
         assert_eq!(direct.direct_batches_applied(), 0);
         assert_eq!(normalized(&a), normalized(&b));
@@ -3447,28 +3580,9 @@ mod direct_tests {
             at: TargetEdge::Start,
             text: "text".to_owned(),
         });
-        let a = direct
-            .apply_steps(
-                &direct.version(),
-                EditSource::Host,
-                EditHistory::None,
-                &[BatchStep::Edit(&step)],
-                &UndoSession::new(),
-                MAX_STAGING_BYTES,
-            )
-            .unwrap()
-            .unwrap();
-        let b = replica
-            .apply_steps(
-                &replica.version(),
-                EditSource::Host,
-                EditHistory::None,
-                &[BatchStep::Edit(&step)],
-                &UndoSession::new(),
-                MAX_STAGING_BYTES,
-            )
-            .unwrap()
-            .unwrap();
+        let steps = [BatchStep::Edit(&step)];
+        let a = apply_text_steps(&direct, &steps, &UndoSession::new(), MAX_STAGING_BYTES).unwrap();
+        let b = apply_text_steps(&replica, &steps, &UndoSession::new(), MAX_STAGING_BYTES).unwrap();
         assert_eq!(direct.direct_batches_applied(), 0);
         assert_eq!(normalized(&a), normalized(&b));
         assert_eq!(
@@ -3513,6 +3627,8 @@ mod direct_tests {
     }
 
     fn raw_replica(doc: &EditingDoc, plan: Plan, history: &UndoSession) -> EditApplication {
+        let base_version = doc.version();
+        let epoch = doc.committed_epoch();
         let base = Base {
             update: doc.encode_state_as_update_v1(),
             state_vector: doc.yrs_doc().transact().state_vector(),
@@ -3536,14 +3652,16 @@ mod direct_tests {
             staged.stage.id_counter.load(Ordering::Relaxed),
             Ordering::Relaxed,
         );
-        EditApplication {
+        let outcome = Ok(EditApplication {
             base_version: plan.base_version,
             version: doc.version(),
             applied: true,
             source: plan.source,
             changed_stories: staged.changed_stories,
             receipts,
-        }
+        });
+        assert_versions(doc, &base_version, epoch, &outcome);
+        outcome.unwrap()
     }
 
     fn raw_export(doc: &EditingDoc) -> Vec<u8> {
@@ -3605,6 +3723,7 @@ mod direct_tests {
                     .split_paragraph(
                         &EditCtx::local("", ""),
                         doc.paragraph_mark_position("p").unwrap(),
+                        None,
                     )
                     .unwrap();
                 doc.insert_text(
@@ -3687,10 +3806,11 @@ mod direct_tests {
                 &direct.yrs_doc().transact(),
                 &plan(&direct).steps
             ));
-            let a = direct
-                .apply_direct(plan(&direct), &direct_history)
-                .unwrap()
-                .unwrap();
+            let base_version = direct.version();
+            let epoch = direct.committed_epoch();
+            let outcome = direct.apply_direct(plan(&direct), &direct_history).unwrap();
+            assert_versions(&direct, &base_version, epoch, &outcome);
+            let a = outcome.unwrap();
             let b = raw_replica(&replica, plan(&replica), &replica_history);
             assert_eq!(direct.direct_batches_applied(), 1);
             assert_eq!(replica.direct_batches_applied(), 0);
@@ -3822,6 +3942,53 @@ mod direct_tests {
             &doc.yrs_doc().transact(),
             &plan.steps
         ));
+    }
+
+    #[test]
+    fn admission_checks_attributes_through_the_paragraph_marks() {
+        for (index, admitted) in [(0, true), (3, false), (4, false), (6, false), (7, false)] {
+            let doc = EditingDoc::new(9001);
+            doc.seed_story(
+                "body",
+                &[
+                    crate::SeedParagraph {
+                        text: "one".to_owned(),
+                        p_style: "Normal".to_owned(),
+                        alignment: "left".to_owned(),
+                    },
+                    crate::SeedParagraph {
+                        text: "two".to_owned(),
+                        p_style: "Normal".to_owned(),
+                        alignment: "left".to_owned(),
+                    },
+                ],
+            )
+            .unwrap();
+            {
+                let mut txn = doc.yrs_doc().transact_mut();
+                story_ref(&txn, "body").unwrap().format(
+                    &mut txn,
+                    index,
+                    1,
+                    HashMap::from([("opaque".into(), Any::Buffer(Arc::from([1, 2])))]),
+                );
+            }
+            let plan = raw_plan(
+                &doc,
+                Effect::Replace {
+                    start: 5,
+                    end: 6,
+                    text: "x".to_owned(),
+                    ctx: EditCtx::local("", ""),
+                },
+                Shape::Replacement { start: 5, len: 1 },
+            );
+            assert_eq!(
+                direct_admissible(&doc, &doc.yrs_doc().transact(), &plan.steps),
+                admitted,
+                "attribute at {index}"
+            );
+        }
     }
 
     #[test]
