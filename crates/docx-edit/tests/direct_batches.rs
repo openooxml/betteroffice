@@ -436,6 +436,15 @@ fn assert_export(left: &EditingDoc, right: &EditingDoc, bytes: &[u8]) {
 }
 
 fn exercise(bytes: &[u8], prepare: impl Fn(&EditingDoc), steps: Vec<EditStep>) -> EditApplication {
+    exercise_path(bytes, prepare, steps, true)
+}
+
+fn exercise_path(
+    bytes: &[u8],
+    prepare: impl Fn(&EditingDoc),
+    steps: Vec<EditStep>,
+    direct_path: bool,
+) -> EditApplication {
     let direct = open(bytes);
     let replica = open(bytes);
     for doc in [&direct, &replica] {
@@ -471,7 +480,7 @@ fn exercise(bytes: &[u8], prepare: impl Fn(&EditingDoc), steps: Vec<EditStep>) -
     direct.end_shared_reads();
     replica.end_shared_reads();
     assert!(result_direct.applied);
-    assert_eq!(direct.direct_batches_applied(), 1);
+    assert_eq!(direct.direct_batches_applied(), u64::from(direct_path));
     assert_eq!(replica.direct_batches_applied(), 0);
     assert_eq!(normalized(&result_direct), normalized(&result_replica));
     assert_eq!(state_vector(&direct), state_vector(&replica));
@@ -559,15 +568,15 @@ fn descending_steps_in_one_paragraph() {
         suggested(delete(search("00000001", "gamma"))),
     ];
     exercise(&fixture(), |_| {}, steps.clone());
-    let plain = steps
+    let plain: Vec<_> = steps
         .into_iter()
-        .take(2)
         .map(|mut step| {
             step.suggest = None;
             step
         })
         .collect();
-    exercise(&fixture(), |_| {}, plain);
+    exercise(&fixture(), |_| {}, plain[..2].to_vec());
+    exercise_path(&fixture(), |_| {}, plain, false);
 }
 
 #[test]
