@@ -229,11 +229,11 @@ test('superseded background slices reach the client in the next chained reply', 
   try {
     const built = await f.build([5], f.base.frameEpoch);
     let sync: ReturnType<typeof f.sync> | undefined;
-    let slice: Uint8Array | undefined;
+    let slice: Uint8Array<ArrayBuffer> | undefined;
     f.engine.buildDisplayPagesFrame = (pages, expected) => {
       const bytes = buildPages(pages, expected);
       if (!sync) {
-        slice = bytes.slice();
+        slice = new Uint8Array(bytes);
         f.edit('Background ');
         sync = f.sync(f.base.frameEpoch, true);
       }
