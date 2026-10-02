@@ -181,6 +181,8 @@ describe('plugin host proposal previews', () => {
     host.geometryPresented(layout(0));
     geometry = { layout: layout(0) } as DocxPluginGeometry;
     host.geometryPresented({ ...layout(0), id: 'older' });
+    await settle();
+    expect(events).toEqual([]);
     host.geometryPresented(layout(0));
     await settle();
     host.geometryPresented(layout(0));
@@ -192,6 +194,18 @@ describe('plugin host proposal previews', () => {
     geometry = { layout: next } as DocxPluginGeometry;
     events.length = 0;
     host.layoutChanged(next);
+    await settle();
+    host.geometryPresented(next);
+    await settle();
+    expect(events).toEqual([
+      { type: 'layout-change', generation: host.generation()!, layout: next },
+    ]);
+    geometry = null;
+    host.layoutChanged(null);
+    host.layoutChanged(next);
+    await settle();
+    events.length = 0;
+    geometry = { layout: next } as DocxPluginGeometry;
     host.geometryPresented(next);
     await settle();
     expect(events).toEqual([

@@ -393,7 +393,6 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       state.version = readSessionVersion(next) ?? '';
       state.previewVersion = proposalSnapshot(next)?.previewVersion ?? 0;
       state.layout = null;
-      state.geometryLayout = null;
       state.selection = EMPTY_SELECTION;
       observe();
       generations += 1;
@@ -433,6 +432,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
           : null;
       if (sameLayout(layout, state.layout)) return;
       state.layout = layout;
+      state.geometryLayout = null;
       const generation = runtime.generation();
       if (generation) notifyLayout(generation);
     },
