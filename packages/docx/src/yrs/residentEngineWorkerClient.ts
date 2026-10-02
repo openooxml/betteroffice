@@ -162,6 +162,7 @@ export class ResidentEngineWorkerClient {
   private lastMemory: WasmModuleMemory[] | null = null;
   private answeredFrameEpoch = 0;
   private retainBuiltPages = false;
+  private failureListener: ((error: Error) => void) | null = null;
 
   constructor(private readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
     this.worker.onmessage = (event) => {
@@ -224,6 +225,11 @@ export class ResidentEngineWorkerClient {
   /** @internal */
   setRetainBuiltPages(retain: boolean): void {
     this.retainBuiltPages = retain;
+  }
+
+  /** @internal Called once when the worker fails, whether or not a request was waiting; not on `destroy`. */
+  onFailure(listener: ((error: Error) => void) | null): void {
+    this.failureListener = listener;
   }
 
   /** @internal Whether foreground document or frame work awaits its reply. */
@@ -732,7 +738,7 @@ export class ResidentEngineWorkerClient {
     const id = this.nextId++;
     const message: ResidentEngineWorkerRequest = { id, type: 'destroy' };
     this.worker.postMessage(message);
-    this.fail(new ResidentWorkerFailureError('Resident engine worker was destroyed'));
+    this.fail(new ResidentWorkerFailureError('Resident engine worker was destroyed'), false);
   }
 
   private request(
@@ -789,7 +795,8 @@ export class ResidentEngineWorkerClient {
     if (response.id >= this.lastSnapshotId) this.appliedFontsRevision = fontsRevision;
   }
 
-  private fail(error: Error): void {
+  private fail(error: Error, notify = true): void {
+    const first = this.terminalError === null;
     this.terminalError = error;
     this.ready = false;
     this.disarmWatchdog();
@@ -797,6 +804,7 @@ export class ResidentEngineWorkerClient {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
     for (const resolve of this.bootstrapWaiters.splice(0)) resolve();
+    if (notify && first) this.failureListener?.(error);
   }
 }
 
