@@ -54,7 +54,7 @@ extern crate self as docx_edit;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use yrs::types::text::YChange;
@@ -538,6 +538,8 @@ pub struct EditingDoc {
     doc: Doc,
     client_id: u64,
     id_counter: AtomicU64,
+    direct_batches: AtomicBool,
+    direct_batches_applied: AtomicU64,
     /// Bumped once per committed update (local ops, remote merges, undo/redo); segment
     /// indexes and chunk snapshots older than the current value are rebuilt on next lookup.
     epoch: Arc<AtomicU64>,
@@ -597,6 +599,8 @@ impl EditingDoc {
             doc,
             client_id,
             id_counter: AtomicU64::new(0),
+            direct_batches: AtomicBool::new(false),
+            direct_batches_applied: AtomicU64::new(0),
             epoch,
             instance: DOC_INSTANCES.fetch_add(1, Ordering::Relaxed),
             version_nonce: AtomicU64::new(batch::mint_nonce(client_id, 0)),
@@ -616,6 +620,16 @@ impl EditingDoc {
             _story_revision_sub: story_revision_sub,
             _seen_subs: seen_subs,
         }
+    }
+
+    #[doc(hidden)]
+    pub fn set_direct_batches(&self, on: bool) {
+        self.direct_batches.store(on, Ordering::Relaxed);
+    }
+
+    #[doc(hidden)]
+    pub fn direct_batches_applied(&self) -> u64 {
+        self.direct_batches_applied.load(Ordering::Relaxed)
     }
 
     /// The optimistic-concurrency token of this replica's committed state.
@@ -650,7 +664,8 @@ impl EditingDoc {
         self.metadata.lock().unwrap().clone()
     }
 
-    pub(crate) fn committed_epoch(&self) -> u64 {
+    #[doc(hidden)]
+    pub fn committed_epoch(&self) -> u64 {
         self.epoch.load(Ordering::Relaxed)
     }
 

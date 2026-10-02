@@ -292,6 +292,10 @@ export class EditSession {
      */
     delete_table(table_json: string): string;
     /**
+     * The number of text batches applied directly to the live document.
+     */
+    direct_batches_applied(): number;
+    /**
      * Region-aware hit test against the resident display list, so no
      * display-list JSON crosses the boundary. `x`/`y` are page-local px.
      * Returns
@@ -969,6 +973,10 @@ export class EditSession {
      */
     set_content_control_value_at(story: string, para_id: string, offset: number, value_json: string): void;
     /**
+     * Apply admitted paragraph-local text batches directly. Off by default.
+     */
+    set_direct_batches(enabled: boolean): void;
+    /**
      * Keep every previously built page while windowed builds are on.
      */
     set_display_retain_built_pages(retain: boolean): void;
@@ -1558,6 +1566,7 @@ export interface InitOutput {
     readonly editsession_delete_row: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly editsession_delete_story: (a: number, b: number, c: number) => [number, number];
     readonly editsession_delete_table: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_direct_batches_applied: (a: number) => number;
     readonly editsession_display_hit_test_regions_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_display_range_rects_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_display_range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
@@ -1657,6 +1666,7 @@ export interface InitOutput {
     readonly editsession_set_comment_ranges: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_set_content_control_value: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_set_content_control_value_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+    readonly editsession_set_direct_batches: (a: number, b: number) => void;
     readonly editsession_set_display_retain_built_pages: (a: number, b: number) => void;
     readonly editsession_set_display_window: (a: number, b: number, c: number) => void;
     readonly editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];

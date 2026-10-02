@@ -53,6 +53,7 @@ export const editsession_delete_range: (a: number, b: number, c: number, d: numb
 export const editsession_delete_row: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const editsession_delete_story: (a: number, b: number, c: number) => [number, number];
 export const editsession_delete_table: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_direct_batches_applied: (a: number) => number;
 export const editsession_display_hit_test_regions_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_display_range_rects_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_display_range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
@@ -152,6 +153,7 @@ export const editsession_set_column_width: (a: number, b: number, c: number, d: 
 export const editsession_set_comment_ranges: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_set_content_control_value: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_set_content_control_value_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+export const editsession_set_direct_batches: (a: number, b: number) => void;
 export const editsession_set_display_retain_built_pages: (a: number, b: number) => void;
 export const editsession_set_display_window: (a: number, b: number, c: number) => void;
 export const editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];

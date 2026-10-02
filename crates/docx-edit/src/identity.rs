@@ -1147,6 +1147,22 @@ pub(crate) fn promote_at(
     }
 }
 
+pub(crate) fn would_promote_at<T: ReadTxn>(
+    doc: &EditingDoc,
+    txn: &T,
+    story_id: &str,
+    story: &TextRef,
+    index: u32,
+) -> bool {
+    index.checked_add(1) == Some(story.len(txn))
+        && doc.with_seen(txn, |seen| {
+            seen.synthetic.iter().any(|(id, pilcrow)| {
+                id == story_id
+                    && map_string(pilcrow, txn, PARA_ORIGIN).as_deref() == Some(SYNTHETIC)
+            })
+        })
+}
+
 /// [`promote`] for an edit that authored into the paragraph ending `story_id`.
 pub(crate) fn promote_story(doc: &EditingDoc, txn: &mut TransactionMut<'_>, story_id: &str) {
     let seeded: Vec<MapRef> = doc.with_seen(&*txn, |seen| {
