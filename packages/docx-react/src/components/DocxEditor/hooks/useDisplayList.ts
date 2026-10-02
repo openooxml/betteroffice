@@ -1465,7 +1465,11 @@ export function useRustDisplayList(
         }
       };
       try {
-        const opened = await requestOpenedWorker(hostEngine, (owner) => owner.opening!);
+        let openedBy: NonNullable<typeof workerRef.current> | null = null;
+        const opened = await requestOpenedWorker(hostEngine, (owner) => {
+          openedBy = owner;
+          return owner.opening!;
+        });
         return {
           ...opened,
           encodeState: () => requestOpenedWorker(hostEngine, (owner) => owner.client.encodeState()),
@@ -1483,11 +1487,16 @@ export function useRustDisplayList(
             requestOpenedWorker(hostEngine, (owner) => owner.client.handOver()),
           save: (request, admit) => {
             const owner = workerRef.current;
-            if (!owner || !isCurrentWorker(hostEngine, owner) || owner.client.hasFailed()) {
+            if (
+              !owner ||
+              owner !== openedBy ||
+              !isCurrentWorker(hostEngine, owner) ||
+              owner.client.hasFailed()
+            ) {
               return Promise.reject(new Error('The resident worker holding this document is gone'));
             }
             return requestOpenedWorker(hostEngine, async (current) => {
-              if (current !== owner || !admit()) {
+              if (current !== openedBy || !admit()) {
                 throw new Error('The document is no longer saved in its resident worker');
               }
               return current.client.save(request);

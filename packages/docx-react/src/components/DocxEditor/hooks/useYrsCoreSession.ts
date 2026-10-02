@@ -704,19 +704,16 @@ export function useYrsCoreSession(
             const save: WorkerOpenSave = (comments) => {
               const host = documentRef.current;
               if (!host) return null;
-              return worker
-                .save(
-                  { source, hostJson: worker.hostJson, host: hostSaveMetadata(host), comments },
-                  () =>
-                    !stale() &&
-                    sessionRef.current === next &&
-                    workerOpenReplicaPending(next) &&
-                    !workerOpenReplicaStarted(next)
-                )
-                .then((saved) => {
-                  registeredWorkerProposalAuthority(next)?.resync();
-                  return saved;
-                });
+              const authority = registeredWorkerProposalAuthority(next);
+              const post = () => worker.save(
+                { source, hostJson: worker.hostJson, host: hostSaveMetadata(host), comments },
+                () =>
+                  !stale() &&
+                  sessionRef.current === next &&
+                  workerOpenReplicaPending(next) &&
+                  !workerOpenReplicaStarted(next)
+              );
+              return authority ? authority.save(post) : post();
             };
             workerSaverRef.current = { session: next, save };
             if (workerOpenRef.current?.workerProposals) {

@@ -203,6 +203,46 @@ test.each(['fallback', 'destroy'])('an opened worker stops owning its document a
   }
 });
 
+test('an opened document rejects saves after OOM replaces its worker', async () => {
+  const { native, engine, frame, layoutJson } = setup();
+  const warnings = spyOn(console, 'warn').mockImplementation(() => {});
+  const { result, unmount } = renderHook(() =>
+    useRustDisplayList(null, undefined, undefined, undefined, engine, undefined, undefined, undefined, true)
+  );
+  try {
+    const source = Uint8Array.of(1);
+    const opening = result.current.openInWorker(engine, source);
+    const first = FakeWorker.spawned[0]!;
+    first.onmessage?.({ data: {
+      id: first.last().id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0),
+    } } as MessageEvent<ResidentEngineWorkerResponse>);
+    const opened = await opening;
+    expect(opened).not.toBeNull();
+    let pending!: Promise<unknown>;
+    await act(async () => {
+      pending = result.current.layoutInWorker(engine, REQUEST)!;
+      expect(first.last()).toMatchObject({ type: 'bootstrap', opened: true });
+      first.outOfMemory();
+    });
+    expect(first.terminated).toBe(true);
+    expect(FakeWorker.spawned).toHaveLength(2);
+    const second = FakeWorker.spawned[1]!;
+    expect(second.last()).toMatchObject({ type: 'bootstrap' });
+    await act(async () => {
+      second.replyFrame(frame(1), 1, { layoutJson });
+      expect(await pending).not.toBeNull();
+    });
+    await expect(opened!.save({
+      source, hostJson: opened!.hostJson, host: { package: { document: { content: [] } } }, comments: [],
+    }, () => true)).rejects.toThrow('The resident worker holding this document is gone');
+    expect(second.posted.some((request) => request.type === 'save')).toBe(false);
+  } finally {
+    unmount();
+    warnings.mockRestore();
+    native.free();
+  }
+});
+
 test('a worker owns a document supplied by bootstrap and sync', async () => {
   const { native, engine, frame, layoutJson } = setup();
   const { result, unmount } = renderHook(() =>

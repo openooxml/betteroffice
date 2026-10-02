@@ -228,6 +228,54 @@ test('initialization runs once and serializes reads after an in-flight proposal'
   expect(h.events).toEqual(['snapshot', 'propose', 'paragraphIdentities']);
 });
 
+test('a save waits for queued proposal mutations and mirrors the version it leaves', async () => {
+  const h = harness();
+  const pending = deferred<ResidentProposalReply>();
+  const posted = deferred<void>();
+  h.worker.proposal.mockImplementation(async (op) => {
+    h.events.push(op.kind);
+    return reply(op.kind === 'snapshot' ? 'worker-3' : 'worker-2');
+  });
+  h.worker.proposal.mockImplementationOnce(async (op) => {
+    h.events.push(op.kind);
+    posted.resolve();
+    return pending.promise;
+  });
+  const initializing = h.authority.initialize();
+  await posted.promise;
+  const mutation = h.authority.setStates({
+    expectVersion: 'worker-1', expectPreviewVersion: 0, changes: [],
+  }, unusedMain);
+  const bytes = Uint8Array.of(2);
+  const task = mock(async () => {
+    h.events.push('save');
+    expect(h.session.version()).toBe('worker-2');
+    return bytes;
+  });
+  const saved = h.authority.save(task);
+  expect(h.events).toEqual(['snapshot']);
+  expect(task).not.toHaveBeenCalled();
+  pending.resolve(reply());
+  await initializing;
+  await mutation;
+  expect(await saved).toBe(bytes);
+  expect(h.events).toEqual(['snapshot', 'setStates', 'save', 'snapshot']);
+  expect(h.session.version()).toBe('worker-3');
+  expect(h.authority.geometry()?.version).toBe('worker-3');
+  expect(h.relayout).toHaveBeenCalledTimes(1);
+});
+
+test('a save rejects while handing over without running its task', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  const handingOver = beginWorkerProposalHandover(h.session)!;
+  const task = mock(async () => Uint8Array.of(2));
+  await expect(h.authority.save(task)).rejects.toThrow('The document is being handed over to its replica');
+  expect(task).not.toHaveBeenCalled();
+  await handingOver;
+  expect(h.events).toEqual(['snapshot', 'handOver']);
+});
+
 test('routed reads wait for layout and the initialization snapshot before posting', async () => {
   const laidOut = deferred<void>();
   const h = harness(() => laidOut.promise);
