@@ -577,11 +577,8 @@ export function useRustDisplayList(
     [isCurrentWorker]
   );
   const canRegisterWorkerFrame = useCallback(
-    (base: RetainedFrame | null, frames: readonly Uint8Array[], owner: WorkerLayoutFrame['owner']): boolean =>
-      base === null
-        ? frames.length > 0 && decodeFrameDelta(frames[0]!).full
-        : workerFrameOwnersRef.current.get(base) === owner ||
-          frames.some((bytes) => decodeFrameDelta(bytes).full),
+    (base: RetainedFrame | null, reset: boolean, owner: WorkerLayoutFrame['owner']): boolean =>
+      reset || (base !== null && workerFrameOwnersRef.current.get(base) === owner),
     []
   );
   // The engines whose worker ran out of memory, each with the failure once its
@@ -1205,8 +1202,14 @@ export function useRustDisplayList(
           // Superseded: a newer frame's reply owns the painted-caret verdict.
           return { frameEpoch: null, caretSynchronized: false, deletedUnits: result.deletedUnits };
         }
-        const { frame: nextFrame } = applyFrameChain(previous.frame, result.pageFrames ?? [result.frame], true);
-        if (canRegisterWorkerFrame(previous.frame, result.pageFrames ?? [result.frame], worker)) {
+        let nextFrame: RetainedFrame;
+        let reset = delta.full;
+        if (result.pageFrames && result.pageFrames.length !== 1) {
+          ({ frame: nextFrame, reset } = applyFrameChain(previous.frame, result.pageFrames, true));
+        } else {
+          nextFrame = applyFrameDeltaOwned(previous.frame, delta);
+        }
+        if (canRegisterWorkerFrame(previous.frame, reset, worker)) {
           workerFrameOwnersRef.current.set(nextFrame, worker);
         }
         mainFrameRef.current = null;
@@ -1991,8 +1994,14 @@ export function useRustDisplayList(
                 finish();
                 return;
               }
-              const { frame: nextFrame } = applyFrameChain(previous, result.pageFrames ?? [result.frame], true);
-              if (worker && canRegisterWorkerFrame(previous, result.pageFrames ?? [result.frame], worker)) {
+              let nextFrame: RetainedFrame;
+              let reset = delta.full;
+              if (result.pageFrames && result.pageFrames.length !== 1) {
+                ({ frame: nextFrame, reset } = applyFrameChain(previous, result.pageFrames, true));
+              } else {
+                nextFrame = applyFrameDeltaOwned(previous, delta);
+              }
+              if (worker && canRegisterWorkerFrame(previous, reset, worker)) {
                 workerFrameOwnersRef.current.set(nextFrame, worker);
               }
               attach(nextFrame);
@@ -2005,23 +2014,29 @@ export function useRustDisplayList(
           const pageFrames = result.pageFrames ?? [result.frame];
           function* decodePages(): Generator<void, RetainedFrame> {
             let nextFrame = buildBase;
-            const damagedPageIds = new Set<bigint>();
-            const removedPageIds = new Set<bigint>();
+            let reset = false;
+            const damagedPageIds = pageFrames.length > 1 ? new Set<bigint>() : null;
+            const removedPageIds = pageFrames.length > 1 ? new Set<bigint>() : null;
             for (const bytes of pageFrames) {
               const delta = yield* decodeFrameDeltaSteps(bytes);
               nextFrame = applyFrameDelta(nextFrame, delta);
-              for (const id of nextFrame.damagedPageIds) damagedPageIds.add(id);
-              for (const id of nextFrame.removedPageIds) removedPageIds.add(id);
+              reset ||= delta.full;
+              if (damagedPageIds && removedPageIds) {
+                for (const id of nextFrame.damagedPageIds) damagedPageIds.add(id);
+                for (const id of nextFrame.removedPageIds) removedPageIds.add(id);
+              }
               yield;
             }
-            const pageIds = new Set(nextFrame.pages.map((page) => page.pageId));
-            for (const id of removedPageIds) if (pageIds.has(id)) removedPageIds.delete(id);
-            for (const id of damagedPageIds) if (!pageIds.has(id)) damagedPageIds.delete(id);
-            const frame = { ...nextFrame, damagedPageIds, removedPageIds };
-            if (worker && canRegisterWorkerFrame(buildBase, pageFrames, worker)) {
-              workerFrameOwnersRef.current.set(frame, worker);
+            if (damagedPageIds && removedPageIds) {
+              const pageIds = new Set(nextFrame.pages.map((page) => page.pageId));
+              for (const id of removedPageIds) if (pageIds.has(id)) removedPageIds.delete(id);
+              for (const id of damagedPageIds) if (!pageIds.has(id)) damagedPageIds.delete(id);
+              nextFrame = { ...nextFrame, damagedPageIds, removedPageIds };
             }
-            return frame;
+            if (worker && canRegisterWorkerFrame(buildBase, reset, worker)) {
+              workerFrameOwnersRef.current.set(nextFrame, worker);
+            }
+            return nextFrame;
           }
           const steps = decodePages();
           const decode = (deadline: Pick<IdleDeadline, 'timeRemaining'>): void => {
@@ -2848,8 +2863,16 @@ export function useRustDisplayList(
             if (recoveredEngine(hostEngine) && !isCurrentWorker(hostEngine, owner)) {
               throw new SupersededPreviewError();
             }
-            const { frame: nextFrame } = applyFrameChain(previousFrame, result.pageFrames ?? [result.frame], false);
-            if (canRegisterWorkerFrame(previousFrame, result.pageFrames ?? [result.frame], owner)) {
+            let nextFrame: RetainedFrame;
+            let reset: boolean;
+            if (result.pageFrames && result.pageFrames.length !== 1) {
+              ({ frame: nextFrame, reset } = applyFrameChain(previousFrame, result.pageFrames, false));
+            } else {
+              const delta = decodeFrameDelta(result.frame);
+              nextFrame = applyFrameDelta(previousFrame, delta);
+              reset = delta.full;
+            }
+            if (canRegisterWorkerFrame(previousFrame, reset, owner)) {
               workerFrameOwnersRef.current.set(nextFrame, owner);
             }
             return {
@@ -2904,8 +2927,14 @@ export function useRustDisplayList(
         ) {
           // The worker ran this layout and built its frame in the same pass.
           const { result } = prebuilt;
-          const { frame: nextFrame } = applyFrameChain(appliesTo, result.pageFrames ?? [result.frame], false);
-          if (canRegisterWorkerFrame(appliesTo, result.pageFrames ?? [result.frame], prebuilt.owner)) {
+          let nextFrame: RetainedFrame;
+          let reset = delta.full;
+          if (result.pageFrames && result.pageFrames.length !== 1) {
+            ({ frame: nextFrame, reset } = applyFrameChain(appliesTo, result.pageFrames, false));
+          } else {
+            nextFrame = applyFrameDelta(appliesTo, delta);
+          }
+          if (canRegisterWorkerFrame(appliesTo, reset, prebuilt.owner)) {
             workerFrameOwnersRef.current.set(nextFrame, prebuilt.owner);
           }
           pending = Promise.resolve({

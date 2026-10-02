@@ -81,6 +81,57 @@ it('a recovery upsert reuses only a page with matching identity, content and pri
   }
 });
 
+it('a singleton frame chain reports whether it resets the base', () => {
+  const page: WireObject = {
+    entries: [['pageIndex', 0], ['width', 10], ['height', 20], ['primitives', []]],
+  };
+  for (const owned of [false, true]) {
+    const full = applyFrameChain(null, [encodeSinglePageFrame(page)], owned);
+    expect(full.reset).toBe(true);
+    expect(full.delta.full).toBe(true);
+    const delta = applyFrameChain(full.frame, [encodeSinglePageFrame(page, 2)], owned);
+    expect(delta.reset).toBe(false);
+    expect(delta.delta.full).toBe(false);
+    const recovery = applyFrameChain(delta.frame, [encodeSinglePageFrame(page, 3, true)], owned);
+    expect(recovery.reset).toBe(true);
+  }
+});
+
+it('a frame chain reports resets in any applied frame', () => {
+  const page: WireObject = {
+    entries: [['pageIndex', 0], ['width', 10], ['height', 20], ['primitives', []]],
+  };
+  for (const owned of [false, true]) {
+    const full = encodeSinglePageFrame(page);
+    const base = applyFrameDelta(null, decodeFrameDelta(full));
+    const second = encodeSinglePageFrame(page, 2);
+    const third = encodeSinglePageFrame(page, 3);
+    const reset = encodeSinglePageFrame(page, 3, true);
+    for (const [previous, frames, expectedReset] of [
+      [null, [full, second], true],
+      [base, [second, third], false],
+      [base, [second, reset], true],
+      [base, [second, reset, encodeSinglePageFrame(page, 4)], true],
+      [applyFrameDelta(base, decodeFrameDelta(second)), [second, third], false],
+    ] as const) {
+      const applied = applyFrameChain(previous, frames, owned);
+      expect(applied.reset).toBe(expectedReset);
+      expect(applied.delta.bytes).toBe(frames.at(-1)!);
+    }
+  }
+});
+
+it('a null base requires the first applied frame to be full', () => {
+  const page: WireObject = {
+    entries: [['pageIndex', 0], ['width', 10], ['height', 20], ['primitives', []]],
+  };
+  for (const owned of [false, true]) {
+    expect(() => applyFrameChain(null, [
+      encodeSinglePageFrame(page, 2), encodeSinglePageFrame(page, 3, true),
+    ], owned)).toThrow('delta base 1 does not match applied frame 0');
+  }
+});
+
 it('a frame chain damages a removed page that is re-added without retaining its removal', () => {
   const page: WireObject = {
     entries: [['pageIndex', 0], ['width', 10], ['height', 20], ['primitives', []]],
@@ -1046,7 +1097,11 @@ interface WireObject {
   entries: [string, WireValue][];
 }
 
-function encodeSinglePageFrame(page: WireObject | null, frameEpoch = 1): Uint8Array {
+function encodeSinglePageFrame(
+  page: WireObject | null,
+  frameEpoch = 1,
+  full = frameEpoch === 1
+): Uint8Array {
   const strings: string[] = [];
   const stringId = (value: string): number => {
     const index = strings.indexOf(value);
@@ -1105,11 +1160,11 @@ function encodeSinglePageFrame(page: WireObject | null, frameEpoch = 1): Uint8Ar
   view.setUint16(4, FRAME_DELTA_VERSION, true);
   view.setUint16(6, 80, true);
   view.setUint32(8, total, true);
-  view.setUint32(12, frameEpoch === 1 ? 1 : 0, true);
+  view.setUint32(12, full ? 1 : 0, true);
   view.setBigUint64(16, 1n, true);
   view.setBigUint64(24, 1n, true);
   view.setBigUint64(32, BigInt(frameEpoch), true);
-  view.setBigUint64(40, BigInt(frameEpoch - 1), true);
+  view.setBigUint64(40, full ? 0n : BigInt(frameEpoch - 1), true);
   view.setUint32(48, page ? 1 : 0, true);
   view.setUint32(52, 1, true);
   view.setUint32(56, 80, true);

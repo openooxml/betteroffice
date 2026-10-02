@@ -681,7 +681,17 @@ test('equal-latest-epoch main frames stay unowned until a worker full frame is a
       marginTop: 300, marginRight: 300, marginBottom: 300, marginLeft: 300,
     } }] },
   });
-  const { native, engine, adopted } = setup(9301, 'Collision pages. '.repeat(600), request);
+  const paragraphText = 'Collision pages. ';
+  const { native, paraId, engine, adopted } = setup(9301, paragraphText.repeat(8), request);
+  let paragraph = paraId;
+  for (let page = 1; page < 8; page++) {
+    const { secondParaId } = JSON.parse(
+      native.split_paragraph('body', paragraph, paragraphText.length)
+    ) as { secondParaId: string };
+    paragraph = secondParaId;
+    native.set_paragraph_attr(paragraph, 'pageBreakBefore', 'true');
+  }
+  native.layout_document_with_regions_retained_json(request);
   const main = createEditSession(9302);
   main.load(native.encode_state());
   const layoutJson = main.layout_document_with_regions_retained_json(request);

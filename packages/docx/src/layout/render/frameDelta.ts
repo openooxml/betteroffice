@@ -451,10 +451,16 @@ export function applyFrameChain(
   base: RetainedFrame | null,
   frames: readonly Uint8Array[],
   owned: boolean
-): { frame: RetainedFrame; delta: DecodedFrameDelta } {
+): { frame: RetainedFrame; delta: DecodedFrameDelta; reset: boolean } {
   if (frames.length === 0) invalid('frame chain is empty');
+  if (frames.length === 1) {
+    const delta = decodeFrameDelta(frames[0]!);
+    const frame = owned ? applyFrameDeltaOwned(base, delta) : applyFrameDelta(base, delta);
+    return { frame, delta, reset: delta.full };
+  }
   let frame = base;
   let delta: DecodedFrameDelta;
+  let reset = false;
   const damagedPageIds = new Set<bigint>();
   const removedPageIds = new Set<bigint>();
   for (let index = 0; index < frames.length; index += 1) {
@@ -463,13 +469,14 @@ export function applyFrameChain(
       continue;
     }
     frame = owned ? applyFrameDeltaOwned(frame, delta) : applyFrameDelta(frame, delta);
+    reset ||= delta.full;
     for (const id of frame.damagedPageIds) damagedPageIds.add(id);
     for (const id of frame.removedPageIds) removedPageIds.add(id);
   }
   const pageIds = new Set(frame!.pages.map((page) => page.pageId));
   for (const id of removedPageIds) if (pageIds.has(id)) removedPageIds.delete(id);
   for (const id of damagedPageIds) if (!pageIds.has(id)) damagedPageIds.delete(id);
-  return { frame: { ...frame!, damagedPageIds, removedPageIds }, delta: delta! };
+  return { frame: { ...frame!, damagedPageIds, removedPageIds }, delta: delta!, reset };
 }
 
 function applyFrameDeltaInternal(
