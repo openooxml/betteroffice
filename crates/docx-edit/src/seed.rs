@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use serde::Deserialize;
 use serde::de::{MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use yrs::types::Attrs;
 use yrs::{Any, Array as _, Map as YrsMap, Out, ReadTxn, Text as _, Transact};
@@ -448,6 +448,7 @@ fn compatibility_mode_from_package(package: Option<&Value>) -> u8 {
         .unwrap_or(12)
 }
 
+#[derive(Debug, PartialEq)]
 enum OrderedValue {
     Null,
     Bool(bool),
@@ -534,6 +535,17 @@ impl<'de> Deserialize<'de> for OrderedValue {
         D: serde::Deserializer<'de>,
     {
         deserializer.deserialize_any(OrderedValueVisitor)
+    }
+}
+
+/// Builds ordered source JSON with round-trip fallback.
+fn source_ordered_value<T: Serialize + ?Sized>(value: &T) -> Result<OrderedValue, String> {
+    match ordered::ordered_value(value) {
+        Some(ordered) => Ok(ordered),
+        None => {
+            let serialized = serde_json::to_string(value).map_err(|error| error.to_string())?;
+            serde_json::from_str(&serialized).map_err(|error| error.to_string())
+        }
     }
 }
 
@@ -5142,16 +5154,7 @@ fn lower_docx_with(
     let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
     collect_fonts_from_value(&parsed, &mut referenced_fonts);
     let source_json = if payloads && needs_source_json(&parsed) {
-        let ordered = match ordered::ordered_value(&envelope.document) {
-            Some(ordered) => ordered,
-            None => {
-                let serialized =
-                    serde_json::to_string(&envelope.document).map_err(|error| error.to_string())?;
-                let ordered: OrderedValue =
-                    serde_json::from_str(&serialized).map_err(|error| error.to_string())?;
-                ordered
-            }
-        };
+        let ordered = source_ordered_value(&envelope.document)?;
         let mut values = BTreeMap::new();
         ordered.collect_source_json(&mut values);
         values

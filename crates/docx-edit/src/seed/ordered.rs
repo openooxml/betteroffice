@@ -10,9 +10,11 @@ use serde::ser::{
 
 use super::{OrderedValue, SOURCE_ORDINAL};
 
+const MAX_DIRECT_DEPTH: u32 = 100;
+
 /// Builds an ordered JSON value, returning `None` when unsupported.
 pub(super) fn ordered_value<T: Serialize + ?Sized>(value: &T) -> Option<OrderedValue> {
-    value.serialize(ValueSerializer).ok()
+    value.serialize(ValueSerializer { depth: 0 }).ok()
 }
 
 #[derive(Debug)]
@@ -45,7 +47,20 @@ fn variant_value(variant: &'static str, value: OrderedValue) -> OrderedValue {
     }
 }
 
-struct ValueSerializer;
+#[derive(Clone, Copy)]
+struct ValueSerializer {
+    depth: u32,
+}
+
+impl ValueSerializer {
+    fn nested(self, levels: u32) -> Result<Self, Error> {
+        let depth = self.depth + levels;
+        if depth > MAX_DIRECT_DEPTH {
+            return Err(Error);
+        }
+        Ok(Self { depth })
+    }
+}
 
 impl serde::Serializer for ValueSerializer {
     type Ok = OrderedValue;
@@ -127,6 +142,7 @@ impl serde::Serializer for ValueSerializer {
     }
 
     fn serialize_bytes(self, value: &[u8]) -> Result<Self::Ok, Error> {
+        self.nested(1)?;
         Ok(OrderedValue::Array(
             value
                 .iter()
@@ -175,15 +191,19 @@ impl serde::Serializer for ValueSerializer {
         variant: &'static str,
         value: &T,
     ) -> Result<Self::Ok, Error> {
-        Ok(variant_value(variant, value.serialize(self)?))
+        Ok(variant_value(variant, value.serialize(self.nested(1)?)?))
     }
 
     fn serialize_seq(self, len: Option<usize>) -> Result<ArraySerializer, Error> {
-        Ok(ArraySerializer::new(len.unwrap_or(0), None))
+        Ok(ArraySerializer::new(
+            len.unwrap_or(0),
+            None,
+            self.nested(1)?.depth,
+        ))
     }
 
     fn serialize_tuple(self, len: usize) -> Result<ArraySerializer, Error> {
-        Ok(ArraySerializer::new(len, None))
+        Ok(ArraySerializer::new(len, None, self.nested(1)?.depth))
     }
 
     fn serialize_tuple_struct(
@@ -191,7 +211,7 @@ impl serde::Serializer for ValueSerializer {
         _name: &'static str,
         len: usize,
     ) -> Result<ArraySerializer, Error> {
-        Ok(ArraySerializer::new(len, None))
+        Ok(ArraySerializer::new(len, None, self.nested(1)?.depth))
     }
 
     fn serialize_tuple_variant(
@@ -201,15 +221,23 @@ impl serde::Serializer for ValueSerializer {
         variant: &'static str,
         len: usize,
     ) -> Result<ArraySerializer, Error> {
-        Ok(ArraySerializer::new(len, Some(variant)))
+        Ok(ArraySerializer::new(
+            len,
+            Some(variant),
+            self.nested(2)?.depth,
+        ))
     }
 
     fn serialize_map(self, len: Option<usize>) -> Result<ObjectSerializer, Error> {
-        Ok(ObjectSerializer::new(len.unwrap_or(0), None))
+        Ok(ObjectSerializer::new(
+            len.unwrap_or(0),
+            None,
+            self.nested(1)?.depth,
+        ))
     }
 
     fn serialize_struct(self, _name: &'static str, len: usize) -> Result<ObjectSerializer, Error> {
-        Ok(ObjectSerializer::new(len, None))
+        Ok(ObjectSerializer::new(len, None, self.nested(1)?.depth))
     }
 
     fn serialize_struct_variant(
@@ -219,7 +247,11 @@ impl serde::Serializer for ValueSerializer {
         variant: &'static str,
         len: usize,
     ) -> Result<ObjectSerializer, Error> {
-        Ok(ObjectSerializer::new(len, Some(variant)))
+        Ok(ObjectSerializer::new(
+            len,
+            Some(variant),
+            self.nested(2)?.depth,
+        ))
     }
 
     fn is_human_readable(&self) -> bool {
@@ -230,18 +262,21 @@ impl serde::Serializer for ValueSerializer {
 struct ArraySerializer {
     values: Vec<OrderedValue>,
     variant: Option<&'static str>,
+    depth: u32,
 }
 
 impl ArraySerializer {
-    fn new(len: usize, variant: Option<&'static str>) -> Self {
+    fn new(len: usize, variant: Option<&'static str>, depth: u32) -> Self {
         Self {
             values: Vec::with_capacity(len),
             variant,
+            depth,
         }
     }
 
     fn push<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Error> {
-        self.values.push(value.serialize(ValueSerializer)?);
+        self.values
+            .push(value.serialize(ValueSerializer { depth: self.depth })?);
         Ok(())
     }
 
@@ -310,19 +345,21 @@ struct ObjectSerializer {
     entries: Vec<(String, OrderedValue)>,
     key: Option<String>,
     variant: Option<&'static str>,
+    depth: u32,
 }
 
 impl ObjectSerializer {
-    fn new(len: usize, variant: Option<&'static str>) -> Self {
+    fn new(len: usize, variant: Option<&'static str>, depth: u32) -> Self {
         Self {
             entries: Vec::with_capacity(len),
             key: None,
             variant,
+            depth,
         }
     }
 
     fn push<T: Serialize + ?Sized>(&mut self, key: String, value: &T) -> Result<(), Error> {
-        let value = value.serialize(ValueSerializer)?;
+        let value = value.serialize(ValueSerializer { depth: self.depth })?;
         if key != SOURCE_ORDINAL {
             self.entries.push((key, value));
         }
@@ -576,9 +613,27 @@ mod tests {
 
     use serde::Serialize;
     use serde::ser::SerializeMap;
-    use serde_json::{Value, json};
+    use serde_json::{Map, Value, json};
 
+    use super::super::source_ordered_value;
     use super::{OrderedValue, SOURCE_ORDINAL, ordered_value};
+
+    const DEPTHS: [u32; 7] = [99, 100, 101, 127, 128, 129, 200];
+
+    fn round_trip<T: Serialize + ?Sized>(value: &T) -> Result<OrderedValue, String> {
+        let token = serde_json::to_string(value).map_err(|error| error.to_string())?;
+        serde_json::from_str(&token).map_err(|error| error.to_string())
+    }
+
+    fn assert_source_round_trip<T: Serialize + ?Sized>(value: &T) {
+        assert_eq!(source_ordered_value(value), round_trip(value));
+    }
+
+    fn assert_depth_round_trip<T: Serialize + ?Sized>(value: &T, depth: u32) {
+        let expected = round_trip(value);
+        assert_eq!(expected.is_ok(), depth < 128, "JSON depth {depth}");
+        assert_eq!(source_ordered_value(value), expected, "JSON depth {depth}");
+    }
 
     fn comparable(value: &OrderedValue) -> Value {
         match value {
@@ -601,8 +656,7 @@ mod tests {
 
     fn assert_round_trip<T: Serialize + ?Sized>(value: &T) -> OrderedValue {
         let direct = ordered_value(value).expect("direct serialization is supported");
-        let token = serde_json::to_string(value).unwrap();
-        let round_trip: OrderedValue = serde_json::from_str(&token).unwrap();
+        let round_trip = round_trip(value).unwrap();
         assert_eq!(comparable(&direct), comparable(&round_trip));
         direct
     }
@@ -787,6 +841,108 @@ mod tests {
         }
     }
 
+    struct MapKey<T>(T);
+
+    impl<T: Serialize> Serialize for MapKey<T> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut map = serializer.serialize_map(Some(1))?;
+            map.serialize_entry(&self.0, &1)?;
+            map.end()
+        }
+    }
+
+    fn nested_array(depth: u32) -> Value {
+        let mut value = Value::Null;
+        for _ in 0..depth {
+            value = Value::Array(vec![value]);
+        }
+        value
+    }
+
+    fn nested_object(depth: u32) -> Value {
+        let mut value = Value::Null;
+        for _ in 0..depth {
+            value = Value::Object(Map::from_iter([("value".to_owned(), value)]));
+        }
+        value
+    }
+
+    #[derive(Serialize)]
+    enum DepthVariant {
+        Unit,
+        Newtype(Box<DepthVariant>),
+        Tuple(Box<DepthVariant>, ()),
+        Struct {
+            value: Box<DepthVariant>,
+        },
+        #[serde(rename = "sourceOrdinal")]
+        OrdinalNewtype(Box<DepthVariant>),
+        #[serde(rename = "sourceOrdinal")]
+        OrdinalTuple(Box<DepthVariant>, ()),
+        #[serde(rename = "sourceOrdinal")]
+        OrdinalStruct {
+            value: Box<DepthVariant>,
+        },
+    }
+
+    fn nested_variant(mut depth: u32) -> DepthVariant {
+        let mut value = DepthVariant::Unit;
+        let mut index = 0;
+        while depth > 0 {
+            if depth == 1 || index % 3 == 0 {
+                value = DepthVariant::Newtype(Box::new(value));
+                depth -= 1;
+            } else if index % 3 == 1 {
+                value = DepthVariant::Tuple(Box::new(value), ());
+                depth -= 2;
+            } else {
+                value = DepthVariant::Struct {
+                    value: Box::new(value),
+                };
+                depth -= 2;
+            }
+            index += 1;
+        }
+        value
+    }
+
+    #[test]
+    fn nested_json_matches_round_trip() {
+        for depth in DEPTHS {
+            assert_depth_round_trip(&nested_array(depth), depth);
+            assert_depth_round_trip(&nested_object(depth), depth);
+        }
+    }
+
+    #[test]
+    fn nested_variants_match_round_trip() {
+        for depth in DEPTHS {
+            assert_depth_round_trip(&nested_variant(depth), depth);
+        }
+    }
+
+    #[test]
+    fn discarded_values_match_round_trip() {
+        for depth in DEPTHS {
+            let value = BTreeMap::from([(SOURCE_ORDINAL, nested_array(depth - 1))]);
+            assert_depth_round_trip(&value, depth);
+            assert_depth_round_trip(
+                &DepthVariant::OrdinalNewtype(Box::new(nested_variant(depth - 1))),
+                depth,
+            );
+            assert_depth_round_trip(
+                &DepthVariant::OrdinalTuple(Box::new(nested_variant(depth - 2)), ()),
+                depth,
+            );
+            assert_depth_round_trip(
+                &DepthVariant::OrdinalStruct {
+                    value: Box::new(nested_variant(depth - 2)),
+                },
+                depth,
+            );
+        }
+    }
+
     #[test]
     fn primitives_and_wrappers_match_round_trip() {
         assert_round_trip(&());
@@ -818,31 +974,23 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_values_request_fallback() {
-        assert!(ordered_value(&i128::MIN).is_none());
-        assert!(ordered_value(&(i64::MIN as i128 - 1)).is_none());
-        assert!(ordered_value(&(u64::MAX as i128 + 1)).is_none());
-        assert!(ordered_value(&(u64::MAX as u128 + 1)).is_none());
-        assert!(ordered_value(&u128::MAX).is_none());
-        assert!(ordered_value(&BTreeMap::from([(true, 1)])).is_none());
-        assert!(ordered_value(&BTreeMap::from([(Some("key"), 1)])).is_none());
-        assert!(ordered_value(&BTreeMap::from([((), 1)])).is_none());
-        assert!(ordered_value(&BTreeMap::from([(vec![1u8], 1)])).is_none());
-        assert!(ordered_value(&Failing).is_none());
-        assert!(ordered_value(&BTreeMap::from([(SOURCE_ORDINAL, u128::MAX)])).is_none());
-        assert!(0.1f32.serialize(super::KeySerializer).is_err());
-        assert!(0.1f64.serialize(super::KeySerializer).is_err());
-        assert!(Bytes.serialize(super::KeySerializer).is_err());
-        assert!(UnitStruct.serialize(super::KeySerializer).is_err());
-        assert!(
-            TupleStruct(true, 'a')
-                .serialize(super::KeySerializer)
-                .is_err()
-        );
-        assert!(
-            Variant::Newtype(nested())
-                .serialize(super::KeySerializer)
-                .is_err()
-        );
+    fn unsupported_values_match_round_trip() {
+        assert_source_round_trip(&i128::MIN);
+        assert_source_round_trip(&(i64::MIN as i128 - 1));
+        assert_source_round_trip(&(u64::MAX as i128 + 1));
+        assert_source_round_trip(&(u64::MAX as u128 + 1));
+        assert_source_round_trip(&u128::MAX);
+        assert_source_round_trip(&BTreeMap::from([(true, 1)]));
+        assert_source_round_trip(&BTreeMap::from([(Some("key"), 1)]));
+        assert_source_round_trip(&BTreeMap::from([((), 1)]));
+        assert_source_round_trip(&BTreeMap::from([(vec![1u8], 1)]));
+        assert_source_round_trip(&Failing);
+        assert_source_round_trip(&BTreeMap::from([(SOURCE_ORDINAL, u128::MAX)]));
+        assert_source_round_trip(&MapKey(0.1f32));
+        assert_source_round_trip(&MapKey(0.1f64));
+        assert_source_round_trip(&MapKey(Bytes));
+        assert_source_round_trip(&MapKey(UnitStruct));
+        assert_source_round_trip(&MapKey(TupleStruct(true, 'a')));
+        assert_source_round_trip(&MapKey(Variant::Newtype(nested())));
     }
 }
