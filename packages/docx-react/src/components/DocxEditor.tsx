@@ -1216,6 +1216,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     commentIdAllocator: commentIdAllocatorRef.current,
     setDocumentFonts,
     fontScope,
+    workerOpen: experimentalWorkerOpen,
+    measurementFontProvider,
   });
 
   // A layout error of the session a newer load replaced is not the loaded

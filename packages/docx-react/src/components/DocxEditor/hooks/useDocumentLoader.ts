@@ -3,6 +3,11 @@ import type { Document } from '@betteroffice/docx/types/document';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { YrsDocxHost, YrsSession } from '@betteroffice/docx/yrs';
 import {
+  prefetchFontChains,
+  resolveDefaultFontProvider,
+  type BundledFontProvider,
+} from '@betteroffice/docx/layout';
+import {
   extractEmbeddedFontFaces,
   extractFontsFromDocument,
   loadEmbeddedFontFamilies,
@@ -44,6 +49,8 @@ export function useDocumentLoader({
   commentIdAllocator,
   setDocumentFonts,
   fontScope,
+  workerOpen = false,
+  measurementFontProvider,
 }: {
   documentBuffer: DocxInput | null | undefined;
   initialDocument: Document | null | undefined;
@@ -68,6 +75,10 @@ export function useDocumentLoader({
   setDocumentFonts: (fonts: FontOption[]) => void;
   /** The editor instance's font loads, see `useFontLoadScope`. */
   fontScope: FontLoadScope;
+  /** `experimentalWorkerOpen`: accepting a full document prefetches its native font chains. */
+  workerOpen?: boolean;
+  /** The provider the editor measures with; the default fonts when absent. */
+  measurementFontProvider?: BundledFontProvider;
 }) {
   // The live history document changes after every edit, but yrs must only be
   // reseeded when a new source document is loaded. Keep that load boundary
@@ -83,6 +94,8 @@ export function useDocumentLoader({
   // Counts accepted host documents: a preview's font loads end once the full
   // document of its load is accepted.
   const hostDocumentsRef = useRef(0);
+  const nativeFontsRef = useRef({ workerOpen, measurementFontProvider });
+  nativeFontsRef.current = { workerOpen, measurementFontProvider };
   // Embedded families registered under an alias because another live document
   // registered different faces under the same name.
   const [fontAliases, setFontAliases] = useState<ReadonlyMap<string, string>>(NO_FONT_ALIASES);
@@ -180,6 +193,14 @@ export function useDocumentLoader({
         session || options?.preview ? host.unusedScriptFonts?.map(fontKey) : undefined
       );
       const isSkipped = (family: string) => skipped.has(fontKey(family));
+      // A preview's own faces load in this window; prefetching more would delay them.
+      const nativeFonts = nativeFontsRef.current;
+      if (nativeFonts.workerOpen && !options?.preview) {
+        void prefetchFontChains(
+          nativeFonts.measurementFontProvider ?? resolveDefaultFontProvider,
+          host.referencedFonts.filter((family) => !isSkipped(family))
+        );
+      }
       const skippedFonts =
         session && !options?.preview && skipped.size > 0
           ? skipUntilChanged(session, () => {

@@ -18,6 +18,7 @@ export type {
   EmbeddedFaceInput,
   FontScript,
 } from './fontRegistry';
+export { prefetchFontChains } from './fontRegistry';
 export {
   configureDefaultFonts,
   resolveDefaultFontProvider,

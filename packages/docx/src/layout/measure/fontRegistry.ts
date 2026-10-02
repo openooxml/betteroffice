@@ -121,6 +121,71 @@ export type BundledFontProviderSource =
   | BundledFontProvider
   | (() => Promise<BundledFontProvider | undefined>);
 
+function resolveProvider(
+  source: BundledFontProviderSource | undefined
+): Promise<BundledFontProvider | undefined> {
+  return Promise.resolve()
+    .then(() => (typeof source === 'function' ? source() : source))
+    .catch(() => undefined);
+}
+
+function metricCompatLoader(
+  provider: BundledFontProvider,
+  family: string,
+  bold: boolean,
+  italic: boolean
+): (() => Promise<ArrayBuffer>) | undefined {
+  return provider.resolve(family, bold, italic);
+}
+
+function lastResortLoader(
+  provider: BundledFontProvider,
+  family: string,
+  bold: boolean,
+  italic: boolean
+): (() => Promise<ArrayBuffer>) | undefined {
+  return provider.resolveLastResort?.(family, bold, italic, 'word');
+}
+
+const STYLES = [
+  [false, false],
+  [true, false],
+  [false, true],
+  [true, true],
+] as const;
+
+/**
+ * Starts loading the bytes of every face a chain for one of `families` may
+ * load in any style, the metric-compatible face and Word's last-resort face,
+ * without registering any. With a provider whose loaders share their bytes,
+ * as `@betteroffice/fonts` does, the chains then take these bytes.
+ * @internal
+ */
+export async function prefetchFontChains(
+  source: BundledFontProviderSource | undefined,
+  families: Iterable<string>
+): Promise<void> {
+  const provider = await resolveProvider(source);
+  if (!provider) return;
+  const loads: Promise<unknown>[] = [];
+  const start = (resolve: () => (() => Promise<ArrayBuffer>) | undefined) => {
+    try {
+      const loader = resolve();
+      if (loader) loads.push(loader());
+    } catch {
+      // The chain resolves this face again and reports the failure.
+    }
+  };
+  const unique = new Map([...families].map((family) => [familyKey(family), family]));
+  for (const family of unique.values()) {
+    for (const [bold, italic] of STYLES) {
+      start(() => metricCompatLoader(provider, family, bold, italic));
+      start(() => lastResortLoader(provider, family, bold, italic));
+    }
+  }
+  await Promise.allSettled(loads);
+}
+
 interface ChainResolution {
   ids: number[];
   retryable: boolean;
@@ -204,10 +269,7 @@ export class TextMeasureFontRegistry {
   /** Shares in-flight resolution but evicts misses for retry. */
   private bundled(): Promise<BundledFontProvider | undefined> {
     if (this.bundledPromise === undefined) {
-      const source = this.bundledSource;
-      const promise = Promise.resolve()
-        .then(() => (typeof source === 'function' ? source() : source))
-        .catch(() => undefined);
+      const promise = resolveProvider(this.bundledSource);
       promise.then((provider) => {
         if (provider === undefined && this.bundledPromise === promise) {
           this.bundledPromise = undefined;
@@ -361,7 +423,7 @@ export class TextMeasureFontRegistry {
     if (bundled === undefined && typeof this.bundledSource === 'function') retryable = true;
     let loader: (() => Promise<ArrayBuffer>) | undefined;
     try {
-      loader = bundled?.resolve(family, bold, italic);
+      loader = bundled && metricCompatLoader(bundled, family, bold, italic);
     } catch (error) {
       retryable = true;
       console.warn(
@@ -383,7 +445,7 @@ export class TextMeasureFontRegistry {
     // the base face, e.g. Arial→Liberation Sans, contributes one id).
     let lastResort: (() => Promise<ArrayBuffer>) | undefined;
     try {
-      lastResort = bundled?.resolveLastResort?.(family, bold, italic, 'word');
+      lastResort = bundled && lastResortLoader(bundled, family, bold, italic);
     } catch (error) {
       retryable = true;
       console.warn(
