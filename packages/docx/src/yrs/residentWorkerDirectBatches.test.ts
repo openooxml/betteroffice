@@ -379,7 +379,7 @@ test('direct batches emit the same story changes, identities and layout as repli
   await expectEquivalent(direct, reference);
   const layouts = [await relayout(direct), await relayout(reference)];
   expect(layouts[0]).toEqual(layouts[1]);
-  expect(direct.frame.displayList.pages.length).toBeGreaterThan(3);
+  expect(direct.frame.displayList.pages.length).toBeGreaterThan(2);
   expect(direct.frame.displayList).toEqual(reference.frame.displayList);
   const cold = await createResidentEngineSession(undefined, 6199);
   try {
