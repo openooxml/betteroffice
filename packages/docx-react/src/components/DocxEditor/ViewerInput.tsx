@@ -38,9 +38,8 @@ const STYLE: CSSProperties = {
   caretColor: 'transparent',
 };
 
-/** A settled selection's text is read this long after it last changed. */
-const SETTLE_MS = 60;
-/** How many settle periods a copy waits for its selection to land on the presented frame. */
+/** A copy waits up to TEXT_RETRIES × RETRY_MS for its selection to land on the presented frame. */
+const RETRY_MS = 60;
 const TEXT_RETRIES = 100;
 
 const MOVE_KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'];
@@ -93,7 +92,8 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
   const revisionRef = useRef(0);
   const captureRef = useRef<Capture | null>(null);
   const pendingRef = useRef<Promise<void> | null>(null);
-  const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const capturingRef = useRef(false);
+  const captureLatestRef = useRef<() => void>(() => {});
   const goalXRef = useRef<number | undefined>(undefined);
   const primedRef = useRef<string | null>(null);
   const queriesRef = useRef(queries);
@@ -135,14 +135,25 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
     [story]
   );
 
-  const scheduleSettle = useCallback(() => {
-    if (settleTimerRef.current !== null) clearTimeout(settleTimerRef.current);
-    settleTimerRef.current = setTimeout(() => {
-      settleTimerRef.current = null;
-      const selection = selectionRef.current;
-      if (selection && selection.version === presented()) capture(selection);
-    }, SETTLE_MS);
+  // One capture at a time; the one landing reads the selection made meanwhile.
+  const captureLatest = useCallback(() => {
+    const selection = selectionRef.current;
+    if (capturingRef.current || !selection || selection.version !== presented()) return;
+    capturingRef.current = true;
+    void capture(selection).read.finally(() => {
+      capturingRef.current = false;
+      const latest = selectionRef.current;
+      if (!latest || latest.revision === selection.revision) return;
+      if (latest.version === presented()) {
+        captureLatestRef.current();
+      } else if (!latest.preview) {
+        // Made on a version the document has since left, before it could be read: it cannot follow.
+        selectionRef.current = null;
+        onChangeRef.current();
+      }
+    });
   }, [capture]);
+  captureLatestRef.current = captureLatest;
 
   const setSelection = useCallback(
     (range: DocxDisplayRange, version: string, gesture: number): void => {
@@ -155,9 +166,9 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
         preview: documentRef.current?.isDisplayOnly() ?? false,
       };
       onChangeRef.current();
-      scheduleSettle();
+      captureLatest();
     },
-    [scheduleSettle]
+    [captureLatest]
   );
 
   const select = useCallback(
@@ -260,7 +271,11 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
     if (!selection || selection.version === presentedWorkerVersion(queries)) return;
     // Hidden until it maps onto this frame; one never captured cannot follow the change.
     onChangeRef.current();
-    if (!selection.preview && captureRef.current?.revision !== selection.revision) {
+    if (
+      !selection.preview &&
+      !capturingRef.current &&
+      captureRef.current?.revision !== selection.revision
+    ) {
       selectionRef.current = null;
       return;
     }
@@ -269,21 +284,14 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
 
   useEffect(() => {
     const previous = documentRef.current;
-    if (previous === documentKey) return;
+    if (previous === documentKey || documentKey === null) return;
     documentRef.current = documentKey;
-    if (!previous?.isDisplayOnly()) {
+    if (previous && !previous.isDisplayOnly()) {
       selectionRef.current = null;
       captureRef.current = null;
       onChangeRef.current();
     }
   }, [documentKey]);
-
-  useEffect(
-    () => () => {
-      if (settleTimerRef.current !== null) clearTimeout(settleTimerRef.current);
-    },
-    []
-  );
 
   const displaySelection = useCallback((): YrsDisplaySelection | null => {
     const selection = selectionRef.current;
@@ -304,7 +312,7 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
       const settled =
         !selection.preview && selection.version === presented() && selectionRef.current === selection;
       if (attempt >= TEXT_RETRIES || settled) return '';
-      await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+      await new Promise((resolve) => setTimeout(resolve, RETRY_MS));
       return textOf(attempt + 1);
     };
     const pending = pendingRef.current;

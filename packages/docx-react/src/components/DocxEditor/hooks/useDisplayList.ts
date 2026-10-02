@@ -322,7 +322,12 @@ type PageBuildInFlight =
   | { kind: 'build'; background: boolean; cancel(): void; promote(): void };
 
 type DisplayPagesFrame = Pick<ResidentEngineWorkerFrame, 'frame' | 'pageFrames'> &
-  Partial<Pick<ResidentEngineWorkerFrame, 'caret' | 'selection' | 'caretPainted' | 'layoutRevision'>>;
+  Partial<
+    Pick<
+      ResidentEngineWorkerFrame,
+      'caret' | 'selection' | 'caretPainted' | 'layoutRevision' | 'documentVersion'
+    >
+  >;
 
 function isPageBuildTask(scheduled: PageBuildTimer): scheduled is PageBuildTask {
   return typeof scheduled === 'object' && 'cancel' in scheduled;
@@ -1971,7 +1976,9 @@ export function useRustDisplayList(
                         ? workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision!)
                         : revisionPreviewKeyOf(previous.queries),
                       line,
-                      worker ? workerFrameVersionOf(previous.queries) : null
+                      worker
+                        ? (result.documentVersion ?? workerFrameVersionOf(previous.queries))
+                        : null
                     )
                   : { displayList: nextFrame.displayList, frame: nextFrame, queries: null, caret };
               if (worker) {

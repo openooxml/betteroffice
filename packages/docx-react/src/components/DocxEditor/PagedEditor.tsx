@@ -576,7 +576,12 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // A viewer whose document fell back to this thread selects through the copy it holds here.
     const viewerDocumentRead =
       viewerDocumentReadProp &&
-      !(displayListQueries && presentedWorkerVersion(displayListQueries) === null && yrsCore.replicaReady)
+      !(
+        displayListQueries &&
+        presentedWorkerVersion(displayListQueries) === null &&
+        yrsCore.session &&
+        !workerOpenReplicaPending(yrsCore.session)
+      )
         ? viewerDocumentReadProp
         : undefined;
     const yrsStyleResolver = useMemo(() => (styles ? createStyleResolver(styles) : null), [styles]);
