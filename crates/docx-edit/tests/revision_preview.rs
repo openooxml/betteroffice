@@ -961,6 +961,7 @@ fn a_windowed_preview_decision_builds_the_pages_a_fresh_engine_builds() {
         engine
             .build_display_list_frame("{}", engine.stats().frame_epoch)
             .unwrap();
+        assert!(engine.stats().incremental_display_builds > before.incremental_display_builds);
         let (expected_list, expected) = fresh_pages(&env);
         let (list, actual) = engine
             .with_display_list(|list| (list.clone(), pages_json(list, &ids)))
@@ -980,7 +981,9 @@ fn a_windowed_preview_decision_builds_the_pages_a_fresh_engine_builds() {
             }
         }
 
-        let sweep: Vec<usize> = (0..pages).filter(|page| !window.contains(page)).collect();
+        let sweep: Vec<usize> = (0..list.pages.len())
+            .filter(|page| !window.contains(page))
+            .collect();
         engine
             .build_display_pages_frame(&sweep, engine.stats().frame_epoch)
             .unwrap();
@@ -999,6 +1002,96 @@ fn a_windowed_preview_decision_builds_the_pages_a_fresh_engine_builds() {
             "released back to the window"
         );
     }
+}
+
+#[test]
+fn a_windowed_decision_that_changes_the_page_count_matches_a_fresh_engine() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let header = r#"<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple><w:r><w:t xml:space="preserve"> of </w:t></w:r><w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>"#;
+    let body = format!("{}{}", wrapped_filler(0..60), wrapped_filler(60..120));
+    let bytes = headed_document(&body, Some(header));
+    let engine = EngineSession::new(75112);
+    seed_from_docx(engine.doc(), &bytes).unwrap();
+    let after = engine
+        .doc()
+        .resolve_search(
+            "body",
+            None,
+            "Filler paragraph 60 ",
+            docx_edit::TextView::Vanilla,
+        )
+        .unwrap();
+    let at = engine.doc().locate_range(&after).unwrap().start;
+    let suggest = EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting();
+    engine
+        .doc()
+        .insert_embed(&suggest, Position::new("body", at), "pageBreak", vec![])
+        .unwrap();
+    let id = engine.doc().list_revisions().unwrap()[0]
+        .change
+        .revision_id
+        .clone();
+    let frame = |engine: &EngineSession, env: &RenderEnv| {
+        let output: Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_json(&layout_request(env, font))
+                .unwrap(),
+        )
+        .unwrap();
+        let extras = json!({ "headersFooters": output["headersFooters"] }).to_string();
+        engine
+            .build_display_list_frame(&extras, engine.stats().frame_epoch)
+            .unwrap();
+        output["layout"]["pages"].as_array().unwrap().len()
+    };
+    engine.set_preview_decision_checkpoints(true);
+    engine.set_windowed_incremental_builds(true);
+    engine.set_display_window(Some(0..1));
+    let tracked_pages = frame(&engine, &RenderEnv::default());
+    let mut counts = Vec::new();
+    for env in [
+        preview(&[(&id, Rejected)]),
+        preview(&[(&id, Accepted)]),
+        preview(&[(&id, Rejected)]),
+        RenderEnv::default(),
+    ] {
+        counts.push(frame(&engine, &env));
+        let fresh = EngineSession::new(75113);
+        fresh
+            .doc()
+            .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+            .unwrap();
+        frame(&fresh, &env);
+        let expected = fresh.with_display_list(Clone::clone).unwrap();
+        let list = engine.with_display_list(Clone::clone).unwrap();
+        assert_eq!(list.pages.len(), expected.pages.len());
+        assert!(!list.pages[0].unbuilt);
+        assert_eq!(
+            list.pages[0], expected.pages[0],
+            "first page with its header"
+        );
+        let sweep: Vec<usize> = (1..list.pages.len()).collect();
+        engine
+            .build_display_pages_frame(&sweep, engine.stats().frame_epoch)
+            .unwrap();
+        assert_eq!(
+            engine.with_display_list(|list| list.pages.clone()).unwrap(),
+            expected.pages,
+            "every page built on demand"
+        );
+        engine
+            .release_display_pages_frame(&sweep, engine.stats().frame_epoch)
+            .unwrap();
+    }
+    assert_eq!(
+        counts,
+        [
+            tracked_pages - 1,
+            tracked_pages,
+            tracked_pages - 1,
+            tracked_pages
+        ]
+    );
 }
 
 #[test]
