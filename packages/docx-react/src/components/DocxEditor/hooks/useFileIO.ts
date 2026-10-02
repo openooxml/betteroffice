@@ -20,12 +20,19 @@ const INSERT_IMAGE_MAX_WIDTH_PX = 612;
  * Saves in the resident worker that holds the document while its main-thread
  * replica has not started loading; null when the worker does not save it.
  */
-async function saveInWorker(
+function saveInWorker(
   pagedEditorRef: React.RefObject<PagedEditorRef | null>,
   comments: Comment[]
-): Promise<{ session: YrsSession; buffer: ArrayBuffer } | null> {
+): Promise<{ session: YrsSession; buffer: ArrayBuffer } | null> | null {
   const before = pagedEditorRef.current?.getYrsSession();
-  if (!before || !workerOpenSave(before)) return null;
+  return before && workerOpenSave(before) ? workerSave(pagedEditorRef, before, comments) : null;
+}
+
+async function workerSave(
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  before: YrsSession,
+  comments: Comment[]
+): Promise<{ session: YrsSession; buffer: ArrayBuffer } | null> {
   const { session } = await flushedSession(pagedEditorRef, false, false);
   const pending = session === before ? workerOpenSave(session)?.(comments) : null;
   if (!pending) return null;
@@ -158,7 +165,8 @@ export function useFileIO({
     async (): Promise<ArrayBuffer | null> => {
       try {
         if (!pagedEditorRef.current) return null;
-        const inWorker = await saveInWorker(pagedEditorRef, comments);
+        const pendingInWorker = saveInWorker(pagedEditorRef, comments);
+        const inWorker = pendingInWorker && (await pendingInWorker);
         if (inWorker) {
           onSave?.(inWorker.buffer);
           return inWorker.buffer;

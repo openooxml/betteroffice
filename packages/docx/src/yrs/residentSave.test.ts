@@ -18,7 +18,7 @@ import { createYrsSession, decodeDocxHostJson, type YrsSession } from './index';
 import { createProposalRegistry, type DocxProposalInput } from './proposals';
 import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
-import { saveResidentDocument, type ResidentSaveRecord } from './residentSave';
+import type { ResidentSaveRecord } from './residentSave';
 import { yrsToDocument } from './yrsToDocument';
 
 const ROOT = resolve(import.meta.dir, '../../../..');
@@ -54,6 +54,16 @@ const owned: Array<{ destroy(): void }> = [];
 afterEach(() => {
   for (const session of owned.splice(0)) session.destroy();
 });
+
+/** Where two packages first differ; null when they are byte-identical. */
+function difference(actual: Uint8Array, expected: Uint8Array): string | null {
+  const length = Math.min(actual.length, expected.length);
+  let at = 0;
+  while (at < length && actual[at] === expected[at]) at += 1;
+  return at === length && actual.length === expected.length
+    ? null
+    : `byte ${at} of ${actual.length} vs ${expected.length}`;
+}
 
 function documents(): string[] {
   const roots = process.env.WORKER_SAVE_DOCS
@@ -118,10 +128,9 @@ async function open(bytes: Uint8Array): Promise<Opened> {
 }
 
 /** The worker's save, its inputs crossing as they do in a message. */
-async function workerSave(opened: Opened, comments: Comment[] = hostComments(opened)): Promise<Uint8Array> {
+async function workerSave(opened: Opened, comments: Comment[] = hostComments(opened)): Promise<Uint8Array<ArrayBuffer>> {
   return new Uint8Array(
-    await saveResidentDocument(
-      opened.resident,
+    await opened.resident.save(
       opened.bytes.slice(),
       opened.hostJson,
       structuredClone(hostSaveMetadata(opened.host)),
@@ -140,7 +149,7 @@ class Replica {
     private readonly host: Document
   ) {}
 
-  async save(comments: Comment[]): Promise<Uint8Array> {
+  async save(comments: Comment[]): Promise<Uint8Array<ArrayBuffer>> {
     const base = this.base ?? this.session.materializeDocx();
     if (!base) throw new Error('the replica has no package');
     const projected = yrsToDocument(this.session, mergeDocxHostMetadata(base, this.host));
@@ -216,11 +225,11 @@ describe('worker save', () => {
   it('equals the replica save on the synthetic fixture: no edit, edits, two saves', async () => {
     const opened = await open(synthetic());
     const replica = await hydrate(opened);
-    expect(await workerSave(opened)).toEqual(await replica.save(hostComments(opened)));
+    expect(difference(await workerSave(opened), await replica.save(hostComments(opened)))).toBeNull();
     expect(residentEdit(opened)).toBe(true);
     replicaEdit(replica, opened.host);
-    expect(await workerSave(opened)).toEqual(await replica.save(hostComments(opened)));
-    expect(await workerSave(opened)).toEqual(await replica.save(hostComments(opened)));
+    expect(difference(await workerSave(opened), await replica.save(hostComments(opened)))).toBeNull();
+    expect(difference(await workerSave(opened), await replica.save(hostComments(opened)))).toBeNull();
   });
 
   it('equals the replica save after host proposals are accepted and rejected', async () => {
@@ -253,7 +262,7 @@ describe('worker save', () => {
     });
     expect(decided.ok).toBe(true);
     const replica = await hydrate(opened);
-    expect(await workerSave(opened)).toEqual(await replica.save(hostComments(opened)));
+    expect(difference(await workerSave(opened), await replica.save(hostComments(opened)))).toBeNull();
   });
 
   it('equals the replica save with the host comments and a reply', async () => {
@@ -272,12 +281,12 @@ describe('worker save', () => {
       parentId: parent.id,
     };
     const replica = await hydrate(opened);
-    expect(await workerSave(opened, [...comments, reply])).toEqual(
-      await replica.save([...comments, reply])
-    );
-    expect(await workerSave(opened, [...comments, reply])).toEqual(
-      await replica.save([...comments, reply])
-    );
+    expect(
+      difference(await workerSave(opened, [...comments, reply]), await replica.save([...comments, reply]))
+    ).toBeNull();
+    expect(
+      difference(await workerSave(opened, [...comments, reply]), await replica.save([...comments, reply]))
+    ).toBeNull();
   });
 
   it('equals a replica that hydrates after the worker saved', async () => {
@@ -290,7 +299,7 @@ describe('worker save', () => {
 
     const opened = await open(synthetic());
     expect(residentEdit(opened)).toBe(true);
-    expect(await workerSave(opened)).toEqual(first);
+    expect(difference(await workerSave(opened), first)).toBeNull();
     const late = await hydrate(opened);
     const record = opened.record;
     adoptEditorSave(late.session, record.full ? { full: true } : { full: false, saved: record.original });
@@ -301,9 +310,8 @@ describe('worker save', () => {
       late.session,
       mergeDocxHostMetadata({ ...materialized, originalBuffer: record.original }, opened.host)
     );
-    expect(new Uint8Array(await saveEditorDocument(late.session, projected, hostComments(opened)))).toEqual(
-      second
-    );
+    const lateSave = new Uint8Array(await saveEditorDocument(late.session, projected, hostComments(opened)));
+    expect(difference(lateSave, second)).toBeNull();
   });
 
   for (const path of documents()) {
@@ -313,10 +321,10 @@ describe('worker save', () => {
       async () => {
         const opened = await open(new Uint8Array(readFileSync(path)));
         const replica = await hydrate(opened);
-        expect(await workerSave(opened)).toEqual(await replica.save(hostComments(opened)));
+        expect(difference(await workerSave(opened), await replica.save(hostComments(opened)))).toBeNull();
         if (!residentEdit(opened)) return;
         replicaEdit(replica, opened.host);
-        expect(await workerSave(opened)).toEqual(await replica.save(hostComments(opened)));
+        expect(difference(await workerSave(opened), await replica.save(hostComments(opened)))).toBeNull();
       },
       TIMEOUT
     );
@@ -379,9 +387,9 @@ describe('worker save request', () => {
     const replica = new Replica(replicaSession, host);
     const request = { source: bytes, hostJson, host: hostSaveMetadata(host), comments: [] };
     const first = await client.save(request);
-    expect(new Uint8Array(first.bytes)).toEqual(await replica.save([]));
+    expect(difference(new Uint8Array(first.bytes), await replica.save([]))).toBeNull();
     const second = await client.save(request);
-    expect(new Uint8Array(second.bytes)).toEqual(await replica.save([]));
+    expect(difference(new Uint8Array(second.bytes), await replica.save([]))).toBeNull();
     expect(second.full).toBe(first.full);
   });
 

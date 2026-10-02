@@ -373,11 +373,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     if (!session || !openedDocument || previewing) {
       throw new Error('Resident engine worker has no opened document');
     }
-    const { saveResidentDocument } = await import('./residentSave');
     pendingUpdates = [];
     try {
-      const saved = await saveResidentDocument(
-        session,
+      const saved = await session.save(
         new Uint8Array(request.source),
         request.hostJson,
         request.host,

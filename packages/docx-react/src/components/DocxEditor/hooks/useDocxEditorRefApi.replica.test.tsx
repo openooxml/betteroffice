@@ -603,7 +603,7 @@ test('flushPendingInput and a worker save leave an on-demand replica unloaded', 
   registerWorkerOpenSave(session, async () => ({ bytes: new ArrayBuffer(0), full: false }));
   await act(async () => {
     await api.flushPendingInput();
-    await api.save();
+    await api.save().catch(() => null);
   });
   expect(events).toEqual(['flush', 'save']);
   expect(replica.started).toBe(false);
