@@ -292,6 +292,10 @@ export class EditSession {
      */
     delete_table(table_json: string): string;
     /**
+     * The number of text batches applied directly to the live document.
+     */
+    direct_batches_applied(): number;
+    /**
      * Region-aware hit test against the resident display list, so no
      * display-list JSON crosses the boundary. `x`/`y` are page-local px.
      * Returns
@@ -968,6 +972,10 @@ export class EditSession {
      * position holds no embed.
      */
     set_content_control_value_at(story: string, para_id: string, offset: number, value_json: string): void;
+    /**
+     * Apply admitted paragraph-local text batches directly. Off by default.
+     */
+    set_direct_batches(enabled: boolean): void;
     /**
      * Keep every previously built page while windowed builds are on.
      */
