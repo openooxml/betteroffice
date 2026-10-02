@@ -6,6 +6,7 @@ import { useRef, type ReactNode } from 'react';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
   createYrsSession,
+  adoptEditorSave,
   createYrsInputPositionMap,
   displayPositionToYrsLoc,
   yrsLocToDisplayPosition,
@@ -23,7 +24,15 @@ import { YrsInput, type YrsInputRef } from '../YrsInput';
 import { createCommentIdAllocator } from '../commentFactories';
 import { deferWorkerOpenReplica, workerOpenReplicaOnDemand, type WorkerOpenFallbackReason } from '../internals/workerOpenReplica';
 import { beginWorkerProposalHandover, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
-import { registerWorkerOpenSave } from '../internals/workerOpenSave';
+import {
+  awaitWorkerOpenSaves,
+  peekWorkerOpenSave,
+  recordWorkerOpenSave,
+  registerWorkerOpenSave,
+  trackWorkerOpenSave,
+  workerOpenSave,
+  workerOpenSaveNeedsBase,
+} from '../internals/workerOpenSave';
 import type { EditorMode } from '../internals/editing-modes';
 import { DOCX_REF_REPLICA_ACCESS, DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
 
@@ -49,12 +58,13 @@ function apiFor(
   session: YrsSession,
   document: Document,
   mode: EditorMode = 'viewing',
-  replicaReadyRef?: { current: boolean }
+  replicaReadyRef?: { current: boolean },
+  compatibilityBase?: { current: Document | null }
 ) {
   const events: string[] = [];
   const inputRef = { current: null as YrsInputRef | null };
   const project = () => {
-    const base = session.materializeDocx();
+    const base = compatibilityBase?.current ?? session.materializeDocx();
     return base ? yrsToDocument(session, base) : null;
   };
   const editor = {
@@ -89,6 +99,14 @@ function apiFor(
       pagedEditorRef,
       handleSave: async () => {
         events.push('save');
+        const pending = workerOpenSave(session)?.([]);
+        if (pending) {
+          return trackWorkerOpenSave(session, pending.then((saved) => {
+            adoptEditorSave(session, saved.full ? { full: true } : { full: false, saved: saved.bytes });
+            recordWorkerOpenSave(session, saved.bytes);
+            return saved.bytes;
+          }));
+        }
         return new TextEncoder().encode(session.paragraphs('body').map((paragraph) => paragraph.text).join('\n')).buffer;
       },
       zoom: 1,
@@ -156,19 +174,29 @@ async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, 
   const opens: boolean[] = [];
   const fallbackReasons: WorkerOpenFallbackReason[] = [];
   const readiness = { current: false };
+  const compatibilityBase = { current: null as Document | null };
+  const savedBase = mock(async (saved: ArrayBuffer): Promise<Document> => ({
+    ...document, originalBuffer: saved,
+  }));
   const replica = deferWorkerOpenReplica(
     session,
     async () => {
       const handover = await beginWorkerProposalHandover(session);
       await held;
+      const saves = awaitWorkerOpenSaves(session);
+      if (saves) await saves;
+      const saved = peekWorkerOpenSave(session);
+      const base = saved ? await savedBase(saved) : null;
       return () => {
         opens.push(false);
         session.openDocx(bytes, false);
         session.loadState(handover?.state ?? state);
+        compatibilityBase.current = base;
         handover?.complete();
       };
     },
     (reason) => {
+      if (workerOpenSaveNeedsBase(session)) throw new Error('The saved resident document could not be hydrated');
       fallbackReasons.push(reason);
       opens.push(true);
       session.openDocx(bytes, true);
@@ -176,8 +204,8 @@ async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, 
     () => { readiness.current = true; },
     { active: () => hydrateOnDemand, request: () => replica.start() }
   );
-  const mounted = apiFor(session, document, mode, mountInput ? readiness : undefined);
-  return { ...mounted, session, worker, replica, release, opens, fallbackReasons };
+  const mounted = apiFor(session, document, mode, mountInput ? readiness : undefined, compatibilityBase);
+  return { ...mounted, session, worker, replica, savedBase, release, opens, fallbackReasons };
 }
 
 async function pendingWorkerProposalReplica() {
@@ -599,15 +627,31 @@ test('getEditorRef immediately inserts text after synchronously finishing the re
 });
 
 test('flushPendingInput and a worker save leave an on-demand replica unloaded', async () => {
-  const { api, events, session, replica, opens } = await pendingReplica('viewing', false, true);
-  registerWorkerOpenSave(session, async () => ({ bytes: new ArrayBuffer(0), full: false }));
+  const { api, events, session, replica, savedBase, opens } = await pendingReplica('viewing', false, true);
+  const saver = mock(async () => ({ bytes: bytes.slice().buffer, full: false }));
+  registerWorkerOpenSave(session, saver);
   await act(async () => {
     await api.flushPendingInput();
     await api.save().catch(() => null);
   });
   expect(events).toEqual(['flush', 'save']);
+  expect(saver).toHaveBeenCalledTimes(1);
+  expect(savedBase).not.toHaveBeenCalled();
   expect(replica.started).toBe(false);
   expect(opens).toEqual([]);
+});
+
+test('an async read after a worker save fetches its saved base during hydration', async () => {
+  const { api, session, replica, savedBase, release, opens } = await pendingReplica('viewing', false, true);
+  const saved = bytes.slice().buffer;
+  registerWorkerOpenSave(session, async () => ({ bytes: saved, full: false }));
+  await act(async () => { expect(await api.save()).toBe(saved); });
+  const read = api.readParagraphs({ view: 'accepted' });
+  expect(replica.started).toBe(true);
+  await act(async () => { release(); await read; });
+  expect(savedBase).toHaveBeenCalledTimes(1);
+  expect(savedBase).toHaveBeenCalledWith(saved);
+  expect(opens).toEqual([false]);
 });
 
 test('flushPendingInput waits for an on-demand replica that started loading', async () => {

@@ -26,8 +26,11 @@ import {
   workerOpenReplicaStarted,
 } from '../internals/workerOpenReplica';
 import {
+  awaitWorkerOpenSaves,
+  peekWorkerOpenSave,
   registerWorkerOpenSave,
   takeWorkerOpenSave,
+  workerOpenSaveNeedsBase,
   type WorkerOpenSave,
 } from '../internals/workerOpenSave';
 import {
@@ -657,19 +660,35 @@ export function useYrsCoreSession(
               gate.wanted = true;
               if (gate.reached) startReplicaRef.current?.();
             };
+            let hydrationFailure: unknown;
             const pending = deferWorkerOpenReplica(
               next,
               async () => {
-                const handover = beginWorkerProposalHandover(next);
-                const handedOver = handover ? await handover : null;
-                const update = handedOver ? handedOver.state : await worker.encodeState();
-                return () => {
-                  next.openDocx(source, false);
-                  next.loadState(update);
-                  handedOver?.complete();
-                };
+                try {
+                  const handover = beginWorkerProposalHandover(next);
+                  const handedOver = handover ? await handover : null;
+                  const update = handedOver ? handedOver.state : await worker.encodeState();
+                  const saves = awaitWorkerOpenSaves(next);
+                  if (saves) await saves;
+                  const saved = peekWorkerOpenSave(next);
+                  const savedBase = saved ? await worker.savedBase(saved) : null;
+                  return () => {
+                    next.openDocx(source, false);
+                    next.loadState(update);
+                    if (savedBase) compatibilityBaseRef.current = savedBase;
+                    handedOver?.complete();
+                  };
+                } catch (error) {
+                  const saves = awaitWorkerOpenSaves(next);
+                  if (saves) await saves;
+                  hydrationFailure = error;
+                  throw error;
+                }
               },
               (reason) => {
+                if (workerOpenSaveNeedsBase(next)) {
+                  throw hydrationFailure ?? new Error('The saved resident document could not be hydrated');
+                }
                 if (registeredWorkerProposalAuthority(next)?.holdsWorkerState()) {
                   throw new Error('The resident worker holds proposals the main thread cannot rebuild');
                 }
@@ -1087,7 +1106,6 @@ export function useYrsCoreSession(
     try {
       if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(live);
       const materialized = compatibilityBaseRef.current ?? live.materializeDocx();
-      // The worker saved last: its bytes are the package, and no projection is cached.
       const workerSaved = takeWorkerOpenSave(live);
       const compatibilityBase =
         materialized && workerSaved ? { ...materialized, originalBuffer: workerSaved } : materialized;

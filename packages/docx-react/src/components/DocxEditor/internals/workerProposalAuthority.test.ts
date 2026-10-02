@@ -276,6 +276,18 @@ test('a save rejects while handing over without running its task', async () => {
   expect(h.events).toEqual(['snapshot', 'handOver']);
 });
 
+test.each([false, true])('a queued save is cancelled by handover with initialized=%s', async (initialized) => {
+  const h = harness();
+  if (initialized) await h.authority.initialize();
+  const task = mock(async () => Uint8Array.of(2));
+  const saved = h.authority.save(task);
+  const handingOver = beginWorkerProposalHandover(h.session)!;
+  await expect(saved).rejects.toThrow('The document is being handed over to its replica');
+  await handingOver;
+  expect(task).not.toHaveBeenCalled();
+  expect(h.events).toEqual(initialized ? ['snapshot', 'handOver'] : ['handOver']);
+});
+
 test('routed reads wait for layout and the initialization snapshot before posting', async () => {
   const laidOut = deferred<void>();
   const h = harness(() => laidOut.promise);

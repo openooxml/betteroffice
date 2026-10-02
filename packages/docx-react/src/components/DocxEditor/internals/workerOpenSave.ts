@@ -9,6 +9,7 @@ export type WorkerOpenSave = (
 
 const savers = new WeakMap<YrsSession, WorkerOpenSave>();
 const savedOriginals = new WeakMap<YrsSession, ArrayBuffer>();
+const saving = new WeakMap<YrsSession, Set<Promise<unknown>>>();
 
 export function registerWorkerOpenSave(session: YrsSession, save: WorkerOpenSave): void {
   savers.set(session, save);
@@ -25,6 +26,27 @@ export function workerOpenSave(session: YrsSession): WorkerOpenSave | null {
 /** `bytes`, the worker's last save of `session`, is the package the replica's next save starts from. */
 export function recordWorkerOpenSave(session: YrsSession, bytes: ArrayBuffer): void {
   savedOriginals.set(session, bytes);
+}
+
+export function trackWorkerOpenSave<T>(session: YrsSession, pending: Promise<T>): Promise<T> {
+  const saves = saving.get(session) ?? new Set<Promise<unknown>>();
+  saving.set(session, saves);
+  const tracked = pending.finally(() => { saves.delete(tracked); });
+  saves.add(tracked);
+  return tracked;
+}
+
+export function awaitWorkerOpenSaves(session: YrsSession): Promise<void> | undefined {
+  const saves = saving.get(session);
+  if (saves?.size) return Promise.allSettled(saves).then(() => {});
+}
+
+export function peekWorkerOpenSave(session: YrsSession): ArrayBuffer | undefined {
+  return savedOriginals.get(session);
+}
+
+export function workerOpenSaveNeedsBase(session: YrsSession): boolean {
+  return savedOriginals.has(session) || (saving.get(session)?.size ?? 0) > 0;
 }
 
 export function takeWorkerOpenSave(session: YrsSession): ArrayBuffer | undefined {

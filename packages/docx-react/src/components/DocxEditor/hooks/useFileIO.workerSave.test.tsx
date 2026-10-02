@@ -4,9 +4,17 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { createYrsSession, yrsToDocument, type YrsSession } from '@betteroffice/docx/yrs';
+import type { Document } from '@betteroffice/docx/types/document';
 import type { PagedEditorRef } from '../PagedEditor';
 import { awaitWorkerOpenReplica, deferWorkerOpenReplica } from '../internals/workerOpenReplica';
-import { registerWorkerOpenSave, takeWorkerOpenSave, type WorkerOpenSave } from '../internals/workerOpenSave';
+import {
+  awaitWorkerOpenSaves,
+  peekWorkerOpenSave,
+  registerWorkerOpenSave,
+  takeWorkerOpenSave,
+  workerOpenSaveNeedsBase,
+  type WorkerOpenSave,
+} from '../internals/workerOpenSave';
 import { useFileIO } from './useFileIO';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -38,14 +46,31 @@ async function workerOpened(save: WorkerOpenSave) {
   sessions.push(worker, session);
   worker.openDocx(bytes, true);
   const hydrated = mock(() => {});
+  let compatibilityBase: Document | null = null;
+  const savedBase = mock(async (saved: ArrayBuffer): Promise<Document> => {
+    const base = worker.materializeDocx();
+    if (!base) throw new Error('the worker has no package');
+    return { ...base, originalBuffer: saved };
+  });
   const replica = deferWorkerOpenReplica(
     session,
-    async () => () => {
-      hydrated();
-      session.openDocx(bytes, false);
-      session.loadState(worker.encodeState());
+    async () => {
+      const update = worker.encodeState();
+      const saves = awaitWorkerOpenSaves(session);
+      if (saves) await saves;
+      const saved = peekWorkerOpenSave(session);
+      const base = saved ? await savedBase(saved) : null;
+      return () => {
+        hydrated();
+        session.openDocx(bytes, false);
+        session.loadState(update);
+        compatibilityBase = base;
+      };
     },
-    () => session.openDocx(bytes, true),
+    () => {
+      if (workerOpenSaveNeedsBase(session)) throw new Error('The saved resident document could not be hydrated');
+      session.openDocx(bytes, true);
+    },
     () => {},
     { active: () => true, request: () => replica.start() }
   );
@@ -58,7 +83,8 @@ async function workerOpened(save: WorkerOpenSave) {
       if (awaitReplica !== false) await awaitWorkerOpenReplica(session);
     },
     getDocument: () => {
-      const base = session.materializeDocx();
+      const base = compatibilityBase ?? session.materializeDocx();
+      takeWorkerOpenSave(session);
       return base ? yrsToDocument(session, base) : null;
     },
   } satisfies Partial<PagedEditorRef>;
@@ -80,7 +106,7 @@ async function workerOpened(save: WorkerOpenSave) {
       focusActiveEditor: () => {},
     })
   );
-  return { session, replica, hydrated, flushes, saved, errors, pagedEditorRef, save: result.current.handleSave };
+  return { session, replica, hydrated, savedBase, flushes, saved, errors, pagedEditorRef, save: result.current.handleSave };
 }
 
 test('saves in the worker without loading the pending replica', async () => {
@@ -93,7 +119,28 @@ test('saves in the worker without loading the pending replica', async () => {
   expect(opened.flushes).toEqual([false]);
   expect(opened.replica.started).toBe(false);
   expect(opened.hydrated).not.toHaveBeenCalled();
+  expect(opened.savedBase).not.toHaveBeenCalled();
   expect(takeWorkerOpenSave(opened.session)).toBe(bytesOut);
+});
+
+test('fetches the last saved base once when the replica later hydrates', async () => {
+  const first = bytes.slice().buffer;
+  const second = bytes.slice().buffer;
+  let saves = 0;
+  const opened = await workerOpened(async () => ({
+    bytes: saves++ === 0 ? first : second,
+    full: false,
+  }));
+  expect(await opened.save()).toBe(first);
+  expect(await opened.save()).toBe(second);
+  expect(opened.savedBase).not.toHaveBeenCalled();
+  await awaitWorkerOpenReplica(opened.session);
+  expect(opened.savedBase).toHaveBeenCalledTimes(1);
+  expect(opened.savedBase).toHaveBeenCalledWith(second);
+  expect(opened.pagedEditorRef.current!.getDocument()?.originalBuffer).toBe(second);
+  expect(await opened.save()).toBeInstanceOf(ArrayBuffer);
+  expect(saves).toBe(2);
+  expect(opened.savedBase).toHaveBeenCalledTimes(1);
 });
 
 test('falls back to the replica when the worker cannot save', async () => {

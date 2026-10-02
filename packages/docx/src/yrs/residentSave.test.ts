@@ -105,7 +105,7 @@ function paragraph(paraId: string, text: string): string {
   return `<w:p w14:paraId="${paraId}"><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
 }
 
-function synthetic(): Uint8Array {
+function synthetic(first = paragraph('0000B001', 'Alpha beta gamma.')): Uint8Array {
   const parts: PartsMap = new Map();
   const set = (name: string, content: string) => parts.set(name, toBytes(content));
   set(
@@ -124,7 +124,7 @@ function synthetic(): Uint8Array {
   set(
     'word/document.xml',
     `<w:document ${NS} xmlns:r="${REL}"><w:body>` +
-      paragraph('0000B001', 'Alpha beta gamma.') +
+      first +
       paragraph('0000B002', 'Delta epsilon zeta.') +
       paragraph('0000B003', 'Eta theta iota.') +
       `<w:sectPr><w:headerReference w:type="default" r:id="rIdH1"/></w:sectPr></w:body></w:document>`
@@ -162,11 +162,10 @@ async function workerSave(opened: Opened, comments: Comment[] = hostComments(ope
 
 /** The main-thread replica the editor hydrates from the worker and saves. */
 class Replica {
-  private base: Document | null = null;
-
   constructor(
     readonly session: YrsSession,
-    private readonly host: Document
+    private readonly host: Document,
+    private base: Document | null = null
   ) {}
 
   async save(comments: Comment[]): Promise<Uint8Array<ArrayBuffer>> {
@@ -180,12 +179,20 @@ class Replica {
   }
 }
 
-async function hydrate(opened: Opened): Promise<Replica> {
+async function hydrate(
+  opened: Opened,
+  saved?: { client: ResidentEngineWorkerClient; bytes: ArrayBuffer; full: boolean }
+): Promise<Replica> {
   const session = await createYrsSession();
   owned.push(session);
+  const update = saved ? await saved.client.encodeState() : opened.resident.encodeState();
+  const base = saved ? await saved.client.savedBase(saved.bytes) : null;
   session.openDocx(opened.bytes.slice(), false);
-  session.loadState(opened.resident.encodeState());
-  return new Replica(session, opened.host);
+  session.loadState(update);
+  if (saved) {
+    adoptEditorSave(session, saved.full ? { full: true } : { full: false, saved: saved.bytes });
+  }
+  return new Replica(session, opened.host, base);
 }
 
 function hostComments(opened: Opened): Comment[] {
@@ -318,22 +325,26 @@ describe('worker save', () => {
     replicaEdit(replica, reference.host);
     const second = await replica.save(hostComments(reference));
 
-    const opened = await open(synthetic());
+    const bytes = synthetic();
+    const worker = startWorker();
+    const client = new ResidentEngineWorkerClient(worker);
+    owned.push(client);
+    const { hostJson } = await client.open(bytes);
+    const opened: Opened = {
+      bytes,
+      resident: worker.sessions[0]!,
+      hostJson,
+      host: decodeDocxHostJson(hostJson, bytes).document,
+      record: { full: false },
+    };
     expect(residentEdit(opened)).toBe(true);
-    expect(difference(await workerSave(opened), first)).toBeNull();
-    const late = await hydrate(opened);
-    const record = opened.record;
-    const saved = record.base?.originalBuffer;
-    adoptEditorSave(late.session, record.full ? { full: true } : { full: false, saved });
-    const materialized = late.session.materializeDocx();
-    if (!materialized) throw new Error('the replica has no package');
+    const saved = await client.save({
+      source: bytes, hostJson, host: hostSaveMetadata(opened.host), comments: hostComments(opened),
+    });
+    expect(difference(new Uint8Array(saved.bytes), first)).toBeNull();
+    const late = await hydrate(opened, { ...saved, client });
     replicaEdit(late, opened.host);
-    const projected = yrsToDocument(
-      late.session,
-      mergeDocxHostMetadata({ ...materialized, originalBuffer: saved }, opened.host)
-    );
-    const lateSave = new Uint8Array(await saveEditorDocument(late.session, projected, hostComments(opened)));
-    expect(difference(lateSave, second)).toBeNull();
+    expect(difference(await late.save(hostComments(opened)), second)).toBeNull();
   });
 
   for (const path of documents()) {
@@ -413,6 +424,107 @@ describe('worker save request', () => {
     const second = await client.save(request);
     expect(difference(new Uint8Array(second.bytes), await replica.save([]))).toBeNull();
     expect(second.full).toBe(first.full);
+  });
+
+  it('keeps the saved raw inline offset when the replica hydrates after two worker saves', async () => {
+    const bytes = synthetic(
+      '<w:p w14:paraId="0000B001"><w:r><w:t>abcdefghij</w:t></w:r>' +
+        '<x:mark xmlns:x="urn:example"/><w:r><w:t>klm</w:t></w:r></w:p>'
+    );
+    const reference = await open(bytes);
+    const replica = await hydrate(reference);
+    const worker = startWorker();
+    const client = new ResidentEngineWorkerClient(worker);
+    owned.push(client);
+    const { hostJson } = await client.open(bytes);
+    const opened: Opened = {
+      bytes,
+      resident: worker.sessions[0]!,
+      hostJson,
+      host: decodeDocxHostJson(hostJson, bytes).document,
+      record: { full: false },
+    };
+    const request = { source: bytes, hostJson, host: hostSaveMetadata(opened.host), comments: [] };
+    const xml = (bytes: Uint8Array) =>
+      new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
+    const rawOffset = (xml: string) => {
+      const at = xml.indexOf('<x:mark');
+      expect(at).toBeGreaterThanOrEqual(0);
+      return [...xml.slice(0, at).matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>/g)]
+        .reduce((length, match) => length + match[1]!.length, 0);
+    };
+    const initial = replica.session.materializeDocx()?.package.document.content[0];
+    if (initial?.type !== 'paragraph') throw new Error('the fixture has no paragraph');
+    expect(initial.content.some((child) => child.type === 'rawXml')).toBe(true);
+    expect(rawOffset(xml(bytes))).toBe(10);
+    const edit = (step: DocxEditRequest['steps'][number]) => {
+      for (const engine of [replica.session, opened.resident.proposalEngine]) {
+        const result = engine.applyEdits({
+          expectVersion: engine.version(),
+          history: 'none',
+          steps: [step],
+        });
+        expect(result.ok).toBe(true);
+      }
+    };
+    edit({
+      op: 'deleteText',
+      target: {
+        kind: 'range',
+        story: 'body',
+        start: { paraId: '0000B001', offset: 3 },
+        end: { paraId: '0000B001', offset: 13 },
+        view: 'accepted',
+      },
+    });
+    expect(replica.session.paragraphs('body')[0]!.text).toBe('abc');
+    const first = new Uint8Array((await client.save(request)).bytes);
+    const firstReplica = await replica.save([]);
+    expect(rawOffset(xml(first))).toBe(3);
+    expect(xml(first)).toBe(xml(firstReplica));
+    expect(difference(first, firstReplica)).toBeNull();
+
+    edit({
+      op: 'insertText',
+      target: { kind: 'paragraph', story: 'body', paraId: '0000B001' },
+      at: 'end',
+      text: 'ABCDEFGHIJ',
+    });
+    expect(replica.session.paragraphs('body')[0]!.text).toBe('abcABCDEFGHIJ');
+    const second = await client.save(request);
+    const secondReplica = await replica.save([]);
+    expect(Object.keys(second).sort()).toEqual(['bytes', 'full']);
+    expect(worker.requests).not.toContain('savedBase');
+    expect(rawOffset(xml(new Uint8Array(second.bytes)))).toBe(3);
+    expect(xml(new Uint8Array(second.bytes))).toBe(xml(secondReplica));
+    expect(difference(new Uint8Array(second.bytes), secondReplica)).toBeNull();
+
+    const late = await hydrate(opened, { ...second, client });
+    expect(worker.requests.filter((type) => type === 'savedBase')).toHaveLength(1);
+    const expected = await replica.save([]);
+    const workerSave = new Uint8Array((await client.save(request)).bytes);
+    const lateSave = await late.save([]);
+    expect(xml(workerSave)).toBe(xml(expected));
+    expect(difference(workerSave, expected)).toBeNull();
+    expect(xml(lateSave)).toBe(xml(expected));
+    expect(difference(lateSave, expected)).toBeNull();
+  });
+
+  it('refuses a saved base that does not match the recorded save', async () => {
+    const bytes = synthetic();
+    const client = new ResidentEngineWorkerClient(startWorker());
+    owned.push(client);
+    const { hostJson } = await client.open(bytes);
+    const host = decodeDocxHostJson(hostJson, bytes).document;
+    const request = { source: bytes, hostJson, host: hostSaveMetadata(host), comments: [] };
+    const first = await client.save(request);
+    const second = await client.save(request);
+    await expect(client.savedBase(first.bytes)).rejects.toThrow(
+      'The saved projection no longer matches the recorded save'
+    );
+    const base = await client.savedBase(second.bytes);
+    expect(base.originalBuffer).toBe(second.bytes);
+    expect(difference(new Uint8Array((await client.save(request)).bytes), new Uint8Array(second.bytes))).toBeNull();
   });
 
   it('refuses a save without an opened document', async () => {

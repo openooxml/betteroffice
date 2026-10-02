@@ -95,6 +95,8 @@ export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
     request: Parameters<ResidentEngineWorkerClient['save']>[0],
     admit: () => boolean
   ): ReturnType<ResidentEngineWorkerClient['save']>;
+  /** @internal */
+  savedBase: ResidentEngineWorkerClient['savedBase'];
   fallback(reason?: WorkerOpenFallbackReason): (() => boolean) | void;
   destroy(): void;
   replicaReady(): void;
@@ -1500,6 +1502,23 @@ export function useRustDisplayList(
                 throw new Error('The document is no longer saved in its resident worker');
               }
               return current.client.save(request);
+            });
+          },
+          savedBase: (saved) => {
+            const owner = workerRef.current;
+            if (
+              !owner ||
+              owner !== openedBy ||
+              !isCurrentWorker(hostEngine, owner) ||
+              owner.client.hasFailed()
+            ) {
+              return Promise.reject(new Error('The resident worker holding this document is gone'));
+            }
+            return requestOpenedWorker(hostEngine, (current) => {
+              if (current !== openedBy) {
+                throw new Error('The resident worker holding this document is gone');
+              }
+              return current.client.savedBase(saved);
             });
           },
           fallback: (reason = 'failure') => {

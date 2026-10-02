@@ -10,7 +10,11 @@ import {
 } from '@betteroffice/docx/layout/render';
 import type { PagedEditorRef } from '../PagedEditor';
 import { flushedSession } from '../editorBatches';
-import { recordWorkerOpenSave, workerOpenSave } from '../internals/workerOpenSave';
+import {
+  recordWorkerOpenSave,
+  trackWorkerOpenSave,
+  workerOpenSave,
+} from '../internals/workerOpenSave';
 import type { DocxEditorProps } from '../../DocxEditor';
 import type { DocxImageInsert, DocxSaveOutcome } from './useDocxCommands';
 
@@ -25,7 +29,9 @@ function saveInWorker(
   comments: Comment[]
 ): Promise<{ session: YrsSession; buffer: ArrayBuffer } | null> | null {
   const before = pagedEditorRef.current?.getYrsSession();
-  return before && workerOpenSave(before) ? workerSave(pagedEditorRef, before, comments) : null;
+  return before && workerOpenSave(before)
+    ? trackWorkerOpenSave(before, workerSave(pagedEditorRef, before, comments))
+    : null;
 }
 
 async function workerSave(

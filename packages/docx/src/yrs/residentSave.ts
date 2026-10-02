@@ -5,14 +5,16 @@ import type { Document } from '../types/document';
 import { mergeDocxHostMetadata, saveEditorDocument, type EditorSaveRecord } from './editorSave';
 import { wrapOpenedEditSession } from './yrsSessionFacade';
 import type { EditSession } from './wasm/index';
-import { yrsToDocument } from './yrsToDocument';
+import { captureProjectionBase, yrsToDocument, type ProjectionBase } from './yrsToDocument';
 
 /**
  * The saves of one opened document so far, and the last one's projection: the
  * base the next save projects from, as the editor's cached projection is. @internal
  */
 export interface ResidentSaveRecord extends EditorSaveRecord {
-  base?: Document;
+  base?: ProjectionBase;
+  /** @internal */
+  saveId?: number;
 }
 
 /**
@@ -31,11 +33,11 @@ export async function saveResidentDocument(
   record: ResidentSaveRecord
 ): Promise<ArrayBuffer> {
   const session = wrapOpenedEditSession(raw, clientId, source, hostJson);
-  const base = record.base ?? session.materializeDocx();
+  const base = record.base?.document ?? session.materializeDocx();
   if (!base?.originalBuffer) throw new Error('The resident worker holds no opened package');
   const projected = yrsToDocument(session, mergeDocxHostMetadata(base, host));
   const buffer = await saveEditorDocument(session, projected, comments, record);
   projected.originalBuffer = buffer;
-  record.base = projected;
+  record.base = captureProjectionBase(projected);
   return buffer;
 }

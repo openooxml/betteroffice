@@ -31,6 +31,7 @@ import { useCanvasRenderer, type OpenInWorker } from './useDisplayList';
 import { useLayoutPipeline } from './useLayoutPipeline';
 import { useHostSearch, type DocxSearchState } from './useHostSearch';
 import { useYrsCoreSession } from './useYrsCoreSession';
+import { useFileIO } from './useFileIO';
 import type { DocxEditorCollaborationOptions } from '../types';
 import { awaitWorkerOpenReplica, ensureWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
 import { isLayoutQueued, revisionPreviewKey, revisionPreviewKeyOf, sourceVersionOf } from '../internals/layoutProvenance';
@@ -110,6 +111,7 @@ afterAll(async () => {
 function installWorker(options: {
   failOpen?: boolean;
   failState?: boolean;
+  failSavedBase?: boolean;
   failProposal?: boolean;
   crashProposalOnce?: boolean;
   /** Fails the replacement worker's first snapshot once this settles. */
@@ -117,7 +119,7 @@ function installWorker(options: {
   holdState?: boolean;
   holdOpen?: boolean;
   oomStage?: 'open' | 'fontRequirements' | 'bootstrap' | 'encodeState' | 'proposal' |
-    'documentRead';
+    'documentRead' | 'savedBase';
   holdRetryOpen?: boolean;
   revisionCount?: number;
   failRevisionCount?: boolean;
@@ -181,7 +183,7 @@ function installWorker(options: {
             (options.holdRetryOpen && workers.length > 1 && request.type === 'open') ||
             (options.holdCompletion && request.type === 'completeLayout')) worker.hold();
         if (options.oomStage === request.type &&
-            (!['encodeState', 'proposal', 'documentRead'].includes(request.type) ||
+            (!['encodeState', 'proposal', 'documentRead', 'savedBase'].includes(request.type) ||
               workers.length === 1)) {
           queueMicrotask(() => worker.onmessage?.({
             data: { id: request.id, ok: false, error: 'worker exhausted memory', terminal: true, outOfMemory: true },
@@ -201,6 +203,10 @@ function installWorker(options: {
         } else if (options.refusePreview && request.type === 'open' && request.previewBlocks !== undefined) {
           queueMicrotask(() => worker.onmessage?.({
             data: { id: request.id, ok: true, previewRefused: true },
+          } as MessageEvent));
+        } else if (options.failSavedBase && request.type === 'savedBase') {
+          queueMicrotask(() => worker.onmessage?.({
+            data: { id: request.id, ok: false, error: 'saved base unavailable' },
           } as MessageEvent));
         } else if ((options.failOpen && request.type === 'open') ||
             (options.failState && request.type === 'encodeState')) {
@@ -1919,6 +1925,7 @@ test('opening the comments sidebar hydrates the pending replica and keeps worker
     await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
     await act(async () => { workers[0]!.release(); await awaitWorkerOpenReplica(session); });
     expect(result.current.mainOpens).toEqual([false]);
+    expect(posted.some((request) => request.type === 'savedBase')).toBe(false);
     const layoutHere = spyOn(session, 'layoutDocumentWithRegionsRetainedJson');
     const buildHere = spyOn(session, 'buildDisplayListFrame');
     try {
@@ -2228,7 +2235,7 @@ test('disabled worker open preserves main-thread open, projection and flush with
     unmount();
     expect(replicas).toEqual([session, null]);
     for (const spy of spies) expect(spy).not.toHaveBeenCalled();
-    expect(posted.some((request) => ['open', 'fontRequirements', 'encodeState'].includes(request.type))).toBe(false);
+    expect(posted.some((request) => ['open', 'fontRequirements', 'encodeState', 'savedBase'].includes(request.type))).toBe(false);
     expect(workers).toHaveLength(1);
   } finally {
     for (const spy of spies) spy.mockRestore();
@@ -2252,6 +2259,104 @@ async function openWorkerProposals(props: HarnessProps = workerProposalProps) {
   });
   return harness;
 }
+
+function workerFileIO(pagedEditorRef: React.RefObject<PagedEditorRef | null>) {
+  const hook = renderHook(() => useFileIO({
+    pagedEditorRef,
+    resolveImage: (() => null) as never,
+    comments: [],
+    documentName: undefined,
+    onSave: undefined,
+    onOpen: undefined,
+    onError: undefined,
+    onPrint: undefined,
+    onDocumentNameChange: undefined,
+    loadBuffer: async () => {},
+    focusActiveEditor: () => {},
+  }));
+  return { save: hook.result.current.handleSave, unmount: hook.unmount };
+}
+
+test('hydration waits for an in-flight authority save and fetches only its recorded base', async () => {
+  let holdSave = false;
+  const { posted, received, reply, responses } = installWorker({
+    holdReply: (request) => holdSave && request.type === 'save',
+  });
+  const { result, unmount } = await openWorkerProposals({ ...workerProposalProps, source: bytes });
+  const io = workerFileIO(result.current.pagedEditorRef);
+  try {
+    const session = result.current.core.session!;
+    await act(async () => { expect(await io.save()).toBeInstanceOf(ArrayBuffer); });
+    const first = await received('save');
+    expect(posted.some((request) => request.type === 'savedBase')).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    holdSave = true;
+    let inFlight!: Promise<ArrayBuffer | null>;
+    act(() => { inFlight = io.save(); });
+    const second = await received('save', first.id);
+    let ready!: Promise<void>;
+    act(() => { ready = requestWorkerOpenReplica(session)!; });
+    await act(async () => {});
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(posted.some((request) => request.type === 'savedBase')).toBe(false);
+    let saved: ArrayBuffer | null = null;
+    await act(async () => {
+      reply(second);
+      saved = await inFlight;
+      await ready;
+    });
+    expect(saved).toBeInstanceOf(ArrayBuffer);
+    const response = responses.get(second);
+    if (!response?.ok || !response.saved) throw new Error('Missing save reply');
+    expect(Object.keys(response.saved).sort()).toEqual(['bytes', 'full']);
+    expect(posted.filter((request) => request.type === 'savedBase').map((request) => request.saveId))
+      .toEqual([second.id]);
+    expect(result.current.core.documentFromYrs()?.originalBuffer).toBe(saved);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    io.unmount();
+    unmount();
+  }
+});
+
+test.each(['request', 'gone', 'oom-handoff', 'oom-base'] as const)(
+  'a saved-base hydration failure rejects the replica without reopening the source: %s',
+  async (failure) => {
+    const { workers, posted } = installWorker({
+      failSavedBase: failure === 'request',
+      ...(failure.startsWith('oom') ? {
+        oomStage: failure === 'oom-handoff' ? 'encodeState' as const : 'savedBase' as const,
+      } : {}),
+    });
+    const { result, unmount } = await openWorkerProposals({ ...workerProposalProps, source: bytes });
+    const io = workerFileIO(result.current.pagedEditorRef);
+    try {
+      const session = result.current.core.session!;
+      await act(async () => { expect(await io.save()).toBeInstanceOf(ArrayBuffer); });
+      if (failure === 'gone') workers[0]!.onerror?.({ message: 'worker gone' } as ErrorEvent);
+      const message = failure === 'request' ? 'saved base unavailable'
+        : failure === 'gone' ? 'worker gone' : 'The resident worker holding this document is gone';
+      await act(async () => {
+        await expect(requestWorkerOpenReplica(session)).rejects.toThrow(message);
+      });
+      expect(result.current.mainOpens).toEqual([]);
+      expect(result.current.core.replicaReady).toBe(false);
+      expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(false);
+      expect(result.current.errors.some((error) => error.message.includes(message))).toBe(true);
+      if (failure.startsWith('oom')) {
+        expect(workers).toHaveLength(2);
+        expect(workers[1]!.requests).not.toContain('savedBase');
+        if (failure === 'oom-handoff') {
+          expect(posted.some((request) => request.type === 'savedBase')).toBe(false);
+        }
+      }
+    } finally {
+      io.unmount();
+      unmount();
+    }
+  }
+);
 
 test('host search reads and navigates the resident worker without starting the main replica', async () => {
   const { workers, posted } = installWorker();

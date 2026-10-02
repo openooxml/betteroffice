@@ -384,10 +384,26 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         (editorSaves ??= { full: false })
       );
       const bytes = saved.slice(0);
+      editorSaves.saveId = request.id;
       reply({ id: request.id, ok: true, saved: { bytes, full: editorSaves.full } }, [bytes]);
     } finally {
       pendingUpdates = [];
     }
+    return;
+  }
+  if (request.type === 'savedBase') {
+    const base = editorSaves?.base;
+    if (!base || editorSaves?.saveId !== request.saveId) {
+      throw new Error('The saved projection no longer matches the recorded save');
+    }
+    reply({
+      id: request.id,
+      ok: true,
+      savedBase: {
+        saveId: request.saveId,
+        base: { ...base, document: { ...base.document, originalBuffer: undefined } },
+      },
+    });
     return;
   }
   if (request.type === 'revisionCount') {

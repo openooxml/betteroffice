@@ -235,7 +235,10 @@ test('an opened document rejects saves after OOM replaces its worker', async () 
     await expect(opened!.save({
       source, hostJson: opened!.hostJson, host: { package: { document: { content: [] } } }, comments: [],
     }, () => true)).rejects.toThrow('The resident worker holding this document is gone');
-    expect(second.posted.some((request) => request.type === 'save')).toBe(false);
+    await expect(opened!.savedBase(new ArrayBuffer(0))).rejects.toThrow(
+      'The resident worker holding this document is gone'
+    );
+    expect(second.posted.some((request) => request.type === 'save' || request.type === 'savedBase')).toBe(false);
   } finally {
     unmount();
     warnings.mockRestore();

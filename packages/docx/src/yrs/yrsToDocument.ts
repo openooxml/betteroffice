@@ -2168,6 +2168,30 @@ interface SessionProjectionMemo {
 
 const projectedBlocks = new WeakMap<BlockContent, ProjectedBlockMemo>();
 
+/** @internal */
+export interface ProjectionBase {
+  document: Document;
+  blocks: Array<[BlockContent, ProjectedBlockMemo]>;
+}
+
+/** @internal */
+export function captureProjectionBase(document: Document): ProjectionBase {
+  const blocks: ProjectionBase['blocks'] = [];
+  for (const content of collectBaseStories(document).values()) {
+    for (const block of content) {
+      const memo = projectedBlocks.get(block);
+      if (memo) blocks.push([block, memo]);
+    }
+  }
+  return { document, blocks };
+}
+
+/** @internal */
+export function restoreProjectionBase(base: ProjectionBase): Document {
+  for (const [block, memo] of base.blocks) projectedBlocks.set(block, memo);
+  return base.document;
+}
+
 /** The session key of the pilcrow a projected paragraph was built from. @internal */
 export function projectedSessionKey(paragraph: Paragraph): string | undefined {
   return projectedBlocks.get(paragraph)?.sessionKey;
