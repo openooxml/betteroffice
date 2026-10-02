@@ -395,8 +395,11 @@ export interface PagedEditorRef {
   getPositionAtPoint(clientX: number, clientY: number): DocxPointPosition | null;
   /** Live authoritative yrs session. */
   getYrsSession(): YrsSession | null;
-  /** Commits accepted input and selection; waits for active IME composition. */
-  flushPendingInput(): Promise<void>;
+  /**
+   * Commits accepted input and selection; waits for active IME composition, and with
+   * `awaitReplica` (the default) for a worker-open document's main-thread replica.
+   */
+  flushPendingInput(awaitReplica?: boolean): Promise<void>;
   /** Whether typed or composed input has yet to reach the session. @internal */
   hasPendingInput(): boolean;
   /** Paragraph-local stored inline formatting for the current yrs caret. */

@@ -16,6 +16,7 @@ import {
 } from './proposals';
 import { computeProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
 import { readResidentSearch } from './residentSearch';
+import type { ResidentSaveRecord } from './residentSave';
 import { hasCachedYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import {
   presentOffscreenPageBackBuffer,
@@ -69,6 +70,8 @@ let requestedRequirements: { owner: ResidentEngineSession; layoutInput: string }
 const REQUIREMENTS_CACHE_INPUTS = 8;
 /** Set while the session holds the document `open` seeded, with the heap limit it used. */
 let openedDocument: { heapLimitBytes?: number } | null = null;
+/** The editor saves of the opened document so far. */
+let editorSaves: ResidentSaveRecord | null = null;
 // The opened document is a display-only preview that an `open` of the whole package replaces.
 let previewing = false;
 /** Pages of a cut preview's layout that match the whole document's; null for a whole document. */
@@ -364,6 +367,28 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       },
       [state]
     );
+    return;
+  }
+  if (request.type === 'save') {
+    if (!session || !openedDocument || previewing) {
+      throw new Error('Resident engine worker has no opened document');
+    }
+    const { saveResidentDocument } = await import('./residentSave');
+    pendingUpdates = [];
+    try {
+      const saved = await saveResidentDocument(
+        session,
+        new Uint8Array(request.source),
+        request.hostJson,
+        request.host,
+        request.comments,
+        (editorSaves ??= { full: false })
+      );
+      const bytes = saved.slice(0);
+      reply({ id: request.id, ok: true, saved: { bytes, full: editorSaves.full } }, [bytes]);
+    } finally {
+      pendingUpdates = [];
+    }
     return;
   }
   if (request.type === 'revisionCount') {
@@ -1243,6 +1268,7 @@ function destroySession(keepSurfaces = false): void {
   lastProposalMirrorVersion = null;
   session = null;
   openedDocument = null;
+  editorSaves = null;
   previewing = false;
   previewFinalPages = null;
   clearProvisionalFinalPages();

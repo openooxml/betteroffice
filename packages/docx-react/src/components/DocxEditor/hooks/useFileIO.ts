@@ -1,7 +1,7 @@
 import { useCallback, useRef } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
 import { readDocxFileFromInput, type DocxInput } from '@betteroffice/docx/utils';
-import { saveEditorDocument } from '@betteroffice/docx/yrs';
+import { adoptEditorSave, saveEditorDocument, type YrsSession } from '@betteroffice/docx/yrs';
 import { openPrintWindow } from '@betteroffice/docx';
 import {
   rasterizeDisplayListPages,
@@ -10,10 +10,40 @@ import {
 } from '@betteroffice/docx/layout/render';
 import type { PagedEditorRef } from '../PagedEditor';
 import { flushedSession } from '../editorBatches';
+import { recordWorkerOpenSave, workerOpenSave } from '../internals/workerOpenSave';
 import type { DocxEditorProps } from '../../DocxEditor';
 import type { DocxImageInsert, DocxSaveOutcome } from './useDocxCommands';
 
 const INSERT_IMAGE_MAX_WIDTH_PX = 612;
+
+/**
+ * Saves in the resident worker that holds the document while its main-thread
+ * replica has not started loading; null when the worker does not save it.
+ */
+async function saveInWorker(
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  comments: Comment[]
+): Promise<{ session: YrsSession; buffer: ArrayBuffer } | null> {
+  const before = pagedEditorRef.current?.getYrsSession();
+  if (!before || !workerOpenSave(before)) return null;
+  const { session } = await flushedSession(pagedEditorRef, false, false);
+  const pending = session === before ? workerOpenSave(session)?.(comments) : null;
+  if (!pending) return null;
+  let saved: Awaited<typeof pending>;
+  try {
+    saved = await pending;
+  } catch (error) {
+    if (pagedEditorRef.current?.getYrsSession() !== session) throw error;
+    console.warn('[DocxEditor] The resident worker could not save; saving on the main thread', error);
+    return null;
+  }
+  if (pagedEditorRef.current?.getYrsSession() !== session) {
+    throw new Error('The document changed while saving');
+  }
+  adoptEditorSave(session, saved.full ? { full: true } : { full: false, saved: saved.bytes });
+  recordWorkerOpenSave(session, saved.bytes);
+  return { session, buffer: saved.bytes };
+}
 
 function toFileIOError(error: unknown, fallbackMessage: string): Error {
   return error instanceof Error ? error : new Error(fallbackMessage);
@@ -128,6 +158,11 @@ export function useFileIO({
     async (): Promise<ArrayBuffer | null> => {
       try {
         if (!pagedEditorRef.current) return null;
+        const inWorker = await saveInWorker(pagedEditorRef, comments);
+        if (inWorker) {
+          onSave?.(inWorker.buffer);
+          return inWorker.buffer;
+        }
         const { editor, session } = await flushedSession(pagedEditorRef);
         if (session.isDisplayOnly?.()) throw new Error('The document is still opening');
         const projected = editor.getDocument();

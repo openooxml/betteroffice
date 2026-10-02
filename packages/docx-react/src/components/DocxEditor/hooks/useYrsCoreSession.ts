@@ -8,7 +8,11 @@ import type {
   YrsRenderEnv,
   YrsSession,
 } from '@betteroffice/docx/yrs';
-import { dirtyProjectionStory, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
+import {
+  dirtyProjectionStory,
+  hostSaveMetadata,
+  mergeDocxHostMetadata,
+} from '@betteroffice/docx/yrs';
 import type { DocxEditorCollaborationOptions } from '../types';
 import type { OpenInWorker, OpenPreviewInWorker, WorkerOpenedDocument } from './useDisplayList';
 import { markLayoutQueued } from '../internals/layoutProvenance';
@@ -19,7 +23,9 @@ import {
   ensureWorkerOpenReplica,
   requestWorkerOpenReplica,
   workerOpenReplicaPending,
+  workerOpenReplicaStarted,
 } from '../internals/workerOpenReplica';
+import { registerWorkerOpenSave, takeWorkerOpenSave } from '../internals/workerOpenSave';
 import {
   beginWorkerProposalHandover,
   registerWorkerProposalAuthority,
@@ -689,6 +695,23 @@ export function useYrsCoreSession(
               },
               { active: () => hydrateOnDemandRef.current, request }
             );
+            registerWorkerOpenSave(next, (comments) => {
+              const host = documentRef.current;
+              if (!host) return null;
+              return worker
+                .save(
+                  { source, hostJson: worker.hostJson, host: hostSaveMetadata(host), comments },
+                  () =>
+                    !stale() &&
+                    sessionRef.current === next &&
+                    workerOpenReplicaPending(next) &&
+                    !workerOpenReplicaStarted(next)
+                )
+                .then((saved) => {
+                  registeredWorkerProposalAuthority(next)?.resync();
+                  return saved;
+                });
+            });
             if (workerOpenRef.current?.workerProposals) {
               let laidOut = new Promise<void>((resolve) => {
                 workerLaidOutRef.current = resolve;
@@ -1055,7 +1078,11 @@ export function useYrsCoreSession(
     if (!enabledRef.current || previewingRef.current || !live || !facade || !base) return null;
     try {
       if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(live);
-      const compatibilityBase = compatibilityBaseRef.current ?? live.materializeDocx();
+      const materialized = compatibilityBaseRef.current ?? live.materializeDocx();
+      // The worker saved last: its bytes are the package, and no projection is cached.
+      const workerSaved = takeWorkerOpenSave(live);
+      const compatibilityBase =
+        materialized && workerSaved ? { ...materialized, originalBuffer: workerSaved } : materialized;
       if (compatibilityBase) {
         base = mergeDocxHostMetadata(compatibilityBase, base);
       }
@@ -1063,7 +1090,7 @@ export function useYrsCoreSession(
       const projected = facade.yrsToDocument(
         live,
         base,
-        dirtyStories.size > 0 ? { storyIds: new Set(dirtyStories) } : undefined
+        dirtyStories.size > 0 && !workerSaved ? { storyIds: new Set(dirtyStories) } : undefined
       );
       dirtyStories.clear();
       if (compatibilityBase) compatibilityBaseRef.current = projected;

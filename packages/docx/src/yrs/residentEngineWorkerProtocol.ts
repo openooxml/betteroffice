@@ -23,6 +23,8 @@ import type {
 } from './paragraphIdentity';
 import type { DocxReadParagraphsRequest, DocxReadParagraphsResult } from './edits';
 import type { ProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
+import type { Comment } from '../types/content';
+import type { Document } from '../types/document';
 
 /** @internal */
 export type ResidentProposalOperation =
@@ -116,6 +118,18 @@ export type ResidentEngineWorkerRequest =
   | { id: number; type: 'fontRequirements'; layoutInput: string }
   | { id: number; type: 'encodeState' }
   | { id: number; type: 'revisionCount' }
+  | {
+      id: number;
+      /** @internal Saves the opened document as the editor saves its replica. */
+      type: 'save';
+      /** The package `open` parsed. */
+      source: ArrayBuffer;
+      /** The host metadata JSON `open` replied with. */
+      hostJson: string;
+      /** The editor document's host metadata the save merges in. */
+      host: Document;
+      comments: Comment[];
+    }
   | { id: number; type: 'proposal'; operation: ResidentProposalOperation }
   | { id: number; type: 'documentRead'; read: ResidentDocumentRead }
   | {
@@ -254,6 +268,8 @@ export type ResidentEngineWorkerResponse = (
       /** An `encodeState` reply: the document state as one yrs v1 update. */
       state?: ArrayBuffer;
       revisionCount?: number;
+      /** @internal A `save` reply: the bytes, and whether any save wrote every part. */
+      saved?: { bytes: ArrayBuffer; full: boolean };
       /** @internal */
       proposals?: DocxProposalRegistryState;
       /** @internal */

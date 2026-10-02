@@ -23,6 +23,7 @@ import { YrsInput, type YrsInputRef } from '../YrsInput';
 import { createCommentIdAllocator } from '../commentFactories';
 import { deferWorkerOpenReplica, workerOpenReplicaOnDemand, type WorkerOpenFallbackReason } from '../internals/workerOpenReplica';
 import { beginWorkerProposalHandover, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
+import { registerWorkerOpenSave } from '../internals/workerOpenSave';
 import type { EditorMode } from '../internals/editing-modes';
 import { DOCX_REF_REPLICA_ACCESS, DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
 
@@ -595,4 +596,30 @@ test('getEditorRef immediately inserts text after synchronously finishing the re
   expect(opens).toEqual([true]);
   expect(fallbackReasons).toEqual([{ syncAccess: 'getEditorRef' }]);
   expect(session.paragraphs('body')[0]!.text).toStartWith('Immediate ');
+});
+
+test('flushPendingInput and a worker save leave an on-demand replica unloaded', async () => {
+  const { api, events, session, replica, opens } = await pendingReplica('viewing', false, true);
+  registerWorkerOpenSave(session, async () => ({ bytes: new ArrayBuffer(0), full: false }));
+  await act(async () => {
+    await api.flushPendingInput();
+    await api.save();
+  });
+  expect(events).toEqual(['flush', 'save']);
+  expect(replica.started).toBe(false);
+  expect(opens).toEqual([]);
+});
+
+test('flushPendingInput waits for an on-demand replica that started loading', async () => {
+  const { api, replica, release, opens } = await pendingReplica('viewing', false, true);
+  replica.start();
+  let flushed = false;
+  const flush = api.flushPendingInput().then(() => { flushed = true; });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(flushed).toBe(false);
+  await act(async () => {
+    release();
+    await flush;
+  });
+  expect(opens).toEqual([false]);
 });

@@ -90,6 +90,11 @@ export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
   proposal: ResidentEngineWorkerClient['proposal'];
   documentRead: ResidentEngineWorkerClient['documentRead'];
   handOver: ResidentEngineWorkerClient['handOver'];
+  /** Saves in the worker that opened the document, if `admit` still holds as the request goes out. */
+  save(
+    request: Parameters<ResidentEngineWorkerClient['save']>[0],
+    admit: () => boolean
+  ): ReturnType<ResidentEngineWorkerClient['save']>;
   fallback(reason?: WorkerOpenFallbackReason): (() => boolean) | void;
   destroy(): void;
   replicaReady(): void;
@@ -1476,6 +1481,18 @@ export function useRustDisplayList(
             requestOpenedWorker(hostEngine, (owner) => owner.client.documentRead(read)),
           handOver: () =>
             requestOpenedWorker(hostEngine, (owner) => owner.client.handOver()),
+          save: (request, admit) => {
+            const owner = workerRef.current;
+            if (!owner || !isCurrentWorker(hostEngine, owner) || owner.client.hasFailed()) {
+              return Promise.reject(new Error('The resident worker holding this document is gone'));
+            }
+            return requestOpenedWorker(hostEngine, async (current) => {
+              if (current !== owner || !admit()) {
+                throw new Error('The document is no longer saved in its resident worker');
+              }
+              return current.client.save(request);
+            });
+          },
           fallback: (reason = 'failure') => {
             const outOfMemory = outOfMemoryRef.current.get(hostEngine);
             if (outOfMemory) throw outOfMemory;

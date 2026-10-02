@@ -32,6 +32,8 @@ export interface WorkerProposalAuthority {
   /** The session mirrors the worker registry and version. */
   readonly initialized: boolean;
   restart(): void;
+  /** Mirrors the worker's version again after it changed outside a proposal call, as a save does. */
+  resync(): void;
   /** Initializes once; rejects when the worker cannot answer. */
   initialize(): Promise<void>;
   /** Mirrored geometry until hand-over. */
@@ -241,6 +243,17 @@ export function registerWorkerProposalAuthority(
       snapshotPosted = false;
       hooks.relayout();
       notify();
+    },
+    resync() {
+      if (!initialized || failure || handingOver || !hooks.current()) return;
+      void enqueue(async () => {
+        if (!initialized || handingOver) return;
+        const previous = mirror?.version;
+        const reply = await worker.proposal({ kind: 'snapshot' });
+        assertCurrent();
+        store(reply);
+        if (reply.mirror.version !== previous) hooks.relayout();
+      }).catch(() => {});
     },
     initialize() {
       if (failure) return Promise.reject(failure.error);

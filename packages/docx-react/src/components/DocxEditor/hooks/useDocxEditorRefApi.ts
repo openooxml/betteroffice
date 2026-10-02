@@ -36,7 +36,9 @@ import {
   requestOnDemandWorkerOpenReplica,
   requestWorkerOpenReplica,
   workerOpenReplicaOnDemand,
+  workerOpenReplicaStarted,
 } from '../internals/workerOpenReplica';
+import { workerOpenSave } from '../internals/workerOpenSave';
 import {
   handedOverRequest,
   workerProposalAuthority,
@@ -159,6 +161,11 @@ const WORKER_PROPOSAL_ACCESS: ReadonlySet<keyof DocxEditorRef> = new Set([
   'readParagraphs', 'getParagraphIdentities', 'resolveParagraphAnchors', 'search',
 ]);
 
+/** An on-demand replica nothing has asked for yet; flushing input leaves it unloaded. */
+function unrequestedReplica(session: YrsSession): boolean {
+  return workerOpenReplicaOnDemand(session) && !workerOpenReplicaStarted(session);
+}
+
 function gateReplicaAccess(
   api: DocxEditorRef,
   pagedEditorRef: React.RefObject<PagedEditorRef | null>,
@@ -175,6 +182,12 @@ function gateReplicaAccess(
         const session = pagedEditorRef.current?.getYrsSession();
         if (session) {
           if (WORKER_PROPOSAL_ACCESS.has(key) && workerProposalAuthority(session)) {
+            return Reflect.apply(call, api, args);
+          }
+          if (
+            (key === 'save' && workerOpenSave(session)) ||
+            (key === 'flushPendingInput' && unrequestedReplica(session))
+          ) {
             return Reflect.apply(call, api, args);
           }
           if (access === 'sync') {
@@ -499,7 +512,12 @@ export function useDocxEditorRefApi({
         opening() ? null : (pagedEditorRef.current?.getDocument() ?? documentFromYrs() ?? document),
       getEditorRef: () => pagedEditorRef.current,
       flushPendingInput: async () => {
-        await flushedSession(pagedEditorRef, experimentalWorkerOpen);
+        const session = pagedEditorRef.current?.getYrsSession();
+        await flushedSession(
+          pagedEditorRef,
+          experimentalWorkerOpen,
+          !experimentalWorkerOpen || !session || !unrequestedReplica(session)
+        );
       },
       save: async () => (opening() ? null : handleSave()),
       setZoom,

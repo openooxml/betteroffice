@@ -25,7 +25,12 @@ import type { ProposalGeometryReader, ProposalGeometryRevision } from './proposa
 import type { DocxProposalSession } from './proposals';
 import type { YrsPositionOutline } from './yrsPositionProjection';
 import { resolveHostJsonCommentMedia } from './hostMedia';
-import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
+import {
+  createEditSession,
+  preloadEditWasm,
+  setEditWasmHeapLimit,
+  type EditSession,
+} from './wasm/index';
 
 export type ResidentEngineSession = Pick<
   YrsSession,
@@ -89,6 +94,8 @@ export type ResidentEngineSession = Pick<
   layoutDocumentWithRegionsRetained(input: string): void;
   /** The retained region layout's `headersFooters` JSON, when it has any. */
   retainedHeadersFootersJson(): string | undefined;
+  /** @internal The wasm session and its client id. */
+  editSession(): { session: EditSession; clientId: number };
 };
 
 export async function createResidentEngineSession(
@@ -96,7 +103,8 @@ export async function createResidentEngineSession(
 ): Promise<ResidentEngineSession> {
   await preloadEditWasm();
   setEditWasmHeapLimit(heapLimitBytes);
-  const session = createEditSession(randomClientId());
+  const clientId = randomClientId();
+  const session = createEditSession(clientId);
   session.set_local_lowering(true);
   const listeners = new Set<
     (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
@@ -285,6 +293,7 @@ export async function createResidentEngineSession(
           );
     },
     encodeState: () => session.encode_state(),
+    editSession: () => ({ session, clientId }),
     revisionCount: (excluding) =>
       (JSON.parse(session.list_revisions()) as { revisionId: string }[]).filter(
         (revision) => !excluding?.has(revision.revisionId)

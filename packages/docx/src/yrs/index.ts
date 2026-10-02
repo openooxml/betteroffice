@@ -136,6 +136,7 @@ export { sessionSourcePackage } from './sessionInternals';
 export {
   adoptEditorSave,
   dirtyProjectionStory,
+  hostSaveMetadata,
   mergeDocxHostMetadata,
   saveEditorDocument,
   type EditorSaveRecord,
@@ -1584,7 +1585,11 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
 /** A lone UTF-16 surrogate, which crossing into Wasm would turn into U+FFFD. */
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
-function wrapSession(session: EditSession, clientId: number): YrsSession {
+function wrapSession(
+  session: EditSession,
+  clientId: number,
+  opened?: { source: Uint8Array; host: YrsDocxHost }
+): YrsSession {
   const listeners = new Map<
     number,
     (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
@@ -1622,8 +1627,10 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     return progress;
   };
   let residentFontsRevision = 0;
-  let docxSource: Uint8Array | null = null;
-  let docxSourceKeys: ReturnType<typeof editorSaveKeys> | null = null;
+  let docxSource: Uint8Array | null = opened?.source ?? null;
+  let docxSourceKeys: ReturnType<typeof editorSaveKeys> | null = opened
+    ? editorSaveKeys(opened.host.document)
+    : null;
 
   const invalidateReadCaches = (): void => {
     cachedSelection = undefined;
@@ -2786,6 +2793,20 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   });
 
   return facade;
+}
+
+/**
+ * A session over `session`, a resident worker's session that opened `source`
+ * and replied `hostJson`, for saving it there; never destroy it. @internal
+ */
+export function wrapOpenedEditSession(
+  session: EditSession,
+  clientId: number,
+  source: Uint8Array,
+  hostJson: string
+): YrsSession {
+  const exact = docxSourceBuffer(source) === source.buffer ? source : source.slice();
+  return wrapSession(session, clientId, { source: exact, host: decodeDocxHost(hostJson, exact) });
 }
 
 /**

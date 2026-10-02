@@ -22,7 +22,8 @@ export type EditorFlushFailure = Extract<EditorFlush, { ok: false }>;
  */
 export async function flushEditorInput(
   pagedEditorRef: React.RefObject<PagedEditorRef | null>,
-  experimentalWorkerOpen = false
+  experimentalWorkerOpen = false,
+  awaitReplica = true
 ): Promise<EditorFlush> {
   const editor = pagedEditorRef.current;
   const session = editor?.getYrsSession();
@@ -34,11 +35,12 @@ export async function flushEditorInput(
     };
   }
   try {
-    await editor.flushPendingInput();
+    await (awaitReplica ? editor.flushPendingInput() : editor.flushPendingInput(false));
     if (pagedEditorRef.current?.getYrsSession() !== session) {
       throw new Error('The document changed while flushing input');
     }
-    const ready = experimentalWorkerOpen ? awaitWorkerOpenReplica(session) : undefined;
+    const ready =
+      experimentalWorkerOpen && awaitReplica ? awaitWorkerOpenReplica(session) : undefined;
     if (ready) {
       await ready;
       if (pagedEditorRef.current?.getYrsSession() !== session) {
@@ -67,9 +69,10 @@ export async function flushEditorInput(
 /** Flushes pending input and returns the current handle; throws when that fails. */
 export async function flushedSession(
   pagedEditorRef: React.RefObject<PagedEditorRef | null>,
-  experimentalWorkerOpen = false
+  experimentalWorkerOpen = false,
+  awaitReplica = true
 ): Promise<{ editor: PagedEditorRef; session: YrsSession }> {
-  const flushed = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen);
+  const flushed = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen, awaitReplica);
   if (!flushed.ok) throw flushed.error;
   return flushed;
 }
