@@ -1191,6 +1191,7 @@ fn persisted_receipt_json(session_id: &str, persisted: &PersistedParagraphIds) -
 #[wasm_bindgen]
 pub struct EditSession {
     engine: EngineSession,
+    paragraph_identities_cache: RefCell<Option<ParagraphIdentitiesCache>>,
     /// This session's measurement fonts; see the module docs.
     fonts: docx_layout::MeasureFonts,
     docx_source: RefCell<Option<Arc<[u8]>>>,
@@ -1207,6 +1208,12 @@ pub struct EditSession {
     compared: RefCell<Option<(Box<CompareApplied>, CompareLimits)>>,
     /// Seed images as `media:{n}` tokens rather than `data:` URLs.
     media_tokens: Cell<bool>,
+}
+
+struct ParagraphIdentitiesCache {
+    version: crate::DocumentVersion,
+    source: Option<Arc<crate::identity::SourceIndex>>,
+    json: String,
 }
 
 struct UpdateEventObserver {
@@ -1606,6 +1613,7 @@ impl EditSession {
         }
         let session = Self {
             engine: EngineSession::new(client_id as u64),
+            paragraph_identities_cache: RefCell::new(None),
             fonts: docx_layout::MeasureFonts::default(),
             docx_source: RefCell::new(None),
             docx_digest: RefCell::new(None),
@@ -4595,6 +4603,40 @@ impl EditSession {
     }
 }
 
+impl EditSession {
+    fn paragraph_identities_uncached(&self) -> Result<String, JsValue> {
+        let identities = self.engine.doc().paragraph_identities();
+        let paragraphs: Vec<Value> = identities
+            .paragraphs
+            .iter()
+            .map(|paragraph| {
+                json!({
+                    "session": match &paragraph.paragraph {
+                        ParagraphRef::Session { .. } => {
+                            paragraph_anchor_json(&identities.session_id, &paragraph.paragraph)
+                        }
+                        ParagraphRef::Source(_) => Value::Null,
+                    },
+                    "origin": paragraph_origin_json(paragraph.origin),
+                    "ooxmlParaId": paragraph.ooxml_para_id,
+                    "idOrigin": origin_json(paragraph.id_origin),
+                    "persisted": persisted_anchor_json(
+                        paragraph.source_story.as_ref(),
+                        paragraph.ooxml_para_id.as_deref(),
+                    ),
+                    "source": paragraph.source.as_ref().map_or(Value::Null, source_anchor_json),
+                })
+            })
+            .collect();
+        serde_json::to_string(&json!({
+            "sessionId": identities.session_id,
+            "packageSha256": identities.package_sha256,
+            "paragraphs": paragraphs,
+        }))
+        .map_err(js_err)
+    }
+}
+
 #[wasm_bindgen]
 impl EditSession {
     /// Gives every paragraph that saves without a Word paragraph ID a fresh
@@ -4640,35 +4682,27 @@ impl EditSession {
     /// in document order, then source paragraphs outside the stories, whose
     /// `session` is `null`. Reads only.
     pub fn paragraph_identities(&self) -> Result<String, JsValue> {
-        let identities = self.engine.doc().paragraph_identities();
-        let paragraphs: Vec<Value> = identities
-            .paragraphs
-            .iter()
-            .map(|paragraph| {
-                json!({
-                    "session": match &paragraph.paragraph {
-                        ParagraphRef::Session { .. } => {
-                            paragraph_anchor_json(&identities.session_id, &paragraph.paragraph)
-                        }
-                        ParagraphRef::Source(_) => Value::Null,
-                    },
-                    "origin": paragraph_origin_json(paragraph.origin),
-                    "ooxmlParaId": paragraph.ooxml_para_id,
-                    "idOrigin": origin_json(paragraph.id_origin),
-                    "persisted": persisted_anchor_json(
-                        paragraph.source_story.as_ref(),
-                        paragraph.ooxml_para_id.as_deref(),
-                    ),
-                    "source": paragraph.source.as_ref().map_or(Value::Null, source_anchor_json),
-                })
-            })
-            .collect();
-        serde_json::to_string(&json!({
-            "sessionId": identities.session_id,
-            "packageSha256": identities.package_sha256,
-            "paragraphs": paragraphs,
-        }))
-        .map_err(js_err)
+        let doc = self.engine.doc();
+        let version = doc.version();
+        let source = doc.source_index();
+        if let Some(cached) = self.paragraph_identities_cache.borrow().as_ref()
+            && cached.version == version
+            && match (&cached.source, &source) {
+                (Some(cached), Some(source)) => Arc::ptr_eq(cached, source),
+                (None, None) => true,
+                _ => false,
+            }
+        {
+            return Ok(cached.json.clone());
+        }
+        let json = self.paragraph_identities_uncached()?;
+        self.paragraph_identities_cache
+            .replace(Some(ParagraphIdentitiesCache {
+                version,
+                source,
+                json: json.clone(),
+            }));
+        Ok(json)
     }
 
     /// Resolves a `session`, `source` or `persisted` anchor JSON against the
@@ -4988,6 +5022,284 @@ mod tests {
 
     fn envelope(json: &str) -> Value {
         serde_json::from_str(json).unwrap()
+    }
+
+    fn identities_cache_buffer(session: &EditSession) -> *const u8 {
+        session
+            .paragraph_identities_cache
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .json
+            .as_ptr()
+    }
+
+    fn checked_paragraph_identities(session: &EditSession) -> String {
+        let json = session.paragraph_identities().unwrap();
+        assert_eq!(json, session.paragraph_identities_uncached().unwrap());
+        let buffer = identities_cache_buffer(session);
+        assert_eq!(json, session.paragraph_identities().unwrap());
+        assert_eq!(buffer, identities_cache_buffer(session));
+        let cache = session.paragraph_identities_cache.borrow();
+        let cached = cache.as_ref().unwrap();
+        assert_eq!(cached.version, session.engine.doc().version());
+        assert_eq!(cached.json, json);
+        json
+    }
+
+    fn changed_paragraph_identities(session: &EditSession, change: impl FnOnce()) -> String {
+        let buffer = identities_cache_buffer(session);
+        change();
+        let json = checked_paragraph_identities(session);
+        assert_ne!(buffer, identities_cache_buffer(session));
+        json
+    }
+
+    #[test]
+    fn paragraph_identities_cache_matches_fresh_json_after_mutations() {
+        let mut session = EditSession::new(71.0).unwrap();
+        session.undo = UndoSession::with_clock(Arc::new(|| 0));
+        checked_paragraph_identities(&session);
+        changed_paragraph_identities(&session, || {
+            session
+                .engine
+                .doc()
+                .create_story_with_paragraph_id("body", "p1", "abcd", "Normal", "left")
+                .unwrap();
+        });
+        changed_paragraph_identities(&session, || {
+            session.begin_opening(Some("first".to_owned()));
+        });
+        session.track_undo();
+        let typed = changed_paragraph_identities(&session, || {
+            session
+                .insert_text("body", "p1", 0, "x", None, None)
+                .unwrap();
+        });
+        session.add_undo_boundary();
+        let split = changed_paragraph_identities(&session, || {
+            session
+                .split_paragraph("body", "p1", 2, None, None)
+                .unwrap();
+        });
+        assert_ne!(split, typed);
+        assert_eq!(
+            changed_paragraph_identities(&session, || assert!(session.undo())),
+            typed
+        );
+        assert_eq!(
+            changed_paragraph_identities(&session, || assert!(session.redo())),
+            split
+        );
+        changed_paragraph_identities(&session, || {
+            session.merge_paragraphs("body", "p1", None, None).unwrap();
+        });
+
+        let remote = EditSession::new(72.0).unwrap();
+        remote.load(&session.encode_state()).unwrap();
+        remote.split_paragraph("body", "p1", 1, None, None).unwrap();
+        let update = remote.encode_diff(&session.encode_state_vector()).unwrap();
+        changed_paragraph_identities(&session, || session.apply_update(&update).unwrap());
+        changed_paragraph_identities(&session, || {
+            let receipt = envelope(&session.persist_paragraph_ids().unwrap());
+            assert!(!receipt["assignments"].as_array().unwrap().is_empty());
+        });
+        let saved: Vec<_> = session
+            .engine
+            .doc()
+            .paragraph_identities()
+            .paragraphs
+            .into_iter()
+            .filter_map(|paragraph| match paragraph.paragraph {
+                ParagraphRef::Session { para_id, .. } => {
+                    paragraph.ooxml_para_id.map(|id| (para_id, id))
+                }
+                ParagraphRef::Source(_) => None,
+            })
+            .collect();
+        let saved = serde_json::to_string(&saved).unwrap();
+        changed_paragraph_identities(&session, || {
+            assert_eq!(session.record_saved_paragraph_ids(&saved).unwrap(), "[]");
+        });
+        let buffer = identities_cache_buffer(&session);
+        session.record_saved_paragraph_ids(&saved).unwrap();
+        checked_paragraph_identities(&session);
+        assert_eq!(buffer, identities_cache_buffer(&session));
+        let before = checked_paragraph_identities(&session);
+        assert_eq!(
+            changed_paragraph_identities(&session, || {
+                session.engine.doc().rotate_version(js_entropy());
+            }),
+            before
+        );
+        let state = session.encode_state();
+        assert_eq!(
+            changed_paragraph_identities(&session, || session.load(&state).unwrap()),
+            before
+        );
+    }
+
+    #[test]
+    fn paragraph_identities_cache_tracks_source_replacement_and_opening() {
+        let session = EditSession::new(73.0).unwrap();
+        let source = batch_docx();
+        checked_paragraph_identities(&session);
+        let opened = changed_paragraph_identities(&session, || {
+            session.open_docx(&source, true, None, None).unwrap();
+        });
+        let version = session.version();
+        assert_eq!(
+            changed_paragraph_identities(&session, || {
+                session.engine.doc().retain_source_docx(source.clone());
+            }),
+            opened
+        );
+        assert_eq!(session.version(), version);
+
+        let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+        let (_, document) = parts
+            .iter_mut()
+            .find(|(name, _)| name == "word/document.xml")
+            .unwrap();
+        *document = String::from_utf8(document.clone())
+            .unwrap()
+            .replace("00000002", "ABCDEF01")
+            .into_bytes();
+        let replacement = ooxml_opc::rezip_parts(&parts).unwrap();
+        let replaced = changed_paragraph_identities(&session, || {
+            session.engine.doc().retain_source_docx(replacement.clone());
+        });
+        assert_ne!(opened, replaced);
+        assert_eq!(session.version(), version);
+        assert_eq!(
+            changed_paragraph_identities(&session, || {
+                session.open_docx(&replacement, false, None, None).unwrap();
+            }),
+            replaced
+        );
+        let reopened = changed_paragraph_identities(&session, || {
+            session.open_docx(&replacement, true, None, None).unwrap();
+        });
+        assert_ne!(
+            envelope(&reopened)["sessionId"],
+            envelope(&opened)["sessionId"]
+        );
+        assert_eq!(
+            envelope(&reopened)["paragraphs"][1]["session"]["paraId"],
+            "ABCDEF01"
+        );
+        changed_paragraph_identities(&session, || {
+            session
+                .engine
+                .doc()
+                .retain_source_docx(&b"invalid docx"[..]);
+        });
+        assert_eq!(
+            envelope(&session.paragraph_identities().unwrap())["packageSha256"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn paragraph_identities_cache_survives_reads_and_layout_slices() {
+        let session = EditSession::new(74.0).unwrap();
+        session.open_docx(&batch_docx(), true, None, None).unwrap();
+        session
+            .insert_text(
+                "body",
+                "00000001",
+                0,
+                "x",
+                Some("Ada".to_owned()),
+                Some("2026-09-24T00:00:00Z".to_owned()),
+            )
+            .unwrap();
+        let json = checked_paragraph_identities(&session);
+        let buffer = identities_cache_buffer(&session);
+        let version = session.version();
+        let state = session.encode_state();
+        let check = || {
+            assert_eq!(checked_paragraph_identities(&session), json);
+            assert_eq!(identities_cache_buffer(&session), buffer);
+            assert_eq!(session.version(), version);
+        };
+        session.paragraphs("body").unwrap();
+        check();
+        session
+            .read_paragraphs_json(r#"{"view":"accepted"}"#)
+            .unwrap();
+        check();
+        for paragraph in envelope(&json)["paragraphs"].as_array().unwrap() {
+            for anchor in ["session", "source", "persisted"] {
+                assert_eq!(
+                    envelope(
+                        &session
+                            .resolve_paragraph_anchor(&paragraph[anchor].to_string())
+                            .unwrap()
+                    )["status"],
+                    "found"
+                );
+                check();
+            }
+        }
+        assert!(
+            !envelope(&session.list_revisions().unwrap())
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        check();
+        session.engine.doc().forget_seen();
+        let txn = session.engine.doc().yrs_doc().transact();
+        session.engine.doc().with_seen(&txn, |_| ());
+        drop(txn);
+        check();
+
+        let font = session
+            .register_measure_font(include_bytes!(
+                "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+            ))
+            .unwrap();
+        let mut request = json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{"properties": {}}]},
+            "renderEnv": {},
+        });
+        let requirements = envelope(
+            &session
+                .layout_font_requirements_json(&request.to_string())
+                .unwrap(),
+        );
+        let chains: serde_json::Map<String, Value> = requirements
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|requirement| {
+                (
+                    requirement["key"].as_str().unwrap().to_owned(),
+                    json!([font]),
+                )
+            })
+            .collect();
+        request["measurement"] = json!({
+            "fontChains": chains,
+            "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+        });
+        check();
+        let request = request.to_string();
+        let mut progress = envelope(&session.begin_region_layout(&request).unwrap());
+        check();
+        while progress["layoutJson"].is_null() {
+            progress = envelope(&session.resume_region_layout(1).unwrap());
+            check();
+        }
+        session
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap();
+        check();
+        session.retained_kernel_inputs_json().unwrap();
+        check();
+        assert_eq!(session.encode_state(), state);
     }
 
     fn replace_request(version: &str, extra: Value) -> String {
