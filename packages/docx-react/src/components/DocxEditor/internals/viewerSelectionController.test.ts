@@ -204,9 +204,28 @@ test('R6: copy rejects when a new gesture starts', async () => {
 test('R6: copy rejects when a valid null answer drops the selection', async () => {
   const { controller, answer } = setup();
   controller.select(1, 6);
+  await answer('selectionText', 'A', captured());
+  controller.onFrame({ version: 'B', preview: false });
   const copy = controller.whenSettled(controller.currentGesture()).catch((error: Error) => error);
-  await answer('selectionText', 'A', null);
+  await answer('stickyPosition', 'B', null);
   expect((await copy as Error).message).toBe('Selection dropped');
+  expect(controller.displaySelection()).toBeNull();
+});
+
+test('a selection the worker cannot capture stays shown and copies nothing', async () => {
+  const { controller, answer } = setup();
+  controller.select(1, 6);
+  const copy = controller.whenSettled(controller.currentGesture());
+  await answer('selectionText', 'A', null);
+  expect(await copy).toBe('');
+  expect(controller.displaySelection()).toEqual({ anchor: 1, head: 6 });
+});
+
+test('a word unit the worker cannot resolve keeps the caret and settles', async () => {
+  const { controller, answer } = setup();
+  controller.expand(5, 'word');
+  await answer('selectionUnit', 'A', null);
+  expect(controller.displaySelection()).not.toBeNull();
 });
 
 test('R6: copy times out without polling or issuing more reads', async () => {

@@ -69,12 +69,15 @@ class ReadChannel<V> {
   private start(task: ReadTask<V>): void {
     this.active = task;
     void task.read().then((outcome) => {
-      task.resolve(outcome);
-      task.apply(outcome);
-      this.active = null;
-      const next = this.queued;
-      this.queued = null;
-      if (next) this.start(next);
+      try {
+        task.resolve(outcome);
+        task.apply(outcome);
+      } finally {
+        this.active = null;
+        const next = this.queued;
+        this.queued = null;
+        if (next) this.start(next);
+      }
     });
   }
 }
@@ -328,8 +331,16 @@ export class ViewerSelectionController {
       kind: 'selectionUnit', story: this.options.story, position, unit, expectVersion: token.version,
     }), (outcome) => {
       if (!this.applies(token, outcome)) return;
-      if (!outcome.value) { this.drop(); return; }
       const selection = this.selection!;
+      if (!outcome.value) {
+        if (unit === 'story' || selection.frame.version !== token.version) {
+          this.drop();
+        } else {
+          selection.unitPending = false;
+          this.emit();
+        }
+        return;
+      }
       const pending = unit === 'story' && this.frame!.preview;
       if (selection.frame.version === token.version && selection.phase === 'live' &&
         selection.anchor === outcome.value.anchor && selection.head === outcome.value.head) {
@@ -352,9 +363,8 @@ export class ViewerSelectionController {
       kind: 'selectionText', story: this.options.story, anchor, head, expectVersion: token.version,
     }), (outcome) => {
       if (!this.applies(token, outcome)) return;
-      if (!outcome.value) { this.drop(); return; }
       this.capture = { revision: token.revision!, version: token.version,
-        sticky: outcome.value.sticky, text: outcome.value.text };
+        sticky: outcome.value?.sticky ?? null, text: outcome.value?.text ?? '' };
       this.emit();
     });
   }
