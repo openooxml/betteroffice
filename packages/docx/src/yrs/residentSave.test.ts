@@ -301,12 +301,13 @@ describe('worker save', () => {
       parentId: parent.id,
     };
     const replica = await hydrate(opened);
-    expect(
-      difference(await workerSave(opened, [...comments, reply]), await replica.save([...comments, reply]))
-    ).toBeNull();
-    expect(
-      difference(await workerSave(opened, [...comments, reply]), await replica.save([...comments, reply]))
-    ).toBeNull();
+    const first = await workerSave(opened, [...comments, reply]);
+    expect(difference(first, await replica.save([...comments, reply]))).toBeNull();
+    const second = await workerSave(opened, [...comments, reply]);
+    expect(difference(second, await replica.save([...comments, reply]))).toBeNull();
+    const body = (bytes: Uint8Array) => new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
+    expect(body(second)).toBe(body(first));
+    expect(body(second).split(`<w:commentRangeStart w:id="${reply.id}"/>`)).toHaveLength(2);
   });
 
   it('equals a replica that hydrates after the worker saved', async () => {

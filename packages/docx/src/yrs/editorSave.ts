@@ -8,7 +8,7 @@ import { editorSaveKeys } from './editorSaveKeys';
 import type { YrsSession } from './index';
 import { captureSessionSave, writeSessionSave, type DocxSessionSave } from './saveYrsDocx';
 import { sessionSourcePackage } from './sessionInternals';
-import { yrsToDocument } from './yrsToDocument';
+import { ownProjectedParagraphs, yrsToDocument } from './yrsToDocument';
 
 /** What the editor's earlier saves of a session leave for its next save. @internal */
 export interface EditorSaveRecord {
@@ -201,6 +201,7 @@ function sameBytes(a: ArrayBuffer, b: ArrayBuffer): boolean {
 /**
  * `document` with the comments a save writes, the stories they are anchored
  * in projected again with them: the editor projects its host's comments.
+ * With replies, its body paragraphs are its own for their range markers.
  */
 function withSavedComments(document: Document, session: YrsSession, comments: Comment[]): Document {
   const base: Document = {
@@ -217,7 +218,16 @@ function withSavedComments(document: Document, session: YrsSession, comments: Co
       // Replies and comments whose anchors are gone hold no range.
     }
   }
-  return storyIds.size > 0 ? yrsToDocument(session, base, { storyIds }) : base;
+  const saved = storyIds.size > 0 ? yrsToDocument(session, base, { storyIds }) : base;
+  if (!comments.some((comment) => comment.parentId != null)) return saved;
+  const body = saved.package.document;
+  return {
+    ...saved,
+    package: {
+      ...saved.package,
+      document: { ...body, content: ownProjectedParagraphs(body.content) },
+    },
+  };
 }
 
 /**
