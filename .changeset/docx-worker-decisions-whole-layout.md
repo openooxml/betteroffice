@@ -2,4 +2,4 @@
 "@betteroffice/docx-react": patch
 ---
 
-With `experimentalWorkerOpen`, `getTotalPages()` and `layout-change` keep reporting the whole document while proposals are accepted, rejected or undone.
+With `experimentalWorkerOpen`, page counts stay whole while proposals are accepted, rejected or undone.

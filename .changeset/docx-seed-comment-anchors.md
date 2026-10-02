@@ -3,4 +3,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-Documents with many comments open faster, with the same editing state as before.
+Documents open faster, especially ones with many comments.
