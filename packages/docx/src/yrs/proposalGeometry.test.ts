@@ -3,13 +3,22 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { preloadEditWasm } from '../wasm/edit';
-import { createYrsSession, type YrsSession } from './index';
-import type { DocxProposalInput, DocxProposalResult } from './proposals';
 import {
+  createYrsPositionProjection,
+  createYrsSession,
+  yrsLocToProjectedDisplayPosition,
+  type YrsLoc,
+  type YrsSession,
+} from './index';
+import { createProposalRegistry, type DocxProposalInput, type DocxProposalResult, type DocxProposalSnapshot } from './proposals';
+import {
+  computeAnchorTargetGeometry,
   computeProposalGeometryMirror,
   proposalSetIdentity,
+  resolveAnchorTarget,
   resolveNavigationTarget,
   resolveMirroredNavigationTarget,
+  type AnchorGeometryTarget,
   type ProposalGeometryReader,
   type ProposalGeometryRevision,
 } from './proposalGeometry';
@@ -66,34 +75,34 @@ function replace(id: string, paraId: string, search: string, replaceWith: string
   };
 }
 
+const proposeRequest = (expectVersion: string) => ({
+  expectVersion,
+  proposals: [
+    replace('delete', '00000001', 'gone ', ''),
+    replace('insert', '00000002', 'Insert', 'Added'),
+    replace('empty', '00000003', '', ''),
+    replace('missing', '00000005', 'Vanish', 'Vanish'),
+    replace('cell', '0000C001', 'value', 'content'),
+    replace('tail', '00000006', 'Tail', 'End'),
+    replace('same', '00000007', 'Unchanged', 'Unchanged'),
+  ],
+});
+
+const statesRequest = (expectVersion: string, expectPreviewVersion: number) => ({
+  expectVersion,
+  expectPreviewVersion,
+  changes: [
+    { id: 'delete', state: 'accepted' as const },
+    { id: 'insert', state: 'rejected' as const },
+  ],
+});
+
 async function proposedDocument(): Promise<YrsSession> {
   const main = await createYrsSession({ clientId: 79101 });
   try {
     main.openDocx(fixture(), true);
-    snapshotOf(
-      main.proposeChanges({
-        expectVersion: main.version(),
-        proposals: [
-          replace('delete', '00000001', 'gone ', ''),
-          replace('insert', '00000002', 'Insert', 'Added'),
-          replace('empty', '00000003', '', ''),
-          replace('missing', '00000005', 'Vanish', 'Vanish'),
-          replace('cell', '0000C001', 'value', 'content'),
-          replace('tail', '00000006', 'Tail', 'End'),
-          replace('same', '00000007', 'Unchanged', 'Unchanged'),
-        ],
-      })
-    );
-    snapshotOf(
-      main.setProposalStates({
-        expectVersion: main.version(),
-        expectPreviewVersion: main.getProposals().previewVersion,
-        changes: [
-          { id: 'delete', state: 'accepted' },
-          { id: 'insert', state: 'rejected' },
-        ],
-      })
-    );
+    snapshotOf(main.proposeChanges(proposeRequest(main.version())));
+    snapshotOf(main.setProposalStates(statesRequest(main.version(), main.getProposals().previewVersion)));
     main.mergeParagraphs('body', '00000004');
     return main;
   } catch (error) {
@@ -123,6 +132,96 @@ function duplicated(reader: ProposalGeometryReader): ProposalGeometryReader {
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
 
 describe('proposal geometry readers', () => {
+  test('matches resident anchor targets to the main session and editor display projection', async () => {
+    const main = await createYrsSession({ clientId: 79102 });
+    const resident = await createResidentEngineSession();
+    try {
+      main.openDocx(fixture(), true);
+      resident.openDocx(fixture());
+      snapshotOf(main.proposeChanges(proposeRequest(main.version())));
+      snapshotOf(main.setProposalStates(statesRequest(main.version(), main.getProposals().previewVersion)));
+      const registry = createProposalRegistry(resident.proposalEngine);
+      snapshotOf(registry.propose(proposeRequest(resident.proposalEngine.version())));
+      snapshotOf(registry.setStates(statesRequest(resident.proposalEngine.version(), registry.snapshot().previewVersion)));
+      const identities = main.paragraphIdentities();
+      const paragraphs = ['00000001', '00000002', '0000C001', '00000007'].map((paraId) =>
+        identities.paragraphs.find(({ ooxmlParaId }) => ooxmlParaId === paraId)!.persisted!
+      );
+      for (const paragraph of paragraphs) {
+        expect(paragraph.kind).toBe('persisted');
+        expect(main.resolveParagraphAnchor(paragraph)).toMatchObject({ status: 'found' });
+        expect(resident.geometryReader.resolveParagraphAnchor(paragraph)).toMatchObject({ status: 'found' });
+      }
+      const paragraph = paragraphs[0]!;
+      const revisionOf = (snapshot: DocxProposalSnapshot) =>
+        snapshot.proposals.find(({ id }) => id === 'cell')!.revisionIds[0]!;
+      expect(revisionOf(main.getProposals())).toBeString();
+      const range = {
+        story: 'body', view: 'accepted',
+        start: { paraId: '00000001', offset: 0 },
+        end: { paraId: '00000001', offset: 4 },
+      } as const;
+      const targets = (
+        version: string,
+        revisionId: string
+      ): Exclude<AnchorGeometryTarget, { kind: 'proposal' }>[] => [
+        ...paragraphs.map((paragraph) => ({ kind: 'paragraph' as const, paragraph })),
+        { kind: 'search', paragraph, text: 'e', occurrence: 'first' },
+        { kind: 'search', paragraph, text: 'e', occurrence: 'all' },
+        { kind: 'search', paragraph, text: 'e', occurrence: 2 },
+        { kind: 'range', version, range },
+        { kind: 'revision', revisionId },
+        { kind: 'search', paragraph, text: 'absent text' },
+        { kind: 'range', version: 'stale', range },
+        { kind: 'range', version, range: { ...range, story: 'hf:header' } },
+        { kind: 'revision', revisionId: 'unknown' },
+      ];
+      const mainTargets = targets(main.version(), revisionOf(main.getProposals()));
+      const residentTargets = targets(resident.geometryReader.version(), revisionOf(registry.snapshot()));
+      const expected = computeAnchorTargetGeometry(main, mainTargets);
+      expect(computeAnchorTargetGeometry(resident.geometryReader, residentTargets)).toEqual(expected);
+      for (const target of expected.slice(0, 9)) {
+        expect(target).toMatchObject({ ok: true });
+        if (!target.ok) throw new Error(target.failure.message);
+        expect(target.ranges.length).toBeGreaterThan(0);
+        expect(target.ranges.every(({ from, to }) => from < to)).toBe(true);
+        expect(target.paragraph).toBeNumber();
+      }
+      expect(expected[5]).toMatchObject({ ranges: [expect.any(Object), expect.any(Object), expect.any(Object)] });
+      if (expected[4]!.ok && expected[5]!.ok && expected[6]!.ok) {
+        expect(expected[4]!.ranges).toEqual([expected[5]!.ranges[0]!]);
+        expect(expected[6]!.ranges).toEqual([expected[5]!.ranges[1]!]);
+      }
+      for (const [index, code] of [
+        [9, 'missing-target'], [10, 'stale-version'], [11, 'unsupported'], [12, 'missing-target'],
+      ] as const) {
+        expect(expected[index]).toMatchObject({ ok: false, failure: { code } });
+      }
+
+      const projection = createYrsPositionProjection(main, 'body');
+      const positionFor = (loc: YrsLoc) => projection?.positionForLoc(loc) ??
+        (loc.story === 'body'
+          ? yrsLocToProjectedDisplayPosition(main, () => projection, loc)
+          : null);
+      expect(expected).toEqual(mainTargets.map((target) => {
+        const resolved = resolveAnchorTarget(main, target, main.version());
+        if (!resolved.ok) return resolved;
+        const ranges = resolved.ranges.map(({ start, end }) => {
+          const from = positionFor(start);
+          const to = positionFor(end);
+          expect(from).not.toBeNull();
+          expect(to).not.toBeNull();
+          return { from: from!, to: to! };
+        });
+        ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+        return { ok: true, ranges, paragraph: positionFor(resolved.paragraph) };
+      }));
+    } finally {
+      resident.destroy();
+      main.destroy();
+    }
+  });
+
   test('can omit navigation targets without reading or building the sidebar projection', async () => {
     const main = await proposedDocument();
     const count = spyOn(main, 'paragraphIdCount');

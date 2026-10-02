@@ -281,7 +281,7 @@ export function registerWorkerProposalAuthority(
     geometry: () => geometry,
     anchorTarget(target) {
       const current = geometry;
-      if (!current || !initialized || handingOver || failure) return undefined;
+      if (!current || !initialized || handingOver || failure || !hooks.current()) return undefined;
       if (anchorTargets?.geometry !== current) {
         anchorTargets = { geometry: current, resolved: new Map(), requested: new Set(), batch: null };
       }
