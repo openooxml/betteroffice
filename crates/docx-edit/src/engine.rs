@@ -918,6 +918,7 @@ struct PaginationState {
     checkpoints: Vec<LayoutCheckpoint>,
     block_fingerprints: Vec<Fingerprint>,
     options_fingerprint: u64,
+    request_fingerprint: Option<String>,
     revision_preview_key: u64,
     /// The decisions [`Self::revision_preview_key`] identifies.
     revision_preview: BTreeMap<String, RevisionPreview>,
@@ -929,6 +930,7 @@ struct PaginationState {
     rebuilt_page_ranges: Vec<std::ops::Range<usize>>,
     position_deltas: HashMap<String, i64>,
     last_incremental: bool,
+    preview_only_pass: bool,
     layout_epoch: u64,
     pagination_calls: u64,
     incremental_pagination_calls: u64,
@@ -3021,6 +3023,7 @@ impl EngineSession {
                 block_fingerprints.clone(),
                 Some((revision_preview_key, &revision_preview, main_body)),
                 cached_page_totals,
+                Some(&request_fingerprint),
             )?;
             let layout = self
                 .pagination
@@ -3095,6 +3098,7 @@ impl EngineSession {
                 fingerprints,
                 Some((revision_preview_key, &revision_preview, main_body)),
                 cached_page_totals,
+                Some(&request_fingerprint),
             )?;
         } else {
             self.pagination.borrow_mut().layout = Some(stabilized.layout);
@@ -3434,7 +3438,7 @@ impl EngineSession {
     /// and `apply_input`.
     fn layout_document_value(&self, input: LayoutInput) -> Result<(), String> {
         let block_fingerprints = measured_fingerprints(&input)?;
-        self.layout_document_value_with_fingerprints(input, block_fingerprints, None, false)
+        self.layout_document_value_with_fingerprints(input, block_fingerprints, None, false, None)
     }
 
     /// Paginate a resident measured arena whose clean block fingerprints were
@@ -3520,6 +3524,7 @@ impl EngineSession {
         mut block_fingerprints: Vec<Fingerprint>,
         revision_preview: Option<(u64, &BTreeMap<String, RevisionPreview>, bool)>,
         cached_page_totals: bool,
+        request_fingerprint: Option<&str>,
     ) -> Result<(), String> {
         if block_fingerprints.len() != input.measured.len() {
             return Err("resident pagination fingerprints do not match measured blocks".to_owned());
@@ -3625,6 +3630,12 @@ impl EngineSession {
             rebuilt_page_ranges,
         } = run;
         let mut pagination = self.pagination.borrow_mut();
+        pagination.preview_only_pass = incremental
+            && pagination.doc_epoch == self.doc_epoch()
+            && request_fingerprint.is_some()
+            && pagination.request_fingerprint.as_deref() == request_fingerprint
+            && revision_preview.is_some_and(|(key, _, _)| key != pagination.revision_preview_key);
+        pagination.request_fingerprint = request_fingerprint.map(str::to_owned);
         pagination.input = Some(input);
         pagination.measured_with = None;
         pagination.lowered_from = None;
@@ -4094,6 +4105,7 @@ impl EngineSession {
             resident.block_fingerprints,
             None,
             false,
+            None,
         )?;
         self.pagination.borrow_mut().input_lowering = resident.lowering;
         let extras = self
@@ -4259,6 +4271,10 @@ impl EngineSession {
             resident.block_fingerprints,
             None,
             cached_page_totals,
+            self.regions
+                .borrow()
+                .as_ref()
+                .map(|state| state.request_fingerprint.as_str()),
         ) {
             if self.local_lowering.get() {
                 // the walk moved the retained extents out
@@ -4381,6 +4397,7 @@ impl EngineSession {
                 resident.block_fingerprints,
                 None,
                 false,
+                None,
             )?;
             self.pagination.borrow_mut().input_lowering = resident.lowering;
             let finished = now();
@@ -4516,9 +4533,13 @@ impl EngineSession {
                     .collect::<BTreeSet<_>>()
                     .into_iter()
                     .collect();
-                let rebuilt_pages: HashSet<usize> =
+                let mut rebuilt_pages: HashSet<usize> =
                     first.clone().chain(note_pages.iter().copied()).collect();
-                let build = window_build_pages(&display, layout, &rebuilt_pages, caret);
+                let build = if pagination.preview_only_pass {
+                    windowed_full_build_pages(&display, layout, caret)
+                } else {
+                    window_build_pages(&display, layout, &rebuilt_pages, caret)
+                };
                 let incremental = if let DisplayState {
                     list: Some(previous),
                     resident_input: Some(resident_input),
@@ -4553,7 +4574,7 @@ impl EngineSession {
                     display.resident_input = Some(resident_input);
                     display.list = Some(list);
                 }
-                let rebuilt_display_pages = if incremental {
+                let mut rebuilt_display_pages = if incremental {
                     rebuilt_pages
                         .iter()
                         .filter(|&&index| build.get(index).copied().unwrap_or(true))
@@ -4561,6 +4582,47 @@ impl EngineSession {
                 } else {
                     rebuilt_pages.len()
                 };
+                if incremental && pagination.preview_only_pass {
+                    let DisplayState {
+                        list: Some(list),
+                        resident_input: Some(resident_input),
+                        ..
+                    } = &mut *display
+                    else {
+                        unreachable!("incremental display update requires a resident list");
+                    };
+                    let release: Vec<usize> = list
+                        .pages
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, page)| !page.unbuilt && !build[*index])
+                        .map(|(index, _)| index)
+                        .collect();
+                    let missing: Vec<usize> = list
+                        .pages
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, page)| page.unbuilt && build[*index])
+                        .map(|(index, _)| index)
+                        .collect();
+                    let released = docx_layout::release_resident_display_pages(
+                        input,
+                        layout,
+                        resident_input,
+                        list,
+                        &release,
+                    )?;
+                    let built = docx_layout::build_resident_display_pages(
+                        input,
+                        layout,
+                        resident_input,
+                        list,
+                        &missing,
+                    )?;
+                    rebuilt_display_pages += released.len() + built.len();
+                    rebuilt_pages.extend(released);
+                    rebuilt_pages.extend(built);
+                }
                 (incremental, rebuilt_display_pages, rebuilt_pages)
             } else {
                 let build = windowed_full_build_pages(&display, layout, caret);
@@ -10640,6 +10702,490 @@ mod tests {
             }
             assert_eq!(applied[0], applied[1]);
         }
+        docx_layout::clear_measure_fonts();
+    }
+
+    fn preview_display_fixture(
+        insertion: &str,
+        at_end: bool,
+    ) -> (EngineSession, serde_json::Value, String, String) {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let engine = EngineSession::new(218);
+        let body = format!(
+            "<w:p><w:r><w:t>Editable paragraph</w:t></w:r></w:p>{}",
+            "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(96)
+        );
+        crate::seed::seed_from_docx(engine.doc(), &docx_bytes("", &body)).unwrap();
+        let at = if at_end {
+            let txn = engine.doc().yrs_doc().transact();
+            let text = crate::story_ref(&txn, "body").unwrap();
+            crate::op::para_bounds(&text, &txn).last().unwrap().pilcrow
+        } else {
+            8
+        };
+        let receipt = engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
+                crate::Position::new("body", at),
+                insertion,
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        assert_eq!(receipt.revision_ids.len(), 1);
+        let request = json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{"sectionId": "main", "properties": {
+                "pageWidth": 4320, "pageHeight": 2880,
+                "marginTop": 300, "marginRight": 300,
+                "marginBottom": 300, "marginLeft": 300
+            }}]},
+            "measurement": {
+                "fontChains": {"liberation sans|0|0": [font]},
+                "defaults": {"fontSize": 11, "fontFamily": "Liberation Sans"},
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        });
+        let extras = json!({"fontChains": {"liberation sans|0|0": [font]}}).to_string();
+        engine.set_display_window(Some(0..1));
+        engine.set_windowed_incremental_builds(true);
+        engine.set_display_retain_built_pages(false);
+        (engine, request, extras, receipt.revision_ids[0].clone())
+    }
+
+    fn apply_preview_display_frame(
+        engine: &EngineSession,
+        bytes: &[u8],
+        mirror: &mut HashMap<u64, docx_layout::display_list::DisplayPage>,
+        epoch: &mut u64,
+    ) -> DisplayList {
+        assert_eq!(
+            u64::from_le_bytes(bytes[40..48].try_into().unwrap()),
+            if u32::from_le_bytes(bytes[12..16].try_into().unwrap())
+                & crate::frame_delta::FRAME_FLAG_FULL
+                != 0
+            {
+                0
+            } else {
+                *epoch
+            }
+        );
+        let list = crate::frame_delta::apply_placeholder_test_frame(bytes, mirror);
+        *epoch = u64::from_le_bytes(bytes[32..40].try_into().unwrap());
+        assert_eq!(list, engine.with_display_list(Clone::clone).unwrap());
+        list
+    }
+
+    fn cold_preview_display_list(
+        engine: &EngineSession,
+        request: &serde_json::Value,
+        extras: &str,
+        previous: &DisplayList,
+    ) -> DisplayList {
+        let cold = EngineSession::new(219);
+        cold.doc()
+            .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+            .unwrap();
+        let display = engine.display.borrow();
+        cold.set_display_window(display.window.clone());
+        cold.set_windowed_incremental_builds(display.windowed_incremental_builds);
+        cold.set_display_retain_built_pages(display.retain_built_pages);
+        if display.retain_built_pages {
+            // Seed the prior built mask for the full branch's retention policy.
+            cold.display.borrow_mut().list = Some(previous.clone());
+        }
+        drop(display);
+        cold.set_local_lowering(engine.local_lowering.get());
+        cold.set_resident_caret_head(engine.resident_caret_head.borrow().clone());
+        cold.layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        assert!(!cold.pagination.borrow().preview_only_pass);
+        let bytes = cold.build_display_list_frame(extras, 0).unwrap();
+        apply_preview_display_frame(&cold, &bytes, &mut HashMap::new(), &mut 0)
+    }
+
+    #[test]
+    fn preview_decisions_converge_idle_filled_frames_to_a_cold_window() {
+        for local in [false, true] {
+            let (engine, mut request, extras, revision) = preview_display_fixture(" new", false);
+            engine.set_local_lowering(local);
+            engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap();
+            let mut mirror = HashMap::new();
+            let mut epoch = 0;
+            let bytes = engine.build_display_list_frame(&extras, epoch).unwrap();
+            let mut shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+            assert!(shown.pages.len() >= 8);
+            for decision in ["accepted", "proposed", "rejected", "proposed"] {
+                let idle: Vec<_> = (1..shown.pages.len()).collect();
+                for batch in idle.chunks(3) {
+                    let bytes = engine.build_display_pages_frame(batch, epoch).unwrap();
+                    shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+                }
+                assert!(shown.pages.iter().all(|page| !page.unbuilt));
+                request["renderEnv"]["revisionPreview"] = if decision == "proposed" {
+                    json!({})
+                } else {
+                    json!({revision.clone(): decision})
+                };
+                let before = engine.stats();
+                engine
+                    .layout_document_with_regions_json(&request.to_string())
+                    .unwrap();
+                assert!(engine.pagination.borrow().preview_only_pass);
+                let released = {
+                    let pagination = engine.pagination.borrow();
+                    (1..shown.pages.len())
+                        .filter(|index| {
+                            !pagination
+                                .rebuilt_page_ranges
+                                .iter()
+                                .any(|range| range.contains(index))
+                        })
+                        .count()
+                };
+                assert!(released > 0);
+                let cold = cold_preview_display_list(&engine, &request, &extras, &shown);
+                assert_eq!(cold.pages.len(), shown.pages.len());
+                let bytes = engine.build_display_list_frame(&extras, epoch).unwrap();
+                shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+                assert_eq!(shown, cold, "{decision}, local lowering {local}");
+                let after = engine.stats();
+                assert!(after.incremental_pagination_calls > before.incremental_pagination_calls);
+                assert_eq!(
+                    after.incremental_display_builds,
+                    before.incremental_display_builds + 1
+                );
+                assert_eq!(
+                    after.rebuilt_display_pages - before.rebuilt_display_pages,
+                    1 + released as u64
+                );
+            }
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn preview_decisions_converge_with_mapped_and_unmapped_carets() {
+        use yrs::{Assoc, IndexedSequence};
+
+        for caret in ["distant", "proposal", "hidden"] {
+            let (engine, mut request, extras, revision) = preview_display_fixture(" new", false);
+            engine.set_display_window(Some(4..5));
+            engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap();
+            let txn = engine.doc().yrs_doc().transact();
+            let text = crate::story_ref(&txn, "body").unwrap();
+            let index = match caret {
+                "distant" => crate::op::para_bounds(&text, &txn).last().unwrap().start + 2,
+                "proposal" => 2,
+                _ => 10,
+            };
+            let head = text.sticky_index(&txn, index, Assoc::After).unwrap();
+            drop(txn);
+            let mut mirror = HashMap::new();
+            let mut epoch = 0;
+            let bytes = engine.build_display_list_frame(&extras, epoch).unwrap();
+            let mut shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+            assert!(shown.pages.len() >= 8);
+            let bytes = engine.build_display_pages_frame(&[2, 6], epoch).unwrap();
+            shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+            engine.set_resident_caret_head(Some(("body".to_owned(), head)));
+            for decision in ["accepted", "proposed", "rejected", "proposed"] {
+                request["renderEnv"]["revisionPreview"] = if decision == "proposed" {
+                    json!({})
+                } else {
+                    json!({revision.clone(): decision})
+                };
+                let before = engine.stats();
+                engine
+                    .layout_document_with_regions_json(&request.to_string())
+                    .unwrap();
+                let paragraphs = engine.doc().paragraph_index("body").unwrap();
+                let paragraph = paragraphs.para_at(index).unwrap();
+                let pagination = engine.pagination.borrow();
+                let mapped = lowered_caret_position(
+                    &pagination.input_lowering.as_ref().unwrap().1,
+                    pagination.input.as_ref().unwrap(),
+                    "body",
+                    paragraph,
+                    index,
+                );
+                assert_eq!(
+                    mapped.is_none(),
+                    caret == "hidden" && decision == "rejected"
+                );
+                drop(pagination);
+                let cold = cold_preview_display_list(&engine, &request, &extras, &shown);
+                assert_eq!(cold.pages.len(), shown.pages.len());
+                let bytes = engine.build_display_list_frame(&extras, epoch).unwrap();
+                shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+                assert_eq!(shown, cold, "{caret}, {decision}");
+                assert!(
+                    engine.stats().incremental_pagination_calls
+                        > before.incremental_pagination_calls
+                );
+                assert_eq!(
+                    engine.stats().incremental_display_builds,
+                    before.incremental_display_builds + 1
+                );
+                assert_eq!(
+                    shown.pages.iter().filter(|page| !page.unbuilt).count(),
+                    if caret == "hidden" && decision == "rejected" {
+                        1
+                    } else {
+                        2
+                    }
+                );
+            }
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn preview_decisions_converge_when_pages_are_added_or_removed() {
+        let (engine, mut request, extras, revision) =
+            preview_display_fixture(&" appended words".repeat(300), true);
+        engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        let mut mirror = HashMap::new();
+        let mut epoch = 0;
+        let bytes = engine.build_display_list_frame(&extras, epoch).unwrap();
+        let mut shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+        let initial_pages = shown.pages.len();
+        let mut removed_pages = None;
+        for decision in ["rejected", "proposed", "accepted", "proposed"] {
+            let idle: Vec<_> = (1..shown.pages.len()).collect();
+            let bytes = engine.build_display_pages_frame(&idle, epoch).unwrap();
+            shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+            request["renderEnv"]["revisionPreview"] = if decision == "proposed" {
+                json!({})
+            } else {
+                json!({revision.clone(): decision})
+            };
+            let before = engine.stats();
+            engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap();
+            let cold = cold_preview_display_list(&engine, &request, &extras, &shown);
+            if cold.pages.len() == shown.pages.len() {
+                assert!(
+                    engine.stats().incremental_pagination_calls
+                        > before.incremental_pagination_calls
+                );
+            }
+            let bytes = engine.build_display_list_frame(&extras, epoch).unwrap();
+            shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+            assert_eq!(shown, cold, "{decision}");
+            if decision == "rejected" {
+                assert!(shown.pages.len() < initial_pages);
+                removed_pages = Some(shown.pages.len());
+            } else {
+                assert_eq!(shown.pages.len(), initial_pages);
+                assert!(shown.pages.len() > removed_pages.unwrap());
+            }
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn preview_decisions_with_a_stale_host_epoch_send_a_cold_window() {
+        let (engine, mut request, extras, revision) = preview_display_fixture(" new", false);
+        engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        let mut mirror = HashMap::new();
+        let mut epoch = 0;
+        let bytes = engine.build_display_list_frame(&extras, epoch).unwrap();
+        let mut shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+        assert!(shown.pages.len() >= 8);
+        for decision in ["accepted", "proposed", "rejected", "proposed"] {
+            let last = shown.pages.len() - 1;
+            let idle: Vec<_> = (1..last).collect();
+            let bytes = engine.build_display_pages_frame(&idle, epoch).unwrap();
+            shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+            let dropped = engine.build_display_pages_frame(&[last], epoch).unwrap();
+            assert_ne!(
+                u64::from_le_bytes(dropped[32..40].try_into().unwrap()),
+                epoch
+            );
+            let idle_count = engine
+                .with_display_list(|list| list.pages.iter().filter(|page| !page.unbuilt).count())
+                .unwrap();
+            request["renderEnv"]["revisionPreview"] = if decision == "proposed" {
+                json!({})
+            } else {
+                json!({revision.clone(): decision})
+            };
+            let before = engine.stats();
+            engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap();
+            let cold = cold_preview_display_list(&engine, &request, &extras, &shown);
+            let bytes = engine.build_display_list_frame(&extras, epoch).unwrap();
+            assert_ne!(
+                u32::from_le_bytes(bytes[12..16].try_into().unwrap())
+                    & crate::frame_delta::FRAME_FLAG_FULL,
+                0
+            );
+            shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+            assert_eq!(shown, cold, "{decision}");
+            assert_eq!(
+                shown.pages.iter().filter(|page| !page.unbuilt).count(),
+                cold.pages.iter().filter(|page| !page.unbuilt).count()
+            );
+            assert!(shown.pages.iter().filter(|page| !page.unbuilt).count() < idle_count);
+            assert!(
+                engine.stats().incremental_pagination_calls > before.incremental_pagination_calls
+            );
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn preview_decisions_retain_the_full_branchs_previously_built_pages() {
+        let (engine, mut request, extras, revision) = preview_display_fixture(" new", false);
+        engine.set_display_retain_built_pages(true);
+        engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        let mut mirror = HashMap::new();
+        let mut epoch = 0;
+        let bytes = engine.build_display_list_frame(&extras, epoch).unwrap();
+        let mut shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+        assert!(shown.pages.len() >= 8);
+        let last = shown.pages.len() - 1;
+        let bytes = engine
+            .build_display_pages_frame(&[2, 4, last], epoch)
+            .unwrap();
+        shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+        for decision in ["accepted", "proposed", "rejected", "proposed"] {
+            request["renderEnv"]["revisionPreview"] = if decision == "proposed" {
+                json!({})
+            } else {
+                json!({revision.clone(): decision})
+            };
+            let before = engine.stats();
+            engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap();
+            let cold = cold_preview_display_list(&engine, &request, &extras, &shown);
+            let bytes = engine.build_display_list_frame(&extras, epoch).unwrap();
+            shown = apply_preview_display_frame(&engine, &bytes, &mut mirror, &mut epoch);
+            assert_eq!(shown, cold, "{decision}");
+            let built: Vec<_> = shown
+                .pages
+                .iter()
+                .enumerate()
+                .filter_map(|(index, page)| (!page.unbuilt).then_some(index))
+                .collect();
+            assert_eq!(built, [0, 2, 4, last]);
+            assert!(
+                engine.stats().incremental_pagination_calls > before.incremental_pagination_calls
+            );
+            assert_eq!(
+                engine.stats().incremental_display_builds,
+                before.incremental_display_builds + 1
+            );
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn preview_only_pass_tracks_completed_layouts() {
+        let (engine, mut request, extras, revision) = preview_display_fixture(" new", false);
+        engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        assert!(!engine.pagination.borrow().preview_only_pass);
+        request["renderEnv"]["revisionPreview"] = json!({revision.clone(): "accepted"});
+        engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        assert!(engine.pagination.borrow().preview_only_pass);
+
+        let mut changed = request.clone();
+        changed["measurement"]["defaults"]["fontSize"] = json!(12);
+        drop(
+            engine
+                .prepare_region_layout(&changed.to_string(), None)
+                .unwrap(),
+        );
+        assert!(engine.pagination.borrow().preview_only_pass);
+        engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        assert!(!engine.pagination.borrow().preview_only_pass);
+        assert!(!engine.pagination.borrow().last_incremental);
+
+        request["renderEnv"]["revisionPreview"] = json!({revision.clone(): "rejected"});
+        engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        assert!(engine.pagination.borrow().preview_only_pass);
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 2),
+                "x",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        assert!(!engine.pagination.borrow().preview_only_pass);
+        request["renderEnv"]["revisionPreview"] = json!({});
+        engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        assert!(engine.pagination.borrow().preview_only_pass);
+
+        let input =
+            serde_json::to_string(engine.pagination.borrow().input.as_ref().unwrap()).unwrap();
+        engine.layout_document_json(&input).unwrap();
+        assert!(!engine.pagination.borrow().preview_only_pass);
+        request["renderEnv"]["revisionPreview"] = json!({revision.clone(): "accepted"});
+        engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        assert!(!engine.pagination.borrow().preview_only_pass);
+        request["renderEnv"]["revisionPreview"] = json!({revision.clone(): "rejected"});
+        engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        assert!(engine.pagination.borrow().preview_only_pass);
+
+        request["measurement"]["defaults"]["fontSize"] = json!(12);
+        engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        assert!(!engine.pagination.borrow().preview_only_pass);
+        request["renderEnv"]["revisionPreview"] = json!({});
+        engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        assert!(engine.pagination.borrow().preview_only_pass);
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 2),
+                "y",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        request["renderEnv"]["revisionPreview"] = json!({revision: "accepted"});
+        engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        assert!(!engine.pagination.borrow().preview_only_pass);
         docx_layout::clear_measure_fonts();
     }
 

@@ -1539,8 +1539,39 @@ pub(crate) fn apply_placeholder_test_frame(
     bytes: &[u8],
     retained: &mut HashMap<u64, DisplayPage>,
 ) -> DisplayList {
+    fn attrs_mut(page: &mut DisplayPage) -> Vec<&mut DocAttrs> {
+        page.primitives
+            .iter_mut()
+            .chain(page.note_areas.iter_mut().flat_map(|area| {
+                area.separator_primitives
+                    .iter_mut()
+                    .chain(area.primitives.iter_mut())
+            }))
+            .chain(
+                page.header
+                    .iter_mut()
+                    .flat_map(|region| region.primitives.iter_mut()),
+            )
+            .chain(
+                page.footer
+                    .iter_mut()
+                    .flat_map(|region| region.primitives.iter_mut()),
+            )
+            .map(|primitive| match primitive {
+                Primitive::Text(value) => &mut value.attrs,
+                Primitive::GlyphRun(value) => &mut value.attrs,
+                Primitive::Rect(value) => &mut value.attrs,
+                Primitive::Line(value) => &mut value.attrs,
+                Primitive::Image(value) => &mut value.attrs,
+                Primitive::Shape(value) => &mut value.attrs,
+                Primitive::Decoration(value) => &mut value.attrs,
+            })
+            .collect()
+    }
+
     let u32_at = |offset| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
     let u64_at = |offset| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    let i64_at = |offset| i64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
     if u32_at(12) & FRAME_FLAG_FULL != 0 {
         retained.clear();
     }
@@ -1574,21 +1605,119 @@ pub(crate) fn apply_placeholder_test_frame(
             PAGE_OP_MOVE => {
                 retained.get_mut(&page_id).unwrap().page_index = u64::from(page_index);
             }
-            PAGE_OP_SHIFT_POSITIONS => {
-                assert_eq!(u32_at(record + 24), 0);
-                assert_eq!(u32_at(record + 40), 0);
-                assert_eq!(u32_at(record + 36), 16);
+            PAGE_OP_PATCH_POSITIONS => {
                 let payload = u32_at(record + 32) as usize;
-                assert_eq!(u32_at(payload), 0);
-                assert_eq!(u32_at(payload + 4), SHIFT_SPAN_PRESENT);
-                let delta =
-                    i64::from_le_bytes(bytes[payload + 8..payload + 16].try_into().unwrap());
+                let count = u32_at(payload) as usize;
+                assert_eq!(count, u32_at(record + 24) as usize);
+                assert_eq!(u32_at(payload + 4), 0);
                 let page = retained.get_mut(&page_id).unwrap();
-                let [start, end] = page.position_span.unwrap();
-                page.position_span = Some([
-                    start.checked_add(delta).unwrap(),
-                    end.checked_add(delta).unwrap(),
-                ]);
+                let ids = primitive_ids(page, page_id);
+                let mut attrs = attrs_mut(page);
+                let mut cursor = payload + 8;
+                for _ in 0..count {
+                    let index = ids.iter().position(|&id| id == u64_at(cursor)).unwrap();
+                    let changed = bytes[cursor + 8];
+                    let present = bytes[cursor + 9];
+                    cursor += 12;
+                    let mut values = [None; 5];
+                    for (index, field) in POSITION_FIELDS.iter().enumerate() {
+                        if present & field != 0 {
+                            values[index] = Some(i64_at(cursor));
+                            cursor += 8;
+                        }
+                    }
+                    let attrs = &mut *attrs[index];
+                    for (index, field) in [
+                        &mut attrs.doc_start,
+                        &mut attrs.doc_end,
+                        &mut attrs.fragment_doc_start,
+                        &mut attrs.fragment_doc_end,
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        if changed & POSITION_FIELDS[index] != 0 {
+                            *field = values[index];
+                        }
+                    }
+                    if changed & POSITION_INLINE_WIDGET != 0 {
+                        attrs.inline_sdt_widget.as_mut().unwrap().pos = values[4].unwrap();
+                    }
+                }
+                assert_eq!(cursor, payload + u32_at(record + 36) as usize);
+                drop(attrs);
+                page.page_index = u64::from(page_index);
+            }
+            PAGE_OP_SHIFT_POSITIONS => {
+                let payload = u32_at(record + 32) as usize;
+                let count = u32_at(payload) as usize;
+                assert_eq!(count, u32_at(record + 24) as usize);
+                let flags = u32_at(payload + 4);
+                assert_eq!(flags & !SHIFT_SPAN_PRESENT, 0);
+                let mut cursor = payload + 8;
+                let page = retained.get_mut(&page_id).unwrap();
+                if flags & SHIFT_SPAN_PRESENT != 0 {
+                    let delta = i64_at(cursor);
+                    cursor += 8;
+                    let [start, end] = page.position_span.unwrap();
+                    page.position_span = Some([
+                        start.checked_add(delta).unwrap(),
+                        end.checked_add(delta).unwrap(),
+                    ]);
+                }
+                let mut attrs = attrs_mut(page);
+                for _ in 0..count {
+                    let start = u32_at(cursor) as usize;
+                    let end = start + u32_at(cursor + 4) as usize;
+                    let changed = bytes[cursor + 8];
+                    let delta = i64_at(cursor + 16);
+                    cursor += 24;
+                    for attrs in &mut attrs[start..end] {
+                        let attrs = &mut **attrs;
+                        for (index, field) in [
+                            &mut attrs.doc_start,
+                            &mut attrs.doc_end,
+                            &mut attrs.fragment_doc_start,
+                            &mut attrs.fragment_doc_end,
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            if changed & POSITION_FIELDS[index] != 0 {
+                                if let Some(value) = field {
+                                    *value = value.checked_add(delta).unwrap();
+                                } else {
+                                    assert_ne!(changed & POSITION_PRESENT_ONLY, 0);
+                                }
+                            }
+                        }
+                        if changed & POSITION_INLINE_WIDGET != 0 {
+                            if let Some(widget) = attrs.inline_sdt_widget.as_mut() {
+                                widget.pos = widget.pos.checked_add(delta).unwrap();
+                            } else {
+                                assert_ne!(changed & POSITION_PRESENT_ONLY, 0);
+                            }
+                        }
+                    }
+                }
+                drop(attrs);
+                let anchors = u32_at(record + 40) as usize;
+                if anchors != 0 {
+                    assert_eq!(u32_at(cursor) as usize, anchors);
+                    assert_eq!(u32_at(cursor + 4), 0);
+                    cursor += 8;
+                    for _ in 0..anchors {
+                        let area = u32_at(cursor) as usize;
+                        let note = u32_at(cursor + 4) as usize;
+                        let start = i64_at(cursor + 8);
+                        let end = i64_at(cursor + 16);
+                        let anchor = &mut page.note_areas[area].notes[note];
+                        anchor.anchor_doc_start = (start != i64::MIN).then_some(start);
+                        anchor.anchor_doc_end = (end != i64::MIN).then_some(end);
+                        cursor += 24;
+                    }
+                }
+                assert_eq!(cursor, payload + u32_at(record + 36) as usize);
                 page.page_index = u64::from(page_index);
             }
             opcode => panic!("unexpected placeholder test opcode {opcode}"),
@@ -2708,6 +2837,50 @@ mod tests {
             "notes": [note],
         }]);
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn position_update_frames_decode_to_the_display_list() {
+        let mut patched = list_at_position(2);
+        let Primitive::Text(text) = &mut patched.pages[0].primitives[0] else {
+            unreachable!();
+        };
+        text.attrs.doc_start = Some(7);
+        text.attrs.doc_end = Some(18);
+        for (before, after, opcode) in [
+            (
+                list_at_position(2),
+                list_at_position(12),
+                PAGE_OP_SHIFT_POSITIONS,
+            ),
+            (list_at_position(2), patched, PAGE_OP_PATCH_POSITIONS),
+            (
+                list_with_note(2, Some(3), "1"),
+                list_with_note(12, Some(13), "1"),
+                PAGE_OP_SHIFT_POSITIONS,
+            ),
+            (
+                list_with_note(2, Some(3), "1"),
+                list_with_note(2, None, "1"),
+                PAGE_OP_SHIFT_POSITIONS,
+            ),
+        ] {
+            let epochs = |frame_epoch| FrameEpochs {
+                doc_epoch: frame_epoch,
+                layout_epoch: frame_epoch,
+                frame_epoch,
+                base_frame_epoch: frame_epoch - 1,
+            };
+            let mut next_id = 0;
+            let (full, snapshot) =
+                encode_frame_delta(&before, &[], epochs(1), true, &mut next_id).unwrap();
+            let mut mirror = HashMap::new();
+            assert_eq!(apply_placeholder_test_frame(&full, &mut mirror), before);
+            let (bytes, _) =
+                encode_frame_delta(&after, &snapshot, epochs(2), false, &mut next_id).unwrap();
+            assert_eq!(bytes[FRAME_HEADER_LEN], opcode);
+            assert_eq!(apply_placeholder_test_frame(&bytes, &mut mirror), after);
+        }
     }
 
     fn delta_between(before: &DisplayList, after: &DisplayList) -> Vec<u8> {
