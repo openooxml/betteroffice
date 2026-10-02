@@ -1,5 +1,26 @@
 # @betteroffice/docx
 
+## 0.4.2
+
+### Patch Changes
+
+- 08c4763: Paragraphs lay out closer to Word: words across formatting runs, list numbers wider than their indent, `w:start`/`w:end` indents and bordered hanging indents. Picture outlines now paint.
+- 9c21cb8: Accepting, rejecting or undoing a proposal no longer stalls for up to 1.5 s on large documents, and tracked replacements apply faster.
+- 4e6a9e4: The first page shows sooner on long documents.
+- 195380d: While a long document lays out, pages that are not final yet show as placeholders instead of partial content.
+- 4f10593: Repeated saves after adding a reply comment produce the same markup.
+- ba93cf9: With `experimentalWorkerOpen`, read-only editors serve proposals, overlays, navigation and `search()` from the worker. New ref methods `getParagraphIdentities` and `resolveParagraphAnchors`; synchronous members that need the document throw `DocxReplicaNotReadyError` until it loads.
+- 380dfac: Saving keeps what you didn't edit as it was, including inherited formatting, link targets and rich comments.
+- dcbc90b: Documents open faster.
+- 4b5f430: `preloadDocxEngine()` and `experimentalPrewarm` compile the engine once and share it with the preloaded worker, which retries an interrupted download.
+- ac0a55f: Tables lay out closer to Word: autofit column widths, floating tables across pages, partial cell margins, bordered table height and vertical text in merged cells.
+- 4797db4: Tracked changes and content controls nested in each other keep their text.
+- 1037096: Long documents finish layout sooner.
+- 5ff39d2: With `experimentalWorkerOpen`, "Page X of N" shows the saved page count until layout finishes.
+- ed29b59: Typing responds faster in long documents.
+- a0ea217: With `experimentalWorkerOpen`, the `previewFirstPage` preview runs in the worker and shows only final pages; `onFirstPagePainted` waits for one.
+- bbfdeb2: With `experimentalWorkerOpen`, host proposals appear and decisions apply faster.
+
 ## 0.4.1
 
 ### Patch Changes

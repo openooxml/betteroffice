@@ -13,7 +13,7 @@
     },
     "apps/demo": {
       "name": "@betteroffice/demo",
-      "version": "0.0.13",
+      "version": "0.0.14",
       "dependencies": {
         "@betteroffice/docx": "workspace:*",
         "@betteroffice/docx-react": "workspace:*",
@@ -49,7 +49,7 @@
     },
     "apps/desktop": {
       "name": "@betteroffice/desktop",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "dependencies": {
         "@betteroffice/docx": "workspace:*",
         "@betteroffice/docx-react": "workspace:*",
@@ -174,11 +174,11 @@
     },
     "crates": {
       "name": "@betteroffice/rust-crates",
-      "version": "0.4.1",
+      "version": "0.4.2",
     },
     "packages/docx": {
       "name": "@betteroffice/docx",
-      "version": "0.4.1",
+      "version": "0.4.2",
       "devDependencies": {
         "@betteroffice/fonts": "workspace:*",
         "@types/bun": "^1.0.0",
@@ -195,7 +195,7 @@
     },
     "packages/docx-i18n": {
       "name": "@betteroffice/docx-i18n",
-      "version": "0.4.1",
+      "version": "0.4.2",
       "devDependencies": {
         "tsup": "^8.0.1",
         "typescript": "^6.0.3",
@@ -203,7 +203,7 @@
     },
     "packages/docx-react": {
       "name": "@betteroffice/docx-react",
-      "version": "0.4.1",
+      "version": "0.4.2",
       "dependencies": {
         "@betteroffice/docx": "workspace:*",
         "@betteroffice/docx-i18n": "workspace:*",

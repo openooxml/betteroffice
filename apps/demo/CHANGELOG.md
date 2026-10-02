@@ -1,5 +1,34 @@
 # @betteroffice/demo
 
+## 0.0.14
+
+### Patch Changes
+
+- Updated dependencies [953cf7d]
+- Updated dependencies [3f09227]
+- Updated dependencies [08c4763]
+- Updated dependencies [9c21cb8]
+- Updated dependencies [4e6a9e4]
+- Updated dependencies [195380d]
+- Updated dependencies [260ba19]
+- Updated dependencies [4f10593]
+- Updated dependencies [ba93cf9]
+- Updated dependencies [380dfac]
+- Updated dependencies [dcbc90b]
+- Updated dependencies [4b5f430]
+- Updated dependencies [3b421e7]
+- Updated dependencies [ac0a55f]
+- Updated dependencies [4797db4]
+- Updated dependencies [1037096]
+- Updated dependencies [5ff39d2]
+- Updated dependencies [864355f]
+- Updated dependencies [02c5459]
+- Updated dependencies [ed29b59]
+- Updated dependencies [a0ea217]
+- Updated dependencies [bbfdeb2]
+  - @betteroffice/docx-react@0.4.2
+  - @betteroffice/docx@0.4.2
+
 ## 0.0.13
 
 ### Patch Changes
