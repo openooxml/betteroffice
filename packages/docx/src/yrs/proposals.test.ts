@@ -32,7 +32,7 @@ const NS = [
   'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"',
 ].join(' ');
 const BODY: DocxSourceStory = { partUri: '/word/document.xml', kind: 'body' };
-const SUGGEST = { author: 'Atira', date: '2026-09-29T12:00:00Z' };
+const SUGGEST = { author: 'Assistant', date: '2026-09-29T12:00:00Z' };
 
 const run = (text: string, props = '') =>
   `<w:r>${props ? `<w:rPr>${props}</w:rPr>` : ''}<w:t xml:space="preserve">${text}</w:t></w:r>`;
@@ -435,9 +435,9 @@ describe('YrsSession host proposals', () => {
     expect(revised.map((segment) => (segment.kind === 'text' ? segment.text : '')).join('')).toBe(
       'worldearth'
     );
-    expect(revised[0]!.attributes.del).toMatchObject({ author: 'Atira' });
-    expect(revised.at(-1)!.attributes.ins).toMatchObject({ author: 'Atira' });
-    expect(session.listRevisions().every((revision) => revision.author === 'Atira')).toBe(true);
+    expect(revised[0]!.attributes.del).toMatchObject({ author: 'Assistant' });
+    expect(revised.at(-1)!.attributes.ins).toMatchObject({ author: 'Assistant' });
+    expect(session.listRevisions().every((revision) => revision.author === 'Assistant')).toBe(true);
   });
 
   it('proposes pure deletions and insertions at start, end and an offset', async () => {
@@ -934,7 +934,7 @@ describe('YrsSession host proposals', () => {
         .find((entry) => entry.kind === 'text' && entry.text === text)!.attributes;
     expect(segment(story, 'Cell fill')).toMatchObject({
       fontSize: { size: 18 },
-      ins: { author: 'Atira' },
+      ins: { author: 'Assistant' },
     });
     expect(segment('body', 'Body fill').fontSize ?? null).toBeNull();
     const xml = new TextDecoder().decode(

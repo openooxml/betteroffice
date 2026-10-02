@@ -136,6 +136,7 @@ function worker() {
     displayWindows: [] as [number, number][],
     retainBuiltPages: [] as boolean[],
     windowedIncrementalBuilds: [] as boolean[],
+    directBatches: [] as boolean[],
     rasterized: [] as number[],
     buffers: [] as Surface[],
     releaseCalls: [] as Array<{ pages: number[]; expectedFrameEpoch: number }>,
@@ -156,6 +157,12 @@ function worker() {
       },
       setWindowedIncrementalBuilds(enabled: boolean) {
         harness.windowedIncrementalBuilds.push(enabled);
+      },
+      setDirectBatches(enabled: boolean) {
+        harness.directBatches.push(enabled);
+      },
+      directBatchesApplied() {
+        return 0;
       },
       clearFonts() {},
       layoutDocumentJson() {},
@@ -1077,6 +1084,7 @@ describe('resident worker layout ownership', () => {
     expect(extras).toEqual([
       '{"headersFooters":{"parts":[]},"fontChains":{"a|0|0":[1]},"resolvedCommentIds":[4]}',
     ]);
+    expect(w.harness.directBatches).toEqual([]);
 
     const plain = await w.send({
       type: 'sync',
@@ -2950,6 +2958,7 @@ describe('resident worker opening', () => {
     });
     expect(opened.ok && opened.hostJson).toBe('{"host":1}');
     expect(opened.ok && opened.stateVector).toBeDefined();
+    expect(w.harness.directBatches).toEqual([true]);
     expect(opened.memory).toEqual(w.harness.memories);
     const requirements = await w.send({ type: 'fontRequirements', layoutInput: '{"request":1}' });
     expect(requirements.ok && requirements.requirementsJson).toBe('[{"key":"a"}]');
@@ -3043,6 +3052,7 @@ describe('resident worker opening', () => {
     const preview = await w.send({ type: 'open', bytes: new Uint8Array([1, 2]).buffer, previewBlocks: 200 });
     expect(preview.ok && preview.hostJson).toBe('{"host":"preview"}');
     expect(preview.ok && preview.stateVector).toBeDefined();
+    expect(w.harness.directBatches).toEqual([]);
     const framed = await w.send(bootstrap);
     expect(framed.ok && framed.layoutJson).toBe(provisional);
     // A second preview never replaces the first.
@@ -3051,6 +3061,7 @@ describe('resident worker opening', () => {
 
     const opened = await w.send({ type: 'open', bytes: new Uint8Array([3]).buffer, digest: 'abc' });
     expect(opened.ok && opened.hostJson).toBe('{"host":1}');
+    expect(w.harness.directBatches).toEqual([true]);
     const full = await w.send({ ...bootstrap, expectedFrameEpoch: 1 });
     expect(full.ok && full.layoutJson).toBe(provisional);
     expect(calls).toEqual([

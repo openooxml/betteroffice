@@ -139,8 +139,13 @@ impl MediaTable {
     pub fn data_url(&self, index: usize) -> Result<String, String> {
         let bytes = self.bytes(index)?;
         let mime_type = self.parts[index].mime_type;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        Ok(format!("data:{mime_type};base64,{encoded}"))
+        let encoded = base64::encoded_len(bytes.len(), true).unwrap_or(0);
+        let mut url = String::with_capacity("data:;base64,".len() + mime_type.len() + encoded);
+        url.push_str("data:");
+        url.push_str(mime_type);
+        url.push_str(";base64,");
+        base64::engine::general_purpose::STANDARD.encode_string(&bytes, &mut url);
+        Ok(url)
     }
 
     /// The `data:` URL a `media:{n}` token stands for, or `None` for any other
