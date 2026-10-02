@@ -848,7 +848,10 @@ fn a_preview_decision_paginates_afresh_as_a_fresh_layout_would() {
         let before = engine.stats();
         let decided = layout(&engine, &ids, &env(&ids));
         let after = engine.stats();
-        assert_eq!(after.incremental_pagination_calls, before.incremental_pagination_calls);
+        assert_eq!(
+            after.incremental_pagination_calls,
+            before.incremental_pagination_calls
+        );
         assert!(after.pagination_blocks_placed - before.pagination_blocks_placed >= blocks);
         let (fresh, fresh_ids) = proposals_in(&bytes);
         assert_eq!(decided, layout(&fresh, &fresh_ids, &env(&fresh_ids)));
@@ -1079,10 +1082,13 @@ fn a_preview_change_reads_revisions_in_a_story_without_paragraphs() {
         .unwrap();
     let request = layout_request(&preview(&[("1", Accepted)]), font);
     let before = engine.stats();
-    let incremental = engine.layout_document_with_regions_json(&request).unwrap();
-    assert!(engine.stats().incremental_pagination_calls > before.incremental_pagination_calls);
+    let decided = engine.layout_document_with_regions_json(&request).unwrap();
     assert_eq!(
-        incremental,
+        engine.stats().incremental_pagination_calls,
+        before.incremental_pagination_calls
+    );
+    assert_eq!(
+        decided,
         seeded()
             .layout_document_with_regions_json(&request)
             .unwrap()
