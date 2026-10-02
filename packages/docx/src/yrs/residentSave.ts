@@ -3,7 +3,7 @@
 import type { Comment } from '../types/content';
 import type { Document } from '../types/document';
 import { mergeDocxHostMetadata, saveEditorDocument, type EditorSaveRecord } from './editorSave';
-import { wrapOpenedEditSession } from './index';
+import { wrapOpenedEditSession } from './yrsSessionFacade';
 import type { EditSession } from './wasm/index';
 import { yrsToDocument } from './yrsToDocument';
 
