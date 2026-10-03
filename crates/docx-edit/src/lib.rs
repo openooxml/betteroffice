@@ -664,6 +664,13 @@ impl EditingDoc {
         self.metadata.lock().unwrap().clone()
     }
 
+    #[cfg(feature = "wasm")]
+    pub(crate) fn clear_comment_writes(&self) {
+        if let Some(source) = self.source_metadata() {
+            source.read().comment_writes.clear();
+        }
+    }
+
     #[doc(hidden)]
     pub fn committed_epoch(&self) -> u64 {
         self.epoch.load(Ordering::Relaxed)

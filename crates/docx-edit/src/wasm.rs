@@ -1196,6 +1196,7 @@ pub struct EditSession {
     docx_source: RefCell<Option<Arc<[u8]>>>,
     /// The [`crate::seed::package_digest`] of `docx_source`, when known.
     docx_digest: RefCell<Option<String>>,
+    awaiting_comment_baseline: Cell<bool>,
     update_observer: Option<Subscription>,
     update_event_observer: Option<UpdateEventObserver>,
     undo: UndoSession,
@@ -1361,6 +1362,7 @@ impl EditSession {
                 seed_media,
             )
             .map_err(|error| error.to_string())?;
+            self.awaiting_comment_baseline.set(false);
             self.engine.doc().begin_opening(generation);
             self.engine.doc().install_media(media);
             fonts
@@ -1369,6 +1371,7 @@ impl EditSession {
                 crate::seed::replica_source(envelope, parts, Arc::clone(&source), digest.clone())?;
             metadata.watch_comments(self.engine.doc());
             self.engine.doc().install_source(metadata, js_entropy());
+            self.awaiting_comment_baseline.set(true);
             self.engine
                 .doc()
                 .retain_source(crate::identity::SourcePackage::Ready(Arc::new(index)));
@@ -1409,6 +1412,7 @@ impl EditSession {
         // The cut stops only once it holds `blocks` blocks.
         let whole_body = envelope.document.package.document.content.len() < blocks;
         let fonts = crate::seed::seed_preview_envelope(self.engine.doc(), envelope, media)?;
+        self.awaiting_comment_baseline.set(false);
         self.engine.set_partial_document(true);
         self.engine.doc().rotate_version(js_entropy());
         serde_json::to_string(&DocxHostWire {
@@ -1609,6 +1613,7 @@ impl EditSession {
             fonts: docx_layout::MeasureFonts::default(),
             docx_source: RefCell::new(None),
             docx_digest: RefCell::new(None),
+            awaiting_comment_baseline: Cell::new(false),
             update_observer: None,
             update_event_observer: None,
             undo: UndoSession::with_clock(Arc::new(|| js_sys::Date::now() as u64)),
@@ -2240,12 +2245,13 @@ impl EditSession {
         docx_layout::outline_glyph_json(font_id, glyph_id)
     }
 
-    /// Hydrates this replica from an encoded yrs v1 update, typically another
-    /// replica's [`EditSession::encode_state`] output. Identical to
-    /// [`EditSession::apply_update`]; the separate name marks the initial-load
-    /// call site. Errors on a malformed update.
+    /// Hydrates this replica from an encoded yrs v1 update. The first load after opening a
+    /// replica is its baseline: the comments it brings in read their source fields.
     pub fn load(&self, update: &[u8]) -> Result<(), JsValue> {
         self.engine.doc().apply_update_v1(update).map_err(js_err)?;
+        if self.awaiting_comment_baseline.replace(false) {
+            self.engine.doc().clear_comment_writes();
+        }
         self.engine.doc().rotate_version(js_entropy());
         Ok(())
     }
@@ -2444,6 +2450,7 @@ impl EditSession {
                 .map(Value::String)
                 .collect();
             receipt.insert(story_id.to_owned(), Value::Array(para_ids));
+            self.awaiting_comment_baseline.set(false);
         }
         if !self.engine.doc().has_opening() {
             self.engine.doc().begin_opening(None);
@@ -4099,6 +4106,7 @@ impl EditSession {
         .map_err(js_err)?;
         let json = outcome.to_json(&options.limits).map_err(js_err)?;
         if let CompareOutcome::Applied(applied) = outcome {
+            self.awaiting_comment_baseline.set(false);
             self.docx_source.replace(Some(Arc::from(original)));
             self.docx_digest.replace(None);
             self.compared.replace(Some((applied, options.limits)));

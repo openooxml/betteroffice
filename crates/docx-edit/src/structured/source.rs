@@ -387,6 +387,14 @@ impl CommentWrites {
         Self { written }
     }
 
+    #[cfg(feature = "wasm")]
+    pub(crate) fn clear(&self) {
+        self.written
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+    }
+
     /// Whether `key` of comment `id` was written since the source was retained.
     pub(crate) fn written(&self, id: &str, key: &str) -> bool {
         let written = self
