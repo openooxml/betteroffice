@@ -90,6 +90,10 @@ interface WorkerProposalProbe {
       ids: readonly string[];
     }): Promise<DocxProposalResult>;
     getProposals(): Promise<DocxProposalSnapshot>;
+    listContentControls(): Promise<{ ok: boolean; version: string; content?: { controls: unknown[] } }>;
+    findContentControls(query: { kind: 'tag'; tag: string }): Promise<{ ok: boolean; version: string; content?: { controls: unknown[] } }>;
+    readSelectionInfo(): Promise<{ selectedText: string; paragraphText: string } | null>;
+    commands: { execute(id: string, args: unknown): Promise<{ ok: boolean; failure?: { code: string } }> };
   } | null;
   session: { selection(): ViewState['selection'] } | null;
   status(): {
@@ -663,6 +667,71 @@ test('a worker viewer exports its retained page layout without opening the main-
   }).toBe(true);
   const current = await status(page);
   expect(current.openedInWorker).toBe(true);
+  expect(current.encodeState).toBe(0);
+  expect(current.errors).toEqual([]);
+});
+
+test('a worker viewer reads content controls and refuses revision commands without the main-thread copy while host decisions apply', async ({ page }) => {
+  await instrument(page);
+  await open(page, true);
+  const reads = await page.evaluate(async () => {
+    const editor = (window as unknown as ProbeWindow).__workerProposalProbe.editor!;
+    return {
+      list: await editor.listContentControls(),
+      find: await editor.findContentControls({ kind: 'tag', tag: 'missing' }),
+      accept: await editor.commands.execute('reviewAccept', { revisionId: 'missing' }),
+      reject: await editor.commands.execute('reviewReject', null),
+    };
+  });
+  expect(reads.list).toMatchObject({ ok: true, content: { controls: [] } });
+  expect(reads.find).toMatchObject({ ok: true, content: { controls: [] } });
+  expect(reads.accept).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+  expect(reads.reject).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+  const prepared = await prepare(page, true);
+  const proposed = snapshotOf(await page.evaluate(
+    (request) => (window as unknown as ProbeWindow).__workerProposalProbe.editor!.proposeChanges(request),
+    { expectVersion: prepared.resolved.version, proposals: prepared.proposals.slice(0, 1) }
+  ));
+  const accepted = snapshotOf(await page.evaluate(
+    (request) => (window as unknown as ProbeWindow).__workerProposalProbe.editor!.setProposalStates(request),
+    {
+      expectVersion: proposed.version,
+      expectPreviewVersion: proposed.previewVersion,
+      changes: [{ id: IDS[0]!, state: 'accepted' as const }],
+    }
+  ));
+  expect(accepted.proposals.map(({ id, state }) => ({ id, state }))).toEqual([{ id: IDS[0], state: 'accepted' }]);
+  expect(accepted.previewVersion).toBe(proposed.previewVersion + 1);
+  const current = await status(page);
+  expect(current.pending).toBe(true);
+  expect(current.encodeState).toBe(0);
+  expect(current.errors).toEqual([]);
+});
+
+test('Find in a worker viewer steps through worker matches without the main-thread copy', async ({ page }) => {
+  await instrument(page);
+  await open(page, true);
+  const selection = () => page.evaluate(() =>
+    (window as unknown as ProbeWindow).__workerProposalProbe.editor!.readSelectionInfo()
+  );
+  expect(await page.evaluate(() =>
+    (window as unknown as ProbeWindow).__workerProposalProbe.editor!.commands.execute('find', null)
+  )).toMatchObject({ ok: true });
+  const dialog = page.locator('.docx-find-replace-dialog');
+  await expect(dialog).toBeVisible();
+  const input = dialog.locator('.docx-find-replace-dialog-input').first();
+  await input.fill('paragraph 12:');
+  await expect(dialog.locator('.docx-find-replace-dialog-status')).toHaveText(/\b1\b\D+\b6\b/);
+  await expect.poll(selection).toMatchObject({
+    selectedText: 'paragraph 12:', paragraphText: 'Page 1 paragraph 12: Original text.',
+  });
+  await input.press('Enter');
+  await expect(dialog.locator('.docx-find-replace-dialog-status')).toHaveText(/\b2\b\D+\b6\b/);
+  await expect.poll(selection).toMatchObject({
+    selectedText: 'paragraph 12:', paragraphText: 'Page 2 paragraph 12: Original text.',
+  });
+  const current = await status(page);
+  expect(current.pending).toBe(true);
   expect(current.encodeState).toBe(0);
   expect(current.errors).toEqual([]);
 });
