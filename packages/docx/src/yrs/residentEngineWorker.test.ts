@@ -146,6 +146,7 @@ function worker() {
     failPresent: null as number | null,
     memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
+      proposalEngine: { version: () => 'v' },
       loadState() {},
       loadMediaSources(_json: string) {},
       setPartialDocument() {},
