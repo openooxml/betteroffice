@@ -6059,6 +6059,93 @@ mod tests {
         assert_eq!(paragraphs[1].text, "ABCD");
     }
 
+    fn resident_surrogate_session(client_id: f64) -> EditSession {
+        let session = EditSession::new(client_id).unwrap();
+        let doc = session.engine.doc();
+        doc.create_story_with_paragraph_id("body", "p0", "a😀b", "Normal", "left")
+            .unwrap();
+        doc.split_paragraph(&EditCtx::local("", ""), Position::new("body", 3), None)
+            .unwrap();
+        let font_id = session
+            .register_measure_font(include_bytes!(
+                "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+            ))
+            .unwrap();
+        let request = json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{
+                "sectionId": "main",
+                "properties": {
+                    "pageWidth": 4320,
+                    "pageHeight": 2880,
+                    "marginTop": 300,
+                    "marginRight": 300,
+                    "marginBottom": 300,
+                    "marginLeft": 300
+                }
+            }]},
+            "measurement": {
+                "fontChains": {"calibri|0|0": [font_id]},
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        });
+        session
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        session
+            .build_display_list_frame(
+                &json!({"fontChains": {"calibri|0|0": [font_id]}}).to_string(),
+                0.0,
+            )
+            .unwrap();
+        session.set_selection("body", "p0", 2, "p0", 2).unwrap();
+        assert_eq!(
+            session.collapsed_resident_input_selection().unwrap(),
+            ("body".into(), "p0".into(), 2)
+        );
+        session
+    }
+
+    #[track_caller]
+    fn assert_resident_surrogate_texts(session: &EditSession, expected: &[&str]) {
+        let texts = |doc: &EditingDoc| {
+            doc.paragraphs("body")
+                .unwrap()
+                .into_iter()
+                .map(|paragraph| paragraph.text)
+                .collect::<Vec<_>>()
+        };
+        let doc = session.engine.doc();
+        assert_eq!(texts(doc), expected);
+        let peer = EditingDoc::new(99);
+        peer.apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        assert_eq!(texts(&peer), texts(doc));
+    }
+
+    #[test]
+    fn resident_backspace_inside_a_surrogate_pair_deletes_the_whole_emoji() {
+        let session = resident_surrogate_session(23.0);
+        session.delete_resident_units("backward", 1).unwrap();
+        assert_resident_surrogate_texts(&session, &["a", "b"]);
+    }
+
+    #[test]
+    fn resident_forward_delete_inside_a_surrogate_pair_deletes_the_whole_emoji() {
+        let session = resident_surrogate_session(24.0);
+        session.delete_resident_units("forward", 1).unwrap();
+        assert_resident_surrogate_texts(&session, &["a", "b"]);
+    }
+
+    #[test]
+    fn resident_typing_inside_a_surrogate_pair_lands_before_the_emoji() {
+        let session = resident_surrogate_session(25.0);
+        session.apply_input("x", 1.0).unwrap();
+        assert_resident_surrogate_texts(&session, &["ax😀", "b"]);
+    }
+
     #[test]
     fn resident_caret_snapshot_rebases_cumulative_block_embeds() {
         let session = EditSession::new(21.0).unwrap();
