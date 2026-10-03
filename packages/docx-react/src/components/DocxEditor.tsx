@@ -39,6 +39,7 @@ import type {
   YrsSession,
   YrsStoryRange,
 } from '@betteroffice/docx/yrs';
+import { proposalRevisionPreview } from '@betteroffice/docx/yrs';
 import type { BundledFontProvider } from '@betteroffice/docx/layout';
 import {
   createYrsSidebarProjection,
@@ -123,6 +124,7 @@ import { DocxEditorPagedArea } from './DocxEditor/DocxEditorPagedArea';
 import { ContentControlWidgets } from './DocxEditor/ContentControlWidgets';
 import { CanvasPagedArea } from './DocxEditor/CanvasPagesView';
 import { useCanvasRenderer } from './DocxEditor/hooks/useDisplayList';
+import { prefetchWorkerFontRequirements } from './DocxEditor/hooks/useLayoutPipeline';
 import type { RustFontChainsProvider } from './DocxEditor/hooks/useRustMeasurement';
 import { useResetEditorState } from './DocxEditor/hooks/useResetEditorState';
 import type { YrsToolbarSelection } from './DocxEditor/yrsToolbar';
@@ -160,7 +162,13 @@ import { createStyleResolver } from '@betteroffice/docx/styles';
 import { useIsDark } from './DocxEditor/hooks/useIsDark';
 
 // Paginated editor
-import { type PagedEditorRef, DEFAULT_PAGE_WIDTH, documentTheme } from './DocxEditor/PagedEditor';
+import {
+  type PagedEditorRef,
+  DEFAULT_PAGE_WIDTH,
+  DEFAULT_PAGE_GAP,
+  documentTheme,
+  yrsRenderEnvFor,
+} from './DocxEditor/PagedEditor';
 
 // Plugin API types
 import type { RenderedDomContext } from '../plugin-api/types';
@@ -1245,12 +1253,21 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     {
       isCurrentLoad,
       onSession: canvasRenderer.recordSession,
-      onPreviewHost: (session, host) =>
-        pagedEditorRef.current?.prefetchWorkerFontRequirements(
+      onPreviewHost: (session, host) => {
+        if (!experimentalWorkerOpen) return;
+        prefetchWorkerFontRequirements(
+          canvasRenderer.fontRequirementsInWorker,
           session,
           host.document,
-          documentTheme(host.document, theme)
-        ),
+          DEFAULT_PAGE_GAP,
+          yrsRenderEnvFor(
+            documentTheme(host.document, theme),
+            host.document,
+            showHiddenText,
+            proposalRevisionPreview(session.getProposals())
+          )
+        );
+      },
       onHostDocument: acceptHostDocument,
       onError: failHostDocument,
       onReplicaError: (error, generation) => {

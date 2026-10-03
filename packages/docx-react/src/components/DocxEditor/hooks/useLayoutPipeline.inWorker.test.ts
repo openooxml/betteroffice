@@ -15,7 +15,7 @@ import { SupersededPreviewError } from '../internals/supersededPreview';
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, renderHook } = await import('@testing-library/react');
-const { useLayoutPipeline } = await import('./useLayoutPipeline');
+const { prefetchWorkerFontRequirements, useLayoutPipeline } = await import('./useLayoutPipeline');
 const restoreFrames: Array<() => void> = [];
 
 afterEach(() => {
@@ -75,6 +75,7 @@ async function opened({
   pendingReplica = false,
   ownsDocument = false,
   fontRequirementsInWorker = undefined as FontRequirementsInWorker | undefined,
+  pageGap = 24,
   onLayoutComputed = undefined as ((layout: Layout | null) => void) | undefined,
   onLayoutCommitted = undefined as ((layout: Layout | null) => void) | undefined,
   strictMode = false,
@@ -105,7 +106,7 @@ async function opened({
       session,
       experimentalWorkerOpen,
       renderEnv: renderEnv ?? ({} as YrsRenderEnv),
-      pageGap: 24,
+      pageGap,
       zoom: 1,
       residentMeasurementConfig: () => (doc.fontsReady ? doc.measurement : null),
       deferLayoutPass: () => false,
@@ -206,12 +207,15 @@ test.each([false, true])('cached page totals are requested only with worker-open
 
 test.each([false, true])('font requirements are prefetched only with worker-open=%s', async (experimentalWorkerOpen) => {
   const inputs: Array<{ session: YrsSession; input: string }> = [];
+  const fontRequirementsInWorker: FontRequirementsInWorker = (session, input) => {
+    inputs.push({ session, input });
+    return Promise.resolve('[]');
+  };
+  const pageGap = 36;
   const h = await opened({
     experimentalWorkerOpen,
-    fontRequirementsInWorker: (session, input) => {
-      inputs.push({ session, input });
-      return Promise.resolve('[]');
-    },
+    fontRequirementsInWorker,
+    pageGap,
   });
   const document = {
     package: {
@@ -229,7 +233,9 @@ test.each([false, true])('font requirements are prefetched only with worker-open
   };
   const { session } = fakeDocument();
   inputs.length = 0;
-  act(() => h.hook.result.current.prefetchFontRequirements(session, document, renderEnv));
+  if (experimentalWorkerOpen) {
+    prefetchWorkerFontRequirements(fontRequirementsInWorker, session, document, pageGap, renderEnv);
+  }
   expect(inputs).toHaveLength(experimentalWorkerOpen ? 1 : 0);
   h.hook.rerender({ session, document, renderEnv });
   await act(async () => h.hook.result.current.runLayoutPipeline());
@@ -245,10 +251,30 @@ test.each([false, true])('font requirements are prefetched only with worker-open
   await h.answer(1);
 });
 
+test.each(['rejection', 'throw', 'unavailable'])('font requirements prefetch swallows a worker %s', async (failure) => {
+  const { session } = fakeDocument();
+  const document = {
+    package: { document: { content: [], finalSectionProperties: {} } },
+  } as unknown as Document;
+  let requests = 0;
+  const fontRequirementsInWorker: FontRequirementsInWorker = () => {
+    requests += 1;
+    if (failure === 'unavailable') return null;
+    const error = new Error('prefetch failed');
+    if (failure === 'throw') throw error;
+    return Promise.reject(error);
+  };
+  expect(() => prefetchWorkerFontRequirements(
+    fontRequirementsInWorker, session, document, 24, {}
+  )).not.toThrow();
+  expect(requests).toBe(1);
+  await Promise.resolve();
+});
+
 test.each([[true, false], [true, true], [false, false], [false, true]])(
   'layouts publish before commit only with worker-open=%s (StrictMode=%s)',
   async (experimentalWorkerOpen, strictMode) => {
-    let committed: Layout | null = null;
+    let committed = null as Layout | null;
     const published: Array<{ layout: Layout | null; committed: Layout | null }> = [];
     const h = await opened({
       experimentalWorkerOpen,
@@ -305,7 +331,7 @@ test.each([false, true])('a pending effect never republishes an older layout (St
   const first = { pages: [] } as unknown as Layout;
   const full = { pages: [] } as unknown as Layout;
   let finish!: (computation: LayoutComputation | null) => unknown;
-  let committed: Layout | null = null;
+  let committed = null as Layout | null;
   const published: Array<{ layout: Layout | null; committed: Layout | null }> = [];
   const h = await opened({
     experimentalWorkerOpen: true,
@@ -342,10 +368,14 @@ test.each([false, true])('a pending effect never republishes an older layout (St
   expect(h.errors).toEqual([]);
 });
 
-test.each([[true, false], [true, true], [false, false], [false, true]])(
-  'a worker reply the pipeline no longer wants never reaches the renderer (replaced session=%s, StrictMode=%s)',
-  async (replacedSession, strictMode) => {
-    let committed: Layout | null = null;
+test.each([
+  [true, false, false], [true, true, false],
+  [false, false, true], [false, true, true],
+  [true, false, true], [true, true, true],
+])(
+  'a worker reply the pipeline no longer wants never reaches the renderer (replaced session=%s, StrictMode=%s, first reply applied=%s)',
+  async (replacedSession, strictMode, answeredBeforeReplacement) => {
+    let committed = null as Layout | null;
     const commits: Array<Layout | null> = [];
     const published: Array<{ layout: Layout | null; committed: Layout | null }> = [];
     const h = await opened({
@@ -362,17 +392,33 @@ test.each([[true, false], [true, true], [false, false], [false, true]])(
     await h.frame();
     let finish!: (computation: LayoutComputation | null) => void;
     const complete = new Promise<LayoutComputation | null>((resolve) => { finish = resolve; });
+    const completion = spyOn(complete, 'then');
     const first = { pages: [] } as unknown as Layout;
     const full = { pages: [] } as unknown as Layout;
     const latest = { pages: [] } as unknown as Layout;
+    if (answeredBeforeReplacement) {
+      await h.answer(1, { layout: first, notesConverged: true, complete });
+      expect(completion).toHaveBeenCalledTimes(1);
+      expect(h.hook.result.current.layout).toBe(first);
+      expect(committed).toBe(first);
+      expect(published.map(({ layout }) => layout)).toEqual([first]);
+      expect(commits).toEqual([first]);
+    }
     if (replacedSession) {
       const next = fakeDocument();
       next.doc.version = 7;
       h.hook.rerender({ session: next.session });
       act(() => h.hook.result.current.runLayoutPipeline());
       await h.answer(2, { layout: latest, notesConverged: true });
+      expect(h.hook.result.current.layout).toBe(latest);
+      expect(committed).toBe(latest);
+      expect(published.at(-1)!.layout).toBe(latest);
     }
-    await h.answer(1, { layout: first, notesConverged: true, complete });
+    if (!answeredBeforeReplacement) {
+      await h.answer(1, { layout: first, notesConverged: true, complete });
+      expect(completion).not.toHaveBeenCalled();
+    }
+    completion.mockRestore();
     if (!replacedSession) {
       expect(h.hook.result.current.layout).toBe(first);
       h.doc.version = 3;
@@ -384,7 +430,9 @@ test.each([[true, false], [true, true], [false, false], [false, true]])(
     expect(h.hook.result.current.layout).toBe(replacedSession ? latest : first);
     if (!replacedSession) await h.answer(2, { layout: latest, notesConverged: true });
     await h.frame();
-    const expected = replacedSession ? [latest] : [first, latest];
+    const expected = answeredBeforeReplacement ? [first, latest] : [latest];
+    expect(published.some(({ layout }) => layout === full)).toBe(false);
+    expect(commits).not.toContain(full);
     expect(published).toHaveLength(expected.length);
     expect(commits).toHaveLength(expected.length);
     expected.forEach((layout, index) => {

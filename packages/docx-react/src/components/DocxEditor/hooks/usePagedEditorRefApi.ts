@@ -84,9 +84,6 @@ interface RefApiInputs {
   yrsSessionRef: React.MutableRefObject<YrsSession | null>;
   yrsLocToDisplayPositionRef: React.MutableRefObject<(loc: YrsLoc) => number | null>;
   refreshWorkerLayoutRef: React.MutableRefObject<() => void>;
-  prefetchWorkerFontRequirementsRef: React.RefObject<
-    PagedEditorRef['prefetchWorkerFontRequirements'] | undefined
-  >;
   syncYrsInputStateRef: React.MutableRefObject<
     (
       docChanged: boolean,
@@ -141,7 +138,6 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     yrsLocToDisplayPositionRef,
     syncYrsInputStateRef,
     refreshWorkerLayoutRef,
-    prefetchWorkerFontRequirementsRef,
     applyYrsFormattingRef,
     applyYrsCommandRef,
     getYrsPositionProjectionRef,
@@ -254,8 +250,6 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     getLayoutRequest,
     relayout: runLayoutPipeline,
     refreshWorkerLayout: () => refreshWorkerLayoutRef.current(),
-    prefetchWorkerFontRequirements: (session, document, theme) =>
-      prefetchWorkerFontRequirementsRef.current?.(session, document, theme),
     scrollToPosition: (position) => {
       bumpInputEpochRef.current?.();
       scrollToPositionImpl(position);
@@ -360,7 +354,6 @@ export interface UsePagedEditorRefApiOptions {
   yrsSession: YrsSession | null;
   replicaReady?: boolean;
   refreshWorkerLayout?: () => void;
-  prefetchWorkerFontRequirements?: PagedEditorRef['prefetchWorkerFontRequirements'];
   experimentalWorkerOpen?: boolean;
   yrsLocToDisplayPosition: (loc: YrsLoc) => number | null;
   syncYrsInputState: (
@@ -395,7 +388,6 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     yrsSession,
     replicaReady = true,
     refreshWorkerLayout = runLayoutPipeline,
-    prefetchWorkerFontRequirements,
     experimentalWorkerOpen = false,
     yrsLocToDisplayPosition,
     syncYrsInputState,
@@ -418,7 +410,6 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   const yrsLocToDisplayPositionRef = useRef(yrsLocToDisplayPosition);
   const syncYrsInputStateRef = useRef(syncYrsInputState);
   const refreshWorkerLayoutRef = useRef(refreshWorkerLayout);
-  const prefetchWorkerFontRequirementsRef = useRef(prefetchWorkerFontRequirements);
   const applyYrsFormattingRef = useRef(applyYrsFormatting);
   const applyYrsCommandRef = useRef(applyYrsCommand);
   const getYrsPositionProjectionRef = useRef(getYrsPositionProjection);
@@ -429,7 +420,6 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   yrsLocToDisplayPositionRef.current = yrsLocToDisplayPosition;
   syncYrsInputStateRef.current = syncYrsInputState;
   refreshWorkerLayoutRef.current = refreshWorkerLayout;
-  prefetchWorkerFontRequirementsRef.current = prefetchWorkerFontRequirements;
   applyYrsFormattingRef.current = applyYrsFormatting;
   applyYrsCommandRef.current = applyYrsCommand;
   getYrsPositionProjectionRef.current = getYrsPositionProjection;
@@ -455,7 +445,6 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     yrsLocToDisplayPositionRef,
     syncYrsInputStateRef,
     refreshWorkerLayoutRef,
-    prefetchWorkerFontRequirementsRef,
     applyYrsFormattingRef,
     applyYrsCommandRef,
     getYrsPositionProjectionRef,

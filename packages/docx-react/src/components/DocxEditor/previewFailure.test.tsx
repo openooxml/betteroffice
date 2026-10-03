@@ -3,7 +3,8 @@ import { afterAll, afterEach, beforeAll, expect, mock, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
-import type { YrsSession } from '@betteroffice/docx/yrs';
+import type { Document, Theme } from '@betteroffice/docx/types/document';
+import type { YrsDocxHost, YrsSession } from '@betteroffice/docx/yrs';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -64,6 +65,7 @@ const displayList = await import('./hooks/useDisplayList');
 const { useCanvasRenderer } = displayList;
 let renderer: ReturnType<typeof useCanvasRenderer> | null = null;
 let workerOpen: ReturnType<typeof useCanvasRenderer>['openInWorker'] | null = null;
+let workerFontRequirements: ReturnType<typeof useCanvasRenderer>['fontRequirementsInWorker'] | null = null;
 let workerFailure: { error: Error; errorEngine: YrsSession } | null = null;
 let holdCanvasReplay: 'full' | 'preview' | 'ordinary' | null = null;
 interface PendingCanvasReplay {
@@ -85,6 +87,9 @@ mock.module('./hooks/useDisplayList', () => ({
     renderer = useCanvasRenderer(...args);
     if (renderer.displayList) shownPages = true;
     if (workerOpen) renderer = { ...renderer, openInWorker: workerOpen };
+    if (workerFontRequirements) {
+      renderer = { ...renderer, fontRequirementsInWorker: workerFontRequirements };
+    }
     if (workerFailure) return { ...renderer, ...workerFailure, status: 'error' as const };
     const error =
       failRender === 'full' && created >= 2
@@ -141,10 +146,12 @@ const { isPresented, onReplayFailed } = await import('./internals/layoutProvenan
 const coreSessionModule = await import('./hooks/useYrsCoreSession');
 const { useYrsCoreSession } = coreSessionModule;
 let replicaError: ((error: Error) => void) | null = null;
+let previewHost: NonNullable<Parameters<typeof useYrsCoreSession>[6]>['onPreviewHost'];
 mock.module('./hooks/useYrsCoreSession', () => ({
   ...coreSessionModule,
   useYrsCoreSession: (...args: Parameters<typeof useYrsCoreSession>) => {
     replicaError = (error) => args[6]?.onReplicaError?.(error, args[4]);
+    previewHost = args[6]?.onPreviewHost;
     return useYrsCoreSession(...args);
   },
 }));
@@ -179,6 +186,8 @@ beforeAll(async () => {
 afterEach(() => {
   cleanup();
   workerOpen = null;
+  workerFontRequirements = null;
+  previewHost = undefined;
   workerFailure = null;
   holdCanvasReplay = null;
   for (const replay of pendingCanvasReplays) replay.resolve();
@@ -228,6 +237,66 @@ async function currentCanvasReplay() {
   });
   return pendingCanvasReplays.find((replay) => replay.isCurrent())!;
 }
+
+test.each([false, true])('DocxEditor prefetches while loading before PagedEditor mounts only with worker-open=%s', (experimentalWorkerOpen) => {
+  created = 0;
+  fullSession = null;
+  shownPages = false;
+  fullOpen = 'open';
+  failRender = null;
+  const prefetch = mock((_session: YrsSession, _input: string) => Promise.resolve('[]'));
+  workerFontRequirements = prefetch;
+  const theme = { colorScheme: { accent1: '#123456' } } as unknown as Theme;
+  const document = {
+    package: {
+      document: { content: [], finalSectionProperties: {} },
+      settings: { defaultTabStop: 900 },
+      footnotes: [{ id: 1, content: [] }],
+    },
+  } as unknown as Document;
+  const session = {
+    getProposals: () => ({
+      version: '1', previewVersion: 1,
+      proposals: [{ state: 'accepted', revisionIds: ['revision-1'] }],
+    }),
+  } as unknown as YrsSession;
+  const host: YrsDocxHost = { document, referencedFonts: [], embeddedFonts: new Map() };
+  const view = render(
+    <DocxEditor
+      previewFirstPage
+      experimentalWorkerOpen={experimentalWorkerOpen}
+      documentBuffer={documentBuffer()}
+      theme={theme}
+      showHiddenText
+    />
+  );
+  try {
+    expect(view.container.querySelector('.docx-editor-loading')).not.toBeNull();
+    expect(view.container.querySelector('.paged-editor')).toBeNull();
+    expect(renderer!.canvasHostRef.current).toBeNull();
+    expect(previewHost).toBeDefined();
+    act(() => previewHost!(session, host));
+    expect(prefetch).toHaveBeenCalledTimes(experimentalWorkerOpen ? 1 : 0);
+    if (experimentalWorkerOpen) {
+      expect(prefetch.mock.calls[0]![0]).toBe(session);
+      expect(JSON.parse(prefetch.mock.calls[0]![1])).toMatchObject({
+        options: { pageGap: 24 },
+        regions: { settings: { defaultTabStop: 900 } },
+        notes: { contents: [{ id: 1, noteKind: 'footnote', height: 0 }] },
+        renderEnv: {
+          themeColors: { accent1: '#123456' },
+          defaultTabStopTwips: 900, numericIds: {}, showHiddenText: true, mediaTokens: true,
+          revisionPreview: { 'revision-1': 'accepted' },
+        },
+        cachedPageTotals: true,
+      });
+    }
+    expect(view.container.querySelector('.docx-editor-loading')).not.toBeNull();
+    expect(view.container.querySelector('.paged-editor')).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
 
 test('a load whose full open fails after its preview painted keeps none of its pages', async () => {
   created = 0;

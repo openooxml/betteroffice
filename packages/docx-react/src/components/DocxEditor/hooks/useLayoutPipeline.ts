@@ -140,11 +140,6 @@ export interface UseLayoutPipelineReturn {
    * `null` while it has no session or the fonts the document needs are not ready.
    */
   getLayoutRequest: () => string | null;
-  prefetchFontRequirements: (
-    session: YrsSession,
-    document: Document,
-    renderEnv: YrsRenderEnv
-  ) => void;
 }
 
 /** Whether `next` measures as `last` does and only adds font chains. */
@@ -178,6 +173,24 @@ function fontRequirementsInput(
   const request = buildResidentRegionLayoutRequest(document, pageGap, renderEnv);
   if (workerOpen) request.cachedPageTotals = true;
   return JSON.stringify(request);
+}
+
+export function prefetchWorkerFontRequirements(
+  fontRequirementsInWorker: FontRequirementsInWorker,
+  session: YrsSession,
+  document: Document,
+  pageGap: number,
+  renderEnv: YrsRenderEnv
+): void {
+  try {
+    const input = fontRequirementsInput(
+      document,
+      pageGap,
+      workerProposalRenderEnv(session, renderEnv),
+      true
+    );
+    void fontRequirementsInWorker(session, input)?.catch(() => {});
+  } catch {}
 }
 
 /** A pass may run in the worker only if every change it lays out asked for that. */
@@ -397,20 +410,6 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       'remote'
     );
   }, []);
-
-  const prefetchFontRequirements = useCallback(
-    (session: YrsSession, document: Document, renderEnv: YrsRenderEnv): void => {
-      if (!workerOpenEnabledRef.current || !fontRequirementsInWorkerRef.current) return;
-      const input = fontRequirementsInput(
-        document,
-        pageGap,
-        workerProposalRenderEnv(session, renderEnv),
-        true
-      );
-      void fontRequirementsInWorkerRef.current(session, input)?.catch(() => {});
-    },
-    [pageGap]
-  );
 
   const runLayoutPipeline = useCallback(
     (options?: { onHost?: boolean }) => {
@@ -987,6 +986,5 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     cancelPendingScrollRestore,
     navigationEpoch,
     getLayoutRequest,
-    prefetchFontRequirements,
   };
 }

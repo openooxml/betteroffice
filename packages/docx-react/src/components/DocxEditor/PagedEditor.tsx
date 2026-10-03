@@ -66,7 +66,6 @@ import type {
 } from '@betteroffice/docx/types/document';
 import type { WrapType } from '@betteroffice/docx/docx/wrapTypes';
 import {
-  proposalRevisionPreview,
   yrsLocToProjectedDisplayPosition,
   type YrsInlineFormatDelta,
   type YrsLoc,
@@ -143,7 +142,7 @@ import { partEditStory, type NoteEdit, type PartEdit } from './partEdit';
 import type { DocxEditorCollaborationOptions, DocxPointPosition } from './types';
 import { positionAtClientPoint } from './internals/pointPosition';
 
-export { DEFAULT_PAGE_WIDTH };
+export { DEFAULT_PAGE_WIDTH, DEFAULT_PAGE_GAP };
 
 function yrsDeltaForTextFormatting(formatting: TextFormatting | undefined): YrsInlineFormatDelta {
   if (!formatting) return {};
@@ -416,11 +415,6 @@ export interface PagedEditorRef {
   ): boolean;
   /** Schedules layout of the resident worker document. */
   refreshWorkerLayout(): void;
-  prefetchWorkerFontRequirements(
-    session: YrsSession,
-    document: Document,
-    theme: Theme | null | undefined
-  ): void;
   /** Apply a body-toolbar command through yrs. */
   applyYrsFormatting(action: FormattingAction): boolean;
   /** Apply a non-toolbar body command through yrs. */
@@ -488,7 +482,7 @@ export function documentTheme(
   return document?.package.theme || theme;
 }
 
-function yrsRenderEnvFor(
+export function yrsRenderEnvFor(
   theme: Theme | null | undefined,
   document: Document | null,
   showHiddenText: boolean,
@@ -614,8 +608,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const yrsInputRef = useRef<YrsInputRef>(null);
 
     const proposalPreview = useRevisionPreview(yrsCore.session);
-    const showHiddenTextRef = useRef(showHiddenText);
-    showHiddenTextRef.current = showHiddenText;
     const yrsRenderEnv = useMemo(
       () => yrsRenderEnvFor(_theme, document, showHiddenText, proposalPreview.revisionPreview),
       [
@@ -745,7 +737,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       cancelPendingScrollRestore,
       navigationEpoch,
       getLayoutRequest,
-      prefetchFontRequirements,
     } = useLayoutPipeline({
       onError,
       document,
@@ -858,19 +849,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const refreshWorkerLayout = useCallback(
       () => refreshYrsLayout('remote', true),
       [refreshYrsLayout]
-    );
-
-    const prefetchWorkerFontRequirements = useCallback(
-      (session: YrsSession, document: Document, theme: Theme | null | undefined): void => {
-        const env = yrsRenderEnvFor(
-          theme,
-          document,
-          showHiddenTextRef.current,
-          proposalRevisionPreview(session.getProposals())
-        );
-        prefetchFontRequirements(session, document, env);
-      },
-      [prefetchFontRequirements]
     );
 
     /**
@@ -1913,7 +1891,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       yrsSession: yrsCore.session,
       replicaReady: yrsCore.replicaReady,
       refreshWorkerLayout,
-      prefetchWorkerFontRequirements,
       experimentalWorkerOpen: yrsCore.experimentalWorkerOpen,
       yrsLocToDisplayPosition,
       syncYrsInputState: (docChanged, dirtyStory, options) =>
