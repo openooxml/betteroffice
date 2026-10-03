@@ -357,7 +357,7 @@ test('viewport frames match a cold rebuild after every resident edit and scroll'
             present(session, hosts, frame!, context);
           }
         } else {
-          const paragraphs = session.geometryReader.positionOutline('body')!.body!.paragraphs;
+          const paragraphs = session.geometryReader.positionOutline!('body')!.body!.paragraphs;
           const mergeTargets = paragraphs.filter(
             (paragraph, index) => index > 0 && paragraph.leading === 0
           );
