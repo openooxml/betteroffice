@@ -341,13 +341,16 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
       () => {
         const editor = latest.current.pagedEditorRef.current;
         const session = editor?.getYrsSession();
-        const proposalGeometry = session ? workerProposalAuthority(session)?.geometry() : null;
+        const authority = session ? workerProposalAuthority(session) : null;
+        const proposalGeometry = authority?.geometry();
         return editor && session
           ? {
               session,
               editor,
               presented: isPresented(dom.context.pagesContainer, dom.queries.displayList),
-              ...(proposalGeometry ? { proposalGeometry } : {}),
+              ...(authority && proposalGeometry
+                ? { proposalGeometry, anchorTarget: authority.anchorTarget }
+                : {}),
             }
           : null;
       },

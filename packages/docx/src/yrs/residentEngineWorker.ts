@@ -14,7 +14,11 @@ import {
   type DocxProposalRequest,
   type DocxProposalResult,
 } from './proposals';
-import { computeProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
+import {
+  computeAnchorTargetGeometry,
+  computeProposalGeometryMirror,
+  resolveNavigationTarget,
+} from './proposalGeometry';
 import { readResidentSearch } from './residentSearch';
 import { hasCachedYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import {
@@ -498,6 +502,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           request.read.story,
           request.read.paraId
         );
+        break;
+      case 'anchorTargets':
+        value = computeAnchorTargetGeometry(session.geometryReader, request.read.targets);
         break;
       case 'searchText':
         value = readResidentSearch(

@@ -22,7 +22,12 @@ import type {
   DocxParagraphIdentitySnapshot,
 } from './paragraphIdentity';
 import type { DocxReadParagraphsRequest, DocxReadParagraphsResult } from './edits';
-import type { ProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
+import type {
+  AnchorGeometryTarget,
+  ProposalGeometryMirror,
+  ProposalGeometryTarget,
+  resolveNavigationTarget,
+} from './proposalGeometry';
 
 /** @internal */
 export type ResidentProposalOperation =
@@ -49,7 +54,8 @@ export type ResidentDocumentRead =
   | { kind: 'readParagraphs'; request: DocxReadParagraphsRequest }
   | { kind: 'searchText'; query: string; caseSensitive: boolean; carry?: YrsStickyPosition | null }
   | { kind: 'stickyAnchors'; locs: YrsLoc[]; version: string }
-  | { kind: 'navigationTarget'; story: string; paraId: string };
+  | { kind: 'navigationTarget'; story: string; paraId: string }
+  | { kind: 'anchorTargets'; targets: Exclude<AnchorGeometryTarget, { kind: 'proposal' }>[] };
 
 /** @internal */
 export interface ResidentDocumentReadValues {
@@ -57,6 +63,7 @@ export interface ResidentDocumentReadValues {
   resolveParagraphAnchors: { results: DocxParagraphAnchorResult[] };
   readParagraphs: DocxReadParagraphsResult;
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
+  anchorTargets: ProposalGeometryTarget[];
   searchText: ResidentSearchResult;
   stickyAnchors: Array<YrsStickyPosition | null>;
 }
