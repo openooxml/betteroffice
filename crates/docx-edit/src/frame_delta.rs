@@ -418,7 +418,7 @@ pub fn encode_frame_delta_changes(
         snapshots[index] = page.snapshot;
     }
     for run in changes.shifts {
-        let salt = shift_range_salt(run.delta);
+        let salt = shift_range_salt(run.delta, epochs.frame_epoch);
         for old in &mut snapshots[run.start..run.end] {
             old.position_base += run.delta;
             if let Some(span) = &mut old.position_span {
@@ -677,7 +677,11 @@ fn encode_ops(
                     checked_u32(run.start, "page index")?,
                 );
                 patch_u64(&mut records, record + 8, *page_id);
-                patch_u64(&mut records, record + 16, shift_range_salt(run.delta));
+                patch_u64(
+                    &mut records,
+                    record + 16,
+                    shift_range_salt(run.delta, epochs.frame_epoch),
+                );
                 patch_u32(
                     &mut records,
                     record + 24,
@@ -1753,9 +1757,13 @@ fn mix(state: u64, word: u64) -> u64 {
     state ^ (state >> 31)
 }
 
-/// Computes the nonzero fingerprint salt shared by every page in a shift range.
-fn shift_range_salt(delta: i64) -> u64 {
-    let salt = mix(mix(FNV_OFFSET, 0x5348_4946_545f_5247), delta as u64);
+/// The nonzero fingerprint salt of a shift range, distinct per frame so that
+/// shifts which cancel out in position never cancel out in fingerprint.
+fn shift_range_salt(delta: i64, frame_epoch: u64) -> u64 {
+    let salt = mix(
+        mix(mix(FNV_OFFSET, 0x5348_4946_545f_5247), delta as u64),
+        frame_epoch,
+    );
     if salt == 0 { 1 } else { salt }
 }
 
@@ -2461,7 +2469,7 @@ mod tests {
                 assert_eq!(bytes[record], PAGE_OP_SHIFT_RANGE);
                 assert_eq!(u32_at(&bytes, record + 4), 0);
                 assert_eq!(u64_at(&bytes, record + 8), previous[0].page_id);
-                assert_eq!(u64_at(&bytes, record + 16), shift_range_salt(delta));
+                assert_eq!(u64_at(&bytes, record + 16), shift_range_salt(delta, epoch));
                 assert_eq!(u32_at(&bytes, record + 24) as usize, count);
                 assert_eq!(
                     i64::from_le_bytes(bytes[record + 32..record + 40].try_into().unwrap()),
@@ -2484,7 +2492,7 @@ mod tests {
                 for (index, snapshot) in snapshots.iter().enumerate() {
                     assert_eq!(
                         snapshot.fingerprint,
-                        previous[index].fingerprint ^ shift_range_salt(delta)
+                        previous[index].fingerprint ^ shift_range_salt(delta, epoch)
                     );
                     assert_eq!(
                         snapshot.fingerprint,
@@ -3390,6 +3398,17 @@ mod tests {
         .unwrap();
         list.pages[0].position_span = span;
         list
+    }
+
+    /// Range shifts that cancel out in position never restore an earlier fingerprint.
+    #[test]
+    fn cancelling_range_shifts_never_restore_an_earlier_fingerprint() {
+        let mut fingerprint = 0x1234_u64;
+        let mut seen = HashSet::from([fingerprint]);
+        for (epoch, delta) in [(2, 1), (3, 1), (4, -1), (5, -1), (6, 1), (7, -1)] {
+            fingerprint ^= shift_range_salt(delta, epoch);
+            assert!(seen.insert(fingerprint), "frame {epoch}");
+        }
     }
 
     fn placeholder_epochs(frame_epoch: u64) -> FrameEpochs {

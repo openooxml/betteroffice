@@ -2057,6 +2057,11 @@ impl EngineSession {
         } else {
             false
         };
+        let length_before = if plain_text_delete {
+            Some(self.doc.story_len(&range.story)?)
+        } else {
+            None
+        };
         let mut attrs = None;
         let ctx = crate::EditCtx::local("", "");
         let receipt = match text {
@@ -2080,7 +2085,12 @@ impl EngineSession {
                 ),
                 None if plain_text_delete
                     && receipt.new_para_ids.is_empty()
-                    && receipt.revision_ids.is_empty() =>
+                    && receipt.revision_ids.is_empty()
+                    && length_before
+                        .zip(self.doc.story_len(&range.story).ok())
+                        .is_some_and(|(before, after)| {
+                            before.checked_sub(after) == Some(range.end - range.start)
+                        }) =>
                 {
                     self.doc.advance_paragraph_index_after_text_delete(
                         &range.story,
@@ -10758,6 +10768,54 @@ mod tests {
                     .get("body", after)
                     .is_none()
             );
+        }
+    }
+
+    /// A delete that splits a surrogate pair keeps the paragraph index exact.
+    #[test]
+    fn a_delete_inside_a_surrogate_pair_keeps_the_paragraph_index_exact() {
+        let engine = EngineSession::new(223);
+        engine.set_local_lowering(true);
+        let ctx = crate::EditCtx::local("", "");
+        engine
+            .doc()
+            .create_story("body", "A\u{1F600}BC", "Normal", "left")
+            .unwrap();
+        engine
+            .doc()
+            .split_paragraph(&ctx, crate::Position::new("body", 4), None)
+            .unwrap();
+        engine.doc().paragraph_index("body").unwrap();
+        engine
+            .edit_resident_text(crate::StoryRange::new("body", 1, 2), None, true)
+            .unwrap();
+        let after = engine.doc().committed_epoch();
+        let cached = engine
+            .doc()
+            .paragraph_indexes
+            .lock()
+            .unwrap()
+            .take("body", after);
+        let fresh = engine.doc().paragraph_index("body").unwrap();
+        if let Some(cached) = cached {
+            let len = engine.doc().story_len("body").unwrap();
+            for index in 0..=len {
+                let geometry = |entry: Option<&crate::segments::ParaEntry>| {
+                    entry.map(|entry| {
+                        (
+                            entry.para_id.clone(),
+                            entry.start,
+                            entry.pilcrow,
+                            entry.node_start,
+                        )
+                    })
+                };
+                assert_eq!(
+                    geometry(cached.para_at(index)),
+                    geometry(fresh.para_at(index)),
+                    "index {index}"
+                );
+            }
         }
     }
 
