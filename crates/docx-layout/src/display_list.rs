@@ -11216,10 +11216,87 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_observed(
     build: &dyn Fn(usize) -> bool,
     observe_phase: &mut impl FnMut(),
 ) -> Result<bool, String> {
+    update_resident_display_list_incremental_partial_with_fonts_shifts(
+        pagination,
+        layout,
+        fonts,
+        resident,
+        previous,
+        rebuilt_page_start,
+        rebuilt_page_end,
+        extra_pages,
+        position_deltas,
+        build,
+        observe_phase,
+    )
+    .map(|result| result.is_some())
+}
+
+/// A contiguous range of retained pages shifted by one position delta.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DisplayShiftRun {
+    pub start: usize,
+    pub end: usize,
+    pub delta: i64,
+}
+
+/// Position changes on retained pages after an incremental display update.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct IncrementalDisplayShifts {
+    pub runs: Vec<DisplayShiftRun>,
+    pub mixed: Vec<usize>,
+}
+
+impl IncrementalDisplayShifts {
+    /// Appends a page's shift, coalescing adjacent uniform and inert pages.
+    fn push(&mut self, index: usize, shift: DisplayShift) {
+        match shift {
+            DisplayShift::Uniform(delta) => {
+                if let Some(last) = self.runs.last_mut()
+                    && last.end == index
+                    && last.delta == delta
+                {
+                    last.end = index + 1;
+                } else {
+                    self.runs.push(DisplayShiftRun {
+                        start: index,
+                        end: index + 1,
+                        delta,
+                    });
+                }
+            }
+            DisplayShift::Inert => {
+                if let Some(last) = self.runs.last_mut()
+                    && last.end == index
+                {
+                    last.end = index + 1;
+                }
+            }
+            DisplayShift::Mixed => self.mixed.push(index),
+            DisplayShift::Unchanged => {}
+        }
+    }
+}
+
+/// Updates selected pages and reports position shifts on retained suffix pages.
+#[allow(clippy::too_many_arguments)]
+pub fn update_resident_display_list_incremental_partial_with_fonts_shifts(
+    pagination: &crate::types::Input,
+    layout: &crate::types::Layout,
+    fonts: &ooxml_text::FontStore,
+    resident: &mut ResidentDisplayInput,
+    previous: &mut DisplayList,
+    rebuilt_page_start: usize,
+    rebuilt_page_end: usize,
+    extra_pages: &[usize],
+    position_deltas: &HashMap<String, i64>,
+    build: &dyn Fn(usize) -> bool,
+    observe_phase: &mut impl FnMut(),
+) -> Result<Option<IncrementalDisplayShifts>, String> {
     if previous.pages.len() != layout.pages.len()
         || resident.input.layout.pages.len() != layout.pages.len()
     {
-        return Ok(false);
+        return Ok(None);
     }
     if rebuilt_page_start > rebuilt_page_end
         || rebuilt_page_end > layout.pages.len()
@@ -11264,24 +11341,26 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_observed(
             );
         }
     }
+    let mut shifts = IncrementalDisplayShifts::default();
     for (page_index, page) in previous.pages.iter_mut().enumerate().skip(rebuilt_page_end) {
         if selected.contains(&page_index) {
             continue;
         }
         page.page_index = page_index as u64;
-        shift_page_body_positions(page, position_deltas);
+        let body = shift_page_body_positions(page, position_deltas);
         // The retained layout page may predate this edit, but a converged
         // page holds the same blocks, which is all the shift reads.
-        shift_unbuilt_span(
+        let span = shift_unbuilt_span(
             page,
             resident.input.layout.pages.get(page_index),
             position_deltas,
         );
+        shifts.push(page_index, body.combine(span));
     }
     if built.len() < selected.len() {
         prune_resident_display_measured(resident, previous);
     }
-    Ok(true)
+    Ok(Some(shifts))
 }
 
 fn refresh_resident_display_pages(
@@ -11407,14 +11486,44 @@ fn measured_block_key(measured: &MeasuredBlockIn) -> Option<String> {
 }
 
 fn fragment_block_key(fragment: &FragmentIn) -> Option<String> {
-    match fragment {
-        FragmentIn::Paragraph(value) => Some(block_key(&value.block_id)),
-        FragmentIn::Table(value) => Some(block_key(&value.block_id)),
-        FragmentIn::Image(value) => Some(block_key(&value.block_id)),
-        FragmentIn::TextBox(value) => Some(block_key(&value.block_id)),
-        FragmentIn::Shape(value) => Some(block_key(&value.block_id)),
-        FragmentIn::Chart(value) => Some(block_key(&value.block_id)),
-        FragmentIn::Unsupported => None,
+    fragment_block_key_ref(fragment).map(Cow::into_owned)
+}
+
+/// Borrows string block ids while preserving their canonical key text.
+fn fragment_block_key_ref(fragment: &FragmentIn) -> Option<Cow<'_, str>> {
+    let id = match fragment {
+        FragmentIn::Paragraph(value) => &value.block_id,
+        FragmentIn::Table(value) => &value.block_id,
+        FragmentIn::Image(value) => &value.block_id,
+        FragmentIn::TextBox(value) => &value.block_id,
+        FragmentIn::Shape(value) => &value.block_id,
+        FragmentIn::Chart(value) => &value.block_id,
+        FragmentIn::Unsupported => return None,
+    };
+    Some(match id {
+        Value::String(value) => Cow::Borrowed(value),
+        other => Cow::Owned(other.to_string()),
+    })
+}
+
+/// Classifies effective position changes without revisiting primitives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DisplayShift {
+    Inert,
+    Uniform(i64),
+    Unchanged,
+    Mixed,
+}
+
+impl DisplayShift {
+    /// Combines the movements of two positioned parts of a page.
+    fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Inert, shift) | (shift, Self::Inert) => shift,
+            (Self::Uniform(left), Self::Uniform(right)) if left == right => Self::Uniform(left),
+            (Self::Unchanged, Self::Unchanged) => Self::Unchanged,
+            _ => Self::Mixed,
+        }
     }
 }
 
@@ -11423,26 +11532,37 @@ fn shift_unbuilt_span(
     page: &mut DisplayPage,
     layout_page: Option<&PageIn>,
     deltas: &HashMap<String, i64>,
-) {
+) -> DisplayShift {
     let Some(span) = &mut page.position_span else {
-        return;
+        return DisplayShift::Inert;
     };
     let delta = layout_page
-        .and_then(|layout_page| layout_page.fragments.iter().find_map(fragment_block_key))
-        .and_then(|key| deltas.get(&key));
-    if let Some(delta) = delta {
+        .and_then(|layout_page| {
+            layout_page
+                .fragments
+                .iter()
+                .find_map(fragment_block_key_ref)
+        })
+        .and_then(|key| deltas.get(key.as_ref()))
+        .filter(|&&delta| delta != 0);
+    if let Some(&delta) = delta {
         span[0] += delta;
         span[1] += delta;
+        DisplayShift::Uniform(delta)
+    } else {
+        DisplayShift::Unchanged
     }
 }
 
-fn shift_page_body_positions(page: &mut DisplayPage, deltas: &HashMap<String, i64>) {
-    if deltas.is_empty() {
-        return;
-    }
+/// Shifts body positions and classifies the deltas applied to positioned primitives.
+fn shift_page_body_positions(
+    page: &mut DisplayPage,
+    deltas: &HashMap<String, i64>,
+) -> DisplayShift {
     // Looked up by reference: a clone per primitive is an allocation per
     // primitive on every page after the edit.
     let mut id_key = String::new();
+    let mut shift = DisplayShift::Inert;
     for primitive in &mut page.primitives {
         let attrs = match primitive {
             Primitive::Text(value) => &mut value.attrs,
@@ -11453,19 +11573,35 @@ fn shift_page_body_positions(page: &mut DisplayPage, deltas: &HashMap<String, i6
             Primitive::Shape(value) => &mut value.attrs,
             Primitive::Decoration(value) => &mut value.attrs,
         };
+        if attrs.doc_start.is_none()
+            && attrs.doc_end.is_none()
+            && attrs.fragment_doc_start.is_none()
+            && attrs.fragment_doc_end.is_none()
+            && attrs.inline_sdt_widget.is_none()
+        {
+            continue;
+        }
+        if deltas.is_empty() {
+            return DisplayShift::Unchanged;
+        }
         let key = match (&attrs.block_key, &attrs.block_id) {
-            (Some(key), _) => key.as_str(),
+            (Some(key), _) => Some(key.as_str()),
             (None, Some(id)) => {
                 id_key.clear();
                 std::fmt::Write::write_fmt(&mut id_key, format_args!("{id}"))
                     .expect("writing to a String cannot fail");
-                id_key.as_str()
+                Some(id_key.as_str())
             }
-            (None, None) => continue,
+            (None, None) => None,
         };
-        let Some(&delta) = deltas.get(key) else {
+        let Some(&delta) = key
+            .and_then(|key| deltas.get(key))
+            .filter(|&&delta| delta != 0)
+        else {
+            shift = shift.combine(DisplayShift::Unchanged);
             continue;
         };
+        shift = shift.combine(DisplayShift::Uniform(delta));
         attrs.doc_start = attrs.doc_start.map(|value| value + delta);
         attrs.doc_end = attrs.doc_end.map(|value| value + delta);
         attrs.fragment_doc_start = attrs.fragment_doc_start.map(|value| value + delta);
@@ -11474,6 +11610,7 @@ fn shift_page_body_positions(page: &mut DisplayPage, deltas: &HashMap<String, i6
             widget.pos += delta;
         }
     }
+    shift
 }
 
 /// Rewrites losslessly-integral JSON floats as integers.
@@ -12173,6 +12310,198 @@ mod tests {
                 (Some(50), None, None),
             ]
         );
+    }
+
+    /// Positioned primitives classify uniformly only when all effective deltas agree.
+    #[test]
+    fn body_position_shifts_classify_uniform_mixed_unchanged_and_inert_pages() {
+        let template: Primitive = serde_json::from_value(serde_json::json!({
+            "kind": "text", "text": "a", "x": 0, "baselineY": 10, "width": 5,
+            "font": "10px serif", "color": "#000"
+        }))
+        .unwrap();
+        let positioned = |key: Option<&str>, start| DocAttrs {
+            block_key: key.map(str::to_owned),
+            doc_start: Some(start),
+            ..Default::default()
+        };
+        let widget: DocAttrs = serde_json::from_value(serde_json::json!({
+            "blockKey": "a",
+            "inlineSdtWidget": {"kind": "checkbox", "groupId": "widget", "pos": 7}
+        }))
+        .unwrap();
+        let deltas = HashMap::from([("a".to_owned(), 3), ("b".to_owned(), -2)]);
+        for (attrs, expected) in [
+            (
+                vec![positioned(Some("a"), 10), widget],
+                DisplayShift::Uniform(3),
+            ),
+            (
+                vec![positioned(Some("a"), 10), positioned(None, 20)],
+                DisplayShift::Mixed,
+            ),
+            (
+                vec![positioned(Some("a"), 10), positioned(Some("b"), 20)],
+                DisplayShift::Mixed,
+            ),
+            (
+                vec![positioned(Some("a"), 10), positioned(Some("absent"), 20)],
+                DisplayShift::Mixed,
+            ),
+            (
+                vec![positioned(Some("absent"), 10), positioned(None, 20)],
+                DisplayShift::Unchanged,
+            ),
+            (vec![DocAttrs::default()], DisplayShift::Inert),
+            (vec![], DisplayShift::Inert),
+        ] {
+            let mut page: DisplayPage = serde_json::from_value(serde_json::json!({
+                "pageIndex": 0, "width": 816, "height": 1056, "primitives": []
+            }))
+            .unwrap();
+            for attrs in attrs {
+                let mut primitive = template.clone();
+                let Primitive::Text(value) = &mut primitive else {
+                    unreachable!()
+                };
+                value.attrs = attrs;
+                page.primitives.push(primitive);
+            }
+            assert_eq!(shift_page_body_positions(&mut page, &deltas), expected);
+            assert_eq!(
+                shift_page_body_positions(&mut page, &HashMap::new()),
+                if expected == DisplayShift::Inert {
+                    DisplayShift::Inert
+                } else {
+                    DisplayShift::Unchanged
+                }
+            );
+        }
+    }
+
+    /// Span shifts borrow string ids and combine with body movements exactly.
+    #[test]
+    fn unbuilt_span_shifts_classify_and_preserve_block_key_text() {
+        let mut page: DisplayPage = serde_json::from_value(serde_json::json!({
+            "pageIndex": 0, "width": 816, "height": 1056, "primitives": [], "unbuilt": true
+        }))
+        .unwrap();
+        let deltas = HashMap::from([("a".to_owned(), 3)]);
+        assert_eq!(
+            shift_unbuilt_span(&mut page, None, &deltas),
+            DisplayShift::Inert
+        );
+        page.position_span = Some([10, 20]);
+        assert_eq!(
+            shift_unbuilt_span(&mut page, None, &deltas),
+            DisplayShift::Unchanged
+        );
+        let layout: PageIn = serde_json::from_value(serde_json::json!({
+            "size": {"width": 816, "height": 1056},
+            "fragments": [{"kind": "paragraph", "blockId": "a"}]
+        }))
+        .unwrap();
+        assert!(matches!(
+            fragment_block_key_ref(&layout.fragments[0]),
+            Some(Cow::Borrowed("a"))
+        ));
+        assert_eq!(
+            shift_unbuilt_span(&mut page, Some(&layout), &deltas),
+            DisplayShift::Uniform(3)
+        );
+        assert_eq!(page.position_span, Some([13, 23]));
+        for id in [
+            serde_json::json!(7),
+            serde_json::json!(7.5),
+            serde_json::json!(-0.0),
+        ] {
+            let fragment: FragmentIn = serde_json::from_value(serde_json::json!({
+                "kind": "paragraph", "blockId": id
+            }))
+            .unwrap();
+            assert_eq!(
+                fragment_block_key_ref(&fragment).unwrap().as_ref(),
+                block_key(&id)
+            );
+        }
+        assert_eq!(
+            DisplayShift::Inert.combine(DisplayShift::Uniform(3)),
+            DisplayShift::Uniform(3)
+        );
+        assert_eq!(
+            DisplayShift::Uniform(3).combine(DisplayShift::Inert),
+            DisplayShift::Uniform(3)
+        );
+        assert_eq!(
+            DisplayShift::Uniform(3).combine(DisplayShift::Uniform(3)),
+            DisplayShift::Uniform(3)
+        );
+        assert_eq!(
+            DisplayShift::Uniform(3).combine(DisplayShift::Uniform(4)),
+            DisplayShift::Mixed
+        );
+        assert_eq!(
+            DisplayShift::Uniform(3).combine(DisplayShift::Unchanged),
+            DisplayShift::Mixed
+        );
+        assert_eq!(
+            DisplayShift::Unchanged.combine(DisplayShift::Unchanged),
+            DisplayShift::Unchanged
+        );
+    }
+
+    /// Runs join equal adjacent shifts and inert extensions while leaving gaps separate.
+    #[test]
+    fn display_shift_runs_coalesce_and_split() {
+        let mut shifts = IncrementalDisplayShifts::default();
+        for (index, shift) in [
+            (0, DisplayShift::Inert),
+            (1, DisplayShift::Uniform(3)),
+            (2, DisplayShift::Uniform(3)),
+            (3, DisplayShift::Inert),
+            (4, DisplayShift::Uniform(3)),
+            (5, DisplayShift::Uniform(-2)),
+            (6, DisplayShift::Unchanged),
+            (7, DisplayShift::Inert),
+            (8, DisplayShift::Uniform(-2)),
+            (9, DisplayShift::Mixed),
+            (10, DisplayShift::Inert),
+            (11, DisplayShift::Uniform(-2)),
+            (13, DisplayShift::Uniform(-2)),
+        ] {
+            shifts.push(index, shift);
+        }
+        assert_eq!(
+            shifts.runs,
+            [
+                DisplayShiftRun {
+                    start: 1,
+                    end: 5,
+                    delta: 3
+                },
+                DisplayShiftRun {
+                    start: 5,
+                    end: 6,
+                    delta: -2
+                },
+                DisplayShiftRun {
+                    start: 8,
+                    end: 9,
+                    delta: -2
+                },
+                DisplayShiftRun {
+                    start: 11,
+                    end: 12,
+                    delta: -2
+                },
+                DisplayShiftRun {
+                    start: 13,
+                    end: 14,
+                    delta: -2
+                },
+            ]
+        );
+        assert_eq!(shifts.mixed, [9]);
     }
 
     #[test]

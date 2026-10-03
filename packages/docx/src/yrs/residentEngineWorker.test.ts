@@ -48,7 +48,7 @@ beforeAll(async () => {
       'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; } }',
     '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.memories;',
     '../layout/render/frameDelta': `
-      export { applyFrameDeltaOwned } from ${JSON.stringify(frameDelta)};
+      export { applyFrameDeltaOwned, retainedFramePageById } from ${JSON.stringify(frameDelta)};
       export const decodeFrameDelta = () => testHarness.delta;
     `,
     '../layout/render/canvasBackend': `

@@ -39,8 +39,8 @@ use crate::bridge::{
 };
 use crate::fingerprint::Fingerprint;
 use crate::frame_delta::{
-    FrameEpochs, FramePageSnapshot, encode_frame_delta, encode_frame_delta_incremental,
-    encode_frame_delta_pages,
+    DisplayChanges, FrameEpochs, FramePageSnapshot, PageShiftRun, encode_frame_delta,
+    encode_frame_delta_changes,
 };
 use crate::structured::pages::{self, PageLimits};
 use crate::structured::{
@@ -4434,7 +4434,7 @@ impl EngineSession {
         observe_display_phase: &mut impl FnMut(),
     ) -> Result<Vec<u8>, String> {
         let extras_fingerprint = hash_bytes(extras_json.as_bytes());
-        let (incremental_build, rebuilt_display_pages, rebuilt_pages) = {
+        let (incremental_build, rebuilt_display_pages, rebuilt_pages, shifts) = {
             let pagination = self.pagination.borrow();
             let input = pagination
                 .input
@@ -4506,13 +4506,13 @@ impl EngineSession {
                 let rebuilt_pages: HashSet<usize> =
                     first.clone().chain(note_pages.iter().copied()).collect();
                 let build = window_build_pages(&display, layout, &rebuilt_pages, caret);
-                let incremental = if let DisplayState {
+                let shifts = if let DisplayState {
                     list: Some(previous),
                     resident_input: Some(resident_input),
                     ..
                 } = &mut *display
                 {
-                    docx_layout::update_resident_display_list_incremental_partial_observed(
+                    docx_layout::update_resident_display_list_incremental_partial_shifts_observed(
                         input,
                         layout,
                         resident_input,
@@ -4525,8 +4525,9 @@ impl EngineSession {
                         observe_display_phase,
                     )?
                 } else {
-                    false
+                    None
                 };
+                let incremental = shifts.is_some();
                 if !incremental {
                     let build = windowed_full_build_pages(&display, layout, caret);
                     let (resident_input, list) =
@@ -4548,7 +4549,12 @@ impl EngineSession {
                 } else {
                     rebuilt_pages.len()
                 };
-                (incremental, rebuilt_display_pages, rebuilt_pages)
+                (
+                    incremental,
+                    rebuilt_display_pages,
+                    rebuilt_pages,
+                    shifts.unwrap_or_default(),
+                )
             } else {
                 let build = windowed_full_build_pages(&display, layout, caret);
                 let (resident_input, list) =
@@ -4561,7 +4567,12 @@ impl EngineSession {
                     )?;
                 display.resident_input = Some(resident_input);
                 display.list = Some(list);
-                (false, layout.pages.len(), HashSet::new())
+                (
+                    false,
+                    layout.pages.len(),
+                    HashSet::new(),
+                    docx_layout::display_list::IncrementalDisplayShifts::default(),
+                )
             }
         };
         observe_display_phase();
@@ -4585,11 +4596,9 @@ impl EngineSession {
             || expected_frame_epoch != binary_frame_epoch
             || binary_frame_epoch == 0;
         let layout_epoch = self.pagination.borrow().layout_epoch;
-        let mut next_page_id = display.next_page_id;
         // Split borrows: the encoder reads the retained list and the previous
         // snapshots in place — no per-frame deep clone of the snapshot set.
         let display = &mut *display;
-        let previous_pages = &display.pages;
         let list = display
             .list
             .as_ref()
@@ -4600,20 +4609,39 @@ impl EngineSession {
             frame_epoch,
             base_frame_epoch: binary_frame_epoch,
         };
-        let (bytes, pages) =
-            if incremental_build && !full && previous_pages.len() == list.pages.len() {
-                encode_frame_delta_incremental(
-                    list,
-                    previous_pages,
-                    epochs,
-                    &mut next_page_id,
-                    &rebuilt_pages,
-                )?
-            } else {
-                encode_frame_delta(list, previous_pages, epochs, full, &mut next_page_id)?
-            };
-        display.pages = pages;
-        display.next_page_id = next_page_id;
+        let bytes = if incremental_build && !full && display.pages.len() == list.pages.len() {
+            let mut rebuilt: Vec<_> = rebuilt_pages.into_iter().collect();
+            rebuilt.sort_unstable();
+            let runs: Vec<_> = shifts
+                .runs
+                .iter()
+                .map(|run| PageShiftRun {
+                    start: run.start,
+                    end: run.end,
+                    delta: run.delta,
+                })
+                .collect();
+            encode_frame_delta_changes(
+                list,
+                &mut display.pages,
+                epochs,
+                DisplayChanges {
+                    rebuilt: &rebuilt,
+                    repositioned: &shifts.mixed,
+                    shifts: &runs,
+                },
+            )?
+        } else {
+            for snapshot in &mut display.pages {
+                snapshot.materialize_positions();
+            }
+            let mut next_page_id = display.next_page_id;
+            let (bytes, pages) =
+                encode_frame_delta(list, &display.pages, epochs, full, &mut next_page_id)?;
+            display.pages = pages;
+            display.next_page_id = next_page_id;
+            bytes
+        };
         display.binary_frame_epoch = frame_epoch;
         display.encoded_doc_epoch = epochs.doc_epoch;
         display.encoded_layout_epoch = epochs.layout_epoch;
@@ -4721,7 +4749,6 @@ impl EngineSession {
         changed_pages: &[usize],
         expected_frame_epoch: u64,
     ) -> Result<Vec<u8>, String> {
-        let rebuilt: HashSet<usize> = changed_pages.iter().copied().collect();
         let mut display = self.display.borrow_mut();
         display.frame_epoch = display
             .frame_epoch
@@ -4738,21 +4765,33 @@ impl EngineSession {
             frame_epoch,
             base_frame_epoch: binary_frame_epoch,
         };
-        let mut next_page_id = display.next_page_id;
         let display = &mut *display;
         let list = display
             .list
             .as_ref()
             .expect("display list built before FrameDelta encoding");
-        let (bytes, snapshots) = if !full && display.pages.len() == list.pages.len() {
-            encode_frame_delta_pages(list, &display.pages, epochs, &mut next_page_id, &|index| {
-                rebuilt.contains(&index)
-            })?
+        let bytes = if !full && display.pages.len() == list.pages.len() {
+            encode_frame_delta_changes(
+                list,
+                &mut display.pages,
+                epochs,
+                DisplayChanges {
+                    rebuilt: changed_pages,
+                    repositioned: &[],
+                    shifts: &[],
+                },
+            )?
         } else {
-            encode_frame_delta(list, &display.pages, epochs, full, &mut next_page_id)?
+            for snapshot in &mut display.pages {
+                snapshot.materialize_positions();
+            }
+            let mut next_page_id = display.next_page_id;
+            let (bytes, snapshots) =
+                encode_frame_delta(list, &display.pages, epochs, full, &mut next_page_id)?;
+            display.pages = snapshots;
+            display.next_page_id = next_page_id;
+            bytes
         };
-        display.pages = snapshots;
-        display.next_page_id = next_page_id;
         display.binary_frame_epoch = frame_epoch;
         display.encoded_doc_epoch = epochs.doc_epoch;
         display.encoded_layout_epoch = epochs.layout_epoch;
@@ -10503,6 +10542,104 @@ mod tests {
         .unwrap()
     }
 
+    /// Windowed edits shift a suffix once and later page builds encode only requested pages.
+    #[test]
+    fn windowed_edit_range_shifts_decode_to_full_build_and_keep_page_builds_scoped() {
+        let (engine, extras) = paged_filler_engine(218, 48);
+        let full = engine.build_display_list_frame(&extras, 0).unwrap();
+        let mut retained = HashMap::new();
+        let initial = crate::frame_delta::apply_placeholder_test_frame(&full, &mut retained);
+        assert!(initial.pages.len() >= 4);
+        assert_eq!(initial, full_display_build(&engine, &extras));
+        let next_page_id = engine.display.borrow().next_page_id;
+        engine.set_display_window(Some(0..1));
+        engine.set_windowed_incremental_builds(true);
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 3),
+                "x",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let bytes = engine.apply_and_layout("body", epoch).unwrap();
+        let operation_count = u32::from_le_bytes(bytes[52..56].try_into().unwrap()) as usize;
+        let ranges: Vec<_> = (0..operation_count)
+            .map(|op| crate::frame_delta::FRAME_HEADER_LEN + op * crate::frame_delta::PAGE_OP_LEN)
+            .filter(|&record| bytes[record] == crate::frame_delta::PAGE_OP_SHIFT_RANGE)
+            .collect();
+        assert_eq!(ranges.len(), 1);
+        let record = ranges[0];
+        let start = u32::from_le_bytes(bytes[record + 4..record + 8].try_into().unwrap()) as usize;
+        let count =
+            u32::from_le_bytes(bytes[record + 24..record + 28].try_into().unwrap()) as usize;
+        assert!(start > 0 && start < initial.pages.len());
+        assert_eq!(start + count, initial.pages.len());
+        assert_eq!(
+            i64::from_le_bytes(bytes[record + 32..record + 40].try_into().unwrap()),
+            1
+        );
+        let expected = full_display_build(&engine, &extras);
+        assert_eq!(
+            crate::frame_delta::apply_placeholder_test_frame(&bytes, &mut retained),
+            expected
+        );
+        assert_eq!(engine.with_display_list(Clone::clone).unwrap(), expected);
+        assert_eq!(engine.display.borrow().next_page_id, next_page_id);
+
+        let last = initial.pages.len() - 1;
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let release = engine.release_display_pages_frame(&[last], epoch).unwrap();
+        crate::frame_delta::apply_placeholder_test_frame(&release, &mut retained);
+        let mut before_build = engine.display.borrow().pages.clone();
+        for snapshot in &mut before_build {
+            snapshot.materialize_positions();
+        }
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let built = engine
+            .build_display_pages_frame(&[last, last, 0], epoch)
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(built[52..56].try_into().unwrap()), 1);
+        assert_eq!(
+            built[crate::frame_delta::FRAME_HEADER_LEN],
+            crate::frame_delta::PAGE_OP_UPSERT
+        );
+        assert_eq!(
+            u32::from_le_bytes(
+                built[crate::frame_delta::FRAME_HEADER_LEN + 4
+                    ..crate::frame_delta::FRAME_HEADER_LEN + 8]
+                    .try_into()
+                    .unwrap()
+            ) as usize,
+            last
+        );
+        assert_eq!(
+            crate::frame_delta::apply_placeholder_test_frame(&built, &mut retained),
+            expected
+        );
+        let mut after_build = engine.display.borrow().pages.clone();
+        for snapshot in &mut after_build {
+            snapshot.materialize_positions();
+        }
+        assert_eq!(after_build[..last], before_build[..last]);
+        assert_eq!(engine.display.borrow().next_page_id, next_page_id);
+
+        engine.reset_frame_base();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let recovery = engine.build_display_pages_frame(&[], epoch).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(recovery[12..16].try_into().unwrap()),
+            crate::frame_delta::FRAME_FLAG_FULL
+        );
+        assert_eq!(
+            crate::frame_delta::apply_placeholder_test_frame(&recovery, &mut retained),
+            expected
+        );
+        docx_layout::clear_measure_fonts();
+    }
+
     #[test]
     fn unbuilt_display_pages_build_on_request_and_match_a_full_build() {
         let (engine, extras) = paged_filler_engine(205, 48);
@@ -10606,22 +10743,25 @@ mod tests {
                 assert_eq!(next, engine.with_display_list(Clone::clone).unwrap());
                 let operation_count =
                     u32::from_le_bytes(bytes[52..56].try_into().unwrap()) as usize;
+                let ranges: Vec<_> = (0..operation_count)
+                    .map(|op| {
+                        crate::frame_delta::FRAME_HEADER_LEN + op * crate::frame_delta::PAGE_OP_LEN
+                    })
+                    .filter(|&record| bytes[record] == crate::frame_delta::PAGE_OP_SHIFT_RANGE)
+                    .collect();
+                assert_eq!(ranges.len(), 1);
+                let record = ranges[0];
                 for (index, page) in next.pages.iter().enumerate().skip(1) {
                     assert!(page.unbuilt);
                     let [start, end] = before.pages[index].position_span.unwrap();
                     assert_eq!(page.position_span, Some([start + 1, end + 1]));
-                    let record = (0..operation_count)
-                        .map(|op| {
-                            crate::frame_delta::FRAME_HEADER_LEN
-                                + op * crate::frame_delta::PAGE_OP_LEN
-                        })
-                        .find(|&record| {
-                            u32::from_le_bytes(bytes[record + 4..record + 8].try_into().unwrap())
-                                as usize
-                                == index
-                        })
-                        .unwrap();
-                    assert_eq!(bytes[record], crate::frame_delta::PAGE_OP_SHIFT_POSITIONS);
+                    let first =
+                        u32::from_le_bytes(bytes[record + 4..record + 8].try_into().unwrap())
+                            as usize;
+                    let count =
+                        u32::from_le_bytes(bytes[record + 24..record + 28].try_into().unwrap())
+                            as usize;
+                    assert!((first..first + count).contains(&index));
                 }
                 applied.push(next);
             }
@@ -10715,11 +10855,16 @@ mod tests {
                 let bytes = edit(3 + offset as u32, text);
                 let operation_count =
                     u32::from_le_bytes(bytes[52..56].try_into().unwrap()) as usize;
-                assert!((0..operation_count).any(|op| {
-                    bytes[crate::frame_delta::FRAME_HEADER_LEN
-                        + op * crate::frame_delta::PAGE_OP_LEN]
-                        == crate::frame_delta::PAGE_OP_SHIFT_POSITIONS
-                }));
+                assert_eq!(
+                    (0..operation_count)
+                        .filter(|&op| {
+                            bytes[crate::frame_delta::FRAME_HEADER_LEN
+                                + op * crate::frame_delta::PAGE_OP_LEN]
+                                == crate::frame_delta::PAGE_OP_SHIFT_RANGE
+                        })
+                        .count(),
+                    1
+                );
                 let next = decode(bytes);
                 for (page, previous) in next.pages.iter().zip(&before.pages).skip(1) {
                     assert!(page.unbuilt);

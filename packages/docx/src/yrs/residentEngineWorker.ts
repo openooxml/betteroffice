@@ -26,6 +26,7 @@ import {
 import {
   applyFrameDeltaOwned,
   decodeFrameDelta,
+  retainedFramePageById,
   type RetainedFrame,
 } from '../layout/render/frameDelta';
 import { GlyphCache } from '../layout/render/glyphCache';
@@ -1276,6 +1277,10 @@ function forgetOffscreenPagePixels(pageId: string): void {
   }
 }
 
+function retainedPageByKey(frame: RetainedFrame, pageId: string) {
+  return /^\d+$/.test(pageId) ? retainedFramePageById(frame, BigInt(pageId)) : undefined;
+}
+
 function applyWorkerFrame(bytes: Uint8Array): void {
   retainedFrame = applyFrameDeltaOwned(retainedFrame, decodeFrameDelta(bytes));
   for (const pageId of retainedFrame.damagedPageIds) pendingOffscreenPageIds.add(pageId.toString());
@@ -1320,14 +1325,13 @@ async function replyFrame(
   // Pages no longer in the document drop their surfaces (their elements
   // unmounted main-side). An unbuilt page keeps its transferred canvas, which
   // can never be transferred again, and only loses its pixels.
-  const unbuiltByPageId = new Map(
-    retainedFrame.pages.map(({ pageId, page }) => [pageId.toString(), page.unbuilt === true])
-  );
   for (const pageId of pendingOffscreenPageIds) {
-    if (unbuiltByPageId.get(pageId) !== false) pendingOffscreenPageIds.delete(pageId);
+    const page = retainedPageByKey(retainedFrame, pageId);
+    if (!page || page.page.unbuilt === true) pendingOffscreenPageIds.delete(pageId);
   }
   for (const pageId of new Set([...offscreenCanvases.keys(), ...offscreenBackBuffers.keys()])) {
-    const unbuilt = unbuiltByPageId.get(pageId);
+    const page = retainedPageByKey(retainedFrame, pageId);
+    const unbuilt = page ? page.page.unbuilt === true : undefined;
     if (unbuilt === false) continue;
     const canvas = offscreenCanvases.get(pageId);
     if (unbuilt === undefined) offscreenCanvases.delete(pageId);
