@@ -1,8 +1,9 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, expect, test } from 'bun:test';
+import { afterAll, afterEach, expect, mock, test } from 'bun:test';
 import { createRef, useRef, type RefObject } from 'react';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
-import type { DocxDisplaySelectionText, ResidentDocumentRead, ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
+import type { Layout } from '@betteroffice/docx/layout/pagination';
+import type { DocxDisplaySelectionText, ResidentDocumentRead, ResidentEngineWorkerClient, YrsSession } from '@betteroffice/docx/yrs';
 import type { PagedEditorRef } from './PagedEditor';
 import { ViewerInput, type ViewerInputProps } from './ViewerInput';
 import type { YrsInputRef } from './YrsInput';
@@ -13,7 +14,7 @@ import { layoutIdOf } from '../../plugins/geometry';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, fireEvent, render } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, renderHook } = await import('@testing-library/react');
 const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
 const originalClipboardItem = globalThis.ClipboardItem;
 
@@ -26,6 +27,43 @@ afterEach(() => {
 afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
+
+for (const viewerSelection of [true, false]) {
+  test(`${viewerSelection ? 'viewer' : 'editor'} readiness ${viewerSelection ? 'uses layout' : 'waits for the replica'}`, () => {
+    const onReady = mock((_ref: PagedEditorRef) => {});
+    const session = {} as YrsSession;
+    const layout = {} as Layout;
+    const runLayoutPipeline = () => {};
+    const scrollToParaIdImpl = () => false;
+    const scrollToPageImpl = () => {};
+    const hook = renderHook(({ layout, replicaReady }: { layout: Layout | null; replicaReady: boolean }) => {
+      const ref = useRef<PagedEditorRef>(null);
+      usePagedEditorRefApi({
+        ref, viewerSelection, yrsInputRef: { current: null }, layout, yrsSession: session, replicaReady,
+        runLayoutPipeline, getLayoutRequest: () => null, readLayoutRequest: async () => null,
+        scrollToPositionImpl: () => {}, revealPositionImpl: () => 'layout-unavailable',
+        scrollToParaIdImpl, scrollToPageImpl, setIsFocused: () => {},
+        onReadyRef: { current: onReady }, documentFromYrs: () => null,
+        yrsLocToDisplayPosition: () => null, syncYrsInputState: () => true,
+        applyYrsFormatting: () => false, applyYrsCommand: () => false,
+        getYrsPositionProjection: () => null, displayPositionToYrsLoc: () => null,
+        getPositionAtPoint: () => null,
+      });
+      return ref;
+    }, { initialProps: { layout: null as Layout | null, replicaReady: false } });
+    expect(onReady).not.toHaveBeenCalled();
+    hook.rerender({ layout, replicaReady: false });
+    if (viewerSelection) {
+      expect(onReady).toHaveBeenCalledTimes(1);
+      expect(onReady.mock.calls[0]![0].isWorkerViewer()).toBe(true);
+    } else {
+      expect(onReady).not.toHaveBeenCalled();
+      hook.rerender({ layout, replicaReady: true });
+      expect(onReady).toHaveBeenCalledTimes(1);
+      expect(onReady.mock.calls[0]![0].isWorkerViewer()).toBe(false);
+    }
+  });
+}
 
 function frame(version: string, preview = false, asOpened = false): DisplayListQueries {
   const lines = [{ pageIndex: 0, from: 1, to: 30 }];

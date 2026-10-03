@@ -98,6 +98,8 @@ pub mod table_row_break;
 
 mod typed_measure;
 
+use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 use wasm_bindgen::prelude::*;
 
 #[cfg(target_arch = "wasm32")]
@@ -448,6 +450,37 @@ pub fn update_resident_display_list_incremental_partial_observed(
     })
 }
 
+/// Page-scoped display update reporting retained suffix position shifts.
+#[allow(clippy::too_many_arguments)]
+pub fn update_resident_display_list_incremental_partial_shifts_observed(
+    pagination: &types::Input,
+    layout: &types::Layout,
+    resident: &mut display_list::ResidentDisplayInput,
+    previous: &mut display_list::DisplayList,
+    rebuilt_page_start: usize,
+    rebuilt_page_end: usize,
+    extra_pages: &[usize],
+    position_deltas: &std::collections::HashMap<String, i64>,
+    build: &dyn Fn(usize) -> bool,
+    observe_phase: &mut impl FnMut(),
+) -> Result<Option<display_list::IncrementalDisplayShifts>, String> {
+    with_measure_fonts(|store| {
+        display_list::update_resident_display_list_incremental_partial_with_fonts_shifts(
+            pagination,
+            layout,
+            &store.borrow(),
+            resident,
+            previous,
+            rebuilt_page_start,
+            rebuilt_page_end,
+            extra_pages,
+            position_deltas,
+            build,
+            observe_phase,
+        )
+    })
+}
+
 /// wasm compatibility wrapper. Resident engine users call
 /// [`build_display_list_value`] and keep the typed result.
 #[wasm_bindgen]
@@ -761,6 +794,22 @@ pub fn measure_fonts_generation() -> (u64, usize) {
         let store = store.borrow();
         (store.id(), store.font_count())
     })
+}
+
+pub fn measure_font_cache_identity(chains: &BTreeMap<String, Vec<u32>>) -> (u64, u64) {
+    let (store, fonts) = measure_fonts_generation();
+    let mut missing = Vec::new();
+    for &id in chains.values().flatten() {
+        if id as usize >= fonts {
+            missing.push(id);
+        }
+    }
+    missing.sort_unstable();
+    missing.dedup();
+    let mut hash = std::hash::DefaultHasher::new();
+    (fonts == 0).hash(&mut hash);
+    missing.hash(&mut hash);
+    (store, hash.finish())
 }
 
 /// Runs `run` against an empty measurement font store of its own, then puts the

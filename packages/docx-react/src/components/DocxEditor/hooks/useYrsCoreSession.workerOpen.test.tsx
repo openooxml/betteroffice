@@ -794,6 +794,41 @@ test('on-demand hydration is inactive without worker opening', async () => {
   }
 });
 
+test.each([true, false])('worker hydration retains comment authors and dates with readOnly=%s', async (readOnly) => {
+  installWorker();
+  const source = new Uint8Array(readFileSync(resolve(
+    import.meta.dir,
+    '../../../../../../crates/docx-edit/tests/fixtures/structured-export/principal.docx'
+  )));
+  const seeded = await createYrsSession();
+  sessions.push(seeded);
+  seeded.openDocx(source, true);
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, source, readOnly, hydrateOnDemand: readOnly },
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    await act(async () => { await requestWorkerOpenReplica(session); });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
+    const options = { revisionView: 'markup' as const, stories: ['comments' as const] };
+    const expected = seeded.exportStructured(options);
+    const actual = session.exportStructured(options);
+    if (!expected.ok) throw new Error(expected.failure.message);
+    if (!actual.ok) throw new Error(actual.failure.message);
+    const metadata = (content: typeof expected.content) => content.stories.map((story) => ({
+      author: story.comment?.author,
+      date: story.comment?.date,
+    }));
+    expect(metadata(expected.content)).toContainEqual({ author: expect.any(String), date: expect.any(String) });
+    expect(metadata(actual.content)).toEqual(metadata(expected.content));
+  } finally {
+    unmount();
+  }
+});
+
 test('an on-demand replica stays empty past its load point until requested', async () => {
   const { workers, posted } = installWorker({ holdState: true });
   const frames = holdFrames();

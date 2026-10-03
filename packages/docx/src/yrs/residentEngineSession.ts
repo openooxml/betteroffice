@@ -1,3 +1,4 @@
+import { decodeEncodedSelection } from './encodedSelection';
 import type {
   YrsEngineApplyProfile,
   YrsParagraph,
@@ -27,6 +28,7 @@ import type { DocxSidebarReader } from './sidebarReads';
 import type { ProposalGeometryReader, ProposalGeometryRevision } from './proposalGeometry';
 import type { DocxProposalSession } from './proposals';
 import type { DocxPageExportOptions } from './pagedExport';
+import type { DocxContentControlsResult } from './contentControls';
 import type { YrsPositionOutline } from './yrsPositionProjection';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
@@ -45,11 +47,15 @@ export type ResidentEngineSession = Pick<
   | 'releaseDisplayPagesFrame'
   | 'clearFonts'
   | 'destroy'
+  | 'encodeSelection'
   | 'encodeStateVector'
+  | 'findContentControls'
+  | 'listContentControls'
   | 'layoutDocumentJson'
   | 'layoutFontRequirementsJson'
   | 'layoutDocumentWithRegionsRetainedJson'
   | 'loadMediaSources'
+  | 'loadNoteSeparators'
   | 'loadState'
   | 'setPartialDocument'
   | 'measureParagraphJson'
@@ -307,6 +313,14 @@ export async function createResidentEngineSession(
       JSON.parse(session.paragraph_identities()) as DocxParagraphIdentitySnapshot,
     exportStructuredWithPagesJson: (options, currentRequest) =>
       session.export_structured_with_pages_json(JSON.stringify(options), currentRequest),
+    listContentControls: (options = {}) =>
+      JSON.parse(
+        session.list_content_controls_json(JSON.stringify(options))
+      ) as DocxContentControlsResult,
+    findContentControls: (query, options = {}) =>
+      JSON.parse(
+        session.find_content_controls_json(JSON.stringify(query), JSON.stringify(options))
+      ) as DocxContentControlsResult,
     storiesChangedSince,
     openDocx: (bytes, digest, generation) => {
       geometryStories.clear();
@@ -376,6 +390,7 @@ export async function createResidentEngineSession(
           range.end.offset
         )
       ) as YrsSelectionText,
+    encodeSelection: () => decodeEncodedSelection(session.encoded_selection()),
     applyInput: (text, expectedFrameEpoch) => {
       ensureUndo();
       return session.apply_input(text, expectedFrameEpoch);
@@ -412,6 +427,7 @@ export async function createResidentEngineSession(
     },
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
     loadMediaSources: (json) => session.load_media_sources(json),
+    loadNoteSeparators: (state) => session.load_note_separators(state),
     loadState: (update) => {
       geometryStories.clear();
       session.load(update);

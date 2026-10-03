@@ -15,6 +15,7 @@
  */
 
 import type { EditSession } from './wasm/index';
+import type { ResidentEngineWorkerFontSync } from './residentEngineWorkerProtocol';
 import type { Document } from '../types/document';
 import type { CompatibilityFlags } from '../docx/settingsParser';
 import { resolveCommentMedia } from './hostMedia';
@@ -29,6 +30,7 @@ import type {
   DocxParagraphSavePlan,
 } from './paragraphIdentity';
 import { decodeS9Envelope, decodeS9EnvelopeValue } from '../docx/rustParseFacade';
+import { decodeEncodedSelection } from './encodedSelection';
 import type {
   CollaborationCursor,
   CollaborationReplica,
@@ -79,6 +81,7 @@ export * from './edits';
 export * from './contentControls';
 export * from './readTypes';
 export * from './findParagraphs';
+export { findBodyMatches, type DocxFindDisplayMatch } from './findMatches';
 export * from './structuredExport';
 export * from './pagedExport';
 export * from './inputPositionMap';
@@ -501,7 +504,10 @@ export interface YrsRevisionReceipt {
   revisionId: string | null;
 }
 
-/** Where the replacement text landed; after the struck-out text when suggesting. */
+/**
+ * Where an edit landed, in whole characters: the inserted text (after the struck-out text when
+ * suggesting), or what a delete left (collapsed when plain, the struck-out text when suggesting).
+ */
 export interface YrsReplaceReceipt extends YrsRevisionReceipt {
   range?: YrsStoryRange;
 }
@@ -680,7 +686,7 @@ export type YrsResidentFontRegistration =
   | Uint8Array
   | { substituteOf: number; family: string };
 
-export interface YrsResidentWorkerSnapshot {
+export interface YrsResidentWorkerSnapshot extends ResidentEngineWorkerFontSync {
   /** @internal */
   workerAuthoritative?: true;
   clientId: number;
@@ -688,8 +694,7 @@ export interface YrsResidentWorkerSnapshot {
    * the worker's known vector — both apply through the same merge path. */
   state: Uint8Array;
   selection: YrsSelection | null;
-  /** Empty when the caller declared the worker's fonts current
-   * (`knownFontsRevision` matches); the worker then keeps its registrations. */
+  /** Full registrations, or a possibly empty suffix after `fontsBaseRevision`. */
   fonts: YrsResidentFontRegistration[];
   /** Monotonic revision of the resident font set (bumped by register/clear). */
   fontsRevision: number;
@@ -702,6 +707,8 @@ export interface YrsResidentWorkerSnapshot {
   partialDocument?: boolean;
   /** Which seeded `data:` image sources lay out as `media:{n}` tokens. @internal */
   mediaSources?: string;
+  /** The opened package's footnote/endnote separator notes, for replicas without its source. @internal */
+  noteSeparators?: Uint8Array;
 }
 
 /**
@@ -1082,6 +1089,8 @@ export interface YrsSession extends CollaborationReplica {
    * snapshot's `mediaSources` names. @internal
    */
   loadMediaSources(json: string): void;
+  /** Loads the opened package's separator notes for this replica. @internal */
+  loadNoteSeparators(state: Uint8Array): void;
   /**
    * Seeds stories and returns paragraph IDs in document order. Seeding a
    * document that has no opening yet starts one; see {@link beginOpening}.
@@ -1186,12 +1195,12 @@ export interface YrsSession extends CollaborationReplica {
   /** Sets the table-wide preferred width in twips. */
   setTableWidth(table: YrsTableLoc, widthTwips: number): YrsTableReceipt;
   /** Inserts paragraph-break-free text. Suggesting mode mints a revision. */
-  insertText(at: YrsLoc, text: string, suggesting?: YrsAuthor): YrsRevisionReceipt;
+  insertText(at: YrsLoc, text: string, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /**
    * Deletes a range (plain) or marks it as a suggested deletion (suggesting).
    * A range spanning paragraphs also merges them (pilcrow-as-character).
    */
-  deleteRange(range: YrsStoryRange, suggesting?: YrsAuthor): YrsRevisionReceipt;
+  deleteRange(range: YrsStoryRange, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /** Replaces a range with text in one transaction (one shared revision when suggesting). */
   replaceRange(range: YrsStoryRange, text: string, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /**
@@ -1222,7 +1231,7 @@ export interface YrsSession extends CollaborationReplica {
     at: YrsLoc,
     image: Readonly<Record<string, unknown>>,
     suggesting?: YrsAuthor
-  ): YrsRevisionReceipt;
+  ): YrsReplaceReceipt;
   /**
    * Sets the value of a content-control embed addressed by stable payload id. A string fills a
    * text control's content as one version-checked step and throws when the fill is refused.
@@ -1632,6 +1641,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     return progress;
   };
   let residentFontsRevision = 0;
+  let residentFontsClearRevision = 0;
   let docxSource: Uint8Array | null = null;
   let docxSourceKeys: ReturnType<typeof editorSaveKeys> | null = null;
 
@@ -1852,7 +1862,6 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
     registerSubstituteFont: (base, family) => {
       const id = session.register_substitute_measure_font(base, family);
-      if (id === base) return id;
       residentFonts.push({ substituteOf: base, family });
       residentFontsRevision += 1;
       return id;
@@ -1862,6 +1871,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       residentFonts.length = 0;
       residentMeasureInputs.clear();
       residentFontsRevision += 1;
+      residentFontsClearRevision = residentFontsRevision;
     },
     measureParagraphJson: (input) => {
       const output = session.measure_paragraph_json(input);
@@ -1972,7 +1982,19 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       const mirrored = workerDocumentVersion !== null;
       const selectionJson = mirrored ? 'null' : session.selection();
       const mediaSources = mirrored ? undefined : session.media_sources_json();
-      const fontsCurrent = options?.knownFontsRevision === residentFontsRevision;
+      const noteSeparators = mirrored ? undefined : session.note_separators_state();
+      const knownFontsRevision = options?.knownFontsRevision;
+      const fontsBaseRevision =
+        knownFontsRevision != null &&
+        Number.isInteger(knownFontsRevision) &&
+        knownFontsRevision >= residentFontsClearRevision &&
+        knownFontsRevision <= residentFontsRevision
+          ? knownFontsRevision
+          : undefined;
+      const fonts =
+        fontsBaseRevision === undefined
+          ? residentFonts
+          : residentFonts.slice(residentFonts.length - (residentFontsRevision - fontsBaseRevision));
       let state: Uint8Array | null = null;
       if (!mirrored && options?.knownStateVector) {
         try {
@@ -1986,12 +2008,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         ...(mirrored ? { workerAuthoritative: true as const } : {}),
         state: mirrored ? new Uint8Array(0) : (state ?? session.encode_state()),
         selection: JSON.parse(selectionJson) as YrsSelection | null,
-        fonts: fontsCurrent
-          ? []
-          : residentFonts.map((font) =>
-              font instanceof Uint8Array ? font.slice() : { ...font }
-            ),
+        fonts: fonts.map((font) => (font instanceof Uint8Array ? font.slice() : { ...font })),
         fontsRevision: residentFontsRevision,
+        ...(fontsBaseRevision === undefined ? {} : { fontsBaseRevision }),
         renderInputs: [...residentRenderInputs].map(([story, env]) => ({
           story,
           env: structuredClone(env),
@@ -2002,6 +2021,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         layoutRevision: residentLayoutRevision,
         ...(partialDocument ? { partialDocument: true } : {}),
         ...(mediaSources ? { mediaSources } : {}),
+        ...(noteSeparators?.length ? { noteSeparators } : {}),
       };
     },
     residentWorkerProbe: () => {
@@ -2044,6 +2064,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       return bytes && mimeType ? { bytes, mimeType } : null;
     },
     loadMediaSources: (json) => session.load_media_sources(json),
+    loadNoteSeparators: (state) => session.load_note_separators(state),
     mediaDataUrl,
     mediaScope: () => mediaScope,
     materializeDocx: () => {
@@ -2123,20 +2144,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       cachedSelection = JSON.parse(session.selection()) as YrsSelection | null;
       return cloneSelection(cachedSelection);
     },
-    encodeSelection: () => {
-      const encoded = JSON.parse(session.encoded_selection()) as {
-        story: string;
-        anchor: number[];
-        head: number[];
-      } | null;
-      return encoded
-        ? {
-            story: encoded.story,
-            anchor: Uint8Array.from(encoded.anchor),
-            head: Uint8Array.from(encoded.head),
-          }
-        : null;
-    },
+    encodeSelection: () => decodeEncodedSelection(session.encoded_selection()),
     resolveSelection: (cursor) => {
       try {
         return JSON.parse(
@@ -2324,7 +2332,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
               suggesting?.name,
               suggesting?.date
             )
-          ) as YrsRevisionReceipt
+          ) as YrsReplaceReceipt
       );
     },
     deleteRange: (range, suggesting) => {
@@ -2341,7 +2349,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
               suggesting?.name,
               suggesting?.date
             )
-          ) as YrsRevisionReceipt
+          ) as YrsReplaceReceipt
       );
     },
     replaceRange: (range, text, suggesting) => {
@@ -2480,7 +2488,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
               suggesting?.name,
               suggesting?.date
             )
-          ) as YrsRevisionReceipt
+          ) as YrsReplaceReceipt
       );
     },
     setContentControlValue: (embedId, value) => {

@@ -4,6 +4,7 @@ import type {
   YrsResidentWorkerSnapshot,
   YrsSelection,
 } from './index';
+import type { CollaborationCursor } from '../collaboration/types';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type {
   ResidentDocumentRead,
@@ -35,6 +36,8 @@ export interface ResidentEngineWorkerFrame {
   engineProfile?: YrsEngineApplyProfile;
   caret: YrsResidentCaretSnapshot;
   selection: YrsSelection | null;
+  /** The same selection as sticky positions, for the host to resolve against its content. */
+  selectionCursor?: CollaborationCursor | null;
   /** The presented frame carries the worker-painted caret line. */
   caretPainted: boolean;
   replayMs: number;
@@ -161,6 +164,7 @@ export class ResidentEngineWorkerClient {
   /** Id of the last snapshot request sent; replies to earlier requests must
    * not replace the state it recorded. */
   private lastSnapshotId = 0;
+  private lastFailedFontsSnapshotId = 0;
   private keepSurfaces = false;
   private bootstrapWaiters: Array<() => void> = [];
   private lastMemory: WasmModuleMemory[] | null = null;
@@ -193,7 +197,13 @@ export class ResidentEngineWorkerClient {
       this.pending.delete(response.id);
       if (this.pending.size === 0) this.disarmWatchdog();
       if (response.ok) pending.resolve(response);
-      else pending.reject(residentWorkerError(response.error, response.residentUnavailable));
+      else {
+        if (pending.type === 'bootstrap' || pending.type === 'sync') {
+          this.appliedFontsRevision = null;
+          this.lastFailedFontsSnapshotId = this.nextId - 1;
+        }
+        pending.reject(residentWorkerError(response.error, response.residentUnavailable));
+      }
     };
     this.worker.onerror = (event) => {
       this.fail(new ResidentWorkerFailureError(`Resident engine worker failed: ${event.message}`));
@@ -236,10 +246,10 @@ export class ResidentEngineWorkerClient {
     this.failureListener = listener;
   }
 
-  /** @internal Whether foreground document or frame work awaits its reply. */
-  frameRequestPending(): boolean {
+  /** @internal Whether foreground document or frame work awaits its reply; `reads: false` leaves document reads out. */
+  frameRequestPending(reads = true): boolean {
     for (const { type } of this.pending.values()) {
-      if (FRAME_REQUESTS.has(type)) return true;
+      if (FRAME_REQUESTS.has(type) && (reads || type !== 'documentRead')) return true;
     }
     return false;
   }
@@ -274,7 +284,7 @@ export class ResidentEngineWorkerClient {
     this.bootstrapped = false;
     this.remoteVector = null;
     this.appliedFontsRevision = null;
-    this.lastSnapshotId = 0;
+    this.lastSnapshotId = this.nextId;
     this.revision = 0;
     this.keepSurfaces = true;
     // The bootstrap it asks for frees the worker's document, opened there or not.
@@ -407,6 +417,30 @@ export class ResidentEngineWorkerClient {
       throw new ResidentWorkerFailureError('Resident engine worker omitted the document read');
     }
     return response.read as { version: string; value: ResidentDocumentReadValues[K] };
+  }
+
+  /**
+   * Reads the document at `expectVersion`. A later message may run first; the
+   * read then answers `superseded` when the document moved on meanwhile.
+   * @internal
+   */
+  async documentReadAt<K extends ResidentDocumentRead['kind']>(
+    read: ResidentDocumentRead & { kind: K },
+    expectVersion: string
+  ): Promise<
+    | { status: 'ok'; version: string; value: ResidentDocumentReadValues[K] }
+    | { status: 'superseded' }
+  > {
+    const response = await this.request({ type: 'documentRead', read, expectVersion });
+    if (response.superseded) return { status: 'superseded' };
+    if (!response.read) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted the document read');
+    }
+    const { version, value } = response.read as {
+      version: string;
+      value: ResidentDocumentReadValues[K];
+    };
+    return { status: 'ok', version, value };
   }
 
   /** @internal */
@@ -796,7 +830,9 @@ export class ResidentEngineWorkerClient {
     response: ResidentEngineWorkerResponse & { ok: true },
     fontsRevision: number
   ): void {
-    if (response.id >= this.lastSnapshotId) this.appliedFontsRevision = fontsRevision;
+    if (response.id >= this.lastSnapshotId && response.id > this.lastFailedFontsSnapshotId) {
+      this.appliedFontsRevision = fontsRevision;
+    }
   }
 
   private fail(error: Error, notify = true): void {
@@ -866,6 +902,7 @@ function frameResult(
     engineProfile: response.engineProfile,
     caret: response.caret,
     selection: response.selection,
+    selectionCursor: response.selectionCursor ?? null,
     caretPainted: response.caretPainted ?? false,
     replayMs: response.replayMs ?? 0,
     replayedPages: response.replayedPages ?? 0,

@@ -14,6 +14,9 @@ import type {
   DocxDisplaySelectionText,
   DocxSelectionUnit,
 } from './viewerSelection';
+import type { FindOptions } from '../utils/findReplace';
+import type { DocxFindDisplayMatch } from './findMatches';
+import type { CollaborationCursor } from '../collaboration/types';
 import type { DocxSidebarRead, DocxOutlineHeading } from './sidebarReads';
 import type { ResidentSearchResult } from './residentSearch';
 import type { DocxFindParagraphsOptions, DocxParagraphMatch } from './findParagraphs';
@@ -34,6 +37,12 @@ import type {
 import type { DocxFindTextRequest, DocxFindTextResult, DocxReadParagraphsRequest, DocxReadParagraphsResult } from './edits';
 import type { ProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
 import type { DocxPageExportOptions } from './pagedExport';
+import type { DocxContentControlQuery, DocxContentControlsOptions, DocxContentControlsResult } from './contentControls';
+
+/** @internal */
+export interface ResidentEngineWorkerFontSync {
+  fontsBaseRevision?: number;
+}
 
 /** @internal */
 export type ResidentProposalOperation =
@@ -57,10 +66,13 @@ export interface ResidentProposalResponse {
 /** @internal */
 export type ResidentDocumentRead =
   | { kind: 'exportStructuredWithPages'; options: DocxPageExportOptions; currentRequest: string }
+  | { kind: 'listContentControls'; options: DocxContentControlsOptions }
+  | { kind: 'findContentControls'; query: DocxContentControlQuery; options: DocxContentControlsOptions }
   | { kind: 'paragraphIdentities' }
   | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
   | { kind: 'readParagraphs'; request: DocxReadParagraphsRequest }
   | { kind: 'findText'; request: DocxFindTextRequest }
+  | { kind: 'findMatches'; searchText: string; options: FindOptions; expectVersion: string }
   | { kind: 'searchText'; query: string; caseSensitive: boolean; carry?: YrsStickyPosition | null }
   | ({ kind: 'findParagraphs'; query: string } & DocxFindParagraphsOptions)
   | { kind: 'stickyAnchors'; locs: YrsLoc[]; version: string }
@@ -85,10 +97,13 @@ export type ResidentDocumentRead =
 /** @internal */
 export interface ResidentDocumentReadValues {
   exportStructuredWithPages: string;
+  listContentControls: DocxContentControlsResult;
+  findContentControls: DocxContentControlsResult;
   paragraphIdentities: DocxParagraphIdentitySnapshot;
   resolveParagraphAnchors: { results: DocxParagraphAnchorResult[] };
   readParagraphs: DocxReadParagraphsResult;
   findText: DocxFindTextResult;
+  findMatches: DocxFindDisplayMatch[] | null;
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
   searchText: ResidentSearchResult;
   findParagraphs: DocxParagraphMatch[];
@@ -161,7 +176,13 @@ export type ResidentEngineWorkerRequest =
   | { id: number; type: 'encodeState' }
   | { id: number; type: 'revisionCount' }
   | { id: number; type: 'proposal'; operation: ResidentProposalOperation }
-  | { id: number; type: 'documentRead'; read: ResidentDocumentRead }
+  | {
+      id: number;
+      type: 'documentRead';
+      read: ResidentDocumentRead;
+      /** Answered `superseded` instead when the document's version differs. */
+      expectVersion?: string;
+    }
   | {
       id: number;
       type: 'sync';
@@ -275,6 +296,8 @@ export type ResidentEngineWorkerResponse = (
       engineProfile?: YrsEngineApplyProfile;
       caret?: YrsResidentCaretSnapshot;
       selection?: YrsSelection | null;
+      /** The same selection as sticky positions, for the host to resolve against its content. */
+      selectionCursor?: CollaborationCursor | null;
       /** The presented frame carries the worker-painted caret line. */
       caretPainted?: boolean;
       replayMs?: number;

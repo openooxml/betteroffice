@@ -728,6 +728,25 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
         }
         case 'find':
         case 'replace': {
+          const pagedEditor = current.pagedEditorRef.current;
+          if (pagedEditor?.isWorkerViewer?.() === true) {
+            return (async () => {
+              let timer: ReturnType<typeof setTimeout> | undefined;
+              let selectedText = '';
+              try {
+                selectedText = (await Promise.race([
+                  Promise.resolve(pagedEditor.readSelectedText()),
+                  new Promise<string>((resolve) => { timer = setTimeout(() => resolve(''), 500); }),
+                ])) ?? '';
+              } catch {} finally {
+                clearTimeout(timer);
+              }
+              openDialog('replace');
+              if (id === 'find') current.findReplace.openFind(selectedText);
+              else current.findReplace.openReplace(selectedText);
+              return OPENED;
+            })();
+          }
           const session = editor?.session();
           const selectedText = session ? yrsSelectedText(session) : '';
           openDialog('replace');
@@ -758,10 +777,15 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
     return {
       environment,
       ordered: (id, args) => {
+        if (
+          (id === 'reviewAccept' || id === 'reviewReject') &&
+          latest.current.pagedEditorRef.current?.isWorkerViewer() === true
+        ) return false;
         const session = latest.current.session;
         if (
           latest.current.experimentalWorkerOpen && session && workerOpenReplicaPending(session) &&
-          (id === 'find' || id === 'replace' || id === 'insertImage' ||
+          (((id === 'find' || id === 'replace') &&
+            latest.current.pagedEditorRef.current?.isWorkerViewer?.() !== true) || id === 'insertImage' ||
             id === 'imageProperties' || id === 'pageSetup' || id === 'watermark')
         ) return true;
         return (

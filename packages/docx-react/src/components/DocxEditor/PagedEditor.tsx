@@ -52,6 +52,8 @@ import {
   type DisplayList,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
+import type { DocxFindDisplayMatch } from '@betteroffice/docx/yrs';
+import type { FindOptions } from '@betteroffice/docx/utils/findReplace';
 import type { ParagraphHighlightOptions, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
 
 // Layout bridge
@@ -98,7 +100,12 @@ import {
   createRenderedDomContext,
 } from '../../plugin-api/RenderedDomContext';
 import { useLayoutPipeline } from './hooks/useLayoutPipeline';
-import type { FontRequirementsInWorker, LayoutInWorker, ResidentFrameApplyResult } from './hooks/useDisplayList';
+import type {
+  DisplayPageNavigation,
+  FontRequirementsInWorker,
+  LayoutInWorker,
+  ResidentFrameApplyResult,
+} from './hooks/useDisplayList';
 import { workerOpenReplicaPending } from './internals/workerOpenReplica';
 import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import { useRustMeasurement, type RustFontChainsProvider } from './hooks/useRustMeasurement';
@@ -152,7 +159,7 @@ import {
   ViewerPointPositions,
 } from './internals/pointPosition';
 import { isPresented, onPresented, presentedWorkerVersion } from './internals/layoutProvenance';
-import { navigateViewer, readViewerSelectionInfo, type ViewerNavigationTarget } from './internals/viewerRefReads';
+import { navigateViewer, readViewerFindMatches, readViewerSelectionInfo, type ViewerNavigationTarget } from './internals/viewerRefReads';
 import type { DocxSelectionInfo } from '../DocxEditor';
 import { readAt } from './internals/viewerReads';
 
@@ -352,6 +359,7 @@ export interface PagedEditorProps {
    */
   displayListQueries?: DisplayListQueries | null;
   resolveDisplayListQueries?: ResolveDisplayListQueries;
+  pageNavigation?: DisplayPageNavigation | null;
   canvasDisplayList?: DisplayList | null;
   displayListFrameEpoch?: number | null;
   residentCaret?: YrsResidentCaretSnapshot | null;
@@ -427,6 +435,10 @@ export interface PagedEditorRef {
   isWorkerViewer(): boolean;
   /** Reads the display selection from the worker. */
   readViewerSelectionInfo(): Promise<DocxSelectionInfo | null>;
+  readViewerFindMatches(
+    searchText: string,
+    options: FindOptions
+  ): Promise<{ version: string; matches: DocxFindDisplayMatch[] } | null>;
   /** Resolves, selects and reveals a worker-owned range. */
   navigateViewer(target: ViewerNavigationTarget, options?: ScrollToParaIdOptions): Promise<boolean>;
 
@@ -577,6 +589,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       rustFontChainsProviderRef,
       displayListQueries = null,
       resolveDisplayListQueries,
+      pageNavigation,
       canvasDisplayList = null,
       displayListFrameEpoch = null,
       residentCaret = null,
@@ -1211,8 +1224,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           } else if (command.type === 'insertImage') {
             const at = session.selection()?.head;
             if (!at) return false;
-            session.insertImage(at, command.image, structuralAuthor);
-            session.setSelection({ ...at, offset: at.offset + 1 });
+            const landed = session.insertImage(at, command.image, structuralAuthor).range;
+            session.setSelection(
+              landed ? { story: landed.story, ...landed.end } : { ...at, offset: at.offset + 1 }
+            );
           } else if (command.type === 'contentControlValue') {
             const node = positionProjection.nodeAt(command.pmPos);
             const embedId = command.embedId ?? (node ? yrsEmbedIdForProjectedNode(node) : null);
@@ -1267,8 +1282,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
                 const receipt = session.replaceRange(range, command.displayText, structuralAuthor);
                 range = receipt.range ?? insertedRange;
               } else {
-                session.insertText(at, command.displayText, structuralAuthor);
-                range = insertedRange;
+                range =
+                  session.insertText(at, command.displayText, structuralAuthor).range ??
+                  insertedRange;
               }
             }
             if (
@@ -1502,6 +1518,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         yrsLocToDisplayPosition,
         getScrollContainer,
         displayListQueries,
+        pageNavigation,
         layout,
         canvasHostRef,
         onNavigationIntent: cancelPendingScrollRestore,
@@ -1986,6 +2003,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     };
 
     usePagedEditorRefApi({
+      readViewerFindMatches: async (searchText, options) => {
+        const access = viewerReadAccess();
+        return access ? readViewerFindMatches(access, searchText, options) : null;
+      },
       readViewerSelectionInfo: async () => {
         const access = viewerReadAccess();
         return access ? readViewerSelectionInfo(access) : null;

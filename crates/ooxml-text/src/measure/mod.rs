@@ -129,9 +129,9 @@ mod tabs;
 
 pub use font_slots::{FontSlotUse, font_slot_use};
 pub use input::{
-    AttrsIn, BlockIn, CompatIn, DefaultsIn, FloatSegmentIn, FloatZoneIn, FontChains, IndentIn,
-    MeasureInput, MeasureRequest, RotationBoundsIn, RunFontSlotsIn, RunIn, RunLanguageSlotsIn,
-    SpacingIn, TabStopIn,
+    AttrsIn, BlockIn, CompatIn, DefaultsIn, FloatSegmentIn, FloatZoneIn, FontChainDependencies,
+    FontChains, IndentIn, MeasureInput, MeasureRequest, RotationBoundsIn, RunFontSlotsIn, RunIn,
+    RunLanguageSlotsIn, SpacingIn, TabStopIn,
 };
 
 use crate::font_store::{FontId, FontStore};

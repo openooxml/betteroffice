@@ -36,6 +36,7 @@
 //! `floatingZones` and `paragraphYOffset` are optional; absent means no float
 //! context. See [`FloatZoneIn`] for their coordinate space.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
 use serde::Deserialize;
@@ -114,8 +115,100 @@ pub enum FontChains<'a> {
     BTree(&'a BTreeMap<String, Vec<u32>>),
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct FontChainDependencies {
+    chains: BTreeMap<String, Option<Vec<u32>>>,
+    unknown: bool,
+}
+
+thread_local! {
+    static FONT_CHAIN_READS: RefCell<Vec<FontChainDependencies>> = const { RefCell::new(Vec::new()) };
+}
+
+struct FontChainReadScope;
+
+impl Drop for FontChainReadScope {
+    fn drop(&mut self) {
+        FONT_CHAIN_READS.with(|reads| {
+            reads.borrow_mut().pop();
+        });
+    }
+}
+
+impl FontChainDependencies {
+    pub fn unknown() -> Self {
+        Self {
+            unknown: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn capture<T>(measure: impl FnOnce() -> T) -> (T, Self) {
+        FONT_CHAIN_READS.with(|reads| reads.borrow_mut().push(Self::default()));
+        let scope = FontChainReadScope;
+        let measured = measure();
+        let dependencies = FONT_CHAIN_READS
+            .with(|reads| std::mem::take(reads.borrow_mut().last_mut().expect("font read scope")));
+        drop(scope);
+        dependencies.record();
+        (measured, dependencies)
+    }
+
+    pub fn matches(&self, chains: FontChains<'_>) -> bool {
+        !self.unknown
+            && self
+                .chains
+                .iter()
+                .all(|(key, ids)| chains.lookup(key) == ids.as_deref())
+    }
+
+    pub fn extend(&mut self, other: &Self) {
+        self.unknown |= other.unknown;
+        for (key, ids) in &other.chains {
+            self.chains
+                .entry(key.clone())
+                .or_insert_with(|| ids.clone());
+        }
+    }
+
+    pub fn record(&self) {
+        FONT_CHAIN_READS.with(|reads| {
+            if let Some(dependencies) = reads.borrow_mut().last_mut() {
+                dependencies.extend(self);
+            }
+        });
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        self.chains
+            .iter()
+            .map(|(key, ids)| {
+                key.len()
+                    + std::mem::size_of::<(String, Option<Vec<u32>>)>()
+                    + ids
+                        .as_ref()
+                        .map_or(0, |ids| ids.len() * std::mem::size_of::<u32>())
+            })
+            .sum()
+    }
+}
+
 impl FontChains<'_> {
     fn get(&self, key: &str) -> Option<&[u32]> {
+        let ids = self.lookup(key);
+        FONT_CHAIN_READS.with(|reads| {
+            if let Some(dependencies) = reads.borrow_mut().last_mut()
+                && !dependencies.chains.contains_key(key)
+            {
+                dependencies
+                    .chains
+                    .insert(key.to_owned(), ids.map(<[u32]>::to_vec));
+            }
+        });
+        ids
+    }
+
+    fn lookup(&self, key: &str) -> Option<&[u32]> {
         match self {
             FontChains::Hash(map) => map.get(key).map(Vec::as_slice),
             FontChains::BTree(map) => map.get(key).map(Vec::as_slice),
@@ -617,5 +710,37 @@ pub(super) fn validate_pt_size(size_pt: f32, name: &str) -> Result<(), MeasureEr
         Ok(())
     } else {
         Err(MeasureError::Unsupported(format!("{name} out of range")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_font_dependencies_remain_unknown_when_extended_and_recorded() {
+        let map = BTreeMap::from([("requested|0|0".to_owned(), vec![0])]);
+        let chains = FontChains::BTree(&map);
+        let (_, known) = FontChainDependencies::capture(|| chains.get("requested|0|0"));
+        assert!(known.matches(chains));
+        assert!(FontChainDependencies::default().matches(chains));
+
+        let mut unknown = FontChainDependencies::unknown();
+        assert!(!unknown.matches(chains));
+        assert!(!unknown.matches(FontChains::BTree(&BTreeMap::new())));
+        unknown.extend(&known);
+        assert!(!unknown.matches(chains));
+
+        let mut merged = known;
+        merged.extend(&unknown);
+        assert!(!merged.matches(chains));
+        let ((_, child), parent) = FontChainDependencies::capture(|| {
+            FontChainDependencies::capture(|| {
+                chains.get("requested|0|0");
+                merged.record();
+            })
+        });
+        assert!(!child.matches(chains));
+        assert!(!parent.matches(chains));
     }
 }

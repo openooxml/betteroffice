@@ -731,10 +731,24 @@ export function useDocxEditorRefApi({
         const authority = proposalAuthority();
         return authority ? authority.resolveParagraphAnchors(anchors, main) : main(anchors);
       },
-      listContentControls: async (options) =>
-        (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.listContentControls(options),
-      findContentControls: async (query, options) =>
-        (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.findContentControls(query, options),
+      listContentControls: (options) => {
+        const main = async () =>
+          (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.listContentControls(options);
+        const session = viewer() ? pagedEditorRef.current?.getYrsSession() : null;
+        const authority = session && workerOpenReplicaPending(session)
+          ? registeredWorkerProposalAuthority(session)
+          : null;
+        return authority ? authority.listContentControls(options, main) : main();
+      },
+      findContentControls: (query, options) => {
+        const main = async () =>
+          (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.findContentControls(query, options);
+        const session = viewer() ? pagedEditorRef.current?.getYrsSession() : null;
+        const authority = session && workerOpenReplicaPending(session)
+          ? registeredWorkerProposalAuthority(session)
+          : null;
+        return authority ? authority.findContentControls(query, options, main) : main();
+      },
       findText: (request) => {
         const main = async () =>
           (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.findText(request);
@@ -1057,6 +1071,8 @@ export function useDocxEditorRefApi({
       applyEdits: async (request) => editRefusal(request) ?? api.applyEdits(request),
       validateEdits: async (request) => editRefusal(request) ?? api.validateEdits(request),
       findText: direct.findText,
+      listContentControls: direct.listContentControls,
+      findContentControls: direct.findContentControls,
       exportStructuredWithPages: direct.exportStructuredWithPages,
       proposeChange: (options) => {
         if (!hostProposalsAllowed()) return api.proposeChange(options);

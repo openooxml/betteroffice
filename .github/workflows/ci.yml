@@ -114,9 +114,10 @@ jobs:
 
       # GHSA-5p4m-2wfm-xmqj reaches only read-yaml-file under @changesets/cli,
       # which parses our own changesets; every way to move it is worse than the
-      # advisory. See SECURITY.md.
+      # advisory. GHSA-vfj7-8cjw-p6xm reaches braces only through build and dev
+      # tooling, and no patched release exists. See SECURITY.md.
       - name: Fail on high or critical advisories
-        run: bun audit --audit-level=high --ignore=GHSA-5p4m-2wfm-xmqj
+        run: bun audit --audit-level=high --ignore=GHSA-5p4m-2wfm-xmqj --ignore=GHSA-vfj7-8cjw-p6xm
 
   rust:
     name: Rust gate
