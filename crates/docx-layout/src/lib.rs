@@ -763,6 +763,11 @@ pub fn measure_fonts_generation() -> (u64, usize) {
     })
 }
 
+pub fn measure_font_cache_identity() -> (u64, bool) {
+    let (store, fonts) = measure_fonts_generation();
+    (store, fonts > 0)
+}
+
 /// Runs `run` against an empty measurement font store of its own, then puts the
 /// store in use back unchanged: fonts `run` registers never reach another
 /// session, and caches keyed by [`measure_store_id`] never mix the two.

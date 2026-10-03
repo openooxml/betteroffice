@@ -73,9 +73,9 @@ test('font snapshots append suffixes, preserve worker ids and recover from a mis
   expect(initial.fonts).toHaveLength(1);
   expect(initial.fontsBaseRevision).toBeUndefined();
   const booted = await client.bootstrap(initial, '{}');
-  expect(
-    main.residentWorkerSnapshot({ knownFontsRevision: client.syncedFontsRevision() })!.fonts
-  ).toEqual([]);
+  const current = main.residentWorkerSnapshot({ knownFontsRevision: client.syncedFontsRevision() })!;
+  expect(current.fonts).toEqual([]);
+  expect(current.fontsBaseRevision).toBe(client.syncedFontsRevision());
   const appendedId = main.registerFont(bytes);
   expect(appendedId).toBe(1);
   const suffix = main.residentWorkerSnapshot({ knownFontsRevision: client.syncedFontsRevision() })!;
@@ -89,15 +89,31 @@ test('font snapshots append suffixes, preserve worker ids and recover from a mis
   const substituteSuffix = main.residentWorkerSnapshot({ knownFontsRevision: client.syncedFontsRevision() })!;
   expect(substituteSuffix.fonts).toEqual([{ substituteOf: appendedId, family: 'Calibri' }]);
   const beforeMismatch = client.syncedFontsRevision();
-  await expect(
-    client.sync({ ...substituteSuffix, fontsBaseRevision: 999 }, '{}', 0)
-  ).rejects.toThrow('font base revision mismatch');
+  worker.hold();
+  const failed = client.sync({ ...substituteSuffix, fontsBaseRevision: 999 }, '{}', 0);
+  const queuedOmission = main.residentWorkerSnapshot({
+    knownFontsRevision: client.syncedFontsRevision(),
+  })!;
+  expect(queuedOmission.fonts).toEqual([]);
+  expect(queuedOmission.fontsBaseRevision).toBe(substituteSuffix.fontsRevision);
+  const queued = client.sync(queuedOmission, '{}', 0);
+  const failures = Promise.all([
+    expect(failed).rejects.toThrow('font base revision mismatch'),
+    expect(queued).rejects.toThrow('font base revision mismatch'),
+  ]);
+  worker.release();
+  await failures;
   expect(client.syncedFontsRevision()).toBeNull();
+  for (const id of [0, appendedId]) {
+    expect(worker.sessions[0]!.outlineGlyphJson(id, 36)).toBe(main.outlineGlyphJson(id, 36));
+  }
   const recovery = main.residentWorkerSnapshot({ knownFontsRevision: client.syncedFontsRevision() })!;
   expect(recovery.fontsBaseRevision).toBeUndefined();
   expect(recovery.fonts).toHaveLength(3);
   await client.sync(recovery, '{}', 0);
-  expect(worker.sessions[0]!.outlineGlyphJson(substitute, 36)).toBe(main.outlineGlyphJson(substitute, 36));
+  for (const id of [0, appendedId, substitute]) {
+    expect(worker.sessions[0]!.outlineGlyphJson(id, 36)).toBe(main.outlineGlyphJson(id, 36));
+  }
   const revision = client.syncedFontsRevision()!;
   for (const knownFontsRevision of [-1, revision + 1, revision + 0.5]) {
     const full = main.residentWorkerSnapshot({ knownFontsRevision })!;

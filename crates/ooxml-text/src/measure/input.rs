@@ -152,9 +152,7 @@ impl FontChainDependencies {
 
     pub fn extend(&mut self, other: &Self) {
         for (key, ids) in &other.0 {
-            if !self.0.contains_key(key) {
-                self.0.insert(key.clone(), ids.clone());
-            }
+            self.0.entry(key.clone()).or_insert_with(|| ids.clone());
         }
     }
 
@@ -184,12 +182,12 @@ impl FontChains<'_> {
     fn get(&self, key: &str) -> Option<&[u32]> {
         let ids = self.lookup(key);
         FONT_CHAIN_READS.with(|reads| {
-            if let Some(dependencies) = reads.borrow_mut().last_mut() {
-                if !dependencies.0.contains_key(key) {
-                    dependencies
-                        .0
-                        .insert(key.to_owned(), ids.map(<[u32]>::to_vec));
-                }
+            if let Some(dependencies) = reads.borrow_mut().last_mut()
+                && !dependencies.0.contains_key(key)
+            {
+                dependencies
+                    .0
+                    .insert(key.to_owned(), ids.map(<[u32]>::to_vec));
             }
         });
         ids

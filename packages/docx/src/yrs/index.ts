@@ -672,7 +672,7 @@ export interface YrsResidentWorkerSnapshot extends ResidentEngineWorkerFontSync 
    * the worker's known vector — both apply through the same merge path. */
   state: Uint8Array;
   selection: YrsSelection | null;
-  /** Full registrations, or the suffix after `fontsBaseRevision`. */
+  /** Full registrations, or a possibly empty suffix after `fontsBaseRevision`. */
   fonts: YrsResidentFontRegistration[];
   /** Monotonic revision of the resident font set (bumped by register/clear). */
   fontsRevision: number;
@@ -1957,12 +1957,11 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       const selectionJson = mirrored ? 'null' : session.selection();
       const mediaSources = mirrored ? undefined : session.media_sources_json();
       const knownFontsRevision = options?.knownFontsRevision;
-      const fontsCurrent = knownFontsRevision === residentFontsRevision;
       const fontsBaseRevision =
         knownFontsRevision != null &&
         Number.isInteger(knownFontsRevision) &&
         knownFontsRevision >= residentFontsClearRevision &&
-        knownFontsRevision < residentFontsRevision
+        knownFontsRevision <= residentFontsRevision
           ? knownFontsRevision
           : undefined;
       const fonts =
@@ -1982,9 +1981,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         ...(mirrored ? { workerAuthoritative: true as const } : {}),
         state: mirrored ? new Uint8Array(0) : (state ?? session.encode_state()),
         selection: JSON.parse(selectionJson) as YrsSelection | null,
-        fonts: fontsCurrent
-          ? []
-          : fonts.map((font) => (font instanceof Uint8Array ? font.slice() : { ...font })),
+        fonts: fonts.map((font) => (font instanceof Uint8Array ? font.slice() : { ...font })),
         fontsRevision: residentFontsRevision,
         ...(fontsBaseRevision === undefined ? {} : { fontsBaseRevision }),
         renderInputs: [...residentRenderInputs].map(([story, env]) => ({

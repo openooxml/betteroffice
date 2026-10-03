@@ -113,6 +113,9 @@ function worker() {
     glyphCacheCreations: 0,
     clearFontCalls: 0,
     fontIds: [] as number[],
+    loadedStates: [] as Uint8Array[],
+    loadedMediaSources: [] as string[],
+    partialDocuments: [] as boolean[],
     sessionsCreated: 0,
     wasmReady: false,
     failWarm: null as Error | null,
@@ -149,9 +152,15 @@ function worker() {
     failPresent: null as number | null,
     memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
-      loadState() {},
-      loadMediaSources(_json: string) {},
-      setPartialDocument() {},
+      loadState(state: Uint8Array) {
+        harness.loadedStates.push(state);
+      },
+      loadMediaSources(json: string) {
+        harness.loadedMediaSources.push(json);
+      },
+      setPartialDocument(partial: boolean) {
+        harness.partialDocuments.push(partial);
+      },
       setDisplayWindow(start: number, end: number) {
         harness.displayWindows.push([start, end]);
       },
@@ -327,6 +336,7 @@ function worker() {
     surfaces,
     answered,
     send,
+    delta,
     resetCalls() {
       harness.rasterized = [];
       harness.presented = [];
@@ -469,22 +479,18 @@ test('a visible page request supersedes the remaining background slices', async 
 
 test('font suffixes preserve ids and glyph caches; mismatches require a full snapshot', async () => {
   const w = worker();
-  await w.bootstrap();
-  await w.attach([1]);
+  expect(await w.bootstrap()).toMatchObject({ ok: true });
+  expect(await w.attach([1])).toMatchObject({ ok: true });
   const font = new Uint8Array([1]);
   const sync = (
     fontsRevision: number,
     fonts: YrsResidentWorkerSnapshot['fonts'],
     fontsBaseRevision?: number
   ) => {
-    const base = w.harness.delta!.frameEpoch;
-    w.harness.delta = {
-      ...w.harness.delta!, frameEpoch: base + 1, baseFrameEpoch: base, operations: [],
-    };
     return w.send({
       type: 'sync',
       extras: '',
-      expectedFrameEpoch: base,
+      expectedFrameEpoch: w.harness.delta!.baseFrameEpoch,
       paintCaret: false,
       snapshot: {
         clientId: 1,
@@ -501,19 +507,36 @@ test('font suffixes preserve ids and glyph caches; mismatches require a full sna
       },
     });
   };
-  expect((await sync(1, [font], 0)).ok).toBe(true);
-  expect((await sync(2, [{ substituteOf: 0, family: 'Calibri' }], 1)).ok).toBe(true);
+  w.delta([]);
+  expect(await sync(1, [font], 0)).toMatchObject({ ok: true });
+  w.delta([]);
+  expect(await sync(2, [{ substituteOf: 0, family: 'Calibri' }], 1)).toMatchObject({ ok: true });
+  w.delta([]);
+  expect(await sync(2, [], 2)).toMatchObject({ ok: true });
   expect(w.harness.fontIds).toEqual([0, 1]);
   expect(w.harness.clearFontCalls).toBe(1);
   expect(w.harness.glyphCacheCreations).toBe(1);
-  const beforeMismatch = w.harness.delta;
+  const beforeMismatch = {
+    states: w.harness.loadedStates.length,
+    media: w.harness.loadedMediaSources.length,
+    partial: w.harness.partialDocuments.length,
+    windows: w.harness.displayWindows.length,
+  };
   expect(await sync(3, [font], 0)).toMatchObject({
+    ok: false, error: 'Resident engine worker font base revision mismatch',
+  });
+  expect(await sync(2, [], 1)).toMatchObject({
     ok: false, error: 'Resident engine worker font base revision mismatch',
   });
   expect(w.harness.fontIds).toEqual([0, 1]);
   expect(w.harness.clearFontCalls).toBe(1);
-  w.harness.delta = beforeMismatch;
-  expect((await sync(3, [font])).ok).toBe(true);
+  expect(w.harness.glyphCacheCreations).toBe(1);
+  expect(w.harness.loadedStates).toHaveLength(beforeMismatch.states);
+  expect(w.harness.loadedMediaSources).toHaveLength(beforeMismatch.media);
+  expect(w.harness.partialDocuments).toHaveLength(beforeMismatch.partial);
+  expect(w.harness.displayWindows).toHaveLength(beforeMismatch.windows);
+  w.delta([]);
+  expect(await sync(3, [font])).toMatchObject({ ok: true });
   expect(w.harness.fontIds).toEqual([0]);
   expect(w.harness.clearFontCalls).toBe(2);
   expect(w.harness.glyphCacheCreations).toBe(2);

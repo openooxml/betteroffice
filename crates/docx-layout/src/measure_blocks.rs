@@ -859,13 +859,25 @@ pub fn section_break_marks(blocks: &[LayoutBlock]) -> Vec<bool> {
         .iter()
         .enumerate()
         .map(|(index, block)| {
-            let opens_its_section =
-                index == 0 || matches!(blocks.get(index - 1), Some(LayoutBlock::SectionBreak(_)));
-            matches!(block, LayoutBlock::Paragraph(paragraph) if paragraph.runs.is_empty())
-                && matches!(blocks.get(index + 1), Some(LayoutBlock::SectionBreak(_)))
-                && !opens_its_section
+            is_section_break_mark(
+                block,
+                index
+                    .checked_sub(1)
+                    .and_then(|previous| blocks.get(previous)),
+                blocks.get(index + 1),
+            )
         })
         .collect()
+}
+
+pub fn is_section_break_mark(
+    block: &LayoutBlock,
+    previous: Option<&LayoutBlock>,
+    next: Option<&LayoutBlock>,
+) -> bool {
+    matches!(block, LayoutBlock::Paragraph(paragraph) if paragraph.runs.is_empty())
+        && matches!(next, Some(LayoutBlock::SectionBreak(_)))
+        && previous.is_some_and(|block| !matches!(block, LayoutBlock::SectionBreak(_)))
 }
 
 fn measure_float_flow(
@@ -1426,7 +1438,9 @@ fn extent_cache_lookup(
             }
         }
         key.extend_from_slice(&config_fingerprint(config).to_le_bytes());
-        key.extend_from_slice(&crate::measure_store_id().to_le_bytes());
+        let (store, has_fonts) = crate::measure_font_cache_identity();
+        key.extend_from_slice(&store.to_le_bytes());
+        key.push(u8::from(has_fonts));
         match EXTENT_CACHE.with(|cache| {
             cache
                 .borrow_mut()
@@ -3294,6 +3308,57 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    #[test]
+    fn first_font_invalidates_extents_without_a_matching_chain() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let mut config = MeasurementConfig {
+            defaults: json!({"fontFamily": "Requested", "fontSize": 12}),
+            ..Default::default()
+        };
+        let paragraph: ParagraphBlock = serde_json::from_value(json!({
+            "id": "empty-run", "runs": [
+                {"kind": "text", "text": "", "fontFamily": "Requested"},
+                {"kind": "lineBreak"}
+            ]
+        }))
+        .unwrap();
+        let (empty, dependencies) = FontChainDependencies::capture(|| {
+            measure_paragraph(&paragraph, 300.0, &config).unwrap()
+        });
+        assert_eq!(empty.lines.len(), 2);
+        assert_ne!(empty.lines[0].synthetic_fallback, Some(true));
+        assert!(matches!(
+            extent_cache_lookup(&paragraph, 300.0, &config, None, 0.0),
+            ExtentLookup::Hit(_)
+        ));
+        let font = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        assert_eq!(crate::register_measure_font_bytes(font).unwrap(), 0);
+        config
+            .font_chains
+            .insert("unrelated|0|0".to_owned(), vec![0]);
+        assert!(dependencies.matches(FontChains::BTree(&config.font_chains)));
+        assert!(matches!(
+            extent_cache_lookup(&paragraph, 300.0, &config, None, 0.0),
+            ExtentLookup::Miss(_)
+        ));
+        let before = EXTENT_MEASURE_CALLS.with(|calls| calls.get());
+        let warm = measure_paragraph(&paragraph, 300.0, &config).unwrap();
+        assert_eq!(EXTENT_MEASURE_CALLS.with(|calls| calls.get()) - before, 1);
+        assert_ne!(
+            serde_json::to_vec(&empty).unwrap(),
+            serde_json::to_vec(&warm).unwrap()
+        );
+        let cold = crate::with_private_measure_fonts(|| {
+            assert_eq!(crate::register_measure_font_bytes(font).unwrap(), 0);
+            measure_paragraph(&paragraph, 300.0, &config).unwrap()
+        });
+        assert_eq!(
+            serde_json::to_vec(&warm).unwrap(),
+            serde_json::to_vec(&cold).unwrap()
+        );
     }
 
     #[test]

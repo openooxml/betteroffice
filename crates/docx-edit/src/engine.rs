@@ -2771,7 +2771,7 @@ impl EngineSession {
             &measurement.defaults,
             &measurement.compat,
             measurement.authoritative_shaping,
-            fonts.0,
+            docx_layout::measure_font_cache_identity(),
         ))
         .map(|bytes| hash_bytes(&bytes))
         .map_err(|error| format!("fingerprint measurement config: {error}"))?;
@@ -3914,16 +3914,23 @@ impl EngineSession {
         let mut reused_blocks = 0_u64;
         let mut section_index = 0_usize;
         for (index, next_block) in blocks.iter().enumerate() {
-            // An empty paragraph ahead of a section break measures to a bare
-            // mark extent; only its own emptiness plus the next block's kind
-            // matter, so a dirty next block has to force a re-measure.
-            let next_is_break = matches!(blocks.get(index + 1), Some(LayoutBlock::SectionBreak(_)));
-            let retained_next_is_break = matches!(
+            let section_break_mark = docx_layout::measure_blocks::is_section_break_mark(
+                next_block,
+                index
+                    .checked_sub(1)
+                    .and_then(|previous| blocks.get(previous)),
+                blocks.get(index + 1),
+            );
+            let retained_section_break_mark = docx_layout::measure_blocks::is_section_break_mark(
+                &previous.measured[index].block,
+                index
+                    .checked_sub(1)
+                    .and_then(|index| previous.measured.get(index))
+                    .map(|measured| &measured.block),
                 previous
                     .measured
                     .get(index + 1)
                     .map(|measured| &measured.block),
-                Some(LayoutBlock::SectionBreak(_))
             );
             if let Some(section) = float_sections.get_mut(index) {
                 *section = section_index;
@@ -3937,7 +3944,7 @@ impl EngineSession {
             // contextual spacing, so that form has to be unchanged too.
             let width_clean = dependencies[index]
                 .matches(FontChains::BTree(&measurement.font_chains))
-                && next_is_break == retained_next_is_break
+                && section_break_mark == retained_section_break_mark
                 && widths.get(index) == previous_widths.get(index)
                 && matches!(previous_entry.measure, BlockExtent::Unsupported)
                     == matches!(next_block, LayoutBlock::Unsupported)
@@ -3998,9 +4005,7 @@ impl EngineSession {
                     block_fingerprints.push(previous_fingerprints[index]);
                 } else {
                     let (measure, reads) = FontChainDependencies::capture(|| {
-                        if next_is_break
-                            && matches!(&owned, LayoutBlock::Paragraph(paragraph) if paragraph.runs.is_empty())
-                        {
+                        if section_break_mark {
                             Ok(BlockExtent::Paragraph(ParagraphExtent {
                                 lines: Vec::new(),
                                 total_height: 0.0,
@@ -6772,6 +6777,308 @@ mod tests {
                     "{label}"
                 );
             });
+        }
+    }
+
+    #[test]
+    fn first_font_invalidates_resident_measurements_without_a_matching_chain() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let engine = EngineSession::new(9653);
+        let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([{
+            "kind": "paragraph", "id": "empty-run", "runs": [
+                {"kind": "text", "text": "", "fontFamily": "Requested"},
+                {"kind": "lineBreak"}
+            ]
+        }]))
+        .unwrap();
+        let mut request = json!({
+            "measurement": {"defaults": {"fontFamily": "Requested", "fontSize": 12}}
+        });
+        let prepared = engine
+            .prepare_region_layout(&request.to_string(), None)
+            .unwrap();
+        let (empty, dependencies) = FontChainDependencies::capture(|| {
+            docx_layout::measure_blocks::measure_block(&mut blocks[0], 300.0, &prepared.measurement)
+                .unwrap()
+        });
+        {
+            let mut pagination = engine.pagination.borrow_mut();
+            pagination.input = Some(LayoutInput {
+                measured: vec![MeasuredBlock {
+                    block: blocks[0].clone(),
+                    measure: empty.clone(),
+                }],
+                options: Default::default(),
+            });
+            pagination.block_fingerprints =
+                measured_fingerprints(pagination.input.as_ref().unwrap()).unwrap();
+            pagination.measured_with = Some(prepared.measurement_fingerprint);
+            pagination.measured_widths = vec![300.0];
+            pagination.measured_font_dependencies = vec![dependencies.clone()];
+        }
+        let (reused, fingerprints) = engine
+            .resident_region_measured(
+                &blocks,
+                &[300.0],
+                &[],
+                &prepared.regions,
+                &prepared.measurement,
+                prepared.measurement_fingerprint,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+        {
+            let mut pagination = engine.pagination.borrow_mut();
+            pagination.input.as_mut().unwrap().measured = reused;
+            pagination.block_fingerprints = fingerprints;
+        }
+        let font = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        assert_eq!(docx_layout::register_measure_font_bytes(font).unwrap(), 0);
+        request["measurement"]["fontChains"] = json!({"unrelated|0|0": [0]});
+        let prepared = engine
+            .prepare_region_layout(&request.to_string(), None)
+            .unwrap();
+        assert!(dependencies.matches(FontChains::BTree(&prepared.measurement.font_chains)));
+        assert!(
+            engine
+                .resident_region_measured(
+                    &blocks,
+                    &[300.0],
+                    &[],
+                    &prepared.regions,
+                    &prepared.measurement,
+                    prepared.measurement_fingerprint,
+                    None,
+                )
+                .unwrap()
+                .is_none()
+        );
+        let warm = docx_layout::measure_blocks::measure_block(
+            &mut blocks[0],
+            300.0,
+            &prepared.measurement,
+        )
+        .unwrap();
+        assert_ne!(
+            serde_json::to_vec(&empty).unwrap(),
+            serde_json::to_vec(&warm).unwrap()
+        );
+        let cold = docx_layout::with_private_measure_fonts(|| {
+            assert_eq!(docx_layout::register_measure_font_bytes(font).unwrap(), 0);
+            docx_layout::measure_blocks::measure_block(&mut blocks[0], 300.0, &prepared.measurement)
+                .unwrap()
+        });
+        assert_eq!(
+            serde_json::to_vec(&warm).unwrap(),
+            serde_json::to_vec(&cold).unwrap()
+        );
+    }
+
+    #[test]
+    fn appended_fonts_keep_the_line_and_dependencies_of_an_empty_section() {
+        for with_previous_section in [false, true] {
+            let fonts = docx_layout::MeasureFonts::default();
+            let _scope = fonts.enter();
+            assert_eq!(
+                docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap(),
+                0
+            );
+            let engine = EngineSession::new(9654);
+            let mut blocks = Vec::new();
+            if with_previous_section {
+                blocks.push(json!({
+                    "type": "paragraph", "content": [font_preflight_run("Prefix", "Stable")],
+                    "sectionProperties": {"sectionStart": "nextPage"}
+                }));
+            }
+            blocks.extend([
+                json!({
+                    "type": "paragraph", "content": [],
+                    "formatting": {"runProperties": {"fontFamily": {"ascii": "Requested"}}},
+                    "sectionProperties": {"sectionStart": "nextPage"}
+                }),
+                json!({"type": "paragraph", "content": [font_preflight_run("Tail", "Stable")]}),
+            ]);
+            crate::seed::seed_blocks(engine.doc(), None, &[("body".to_owned(), &blocks)]).unwrap();
+            let mut request: serde_json::Value =
+                serde_json::from_str(&small_page_request(0)).unwrap();
+            request["measurement"]["defaults"]["fontFamily"] = json!("Stable");
+            request["measurement"]["fontChains"] = json!({"requested|0|0": [0], "stable|0|0": [0]});
+            let section = request["regions"]["sections"][0].clone();
+            for _ in 0..1 + usize::from(with_previous_section) {
+                request["regions"]["sections"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(section.clone());
+            }
+            engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap();
+            let opening = if with_previous_section { 2 } else { 0 };
+            let assert_line = |engine: &EngineSession| {
+                let pagination = engine.pagination.borrow();
+                let BlockExtent::Paragraph(extent) =
+                    &pagination.input.as_ref().unwrap().measured[opening].measure
+                else {
+                    panic!("empty section must retain a paragraph");
+                };
+                assert_eq!(extent.lines.len(), 1);
+                assert!(extent.total_height > 0.0);
+            };
+            assert_line(&engine);
+            let mut retained = HashMap::new();
+            let frame = engine.build_display_list_frame("{}", 0).unwrap();
+            crate::frame_delta::apply_placeholder_test_frame(&frame, &mut retained);
+            let before = engine.stats();
+            assert_eq!(
+                docx_layout::register_measure_font_bytes(lowering_pages::OTHER_FONT).unwrap(),
+                1
+            );
+            request["measurement"]["fontChains"]["requested|0|0"] = json!([1]);
+            let warm = engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap();
+            assert_eq!(
+                engine.stats().resident_measure_calls - before.resident_measure_calls,
+                1
+            );
+            assert_line(&engine);
+            let dependencies =
+                engine.pagination.borrow().measured_font_dependencies[opening].clone();
+            let mut measurement: docx_layout::measure_blocks::MeasurementConfig =
+                serde_json::from_value(request["measurement"].clone()).unwrap();
+            assert!(dependencies.matches(FontChains::BTree(&measurement.font_chains)));
+            measurement.font_chains.remove("requested|0|0");
+            assert!(!dependencies.matches(FontChains::BTree(&measurement.font_chains)));
+            let epoch = engine.display.borrow().binary_frame_epoch;
+            let frame = engine.build_display_list_frame("{}", epoch).unwrap();
+            let warm_pages =
+                crate::frame_delta::apply_placeholder_test_frame(&frame, &mut retained).pages;
+            let state = engine.doc().encode_state_as_update_v1();
+            docx_layout::with_private_measure_fonts(|| {
+                assert_eq!(
+                    docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap(),
+                    0
+                );
+                assert_eq!(
+                    docx_layout::register_measure_font_bytes(lowering_pages::OTHER_FONT).unwrap(),
+                    1
+                );
+                let cold = EngineSession::new(9655);
+                cold.doc().apply_update_v1(&state).unwrap();
+                assert_eq!(
+                    warm,
+                    cold.layout_document_with_regions_json(&request.to_string())
+                        .unwrap()
+                );
+                assert_line(&cold);
+                let frame = cold.build_display_list_frame("{}", 0).unwrap();
+                let cold_pages =
+                    crate::frame_delta::apply_placeholder_test_frame(&frame, &mut HashMap::new())
+                        .pages;
+                assert_eq!(
+                    serde_json::to_vec(&warm_pages).unwrap(),
+                    serde_json::to_vec(&cold_pages).unwrap()
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn resident_section_marks_remeasure_when_the_previous_block_kind_changes() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        assert_eq!(
+            docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap(),
+            0
+        );
+        for previous_is_section in [false, true] {
+            let engine = EngineSession::new(9656);
+            let prepared = engine
+                .prepare_region_layout(
+                    &json!({
+                        "measurement": {
+                            "fontChains": {"requested|0|0": [0]},
+                            "defaults": {"fontFamily": "Requested", "fontSize": 12}
+                        }
+                    })
+                    .to_string(),
+                    None,
+                )
+                .unwrap();
+            let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+                {"kind": if previous_is_section {"sectionBreak"} else {"pageBreak"}, "id": "previous"},
+                {"kind": "paragraph", "id": "mark", "runs": []},
+                {"kind": "sectionBreak", "id": "next"}
+            ])).unwrap();
+            let widths = [300.0; 3];
+            let mut flow = docx_layout::measure_blocks::FloatFlow::new(
+                &blocks,
+                &widths,
+                &prepared.measurement,
+                None,
+            )
+            .unwrap();
+            flow.measure_until(&mut blocks, &widths, &prepared.measurement, 3)
+                .unwrap();
+            {
+                let mut pagination = engine.pagination.borrow_mut();
+                pagination.measured_font_dependencies = flow.font_dependencies().to_vec();
+                pagination.input = Some(LayoutInput {
+                    measured: blocks
+                        .iter()
+                        .cloned()
+                        .zip(flow.into_extents())
+                        .map(|(block, measure)| MeasuredBlock { block, measure })
+                        .collect(),
+                    options: Default::default(),
+                });
+                pagination.block_fingerprints =
+                    measured_fingerprints(pagination.input.as_ref().unwrap()).unwrap();
+                pagination.measured_with = Some(prepared.measurement_fingerprint);
+                pagination.measured_widths = widths.to_vec();
+            }
+            blocks[0] = serde_json::from_value(json!({
+                "kind": if previous_is_section {"pageBreak"} else {"sectionBreak"}, "id": "previous"
+            }))
+            .unwrap();
+            let (warm, _) = engine
+                .resident_region_measured(
+                    &blocks,
+                    &widths,
+                    &[],
+                    &prepared.regions,
+                    &prepared.measurement,
+                    prepared.measurement_fingerprint,
+                    None,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(engine.stats().resident_measure_calls, 2);
+            let BlockExtent::Paragraph(extent) = &warm[1].measure else {
+                panic!("section mark must retain a paragraph");
+            };
+            assert_eq!(extent.lines.len(), usize::from(!previous_is_section));
+            let dependencies = engine.pagination.borrow().measured_font_dependencies[1].clone();
+            assert_eq!(
+                dependencies.matches(FontChains::BTree(&BTreeMap::new())),
+                previous_is_section
+            );
+            let mut cold = blocks.clone();
+            let extents = docx_layout::measure_blocks::measure_blocks_with_floats(
+                &mut cold,
+                &widths,
+                &prepared.measurement,
+                None,
+            )
+            .unwrap();
+            let warm_extents: Vec<_> = warm.iter().map(|entry| &entry.measure).collect();
+            assert_eq!(
+                serde_json::to_vec(&warm_extents).unwrap(),
+                serde_json::to_vec(&extents).unwrap()
+            );
         }
     }
 

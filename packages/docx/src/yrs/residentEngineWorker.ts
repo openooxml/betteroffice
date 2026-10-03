@@ -218,6 +218,7 @@ function trapped(id: number, error: WebAssembly.RuntimeError): void {
 }
 
 async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
+  if (session && request.type === 'sync') validateFontsBaseRevision(request.snapshot);
   supersedeBackgroundPageBuild();
   if (request.type === 'warm') {
     try {
@@ -769,6 +770,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
 }
 
+function validateFontsBaseRevision(snapshot: YrsResidentWorkerSnapshot): void {
+  if (snapshot.fontsBaseRevision !== undefined && snapshot.fontsBaseRevision !== fontsRevision) {
+    throw new Error('Resident engine worker font base revision mismatch');
+  }
+}
+
 /**
  * Loads a snapshot and runs its layout, over the first `provisionalPages`
  * pages only when given; returns the region layout reply, which a full pass
@@ -781,6 +788,7 @@ function hydrate(
   loadState = true
 ): { layoutJson: string | null; provisional: boolean } {
   if (!session) throw new Error('Resident engine worker is not initialized');
+  validateFontsBaseRevision(snapshot);
   supersedeSlicedCompletion();
   incompleteLayout = null;
   clearProvisionalFinalPages();
@@ -792,9 +800,6 @@ function hydrate(
   session.setPartialDocument(snapshot.partialDocument === true);
   previewFinalPages = snapshot.partialDocument === true ? 0 : null;
   if (!snapshot.workerAuthoritative) session.loadMediaSources(snapshot.mediaSources ?? '');
-  if (snapshot.fontsBaseRevision !== undefined && snapshot.fontsBaseRevision !== fontsRevision) {
-    throw new Error('Resident engine worker font base revision mismatch');
-  }
   if (snapshot.fontsRevision !== fontsRevision) {
     if (snapshot.fontsBaseRevision === undefined) {
       session.clearFonts();
