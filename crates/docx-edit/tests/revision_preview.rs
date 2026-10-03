@@ -532,7 +532,10 @@ fn the_preview_parses_leniently_and_keys_the_lowering_cache() {
     );
 
     let (engine, [replace, ..]) = proposals();
-    let misses = || engine.stats().lower_cache_misses;
+    let misses = || {
+        let stats = engine.stats();
+        stats.lower_cache_misses + stats.lower_preview_patches
+    };
     lower(&engine, &RenderEnv::default());
     let start = misses();
     let empty: RenderEnv = serde_json::from_value(json!({"revisionPreview": {}})).unwrap();

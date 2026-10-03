@@ -142,6 +142,29 @@ function setup() {
   return { worker, client };
 }
 
+test('a font base mismatch forgets optimistic revisions, including queued snapshots', async () => {
+  const { worker, client } = setup();
+  const bootstrap = client.bootstrap({ ...snapshot, fontsRevision: 1 }, '');
+  worker.reply(frameReply(worker.lastId()));
+  await bootstrap;
+  const first = client.sync({ ...snapshot, fontsRevision: 2, fontsBaseRevision: 1 }, '', 0);
+  const firstId = worker.lastId();
+  const queued = client.sync({ ...snapshot, fontsRevision: 3, fontsBaseRevision: 2 }, '', 0);
+  const queuedId = worker.lastId();
+  expect(client.syncedFontsRevision()).toBe(3);
+  worker.reply({ id: firstId, ok: false, error: 'Resident engine worker font base revision mismatch' });
+  await expect(first).rejects.toThrow('font base revision mismatch');
+  expect(client.syncedFontsRevision()).toBeNull();
+  worker.reply(frameReply(queuedId));
+  await queued;
+  expect(client.syncedFontsRevision()).toBeNull();
+  const full = client.sync({ ...snapshot, fontsRevision: 3 }, '', 0);
+  worker.reply(frameReply(worker.lastId()));
+  await full;
+  expect(client.syncedFontsRevision()).toBe(3);
+  client.destroy();
+});
+
 test('frame results preserve the document version and preview provenance', async () => {
   const { worker, client } = setup();
   const pending = client.bootstrap(snapshot, '');
@@ -1167,6 +1190,32 @@ describe('queued snapshots', () => {
 });
 
 describe('sent snapshot state', () => {
+  test('rebootstrap ignores a pending sync reply and records the new bootstrap', async () => {
+    const { worker, client } = setup();
+    const bootstrap = client.bootstrap({ ...snapshot, fontsRevision: 1 }, '');
+    worker.reply(frameReply(worker.lastId()));
+    await bootstrap;
+    const sync = client.sync({ ...snapshot, fontsRevision: 2 }, '', 0, false, {
+      stateVector: new Uint8Array([2]),
+    });
+    const oldId = worker.lastId();
+    expect(client.syncedFontsRevision()).toBe(2);
+    expect(client.remoteStateVector()).toEqual(new Uint8Array([2]));
+    client.rebootstrap();
+    expect(client.syncedFontsRevision()).toBeNull();
+    expect(client.remoteStateVector()).toBeNull();
+    worker.reply({ ...frameReply(oldId), stateVector: new Uint8Array([9]).buffer });
+    await sync;
+    expect(client.syncedFontsRevision()).toBeNull();
+    expect(client.remoteStateVector()).toBeNull();
+    const next = client.bootstrap({ ...snapshot, fontsRevision: 3 }, '');
+    worker.reply({ ...frameReply(worker.lastId()), stateVector: new Uint8Array([3]).buffer });
+    await next;
+    expect(client.syncedFontsRevision()).toBe(3);
+    expect(client.remoteStateVector()).toEqual(new Uint8Array([3]));
+    client.destroy();
+  });
+
   test('a reply to an earlier request does not replace a later snapshot hint', async () => {
     const { worker, client } = setup();
     const bootstrap = client.bootstrap({ ...snapshot, fontsRevision: 1 }, '', {

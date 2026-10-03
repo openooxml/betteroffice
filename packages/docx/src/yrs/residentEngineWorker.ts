@@ -301,6 +301,7 @@ function trapped(id: number, error: WebAssembly.RuntimeError): void {
 }
 
 async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
+  if (session && request.type === 'sync') validateFontsBaseRevision(request.snapshot);
   if (
     request.type !== 'documentRead' && request.type !== 'fontRequirements' &&
     request.type !== 'encodeState' && request.type !== 'revisionCount' &&
@@ -984,6 +985,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
 }
 
+function validateFontsBaseRevision(snapshot: YrsResidentWorkerSnapshot): void {
+  if (snapshot.fontsBaseRevision !== undefined && snapshot.fontsBaseRevision !== fontsRevision) {
+    throw new Error('Resident engine worker font base revision mismatch');
+  }
+}
+
 /**
  * Loads a snapshot and runs its layout, over the first `provisionalPages`
  * pages only when given; returns the region layout reply, which a full pass
@@ -996,6 +1003,7 @@ function hydrate(
   loadState = true
 ): { layoutJson: string | null; provisional: boolean } {
   if (!session) throw new Error('Resident engine worker is not initialized');
+  validateFontsBaseRevision(snapshot);
   supersedeSlicedCompletion();
   incompleteLayout = null;
   clearProvisionalFinalPages();
@@ -1012,9 +1020,13 @@ function hydrate(
     session.loadNoteSeparators(snapshot.noteSeparators ?? new Uint8Array(0));
   }
   if (snapshot.fontsRevision !== fontsRevision) {
-    // A mismatched revision always carries the full font set (the client only
-    // omits fonts when it knows this session's applied revision matches).
-    session.clearFonts();
+    if (snapshot.fontsBaseRevision === undefined) {
+      session.clearFonts();
+      glyphCache = null;
+      for (const pageId of activeOffscreenPageIds) pendingOffscreenPageIds.add(pageId);
+      intactBackBuffers.clear();
+    }
+    fontsRevision = -1;
     for (const font of snapshot.fonts) {
       if (font instanceof Uint8Array) session.registerFont(font);
       else session.registerSubstituteFont(font.substituteOf, font.family);

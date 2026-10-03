@@ -39,6 +39,11 @@ import type { DocxPageExportOptions } from './pagedExport';
 import type { DocxContentControlQuery, DocxContentControlsOptions, DocxContentControlsResult } from './contentControls';
 
 /** @internal */
+export interface ResidentEngineWorkerFontSync {
+  fontsBaseRevision?: number;
+}
+
+/** @internal */
 export type ResidentProposalOperation =
   | { kind: 'propose'; request: DocxProposalRequest }
   | { kind: 'setStates'; request: DocxProposalStateRequest }
