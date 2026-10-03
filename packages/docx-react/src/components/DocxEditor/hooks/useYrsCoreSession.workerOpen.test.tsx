@@ -264,6 +264,9 @@ interface HarnessProps {
   allowHostProposals?: boolean;
   resolvedCommentIds?: ReadonlySet<number>;
   measurementFont?: Uint8Array;
+  isCurrentLoad?: (generation: number) => boolean;
+  onSession?: (session: YrsSession) => void;
+  onPreviewHost?: (session: YrsSession, host: YrsDocxHost) => void;
   onHostDocument?: (session: YrsSession) => void;
   onLoad?: (api: DocxEditorRef) => void;
   onPresented?: (session: unknown) => void;
@@ -307,9 +310,10 @@ function useHarness(props: HarnessProps) {
     {
       isCurrentLoad: (generation) => {
         loadChecks.current.push(generation);
-        return generation === props.generation;
+        return generation === props.generation && props.isCurrentLoad?.(generation) !== false;
       },
       onSession: (session) => {
+        props.onSession?.(session);
         renderer.recordSession(session);
         const open = session.openDocx.bind(session);
         session.openDocx = (input, seed, options) => {
@@ -317,6 +321,7 @@ function useHarness(props: HarnessProps) {
           return open(input, seed, options);
         };
       },
+      onPreviewHost: props.onPreviewHost,
       onHostDocument: (host, _generation, session) => {
         setHost(host);
         props.onHostDocument?.(session);
@@ -1347,6 +1352,89 @@ test('a preloaded spare worker takes the open that starts alongside the preview'
     await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(result.current.core.session));
     expect(workers).toHaveLength(1);
     expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
+
+test.each([false, true])('a worker preview publishes its decoded host before the session (callback throws=%s)', async (throws) => {
+  installWorker();
+  const frames = holdFrames();
+  const order: string[] = [];
+  const onPreviewHost = mock((_session: YrsSession, _host: YrsDocxHost) => {
+    order.push('previewHost');
+    if (throws) throw new Error('prefetch failed');
+  });
+  const onSession = mock((_session: YrsSession) => { order.push('session'); });
+  try {
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: {
+        ...initialProps, previewFirstPage: true, workerPreview: true, source: longBytes,
+        onPreviewHost, onSession,
+      },
+    });
+    await waitFor(() => expect(result.current.core.previewing).toBe(true));
+    const preview = result.current.core.session!;
+    expect(onPreviewHost).toHaveBeenCalledTimes(1);
+    expect(onPreviewHost.mock.calls[0]![0]).toBe(preview);
+    expect(onPreviewHost.mock.calls[0]![1]).toBe(result.current.host);
+    expect(onSession).toHaveBeenCalledTimes(1);
+    expect(onSession.mock.calls[0]![0]).toBe(preview);
+    expect(order).toEqual(['previewHost', 'session']);
+    expect(preview.storyIds()).toEqual([]);
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
+
+test('a stale worker preview never publishes its host or session', async () => {
+  const { received, reply } = installWorker({
+    holdReply: (request) => request.type === 'open' && request.previewBlocks !== undefined,
+  });
+  let current = true;
+  const onPreviewHost = mock((_session: YrsSession, _host: YrsDocxHost) => {});
+  const onSession = mock((_session: YrsSession) => {});
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: {
+      ...initialProps, previewFirstPage: true, workerPreview: true, source: longBytes,
+      isCurrentLoad: () => current, onPreviewHost, onSession,
+    },
+  });
+  const request = await received('open');
+  current = false;
+  await act(async () => {
+    reply(request);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  });
+  expect(onPreviewHost).not.toHaveBeenCalled();
+  expect(onSession).not.toHaveBeenCalled();
+  expect(result.current.host).toBeNull();
+  expect(result.current.core.session).toBeNull();
+  expect(result.current.errors).toEqual([]);
+  unmount();
+});
+
+test.each(['failed', 'refused'])('a %s worker preview never publishes its main-thread fallback through onPreviewHost', async (outcome) => {
+  installWorker({ failOpen: outcome === 'failed', refusePreview: outcome === 'refused' });
+  const frames = holdFrames();
+  const onPreviewHost = mock((_session: YrsSession, _host: YrsDocxHost) => {});
+  try {
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: {
+        ...initialProps, previewFirstPage: true, workerPreview: true, source: longBytes,
+        onPreviewHost,
+      },
+    });
+    await waitFor(() => expect(result.current.core.previewing).toBe(true));
+    expect(onPreviewHost).not.toHaveBeenCalled();
+    expect(result.current.host).not.toBeNull();
+    expect(result.current.core.session!.storyIds()).not.toEqual([]);
     expect(result.current.errors).toEqual([]);
     unmount();
   } finally {

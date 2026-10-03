@@ -1,8 +1,10 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, spyOn, test } from 'bun:test';
+import { StrictMode, useLayoutEffect } from 'react';
 import type { LayoutComputation } from '@betteroffice/docx/editor';
 import { LayoutSelectionGate, type ResidentMeasurementConfig } from '@betteroffice/docx/layout';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
+import type { Document } from '@betteroffice/docx/types/document';
 import { proposalSetIdentity, type ResidentProposalReply, type YrsRenderEnv, type YrsSession } from '@betteroffice/docx/yrs';
 import { isLayoutQueued, isSupersededLayout, sourceVersionOf } from '../internals/layoutProvenance';
 import { deferWorkerOpenReplica } from '../internals/workerOpenReplica';
@@ -35,6 +37,7 @@ interface WorkerPass {
 
 interface HookProps {
   session: YrsSession;
+  document?: Document;
   renderEnv?: YrsRenderEnv;
 }
 
@@ -72,6 +75,9 @@ async function opened({
   pendingReplica = false,
   ownsDocument = false,
   fontRequirementsInWorker = undefined as FontRequirementsInWorker | undefined,
+  onLayoutComputed = undefined as ((layout: Layout | null) => void) | undefined,
+  onLayoutCommitted = undefined as ((layout: Layout | null) => void) | undefined,
+  strictMode = false,
 } = {}) {
   let nextFrame = 0;
   const frames = new Map<number, FrameRequestCallback>();
@@ -93,9 +99,9 @@ async function opened({
   const worker: WorkerPass[] = [];
   const errors: Error[] = [];
   const syncCoordinator = new LayoutSelectionGate();
-  const hook = renderHook(({ session, renderEnv }: HookProps) =>
-    useLayoutPipeline({
-      document: null,
+  const hook = renderHook(({ session, document, renderEnv }: HookProps) => {
+    const pipeline = useLayoutPipeline({
+      document: document ?? null,
       session,
       experimentalWorkerOpen,
       renderEnv: renderEnv ?? ({} as YrsRenderEnv),
@@ -108,6 +114,7 @@ async function opened({
       syncCoordinator,
       getScrollContainer: () => null,
       onError: (error) => errors.push(error),
+      onLayoutComputed,
       fontRequirementsInWorker,
       layoutInWorker: Object.assign((asked: YrsSession, request: string) =>
         doc.workerAvailable
@@ -125,9 +132,10 @@ async function opened({
           : null, {
         ownsDocument: (asked: YrsSession) => asked === session && doc.workerOwnsDocument,
       }),
-    }),
-    { initialProps: { session } as HookProps }
-  );
+    });
+    useLayoutEffect(() => onLayoutCommitted?.(pipeline.layout), [pipeline.layout]);
+    return pipeline;
+  }, { initialProps: { session } as HookProps, wrapper: strictMode ? StrictMode : undefined });
   const frame = () =>
     act(async () => {
       const pending = [...frames];
@@ -141,7 +149,7 @@ async function opened({
       worker[index]!.answer(computation);
     });
   const shown = () => sourceVersionOf(hook.result.current.layout);
-  act(() => hook.result.current.runLayoutPipeline());
+  await act(async () => hook.result.current.runLayoutPipeline());
   await answer(0);
   expect(shown()).toBe('1');
   return {
@@ -195,6 +203,105 @@ test.each([false, true])('cached page totals are requested only with worker-open
     expect(retainedRequest).not.toHaveProperty('cachedPageTotals');
   }
 });
+
+test.each([false, true])('font requirements are prefetched only with worker-open=%s', async (experimentalWorkerOpen) => {
+  const inputs: Array<{ session: YrsSession; input: string }> = [];
+  const h = await opened({
+    experimentalWorkerOpen,
+    fontRequirementsInWorker: (session, input) => {
+      inputs.push({ session, input });
+      return Promise.resolve('[]');
+    },
+  });
+  const document = {
+    package: {
+      document: { content: [], finalSectionProperties: {} },
+      settings: { defaultTabStop: 900 },
+      footnotes: [{ id: 1, content: [] }],
+    },
+  } as unknown as Document;
+  const renderEnv: YrsRenderEnv = {
+    themeColors: { accent1: '#123456' },
+    defaultTabStopTwips: 900,
+    numericIds: {},
+    showHiddenText: true,
+    mediaTokens: true,
+  };
+  const { session } = fakeDocument();
+  inputs.length = 0;
+  act(() => h.hook.result.current.prefetchFontRequirements(session, document, renderEnv));
+  expect(inputs).toHaveLength(experimentalWorkerOpen ? 1 : 0);
+  h.hook.rerender({ session, document, renderEnv });
+  await act(async () => h.hook.result.current.runLayoutPipeline());
+  if (experimentalWorkerOpen) {
+    expect(inputs).toHaveLength(2);
+    expect(inputs[0]!.session).toBe(session);
+    expect(inputs[1]!.session).toBe(session);
+    expect(inputs[0]!.input).toBe(inputs[1]!.input);
+    expect(JSON.parse(inputs[0]!.input).cachedPageTotals).toBe(true);
+  } else {
+    expect(inputs).toEqual([]);
+  }
+  await h.answer(1);
+});
+
+test.each([[true, false], [true, true], [false, false]])(
+  'layouts publish before commit only with worker-open=%s (StrictMode=%s)',
+  async (experimentalWorkerOpen, strictMode) => {
+    let committed: Layout | null = null;
+    const published: Array<{ layout: Layout | null; committed: Layout | null }> = [];
+    const h = await opened({
+      experimentalWorkerOpen,
+      strictMode,
+      onLayoutComputed: (layout) => published.push({ layout, committed }),
+      onLayoutCommitted: (layout) => { committed = layout; },
+    });
+    const previous = h.hook.result.current.layout;
+    const initial = published.filter(({ layout }) => layout !== null);
+    expect(initial).toHaveLength(experimentalWorkerOpen ? 2 : 1);
+    initial.forEach(({ layout }) => expect(layout).toBe(previous));
+    expect(initial[0]!.committed).toBe(experimentalWorkerOpen ? null : previous);
+    expect(initial.at(-1)!.committed).toBe(previous);
+    published.length = 0;
+    h.doc.version = 2;
+    act(() => h.hook.result.current.scheduleLayout('remote'));
+    await h.frame();
+    let finish!: (computation: LayoutComputation | null) => void;
+    const complete = new Promise<LayoutComputation | null>((resolve) => { finish = resolve; });
+    const first = { pages: [] } as unknown as Layout;
+    const full = { pages: [] } as unknown as Layout;
+    await act(async () => {
+      h.worker[1]!.answer({ layout: first, notesConverged: true, complete });
+      await Promise.resolve();
+      expect(committed).toBe(previous);
+      expect(published.map(({ layout }) => layout)).toEqual(experimentalWorkerOpen ? [first] : []);
+      if (experimentalWorkerOpen) expect(published[0]!.layout).toBe(first);
+    });
+    await act(async () => {
+      finish({ layout: full, notesConverged: true });
+      await Promise.resolve();
+      expect(committed).toBe(first);
+      expect(published.map(({ layout }) => layout)).toEqual(
+        experimentalWorkerOpen ? [first, first, full] : [first]
+      );
+    });
+    const expected = experimentalWorkerOpen
+      ? [
+          { layout: first, committed: previous },
+          { layout: first, committed: first },
+          { layout: full, committed: first },
+          { layout: full, committed: full },
+        ]
+      : [{ layout: first, committed: first }, { layout: full, committed: full }];
+    expect(published).toHaveLength(expected.length);
+    expected.forEach((event, index) => {
+      expect(published[index]!.layout).toBe(event.layout);
+      expect(published[index]!.committed).toBe(event.committed);
+    });
+    expect(h.hook.result.current.layout).toBe(full);
+    expect(h.errors).toEqual([]);
+  }
+);
 
 test('a superseded null completion requests the worker while it holds proposals', async () => {
   const h = await opened({ experimentalWorkerOpen: true, pendingReplica: true });

@@ -140,6 +140,11 @@ export interface UseLayoutPipelineReturn {
    * `null` while it has no session or the fonts the document needs are not ready.
    */
   getLayoutRequest: () => string | null;
+  prefetchFontRequirements: (
+    session: YrsSession,
+    document: Document,
+    renderEnv: YrsRenderEnv
+  ) => void;
 }
 
 /** Whether `next` measures as `last` does and only adds font chains. */
@@ -162,6 +167,17 @@ function workerProposalRenderEnv(session: YrsSession, renderEnv: YrsRenderEnv): 
   return workerProposalAuthority(session)?.initialized
     ? { ...renderEnv, revisionPreview: proposalRevisionPreview(session.getProposals()) }
     : renderEnv;
+}
+
+function fontRequirementsInput(
+  document: Document | null,
+  pageGap: number,
+  renderEnv: YrsRenderEnv,
+  workerOpen: boolean
+): string {
+  const request = buildResidentRegionLayoutRequest(document, pageGap, renderEnv);
+  if (workerOpen) request.cachedPageTotals = true;
+  return JSON.stringify(request);
 }
 
 /** A pass may run in the worker only if every change it lays out asked for that. */
@@ -381,6 +397,20 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     );
   }, []);
 
+  const prefetchFontRequirements = useCallback(
+    (session: YrsSession, document: Document, renderEnv: YrsRenderEnv): void => {
+      if (!workerOpenEnabledRef.current || !fontRequirementsInWorkerRef.current) return;
+      const input = fontRequirementsInput(
+        document,
+        pageGap,
+        workerProposalRenderEnv(session, renderEnv),
+        true
+      );
+      void fontRequirementsInWorkerRef.current(session, input)?.catch(() => {});
+    },
+    [pageGap]
+  );
+
   const runLayoutPipeline = useCallback(
     (options?: { onHost?: boolean }) => {
       const workerRequired = session !== null &&
@@ -425,9 +455,12 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       const run = (workerRequirements?: string | null): void => {
         let measurement: ResidentMeasurementConfig | null = null;
         try {
-          const request = buildResidentRegionLayoutRequest(document, pageGap, passRenderEnv);
-          if (workerOpenEnabledRef.current) request.cachedPageTotals = true;
-          const input = JSON.stringify(request);
+          const input = fontRequirementsInput(
+            document,
+            pageGap,
+            passRenderEnv,
+            workerOpenEnabledRef.current
+          );
           const pendingRequirements =
             (workerOpenEnabledRef.current ||
               registeredWorkerProposalAuthority(session)?.holdsWorkerState()) &&
@@ -568,6 +601,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           viewportAnchorCaptureReadyRef.current = false;
           layoutUpdateOriginRef.current = origin;
           setLayout(newLayout);
+          if (workerOpenEnabledRef.current) onLayoutComputedRef.current?.(newLayout);
 
           const vp = viewportLayoutRef.current;
           if (vp) {
@@ -949,5 +983,6 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     cancelPendingScrollRestore,
     navigationEpoch,
     getLayoutRequest,
+    prefetchFontRequirements,
   };
 }

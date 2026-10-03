@@ -66,6 +66,7 @@ import type {
 } from '@betteroffice/docx/types/document';
 import type { WrapType } from '@betteroffice/docx/docx/wrapTypes';
 import {
+  proposalRevisionPreview,
   yrsLocToProjectedDisplayPosition,
   type YrsInlineFormatDelta,
   type YrsLoc,
@@ -415,6 +416,7 @@ export interface PagedEditorRef {
   ): boolean;
   /** Schedules layout of the resident worker document. */
   refreshWorkerLayout(): void;
+  prefetchWorkerFontRequirements(session: YrsSession, document: Document): void;
   /** Apply a body-toolbar command through yrs. */
   applyYrsFormatting(action: FormattingAction): boolean;
   /** Apply a non-toolbar body command through yrs. */
@@ -473,6 +475,26 @@ export interface PagedEditorRef {
 // =============================================================================
 // COMPONENT (module-scope helpers live in per-domain files — see imports)
 // =============================================================================
+
+function yrsRenderEnvFor(
+  theme: Theme | null | undefined,
+  document: Document | null,
+  showHiddenText: boolean,
+  revisionPreview: YrsRenderEnv['revisionPreview']
+): YrsRenderEnv {
+  const themeColors: Record<string, string> = {};
+  for (const [name, value] of Object.entries(theme?.colorScheme ?? {})) {
+    if (typeof value === 'string') themeColors[name] = value;
+  }
+  return {
+    themeColors,
+    defaultTabStopTwips: document?.package.settings?.defaultTabStop ?? null,
+    numericIds: {},
+    showHiddenText,
+    mediaTokens: true,
+    ...(revisionPreview ? { revisionPreview } : {}),
+  };
+}
 
 const SIDEBAR_ANCHOR_EMIT_MS = 150;
 const SIDEBAR_ANCHOR_STALE_MS = 400;
@@ -580,27 +602,17 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const yrsInputRef = useRef<YrsInputRef>(null);
 
     const proposalPreview = useRevisionPreview(yrsCore.session);
-    const yrsRenderEnv = useMemo<YrsRenderEnv>(() => {
-      const themeColors: Record<string, string> = {};
-      for (const [name, value] of Object.entries(_theme?.colorScheme ?? {})) {
-        if (typeof value === 'string') themeColors[name] = value;
-      }
-      return {
-        themeColors,
-        defaultTabStopTwips: document?.package.settings?.defaultTabStop ?? null,
-        numericIds: {},
+    const yrsRenderEnvPropsRef = useRef({ theme: _theme, showHiddenText });
+    yrsRenderEnvPropsRef.current = { theme: _theme, showHiddenText };
+    const yrsRenderEnv = useMemo(
+      () => yrsRenderEnvFor(_theme, document, showHiddenText, proposalPreview.revisionPreview),
+      [
+        _theme?.colorScheme,
+        document?.package.settings?.defaultTabStop,
         showHiddenText,
-        mediaTokens: true,
-        ...(proposalPreview.revisionPreview
-          ? { revisionPreview: proposalPreview.revisionPreview }
-          : {}),
-      };
-    }, [
-      _theme?.colorScheme,
-      document?.package.settings?.defaultTabStop,
-      showHiddenText,
-      proposalPreview,
-    ]);
+        proposalPreview,
+      ]
+    );
     const activeYrsRootStory = partEditStory(partEdit);
     const yrsInputPositionMap = useCallback(
       (storyId = activeYrsRootStory) => yrsCore.inputPositionMap(storyId),
@@ -721,6 +733,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       cancelPendingScrollRestore,
       navigationEpoch,
       getLayoutRequest,
+      prefetchFontRequirements,
     } = useLayoutPipeline({
       onError,
       document,
@@ -833,6 +846,20 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const refreshWorkerLayout = useCallback(
       () => refreshYrsLayout('remote', true),
       [refreshYrsLayout]
+    );
+
+    const prefetchWorkerFontRequirements = useCallback(
+      (session: YrsSession, document: Document): void => {
+        const { theme, showHiddenText } = yrsRenderEnvPropsRef.current;
+        const env = yrsRenderEnvFor(
+          theme,
+          document,
+          showHiddenText,
+          proposalRevisionPreview(session.getProposals())
+        );
+        prefetchFontRequirements(session, document, env);
+      },
+      [prefetchFontRequirements]
     );
 
     /**
@@ -1875,6 +1902,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       yrsSession: yrsCore.session,
       replicaReady: yrsCore.replicaReady,
       refreshWorkerLayout,
+      prefetchWorkerFontRequirements,
       experimentalWorkerOpen: yrsCore.experimentalWorkerOpen,
       yrsLocToDisplayPosition,
       syncYrsInputState: (docChanged, dirtyStory, options) =>

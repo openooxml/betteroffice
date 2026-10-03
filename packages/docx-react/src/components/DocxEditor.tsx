@@ -1245,6 +1245,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     {
       isCurrentLoad,
       onSession: canvasRenderer.recordSession,
+      onPreviewHost: (session, host) =>
+        pagedEditorRef.current?.prefetchWorkerFontRequirements(session, host.document),
       onHostDocument: acceptHostDocument,
       onError: failHostDocument,
       onReplicaError: (error, generation) => {

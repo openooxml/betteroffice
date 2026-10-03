@@ -83,6 +83,7 @@ interface YrsCoreSessionCallbacks {
   isCurrentLoad?: (generation: number) => boolean;
   /** A session was created for the current load, before it is seeded. */
   onSession?: (session: YrsSession) => void;
+  onPreviewHost?: (session: YrsSession, host: YrsDocxHost) => void;
   onHostDocument?: (
     host: YrsDocxHost,
     generation: number,
@@ -657,6 +658,11 @@ export function useYrsCoreSession(
           return;
         }
         if (opened) {
+          if (inWorker) {
+            try {
+              callbacksRef.current?.onPreviewHost?.(opened.session, opened.host);
+            } catch {}
+          }
           callbacksRef.current?.onSession?.(opened.session);
           const painted = new Promise<void>((resolve) => {
             paintWaitRef.current = { session: opened.session, resolve };
