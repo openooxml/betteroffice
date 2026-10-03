@@ -43,6 +43,7 @@ import type { DocxEditorCollaborationOptions } from './types';
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
 import { partEditStory, type NoteEdit, type PartEdit, type PartEditTarget } from './partEdit';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import type { ViewerSelectionChange } from './internals/viewerSelectionController';
 
 /**
  * Body of the editor: the paged editor host, its sidebar overlay
@@ -87,6 +88,7 @@ export function DocxEditorPagedArea({
   onYrsHistoryChange,
   onPagedSelectionChange,
   onYrsSelectionChange,
+  onViewerSelectionChange,
   onRenderedDomContextReady,
   pluginOverlays,
   onHyperlinkClick,
@@ -172,6 +174,7 @@ export function DocxEditorPagedArea({
   onYrsHistoryChange?: (canUndo: boolean, canRedo: boolean) => void;
   onPagedSelectionChange: () => void;
   onYrsSelectionChange: (selection: YrsToolbarSelection) => void;
+  onViewerSelectionChange?: (selection: ViewerSelectionChange) => void;
   onRenderedDomContextReady:
     | ((ctx: RenderedDomContext, queries: DisplayListQueries) => void)
     | undefined;
@@ -465,6 +468,7 @@ export function DocxEditorPagedArea({
         onYrsHistoryChange={onYrsHistoryChange}
         onSelectionChange={onPagedSelectionChange}
         onYrsSelectionChange={onYrsSelectionChange}
+        onViewerSelectionChange={onViewerSelectionChange}
         onYrsPartSelectionChange={(part, selection) => {
           if (partEditStory(part) === partStory) setPartSelection(selection);
         }}

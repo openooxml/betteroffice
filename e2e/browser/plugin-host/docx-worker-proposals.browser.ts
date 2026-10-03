@@ -94,6 +94,7 @@ interface WorkerProposalProbe {
     layoutComplete: number | null;
     renderedDomContextCalls: number;
     contentChanges: { bodyContainsProposedText: boolean }[];
+    documentChanges: string[];
     load: { version: string; sessionVersion: string; snapshotVersion: string } | null;
     events: { load: number; 'proposal-change': number; 'layout-change': number };
     errors: string[];
@@ -584,11 +585,10 @@ test('existing revisions open the sidebar and hydrate once', async ({ page }) =>
   expect(current.unexpectedScrolls).toBe(0);
 });
 
-test('onChange hydrates the first worker proposal once and preserves records', async ({ page }) => {
+test('a worker viewer reports a proposal through onDocumentChange without opening the main-thread copy', async ({ page }) => {
   await instrument(page);
   await open(page, true, 'onChange=1');
   const prepared = await prepare(page, true);
-  const beforeHydration = await view(page);
   const result = await page.evaluate(
     (request) =>
       (window as unknown as ProbeWindow).__workerProposalProbe.editor!.proposeChanges(request),
@@ -597,11 +597,7 @@ test('onChange hydrates the first worker proposal once and preserves records', a
   const proposed = snapshotOf(result);
   expect(proposed.proposals.map(({ id }) => id)).toEqual([IDS[0]]);
   expect(proposed.proposals[0]!.changed).toBe(true);
-  await expect.poll(async () => (await status(page)).pending).toBe(false);
-  await assertHydration(page, beforeHydration);
-  await expect.poll(async () => (await status(page)).contentChanges.some((change) =>
-    change.bodyContainsProposedText
-  )).toBe(true);
+  await expect.poll(async () => (await status(page)).documentChanges.length).toBeGreaterThan(0);
   const after = await getProposals(page);
   expect(after.previewVersion).toBe(proposed.previewVersion);
   expect(after.proposals).toEqual(proposed.proposals);
@@ -611,7 +607,9 @@ test('onChange hydrates the first worker proposal once and preserves records', a
   const current = await status(page);
   expect(current.openedInWorker).toBe(true);
   expect(current.captures).toBe(1);
-  expect(current.encodeState).toBe(1);
+  expect(current.pending).toBe(true);
+  expect(current.encodeState).toBe(0);
+  expect(current.contentChanges).toEqual([]);
   expect(current.sidebarOpen).toBe(false);
   expect(current.errors).toEqual([]);
   expect(current.unexpectedScrolls).toBe(0);
