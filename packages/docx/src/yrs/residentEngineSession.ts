@@ -139,6 +139,7 @@ export async function createResidentEngineSession(
       storyRevision += 1;
       for (const story of changes.stories) storyRevisions.set(story, storyRevision);
     }
+    if (since >= storyRevision) return { revision: storyRevision, stories: [] };
     return {
       revision: storyRevision,
       stories: [...storyRevisions].filter(([, revision]) => revision > since)

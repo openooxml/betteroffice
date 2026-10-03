@@ -133,6 +133,7 @@ test('deleting a viewer comment removes its worker anchor without a document rep
     (window as unknown as ViewerWindow).__viewerSidebarsProbe.commentAnchors('7')
   )).toEqual([]);
   await expect(page.locator('.docx-canvas-brighten-comment')).toHaveCount(0);
+  await expectUnchanged(page, before);
 
   const canvas = page.locator('canvas[data-page-index="0"]');
   const width = await canvas.evaluate((element) => element.getBoundingClientRect().width);
@@ -142,5 +143,5 @@ test('deleting a viewer comment removes its worker anchor without a document rep
   await expect.poll(() => page.evaluate(() =>
     (window as unknown as ViewerWindow).__viewerSidebarsProbe.commentAnchors('7')
   )).toEqual([]);
-  await expectUnchanged(page, before);
+  expect(await status(page)).toMatchObject({ wasm: before.wasm, replica: { started: false, loaded: false }, errors: [] });
 });
