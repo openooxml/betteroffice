@@ -294,3 +294,24 @@ test('docx: a double-click on the first page header opens the header for editing
   await page.keyboard.type('Edited');
   expect(await savedText(page, info, 'header', /^word\/header\d+\.xml$/)).toContain('Edited');
 });
+
+test('docx: with the first page footer open, a double-click on the next page header switches to it', async ({
+  page,
+}, info) => {
+  await open(page);
+  await focusDocument(page);
+  const footer = page.locator('.layout-page[data-page-index="0"] .layout-page-footer');
+  await footer.evaluate((band) => band.scrollIntoView({ block: 'center' }));
+  const footerBox = (await footer.boundingBox())!;
+  await page.mouse.dblclick(footerBox.x + footerBox.width / 2, footerBox.y + footerBox.height / 2);
+  await expect(page.locator('.hf-inline-editor')).toContainText('Footer');
+
+  const header = page.locator('.layout-page[data-page-index="1"] .layout-page-header');
+  const box = (await header.boundingBox())!;
+  await page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(page.locator('.hf-inline-editor')).toContainText('Header');
+  expect((await header.boundingBox())!.y).toBe(box.y);
+  await page.keyboard.type('Switched');
+  expect(await savedText(page, info, 'switched', /^word\/header\d+\.xml$/)).toContain('Switched');
+  expect(await savedText(page, info, 'footer', /^word\/footer\d+\.xml$/)).not.toContain('Switched');
+});
