@@ -1116,7 +1116,8 @@ async function backgroundPageSlice(build: BackgroundPageBuild, budgetMs: number)
   const elapsed = performance.now() - started;
   build.engineMs += elapsed;
   build.pagesPerSlice = Math.min(
-    32, Math.max(1, Math.round((pages.length * budgetMs) / Math.max(1, elapsed)))
+    32,
+    Math.max(BACKGROUND_SLICE_PAGES, Math.round((pages.length * budgetMs) / Math.max(1, elapsed)))
   );
   build.offset += pages.length;
   if (build.offset === build.request.pages.length) {

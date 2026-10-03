@@ -609,6 +609,30 @@ test('fast background page slices grow beyond four pages and keep every frame', 
   expect(w.answered).toEqual([1, 2]);
 });
 
+test('slow background page slices keep at least four pages', async () => {
+  const w = worker();
+  await w.bootstrap(12);
+  let clock = 0;
+  w.harness.now = () => clock;
+  const calls: number[][] = [];
+  Object.assign(w.harness.session, {
+    buildDisplayPagesFrame(pages: number[]) {
+      calls.push(pages);
+      clock += 100;
+      const bytes = w.harness.session.applyInput();
+      w.harness.delta = { ...w.harness.delta!, pageCount: 12 };
+      return bytes;
+    },
+  });
+  const pages = Array.from({ length: 12 }, (_, index) => index);
+  const response = await w.send({
+    type: 'buildPages', pages, expectedFrameEpoch: 1, paintCaret: false, background: true,
+  });
+  expect(response.ok).toBe(true);
+  expect(calls.map((slice) => slice.length)).toEqual([4, 4, 4]);
+  expect(calls.flat()).toEqual(pages);
+});
+
 test('a visible page request supersedes the remaining background slices', async () => {
   const w = worker();
   await w.bootstrap(9);
