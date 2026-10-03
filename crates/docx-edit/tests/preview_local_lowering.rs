@@ -131,11 +131,11 @@ fn preview_local_random_edit_and_decision_streams() {
         let mut random = fixture::Random::new(seed);
         oracle(&engine, &env);
         for _ in 0..24 {
-            let suggested = random.next() % 2 == 0;
+            let suggested = random.next().is_multiple_of(2);
             let plain = EditCtx::local("", "");
             let suggesting = EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting();
             let ctx = if suggested { &suggesting } else { &plain };
-            if random.next() % 2 == 0 {
+            if random.next().is_multiple_of(2) {
                 engine
                     .doc()
                     .insert_text(ctx, Position::new("body", 1), "x", FormatPolicy::Plain)

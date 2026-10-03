@@ -226,7 +226,7 @@ pub fn decide(env: &mut docx_edit::bridge::RenderEnv, ids: &[String], random: &m
     use docx_edit::bridge::RevisionPreview::{Accepted, Rejected};
     let before = env.revision_preview.clone();
     for id in ids {
-        if random.next() % 3 != 0 {
+        if !random.next().is_multiple_of(3) {
             continue;
         }
         match random.next() % 3 {
