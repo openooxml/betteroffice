@@ -97,7 +97,34 @@ export function mergeDocxHostMetadata(full: Document, host: Document): Document 
   };
 }
 
-/** Story a direct-input edit dirties: the hf/note root it sits in, everything else the body. */
+/** Host metadata read by `mergeDocxHostMetadata`. @internal */
+export function hostSaveMetadata(host: Document): Document {
+  const pkg = host.package;
+  return {
+    contractVersion: host.contractVersion,
+    warnings: host.warnings,
+    package: {
+      contractVersion: pkg.contractVersion,
+      styles: pkg.styles,
+      theme: pkg.theme,
+      settings: pkg.settings,
+      fontTable: pkg.fontTable,
+      relationships: pkg.relationships,
+      headers: pkg.headers,
+      footers: pkg.footers,
+      footnotes: pkg.footnotes,
+      endnotes: pkg.endnotes,
+      document: {
+        content: [],
+        sections: pkg.document.sections,
+        finalSectionProperties: pkg.document.finalSectionProperties,
+        comments: pkg.document.comments,
+      },
+    },
+  };
+}
+
+/** Story a direct-input edit dirties: the hf/note root it sits in, everything else the body. @internal */
 export function dirtyProjectionStory(activeStory: string): string {
   return ['hf:', 'fn:', 'en:'].some((prefix) => activeStory.startsWith(prefix))
     ? activeStory.split(':', 2).join(':')

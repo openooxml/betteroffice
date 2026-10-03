@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { applyFrameDeltaOwned, decodeFrameDelta } from '../layout/render/frameDelta';
-import { createResidentEngineSession } from './residentEngineSession';
+import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
+import type { ResidentSaveRecord } from './residentSave';
 import { proposalRevisionPreview } from './proposals';
 import { createYrsSession } from './index';
 import { readSidebar, readOutlineHeadings } from './sidebarReads';
@@ -3591,6 +3592,61 @@ describe('resident worker opening', () => {
     });
     return { w, calls };
   }
+
+  test('retains the opened source, keeps save history across an opened bootstrap and resets it on destroy/open', async () => {
+    const { w } = openingWorker();
+    const host = { package: { document: { content: [] } } };
+    let source = new Uint8Array([1, 2, 3]).buffer;
+    const records: ResidentSaveRecord[] = [];
+    const save: ResidentEngineSession['save'] = async (bytes, hostJson, metadata, comments, record) => {
+      expect(bytes.buffer).toBe(source);
+      expect(hostJson).toBe('{"host":1}');
+      expect(metadata).toBe(host);
+      expect(comments).toEqual([]);
+      if (records.at(-1) !== record) {
+        expect(record).toEqual({ full: false });
+        records.push(record);
+      } else {
+        expect(record.full).toBe(true);
+        expect(record.saved).toBeDefined();
+        expect(record.base).toBe(host);
+      }
+      const saved = new Uint8Array([4, 5, 6]).buffer;
+      record.full = true;
+      record.saved = saved;
+      record.base = host as unknown as NonNullable<ResidentSaveRecord['base']>;
+      return saved;
+    };
+    Object.assign(w.harness.session, { save });
+    expect((await w.send({ type: 'open', bytes: source })).ok).toBe(true);
+    const first = await w.send({ type: 'save', host, comments: [] });
+    expect(first.ok && first.saved).not.toBe(records[0]!.saved);
+    expect(first.ok && [...new Uint8Array(first.saved!)]).toEqual([4, 5, 6]);
+    expect((await w.send({ type: 'save', host, comments: [] })).ok).toBe(true);
+    expect((await w.send({
+      type: 'bootstrap', opened: true, snapshot, extras: '', layoutExtras: '{}', expectedFrameEpoch: 0,
+    })).ok).toBe(true);
+    expect((await w.send({ type: 'save', host, comments: [] })).ok).toBe(true);
+    expect(records).toHaveLength(1);
+    w.scope.onmessage({ data: { id: 999, type: 'destroy' } });
+    source = new Uint8Array([7, 8]).buffer;
+    expect((await w.send({ type: 'open', bytes: source })).ok).toBe(true);
+    expect((await w.send({ type: 'save', host, comments: [] })).ok).toBe(true);
+    expect(records).toHaveLength(2);
+    expect((await w.bootstrap()).ok).toBe(true);
+    expect(await w.send({ type: 'save', host, comments: [] })).toMatchObject({
+      ok: false, code: 'save-unavailable',
+    });
+  });
+
+  test('a preview rejects save as still opening', async () => {
+    const { w } = openingWorker();
+    Object.assign(w.harness.session, { openDocxPreview: () => '{"host":"preview"}' });
+    expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1), previewBlocks: 1 })).ok).toBe(true);
+    expect(await w.send({ type: 'save', comments: [] })).toMatchObject({
+      ok: false, code: 'save-unavailable', error: 'Resident engine worker is still opening',
+    });
+  });
 
   test('opens a package, lays it out without a state to load, and hands its state over', async () => {
     const { w, calls } = openingWorker();

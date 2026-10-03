@@ -18,6 +18,7 @@ import {
 import { computeProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
 import { findBodyMatches } from './findMatches';
 import { readResidentSearch, residentBodyPositions } from './residentSearch';
+import type { ResidentSaveRecord } from './residentSave';
 import { findParagraphs } from './findParagraphs';
 import { DisplayPositionIndex } from './displayPositionIndex';
 import { resolveYrsPointPosition } from './pointPosition';
@@ -101,6 +102,9 @@ let requestedRequirements: { owner: ResidentEngineSession; layoutInput: string }
 const REQUIREMENTS_CACHE_INPUTS = 8;
 /** Set while the session holds the document `open` seeded, with the heap limit it used. */
 let openedDocument: { heapLimitBytes?: number } | null = null;
+let openedSource: { bytes: ArrayBuffer; hostJson: string } | null = null;
+let editorSaves: ResidentSaveRecord = { full: false };
+class SaveUnavailableError extends Error {}
 let openedVersion: string | null | undefined;
 /** A change before the whole document's first frame leaves no frame as opened. */
 function noteDocumentChange(): void {
@@ -235,6 +239,7 @@ function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
     case 'fontRequirements':
     case 'encodeState':
     case 'revisionCount':
+    case 'save':
       return { lane: 'interactive', run };
     case 'buildPages':
       return {
@@ -280,6 +285,7 @@ function replyFailure(id: number, error: unknown): void {
     id,
     ok: false,
     error: error instanceof Error ? error.message : String(error),
+    ...(failure instanceof SaveUnavailableError ? { code: 'save-unavailable' as const } : {}),
   });
 }
 
@@ -306,6 +312,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (
     request.type !== 'documentRead' && request.type !== 'fontRequirements' &&
     request.type !== 'encodeState' && request.type !== 'revisionCount' &&
+    request.type !== 'save' &&
     request.type !== 'warm' &&
     !(request.type === 'proposal' && request.operation.kind === 'snapshot')
   ) supersedeBackgroundPageBuild();
@@ -346,6 +353,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     }
     // The preview's memory goes before the whole package seeds; its pages stay painted.
     if (session) destroySession(true);
+    openedSource = null;
+    editorSaves = { full: false };
     const opening = await createResidentEngineSession(request.heapLimitBytes);
     let hostJson: string | null;
     try {
@@ -369,6 +378,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     if (request.previewBlocks === undefined) openedVersion = undefined;
     openedDocument = { heapLimitBytes: request.heapLimitBytes };
     previewing = request.previewBlocks !== undefined;
+    if (!previewing) openedSource = { bytes: request.bytes, hostJson };
     const stateVector = exactBuffer(session.encodeStateVector());
     reply({ id: request.id, ok: true, hostJson, stateVector }, [stateVector]);
     return;
@@ -457,6 +467,40 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       },
       [state]
     );
+    return;
+  }
+  if (request.type === 'save') {
+    if (previewing) throw new SaveUnavailableError('Resident engine worker is still opening');
+    if (!session || !openedSource) {
+      throw new SaveUnavailableError('Resident engine worker has no opened document to save');
+    }
+    pendingUpdates = [];
+    try {
+      const saved = await session.save(
+        new Uint8Array(openedSource.bytes),
+        openedSource.hostJson,
+        request.host,
+        request.comments,
+        editorSaves
+      );
+      const bytes = saved.slice(0);
+      // The save records the paragraph IDs it wrote; the editor's copy integrates them.
+      const updates = pendingUpdates.map(exactBuffer);
+      const stateVector = exactBuffer(session.encodeStateVector());
+      reply(
+        {
+          id: request.id,
+          ok: true,
+          saved: bytes,
+          updates,
+          stateVector,
+          version: session.proposalEngine.version(),
+        },
+        [bytes, ...updates, stateVector]
+      );
+    } finally {
+      pendingUpdates = [];
+    }
     return;
   }
   if (request.type === 'revisionCount') {
@@ -1481,6 +1525,8 @@ function destroySession(keepSurfaces = false): void {
   session = null;
   positionIndex = null;
   openedDocument = null;
+  openedSource = null;
+  editorSaves = { full: false };
   openedVersion = undefined;
   previewing = false;
   previewFinalPages = null;

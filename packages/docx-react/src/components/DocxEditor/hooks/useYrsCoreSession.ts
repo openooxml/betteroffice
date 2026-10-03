@@ -8,7 +8,7 @@ import type {
   YrsRenderEnv,
   YrsSession,
 } from '@betteroffice/docx/yrs';
-import { dirtyProjectionStory, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
+import { dirtyProjectionStory, hostSaveMetadata, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
 import type { DocxEditorCollaborationOptions } from '../types';
 import type { OpenInWorker, OpenPreviewInWorker, WorkerOpenedDocument } from './useDisplayList';
 import { markLayoutQueued } from '../internals/layoutProvenance';
@@ -26,6 +26,7 @@ import {
   registeredWorkerProposalAuthority,
   workerProposalFailure,
 } from '../internals/workerProposalAuthority';
+import { registerWorkerOpenSave } from '../internals/workerOpenSave';
 
 export { dirtyProjectionStory, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
 
@@ -408,6 +409,7 @@ export function useYrsCoreSession(
     if (!enabled || (!seedDocument && !seedBytes)) return;
     let cancelled = false;
     let openedWorker: WorkerOpenedDocument | null = null;
+    let unregisterSave: (() => void) | null = null;
     inputPositionMapsRef.current.clear();
     projectionStoriesRef.current.clear();
     compatibilityBaseRef.current = null;
@@ -638,6 +640,14 @@ export function useYrsCoreSession(
             inheritedFrameRef.current = renderedFrameRef.current;
             const worker = openedWorker;
             const source = bytes;
+            unregisterSave = registerWorkerOpenSave(next, {
+              available: () => !stale() && worker.canSave(),
+              save: (comments, peer) => {
+                if (stale()) return Promise.reject(new Error('The document changed while saving'));
+                const currentHost = documentRef.current ?? host?.document;
+                return worker.save({ comments, ...(currentHost ? { host: hostSaveMetadata(currentHost) } : {}) }, peer);
+              },
+            });
             const gate = { reached: false, wanted: false };
             let recoveredRendering = false;
             let warnedSyncAccess = false;
@@ -805,6 +815,7 @@ export function useYrsCoreSession(
 
     return () => {
       cancelled = true;
+      unregisterSave?.();
       pendingReplicaRef.current?.cancel();
       pendingReplicaRef.current = null;
       startReplicaRef.current = null;

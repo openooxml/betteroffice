@@ -100,6 +100,50 @@ function harness(laidOut = () => Promise.resolve()) {
 const request: DocxProposalRequest = { expectVersion: 'worker-1', proposals: [] };
 const unusedMain = async () => { throw new Error('unexpected main call'); };
 
+test('save runs after every proposal call already queued without opening the replica', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  const held = deferred<ResidentProposalReply>();
+  h.worker.proposal.mockImplementationOnce(async () => {
+    h.events.push('propose');
+    return held.promise;
+  });
+  const proposal = h.authority.propose(request, unusedMain);
+  const save = mock(async () => {
+    h.events.push('save');
+    return new ArrayBuffer(1);
+  });
+  const saving = h.authority.save(save);
+  await Promise.resolve();
+  expect(save).not.toHaveBeenCalled();
+  held.resolve(reply());
+  await proposal;
+  expect(await saving).toBeInstanceOf(ArrayBuffer);
+  expect(h.events).toEqual(['snapshot', 'propose', 'save', 'snapshot']);
+});
+
+test('a failed authority rejects queued saves without running them', async () => {
+  const h = harness();
+  const error = new Error('Worker stopped');
+  failWorkerProposalAuthority(h.session, error);
+  const save = mock(async () => new ArrayBuffer(1));
+  expect(await h.authority.save(save).catch((failure) => failure)).toBe(error);
+  expect(save).not.toHaveBeenCalled();
+});
+
+test('save remains queued after the peer has taken over proposal calls', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  const handover = await beginWorkerProposalHandover(h.session);
+  handover!.complete();
+  const bytes = new ArrayBuffer(1);
+  expect(await h.authority.save(async () => {
+    h.events.push('save');
+    return bytes;
+  })).toBe(bytes);
+  expect(h.events).toEqual(['snapshot', 'handOver', 'save']);
+});
+
 function navigationReply(version = 'worker-1', position = 42): ResidentProposalReply {
   const snapshot = reply(version);
   const paragraph = { kind: 'session' as const, sessionId: 'session', story: 'body', paraId: 'p1' };

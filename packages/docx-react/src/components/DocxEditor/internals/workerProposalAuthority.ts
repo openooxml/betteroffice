@@ -43,6 +43,7 @@ export interface WorkerProposalAuthority {
   /** The session mirrors the worker registry and version. */
   readonly initialized: boolean;
   restart(): void;
+  save<T>(task: () => Promise<T>): Promise<T>;
   /** Initializes once; rejects when the worker cannot answer. */
   initialize(): Promise<void>;
   /** Mirrored geometry until hand-over. */
@@ -280,6 +281,18 @@ export function registerWorkerProposalAuthority(
       hooks.relayout();
       notify();
     },
+    save: (task) => enqueue(async () => {
+      const previous = mirror?.version;
+      const result = await task();
+      assertCurrent();
+      if (initialized && !handingOver) {
+        const reply = await worker.proposal({ kind: 'snapshot' });
+        assertCurrent();
+        store(reply);
+        if (reply.mirror.version !== previous) hooks.relayout();
+      }
+      return result;
+    }),
     initialize() {
       if (failure) return Promise.reject(failure.error);
       if (initializing) return initializing;

@@ -102,6 +102,8 @@ export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
   proposal: ResidentEngineWorkerClient['proposal'];
   documentRead: ResidentEngineWorkerClient['documentRead'];
   handOver: ResidentEngineWorkerClient['handOver'];
+  canSave(): boolean;
+  save(request: Parameters<ResidentEngineWorkerClient['save']>[0], peer?: YrsSession): Promise<ArrayBuffer>;
   fallback(reason?: WorkerOpenFallbackReason): (() => boolean) | void;
   destroy(): void;
   replicaReady(): void;
@@ -1631,6 +1633,36 @@ export function useRustDisplayList(
             requestOpenedWorker(hostEngine, (owner) => owner.client.documentRead(read)),
           handOver: () =>
             requestOpenedWorker(hostEngine, (owner) => owner.client.handOver()),
+          canSave: () => {
+            const owner = workerRef.current;
+            return owner !== null && isCurrentWorker(hostEngine, owner) && !owner.client.hasFailed();
+          },
+          save: (request, peer) => {
+            const owner = workerRef.current;
+            const failure = workerFailureRef.current.get(hostEngine);
+            if (failure) return Promise.reject(failure);
+            if (!owner || !isCurrentWorker(hostEngine, owner)) {
+              return Promise.reject(new Error('No document worker'));
+            }
+            if (peer) {
+              const update = peer.encodeStateAsUpdate(owner.client.remoteStateVector() ?? undefined);
+              if (update.length > 0 && !(update.length === 2 && update[0] === 0 && update[1] === 0)) {
+                owner.client.invalidate(update, null);
+              }
+            }
+            return owner.client.save(request).then((saved) => {
+              if (!isCurrentWorker(hostEngine, owner)) throw new Error('The document changed while saving');
+              if (peer) {
+                suppressWorkerInvalidationRef.current += 1;
+                try {
+                  for (const update of saved.updates) peer.applyLocalUpdate(update);
+                } finally {
+                  suppressWorkerInvalidationRef.current -= 1;
+                }
+              }
+              return saved.bytes;
+            });
+          },
           fallback: (reason = 'failure') => {
             const outOfMemory = outOfMemoryRef.current.get(hostEngine);
             if (outOfMemory) throw outOfMemory;

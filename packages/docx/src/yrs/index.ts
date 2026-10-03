@@ -98,6 +98,7 @@ export type {
 export {
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
+  ResidentWorkerSaveUnavailableError,
   ResidentWorkerOutOfMemoryError,
   canUseResidentEngineWorker,
   preloadResidentEngineWorker,
@@ -149,6 +150,7 @@ export {
 export { sessionSourcePackage } from './sessionInternals';
 export {
   dirtyProjectionStory,
+  hostSaveMetadata,
   mergeDocxHostMetadata,
   saveEditorDocument,
   type EditorSaveRecord,
