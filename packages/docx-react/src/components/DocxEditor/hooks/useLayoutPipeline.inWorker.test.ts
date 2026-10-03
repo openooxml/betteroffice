@@ -245,7 +245,7 @@ test.each([false, true])('font requirements are prefetched only with worker-open
   await h.answer(1);
 });
 
-test.each([[true, false], [true, true], [false, false]])(
+test.each([[true, false], [true, true], [false, false], [false, true]])(
   'layouts publish before commit only with worker-open=%s (StrictMode=%s)',
   async (experimentalWorkerOpen, strictMode) => {
     let committed: Layout | null = null;
@@ -258,10 +258,10 @@ test.each([[true, false], [true, true], [false, false]])(
     });
     const previous = h.hook.result.current.layout;
     const initial = published.filter(({ layout }) => layout !== null);
-    expect(initial).toHaveLength(experimentalWorkerOpen ? 2 : 1);
-    initial.forEach(({ layout }) => expect(layout).toBe(previous));
+    expect(initial).toHaveLength(1);
+    expect(initial[0]!.layout).toBe(previous);
     expect(initial[0]!.committed).toBe(experimentalWorkerOpen ? null : previous);
-    expect(initial.at(-1)!.committed).toBe(previous);
+    expect(committed).toBe(previous);
     published.length = 0;
     h.doc.version = 2;
     act(() => h.hook.result.current.scheduleLayout('remote'));
@@ -282,15 +282,13 @@ test.each([[true, false], [true, true], [false, false]])(
       await Promise.resolve();
       expect(committed).toBe(first);
       expect(published.map(({ layout }) => layout)).toEqual(
-        experimentalWorkerOpen ? [first, first, full] : [first]
+        experimentalWorkerOpen ? [first, full] : [first]
       );
     });
     const expected = experimentalWorkerOpen
       ? [
           { layout: first, committed: previous },
-          { layout: first, committed: first },
           { layout: full, committed: first },
-          { layout: full, committed: full },
         ]
       : [{ layout: first, committed: first }, { layout: full, committed: full }];
     expect(published).toHaveLength(expected.length);
@@ -299,6 +297,104 @@ test.each([[true, false], [true, true], [false, false]])(
       expect(published[index]!.committed).toBe(event.committed);
     });
     expect(h.hook.result.current.layout).toBe(full);
+    expect(h.errors).toEqual([]);
+  }
+);
+
+test.each([false, true])('a pending effect never republishes an older layout (StrictMode=%s)', async (strictMode) => {
+  const first = { pages: [] } as unknown as Layout;
+  const full = { pages: [] } as unknown as Layout;
+  let finish!: (computation: LayoutComputation | null) => unknown;
+  let committed: Layout | null = null;
+  const published: Array<{ layout: Layout | null; committed: Layout | null }> = [];
+  const h = await opened({
+    experimentalWorkerOpen: true,
+    strictMode,
+    onLayoutComputed: (layout) => published.push({ layout, committed }),
+    onLayoutCommitted: (layout) => {
+      committed = layout;
+      if (layout === first) finish({ layout: full, notesConverged: true });
+    },
+  });
+  const previous = h.hook.result.current.layout;
+  published.length = 0;
+  h.doc.version = 2;
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  const complete = new Promise<LayoutComputation | null>(() => {});
+  const then = complete.then.bind(complete);
+  const completion = spyOn(complete, 'then').mockImplementation((apply, reject) => {
+    finish = apply!;
+    return then(apply, reject);
+  });
+  await h.answer(1, { layout: first, notesConverged: true, complete });
+  completion.mockRestore();
+  expect(published).toHaveLength(2);
+  expect(published[0]!.layout).toBe(first);
+  expect(published[0]!.committed).toBe(previous);
+  expect(published[1]!.layout).toBe(full);
+  expect(published[1]!.committed).toBe(first);
+  for (const layout of [first, full]) {
+    expect(published.filter((event) => event.layout === layout)).toHaveLength(1);
+  }
+  expect(h.hook.result.current.layout).toBe(full);
+  expect(committed).toBe(full);
+  expect(h.errors).toEqual([]);
+});
+
+test.each([[true, false], [true, true], [false, false], [false, true]])(
+  'a worker reply the pipeline no longer wants never reaches the renderer (replaced session=%s, StrictMode=%s)',
+  async (replacedSession, strictMode) => {
+    let committed: Layout | null = null;
+    const commits: Array<Layout | null> = [];
+    const published: Array<{ layout: Layout | null; committed: Layout | null }> = [];
+    const h = await opened({
+      experimentalWorkerOpen: true,
+      strictMode,
+      onLayoutComputed: (layout) => published.push({ layout, committed }),
+      onLayoutCommitted: (layout) => { committed = layout; commits.push(layout); },
+    });
+    const previous = h.hook.result.current.layout;
+    published.length = 0;
+    commits.length = 0;
+    h.doc.version = 2;
+    act(() => h.hook.result.current.scheduleLayout('local', true));
+    await h.frame();
+    let finish!: (computation: LayoutComputation | null) => void;
+    const complete = new Promise<LayoutComputation | null>((resolve) => { finish = resolve; });
+    const first = { pages: [] } as unknown as Layout;
+    const full = { pages: [] } as unknown as Layout;
+    const latest = { pages: [] } as unknown as Layout;
+    if (replacedSession) {
+      const next = fakeDocument();
+      next.doc.version = 7;
+      h.hook.rerender({ session: next.session });
+      act(() => h.hook.result.current.runLayoutPipeline());
+      await h.answer(2, { layout: latest, notesConverged: true });
+    }
+    await h.answer(1, { layout: first, notesConverged: true, complete });
+    if (!replacedSession) {
+      expect(h.hook.result.current.layout).toBe(first);
+      h.doc.version = 3;
+      act(() => h.hook.result.current.scheduleLayout('local', true));
+      await h.frame();
+    }
+    expect(h.worker.map((pass) => pass.at)).toEqual(replacedSession ? [1, 2, 7] : [1, 2, 3]);
+    await act(async () => finish({ layout: full, notesConverged: true }));
+    expect(h.hook.result.current.layout).toBe(replacedSession ? latest : first);
+    if (!replacedSession) await h.answer(2, { layout: latest, notesConverged: true });
+    await h.frame();
+    const expected = replacedSession ? [latest] : [first, latest];
+    expect(published).toHaveLength(expected.length);
+    expect(commits).toHaveLength(expected.length);
+    expected.forEach((layout, index) => {
+      expect(published[index]!.layout).toBe(layout);
+      expect(commits[index]).toBe(layout);
+      expect(published[index]!.committed).toBe(index === 0 ? previous : expected[index - 1]);
+    });
+    expect(h.hook.result.current.layout).toBe(latest);
+    expect(committed).toBe(latest);
+    expect(h.worker).toHaveLength(3);
     expect(h.errors).toEqual([]);
   }
 );
