@@ -2,7 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { createRef } from 'react';
+import { cloneElement, createRef } from 'react';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
   createYrsInputPositionMap,
@@ -636,6 +636,44 @@ test('deletes queued behind busy input reach the resident engine as one batch', 
   });
   expect(deletes[0]).toBe('backward:3');
   expect(text(session)).toBe('Seed');
+});
+
+test('a resident delete is dispatched without exporting the story paragraphs', async () => {
+  const session = await seededSession();
+  const input = createRef<YrsInputRef>();
+  const live = () =>
+    createYrsInputPositionMap(
+      'body',
+      session.paragraphs('body').map((p) => ({ paraId: p.paraId, length: p.text.length }))
+    );
+  let frozen: ReturnType<typeof live> | null = null;
+  const map = () => frozen ?? live();
+  let exports!: ReturnType<typeof spyOn>;
+  const exportsBeforeDispatch: number[] = [];
+  const element = inputFor(session, input, undefined, async (_direction, count) => {
+    exportsBeforeDispatch.push(exports.mock.calls.length);
+    return { frameEpoch: null, caretSynchronized: false, deletedUnits: count };
+  });
+  const view = render(
+    cloneElement(element, {
+      inputPositionMap: map,
+      displayPositionToLoc: (position: number) => displayPositionToYrsLoc(map(), position),
+      locToDisplayPosition: (loc: Parameters<typeof yrsLocToDisplayPosition>[1]) =>
+        yrsLocToDisplayPosition(map(), loc),
+    })
+  );
+  act(() => input.current!.insertText('XY'));
+  await act(async () => {
+    await input.current!.flushPendingInput();
+  });
+  frozen = live();
+  exports = spyOn(session, 'paragraphs');
+  fireEvent.keyDown(view.getByTestId('yrs-input'), { key: 'Backspace' });
+  await act(async () => {
+    await input.current!.flushPendingInput();
+  });
+  exports.mockRestore();
+  expect(exportsBeforeDispatch).toEqual([0]);
 });
 
 test('repeated undo requests each run', async () => {
