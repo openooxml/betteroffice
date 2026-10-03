@@ -210,7 +210,7 @@ impl LocalLowering {
             );
             units += utf16_len(&segment.text);
         }
-        let mut replacement = LoweringMap::default();
+        let mut replacement = super::preview::LoweringOutput::default();
         let mut paragraph = flush_paragraph(
             runs,
             pilcrow,
@@ -260,7 +260,8 @@ impl LocalLowering {
                 span.raw_end = (i64::from(span.raw_end) + delta) as u32;
             }
         }
-        map.spans.splice(span_start..span_end, replacement.spans);
+        map.spans
+            .splice(span_start..span_end, replacement.map.spans);
         for seed in self.seeds.values_mut() {
             if seed.raw_start > raw {
                 seed.raw_start = (i64::from(seed.raw_start) + delta) as u32;

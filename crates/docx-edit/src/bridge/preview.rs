@@ -207,9 +207,9 @@ impl UnitRecorder {
     ) {
         let (pilcrow, standalone, is_break) = match &diff.insert {
             Out::YMap(mark) => {
-                let kind = shared_map_string(mark, txn, "_kind");
+                let kind = shared_map_string(mark, txn, crate::KIND_KEY);
                 (
-                    is_pilcrow(mark, txn),
+                    kind.as_deref() == Some(crate::PILCROW_KIND),
                     matches!(kind.as_deref(), Some("table" | "blockSdt")),
                     matches!(kind.as_deref(), Some("pageBreak" | "columnBreak")),
                 )
@@ -371,11 +371,12 @@ pub(crate) fn lower_recorded(
     Ok((blocks, map, revealable.unwrap_or_default(), preview))
 }
 
-pub(crate) struct PatchedLowering {
-    pub(crate) blocks: Vec<LayoutBlock>,
-    pub(crate) map: LoweringMap,
-    pub(crate) revealable: Vec<LayoutBlock>,
-    pub(crate) preview: PreviewUnits,
+pub(crate) struct Replay {
+    record: usize,
+    blocks: Vec<LayoutBlock>,
+    map: LoweringMap,
+    revealable: Vec<LayoutBlock>,
+    ids: BTreeSet<String>,
 }
 
 fn replace_positions<T>(
@@ -396,15 +397,12 @@ pub(crate) fn targets(units: &PreviewUnits, changed: &BTreeSet<String>) -> bool 
         .any(|record| !record.ids.is_disjoint(changed))
 }
 
-pub(crate) fn patch(
+pub(crate) fn replay(
     doc: &EditingDoc,
     env: &RenderEnv,
     units: &PreviewUnits,
     changed: &BTreeSet<String>,
-    blocks: &[LayoutBlock],
-    map: &LoweringMap,
-    revealable: &[LayoutBlock],
-) -> Option<PatchedLowering> {
+) -> Option<Vec<Replay>> {
     let txn = doc.yrs_doc().transact();
     let story = story_ref(&txn, "body").ok()?;
     let with_media;
@@ -470,69 +468,68 @@ pub(crate) fn patch(
         {
             return None;
         }
-        replays.push((
-            index,
-            replacement,
-            output.map,
-            revealed.unwrap_or_default(),
-            reads.ids,
-        ));
+        replays.push(Replay {
+            record: index,
+            blocks: replacement,
+            map: output.map,
+            revealable: revealed.unwrap_or_default(),
+            ids: reads.ids,
+        });
     }
-    let mut patched = PatchedLowering {
-        blocks: blocks.to_vec(),
-        map: map.clone(),
-        revealable: revealable.to_vec(),
-        preview: units.clone(),
-    };
+    Some(replays)
+}
+
+pub(crate) fn splice(
+    replays: Vec<Replay>,
+    blocks: &mut Vec<LayoutBlock>,
+    map: &mut LoweringMap,
+    revealable: &mut Vec<LayoutBlock>,
+    units: &mut PreviewUnits,
+) {
     let mut block_shift = 0_isize;
     let mut revealable_shift = 0_isize;
     let mut replays = replays.into_iter().peekable();
-    for (index, record) in patched.preview.records.iter_mut().enumerate() {
-        record.blocks = record.blocks.start.checked_add_signed(block_shift)?
-            ..record.blocks.end.checked_add_signed(block_shift)?;
+    for (index, record) in units.records.iter_mut().enumerate() {
+        record.blocks = record.blocks.start.saturating_add_signed(block_shift)
+            ..record.blocks.end.saturating_add_signed(block_shift);
         record.revealable = record
             .revealable
             .start
-            .checked_add_signed(revealable_shift)?
-            ..record.revealable.end.checked_add_signed(revealable_shift)?;
-        if replays.peek().is_none_or(|replay| replay.0 != index) {
+            .saturating_add_signed(revealable_shift)
+            ..record
+                .revealable
+                .end
+                .saturating_add_signed(revealable_shift);
+        let Some(replay) = replays.next_if(|replay| replay.record == index) else {
             continue;
-        }
-        let (_, blocks, map, revealable, ids) = replays.next()?;
-        block_shift += blocks.len() as isize - record.blocks.len() as isize;
-        revealable_shift += revealable.len() as isize - record.revealable.len() as isize;
-        let block_end = record.blocks.start + blocks.len();
-        let revealable_end = record.revealable.start + revealable.len();
-        patched.blocks.splice(record.blocks.clone(), blocks);
-        patched
-            .revealable
-            .splice(record.revealable.clone(), revealable);
-        patched
-            .map
-            .stories
-            .splice(record.stories.clone(), map.stories);
-        patched
-            .map
-            .paragraphs
-            .splice(record.paragraphs.clone(), map.paragraphs);
-        replace_positions(&mut patched.map.spans, map.spans, &record.pm, |span| {
+        };
+        block_shift += replay.blocks.len() as isize - record.blocks.len() as isize;
+        revealable_shift += replay.revealable.len() as isize - record.revealable.len() as isize;
+        let block_end = record.blocks.start + replay.blocks.len();
+        let revealable_end = record.revealable.start + replay.revealable.len();
+        blocks.splice(record.blocks.clone(), replay.blocks);
+        revealable.splice(record.revealable.clone(), replay.revealable);
+        map.stories
+            .splice(record.stories.clone(), replay.map.stories);
+        map.paragraphs
+            .splice(record.paragraphs.clone(), replay.map.paragraphs);
+        replace_positions(&mut map.spans, replay.map.spans, &record.pm, |span| {
             span.pm_start
         });
         replace_positions(
-            &mut patched.map.paragraph_blocks,
-            map.paragraph_blocks,
+            &mut map.paragraph_blocks,
+            replay.map.paragraph_blocks,
             &record.pm,
             |(pm, _)| *pm,
         );
         replace_positions(
-            &mut patched.map.tables,
-            map.tables,
+            &mut map.tables,
+            replay.map.tables,
             &record.pm,
             |(pm, ..)| *pm,
         );
         record.blocks.end = block_end;
         record.revealable.end = revealable_end;
-        record.ids = ids;
+        record.ids = replay.ids;
     }
-    Some(patched)
 }

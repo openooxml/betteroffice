@@ -339,6 +339,7 @@ pub fn yrs_doc_to_mapped_layout_blocks(
 
 /// [`yrs_doc_to_mapped_layout_blocks`] plus the blocks it leaves out that a revision
 /// preview can reveal: suppressed field results and drawing-only paragraphs.
+#[cfg(test)]
 pub(crate) fn yrs_doc_to_mapped_layout_blocks_with_revealable(
     doc: &EditingDoc,
     story_id: &str,

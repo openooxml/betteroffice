@@ -34,10 +34,7 @@ use serde::Serialize;
 use yrs::{StickyIndex, Subscription, Transact};
 
 use crate::EditingDoc;
-use crate::bridge::{
-    BridgeError, LoweringMap, RenderEnv, RevisionPreview,
-    yrs_doc_to_mapped_layout_blocks_with_revealable,
-};
+use crate::bridge::{BridgeError, LoweringMap, RenderEnv, RevisionPreview};
 use crate::fingerprint::Fingerprint;
 use crate::frame_delta::{
     FrameEpochs, FramePageSnapshot, encode_frame_delta, encode_frame_delta_incremental,
@@ -2152,6 +2149,7 @@ impl EngineSession {
         lowered.local.patch(blocks, map, &txn, env, &edit)?;
         lowered.doc_epoch = epoch;
         lowered.serialized_blocks = None;
+        lowered.preview = None;
         Some(())
     }
 
@@ -2184,19 +2182,16 @@ impl EngineSession {
             }
             let units = lowered.preview.as_ref()?;
             if crate::bridge::preview::targets(units, &changed) {
-                let patched = crate::bridge::preview::patch(
-                    &self.doc,
-                    env,
-                    units,
-                    &changed,
-                    &lowered.blocks,
-                    &lowered.map,
-                    &lowered.revealable_blocks,
-                )?;
-                lowered.blocks = Rc::new(patched.blocks);
-                lowered.map = Rc::new(patched.map);
-                lowered.revealable_blocks = Rc::new(patched.revealable);
-                lowered.preview = Some(Rc::new(patched.preview));
+                let replays = crate::bridge::preview::replay(&self.doc, env, units, &changed)?;
+                let mut units = units.as_ref().clone();
+                crate::bridge::preview::splice(
+                    replays,
+                    Rc::make_mut(&mut lowered.blocks),
+                    Rc::make_mut(&mut lowered.map),
+                    Rc::make_mut(&mut lowered.revealable_blocks),
+                    &mut units,
+                );
+                lowered.preview = Some(Rc::new(units));
                 lowered.serialized_blocks = None;
             }
             lowered.env = env.clone();
@@ -13358,13 +13353,14 @@ mod tests {
             let lowered = &render.stories["body"];
             preview_mapped_snapshot(&lowered.blocks, &lowered.map, &lowered.revealable_blocks)
         };
-        let (blocks, map, revealable) = yrs_doc_to_mapped_layout_blocks_with_revealable(
-            engine.doc(),
-            "body",
-            env,
-            &mut crate::bridge::local::LocalLowering::new(false),
-        )
-        .unwrap();
+        let (blocks, map, revealable) =
+            crate::bridge::yrs_doc_to_mapped_layout_blocks_with_revealable(
+                engine.doc(),
+                "body",
+                env,
+                &mut crate::bridge::local::LocalLowering::new(false),
+            )
+            .unwrap();
         assert_eq!(actual, preview_mapped_snapshot(&blocks, &map, &revealable));
     }
 
