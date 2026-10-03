@@ -284,6 +284,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   displayPositionToYrsLocRef.current = displayPositionToYrsLoc;
   yrsLocToDisplayPositionRef.current = yrsLocToDisplayPosition;
 
+  const publishedLayoutsRef = useRef(new WeakSet<Layout>());
   // Total-pages notifier — fires only when count changes (including N → 0).
   const lastTotalPagesRef = useRef<number>(0);
   useEffect(() => {
@@ -296,7 +297,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       revisionPreviewKeyOf(layout) ===
         revisionPreviewKey(proposalRevisionPreview(session.getProposals()))
     ) markLayoutQueued(session, false);
-    onLayoutComputedRef.current?.(layout);
+    if (!layout || !publishedLayoutsRef.current.has(layout)) onLayoutComputedRef.current?.(layout);
     const total = documentPageCount(layout);
     if (total === lastTotalPagesRef.current) return;
     lastTotalPagesRef.current = total;
@@ -601,7 +602,10 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           viewportAnchorCaptureReadyRef.current = false;
           layoutUpdateOriginRef.current = origin;
           setLayout(newLayout);
-          if (workerOpenEnabledRef.current) onLayoutComputedRef.current?.(newLayout);
+          if (workerOpenEnabledRef.current) {
+            publishedLayoutsRef.current.add(newLayout);
+            onLayoutComputedRef.current?.(newLayout);
+          }
 
           const vp = viewportLayoutRef.current;
           if (vp) {

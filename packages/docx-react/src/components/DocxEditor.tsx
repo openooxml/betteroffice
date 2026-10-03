@@ -160,7 +160,7 @@ import { createStyleResolver } from '@betteroffice/docx/styles';
 import { useIsDark } from './DocxEditor/hooks/useIsDark';
 
 // Paginated editor
-import { type PagedEditorRef, DEFAULT_PAGE_WIDTH } from './DocxEditor/PagedEditor';
+import { type PagedEditorRef, DEFAULT_PAGE_WIDTH, documentTheme } from './DocxEditor/PagedEditor';
 
 // Plugin API types
 import type { RenderedDomContext } from '../plugin-api/types';
@@ -1246,7 +1246,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       isCurrentLoad,
       onSession: canvasRenderer.recordSession,
       onPreviewHost: (session, host) =>
-        pagedEditorRef.current?.prefetchWorkerFontRequirements(session, host.document),
+        pagedEditorRef.current?.prefetchWorkerFontRequirements(
+          session,
+          host.document,
+          documentTheme(host.document, theme)
+        ),
       onHostDocument: acceptHostDocument,
       onError: failHostDocument,
       onReplicaError: (error, generation) => {

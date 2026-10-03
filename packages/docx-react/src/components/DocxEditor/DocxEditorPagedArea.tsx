@@ -9,7 +9,7 @@ import type {
 } from '@betteroffice/docx/types/document';
 import type { Comment } from '@betteroffice/docx/types/content';
 import { type BundledFontProvider } from '@betteroffice/docx/layout';
-import { PagedEditor, type PagedEditorRef } from './PagedEditor';
+import { documentTheme, PagedEditor, type PagedEditorRef } from './PagedEditor';
 import type { PagedEditorCommandBridge } from './hooks/usePagedEditorRefApi';
 import type { RustFontChainsProvider } from './hooks/useRustMeasurement';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
@@ -432,7 +432,7 @@ export function DocxEditorPagedArea({
         yrsCore={yrsCore}
         collaboration={collaboration}
         styles={document?.package.styles}
-        theme={document?.package.theme || theme}
+        theme={documentTheme(document, theme)}
         sectionProperties={initialSectionProperties}
         finalSectionProperties={finalSectionProperties}
         headerContent={headerContent}

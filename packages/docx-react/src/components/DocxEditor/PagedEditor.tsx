@@ -416,7 +416,11 @@ export interface PagedEditorRef {
   ): boolean;
   /** Schedules layout of the resident worker document. */
   refreshWorkerLayout(): void;
-  prefetchWorkerFontRequirements(session: YrsSession, document: Document): void;
+  prefetchWorkerFontRequirements(
+    session: YrsSession,
+    document: Document,
+    theme: Theme | null | undefined
+  ): void;
   /** Apply a body-toolbar command through yrs. */
   applyYrsFormatting(action: FormattingAction): boolean;
   /** Apply a non-toolbar body command through yrs. */
@@ -475,6 +479,14 @@ export interface PagedEditorRef {
 // =============================================================================
 // COMPONENT (module-scope helpers live in per-domain files — see imports)
 // =============================================================================
+
+/** The theme a document lays out with: its own, else the host's. */
+export function documentTheme(
+  document: Document | null | undefined,
+  theme: Theme | null | undefined
+): Theme | null | undefined {
+  return document?.package.theme || theme;
+}
 
 function yrsRenderEnvFor(
   theme: Theme | null | undefined,
@@ -602,8 +614,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const yrsInputRef = useRef<YrsInputRef>(null);
 
     const proposalPreview = useRevisionPreview(yrsCore.session);
-    const yrsRenderEnvPropsRef = useRef({ theme: _theme, showHiddenText });
-    yrsRenderEnvPropsRef.current = { theme: _theme, showHiddenText };
+    const showHiddenTextRef = useRef(showHiddenText);
+    showHiddenTextRef.current = showHiddenText;
     const yrsRenderEnv = useMemo(
       () => yrsRenderEnvFor(_theme, document, showHiddenText, proposalPreview.revisionPreview),
       [
@@ -849,12 +861,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     );
 
     const prefetchWorkerFontRequirements = useCallback(
-      (session: YrsSession, document: Document): void => {
-        const { theme, showHiddenText } = yrsRenderEnvPropsRef.current;
+      (session: YrsSession, document: Document, theme: Theme | null | undefined): void => {
         const env = yrsRenderEnvFor(
           theme,
           document,
-          showHiddenText,
+          showHiddenTextRef.current,
           proposalRevisionPreview(session.getProposals())
         );
         prefetchFontRequirements(session, document, env);

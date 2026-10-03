@@ -254,8 +254,8 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     getLayoutRequest,
     relayout: runLayoutPipeline,
     refreshWorkerLayout: () => refreshWorkerLayoutRef.current(),
-    prefetchWorkerFontRequirements: (session, document) =>
-      prefetchWorkerFontRequirementsRef.current?.(session, document),
+    prefetchWorkerFontRequirements: (session, document, theme) =>
+      prefetchWorkerFontRequirementsRef.current?.(session, document, theme),
     scrollToPosition: (position) => {
       bumpInputEpochRef.current?.();
       scrollToPositionImpl(position);

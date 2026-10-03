@@ -1380,7 +1380,7 @@ test.each([false, true])('a worker preview publishes its decoded host before the
     const preview = result.current.core.session!;
     expect(onPreviewHost).toHaveBeenCalledTimes(1);
     expect(onPreviewHost.mock.calls[0]![0]).toBe(preview);
-    expect(onPreviewHost.mock.calls[0]![1]).toBe(result.current.host);
+    expect(onPreviewHost.mock.calls[0]![1]).toBe(result.current.host!);
     expect(onSession).toHaveBeenCalledTimes(1);
     expect(onSession.mock.calls[0]![0]).toBe(preview);
     expect(order).toEqual(['previewHost', 'session']);
