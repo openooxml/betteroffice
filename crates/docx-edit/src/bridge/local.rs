@@ -2,7 +2,7 @@ use super::*;
 
 #[derive(Debug, Default)]
 pub(crate) struct LocalLowering {
-    pub(super) blocked: bool,
+    pub(crate) blocked: bool,
     pub(super) source: std::sync::Weak<crate::seed::SourceMetadata>,
     pub(super) seeds: BTreeMap<String, ParagraphSeed>,
     pub(crate) edit: Option<TextEdit>,
