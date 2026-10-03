@@ -73,7 +73,7 @@ function options(overrides: Partial<UsePagesPointerOptions> = {}) {
   const opts: UsePagesPointerOptions = {
     pagesContainerRef: { current: null },
     yrsInputRef: { current: input },
-    yrsSession: { cellSelection: () => null } as unknown as YrsSession,
+    yrsSession: { cellSelection: () => null, version: () => 'initial' } as unknown as YrsSession,
     yrsRootStory: 'body',
     getYrsPositionProjection: () => (opts.replicaReady ? projection : null),
     applyYrsCommand: () => false,
@@ -247,24 +247,36 @@ test.each([
   if (!loaded) expect(other).toEqual([]);
 });
 
-test('a recorded gesture asks for the replica', () => {
-  const requestReplica = mock(() => {});
-  const { opts } = options({ requestReplica });
-  renderHook(() => usePagesPointer(opts));
+test('a recorded gesture never starts loading the replica', () => {
+  const { opts, selections } = options();
+  const hydrate = mock(async () => () => {});
+  const fallback = mock(() => {});
+  deferWorkerOpenReplica(opts.yrsSession!, hydrate, fallback, () => {});
+  const view = renderHook(() => usePagesPointer(opts));
 
   click(1);
-  expect(requestReplica).toHaveBeenCalled();
+  expect(hydrate).not.toHaveBeenCalled();
+  expect(fallback).not.toHaveBeenCalled();
+  expect(selections).toEqual([]);
+  opts.replicaReady = true;
+  view.rerender();
+  expect(selections).toEqual([[20, 20, 'body']]);
+  expect(hydrate).not.toHaveBeenCalled();
+  expect(fallback).not.toHaveBeenCalled();
 });
 
 test('without a recorded gesture the pointer asks for nothing', () => {
-  const requestReplica = mock(() => {});
-  const { opts } = options({ requestReplica, replicaPending: () => false });
+  const { opts } = options({ replicaPending: () => false });
+  const hydrate = mock(async () => () => {});
+  const fallback = mock(() => {});
+  deferWorkerOpenReplica(opts.yrsSession!, hydrate, fallback, () => {});
   opts.getYrsPositionProjection = () => null;
   renderHook(() => usePagesPointer(opts));
 
   click(1);
   pointerDown(host.firstElementChild!, 'touch');
-  expect(requestReplica).not.toHaveBeenCalled();
+  expect(hydrate).not.toHaveBeenCalled();
+  expect(fallback).not.toHaveBeenCalled();
 });
 
 test('a pending drag replays the latest mousemove before an animation frame', () => {

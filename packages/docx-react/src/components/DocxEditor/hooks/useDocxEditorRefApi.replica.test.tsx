@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, mock, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { useRef, type ReactNode } from 'react';
@@ -24,7 +24,7 @@ import { createCommentIdAllocator } from '../commentFactories';
 import { deferWorkerOpenReplica, workerOpenReplicaOnDemand, type WorkerOpenFallbackReason } from '../internals/workerOpenReplica';
 import { beginWorkerProposalHandover, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { EditorMode } from '../internals/editing-modes';
-import { DOCX_REF_REPLICA_ACCESS, DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
+import { DOCX_REF_REPLICA_ACCESS, DOCX_REF_REPLICA_LOADING_ANSWERS, useDocxEditorRefApi } from './useDocxEditorRefApi';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -38,6 +38,7 @@ beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(
 )))));
 afterEach(() => {
   cleanup();
+  mock.restore();
   for (const session of sessions.splice(0)) session.destroy();
 });
 afterAll(async () => {
@@ -179,8 +180,8 @@ async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, 
   return { ...mounted, session, worker, replica, release, opens, fallbackReasons };
 }
 
-async function pendingWorkerProposalReplica() {
-  const pending = await pendingReplica('viewing', false, true);
+async function pendingWorkerProposalReplica(mode: EditorMode = 'viewing', hydrateOnDemand = true) {
+  const pending = await pendingReplica(mode, false, hydrateOnDemand);
   const { session, worker } = pending;
   let previewVersion = 0;
   const reply = (): ResidentProposalReply => {
@@ -241,6 +242,14 @@ test('every public ref API is classified for replica access', async () => {
     'withdrawProposals', 'readSelectionInfo', 'findParagraphs', 'scrollToParagraph', 'scrollToComment',
     'scrollToChange', 'insertComment', 'insertCommentReply', 'onDocumentChange',
   ].sort());
+  const direct = new Set([
+    'focus', 'scrollToPosition', 'openPrintPreview', 'print', 'highlightRange', 'getPositionAtPoint',
+  ]);
+  expect(Object.keys(DOCX_REF_REPLICA_LOADING_ANSWERS).sort()).toEqual(
+    Object.entries(DOCX_REF_REPLICA_ACCESS)
+      .filter(([member, access]) => access === 'sync' && !direct.has(member))
+      .map(([member]) => member).sort()
+  );
 });
 
 test('async reads, save, exports and write refusals wait for the main replica', async () => {
@@ -268,6 +277,11 @@ test('async reads, save, exports and write refusals wait for the main replica', 
   ]);
   const completed = { value: false };
   void pending.then(() => { completed.value = true; });
+  await act(async () => {});
+  expect(replica.started).toBe(false);
+  expect(completed.value).toBe(false);
+  expect(events).toEqual([]);
+  expect(opens).toEqual([]);
   replica.start();
   await act(async () => {});
   expect(completed.value).toBe(false);
@@ -293,20 +307,61 @@ test('async reads, save, exports and write refusals wait for the main replica', 
   expect(values[13]).toBe(0);
 });
 
-test('synchronous reads finish the main open without changing their return types', async () => {
-  const { api, session, replica, opens, fallbackReasons } = await pendingReplica();
-  let document: Document | null = null;
-  act(() => { document = api.getDocument(); });
-  expect(document).not.toBeNull();
-  expect(opens).toEqual([true]);
-  expect(replica.pending).toBe(false);
+test('synchronous reads return loading answers until the owner opens the editor replica', async () => {
+  const { api, session, replica, release, opens, fallbackReasons } = await pendingReplica('editing');
+  expect(api.getDocument()).toBeNull();
+  expect(api.getEditorRef()).toBeNull();
+  expect(api.findInDocument('Page')).toEqual([]);
+  expect(api.scrollToParaId('00000001')).toBe(false);
+  await act(async () => {});
+  expect(opens).toEqual([]);
+  expect(replica.started).toBe(false);
+  expect(replica.pending).toBe(true);
+  replica.start();
+  await act(async () => { release(); await replica.ready; });
+  expect(api.getDocument()).not.toBeNull();
   expect(api.getEditorRef()?.getYrsSession()).toBe(session);
   const first = session.paragraphs('body')[0]!;
   expect(api.findInDocument(first.text)).toContainEqual({
     paraId: first.paraId, match: first.text, before: '', after: '',
   });
   expect(api.scrollToParaId(first.paraId)).toBe(true);
-  expect(fallbackReasons).toEqual([{ syncAccess: 'getDocument' }]);
+  expect(opens).toEqual([false]);
+  expect(fallbackReasons).toEqual([]);
+});
+
+test('editor document access and paragraph styling return loading answers until the peer is ready', async () => {
+  const { api, session, replica, release, opens, fallbackReasons, pagedEditorRef } = await pendingReplica('editing');
+  const getDocument = spyOn(pagedEditorRef.current!, 'getDocument');
+  const paragraphs = spyOn(session, 'paragraphs');
+  const open = spyOn(session, 'openDocx');
+  const style = spyOn(session, 'applyParagraphStyle');
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const options = { paraId: '00000001', styleId: 'Normal' };
+  expect(api.getDocument()).toBeNull();
+  expect(api.getEditorRef()).toBeNull();
+  expect(api.setParagraphStyle(options)).toBe(false);
+  await act(async () => {});
+  expect(replica.started).toBe(false);
+  expect(getDocument).not.toHaveBeenCalled();
+  expect(paragraphs).not.toHaveBeenCalled();
+  expect(open).not.toHaveBeenCalled();
+  expect(style).not.toHaveBeenCalled();
+  expect(warning).not.toHaveBeenCalled();
+  expect(opens).toEqual([]);
+  replica.start();
+  await act(async () => { release(); await replica.ready; });
+  expect(api.getDocument()).toEqual(pagedEditorRef.current!.getDocument());
+  expect(api.getDocument()).not.toBeNull();
+  expect(api.getEditorRef()).toBe(pagedEditorRef.current);
+  act(() => { expect(api.setParagraphStyle(options)).toBe(true); });
+  expect(session.paragraphs('body')[0]!.properties.pStyle).toBe('Normal');
+  expect(open).toHaveBeenCalledTimes(1);
+  expect(open).toHaveBeenCalledWith(bytes, false);
+  expect(style).toHaveBeenCalledTimes(1);
+  expect(warning).not.toHaveBeenCalled();
+  expect(opens).toEqual([false]);
+  expect(fallbackReasons).toEqual([]);
 });
 
 test('a batch chained from an early read edits the hydrated document', async () => {
@@ -327,15 +382,20 @@ test('a batch chained from an early read edits the hydrated document', async () 
   expect(session.paragraphs('body')[0]!.text).toBe('Written after opening');
 });
 
-test('a synchronous write during an in-flight handoff is not overwritten by its reply', async () => {
-  const { api, session, replica, release, opens } = await pendingReplica();
+test('a synchronous write during an in-flight editor handoff returns false until readiness', async () => {
+  const { api, session, replica, release, opens, fallbackReasons } = await pendingReplica('editing');
   replica.start();
   await act(async () => {});
-  act(() => expect(api.insertBreak({ paraId: '00000001', type: 'page' })).toBe(true));
-  const edited = session.encodeState();
+  act(() => expect(api.insertBreak({ paraId: '00000001', type: 'page' })).toBe(false));
+  expect(opens).toEqual([]);
+  expect(session.storyIds()).toEqual([]);
   await act(async () => { release(); await replica.ready; });
-  expect(opens).toEqual([true]);
-  expect(session.encodeState()).toEqual(edited);
+  expect(opens).toEqual([false]);
+  const readyVersion = session.version();
+  act(() => expect(api.insertBreak({ paraId: '00000001', type: 'page' })).toBe(true));
+  expect(session.version()).not.toBe(readyVersion);
+  expect(opens).toEqual([false]);
+  expect(fallbackReasons).toEqual([]);
 });
 
 test('replacing the document while a ref waits rejects the pending call', async () => {
@@ -376,6 +436,31 @@ test('layout completion leaves an on-demand replica pending while async reads st
   expect(replica.pending).toBe(false);
 });
 
+test.each(['focus', 'scrollToPosition', 'print', 'openPrintPreview', 'highlightRange', 'getPositionAtPoint'] as const)(
+  '%s calls through without starting a pending editor replica', async (method) => {
+    const { api, opens, replica, pagedEditorRef } = await pendingReplica('editing');
+    if (method === 'print' || method === 'openPrintPreview') {
+      const execute = spyOn(UNAVAILABLE_DOCX_COMMANDS, 'execute');
+      api[method]();
+      expect(execute).toHaveBeenCalledWith('print', null);
+    } else if (method === 'getPositionAtPoint') {
+      const point = spyOn(pagedEditorRef.current!, method).mockReturnValue(7);
+      expect(api.getPositionAtPoint(0, 0)).toBe(7);
+      expect(point).toHaveBeenCalledWith(0, 0);
+    } else {
+      const call = spyOn(pagedEditorRef.current!, method);
+      if (method === 'scrollToPosition') api.scrollToPosition(0);
+      else if (method === 'highlightRange') api.highlightRange(0, 1);
+      else api.focus();
+      expect(call).toHaveBeenCalledTimes(1);
+    }
+    await act(async () => {});
+    expect(opens).toEqual([]);
+    expect(replica.started).toBe(false);
+    expect(replica.pending).toBe(true);
+  }
+);
+
 test.each(['focus', 'scrollToPosition', 'print', 'openPrintPreview', 'highlightRange'] as const)(
   '%s leaves an on-demand replica pending', async (method) => {
     const { api, opens, replica, release } = await pendingReplica('viewing', false, true);
@@ -414,114 +499,107 @@ test('getPositionAtPoint answers without starting an on-demand replica', async (
   expect(replica.pending).toBe(true);
 });
 
-test.each([
-  ['getDocument', (api: DocxEditorRef) => expect(api.getDocument()).not.toBeNull()],
-  ['getEditorRef', (api: DocxEditorRef) => expect(api.getEditorRef()).not.toBeNull()],
-  ['scrollToParaId', (api: DocxEditorRef) => expect(api.scrollToParaId('00000001')).toBe(true)],
-  ['scrollToCommentId', (api: DocxEditorRef) => expect(api.scrollToCommentId(-1)).toBe(false)],
-  ['scrollToChangeId', (api: DocxEditorRef) => expect(api.scrollToChangeId(-1)).toBe(false)],
-  ['findInDocument', (api: DocxEditorRef) => expect(api.findInDocument('map')).toContainEqual({
+const SYNC_REPLICA_CALLS = [
+  ['getDocument', [], null, (result: unknown) => expect(result).not.toBeNull()],
+  ['getEditorRef', [], null, (result: unknown) => expect(result).not.toBeNull()],
+  ['scrollToParaId', ['00000001'], false, (result: unknown) => expect(result).toBe(true)],
+  ['scrollToCommentId', [-1], false, (result: unknown) => expect(result).toBe(true)],
+  ['scrollToChangeId', [-1], false, (result: unknown) => expect(result).toBe(true)],
+  ['findInDocument', ['map'], [], (result: unknown) => expect(result).toContainEqual({
     paraId: '00000001', match: 'map', before: 'Page ', after: '',
   })],
-  ['getPageContent', (api: DocxEditorRef) => expect(api.getPageContent(1)).toEqual({
+  ['getPageContent', [1], null, (result: unknown) => expect(result).toEqual({
     pageNumber: 1,
     text: '[00000001] Page map',
     paragraphs: [{ paraId: '00000001', text: 'Page map', styleId: 'Heading1' }],
   })],
-  ['addComment', (api: DocxEditorRef) => expect(api.addComment({
+  ['getSelectionInfo', [], null, (result: unknown) => expect(result).toMatchObject({
+    paraId: '00000001', selectedText: 'Page map', paragraphText: 'Page map',
+  })],
+  ['addComment', [{
     paraId: '00000001', search: 'map', text: 'Check', author: 'Ann',
-  })).toEqual(expect.any(Number))],
-  ['proposeChange', (api: DocxEditorRef) => expect(api.proposeChange({
+  }], null, (result: unknown) => expect(result).toEqual(expect.any(Number))],
+  ['proposeChange', [{
     paraId: '00000001', search: 'map', replaceWith: 'plan', author: 'Agent',
-  })).toBe(true)],
-  ['applyFormatting', (api: DocxEditorRef) => expect(api.applyFormatting({
+  }], false, (result: unknown) => expect(result).toBe(true)],
+  ['applyFormatting', [{
     paraId: '00000001', search: 'map', marks: { bold: true },
-  })).toBe(true)],
-  ['setParagraphStyle', (api: DocxEditorRef) => expect(api.setParagraphStyle({
+  }], false, (result: unknown) => expect(result).toBe(true)],
+  ['setParagraphStyle', [{
     paraId: '00000001', styleId: 'Normal',
-  })).toBe(true)],
-  ['insertBreak', (api: DocxEditorRef) => expect(api.insertBreak({
+  }], false, (result: unknown) => expect(result).toBe(true)],
+  ['insertBreak', [{
     paraId: '00000001', type: 'page',
-  })).toBe(true)],
-] as const)('%s synchronously opens an on-demand replica and returns its result', async (method, check) => {
-  const mode = ['addComment', 'proposeChange', 'applyFormatting', 'setParagraphStyle', 'insertBreak']
-    .includes(method) ? 'editing' : 'viewing';
-  const { api, opens, replica, pagedEditorRef } = await pendingReplica(mode, false, true);
-  if (method === 'getPageContent') {
-    pagedEditorRef.current!.getLayout = () => ({
-      pages: [{ fragments: [{ kind: 'paragraph', pmStart: 0 }] }],
-    }) as unknown as ReturnType<PagedEditorRef['getLayout']>;
-    pagedEditorRef.current!.displayPositionToYrsLoc = () => ({
-      story: 'body', paraId: '00000001', offset: 0,
-    });
-  }
-  expect(replica.pending).toBe(true);
-  act(() => { check(api); });
-  expect(opens).toEqual([true]);
-  expect(replica.pending).toBe(false);
-});
+  }], false, (result: unknown) => expect(result).toBe(true)],
+] as const;
 
-test.each([
-  ['getDocument', (api: DocxEditorRef) => expect(api.getDocument()).not.toBeNull()],
-  ['getEditorRef', (api: DocxEditorRef) => expect(api.getEditorRef()).not.toBeNull()],
-  ['scrollToParaId', (api: DocxEditorRef) => expect(api.scrollToParaId('00000001')).toBe(true)],
-  ['scrollToCommentId', (api: DocxEditorRef) => expect(api.scrollToCommentId(-1)).toBe(false)],
-  ['scrollToChangeId', (api: DocxEditorRef) => expect(api.scrollToChangeId(-1)).toBe(false)],
-  ['findInDocument', (api: DocxEditorRef) => expect(api.findInDocument('map')).toContainEqual({
-    paraId: '00000001', match: 'map', before: 'Page ', after: '',
-  })],
-  ['getPageContent', (api: DocxEditorRef) => expect(api.getPageContent(1)).toEqual({
-    pageNumber: 1,
-    text: '[00000001] Page map',
-    paragraphs: [{ paraId: '00000001', text: 'Page map', styleId: 'Heading1' }],
-  })],
-  ['addComment', (api: DocxEditorRef) => expect(api.addComment({
-    paraId: '00000001', search: 'map', text: 'Check', author: 'Ann',
-  })).toEqual(expect.any(Number))],
-  ['proposeChange', (api: DocxEditorRef) => expect(api.proposeChange({
-    paraId: '00000001', search: 'map', replaceWith: 'plan', author: 'Agent',
-  })).toBe(true)],
-  ['applyFormatting', (api: DocxEditorRef) => expect(api.applyFormatting({
-    paraId: '00000001', search: 'map', marks: { bold: true },
-  })).toBe(true)],
-  ['setParagraphStyle', (api: DocxEditorRef) => expect(api.setParagraphStyle({
-    paraId: '00000001', styleId: 'Normal',
-  })).toBe(true)],
-  ['insertBreak', (api: DocxEditorRef) => expect(api.insertBreak({
-    paraId: '00000001', type: 'page',
-  })).toBe(true)],
-] as const)('%s requests hand-over and throws while proposals are held in the worker', async (method, check) => {
-  const { api, opens, replica, release, pagedEditorRef, authority, transport } =
-    await pendingWorkerProposalReplica();
-  if (method === 'getPageContent') {
-    pagedEditorRef.current!.getLayout = () => ({
-      pages: [{ fragments: [{ kind: 'paragraph', pmStart: 0 }] }],
-    }) as unknown as ReturnType<PagedEditorRef['getLayout']>;
-    pagedEditorRef.current!.displayPositionToYrsLoc = () => ({
-      story: 'body', paraId: '00000001', offset: 0,
-    });
+function prepareSyncRead(editor: PagedEditorRef) {
+  editor.getLayout = () => ({
+    pages: [{ fragments: [{ kind: 'paragraph', pmStart: 0 }] }],
+  }) as unknown as ReturnType<PagedEditorRef['getLayout']>;
+  editor.displayPositionToYrsLoc = () => ({ story: 'body', paraId: '00000001', offset: 0 });
+  editor.scrollToCommentId = () => true;
+  editor.scrollToChangeId = () => true;
+}
+
+for (const onDemand of [false, true]) {
+  test.each(SYNC_REPLICA_CALLS)(
+    `%s returns its loading answer without opening an ${onDemand ? 'on-demand' : 'editor'} replica`,
+    async (method, args, loading, check) => {
+      const { api, opens, replica, release, session, fallbackReasons, pagedEditorRef } =
+        await pendingReplica('editing', false, onDemand);
+      prepareSyncRead(pagedEditorRef.current!);
+      expect(Reflect.apply(api[method], api, args)).toEqual(loading);
+      await act(async () => {});
+      expect(opens).toEqual([]);
+      expect(fallbackReasons).toEqual([]);
+      expect(replica.started).toBe(false);
+      expect(replica.pending).toBe(true);
+      replica.start();
+      await act(async () => { release(); await replica.ready; });
+      session.setSelection(
+        { story: 'body', paraId: '00000001', offset: 0 },
+        { story: 'body', paraId: '00000001', offset: 8 }
+      );
+      act(() => { check(Reflect.apply(api[method], api, args)); });
+      expect(opens).toEqual([false]);
+      expect(fallbackReasons).toEqual([]);
+    }
+  );
+}
+
+test.each(SYNC_REPLICA_CALLS)(
+  '%s returns its loading answer without requesting worker proposal hand-over', async (method, args, loading, check) => {
+    const { api, opens, replica, release, session, pagedEditorRef, authority, transport, fallbackReasons } =
+      await pendingWorkerProposalReplica('editing', false);
+    prepareSyncRead(pagedEditorRef.current!);
+    expect(Reflect.apply(api[method], api, args)).toEqual(loading);
+    await act(async () => {});
+    expect(opens).toEqual([]);
+    expect(fallbackReasons).toEqual([]);
+    expect(replica.started).toBe(false);
+    expect(replica.pending).toBe(true);
+    expect(authority.holdsWorkerState()).toBe(true);
+    expect(transport.handOver).not.toHaveBeenCalled();
+    const ready = api.flushPendingInput();
+    await act(async () => {});
+    expect(replica.started).toBe(false);
+    expect(transport.handOver).not.toHaveBeenCalled();
+    replica.start();
+    await act(async () => { release(); await ready; });
+    expect(transport.handOver).toHaveBeenCalledTimes(1);
+    expect(opens).toEqual([false]);
+    expect(replica.pending).toBe(false);
+    expect(authority.holdsWorkerState()).toBe(false);
+    session.setSelection(
+      { story: 'body', paraId: '00000001', offset: 0 },
+      { story: 'body', paraId: '00000001', offset: 8 }
+    );
+    act(() => { check(Reflect.apply(api[method], api, args)); });
+    expect(opens).toEqual([false]);
+    expect(fallbackReasons).toEqual([]);
   }
-  let error: unknown;
-  act(() => {
-    try { check(api); } catch (failure) { error = failure; }
-  });
-  expect(error).toBeInstanceOf(DocxReplicaNotReadyError);
-  expect((error as DocxReplicaNotReadyError).member).toBe(method);
-  expect((error as Error).message).toContain(method);
-  expect((error as Error).message).toContain('flushPendingInput()');
-  expect(opens).toEqual([]);
-  expect(replica.started).toBe(true);
-  expect(replica.pending).toBe(true);
-  expect(authority.holdsWorkerState()).toBe(true);
-  const ready = api.flushPendingInput();
-  await act(async () => { release(); await ready; });
-  expect(transport.handOver).toHaveBeenCalledTimes(1);
-  expect(opens).toEqual([false]);
-  expect(replica.pending).toBe(false);
-  expect(authority.holdsWorkerState()).toBe(false);
-  act(() => { check(api); });
-  expect(opens).toEqual([false]);
-});
+);
 
 test('selection and point reads return null while proposals are held in the worker', async () => {
   const { api, opens, replica, release, transport } = await pendingWorkerProposalReplica();
@@ -581,15 +659,20 @@ test('independent APIs do not start a replica open', async () => {
   expect(replica.pending).toBe(true);
 });
 
-test('getEditorRef immediately inserts text after synchronously finishing the replica', async () => {
-  const { api, session, replica, opens, fallbackReasons } = await pendingReplica('editing', true);
+test('getEditorRef returns null until readiness and then immediately inserts text', async () => {
+  const { api, session, replica, release, opens, fallbackReasons } = await pendingReplica('editing', true);
   expect(replica.pending).toBe(true);
+  expect(api.getEditorRef()).toBeNull();
+  expect(replica.started).toBe(false);
+  expect(opens).toEqual([]);
+  replica.start();
+  await act(async () => { release(); await replica.ready; });
   await act(async () => {
     api.getEditorRef()!.insertText('Immediate ');
     await api.flushPendingInput();
   });
   expect(replica.pending).toBe(false);
-  expect(opens).toEqual([true]);
-  expect(fallbackReasons).toEqual([{ syncAccess: 'getEditorRef' }]);
+  expect(opens).toEqual([false]);
+  expect(fallbackReasons).toEqual([]);
   expect(session.paragraphs('body')[0]!.text).toStartWith('Immediate ');
 });

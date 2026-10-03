@@ -105,8 +105,6 @@ export interface YrsInputProps {
   enabled: boolean;
   readOnly: boolean;
   replicaReadyRef?: React.RefObject<boolean>;
-  /** Asks for the replica when input reaches the textarea before it has loaded. */
-  requestReplica?: () => void;
   /** Advances on input that supersedes input still waiting for the replica. */
   inputEpoch?: () => number;
   /** Applies a selection gesture recorded while the replica loaded; waiting input follows it. */
@@ -233,7 +231,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     enabled,
     readOnly,
     replicaReadyRef,
-    requestReplica,
     inputEpoch,
     applyPendingSelection,
     seedSelection = true,
@@ -267,19 +264,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 ) {
   const replicaReady = replicaReadyRef?.current !== false;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => {
-    const textarea = textareaRef.current;
-    if (!textarea || !requestReplica) return;
-    const onInput = () => {
-      if (replicaReadyRef?.current === false) requestReplica();
-    };
-    textarea.addEventListener('focus', onInput);
-    textarea.addEventListener('keydown', onInput, true);
-    return () => {
-      textarea.removeEventListener('focus', onInput);
-      textarea.removeEventListener('keydown', onInput, true);
-    };
-  }, [enabled, replicaReadyRef, requestReplica]);
   const composingRef = useRef(false);
   const compositionPendingRef = useRef(false);
   const compositionCommitRef = useRef('');
@@ -1169,10 +1153,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     });
   }, [session]);
 
-  // A copy asked before an on-demand replica loads writes the selection it then has.
+  // A copy asked before the edit peer loads writes the selection it then has.
   const copyAfterReplica = useCallback((): boolean => {
     const clipboard = typeof navigator === 'undefined' ? undefined : navigator.clipboard;
-    if (!session || !requestReplica || replicaReadyRef?.current !== false || !clipboard) {
+    if (!session || replicaReadyRef?.current !== false || !clipboard) {
       return false;
     }
     const copied = session;
@@ -1197,7 +1181,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         .catch(() => {});
     }
     return true;
-  }, [enqueueInputOperation, replicaReadyRef, requestReplica, session]);
+  }, [enqueueInputOperation, replicaReadyRef, session]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {

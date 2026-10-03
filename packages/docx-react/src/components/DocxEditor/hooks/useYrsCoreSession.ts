@@ -21,7 +21,6 @@ import {
   adoptWorkerOpenHandoverVersion,
   adoptWorkerOpenMirrorVersion,
   deferWorkerOpenReplica,
-  ensureWorkerOpenReplica,
   requestWorkerOpenReplica,
   workerOpenReplicaPending,
 } from '../internals/workerOpenReplica';
@@ -131,10 +130,6 @@ const PREVIEW_BODY_BLOCKS = 200;
 const PREVIEW_PAINT_TIMEOUT_MS = 2000;
 /** Bounds the wait for the painted preview to reach the screen; hidden tabs get no frames. */
 const PREVIEW_FRAME_WAIT_MS = 100;
-/** Bounds the wait for a worker frame to reach the screen before the replica hydrates. */
-const REPLICA_FRAME_WAIT_MS = 1000;
-/** Bounds the wait for a worker-opened session's first frame before the replica hydrates. */
-const REPLICA_OPEN_WAIT_MS = 5000;
 /**
  * How long a preview waits for the full session, from the end of its own
  * paint. A full open that has not produced one by then fails the load; once
@@ -418,7 +413,6 @@ export function useYrsCoreSession(
   // An on-demand replica loads once wanted and past the point main's automatic load waits for.
   const replicaGateRef = useRef<{ reached: boolean; wanted: boolean } | null>(null);
   const requestReplicaRef = useRef<(() => void) | null>(null);
-  const replicaWaitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const openReplicaGate = useCallback((): void => {
     const gate = replicaGateRef.current;
     const start = startReplicaRef.current;
@@ -429,16 +423,6 @@ export function useYrsCoreSession(
     }
     if (!hydrateOnDemandRef.current || gate.wanted) start();
   }, []);
-  const armReplicaGate = useCallback(
-    (delayMs: number): void => {
-      if (replicaWaitTimerRef.current !== null) clearTimeout(replicaWaitTimerRef.current);
-      replicaWaitTimerRef.current = setTimeout(() => {
-        replicaWaitTimerRef.current = null;
-        openReplicaGate();
-      }, delayMs);
-    },
-    [openReplicaGate]
-  );
   const inheritedFrameRef = useRef<object | null>(null);
   const renderedFrameRef = useRef(workerOpen?.renderedFrame ?? null);
   renderedFrameRef.current = workerOpen?.renderedFrame ?? null;
@@ -716,8 +700,6 @@ export function useYrsCoreSession(
             const worker = openedWorker;
             const source = bytes;
             const gate = { reached: false, wanted: false };
-            let recoveredRendering = false;
-            let warnedSyncAccess = false;
             const request = (): void => {
               gate.wanted = true;
               if (gate.reached) startReplicaRef.current?.();
@@ -734,34 +716,19 @@ export function useYrsCoreSession(
                   handedOver?.complete();
                 };
               },
-              (reason) => {
+              () => {
                 if (registeredWorkerProposalAuthority(next)?.holdsWorkerState()) {
                   throw new Error('The resident worker holds proposals the main thread cannot rebuild');
                 }
-                const recoverRendering = worker.fallback(reason);
-                if (reason !== 'failure' && !warnedSyncAccess) {
-                  warnedSyncAccess = true;
-                  console.warn(
-                    `[DocxEditor] ${reason.syncAccess}() needed the main-thread document before it was ready, ` +
-                    'so the document was opened on the main thread. Use the asynchronous APIs ' +
-                    '(for example getParagraphIdentities) to keep it in the worker.'
-                  );
-                }
+                worker.fallback();
                 next.openDocx(source, true);
                 if (registeredWorkerProposalAuthority(next)) next.mirrorWorkerDocument(null);
-                if (recoverRendering) {
-                  recoveredRendering = recoverRendering();
-                }
               },
               () => {
                 if (stale()) return;
                 inputPositionMapsRef.current.clear();
                 replicaReadyRef.current = true;
                 worker.replicaReady();
-                if (recoveredRendering) {
-                  markLayoutQueued(next, true);
-                  workerOpenRef.current?.refreshWorkerLayout?.();
-                }
                 setReplicaReady(true);
               },
               { active: () => hydrateOnDemandRef.current, request }
@@ -822,10 +789,6 @@ export function useYrsCoreSession(
                 sessionRef.current !== next ||
                 pendingReplicaRef.current !== pending
               ) return;
-              if (replicaWaitTimerRef.current !== null) {
-                clearTimeout(replicaWaitTimerRef.current);
-                replicaWaitTimerRef.current = null;
-              }
               requestWorkerOpenReplica(next);
             };
             replicaReadyRef.current = false;
@@ -870,7 +833,6 @@ export function useYrsCoreSession(
         setSession(next);
         setPreviewing(false);
         setSessionGeneration(seedGeneration);
-        if (openedWorker && startReplicaRef.current) armReplicaGate(REPLICA_OPEN_WAIT_MS);
         if (host) callbacksRef.current?.onHostDocument?.(host, seedGeneration, next);
       })
       .catch((error) => {
@@ -890,8 +852,6 @@ export function useYrsCoreSession(
       workerLaidOutRef.current = null;
       replicaGateRef.current = null;
       requestReplicaRef.current = null;
-      if (replicaWaitTimerRef.current !== null) clearTimeout(replicaWaitTimerRef.current);
-      replicaWaitTimerRef.current = null;
       openedWorker?.destroy();
       failOpeningRef.current = null;
       if (fullOpenTimer !== null) clearTimeout(fullOpenTimer);
@@ -963,15 +923,27 @@ export function useYrsCoreSession(
     if (previewing || (handoffFrom && options?.shownEngine !== session)) return;
     // The replica blocks this thread: it loads once the worker is laying out the rest.
     if (workerOpen?.pendingCompletion === session) return;
-    armReplicaGate(REPLICA_FRAME_WAIT_MS);
-    if (typeof requestAnimationFrame !== 'function') {
+    const visibilityDocument = globalThis.document;
+    if (typeof requestAnimationFrame !== 'function' || visibilityDocument?.visibilityState === 'hidden') {
       const timer = setTimeout(openReplicaGate, 0);
       return () => clearTimeout(timer);
     }
+    const startAfterPaint = (): void => {
+      cancelAnimationFrame(frameId);
+      visibilityDocument?.removeEventListener('visibilitychange', onVisibilityChange);
+      openReplicaGate();
+    };
+    const onVisibilityChange = (): void => {
+      if (visibilityDocument?.visibilityState === 'hidden') startAfterPaint();
+    };
+    visibilityDocument?.addEventListener('visibilitychange', onVisibilityChange);
     let frameId = requestAnimationFrame(() => {
-      frameId = requestAnimationFrame(openReplicaGate);
+      frameId = requestAnimationFrame(startAfterPaint);
     });
-    return () => cancelAnimationFrame(frameId);
+    return () => {
+      cancelAnimationFrame(frameId);
+      visibilityDocument?.removeEventListener('visibilitychange', onVisibilityChange);
+    };
   }, [
     openInWorker,
     session,
@@ -983,23 +955,7 @@ export function useYrsCoreSession(
     options?.shownEngine,
   ]);
 
-  // Turning on-demand hydration off restores the bounded start a frame may never trigger.
   const hydrateOnDemand = workerOpen?.hydrateOnDemand === true && Boolean(openInWorker);
-  const wasOnDemandRef = useRef(hydrateOnDemand);
-  useEffect(() => {
-    const was = wasOnDemandRef.current;
-    wasOnDemandRef.current = hydrateOnDemand;
-    const start = startReplicaRef.current;
-    if (
-      !was ||
-      hydrateOnDemand ||
-      !openInWorker ||
-      !start ||
-      !pendingReplicaRef.current?.pending ||
-      replicaWaitTimerRef.current !== null
-    ) return;
-    replicaWaitTimerRef.current = setTimeout(start, REPLICA_OPEN_WAIT_MS);
-  }, [hydrateOnDemand, openInWorker]);
 
   const requestReplica = useCallback((): void => {
     requestReplicaRef.current?.();
@@ -1131,7 +1087,7 @@ export function useYrsCoreSession(
     // A preview holds only the first pages: nothing saves or exports it.
     if (!enabledRef.current || previewingRef.current || !live || !facade || !base) return null;
     try {
-      if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(live);
+      if (workerOpenEnabledRef.current && workerOpenReplicaPending(live)) return null;
       const compatibilityBase = compatibilityBaseRef.current ?? live.materializeDocx();
       if (compatibilityBase) {
         base = mergeDocxHostMetadata(compatibilityBase, base);

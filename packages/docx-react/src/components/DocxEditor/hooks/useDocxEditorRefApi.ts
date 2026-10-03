@@ -32,9 +32,7 @@ import { documentPageCount } from './documentPageCount';
 import type { DocxHostSearch } from './useHostSearch';
 import {
   awaitWorkerOpenReplica,
-  ensureWorkerOpenReplica,
   requestOnDemandWorkerOpenReplica,
-  requestWorkerOpenReplica,
   workerOpenReplicaOnDemand,
   workerOpenReplicaPending,
 } from '../internals/workerOpenReplica';
@@ -136,6 +134,25 @@ export const DOCX_REF_REPLICA_ACCESS = {
   onDocumentChange: 'independent',
 } as const satisfies Record<keyof DocxEditorRef, 'await' | 'sync' | 'independent' | 'commands'>;
 
+/** What a synchronous member returns while the editor's document is still loading here. */
+export const DOCX_REF_REPLICA_LOADING_ANSWERS = {
+  getDocument: null,
+  getEditorRef: null,
+  getSelectionInfo: null,
+  getPageContent: null,
+  addComment: null,
+  proposeChange: false,
+  applyFormatting: false,
+  setParagraphStyle: false,
+  insertBreak: false,
+  scrollToParaId: false,
+  scrollToCommentId: false,
+  scrollToChangeId: false,
+  findInDocument: [],
+} satisfies Partial<{
+  [Member in keyof DocxEditorRef]: DocxEditorRef[Member] extends (...args: never[]) => infer Result ? Result : never;
+}>;
+
 /**
  * Synchronous APIs that an on-demand replica still loading answers without loading it at once:
  * `direct` needs no replica (the display list, print, focus, or a call that waits for the replica
@@ -153,10 +170,8 @@ const ON_DEMAND_SYNC_ACCESS: Partial<Record<keyof DocxEditorRef, 'direct' | 'uns
 };
 
 /**
- * Thrown by a synchronous editor ref member that needs the document on the main thread while a
- * read-only `experimentalWorkerOpen` editor still holds it, with host proposals, in its worker. The
- * document starts loading; await `flushPendingInput()` (or the member's async counterpart) and call
- * it again.
+ * @deprecated No longer thrown: until the document is ready, synchronous members answer as they do
+ * while it opens (`null`, `false` or `[]`).
  */
 export class DocxReplicaNotReadyError extends Error {
   constructor(readonly member: string) {
@@ -284,12 +299,10 @@ function gateReplicaAccess(
               requestOnDemandWorkerOpenReplica(session);
               return null;
             }
-            // Proposals only the worker holds cannot be rebuilt here: the replica takes them over.
-            if (onDemand === undefined && workerProposalAuthority(session)?.holdsWorkerState()) {
-              void requestWorkerOpenReplica(session)?.catch(() => {});
-              throw new DocxReplicaNotReadyError(key);
+            if (workerOpenReplicaPending(session) && key in DOCX_REF_REPLICA_LOADING_ANSWERS) {
+              const answer = DOCX_REF_REPLICA_LOADING_ANSWERS[key as keyof typeof DOCX_REF_REPLICA_LOADING_ANSWERS];
+              return Array.isArray(answer) ? answer.slice() : answer;
             }
-            if (onDemand === undefined) ensureWorkerOpenReplica(session, key);
           } else {
             if (key === 'whenLayoutComplete' && workerOpenReplicaOnDemand(session)) {
               return Reflect.apply(call, api, args);

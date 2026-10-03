@@ -17,7 +17,7 @@ import {
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
 import { isLayoutQueued, sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
 import {
-  requestWorkerOpenReplica,
+  awaitWorkerOpenReplica,
   workerOpenSourceVersion,
 } from '../components/DocxEditor/internals/workerOpenReplica';
 import {
@@ -155,7 +155,7 @@ export function createPluginClients(
     const before = invalid(session);
     if (before) return before;
     try {
-      await requestWorkerOpenReplica(session);
+      await awaitWorkerOpenReplica(session);
     } catch {
       return invalid(session) ?? pluginRefusal('input-failed');
     }

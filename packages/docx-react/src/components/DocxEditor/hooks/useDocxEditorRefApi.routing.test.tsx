@@ -291,12 +291,12 @@ for (const failure of ['missing paragraph', 'refused proposal', 'rejected propos
   });
 }
 
-test('viewer proposeChange without host admission retains the replica gate', () => {
+test('viewer proposeChange without host admission returns false without loading the replica', () => {
   spyOn(console, 'warn').mockImplementation(() => {});
   const host = apiFor(true, true);
   host.allowHostProposalsRef.current = false;
   expect(host.api.proposeChange({ paraId: 'p', search: 'hello', replaceWith: 'world', author: 'Host' })).toBe(false);
-  expect(host.fallback).toHaveBeenCalledTimes(1);
+  expectNoReplica(host);
 });
 
 test('editor proposeChange preserves synchronous edits, refresh and sidebar behavior', () => {
@@ -590,8 +590,8 @@ for (const [member, args, use] of [
     expect(host.fallback).not.toHaveBeenCalled();
     expect(host.request).not.toHaveBeenCalled();
     host.state.viewer = false;
-    Reflect.apply(host.api[member], host.api, args);
-    expect(host.fallback).toHaveBeenCalledTimes(1);
+    expect(Reflect.apply(host.api[member], host.api, args)).toEqual(member === 'findInDocument' ? [] : null);
+    expectNoReplica(host);
     expect(warning).toHaveBeenCalledTimes(1);
   });
 }

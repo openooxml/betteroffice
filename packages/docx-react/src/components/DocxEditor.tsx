@@ -88,7 +88,6 @@ import { warnDeprecatedViewerMember } from './DocxEditor/internals/deprecatedVie
 import type { ViewerCommentRanges } from './DocxEditor/internals/viewerSidebarReads';
 import { useViewerSession, viewerReadsWorker } from './DocxEditor/internals/viewerSession';
 import type { ViewerSelectionChange } from './DocxEditor/internals/viewerSelectionController';
-import { pagePressNeedsReplica } from './DocxEditor/internals/replicaTriggers';
 import { useImageActions } from './DocxEditor/hooks/useImageActions';
 import { useDocxEditorRefApi } from './DocxEditor/hooks/useDocxEditorRefApi';
 import {
@@ -2294,16 +2293,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   useEffect(() => {
     if (!viewerReads && experimentalWorkerOpen && replicaReady && showOutlineRef.current) refreshHeadings();
   }, [experimentalWorkerOpen, replicaReady, refreshHeadings, showOutlineRef, viewerReads]);
-  // A tap asks through its gesture, the input for itself.
-  useEffect(() => {
-    const content = editorContentRef.current;
-    if (!replicaPending || !content || viewerSession) return;
-    const onPointer = (event: PointerEvent) => {
-      if (pagePressNeedsReplica(event)) requestReplica();
-    };
-    content.addEventListener('pointerdown', onPointer, true);
-    return () => content.removeEventListener('pointerdown', onPointer, true);
-  }, [replicaPending, requestReplica, viewerSession]);
 
   // Reserve 2× the left-edge allowance so the centered page clears whatever
   // outline UI is showing, without forcing a shift on wide viewports.

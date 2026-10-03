@@ -69,8 +69,6 @@ export interface UsePagesPointerOptions {
   readOnly: boolean;
   replicaPending?: () => boolean;
   replicaReady?: boolean;
-  /** Asks for the replica a recorded gesture waits for. */
-  requestReplica?: () => void;
   /** the non-body part open for editing — the body is inert behind it */
   partEdit?: PartEdit | null;
   displayListQueries?: DisplayListQueries | null;
@@ -201,7 +199,6 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     readOnly,
     replicaPending,
     replicaReady = true,
-    requestReplica,
     partEdit = null,
     displayListQueries,
     canvasHostRef,
@@ -442,12 +439,11 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
           epoch: inputEpochRef.current,
         };
         listenForOutsideInput();
-        requestReplica?.();
         beginTextDrag(position);
       }
       return true;
     },
-    [beginTextDrag, listenForOutsideInput, replicaPending, requestReplica]
+    [beginTextDrag, listenForOutsideInput, replicaPending]
   );
 
   const updatePendingGestureHead = useCallback((position: number): boolean => {
@@ -974,7 +970,6 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
                 epoch: inputEpochRef.current,
               };
               listenForOutsideInput();
-              requestReplica?.();
             }
             return;
           }
@@ -1083,7 +1078,6 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       partEdit,
       readOnly,
       replicaPending,
-      requestReplica,
       resolveCanvasHit,
       resolveTarget,
       scrollToPositionImpl,

@@ -1634,7 +1634,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             !!yrsCore.experimentalWorkerOpen &&
             !(yrsCore.replicaReadyRef?.current ?? yrsCore.replicaReady),
       replicaReady: viewerDocumentRead ? true : yrsCore.replicaReady,
-      requestReplica: viewerDocumentRead ? undefined : yrsCore.requestReplica,
       partEdit,
       displayListQueries,
       canvasHostRef,
@@ -2196,7 +2195,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             enabled
             readOnly={readOnly || (!!partEdit && activeYrsRootStory === 'body')}
             replicaReadyRef={yrsCore.experimentalWorkerOpen ? yrsCore.replicaReadyRef : undefined}
-            requestReplica={yrsCore.experimentalWorkerOpen ? yrsCore.requestReplica : undefined}
             inputEpoch={inputEpoch}
             applyPendingSelection={applyPendingSelection}
             seedSelection={!yrsCore.hydrateOnDemand}
