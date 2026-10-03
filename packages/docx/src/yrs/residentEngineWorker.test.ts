@@ -2355,6 +2355,33 @@ describe('worker proposals during sliced completion', () => {
     return { w, engine, calls, onResume, snapshot, booted, proposal, complete, expectFullLayout };
   }
 
+  test('paged export replies with the resident session export of its retained layout', async () => {
+    const { w, engine, complete } = await proposalWorker();
+    try {
+      const completed = await complete();
+      expect(completed.ok && completed.layoutProvisional).not.toBe(true);
+      const options = { revisionView: 'markup' } as const;
+      for (const currentRequest of [
+        layoutInput,
+        JSON.stringify({ ...JSON.parse(layoutInput), renderEnv: { revisionPreview: { '1': 'accepted' } } }),
+      ]) {
+        const reply = await w.send({
+          type: 'documentRead',
+          read: { kind: 'exportStructuredWithPages', options, currentRequest },
+        });
+        if (!reply.ok || !reply.read) throw new Error('expected a paged export read');
+        expect(reply.read.value).toBe(engine.exportStructuredWithPagesJson(options, currentRequest));
+        expect(JSON.parse(reply.read.value as string).version).toBe(reply.read.version);
+      }
+      const preview = JSON.parse(engine.exportStructuredWithPagesJson(options, JSON.stringify({
+        ...JSON.parse(layoutInput), renderEnv: { revisionPreview: { '1': 'accepted' } },
+      })));
+      expect(preview).toMatchObject({ ok: false, failure: { code: 'unsupported-revision-layout' } });
+    } finally {
+      engine.destroy();
+    }
+  });
+
   test('proposal mirrors retain the same navigation target as repeated worker reads', async () => {
     const { w, engine, proposal } = await proposalWorker();
     try {

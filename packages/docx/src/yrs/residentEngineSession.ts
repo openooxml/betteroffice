@@ -25,6 +25,7 @@ import type {
 } from './paragraphIdentity';
 import type { ProposalGeometryReader, ProposalGeometryRevision } from './proposalGeometry';
 import type { DocxProposalSession } from './proposals';
+import type { DocxPageExportOptions } from './pagedExport';
 import type { YrsPositionOutline } from './yrsPositionProjection';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
@@ -77,6 +78,8 @@ export type ResidentEngineSession = Pick<
   paragraphSegments(story: string, indices: readonly number[]): YrsStorySegment[][];
   /** @internal */
   paragraphIdentities(): DocxParagraphIdentitySnapshot;
+  /** @internal */
+  exportStructuredWithPagesJson(options: DocxPageExportOptions, currentRequest: string): string;
   /** The region layout of only as much of the body as fills `pages` pages. */
   layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
   /** Limit incremental rebuilds to the display window and caret pages. Off by default. */
@@ -276,6 +279,8 @@ export async function createResidentEngineSession(
     },
     paragraphIdentities: () =>
       JSON.parse(session.paragraph_identities()) as DocxParagraphIdentitySnapshot,
+    exportStructuredWithPagesJson: (options, currentRequest) =>
+      session.export_structured_with_pages_json(JSON.stringify(options), currentRequest),
     storiesChangedSince: (since) =>
       JSON.parse(session.stories_changed_since(since)) as { revision: number; stories: string[] },
     openDocx: (bytes, digest, generation) => {
