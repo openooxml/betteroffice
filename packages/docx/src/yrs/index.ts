@@ -1594,6 +1594,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   let undoTracked = false;
   let cachedSelection: YrsSelection | null | undefined;
   let cachedSelectionContext: { key: string; json: string } | null = null;
+  let cachedRevisions: { version: string; json: string } | null = null;
   const residentFonts: YrsResidentFontRegistration[] = [];
   const residentRenderInputs = new Map<string, YrsRenderEnv>();
   const residentMeasureInputs = new Map<string, string>();
@@ -1621,6 +1622,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   const invalidateReadCaches = (): void => {
     cachedSelection = undefined;
     cachedSelectionContext = null;
+    cachedRevisions = null;
   };
 
   const flushUpdates = (): void => {
@@ -2575,7 +2577,13 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       cachedSelectionContext = { key, json };
       return context;
     },
-    listRevisions: () => JSON.parse(session.list_revisions()) as YrsRevisionInfo[],
+    listRevisions: () => {
+      const version = facade.version();
+      if (cachedRevisions?.version !== version) {
+        cachedRevisions = { version, json: session.list_revisions() };
+      }
+      return JSON.parse(cachedRevisions.json) as YrsRevisionInfo[];
+    },
     resolveComment: (commentId) =>
       JSON.parse(session.resolve_comment(commentId)) as YrsResolvedCommentAnchor[],
     listComments: () => JSON.parse(session.list_comments()) as YrsCommentInfo[],

@@ -138,6 +138,10 @@ impl ParagraphIndex {
             .get(self.paras.partition_point(|para| para.pilcrow < index))
     }
 
+    pub(crate) fn last(&self) -> Option<&ParaEntry> {
+        self.paras.last()
+    }
+
     pub(crate) fn shift_for_text_insert(&mut self, index: u32, units: u32) -> bool {
         let slot = self.paras.partition_point(|para| para.pilcrow < index);
         let Some(para) = self.paras.get_mut(slot) else {

@@ -1,9 +1,10 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { DisplayList } from '@betteroffice/docx/layout/render';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
+import { EditSession as WasmEditSession } from '../../../../../docx/src/wasm/generated/edit/docx_edit';
 import {
   createYrsInputPositionMap,
   createYrsSession,
@@ -13,6 +14,7 @@ import {
 import { DocxCommandAdmissionError } from '../../../commands/createDocxCommandStore';
 import type { DocxCommandResult } from '../../../commands/types';
 import type { PagedEditorRef } from '../PagedEditor';
+import { SidebarRevisionReads } from '../internals/sidebarRevisionReads';
 import { createYrsPositionProjection } from '../internals/yrsPositionProjection';
 import { currentYrsToolbarSelection } from '../yrsToolbar';
 import {
@@ -377,6 +379,31 @@ describe('editor command binding', () => {
       Promise.reject(new DocxCommandAdmissionError('input-failed'));
     expect(code(await editor.store.execute('print', null))).toBe('input-failed');
     expect(events).toEqual(['cancelled', 'cancelled']);
+  });
+
+  test('the command store and sidebar share one wasm revision read per version', async () => {
+    const { session, paraId } = await newSession();
+    const author = { name: 'Reviewer', date: '2026-01-01T00:00:00Z' };
+    session.insertText({ story: 'body', paraId, offset: 5 }, ' new', author);
+    const lists = spyOn(WasmEditSession.prototype, 'list_revisions');
+    try {
+      const editor = mount(session);
+      const sidebar = new SidebarRevisionReads();
+      expect(editor.store.getState('reviewNext').enabled).toBe(true);
+      const first = sidebar.revisions(session).revisions;
+      expect(first).toHaveLength(1);
+      const accept = editor.store.getState('reviewAccept', { revisionId: first[0]!.revisionId });
+      expect(accept.enabled).toBe(true);
+      expect(lists).toHaveBeenCalledTimes(1);
+
+      session.insertText({ story: 'body', paraId, offset: 0 }, 'another ', author);
+      expect(sidebar.revisions(session).revisions).toHaveLength(2);
+      editor.hook.result.current.commands.controller.refresh();
+      expect(editor.store.getState('reviewNext').enabled).toBe(true);
+      expect(lists).toHaveBeenCalledTimes(2);
+    } finally {
+      lists.mockRestore();
+    }
   });
 
   test('accepts and rejects header and footer revisions by id', async () => {

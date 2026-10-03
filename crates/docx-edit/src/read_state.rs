@@ -4,7 +4,9 @@ use std::collections::HashSet;
 
 use yrs::{Any, Map, Out, ReadTxn, TextRef, Transact};
 
-use crate::op::{OpError, OpResult, para_bounds};
+#[cfg(test)]
+use crate::op::para_bounds;
+use crate::op::{OpError, OpResult};
 use crate::ops::{Chunk, ChunkKind, capture_pilcrow};
 use crate::queries::TextView;
 use crate::{
@@ -203,9 +205,51 @@ fn collect_table_cell_stories<T: ReadTxn>(
     }
 }
 
+struct SelectionLookups<'p, 'c, At, After> {
+    paragraph_start: u32,
+    pilcrow_index: u32,
+    start_para_id: &'p str,
+    end_para_id: &'p str,
+    pilcrow_chunk: Option<&'c Chunk>,
+    chunk_at: At,
+    first_after: After,
+}
+
 impl EditingDoc {
     /// Aggregates text-unit marks and start-paragraph state over a story range.
     pub fn selection_context(&self, range: &StoryRange) -> OpResult<SelectionContextInfo> {
+        self.read_selection_context(range, |txn, _, chunks| {
+            let paragraphs = self.paragraph_index(&range.story)?;
+            let start_para = paragraphs
+                .para_at(range.start)
+                .ok_or_else(|| OpError::UnknownStory(range.story.clone()))?;
+            let end_para = paragraphs
+                .para_at(range.end)
+                .or_else(|| paragraphs.last())
+                .ok_or_else(|| OpError::UnknownStory(range.story.clone()))?;
+            let first_after = |index| chunks.partition_point(|chunk| chunk.end() <= index);
+            let chunk_at = |index| {
+                chunks
+                    .get(first_after(index))
+                    .filter(|chunk| chunk.start <= index && index < chunk.end())
+            };
+            self.aggregate_selection_context(range, txn, chunks, SelectionLookups {
+                paragraph_start: start_para.start,
+                pilcrow_index: start_para.pilcrow,
+                start_para_id: &start_para.para_id,
+                end_para_id: &end_para.para_id,
+                pilcrow_chunk: chunk_at(start_para.pilcrow),
+                chunk_at,
+                first_after,
+            })
+        })
+    }
+
+    fn read_selection_context(
+        &self,
+        range: &StoryRange,
+        read: impl FnOnce(&yrs::Transaction<'_>, &TextRef, &[Chunk]) -> OpResult<SelectionContextInfo>,
+    ) -> OpResult<SelectionContextInfo> {
         if range.end < range.start {
             return Err(OpError::InvalidRange {
                 start: range.start,
@@ -223,30 +267,37 @@ impl EditingDoc {
             });
         }
 
-        let bounds = para_bounds(&story, &txn);
-        let start_para = bounds
-            .iter()
-            .find(|para| range.start <= para.pilcrow)
-            .ok_or_else(|| OpError::UnknownStory(range.story.clone()))?;
-        let end_para = bounds
-            .iter()
-            .find(|para| range.end <= para.pilcrow)
-            .or_else(|| bounds.last())
-            .ok_or_else(|| OpError::UnknownStory(range.story.clone()))?;
-        let is_multi_paragraph = start_para.para_id != end_para.para_id;
+        read(&txn, &story, &chunks)
+    }
 
+    fn aggregate_selection_context<'a>(
+        &self,
+        range: &StoryRange,
+        txn: &impl ReadTxn,
+        chunks: &'a [Chunk],
+        lookups: SelectionLookups<'_, 'a, impl Fn(u32) -> Option<&'a Chunk>, impl Fn(u32) -> usize>,
+    ) -> OpResult<SelectionContextInfo> {
+        let SelectionLookups {
+            paragraph_start,
+            pilcrow_index,
+            start_para_id,
+            end_para_id,
+            pilcrow_chunk,
+            chunk_at,
+            first_after,
+        } = lookups;
+        let is_multi_paragraph = start_para_id != end_para_id;
         // Paragraph properties from the start paragraph's pilcrow map.
-        let (para_id, para_props) = chunks
-            .iter()
-            .find_map(|chunk| match &chunk.kind {
-                ChunkKind::Pilcrow(map) if chunk.start == start_para.pilcrow => {
-                    Some(capture_pilcrow(map, &txn))
+        let (para_id, para_props) = pilcrow_chunk
+            .and_then(|chunk| match &chunk.kind {
+                ChunkKind::Pilcrow(map) if chunk.start == pilcrow_index => {
+                    Some(capture_pilcrow(map, txn))
                 }
                 _ => None,
             })
             .ok_or_else(|| OpError::ExpectedPilcrow {
                 story: range.story.clone(),
-                index: start_para.pilcrow,
+                index: pilcrow_index,
             })?;
         let paragraph_properties: std::collections::BTreeMap<String, Any> = para_props
             .into_iter()
@@ -258,19 +309,16 @@ impl EditingDoc {
         };
 
         let is_text_unit = |index: u32| {
-            chunks
-                .iter()
-                .find(|chunk| chunk.start <= index && index < chunk.end())
-                .is_some_and(|chunk| matches!(chunk.kind, ChunkKind::Text(_)))
+            chunk_at(index).is_some_and(|chunk| matches!(chunk.kind, ChunkKind::Text(_)))
         };
 
         // The effective mark range: the range itself, or the caret-adjacent
         // text unit (before within the paragraph, else after).
         let (mark_from, mark_to) = if range.start == range.end {
             let at = range.start;
-            if at > start_para.start && is_text_unit(at - 1) {
+            if at > paragraph_start && is_text_unit(at - 1) {
                 (at - 1, at)
-            } else if at < start_para.pilcrow && is_text_unit(at) {
+            } else if at < pilcrow_index && is_text_unit(at) {
                 (at, at + 1)
             } else {
                 (at, at)
@@ -291,7 +339,8 @@ impl EditingDoc {
         let mut font_size = ValueAgg::Empty;
         let mut color = ValueAgg::Empty;
         let mut highlight = ValueAgg::Empty;
-        for chunk in chunks.iter() {
+        let first = first_after(mark_from);
+        for chunk in &chunks[first..] {
             if chunk.start >= mark_to {
                 break;
             }
@@ -347,16 +396,13 @@ impl EditingDoc {
         };
 
         let embed_kind = if range.end == range.start + 1 {
-            chunks
-                .iter()
-                .find(|chunk| chunk.start <= range.start && range.start < chunk.end())
-                .and_then(|chunk| match &chunk.kind {
-                    ChunkKind::Embed(Some(map)) => {
-                        Some(map_string(map, &txn, KIND_KEY).unwrap_or_default())
-                    }
-                    ChunkKind::Embed(None) => Some(String::new()),
-                    _ => None,
-                })
+            chunk_at(range.start).and_then(|chunk| match &chunk.kind {
+                ChunkKind::Embed(Some(map)) => {
+                    Some(map_string(map, txn, KIND_KEY).unwrap_or_default())
+                }
+                ChunkKind::Embed(None) => Some(String::new()),
+                _ => None,
+            })
         } else {
             None
         };
@@ -378,10 +424,36 @@ impl EditingDoc {
             paragraph_properties,
             has_selection: range.start != range.end,
             is_multi_paragraph,
-            in_table: is_table_cell_story(self, &txn, &range.story),
+            in_table: is_table_cell_story(self, txn, &range.story),
             embed_kind,
             in_insertion: ins == Some(TriState::On),
             in_deletion: del == Some(TriState::On),
+        })
+    }
+
+    #[cfg(test)]
+    fn selection_context_reference(&self, range: &StoryRange) -> OpResult<SelectionContextInfo> {
+        self.read_selection_context(range, |txn, story, chunks| {
+            let bounds = para_bounds(story, txn);
+            let para_at = |index| bounds.iter().find(|para| index <= para.pilcrow);
+            let unknown = || OpError::UnknownStory(range.story.clone());
+            let start_para = para_at(range.start).ok_or_else(unknown)?;
+            let end_para = para_at(range.end).or_else(|| bounds.last()).ok_or_else(unknown)?;
+            let pilcrow_chunk = chunks.iter().find_map(|chunk| match &chunk.kind {
+                ChunkKind::Pilcrow(_) if chunk.start == start_para.pilcrow => Some(chunk),
+                _ => None,
+            });
+            self.aggregate_selection_context(range, txn, chunks, SelectionLookups {
+                paragraph_start: start_para.start,
+                pilcrow_index: start_para.pilcrow,
+                start_para_id: &start_para.para_id,
+                end_para_id: &end_para.para_id,
+                pilcrow_chunk,
+                chunk_at: |index| chunks.iter()
+                    .find(|chunk| chunk.start <= index && index < chunk.end()),
+                first_after: |index| chunks.iter().position(|chunk| chunk.end() > index)
+                    .unwrap_or(chunks.len()),
+            })
         })
     }
 
@@ -495,6 +567,9 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::sync::Arc;
 
+    use yrs::types::Attrs;
+    use yrs::{MapPrelim, Text};
+
     use super::*;
     use crate::{
         ChangeKind, ColorPatch, EditCtx, FontFamilyPatch, FormatPolicy, InlineFormatDelta, Patch,
@@ -520,6 +595,127 @@ mod tests {
     fn context(doc: &EditingDoc, start: u32, end: u32) -> SelectionContextInfo {
         doc.selection_context(&StoryRange::new("body", start, end))
             .unwrap()
+    }
+
+    #[test]
+    fn selection_context_matches_seeded_random_oracle_after_text_edits() {
+        fn random(state: &mut u64, upper: u32) -> u32 {
+            *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (*state >> 32) as u32 % upper
+        }
+        fn map(entries: impl IntoIterator<Item = (&'static str, Any)>) -> Any {
+            Any::Map(Arc::new(entries.into_iter().map(|(k, v)| (k.to_owned(), v)).collect()))
+        }
+        fn attrs(state: &mut u64) -> Attrs {
+            let mut attrs = Attrs::new();
+            for key in ["bold", "italic", "underline", "strike", "superscript", "subscript",
+                crate::INS, crate::DEL] {
+                let value = match random(state, 4) {
+                    0 => continue,
+                    1 => Any::Null,
+                    2 => Any::Bool(false),
+                    _ if key == crate::INS || key == crate::DEL => map([
+                        ("id", Any::from("revision")), ("author", Any::from("Reviewer")),
+                        ("date", Any::from(DATE)),
+                    ]),
+                    _ => Any::Bool(true),
+                };
+                attrs.insert(key.into(), value);
+            }
+            let size = Any::Number(20.0 + f64::from(random(state, 3)) * 2.0);
+            attrs.insert("fontSize".into(), map([("sizeCs", size)]));
+            attrs
+        }
+        for seed in 1..=12 {
+            let mut state = seed;
+            let doc = EditingDoc::new(7);
+            for id in ["body", "body:t0:r0c0", "empty", "unmarked", "trailing", "broken"] {
+                doc.create_story(id, "", "Normal", "left").unwrap();
+            }
+            let mut txn = doc.yrs_doc().transact_mut();
+            for id in ["empty", "unmarked", "body", "body:t0:r0c0"] {
+                let story = story_ref(&txn, id).unwrap();
+                story.remove_range(&mut txn, 0, 1);
+                if id == "empty" { continue; }
+                if id == "unmarked" { story.insert(&mut txn, 0, "text"); continue; }
+                let cell = map([("story", Any::from("body:t0:r0c0"))]);
+                let row = map([("cells", Any::Array(Arc::from(vec![cell])))]);
+                let mut index = 0;
+                for paragraph in 0..4 + random(&mut state, 3) {
+                    if paragraph == 0 || paragraph == 2 {
+                        let kind = if id == "body" && paragraph == 0 { "table" } else { "pageBreak" };
+                        story.insert_embed_with_attributes(&mut txn, index, MapPrelim::from_iter([
+                            (KIND_KEY, Any::from(kind)), ("rows", Any::Array(Arc::from(vec![row.clone()]))),
+                        ]), attrs(&mut state));
+                        index += 1;
+                    }
+                    for run in 0..if paragraph == 1 { 0 } else { 2 + random(&mut state, 3) } {
+                        if run == 1 {
+                            story.insert_embed_with_attributes(&mut txn, index,
+                                MapPrelim::from_iter([(KIND_KEY, Any::from("image"))]), attrs(&mut state));
+                            index += 1;
+                        }
+                        let text = ["a", "bc", "é", "😀", "xyz"][random(&mut state, 5) as usize];
+                        story.insert_with_attributes(&mut txn, index, text, attrs(&mut state));
+                        index += text.encode_utf16().count() as u32;
+                    }
+                    story.insert_embed_with_attributes(&mut txn, index, MapPrelim::from_iter([
+                        (KIND_KEY, Any::from("pilcrow")),
+                        (crate::PARA_ID, Any::from(format!("{id}:p{}", paragraph % 2))),
+                        ("pStyle", Any::from(format!("Style{paragraph}"))),
+                    ]), attrs(&mut state));
+                    index += 1;
+                }
+            }
+            story_ref(&txn, "trailing").unwrap().insert(&mut txn, 1, "tail");
+            drop(txn);
+            let check = |range: StoryRange| assert_eq!(doc.selection_context(&range),
+                doc.selection_context_reference(&range), "range {range:?}, seed {seed}");
+            for edit in 0..=10 {
+                for id in ["body", "body:t0:r0c0", "empty", "unmarked", "trailing", "missing"] {
+                    let len = doc.story_len(id).unwrap_or(0);
+                    for start in 0..=len + 2 {
+                        for end in (start..=start + 4).chain([len, 0, u32::MAX]) {
+                            check(StoryRange::new(id, start, end));
+                        }
+                    }
+                    check(StoryRange::new(id, u32::MAX, 0));
+                }
+                if edit == 10 { break; }
+                let id = ["body", "body:t0:r0c0"][random(&mut state, 2) as usize];
+                let txn = doc.yrs_doc().transact();
+                let story = story_ref(&txn, id).unwrap();
+                let chunks = doc.chunk_snapshot(id, &story, &txn);
+                drop(txn);
+                let chunk = &chunks[random(&mut state, chunks.len() as u32) as usize];
+                if let ChunkKind::Text(text) = &chunk.kind && edit % 3 == 0 {
+                    let end = chunk.start + text.chars().next().unwrap().len_utf16() as u32;
+                    doc.delete_range(&local(), StoryRange::new(id, chunk.start, end)).unwrap();
+                } else {
+                    let text = ["q", "rs", "😀"][random(&mut state, 3) as usize];
+                    let before = doc.committed_epoch();
+                    let mut txn = doc.yrs_doc().transact_mut();
+                    story.insert_with_attributes(&mut txn, chunk.start, text, attrs(&mut state));
+                    drop(txn);
+                    doc.advance_paragraph_index_after_text_insert(id, before,
+                        doc.committed_epoch(), chunk.start, text.encode_utf16().count() as u32);
+                }
+            }
+            doc.chunk_snapshots.lock().unwrap().insert("broken", doc.committed_epoch(),
+                Arc::new(vec![Chunk { start: 0, len: 1, kind: ChunkKind::Embed(None),
+                    attrs: BTreeMap::new() }]));
+            for (id, start, end, error) in [
+                ("missing", 1, 0, OpError::InvalidRange { start: 1, end: 0 }),
+                ("missing", 0, 1, OpError::UnknownStory("missing".into())),
+                ("empty", 0, 1, OpError::OutOfBounds { index: 1, len: 0 }),
+                ("empty", 0, 0, OpError::UnknownStory("empty".into())),
+                ("broken", 0, 2, OpError::OutOfBounds { index: 2, len: 1 }),
+                ("broken", 0, 0, OpError::ExpectedPilcrow { story: "broken".into(), index: 0 }),
+            ] {
+                check(StoryRange::new(id, start, end));
+                assert_eq!(doc.selection_context(&StoryRange::new(id, start, end)), Err(error));
+            }
+        }
     }
 
     #[test]
