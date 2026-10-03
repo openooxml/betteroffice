@@ -1103,8 +1103,8 @@ fn per_cell_oversized_kept_remainders_yield_to_lines_and_terminate() {
         two_cell_table(&[(6, 0.0, json!({})), (12, 4.4, json!({"keepLines": true}))]),
     );
     let result = table_fragments(measured.clone(), None);
-    assert_eq!(result.len(), 5);
-    assert_eq!(cell_windows(&result[0].1), [(0.0, 60.0), (0.0, 0.0)]);
+    assert_eq!(result.len(), 3);
+    assert_eq!(cell_windows(&result[0].1), [(0.0, 60.0), (0.0, 44.4)]);
     assert!(result.iter().all(|(_, fragment)| {
         cell_windows(fragment)
             .iter()

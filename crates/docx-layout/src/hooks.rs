@@ -328,6 +328,7 @@ fn layout_table_with_position(
                 header_budget,
                 snap_row_break(&breaks.kept, header_row_count, 0.0, header_budget),
                 false,
+                body_capacity,
             )
         } else {
             None
@@ -388,6 +389,7 @@ fn layout_table_with_position(
                 header_budget,
                 snap_row_break(&breaks.kept, row_index, consumed, header_budget),
                 false,
+                body_capacity,
             )
         {
             let tops: Vec<_> = slice.clips.iter().map(|clip| clip.top).collect();
@@ -505,7 +507,15 @@ fn layout_table_with_position(
             let cell_slice = if active_tops.is_none() && limited_by_float {
                 None
             } else {
-                breaks.cell_slice(cur, start_off, active_tops, budget, placeable, false)
+                breaks.cell_slice(
+                    cur,
+                    start_off,
+                    active_tops,
+                    budget,
+                    placeable,
+                    false,
+                    row_capacity,
+                )
             };
             if let Some(slice) = cell_slice {
                 used += slice.height;
@@ -535,7 +545,15 @@ fn layout_table_with_position(
                     }
                 }
                 let slice = breaks
-                    .cell_slice(cur, start_off, active_tops, budget, placeable, true)
+                    .cell_slice(
+                        cur,
+                        start_off,
+                        active_tops,
+                        budget,
+                        placeable,
+                        true,
+                        row_capacity,
+                    )
                     .unwrap_or_else(|| breaks.cell_remainder(cur, tops));
                 used += slice.height;
                 row_end = cur + 1;

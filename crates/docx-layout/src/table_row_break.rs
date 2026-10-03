@@ -320,7 +320,7 @@ impl<'a> RowBreaks<'a> {
         let shared = snap_row_break(&self.kept, row, consumed, minimum);
         (minimum <= capacity
             && self
-                .cell_slice(row, consumed, None, minimum, shared, false)
+                .cell_slice(row, consumed, None, minimum, shared, false, capacity)
                 .is_some())
         .then_some(minimum)
     }
@@ -333,9 +333,17 @@ impl<'a> RowBreaks<'a> {
         budget: f64,
         shared_slice: f64,
         whole_lines: bool,
+        capacity: f64,
     ) -> Option<CellRowSlice> {
         let cells = self.cells(row)?;
-        let clips: Vec<_> = cells
+        let last_fitting = |offsets: &[f64], top: f64| {
+            offsets
+                .iter()
+                .copied()
+                .rfind(|offset| *offset > top && *offset <= top + budget)
+                .unwrap_or(top)
+        };
+        let mut clips: Vec<_> = cells
             .iter()
             .enumerate()
             .map(|(index, cell)| {
@@ -345,24 +353,21 @@ impl<'a> RowBreaks<'a> {
                     .unwrap_or(consumed)
                     .min(cell.end);
                 let offsets = if whole_lines { &cell.lines } else { &cell.kept };
-                let bottom = offsets
-                    .iter()
-                    .copied()
-                    .rfind(|offset| *offset > top && *offset <= top + budget)
-                    .unwrap_or(top);
                 CellClip {
                     row,
                     cell: index,
                     top,
-                    bottom,
+                    bottom: last_fitting(offsets, top),
                 }
             })
             .collect();
-        let height = clips
-            .iter()
-            .map(|clip| clip.bottom - clip.top)
-            .fold(0.0, f64::max);
-        if height <= 0.0
+        let height = |clips: &[CellClip]| {
+            clips
+                .iter()
+                .map(|clip| clip.bottom - clip.top)
+                .fold(0.0, f64::max)
+        };
+        if height(&clips) <= 0.0
             || (tops.is_none()
                 && !cells.iter().zip(&clips).any(|(cell, clip)| {
                     cell.end > consumed + shared_slice && clip.bottom > consumed + shared_slice
@@ -370,6 +375,14 @@ impl<'a> RowBreaks<'a> {
         {
             return None;
         }
+        // A cell its paragraph rules leave no break even on a fresh page cuts at
+        // whole lines, as an oversized row does, while the other cells progress.
+        for (cell, clip) in cells.iter().zip(&mut clips) {
+            if !whole_lines && clip.bottom == clip.top && cell.kept_oversized(clip.top, capacity) {
+                clip.bottom = last_fitting(&cell.lines, clip.top);
+            }
+        }
+        let height = height(&clips);
         let complete = cells
             .iter()
             .zip(&clips)
@@ -454,6 +467,22 @@ struct CellBreaks {
     kept: Vec<f64>,
     lines: Vec<f64>,
     end: f64,
+}
+
+impl CellBreaks {
+    /// Whether the paragraph rules leave this cell no break from `top` on in a
+    /// fresh column `capacity` tall while whole lines still break it sooner, so
+    /// the cell falls back to whole lines as an oversized row does.
+    fn kept_oversized(&self, top: f64, capacity: f64) -> bool {
+        let next = |offsets: &[f64]| {
+            offsets
+                .iter()
+                .copied()
+                .find(|offset| *offset > top)
+                .map(|offset| offset - top)
+        };
+        matches!((next(&self.kept), next(&self.lines)), (Some(kept), Some(line)) if kept > capacity && line < kept)
+    }
 }
 
 pub(crate) struct CellRowSlice {
@@ -1051,7 +1080,9 @@ mod tests {
         assert_eq!(info.break_offsets[0], vec![60.0]);
         assert_eq!(snap_row_break(&info, 0, 0.0, 40.0), 0.0);
         let breaks = RowBreaks::new(&block, &measure);
-        let slice = breaks.cell_slice(0, 0.0, None, 40.0, 0.0, false).unwrap();
+        let slice = breaks
+            .cell_slice(0, 0.0, None, 40.0, 0.0, false, f64::INFINITY)
+            .unwrap();
         assert_eq!(slice.height, 40.0);
         assert_eq!(
             slice.clips,
