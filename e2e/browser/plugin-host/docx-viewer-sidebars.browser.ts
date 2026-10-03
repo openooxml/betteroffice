@@ -1,8 +1,24 @@
 import { expect, test, type Page } from 'playwright/test';
-import type { DocxEditorRef } from '@betteroffice/docx-react';
+
+interface CommentInsertion {
+  paraId: string;
+  search: string;
+  text: string;
+  author: string;
+}
 
 interface ViewerSidebarsProbe {
-  editor: DocxEditorRef | null;
+  editor: {
+    commands: { execute(command: string, payload: null): Promise<unknown> };
+    getEditorRef(): unknown;
+    setParagraphStyle(options: { paraId: string; styleId: string }): boolean;
+    applyFormatting(options: { paraId: string; marks: { bold?: boolean } }): boolean;
+    insertBreak(options: { paraId: string; type: 'page' }): boolean;
+    addComment(options: CommentInsertion): number | null;
+    replyToComment(commentId: number, text: string, author: string): number | null;
+    insertComment(options: CommentInsertion): Promise<number | null>;
+    insertCommentReply(commentId: number, text: string, author: string): Promise<number | null>;
+  } | null;
   sessions: unknown[];
   errors: string[];
   sidebarOpen: boolean;

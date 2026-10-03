@@ -734,7 +734,7 @@ test('viewer ref refusals remain active after worker read routing ends', async (
 test('editor refusal members preserve synchronous edits and comment state', () => {
   const warning = spyOn(console, 'warn').mockImplementation(() => {});
   const host = apiFor();
-  expect(host.api.getEditorRef()).toBe(host.editor);
+  expect(host.api.getEditorRef() as unknown).toBe(host.editor);
   expect(host.api.setParagraphStyle({ paraId: 'p', styleId: 'Normal' })).toBe(true);
   expect(host.api.applyFormatting({ paraId: 'p', search: 'hello', marks: { bold: true } })).toBe(true);
   expect(host.api.insertBreak({ paraId: 'p', type: 'page' })).toBe(true);
