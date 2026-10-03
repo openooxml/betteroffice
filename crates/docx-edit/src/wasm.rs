@@ -1835,6 +1835,11 @@ impl EditSession {
         self.engine.doc().direct_batches_applied() as f64
     }
 
+    /// Let revision preview decisions keep the pagination checkpoints. Off by default.
+    pub fn set_preview_decision_checkpoints(&self, enabled: bool) {
+        self.engine.set_preview_decision_checkpoints(enabled);
+    }
+
     /// Limit incremental rebuilds to the display window and caret pages. Off by default.
     pub fn set_windowed_incremental_builds(&self, enabled: bool) {
         let _fonts = self.fonts.enter();

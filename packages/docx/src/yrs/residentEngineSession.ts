@@ -81,6 +81,8 @@ export type ResidentEngineSession = Pick<
   setDirectBatches(enabled: boolean): void;
   /** @internal */
   directBatchesApplied(): number;
+  /** @internal */
+  setPreviewDecisionCheckpoints(enabled: boolean): void;
   /** Parses and seeds a DOCX; returns the host metadata JSON the main thread decodes. */
   openDocx(bytes: Uint8Array, digest?: string, generation?: string): string;
   /** Opens a display-only preview of the first `blocks` body blocks; null when it refuses. */
@@ -321,6 +323,7 @@ export async function createResidentEngineSession(
     setWindowedIncrementalBuilds: (enabled) => session.set_windowed_incremental_builds(enabled),
     setDirectBatches: (enabled) => session.set_direct_batches(enabled),
     directBatchesApplied: () => session.direct_batches_applied(),
+    setPreviewDecisionCheckpoints: (enabled) => session.set_preview_decision_checkpoints(enabled),
     buildDisplayPagesFrame: (pages, expectedFrameEpoch) =>
       session.build_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch),
     releaseDisplayPagesFrame: (pages, expectedFrameEpoch) => {

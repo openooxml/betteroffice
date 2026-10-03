@@ -1051,6 +1051,10 @@ export class EditSession {
      */
     set_partial_document(partial: boolean): void;
     /**
+     * Let revision preview decisions keep the pagination checkpoints. Off by default.
+     */
+    set_preview_decision_checkpoints(enabled: boolean): void;
+    /**
      * Stores this peer's anchor and head as sticky positions, replacing any
      * previous selection. Both endpoints must lie in `story`. The positions
      * live outside the yrs document, so they are never serialized as content
@@ -1677,6 +1681,7 @@ export interface InitOutput {
     readonly editsession_set_paragraph_attr: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly editsession_set_paragraph_attrs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
     readonly editsession_set_partial_document: (a: number, b: number) => void;
+    readonly editsession_set_preview_decision_checkpoints: (a: number, b: number) => void;
     readonly editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];

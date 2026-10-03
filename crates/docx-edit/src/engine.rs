@@ -98,7 +98,7 @@ struct MeasurementState {
 #[derive(Debug)]
 struct ResidentRegionState {
     request_json: String,
-    /// [`layout_options_fingerprint`] of `request_json`.
+    /// [`EngineSession::region_request_fingerprint`] of `request_json`.
     request_fingerprint: String,
     headers_footers: Option<serde_json::Value>,
     /// Inputs retained from the last full region pass so a plain body-text
@@ -1058,6 +1058,8 @@ pub struct EngineSession {
     partial_document: Cell<bool>,
     /// Resident text edits re-lower only their paragraph when eligible.
     local_lowering: Cell<bool>,
+    /// Revision preview decisions keep the pagination checkpoints.
+    preview_decision_checkpoints: Cell<bool>,
 }
 
 /// The font requirements of `blocks` that `measurement` gives no chain of registered fonts, so
@@ -2006,12 +2008,33 @@ impl EngineSession {
             font_fingerprints: RefCell::new(HashMap::new()),
             partial_document: Cell::new(false),
             local_lowering: Cell::new(false),
+            preview_decision_checkpoints: Cell::new(false),
         }
     }
 
     /// Lets an eligible resident text edit re-lower only its paragraph. Off by default.
     pub fn set_local_lowering(&self, enabled: bool) {
         self.local_lowering.set(enabled);
+    }
+
+    /// Lets a revision preview decision keep the pagination checkpoints, so it
+    /// paginates from the first block whose layout it changes. Off by default.
+    pub fn set_preview_decision_checkpoints(&self, enabled: bool) {
+        self.preview_decision_checkpoints.set(enabled);
+    }
+
+    /// The fingerprint whose change clears the pagination checkpoints:
+    /// [`layout_options_fingerprint`], without the revision preview while
+    /// [`Self::set_preview_decision_checkpoints`] is on.
+    fn region_request_fingerprint(&self, mut request: serde_json::Value) -> String {
+        if self.preview_decision_checkpoints.get()
+            && let Some(env) = request
+                .get_mut("renderEnv")
+                .and_then(serde_json::Value::as_object_mut)
+        {
+            env.remove("revisionPreview");
+        }
+        layout_options_fingerprint(request)
     }
 
     /// Marks whether the document is part of a package, such as a preview's
@@ -2704,11 +2727,13 @@ impl EngineSession {
         input_json: &str,
         prefix_pages: Option<usize>,
     ) -> Result<PreparedRegionLayout, String> {
-        let request_fingerprint = layout_options_fingerprint(
+        let request_fingerprint = self.region_request_fingerprint(
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?,
         );
         // Reused pages keep the section stamps and page labels of the regions
         // they were laid out under, so a regions change paginates afresh.
+        // While decisions keep the checkpoints, a revision preview change
+        // alters only the blocks it decides, which the block fingerprints catch.
         if self
             .regions
             .borrow()

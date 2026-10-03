@@ -12,7 +12,7 @@ use docx_edit::{
     EditSuggestion, EditTextView, EngineSession, FormatPolicy, ParagraphTarget, Position,
     SearchScope, StoryRange, TargetEdge, TextTarget, UndoSession, seed_from_docx,
 };
-use docx_layout::display_list::{Primitive, RevisionKind};
+use docx_layout::display_list::{DisplayList, Primitive, RevisionKind};
 use docx_layout::types::LayoutBlock;
 use serde_json::{Value, json};
 
@@ -595,6 +595,26 @@ fn painted(engine: &EngineSession) -> Vec<(String, Option<RevisionKind>)> {
     segments
 }
 
+fn wrapped_filler(range: std::ops::Range<usize>) -> String {
+    range
+        .map(|index| {
+            format!(
+                "<w:p><w:r><w:t>Filler paragraph {index} carries enough words to wrap onto a second line of the page.</w:t></w:r></w:p>"
+            )
+        })
+        .collect()
+}
+
+/// A preview decision paginates incrementally exactly when the engine keeps
+/// the pagination checkpoints across decisions.
+fn assert_decision_pagination(engine: &EngineSession, incremental_before: u64, keep: bool) {
+    assert_eq!(
+        engine.stats().incremental_pagination_calls > incremental_before,
+        keep,
+        "incremental pagination with checkpoints kept: {keep}"
+    );
+}
+
 fn segment(text: &str, kind: Option<RevisionKind>) -> (String, Option<RevisionKind>) {
     (text.to_owned(), kind)
 }
@@ -602,56 +622,55 @@ fn segment(text: &str, kind: Option<RevisionKind>) -> (String, Option<RevisionKi
 #[test]
 fn a_changed_preview_rebuilds_the_retained_frame() {
     let font = docx_layout::register_measure_font(FONT).unwrap();
-    let (engine, [replace, delete, insert]) = proposals();
-    let native = RenderEnv::default();
-    engine
-        .layout_document_with_regions_json(&layout_request(&native, font))
-        .unwrap();
-    engine.build_display_list_frame("{}", 0).unwrap();
-    let tracked = painted(&engine);
-    assert_eq!(
-        tracked,
-        [
-            segment("Alpha ", None),
-            segment("beta", Some(RevisionKind::Del)),
-            segment("BETA", Some(RevisionKind::Ins)),
-            segment(" gamma", None),
-            segment("Delta", Some(RevisionKind::Del)),
-            segment("Title", None),
-            segment("!", Some(RevisionKind::Ins)),
-        ]
-    );
-
-    let mut epoch = engine.stats().frame_epoch;
-    let mut frame = |env: &RenderEnv| {
-        let incremental = engine.stats().incremental_pagination_calls;
+    for keep in [false, true] {
+        let (engine, [replace, delete, insert]) = proposals();
+        engine.set_preview_decision_checkpoints(keep);
+        let native = RenderEnv::default();
         engine
-            .layout_document_with_regions_json(&layout_request(env, font))
+            .layout_document_with_regions_json(&layout_request(&native, font))
             .unwrap();
+        engine.build_display_list_frame("{}", 0).unwrap();
+        let tracked = painted(&engine);
         assert_eq!(
-            engine.stats().incremental_pagination_calls,
-            incremental,
-            "a preview change paginates afresh"
+            tracked,
+            [
+                segment("Alpha ", None),
+                segment("beta", Some(RevisionKind::Del)),
+                segment("BETA", Some(RevisionKind::Ins)),
+                segment(" gamma", None),
+                segment("Delta", Some(RevisionKind::Del)),
+                segment("Title", None),
+                segment("!", Some(RevisionKind::Ins)),
+            ]
         );
-        engine.build_display_list_frame("{}", epoch).unwrap();
-        assert!(engine.stats().frame_epoch > epoch);
-        epoch = engine.stats().frame_epoch;
-        painted(&engine)
-    };
-    assert_eq!(
-        frame(&preview(&[(&insert, Accepted)]))[4..],
-        [
-            segment("Delta", Some(RevisionKind::Del)),
-            segment("Title!", None)
-        ]
-    );
-    let all = preview(&[
-        (&replace, Accepted),
-        (&delete, Accepted),
-        (&insert, Accepted),
-    ]);
-    assert_eq!(frame(&all), [segment("Alpha BETA gammaTitle!", None)]);
-    assert_eq!(frame(&native), tracked);
+
+        let mut epoch = engine.stats().frame_epoch;
+        let mut frame = |env: &RenderEnv| {
+            let incremental = engine.stats().incremental_pagination_calls;
+            engine
+                .layout_document_with_regions_json(&layout_request(env, font))
+                .unwrap();
+            assert_decision_pagination(&engine, incremental, keep);
+            engine.build_display_list_frame("{}", epoch).unwrap();
+            assert!(engine.stats().frame_epoch > epoch);
+            epoch = engine.stats().frame_epoch;
+            painted(&engine)
+        };
+        assert_eq!(
+            frame(&preview(&[(&insert, Accepted)]))[4..],
+            [
+                segment("Delta", Some(RevisionKind::Del)),
+                segment("Title!", None)
+            ]
+        );
+        let all = preview(&[
+            (&replace, Accepted),
+            (&delete, Accepted),
+            (&insert, Accepted),
+        ]);
+        assert_eq!(frame(&all), [segment("Alpha BETA gammaTitle!", None)]);
+        assert_eq!(frame(&native), tracked);
+    }
 }
 
 /// Two pages: "red" suggested as "blue", then after a page break a suggested
@@ -719,48 +738,48 @@ fn twin_x_engine() -> (EngineSession, RenderEnv, RenderEnv, usize, f64) {
 #[test]
 fn a_changed_preview_refreshes_positions_in_an_identical_later_block() {
     let font = docx_layout::register_measure_font(FONT).unwrap();
-    let (engine, accepted, rejected, last, start) = twin_x_engine();
-    let before = lower(&engine, &accepted);
-    let after = lower(&engine, &rejected);
-    assert_eq!(
-        serde_json::from_value::<LayoutBlock>(before[last].clone()).unwrap(),
-        serde_json::from_value::<LayoutBlock>(after[last].clone()).unwrap()
-    );
-    assert_eq!(before[last]["pmStart"], after[last]["pmStart"]);
-    assert_eq!(before[last]["pmEnd"], after[last]["pmEnd"]);
-    assert_eq!(
-        runs(&before, last),
-        [run("x", start + 1.0, start + 2.0, "")]
-    );
-    assert_eq!(runs(&after, last), [run("x", start, start + 1.0, "")]);
+    for keep in [false, true] {
+        let (engine, accepted, rejected, last, start) = twin_x_engine();
+        engine.set_preview_decision_checkpoints(keep);
+        let before = lower(&engine, &accepted);
+        let after = lower(&engine, &rejected);
+        assert_eq!(
+            serde_json::from_value::<LayoutBlock>(before[last].clone()).unwrap(),
+            serde_json::from_value::<LayoutBlock>(after[last].clone()).unwrap()
+        );
+        assert_eq!(before[last]["pmStart"], after[last]["pmStart"]);
+        assert_eq!(before[last]["pmEnd"], after[last]["pmEnd"]);
+        assert_eq!(
+            runs(&before, last),
+            [run("x", start + 1.0, start + 2.0, "")]
+        );
+        assert_eq!(runs(&after, last), [run("x", start, start + 1.0, "")]);
 
-    engine
-        .layout_document_with_regions_json(&layout_request(&accepted, font))
-        .unwrap();
-    engine.build_display_list_frame("{}", 0).unwrap();
-    assert_eq!(engine.with_display_list(|list| list.pages.len()), Some(2));
-    let initial = engine.stats();
-    let request = layout_request(&rejected, font);
-    engine.layout_document_with_regions_json(&request).unwrap();
-    assert_eq!(
-        engine.stats().incremental_pagination_calls,
-        initial.incremental_pagination_calls
-    );
-    engine
-        .build_display_list_frame("{}", initial.frame_epoch)
-        .unwrap();
+        engine
+            .layout_document_with_regions_json(&layout_request(&accepted, font))
+            .unwrap();
+        engine.build_display_list_frame("{}", 0).unwrap();
+        assert_eq!(engine.with_display_list(|list| list.pages.len()), Some(2));
+        let initial = engine.stats();
+        let request = layout_request(&rejected, font);
+        engine.layout_document_with_regions_json(&request).unwrap();
+        assert_decision_pagination(&engine, initial.incremental_pagination_calls, keep);
+        engine
+            .build_display_list_frame("{}", initial.frame_epoch)
+            .unwrap();
 
-    let fresh = EngineSession::new(75111);
-    fresh
-        .doc()
-        .apply_update_v1(&engine.doc().encode_state_as_update_v1())
-        .unwrap();
-    fresh.layout_document_with_regions_json(&request).unwrap();
-    fresh.build_display_list_frame("{}", 0).unwrap();
-    assert_eq!(
-        engine.with_display_list(Clone::clone).unwrap(),
-        fresh.with_display_list(Clone::clone).unwrap()
-    );
+        let fresh = EngineSession::new(75111);
+        fresh
+            .doc()
+            .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+            .unwrap();
+        fresh.layout_document_with_regions_json(&request).unwrap();
+        fresh.build_display_list_frame("{}", 0).unwrap();
+        assert_eq!(
+            engine.with_display_list(Clone::clone).unwrap(),
+            fresh.with_display_list(Clone::clone).unwrap()
+        );
+    }
 }
 
 #[test]
@@ -800,36 +819,125 @@ fn a_resident_edit_after_a_preview_only_preflight_lays_out_the_retained_request(
 }
 
 #[test]
-fn a_preview_decision_paginates_afresh_as_a_fresh_layout_would() {
+fn a_preview_decision_lays_out_as_a_fresh_layout_would() {
     let font = docx_layout::register_measure_font(FONT).unwrap();
-    let filler = |range: std::ops::Range<usize>| -> String {
-        range
-            .map(|index| {
-                format!(
-                    "<w:p><w:r><w:t>Filler paragraph {index} carries enough words to wrap onto a second line of the page.</w:t></w:r></w:p>"
+    for keep in [false, true] {
+        let bytes = document(&format!(
+            "{}{PROPOSALS}{}",
+            wrapped_filler(0..240),
+            wrapped_filler(240..300)
+        ));
+        let blocks = 303;
+        let layout = |engine: &EngineSession, ids: &[String; 3], env: &RenderEnv| {
+            let mut output = engine
+                .layout_document_with_regions_json(&layout_request(env, font))
+                .unwrap();
+            for (index, id) in ids.iter().enumerate() {
+                output = output.replace(id.as_str(), &format!("revision-{index}"));
+            }
+            let mut output: Value = serde_json::from_str(&output).unwrap();
+            output["layout"].take()
+        };
+        let display = |engine: &EngineSession, ids: &[String; 3]| {
+            engine
+                .build_display_list_frame("{}", engine.stats().frame_epoch)
+                .unwrap();
+            let mut pages = engine
+                .with_display_list(|list| serde_json::to_string(&list.pages).unwrap())
+                .unwrap();
+            for (index, id) in ids.iter().enumerate() {
+                pages = pages.replace(id.as_str(), &format!("revision-{index}"));
+            }
+            pages
+        };
+        let (engine, ids) = proposals_in(&bytes);
+        engine.set_preview_decision_checkpoints(keep);
+        let native = layout(&engine, &ids, &RenderEnv::default());
+        display(&engine, &ids);
+        assert!(native["pages"].as_array().unwrap().len() > 3);
+        let [replace, delete, insert] = [0, 1, 2];
+        for decisions in [
+            vec![(insert, Accepted)],
+            vec![(replace, Accepted), (delete, Accepted), (insert, Accepted)],
+            vec![(delete, Rejected)],
+            vec![],
+        ] {
+            let env = |ids: &[String; 3]| {
+                preview(
+                    &decisions
+                        .iter()
+                        .map(|&(index, decision)| (ids[index].as_str(), decision))
+                        .collect::<Vec<_>>(),
                 )
+            };
+            let before = engine.stats();
+            let decided = layout(&engine, &ids, &env(&ids));
+            let after = engine.stats();
+            assert_decision_pagination(&engine, before.incremental_pagination_calls, keep);
+            let placed = after.pagination_blocks_placed - before.pagination_blocks_placed;
+            assert_eq!(placed < blocks, keep, "{placed} of {blocks} blocks placed");
+            let (fresh, fresh_ids) = proposals_in(&bytes);
+            assert_eq!(decided, layout(&fresh, &fresh_ids, &env(&fresh_ids)));
+            assert_eq!(display(&engine, &ids), display(&fresh, &fresh_ids));
+        }
+    }
+}
+
+#[test]
+fn a_windowed_preview_decision_builds_the_pages_a_fresh_engine_builds() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let bytes = document(&format!(
+        "{}{PROPOSALS}{}",
+        wrapped_filler(0..240),
+        wrapped_filler(240..300)
+    ));
+    let pages_json = |list: &DisplayList, ids: &[String; 3]| -> Vec<String> {
+        list.pages
+            .iter()
+            .map(|page| {
+                let mut json = serde_json::to_string(page).unwrap();
+                for (index, id) in ids.iter().enumerate() {
+                    json = json.replace(id.as_str(), &format!("revision-{index}"));
+                }
+                json
             })
             .collect()
     };
-    let bytes = document(&format!(
-        "{}{PROPOSALS}{}",
-        filler(0..240),
-        filler(240..300)
-    ));
-    let blocks = 303;
-    let layout = |engine: &EngineSession, ids: &[String; 3], env: &RenderEnv| {
-        let mut output = engine
-            .layout_document_with_regions_json(&layout_request(env, font))
+    let fresh_pages = |env: &dyn Fn(&[String; 3]) -> RenderEnv| {
+        let (fresh, fresh_ids) = proposals_in(&bytes);
+        fresh
+            .layout_document_with_regions_json(&layout_request(&env(&fresh_ids), font))
             .unwrap();
-        for (index, id) in ids.iter().enumerate() {
-            output = output.replace(id.as_str(), &format!("revision-{index}"));
-        }
-        let mut output: Value = serde_json::from_str(&output).unwrap();
-        output["layout"].take()
+        fresh.build_display_list_frame("{}", 0).unwrap();
+        fresh
+            .with_display_list(|list| (list.clone(), pages_json(list, &fresh_ids)))
+            .unwrap()
     };
+    let (native_list, _) = fresh_pages(&|_| RenderEnv::default());
+    let shown = native_list
+        .pages
+        .iter()
+        .position(|page| {
+            page.primitives
+                .iter()
+                .any(|primitive| matches!(primitive, Primitive::Text(text) if text.text.contains("Alpha")))
+        })
+        .unwrap();
+    let pages = native_list.pages.len();
+    assert!(
+        shown > 1 && shown + 1 < pages,
+        "proposals on page {shown} of {pages}"
+    );
+    let window = shown..shown + 1;
+
     let (engine, ids) = proposals_in(&bytes);
-    let native = layout(&engine, &ids, &RenderEnv::default());
-    assert!(native["pages"].as_array().unwrap().len() > 3);
+    engine.set_preview_decision_checkpoints(true);
+    engine.set_windowed_incremental_builds(true);
+    engine.set_display_window(Some(window.clone()));
+    engine
+        .layout_document_with_regions_json(&layout_request(&RenderEnv::default(), font))
+        .unwrap();
+    engine.build_display_list_frame("{}", 0).unwrap();
     let [replace, delete, insert] = [0, 1, 2];
     for decisions in [
         vec![(insert, Accepted)],
@@ -846,66 +954,194 @@ fn a_preview_decision_paginates_afresh_as_a_fresh_layout_would() {
             )
         };
         let before = engine.stats();
-        let decided = layout(&engine, &ids, &env(&ids));
-        let after = engine.stats();
+        engine
+            .layout_document_with_regions_json(&layout_request(&env(&ids), font))
+            .unwrap();
+        assert_decision_pagination(&engine, before.incremental_pagination_calls, true);
+        engine
+            .build_display_list_frame("{}", engine.stats().frame_epoch)
+            .unwrap();
+        assert!(engine.stats().incremental_display_builds > before.incremental_display_builds);
+        let (expected_list, expected) = fresh_pages(&env);
+        let (list, actual) = engine
+            .with_display_list(|list| (list.clone(), pages_json(list, &ids)))
+            .unwrap();
+        assert_eq!(list.pages.len(), expected_list.pages.len());
+        let built: Vec<usize> = (0..list.pages.len())
+            .filter(|&page| !list.pages[page].unbuilt)
+            .collect();
+        assert_eq!(built, window.clone().collect::<Vec<_>>(), "built pages");
+        for (index, (page, full)) in list.pages.iter().zip(&expected_list.pages).enumerate() {
+            if page.unbuilt {
+                assert!(page.primitives.is_empty());
+                assert_eq!((&page.width, &page.height), (&full.width, &full.height));
+                assert_eq!(page.content_bounds, full.content_bounds, "page {index}");
+            } else {
+                assert_eq!(actual[index], expected[index], "built page {index}");
+            }
+        }
+
+        let sweep: Vec<usize> = (0..list.pages.len())
+            .filter(|page| !window.contains(page))
+            .collect();
+        engine
+            .build_display_pages_frame(&sweep, engine.stats().frame_epoch)
+            .unwrap();
+        let swept = engine
+            .with_display_list(|list| pages_json(list, &ids))
+            .unwrap();
+        assert_eq!(swept, expected, "every page built on demand");
+        engine
+            .release_display_pages_frame(&sweep, engine.stats().frame_epoch)
+            .unwrap();
         assert_eq!(
-            after.incremental_pagination_calls,
-            before.incremental_pagination_calls
+            engine
+                .with_display_list(|list| list.pages.iter().filter(|page| !page.unbuilt).count())
+                .unwrap(),
+            window.len(),
+            "released back to the window"
         );
-        assert!(after.pagination_blocks_placed - before.pagination_blocks_placed >= blocks);
-        let (fresh, fresh_ids) = proposals_in(&bytes);
-        assert_eq!(decided, layout(&fresh, &fresh_ids, &env(&fresh_ids)));
     }
+}
+
+#[test]
+fn a_windowed_decision_that_changes_the_page_count_matches_a_fresh_engine() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let header = r#"<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple><w:r><w:t xml:space="preserve"> of </w:t></w:r><w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>"#;
+    let body = format!("{}{}", wrapped_filler(0..60), wrapped_filler(60..120));
+    let bytes = headed_document(&body, Some(header));
+    let engine = EngineSession::new(75112);
+    seed_from_docx(engine.doc(), &bytes).unwrap();
+    let after = engine
+        .doc()
+        .resolve_search(
+            "body",
+            None,
+            "Filler paragraph 60 ",
+            docx_edit::TextView::Vanilla,
+        )
+        .unwrap();
+    let at = engine.doc().locate_range(&after).unwrap().start;
+    let suggest = EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting();
+    engine
+        .doc()
+        .insert_embed(&suggest, Position::new("body", at), "pageBreak", vec![])
+        .unwrap();
+    let id = engine.doc().list_revisions().unwrap()[0]
+        .change
+        .revision_id
+        .clone();
+    let frame = |engine: &EngineSession, env: &RenderEnv| {
+        let output: Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_json(&layout_request(env, font))
+                .unwrap(),
+        )
+        .unwrap();
+        let extras = json!({ "headersFooters": output["headersFooters"] }).to_string();
+        engine
+            .build_display_list_frame(&extras, engine.stats().frame_epoch)
+            .unwrap();
+        output["layout"]["pages"].as_array().unwrap().len()
+    };
+    engine.set_preview_decision_checkpoints(true);
+    engine.set_windowed_incremental_builds(true);
+    engine.set_display_window(Some(0..1));
+    let tracked_pages = frame(&engine, &RenderEnv::default());
+    let mut counts = Vec::new();
+    for env in [
+        preview(&[(&id, Rejected)]),
+        preview(&[(&id, Accepted)]),
+        preview(&[(&id, Rejected)]),
+        RenderEnv::default(),
+    ] {
+        counts.push(frame(&engine, &env));
+        let fresh = EngineSession::new(75113);
+        fresh
+            .doc()
+            .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+            .unwrap();
+        frame(&fresh, &env);
+        let expected = fresh.with_display_list(Clone::clone).unwrap();
+        let list = engine.with_display_list(Clone::clone).unwrap();
+        assert_eq!(list.pages.len(), expected.pages.len());
+        assert!(!list.pages[0].unbuilt);
+        assert_eq!(
+            list.pages[0], expected.pages[0],
+            "first page with its header"
+        );
+        let sweep: Vec<usize> = (1..list.pages.len()).collect();
+        engine
+            .build_display_pages_frame(&sweep, engine.stats().frame_epoch)
+            .unwrap();
+        assert_eq!(
+            engine.with_display_list(|list| list.pages.clone()).unwrap(),
+            expected.pages,
+            "every page built on demand"
+        );
+        engine
+            .release_display_pages_frame(&sweep, engine.stats().frame_epoch)
+            .unwrap();
+    }
+    assert_eq!(
+        counts,
+        [
+            tracked_pages - 1,
+            tracked_pages,
+            tracked_pages - 1,
+            tracked_pages
+        ]
+    );
 }
 
 #[test]
 fn a_decision_that_only_moves_a_paragraphs_positions_lays_it_out_again() {
     let font = docx_layout::register_measure_font(FONT).unwrap();
-    let insertion = |id: u32, text: &str| {
-        format!(
-            r#"<w:ins w:id="{id}" w:author="Bo" w:date="2026-09-29T12:00:00Z"><w:r><w:t>{text}</w:t></w:r></w:ins>"#
-        )
-    };
-    let filler: String = (0..240)
-        .map(|index| format!("<w:p><w:r><w:t>Filler paragraph {index}</w:t></w:r></w:p>"))
-        .collect();
-    let bytes = document(&format!(
-        "<w:p>{}{}</w:p>{filler}<w:p><w:r><w:t>End</w:t></w:r>{}</w:p>",
-        insertion(1, "X"),
-        insertion(2, "X"),
-        insertion(3, "!")
-    ));
-    let pass = |engine: &EngineSession, env: &RenderEnv| {
-        let output = engine
-            .layout_document_with_regions_json(&layout_request(env, font))
-            .unwrap();
-        let epoch = engine.stats().frame_epoch;
-        engine.build_display_list_frame("{}", epoch).unwrap();
-        let mut output: Value = serde_json::from_str(&output).unwrap();
-        let primitives = engine
-            .with_display_list(|list| serde_json::to_value(&list.pages[0].primitives).unwrap())
-            .unwrap();
-        (output["layout"].take(), primitives)
-    };
-    let engine = EngineSession::new(75110);
-    seed_from_docx(engine.doc(), &bytes).unwrap();
-    pass(&engine, &preview(&[("1", Accepted), ("2", Rejected)]));
-    let decided = preview(&[("1", Rejected), ("2", Accepted), ("3", Accepted)]);
-    let before = engine.stats();
-    let incremental = pass(&engine, &decided);
-    assert_eq!(
-        engine.stats().incremental_pagination_calls,
-        before.incremental_pagination_calls
-    );
-    let fresh = EngineSession::new(75111);
-    seed_from_docx(fresh.doc(), &bytes).unwrap();
-    let expected = pass(&fresh, &decided);
-    assert_eq!(
-        incremental.0["pages"][0]["fragments"][0], expected.0["pages"][0]["fragments"][0],
-        "first fragment"
-    );
-    assert_eq!(incremental.1, expected.1, "first page primitives");
-    assert_eq!(incremental, expected);
+    for keep in [false, true] {
+        let insertion = |id: u32, text: &str| {
+            format!(
+                r#"<w:ins w:id="{id}" w:author="Bo" w:date="2026-09-29T12:00:00Z"><w:r><w:t>{text}</w:t></w:r></w:ins>"#
+            )
+        };
+        let filler: String = (0..240)
+            .map(|index| format!("<w:p><w:r><w:t>Filler paragraph {index}</w:t></w:r></w:p>"))
+            .collect();
+        let bytes = document(&format!(
+            "<w:p>{}{}</w:p>{filler}<w:p><w:r><w:t>End</w:t></w:r>{}</w:p>",
+            insertion(1, "X"),
+            insertion(2, "X"),
+            insertion(3, "!")
+        ));
+        let pass = |engine: &EngineSession, env: &RenderEnv| {
+            let output = engine
+                .layout_document_with_regions_json(&layout_request(env, font))
+                .unwrap();
+            let epoch = engine.stats().frame_epoch;
+            engine.build_display_list_frame("{}", epoch).unwrap();
+            let mut output: Value = serde_json::from_str(&output).unwrap();
+            let primitives = engine
+                .with_display_list(|list| serde_json::to_value(&list.pages[0].primitives).unwrap())
+                .unwrap();
+            (output["layout"].take(), primitives)
+        };
+        let engine = EngineSession::new(75110);
+        seed_from_docx(engine.doc(), &bytes).unwrap();
+        engine.set_preview_decision_checkpoints(keep);
+        pass(&engine, &preview(&[("1", Accepted), ("2", Rejected)]));
+        let decided = preview(&[("1", Rejected), ("2", Accepted), ("3", Accepted)]);
+        let before = engine.stats();
+        let decided_pass = pass(&engine, &decided);
+        assert_decision_pagination(&engine, before.incremental_pagination_calls, keep);
+        let fresh = EngineSession::new(75111);
+        seed_from_docx(fresh.doc(), &bytes).unwrap();
+        let expected = pass(&fresh, &decided);
+        assert_eq!(
+            decided_pass.0["pages"][0]["fragments"][0], expected.0["pages"][0]["fragments"][0],
+            "first fragment"
+        );
+        assert_eq!(decided_pass.1, expected.1, "first page primitives");
+        assert_eq!(decided_pass, expected);
+    }
 }
 
 #[test]
@@ -1065,34 +1301,34 @@ fn hidden_ranges_collapse_to_the_neighbouring_edges() {
 #[test]
 fn a_preview_change_reads_revisions_in_a_story_without_paragraphs() {
     let font = docx_layout::register_measure_font(FONT).unwrap();
-    let header = r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:trPr><w:ins w:id="9" w:author="Bo" w:date="2026-01-01T00:00:00Z"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;
-    let body: String = (0..120)
-        .map(|index| format!("<w:p><w:r><w:t>Filler paragraph {index} carries enough words to wrap onto a second line of the page.</w:t></w:r></w:p>"))
-        .chain([r#"<w:p><w:r><w:t>Tail</w:t></w:r><w:ins w:id="1" w:author="Bo" w:date="2026-01-01T00:00:00Z"><w:r><w:t xml:space="preserve"> added</w:t></w:r></w:ins></w:p>"#.to_owned()])
-        .collect();
-    let bytes = headed_document(&body, Some(header));
-    let seeded = || {
-        let engine = EngineSession::new(75103);
-        seed_from_docx(engine.doc(), &bytes).unwrap();
+    for keep in [false, true] {
+        let header = r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:trPr><w:ins w:id="9" w:author="Bo" w:date="2026-01-01T00:00:00Z"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;
+        let body: String = (0..120)
+            .map(|index| format!("<w:p><w:r><w:t>Filler paragraph {index} carries enough words to wrap onto a second line of the page.</w:t></w:r></w:p>"))
+            .chain([r#"<w:p><w:r><w:t>Tail</w:t></w:r><w:ins w:id="1" w:author="Bo" w:date="2026-01-01T00:00:00Z"><w:r><w:t xml:space="preserve"> added</w:t></w:r></w:ins></w:p>"#.to_owned()])
+            .collect();
+        let bytes = headed_document(&body, Some(header));
+        let seeded = || {
+            let engine = EngineSession::new(75103);
+            seed_from_docx(engine.doc(), &bytes).unwrap();
+            engine
+        };
+        let engine = seeded();
+        engine.set_preview_decision_checkpoints(keep);
         engine
-    };
-    let engine = seeded();
-    engine
-        .layout_document_with_regions_json(&layout_request(&RenderEnv::default(), font))
-        .unwrap();
-    let request = layout_request(&preview(&[("1", Accepted)]), font);
-    let before = engine.stats();
-    let decided = engine.layout_document_with_regions_json(&request).unwrap();
-    assert_eq!(
-        engine.stats().incremental_pagination_calls,
-        before.incremental_pagination_calls
-    );
-    assert_eq!(
-        decided,
-        seeded()
-            .layout_document_with_regions_json(&request)
-            .unwrap()
-    );
+            .layout_document_with_regions_json(&layout_request(&RenderEnv::default(), font))
+            .unwrap();
+        let request = layout_request(&preview(&[("1", Accepted)]), font);
+        let before = engine.stats();
+        let decided = engine.layout_document_with_regions_json(&request).unwrap();
+        assert_decision_pagination(&engine, before.incremental_pagination_calls, keep);
+        assert_eq!(
+            decided,
+            seeded()
+                .layout_document_with_regions_json(&request)
+                .unwrap()
+        );
+    }
 }
 
 #[test]
