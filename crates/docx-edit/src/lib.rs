@@ -52,6 +52,8 @@
 #[cfg(test)]
 extern crate self as docx_edit;
 
+#[cfg(feature = "wasm")]
+use std::collections::HashSet;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -664,6 +666,41 @@ impl EditingDoc {
         self.metadata.lock().unwrap().clone()
     }
 
+    #[cfg(feature = "wasm")]
+    pub(crate) fn rebase_comment_writes(&self, mut written: HashSet<(String, Option<String>)>) {
+        let Some(source) = self.source_metadata() else {
+            return;
+        };
+        let read = source.read();
+        let txn = self.doc.transact();
+        if let Some(comments) = txn.get_map(COMMENTS) {
+            for source_comment in &read.comments {
+                let Some(comment) = comments
+                    .get(&txn, &source_comment.id)
+                    .and_then(|value| value.cast::<MapRef>().ok())
+                else {
+                    continue;
+                };
+                for (key, placeholder) in [
+                    ("author", Any::String("".into())),
+                    ("date", Any::String("".into())),
+                    ("parentId", Any::Null),
+                    ("body", Any::Null),
+                    ("done", Any::Bool(false)),
+                ] {
+                    let authored = match comment.get(&txn, key) {
+                        Some(Out::Any(value)) => value != placeholder,
+                        _ => true,
+                    };
+                    if authored {
+                        written.insert((source_comment.id.clone(), Some(key.to_owned())));
+                    }
+                }
+            }
+        }
+        read.comment_writes.replace(written);
+    }
+
     #[doc(hidden)]
     pub fn committed_epoch(&self) -> u64 {
         self.epoch.load(Ordering::Relaxed)
@@ -1102,13 +1139,14 @@ impl EditingDoc {
             let len = range.len()?;
             let story = story_ref(&txn, &range.story)?;
             check_range(&story, &txn, range.start, len)?;
+            let (from, to) = crate::ops::code_point_range(&story, &txn, range.start, range.end);
             let start = story
-                .sticky_index(&txn, range.start, Assoc::After)
+                .sticky_index(&txn, from, Assoc::After)
                 .ok_or_else(|| {
                     EditError::InvalidComment("start anchor could not be made".into())
                 })?;
             let end = story
-                .sticky_index(&txn, range.end, Assoc::Before)
+                .sticky_index(&txn, to, Assoc::Before)
                 .ok_or_else(|| EditError::InvalidComment("end anchor could not be made".into()))?;
             anchors.push(anchor_value(&range.story, &start, &end));
         }
@@ -1148,13 +1186,14 @@ impl EditingDoc {
             }
             let story = story_ref(&txn, &range.story)?;
             check_range(&story, &txn, range.start, len)?;
+            let (from, to) = crate::ops::code_point_range(&story, &txn, range.start, range.end);
             let start = story
-                .sticky_index(&txn, range.start, Assoc::After)
+                .sticky_index(&txn, from, Assoc::After)
                 .ok_or_else(|| {
                     EditError::InvalidComment("start anchor could not be made".into())
                 })?;
             let end = story
-                .sticky_index(&txn, range.end, Assoc::Before)
+                .sticky_index(&txn, to, Assoc::Before)
                 .ok_or_else(|| EditError::InvalidComment("end anchor could not be made".into()))?;
             anchors.push(anchor_value(&range.story, &start, &end));
         }

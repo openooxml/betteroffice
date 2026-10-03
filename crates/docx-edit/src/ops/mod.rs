@@ -14,7 +14,8 @@ use yrs::types::text::YChange;
 use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
 
 use crate::{
-    DEL, INS, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, is_pilcrow, map_string, out_len,
+    DEL, INS, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, StoryRange, is_pilcrow, map_string,
+    out_len,
 };
 
 /// One formatting-run chunk of a story, snapshotted for index-stable reverse walks.
@@ -315,4 +316,108 @@ pub(crate) fn adopt_pilcrow(
 
 pub(crate) fn utf16_len(text: &str) -> u32 {
     text.encode_utf16().count() as u32
+}
+
+/// Whether UTF-16 `offset` falls between the two units of a surrogate pair in `text`.
+fn inside_pair(text: &str, offset: u32) -> bool {
+    let mut at = 0;
+    for ch in text.chars() {
+        if at >= offset {
+            return false;
+        }
+        at += ch.len_utf16() as u32;
+        if at > offset {
+            return true;
+        }
+    }
+    false
+}
+
+/// `index` moved off the middle of a surrogate pair in `chunks`: back to the pair's start, or
+/// past its end when `forward`. yrs splits such an index after the pair while the new item's
+/// id assumes the index itself, which corrupts the story.
+fn code_point_index(chunks: &[Chunk], index: u32, forward: bool) -> u32 {
+    let inside = chunks.iter().any(|chunk| {
+        matches!(&chunk.kind, ChunkKind::Text(text)
+            if chunk.start < index && inside_pair(text, index - chunk.start))
+    });
+    match (inside, forward) {
+        (false, _) => index,
+        (true, false) => index - 1,
+        (true, true) => index + 1,
+    }
+}
+
+/// Chunks covering the units on both sides of `index`, after moving `index` off the middle of
+/// a surrogate pair to the pair's start.
+pub(crate) fn position_chunks<T: ReadTxn>(story: &TextRef, txn: &T, index: &mut u32) -> Vec<Chunk> {
+    let take =
+        |index: u32| snapshot_range(story, txn, index.saturating_sub(1), index.saturating_add(1));
+    let chunks = take(*index);
+    let snapped = code_point_index(&chunks, *index, false);
+    if snapped == *index {
+        return chunks;
+    }
+    *index = snapped;
+    take(snapped)
+}
+
+/// Chunks covering `range` and the unit on each side, after widening `range` to whole code
+/// points (a collapsed range moves to the pair's start).
+pub(crate) fn range_chunks<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    range: &mut StoryRange,
+) -> Vec<Chunk> {
+    let take = |range: &StoryRange| {
+        snapshot_range(
+            story,
+            txn,
+            range.start.saturating_sub(1),
+            range.end.saturating_add(1),
+        )
+    };
+    let chunks = take(range);
+    let start = code_point_index(&chunks, range.start, false);
+    let end = if range.start == range.end {
+        start
+    } else {
+        code_point_index(&chunks, range.end, true)
+    };
+    if (start, end) == (range.start, range.end) {
+        return chunks;
+    }
+    range.start = start;
+    range.end = end;
+    take(range)
+}
+
+/// `[start, end)` widened to whole code points, for ops that take no chunk snapshot; a
+/// collapsed range moves to the pair's start.
+pub(crate) fn code_point_range<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    start: u32,
+    end: u32,
+) -> (u32, u32) {
+    let mut range = (start, end);
+    let mut offset = 0;
+    for diff in story.diff(txn, YChange::identity) {
+        if offset >= end {
+            break;
+        }
+        if let Out::Any(Any::String(text)) = &diff.insert {
+            if offset < start && inside_pair(text, start - offset) {
+                range.0 = start - 1;
+            }
+            if start < end && inside_pair(text, end - offset) {
+                range.1 = end + 1;
+            }
+        }
+        offset += out_len(&diff.insert);
+    }
+    if start == end {
+        range.1 = range.0;
+    }
+    range
 }
