@@ -5,7 +5,7 @@ use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, Transact};
 
 use crate::control_values::{guard_embed_insert, guard_embed_write};
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
-use crate::ops::{adjacent_paragraph_change_revision_id, adjacent_revision_id, snapshot_range};
+use crate::ops::{adjacent_paragraph_change_revision_id, adjacent_revision_id, position_chunks};
 use crate::{
     EditCtx, EditingDoc, INS, KIND_KEY, PILCROW_KIND, Position, check_position, insertion_attrs,
     is_pilcrow, out_len, revision_value, story_ref,
@@ -196,7 +196,7 @@ impl EditingDoc {
     pub fn insert_embed(
         &self,
         ctx: &EditCtx,
-        at: Position,
+        mut at: Position,
         kind: &str,
         payload: Vec<(String, Any)>,
     ) -> OpResult<Receipt> {
@@ -216,12 +216,7 @@ impl EditingDoc {
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
         crate::identity::promote_at(self, &mut txn, &at.story, &story, at.index);
-        let chunks = snapshot_range(
-            &story,
-            &txn,
-            at.index.saturating_sub(1),
-            at.index.saturating_add(1),
-        );
+        let chunks = position_chunks(&story, &txn, &mut at.index);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
                 .or_else(|| {

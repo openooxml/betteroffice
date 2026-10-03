@@ -497,6 +497,7 @@ fn whole_items<'a>(
                     header_row_count: None,
                     clip_top: None,
                     clip_bottom: None,
+                    cell_clips: None,
                 };
                 let at = items.len();
                 readable &= place_table_fragment(&TableGeometry::new(table, extent), &whole, items);
@@ -948,6 +949,7 @@ mod tests {
             header_row_count: None,
             clip_top,
             clip_bottom,
+            cell_clips: None,
         }
     }
 

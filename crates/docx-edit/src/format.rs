@@ -283,7 +283,7 @@ impl EditingDoc {
     pub fn toggle_format(
         &self,
         ctx: &EditCtx,
-        range: StoryRange,
+        mut range: StoryRange,
         format: SimpleFormat,
     ) -> OpResult<Receipt> {
         let len = range_len(&range)?;
@@ -293,6 +293,9 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         crate::check_range(&story, &txn, range.start, len)?;
+        (range.start, range.end) =
+            crate::ops::code_point_range(&story, &txn, range.start, range.end);
+        let len = range.end - range.start;
         let (key, on_value, counterpart) = match format {
             SimpleFormat::Bold => ("bold", Any::Bool(true), None),
             SimpleFormat::Italic => ("italic", Any::Bool(true), None),
@@ -336,7 +339,7 @@ impl EditingDoc {
     pub fn format_range(
         &self,
         ctx: &EditCtx,
-        range: StoryRange,
+        mut range: StoryRange,
         delta: &InlineFormatDelta,
     ) -> OpResult<Receipt> {
         let len = range_len(&range)?;
@@ -347,6 +350,9 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         crate::check_range(&story, &txn, range.start, len)?;
+        (range.start, range.end) =
+            crate::ops::code_point_range(&story, &txn, range.start, range.end);
+        let len = range.end - range.start;
         if !attrs.is_empty() {
             story.format(&mut txn, range.start, len, attrs);
         }
@@ -364,7 +370,7 @@ impl EditingDoc {
     pub fn set_hyperlink(
         &self,
         ctx: &EditCtx,
-        range: StoryRange,
+        mut range: StoryRange,
         hyperlink: Option<Any>,
     ) -> OpResult<Receipt> {
         let len = range_len(&range)?;
@@ -374,6 +380,9 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         crate::check_range(&story, &txn, range.start, len)?;
+        (range.start, range.end) =
+            crate::ops::code_point_range(&story, &txn, range.start, range.end);
+        let len = range.end - range.start;
         story.format(
             &mut txn,
             range.start,
@@ -389,7 +398,7 @@ impl EditingDoc {
     }
 
     /// Clears formatting while retaining tracked-change stamps and hyperlinks.
-    pub fn clear_formatting(&self, ctx: &EditCtx, range: StoryRange) -> OpResult<Receipt> {
+    pub fn clear_formatting(&self, ctx: &EditCtx, mut range: StoryRange) -> OpResult<Receipt> {
         let len = range_len(&range)?;
         if len == 0 {
             return Err(OpError::EmptyRange);
@@ -397,6 +406,9 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         crate::check_range(&story, &txn, range.start, len)?;
+        (range.start, range.end) =
+            crate::ops::code_point_range(&story, &txn, range.start, range.end);
+        let len = range.end - range.start;
         let mut keys: BTreeMap<String, ()> = BTreeMap::new();
         let mut offset = 0;
         for diff in story.diff(&txn, YChange::identity) {

@@ -1,4 +1,12 @@
-import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  startTransition,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   buildRustDisplayList,
   buildRustDisplayFrame,
@@ -142,6 +150,17 @@ export function useDisplayList(injected?: DisplayList | null): DisplayList {
   return injected ?? demoDisplayList;
 }
 
+/** Lets a navigation build its target page ahead of the display window and act on the frame that brings it. */
+export interface DisplayPageNavigation {
+  /** Builds these pages next, ahead of the display window. An empty list withdraws the request. */
+  buildPages(pageIndices: readonly number[]): void;
+  /**
+   * Calls `listener` with the queries of each published frame whose page sizes match the pages on
+   * screen, before that frame renders. Returns the unsubscribe function.
+   */
+  subscribeFrames(listener: (queries: DisplayListQueries) => void): () => void;
+}
+
 export interface UseRustDisplayListResult {
   /** the latest successfully built display list (kept across rebuilds so the canvas never blanks mid-compute) */
   displayList: DisplayList | null;
@@ -157,6 +176,7 @@ export interface UseRustDisplayListResult {
   queries: DisplayListQueries | null;
   /** Resolve the newest query facade after pending document/frame changes. */
   resolveQueries: ResolveDisplayListQueries;
+  pageNavigation: DisplayPageNavigation;
   /**
    * The display list once it shows every document change so far, laid out in
    * full. `relayout` runs a layout pass when none is on its way; rejects when
@@ -324,6 +344,13 @@ function isPageBuildTask(scheduled: PageBuildTimer): scheduled is PageBuildTask 
 }
 
 /** A page build queued on a timer, which runs sooner than an idle-time build. */
+function samePageSizes(shown: DisplayList | null, next: DisplayList | null): boolean {
+  return Boolean(shown && next) && shown!.pages.length === next!.pages.length &&
+    shown!.pages.every((page, index) =>
+      page.width === next!.pages[index]!.width && page.height === next!.pages[index]!.height
+    );
+}
+
 function pageBuildTimerQueued(scheduled: PageBuildTimer | null): boolean {
   return scheduled !== null && !isPageBuildTask(scheduled);
 }
@@ -433,6 +460,12 @@ export function useRustDisplayList(
   const [presentedEngine, setPresentedEngine] = useState<unknown>(null);
   const [snapshot, setSnapshot] = useState<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
   const snapshotRef = useRef<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
+  const shownDisplayListRef = useRef<DisplayList | null>(null);
+  useLayoutEffect(() => {
+    shownDisplayListRef.current = snapshot.displayList;
+  }, [snapshot.displayList]);
+  const navigationPagesRef = useRef<{ pages: ReadonlySet<number>; layoutEpoch: number } | null>(null);
+  const frameListenersRef = useRef(new Set<(queries: DisplayListQueries) => void>());
   const queryEpochGateRef = useRef<DisplayListQueryEpochGate | null>(null);
   if (!queryEpochGateRef.current) queryEpochGateRef.current = new DisplayListQueryEpochGate();
   const queryEpochGate = queryEpochGateRef.current;
@@ -596,6 +629,46 @@ export function useRustDisplayList(
   }>());
   const schedulePageBuildsWhenIdleRef = useRef<() => void>(() => {});
   const retryPageBuildsRef = useRef<(idle: boolean) => void>(() => {});
+  const buildUnbuiltPagesRef = useRef<() => void>(() => {});
+  const pageNavigation = useMemo<DisplayPageNavigation>(
+    () => ({
+      buildPages(pageIndices) {
+        const frame = snapshotRef.current.frame;
+        if (pageIndices.length === 0 || !frame) {
+          navigationPagesRef.current = null;
+          return;
+        }
+        navigationPagesRef.current = { pages: new Set(pageIndices), layoutEpoch: frame.layoutEpoch };
+        if (pageIndices.some((index) => frame.displayList.pages[index]?.unbuilt)) {
+          cancelPageBuilds(pageBuildTimerRef);
+          buildUnbuiltPagesRef.current();
+        }
+      },
+      subscribeFrames(listener) {
+        frameListenersRef.current.add(listener);
+        return () => {
+          frameListenersRef.current.delete(listener);
+        };
+      },
+    }),
+    []
+  );
+  const navigationPagesPending = useCallback((): boolean => {
+    const navigation = navigationPagesRef.current;
+    const frame = snapshotRef.current.frame;
+    if (!navigation || !frame || navigation.layoutEpoch !== frame.layoutEpoch) return false;
+    const worker = workerRef.current;
+    const deferred = worker && frameEngineRef.current === worker.engine
+      ? deferredPageBuildsRef.current.get(worker.engine)
+      : undefined;
+    const deferredPages = deferred && deferred.client === worker?.client &&
+      deferred.layoutEpoch === frame.layoutEpoch
+      ? deferred.pages
+      : undefined;
+    return [...navigation.pages].some((index) =>
+      frame.displayList.pages[index]?.unbuilt && !deferredPages?.has(index)
+    );
+  }, []);
   const unadoptedFrameSinceRef = useRef<number | null>(null);
   const workerLayoutFramesRef = useRef(new WeakMap<Layout, WorkerLayoutFrame>());
   const completionGateRef = useRef<(() => void) | null>(null);
@@ -938,6 +1011,20 @@ export function useRustDisplayList(
           queries,
           frameEpoch: nextSnapshot.frame?.frameEpoch ?? null,
         });
+        if (frameListenersRef.current.size === 0) return;
+        const generation = generationRef.current;
+        const current = (): boolean =>
+          !unmountedRef.current &&
+          generation === generationRef.current &&
+          snapshotRef.current === nextSnapshot &&
+          contentEpoch === contentEpochRef.current &&
+          samePageSizes(shownDisplayListRef.current, nextSnapshot.displayList);
+        queueMicrotask(() => {
+          for (const listener of [...frameListenersRef.current]) {
+            if (!current()) return;
+            if (frameListenersRef.current.has(listener)) listener(queries);
+          }
+        });
       };
       if (queries.isReady()) {
         publish();
@@ -1212,6 +1299,13 @@ export function useRustDisplayList(
         }
         const nextFrame = applyFrameDeltaOwned(previous.frame, delta);
         mainFrameRef.current = null;
+        // Typing moved off the middle of a surrogate pair leaves this peer's sticky caret inside it.
+        const settled = result.selectionCursor
+          ? worker.engine.resolveSelection(result.selectionCursor)
+          : null;
+        if (settled && !sameYrsSelection(settled, worker.engine.selection())) {
+          worker.engine.setSelection(settled.anchor, settled.head);
+        }
         const caret = residentCaretForSelection(
           result.caret,
           result.selection,
@@ -1745,6 +1839,13 @@ export function useRustDisplayList(
         return;
       }
       const pages = frame.displayList.pages;
+      const requestedNavigation = navigationPagesRef.current;
+      const navigation = requestedNavigation?.layoutEpoch === frame.layoutEpoch
+        ? requestedNavigation.pages
+        : new Set<number>();
+      if (requestedNavigation && requestedNavigation.layoutEpoch !== frame.layoutEpoch) {
+        navigationPagesRef.current = null;
+      }
       const [start, end] = displayWindowRef.current;
       const settling = settleWaitersRef.current.size > 0;
       const windowOnly = settling
@@ -1763,9 +1864,16 @@ export function useRustDisplayList(
       for (let index = first; index < last; index += 1) {
         if (pages[index]?.unbuilt && !deferredPages?.has(index)) unbuilt.push(index);
       }
+      for (const index of navigation) {
+        if ((index < first || index >= last) && pages[index]?.unbuilt && !deferredPages?.has(index)) {
+          unbuilt.push(index);
+        }
+      }
+      unbuilt.sort((left, right) => left - right);
+      if (!navigationPagesPending()) navigationPagesRef.current = null;
       const release = unbuilt.length === 0 ? pagesToRelease(frame) : [];
       if (unbuilt.length === 0 && release.length === 0) return;
-      let batch = unbuilt.filter((index) => index >= start && index < end);
+      let batch = unbuilt.filter((index) => (index >= start && index < end) || navigation.has(index));
       const background = batch.length === 0 && release.length === 0;
       const inFlight = pageBuildInFlightRef.current;
       // Pages the worker has built for a background request come back as a
@@ -1797,8 +1905,10 @@ export function useRustDisplayList(
         }
       }
       // Behind a worker frame the display has not adopted, the pages would
-      // come back as a whole-document recovery frame: wait for it.
-      const framePending = worker?.client.frameRequestPending() ?? false;
+      // come back as a whole-document recovery frame: wait for it. A navigation's
+      // pages do not wait for document reads, which leave the frame as it is.
+      const navigationBuild = batch.some((index) => navigation.has(index));
+      const framePending = worker?.client.frameRequestPending(!navigationBuild) ?? false;
       if (
         worker && (framePending ||
           (!supersedingBackground && worker.client.answeredFrame() > frame.frameEpoch))
@@ -1852,12 +1962,18 @@ export function useRustDisplayList(
         (!workerOpen || (
           pageBuildInFlightRef.current === build &&
           ((worker && build.kind === 'release') ||
-            (contentEpochRef.current === dispatchedEpoch && !worker?.client.frameRequestPending())) &&
+            (contentEpochRef.current === dispatchedEpoch &&
+              !worker?.client.frameRequestPending(!navigationBuild))) &&
           (!background || snapshotRef.current.frame?.frameEpoch === buildBase.frameEpoch)
         ));
       const finish = (): void => {
         if (pageBuildInFlightRef.current !== build) return;
         pageBuildInFlightRef.current = null;
+        if (navigationPagesPending()) {
+          cancelPageBuilds(pageBuildTimerRef);
+          pageBuildTimerRef.current = setTimeout(() => buildUnbuiltPagesRef.current(), 0);
+          return;
+        }
         const keepTimer =
           !workerOpenEnabledRef.current &&
           settleWaitersRef.current.size === 0 &&
@@ -2055,6 +2171,7 @@ export function useRustDisplayList(
       isCurrentWorker,
       mainPageBuildEngine,
       markSettled,
+      navigationPagesPending,
       paintedCaretMachine,
       pagesToRelease,
       publishQuerySnapshot,
@@ -2064,6 +2181,7 @@ export function useRustDisplayList(
       sourceLine,
     ]
   );
+  buildUnbuiltPagesRef.current = buildUnbuiltPages;
 
   const schedulePageBuilds = useCallback(
     (delay: number): void => {
@@ -2118,11 +2236,11 @@ export function useRustDisplayList(
     const frame = snapshot.frame;
     if (!frame) return;
     if (frame.displayList.pages.some((page) => page.unbuilt)) {
-      schedulePageBuilds(pageBuildInFlightRef.current ? 50 : 16);
+      schedulePageBuilds(navigationPagesPending() ? 0 : pageBuildInFlightRef.current ? 50 : 16);
     } else if (pagesToRelease(frame).length > 0) {
       schedulePageBuildsWhenIdleRef.current();
     }
-  }, [pagesToRelease, schedulePageBuilds, snapshot.frame]);
+  }, [navigationPagesPending, pagesToRelease, schedulePageBuilds, snapshot.frame]);
 
   useEffect(() => () => {
     cancelPageBuilds(pageBuildTimerRef);
@@ -3100,6 +3218,7 @@ export function useRustDisplayList(
     frame: snapshot.frame,
     queries: snapshot.queries,
     resolveQueries,
+    pageNavigation,
     settledDisplayList,
     resetSettled,
     awaitingDocument,
@@ -3273,6 +3392,7 @@ export interface UseCanvasRendererResult {
   queries: DisplayListQueries | null;
   /** Resolve the newest facade after pending edits and relayouts. */
   resolveQueries: ResolveDisplayListQueries;
+  pageNavigation: DisplayPageNavigation;
   /** See {@link UseRustDisplayListResult.settledDisplayList}. */
   settledDisplayList: UseRustDisplayListResult['settledDisplayList'];
   /** See {@link UseRustDisplayListResult.resetSettled}. */
@@ -3391,6 +3511,7 @@ export function useCanvasRenderer(
     frame,
     queries: snapshotQueries,
     resolveQueries,
+    pageNavigation,
     settledDisplayList,
     resetSettled,
     awaitingDocument,
@@ -3520,6 +3641,7 @@ export function useCanvasRenderer(
     resolveImage,
     queries: geometryReady ? snapshotQueries : null,
     resolveQueries,
+    pageNavigation,
     settledDisplayList,
     resetSettled,
     awaitingDocument,
