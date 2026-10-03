@@ -788,9 +788,10 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     const ticket = scrollRestoreController.peek();
     const pagesEl = pagesContainerRef.current;
     const host = interactionPageHostRef?.current ?? pagesEl;
+    if (!ticket || !displayListQueries || !host) return;
     const scrollParent =
       getScrollContainer() ?? (pagesEl ? findVerticalScrollParentOrRoot(pagesEl) : null);
-    if (!ticket || !displayListQueries || !host || !scrollParent?.isConnected) return;
+    if (!scrollParent?.isConnected) return;
     const pending = scrollRestoreController.take();
     if (!pending) return;
     const restore = (): void => {

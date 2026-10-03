@@ -1,8 +1,9 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, expect, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, expect, mock, spyOn, test } from 'bun:test';
 import type { LayoutComputation } from '@betteroffice/docx/editor';
 import { LayoutSelectionGate, type ResidentMeasurementConfig } from '@betteroffice/docx/layout';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
+import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { proposalSetIdentity, type ResidentProposalReply, type YrsRenderEnv, type YrsSession } from '@betteroffice/docx/yrs';
 import { isLayoutQueued, isSupersededLayout, sourceVersionOf } from '../internals/layoutProvenance';
 import { deferWorkerOpenReplica } from '../internals/workerOpenReplica';
@@ -36,6 +37,7 @@ interface WorkerPass {
 interface HookProps {
   session: YrsSession;
   renderEnv?: YrsRenderEnv;
+  displayListQueries?: DisplayListQueries | null;
 }
 
 const MEASUREMENT: ResidentMeasurementConfig = {
@@ -72,6 +74,9 @@ async function opened({
   pendingReplica = false,
   ownsDocument = false,
   fontRequirementsInWorker = undefined as FontRequirementsInWorker | undefined,
+  pagesContainer = null as HTMLDivElement | null,
+  getScrollContainer = () => null as HTMLDivElement | null,
+  displayListQueries = undefined as DisplayListQueries | undefined,
 } = {}) {
   let nextFrame = 0;
   const frames = new Map<number, FrameRequestCallback>();
@@ -93,7 +98,8 @@ async function opened({
   const worker: WorkerPass[] = [];
   const errors: Error[] = [];
   const syncCoordinator = new LayoutSelectionGate();
-  const hook = renderHook(({ session, renderEnv }: HookProps) =>
+  const pagesContainerRef = { current: pagesContainer };
+  const hook = renderHook(({ session, renderEnv, displayListQueries }: HookProps) =>
     useLayoutPipeline({
       document: null,
       session,
@@ -103,10 +109,11 @@ async function opened({
       zoom: 1,
       residentMeasurementConfig: () => (doc.fontsReady ? doc.measurement : null),
       deferLayoutPass: () => false,
-      pagesContainerRef: { current: null },
+      pagesContainerRef,
       viewportLayoutRef: { current: null },
       syncCoordinator,
-      getScrollContainer: () => null,
+      getScrollContainer,
+      displayListQueries,
       onError: (error) => errors.push(error),
       fontRequirementsInWorker,
       layoutInWorker: Object.assign((asked: YrsSession, request: string) =>
@@ -126,7 +133,7 @@ async function opened({
         ownsDocument: (asked: YrsSession) => asked === session && doc.workerOwnsDocument,
       }),
     }),
-    { initialProps: { session } as HookProps }
+    { initialProps: { session, displayListQueries } as HookProps }
   );
   const frame = () =>
     act(async () => {
@@ -182,6 +189,84 @@ async function holdProposals(session: YrsSession) {
   });
   expect(authority.holdsWorkerState()).toBe(true);
 }
+
+function scrollScene() {
+  const scroller = document.createElement('div');
+  const pages = document.createElement('div');
+  scroller.style.overflowY = 'auto';
+  scroller.style.overflowAnchor = 'none';
+  scroller.append(pages);
+  document.body.append(scroller);
+  scroller.scrollTop = 700;
+  const scrollHeight = mock(() => 2_000);
+  const clientHeight = mock(() => 200);
+  Object.defineProperties(scroller, {
+    scrollHeight: { get: scrollHeight },
+    clientHeight: { get: clientHeight },
+    currentCSSZoom: { value: 1 },
+  });
+  Object.defineProperty(pages, 'offsetWidth', { value: 600 });
+  const scrollRect = spyOn(scroller, 'getBoundingClientRect').mockImplementation(
+    () => new DOMRect(0, 60, 600, 200)
+  );
+  const pageRect = spyOn(pages, 'getBoundingClientRect').mockImplementation(
+    () => new DOMRect(0, 60 - scroller.scrollTop, 600, 2_000)
+  );
+  restoreFrames.push(() => {
+    scrollRect.mockRestore();
+    pageRect.mockRestore();
+    scroller.remove();
+  });
+  const queries = (y: number) => ({
+    pageCount: () => 1,
+    pageSize: () => ({ width: 600, height: 800 }),
+    anchorRect: () => ({ pageIndex: 0, x: 0, y, width: 2, height: 16 }),
+    visualLines: () => [],
+    visualLinesOnPage: () => [],
+    visualLineExtent: () => null,
+  }) as unknown as DisplayListQueries;
+  return { scroller, pages, scrollHeight, clientHeight, scrollRect, pageRect, queries };
+}
+
+test('a commit without a scroll restoration ticket reads no scroll parent or geometry', async () => {
+  const scene = scrollScene();
+  const getScrollContainer = mock(() => null);
+  const h = await opened({ pagesContainer: scene.pages, getScrollContainer });
+  const queries = scene.queries(700);
+  const style = spyOn(globalThis, 'getComputedStyle');
+  restoreFrames.push(() => style.mockRestore());
+  for (const read of [
+    getScrollContainer, scene.scrollHeight, scene.clientHeight, scene.scrollRect, scene.pageRect,
+  ]) read.mockClear();
+
+  h.hook.rerender({ session: h.session, displayListQueries: queries });
+  h.hook.rerender({ session: h.session, displayListQueries: null });
+
+  for (const read of [
+    getScrollContainer, style, scene.scrollHeight, scene.clientHeight, scene.scrollRect, scene.pageRect,
+  ]) expect(read).not.toHaveBeenCalled();
+});
+
+test('a pending scroll restoration pins the same line at commit and on the next frame', async () => {
+  const scene = scrollScene();
+  const getScrollContainer = mock(() => null);
+  const h = await opened({
+    pagesContainer: scene.pages,
+    getScrollContainer,
+    displayListQueries: scene.queries(700),
+  });
+  expect(scene.scroller.scrollTop).toBe(700);
+  getScrollContainer.mockClear();
+
+  h.hook.rerender({ session: h.session, displayListQueries: scene.queries(740) });
+  expect(getScrollContainer).toHaveBeenCalled();
+  expect(scene.scroller.scrollTop).toBe(740);
+
+  scene.scroller.scrollTop = 900;
+  await h.frame();
+  expect(scene.scroller.scrollTop).toBe(740);
+  expect(h.errors).toEqual([]);
+});
 
 test.each([false, true])('cached page totals are requested only with worker-open=%s', async (experimentalWorkerOpen) => {
   const h = await opened({ experimentalWorkerOpen });
