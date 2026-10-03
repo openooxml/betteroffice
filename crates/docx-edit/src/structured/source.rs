@@ -596,11 +596,9 @@ impl ReadSource {
             ]
             .into_iter()
             .filter_map(|(key, kind)| {
-                let note = array(field(package, key))
-                    .iter()
-                    .find(|note| {
-                        note.get("noteType").and_then(Value::as_str) == Some("separator")
-                    })?;
+                let note = array(field(package, key)).iter().find(|note| {
+                    note.get("noteType").and_then(Value::as_str) == Some("separator")
+                })?;
                 let paragraphs: Vec<_> = array(note.get("content"))
                     .iter()
                     .filter(|block| block.get("type").and_then(Value::as_str) == Some("paragraph"))
