@@ -116,7 +116,10 @@ pub enum FontChains<'a> {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct FontChainDependencies(BTreeMap<String, Option<Vec<u32>>>);
+pub struct FontChainDependencies {
+    chains: BTreeMap<String, Option<Vec<u32>>>,
+    unknown: bool,
+}
 
 thread_local! {
     static FONT_CHAIN_READS: RefCell<Vec<FontChainDependencies>> = const { RefCell::new(Vec::new()) };
@@ -133,6 +136,13 @@ impl Drop for FontChainReadScope {
 }
 
 impl FontChainDependencies {
+    pub fn unknown() -> Self {
+        Self {
+            unknown: true,
+            ..Self::default()
+        }
+    }
+
     pub fn capture<T>(measure: impl FnOnce() -> T) -> (T, Self) {
         FONT_CHAIN_READS.with(|reads| reads.borrow_mut().push(Self::default()));
         let scope = FontChainReadScope;
@@ -145,14 +155,19 @@ impl FontChainDependencies {
     }
 
     pub fn matches(&self, chains: FontChains<'_>) -> bool {
-        self.0
-            .iter()
-            .all(|(key, ids)| chains.lookup(key) == ids.as_deref())
+        !self.unknown
+            && self
+                .chains
+                .iter()
+                .all(|(key, ids)| chains.lookup(key) == ids.as_deref())
     }
 
     pub fn extend(&mut self, other: &Self) {
-        for (key, ids) in &other.0 {
-            self.0.entry(key.clone()).or_insert_with(|| ids.clone());
+        self.unknown |= other.unknown;
+        for (key, ids) in &other.chains {
+            self.chains
+                .entry(key.clone())
+                .or_insert_with(|| ids.clone());
         }
     }
 
@@ -165,7 +180,7 @@ impl FontChainDependencies {
     }
 
     pub fn retained_bytes(&self) -> usize {
-        self.0
+        self.chains
             .iter()
             .map(|(key, ids)| {
                 key.len()
@@ -183,10 +198,10 @@ impl FontChains<'_> {
         let ids = self.lookup(key);
         FONT_CHAIN_READS.with(|reads| {
             if let Some(dependencies) = reads.borrow_mut().last_mut()
-                && !dependencies.0.contains_key(key)
+                && !dependencies.chains.contains_key(key)
             {
                 dependencies
-                    .0
+                    .chains
                     .insert(key.to_owned(), ids.map(<[u32]>::to_vec));
             }
         });
@@ -695,5 +710,37 @@ pub(super) fn validate_pt_size(size_pt: f32, name: &str) -> Result<(), MeasureEr
         Ok(())
     } else {
         Err(MeasureError::Unsupported(format!("{name} out of range")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_font_dependencies_remain_unknown_when_extended_and_recorded() {
+        let map = BTreeMap::from([("requested|0|0".to_owned(), vec![0])]);
+        let chains = FontChains::BTree(&map);
+        let (_, known) = FontChainDependencies::capture(|| chains.get("requested|0|0"));
+        assert!(known.matches(chains));
+        assert!(FontChainDependencies::default().matches(chains));
+
+        let mut unknown = FontChainDependencies::unknown();
+        assert!(!unknown.matches(chains));
+        assert!(!unknown.matches(FontChains::BTree(&BTreeMap::new())));
+        unknown.extend(&known);
+        assert!(!unknown.matches(chains));
+
+        let mut merged = known;
+        merged.extend(&unknown);
+        assert!(!merged.matches(chains));
+        let ((_, child), parent) = FontChainDependencies::capture(|| {
+            FontChainDependencies::capture(|| {
+                chains.get("requested|0|0");
+                merged.record();
+            })
+        });
+        assert!(!child.matches(chains));
+        assert!(!parent.matches(chains));
     }
 }

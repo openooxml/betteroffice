@@ -536,39 +536,47 @@ fn measure_page_prefix(
     regions: &DocumentRegions,
     pages: usize,
     anchored: bool,
-) -> Result<Vec<BlockExtent>, String> {
+) -> Result<(Vec<BlockExtent>, Vec<FontChainDependencies>), String> {
     let mut measures = Vec::new();
+    let mut dependencies = Vec::new();
     let mut step = 32;
     loop {
         let start = measures.len();
         let end = prefix_boundary(blocks, (start + step).min(blocks.len()));
         if anchored {
             let mut prefix = blocks[..end].to_vec();
-            measures = docx_layout::measure_blocks::measure_blocks_with_table_wrap_frames(
-                &mut prefix,
+            let mut flow = docx_layout::measure_blocks::FloatFlow::with_table_wrap_frames(
+                &prefix,
                 &widths[..end],
                 &table_wrap_frames[..end],
                 measurement,
                 Some(geometry),
-                &BTreeMap::new(),
             )?;
+            flow.measure_until(&mut prefix, &widths[..end], measurement, end)?;
+            dependencies = flow.font_dependencies().to_vec();
+            measures = flow.into_extents();
             for (block, measured) in blocks.iter_mut().zip(prefix) {
                 *block = measured;
             }
         } else {
-            measures.extend(
-                docx_layout::measure_blocks::measure_blocks_with_table_wrap_frames(
-                    &mut blocks[start..end],
-                    &widths[start..end],
-                    &table_wrap_frames[start..end],
-                    measurement,
-                    Some(geometry),
-                    &BTreeMap::new(),
-                )?,
-            );
+            let mut flow = docx_layout::measure_blocks::FloatFlow::with_table_wrap_frames(
+                &blocks[start..end],
+                &widths[start..end],
+                &table_wrap_frames[start..end],
+                measurement,
+                Some(geometry),
+            )?;
+            flow.measure_until(
+                &mut blocks[start..end],
+                &widths[start..end],
+                measurement,
+                end - start,
+            )?;
+            dependencies.extend_from_slice(flow.font_dependencies());
+            measures.extend(flow.into_extents());
         }
         if end == blocks.len() {
-            return Ok(measures);
+            return Ok((measures, dependencies));
         }
         let options =
             options_through_section(request_options, regions, section_breaks(&blocks[..end]));
@@ -595,7 +603,7 @@ fn measure_page_prefix(
         let probed =
             docx_layout::place::layout_document(&mut probe).map_err(layout_error_message)?;
         if probed.pages.len() >= pages + 2 {
-            return Ok(measures);
+            return Ok((measures, dependencies));
         }
         step *= 2;
     }
@@ -947,6 +955,7 @@ struct DisplayState {
     encoded_layout_epoch: u64,
     pages: Vec<FramePageSnapshot>,
     next_page_id: u64,
+    font_store_id: Option<u64>,
     extras_fingerprint: u64,
     extras_json: Option<String>,
     /// The next frame is full whatever epoch the caller holds.
@@ -1779,7 +1788,7 @@ fn resident_walk(
                 previous_dependencies
                     .get(index)
                     .cloned()
-                    .unwrap_or_default(),
+                    .unwrap_or_else(FontChainDependencies::unknown),
             );
             let measure = reuse(previous, index, measured.len());
             measured.push(MeasuredBlock {
@@ -1799,7 +1808,7 @@ fn resident_walk(
                 previous_dependencies
                     .get(index)
                     .cloned()
-                    .unwrap_or_default(),
+                    .unwrap_or_else(FontChainDependencies::unknown),
             );
             let measure = reuse(previous, index, measured.len());
             measured.push(MeasuredBlock {
@@ -2880,7 +2889,7 @@ impl EngineSession {
                         // wrapping brings into the body, rule a prefix out too.
                         Some(pages) if !coupled && floats_follow_the_text(&blocks) => {
                             let anchored = anchors_objects(&blocks);
-                            let measures = measure_page_prefix(
+                            let (measures, dependencies) = measure_page_prefix(
                                 &mut blocks,
                                 &widths,
                                 &table_wrap_frames,
@@ -2891,6 +2900,7 @@ impl EngineSession {
                                 pages,
                                 anchored,
                             )?;
+                            measured_font_dependencies = dependencies;
                             provisional = measures.len() < blocks.len();
                             blocks.truncate(measures.len());
                             if provisional {
@@ -4502,6 +4512,7 @@ impl EngineSession {
         observe_display_phase: &mut impl FnMut(),
     ) -> Result<Vec<u8>, String> {
         let extras_fingerprint = hash_bytes(extras_json.as_bytes());
+        let font_store_id = docx_layout::measure_store_id();
         let (incremental_build, rebuilt_display_pages, rebuilt_pages) = {
             let pagination = self.pagination.borrow();
             let input = pagination
@@ -4536,7 +4547,10 @@ impl EngineSession {
             } else {
                 None
             };
-            if pagination.last_incremental && display.extras_fingerprint == extras_fingerprint {
+            if pagination.last_incremental
+                && display.extras_fingerprint == extras_fingerprint
+                && display.font_store_id == Some(font_store_id)
+            {
                 // The first range is rebuilt as a range; the pages after it shift,
                 // but later ranges, the pages elsewhere whose notes anchor to
                 // references the edit moved, and retained pages whose section or
@@ -4646,6 +4660,7 @@ impl EngineSession {
             .rebuilt_display_pages
             .wrapping_add(rebuilt_display_pages as u64);
         display.extras_fingerprint = extras_fingerprint;
+        display.font_store_id = Some(font_store_id);
         display.extras_json = Some(extras_json.to_owned());
         let frame_epoch = display.frame_epoch;
         let binary_frame_epoch = display.binary_frame_epoch;
@@ -6781,6 +6796,360 @@ mod tests {
     }
 
     #[test]
+    fn prefix_font_dependencies_survive_resident_edits_and_match_a_fresh_store() {
+        for missing_record in [false, true] {
+            let fonts = docx_layout::MeasureFonts::default();
+            let _scope = fonts.enter();
+            assert_eq!(
+                docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap(),
+                0
+            );
+            let engine = EngineSession::new(9659);
+            let text = "iiiiiiiiii";
+            let blocks = [
+                json!({"type": "paragraph", "content": [font_preflight_run(text, "Requested")]}),
+                json!({"type": "paragraph", "content": [font_preflight_run("Tail", "Stable")]}),
+            ];
+            crate::seed::seed_blocks(engine.doc(), None, &[("body".to_owned(), &blocks)]).unwrap();
+            let mut request: serde_json::Value =
+                serde_json::from_str(&small_page_request(0)).unwrap();
+            request["measurement"]["defaults"]["fontFamily"] = json!("Stable");
+            request["measurement"]["fontChains"] = json!({"requested|0|0": [0], "stable|0|0": [0]});
+            let prefix = engine
+                .layout_document_with_regions_prefix_retained_json(&request.to_string(), 1)
+                .unwrap();
+            let prefix: serde_json::Value = serde_json::from_str(&prefix).unwrap();
+            assert!(prefix.get("provisional").is_none());
+            let chains = BTreeMap::from([
+                ("requested|0|0".to_owned(), vec![1]),
+                ("stable|0|0".to_owned(), vec![0]),
+            ]);
+            let initial_extent = {
+                let pagination = engine.pagination.borrow();
+                assert_eq!(pagination.input.as_ref().unwrap().measured.len(), 2);
+                assert_eq!(pagination.measured_font_dependencies.len(), 2);
+                assert!(
+                    !pagination.measured_font_dependencies[0].matches(FontChains::BTree(&chains))
+                );
+                serde_json::to_vec(&pagination.input.as_ref().unwrap().measured[0].measure).unwrap()
+            };
+            let extras = json!({"fontChains": request["measurement"]["fontChains"]}).to_string();
+            engine.build_display_list_frame(&extras, 0).unwrap();
+            if missing_record {
+                engine
+                    .pagination
+                    .borrow_mut()
+                    .measured_font_dependencies
+                    .clear();
+            }
+            engine
+                .doc()
+                .insert_text(
+                    &crate::EditCtx::local("", ""),
+                    crate::Position::new("body", text.len() as u32 + 1),
+                    "edited ",
+                    crate::FormatPolicy::Inherit,
+                )
+                .unwrap();
+            let before = engine.stats();
+            let epoch = engine.display.borrow().binary_frame_epoch;
+            engine.apply_and_layout("body", epoch).unwrap();
+            let after = engine.stats();
+            assert_eq!(
+                after.resident_measure_calls - before.resident_measure_calls,
+                1
+            );
+            assert_eq!(
+                after.resident_reused_blocks - before.resident_reused_blocks,
+                1
+            );
+            assert!(
+                !engine.pagination.borrow().measured_font_dependencies[0]
+                    .matches(FontChains::BTree(&chains))
+            );
+
+            assert_eq!(
+                docx_layout::register_measure_font_bytes(lowering_pages::OTHER_FONT).unwrap(),
+                1
+            );
+            request["measurement"]["fontChains"]["requested|0|0"] = json!([1]);
+            let request_json = request.to_string();
+            let before = engine.stats();
+            let warm = engine
+                .layout_document_with_regions_json(&request_json)
+                .unwrap();
+            let after = engine.stats();
+            assert_eq!(
+                after.resident_measure_calls - before.resident_measure_calls,
+                1
+            );
+            assert_eq!(
+                after.resident_reused_blocks - before.resident_reused_blocks,
+                1
+            );
+            let extents = |engine: &EngineSession| {
+                let pagination = engine.pagination.borrow();
+                let extents: Vec<_> = pagination
+                    .input
+                    .as_ref()
+                    .unwrap()
+                    .measured
+                    .iter()
+                    .map(|entry| &entry.measure)
+                    .collect();
+                serde_json::to_vec(&extents).unwrap()
+            };
+            let warm_extents = extents(&engine);
+            assert_ne!(
+                initial_extent,
+                serde_json::to_vec(
+                    &engine.pagination.borrow().input.as_ref().unwrap().measured[0].measure
+                )
+                .unwrap()
+            );
+            assert!(
+                engine.pagination.borrow().measured_font_dependencies[0]
+                    .matches(FontChains::BTree(&chains))
+            );
+            let before = engine.stats();
+            assert_eq!(
+                engine
+                    .layout_document_with_regions_json(&request_json)
+                    .unwrap(),
+                warm
+            );
+            let after = engine.stats();
+            assert_eq!(after.resident_measure_calls, before.resident_measure_calls);
+            assert_eq!(
+                after.resident_reused_blocks - before.resident_reused_blocks,
+                2
+            );
+
+            let extras = json!({"fontChains": request["measurement"]["fontChains"]}).to_string();
+            let epoch = engine.display.borrow().binary_frame_epoch;
+            engine.build_display_list_frame(&extras, epoch).unwrap();
+            let warm_pages = engine.with_display_list(|list| list.pages.clone()).unwrap();
+            let state = engine.doc().encode_state_as_update_v1();
+            docx_layout::with_private_measure_fonts(|| {
+                assert_eq!(
+                    docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap(),
+                    0
+                );
+                assert_eq!(
+                    docx_layout::register_measure_font_bytes(lowering_pages::OTHER_FONT).unwrap(),
+                    1
+                );
+                let cold = EngineSession::new(9660);
+                cold.doc().apply_update_v1(&state).unwrap();
+                assert_eq!(
+                    warm,
+                    cold.layout_document_with_regions_json(&request_json)
+                        .unwrap()
+                );
+                assert_eq!(warm_extents, extents(&cold));
+                cold.build_display_list_frame(&extras, 0).unwrap();
+                assert_eq!(
+                    warm_pages,
+                    cold.with_display_list(|list| list.pages.clone()).unwrap()
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn font_store_replacement_rebuilds_display_pages_but_appends_reuse_them() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        assert_eq!(
+            docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap(),
+            0
+        );
+        let mut store = ooxml_text::FontStore::new();
+        let font = store.register(lowering_pages::FONT.to_vec()).unwrap();
+        let glyph = usize::from(store.glyph_id(font, 'z').unwrap().unwrap());
+        let table_offset = |tag: &[u8; 4]| {
+            let bytes = lowering_pages::FONT;
+            let count = usize::from(u16::from_be_bytes(bytes[4..6].try_into().unwrap()));
+            let table = bytes[12..]
+                .chunks_exact(16)
+                .take(count)
+                .find(|table| &table[..4] == tag)
+                .unwrap();
+            u32::from_be_bytes(table[8..12].try_into().unwrap()) as usize
+        };
+        let hhea = table_offset(b"hhea");
+        let metric_count = usize::from(u16::from_be_bytes(
+            lowering_pages::FONT[hhea + 34..hhea + 36]
+                .try_into()
+                .unwrap(),
+        ));
+        assert!(glyph < metric_count);
+        let advance_offset = table_offset(b"hmtx") + glyph * 4;
+        let mut replacement = lowering_pages::FONT.to_vec();
+        let advance = u16::from_be_bytes(
+            replacement[advance_offset..advance_offset + 2]
+                .try_into()
+                .unwrap(),
+        );
+        replacement[advance_offset..advance_offset + 2]
+            .copy_from_slice(&(advance + 128).to_be_bytes());
+
+        let engine = EngineSession::new(9661);
+        let mut blocks: Vec<_> = (0..80).map(|_| json!({
+            "type": "paragraph", "content": [font_preflight_run("Stable first pages", "Requested")]
+        })).collect();
+        blocks.push(
+            json!({"type": "paragraph", "content": [font_preflight_run("zzzz", "Requested")]}),
+        );
+        crate::seed::seed_blocks(engine.doc(), None, &[("body".to_owned(), &blocks)]).unwrap();
+        let mut request: serde_json::Value = serde_json::from_str(&small_page_request(0)).unwrap();
+        request["measurement"]["defaults"]["fontFamily"] = json!("Requested");
+        request["measurement"]["fontChains"] = json!({"requested|0|0": [0]});
+        let request = request.to_string();
+        let extras = json!({"fontChains": {"requested|0|0": [0]}}).to_string();
+        engine.layout_document_with_regions_json(&request).unwrap();
+        let mut retained = HashMap::new();
+        let frame = engine.build_display_list_frame(&extras, 0).unwrap();
+        crate::frame_delta::apply_placeholder_test_frame(&frame, &mut retained);
+        let original = engine.with_display_list(Clone::clone).unwrap();
+        assert!(original.pages.len() > 2);
+        assert!(
+            original.pages[0]
+                .primitives
+                .iter()
+                .any(|primitive| matches!(
+                    primitive,
+                    docx_layout::display_list::Primitive::GlyphRun(_)
+                ))
+        );
+        let first_extent = serde_json::to_vec(
+            &engine.pagination.borrow().input.as_ref().unwrap().measured[0].measure,
+        )
+        .unwrap();
+        let initial_store = docx_layout::measure_store_id();
+        docx_layout::clear_measure_fonts();
+        assert_eq!(
+            docx_layout::register_measure_font_bytes(&replacement).unwrap(),
+            0
+        );
+        assert_ne!(docx_layout::measure_store_id(), initial_store);
+        engine.layout_document_with_regions_json(&request).unwrap();
+        {
+            let pagination = engine.pagination.borrow();
+            assert!(pagination.last_incremental);
+            assert!(pagination.rebuilt_page_start > 0);
+            assert_eq!(
+                first_extent,
+                serde_json::to_vec(&pagination.input.as_ref().unwrap().measured[0].measure)
+                    .unwrap()
+            );
+        }
+        let before = engine.stats();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let frame = engine.build_display_list_frame(&extras, epoch).unwrap();
+        let warm_frame =
+            crate::frame_delta::apply_placeholder_test_frame(&frame, &mut retained).pages;
+        let after = engine.stats();
+        assert_eq!(
+            after.incremental_display_builds,
+            before.incremental_display_builds
+        );
+        assert_eq!(
+            after.rebuilt_display_pages - before.rebuilt_display_pages,
+            after.retained_pages as u64
+        );
+        assert_eq!(
+            original.pages[0],
+            engine
+                .with_display_list(|list| list.pages[0].clone())
+                .unwrap()
+        );
+
+        let assert_cold = |warm_frame| {
+            let state = engine.doc().encode_state_as_update_v1();
+            let warm_pages = engine.with_display_list(|list| list.pages.clone()).unwrap();
+            let font_count = docx_layout::measure_fonts_generation().1;
+            docx_layout::with_private_measure_fonts(|| {
+                assert_eq!(
+                    docx_layout::register_measure_font_bytes(&replacement).unwrap(),
+                    0
+                );
+                if font_count > 1 {
+                    assert_eq!(
+                        docx_layout::register_measure_font_bytes(lowering_pages::OTHER_FONT)
+                            .unwrap(),
+                        1
+                    );
+                }
+                let cold = EngineSession::new(9662);
+                cold.doc().apply_update_v1(&state).unwrap();
+                cold.layout_document_with_regions_json(&request).unwrap();
+                let frame = cold.build_display_list_frame(&extras, 0).unwrap();
+                let cold_frame =
+                    crate::frame_delta::apply_placeholder_test_frame(&frame, &mut HashMap::new())
+                        .pages;
+                assert_eq!(
+                    warm_pages,
+                    cold.with_display_list(|list| list.pages.clone()).unwrap()
+                );
+                assert_eq!(
+                    serde_json::to_vec(&warm_frame).unwrap(),
+                    serde_json::to_vec(&cold_frame).unwrap()
+                );
+            });
+        };
+        assert_cold(warm_frame);
+
+        let store_id = docx_layout::measure_store_id();
+        assert_eq!(
+            docx_layout::register_measure_font_bytes(lowering_pages::OTHER_FONT).unwrap(),
+            1
+        );
+        assert_eq!(docx_layout::measure_store_id(), store_id);
+        let offset: u32 = engine
+            .doc()
+            .paragraphs("body")
+            .unwrap()
+            .iter()
+            .take(80)
+            .map(|paragraph| paragraph.text.len() as u32 + 1)
+            .sum();
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", offset),
+                "z",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        engine.layout_document_with_regions_json(&request).unwrap();
+        assert!(engine.pagination.borrow().last_incremental);
+        assert!(engine.pagination.borrow().rebuilt_page_start > 0);
+        let before = engine.stats();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let frame = engine.build_display_list_frame(&extras, epoch).unwrap();
+        let warm_frame =
+            crate::frame_delta::apply_placeholder_test_frame(&frame, &mut retained).pages;
+        let after = engine.stats();
+        assert_eq!(
+            after.incremental_display_builds,
+            before.incremental_display_builds + 1
+        );
+        assert!(
+            after.rebuilt_display_pages - before.rebuilt_display_pages
+                < after.retained_pages as u64
+        );
+        assert_eq!(
+            original.pages[0],
+            engine
+                .with_display_list(|list| list.pages[0].clone())
+                .unwrap()
+        );
+        assert_cold(warm_frame);
+    }
+
+    #[test]
     fn first_font_invalidates_resident_measurements_without_a_matching_chain() {
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
@@ -7940,6 +8309,20 @@ mod tests {
         assert!(full.get("provisional").is_none());
         assert!(prefix_pages.len() >= 5 && prefix_pages.len() < full_pages.len());
         assert_eq!(prefix_pages[..3], full_pages[..3]);
+        {
+            let pagination = engine.pagination.borrow();
+            assert_eq!(
+                pagination.measured_font_dependencies.len(),
+                pagination.input.as_ref().unwrap().measured.len()
+            );
+            let chains = BTreeMap::from([("calibri|0|0".to_owned(), vec![font_id])]);
+            assert!(
+                pagination
+                    .measured_font_dependencies
+                    .iter()
+                    .all(|dependencies| dependencies.matches(FontChains::BTree(&chains)))
+            );
+        }
 
         assert_eq!(
             engine
@@ -7999,12 +8382,27 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
+        let engine = seeded();
         let prefix: serde_json::Value = serde_json::from_str(
-            &seeded()
+            &engine
                 .layout_document_with_regions_prefix_retained_json(&request, 3)
                 .unwrap(),
         )
         .unwrap();
+        {
+            let pagination = engine.pagination.borrow();
+            assert_eq!(
+                pagination.measured_font_dependencies.len(),
+                pagination.input.as_ref().unwrap().measured.len()
+            );
+            let chains = BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font_id])]);
+            assert!(
+                pagination
+                    .measured_font_dependencies
+                    .iter()
+                    .all(|dependencies| dependencies.matches(FontChains::BTree(&chains)))
+            );
+        }
         let first_pages = full["layout"]["pages"].as_array().unwrap()[..3].to_vec();
         assert!(
             serde_json::to_string(&first_pages)

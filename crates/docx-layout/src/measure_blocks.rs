@@ -933,10 +933,10 @@ fn measure_float_flow_recorded(
                 section_break_marks,
             )
         });
-        if let Some(zones) = zone_dependencies.get(index) {
-            reads.extend(zones);
-            zones.record();
-        }
+        let unknown = FontChainDependencies::unknown();
+        let zones = zone_dependencies.get(index).unwrap_or(&unknown);
+        reads.extend(zones);
+        zones.record();
         measured.push(extent?);
         dependencies.push(reads);
     }
