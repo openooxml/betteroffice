@@ -34,6 +34,7 @@ const FONT = new Uint8Array(
 const SEED = 0x72616e67;
 const STEPS = 12;
 const SMALL_FIXTURE_STEPS = 6;
+const RECOVERY_STEP = 1;
 const BASELINE_EXCLUSIONS: Array<[string, string]> = [];
 const FLAVOURS: Flavour[] = [
   'plain',
@@ -44,12 +45,14 @@ const FLAVOURS: Flavour[] = [
   'floats',
   'early-sect',
 ];
+const NO_WINDOW_FLAVOURS: Flavour[] = ['plain', 'footnotes'];
 
 interface Fixture {
   name: string;
   bytes: Uint8Array;
   seed: number;
   corpus: boolean;
+  noWindow?: boolean;
 }
 
 interface Hosts {
@@ -71,12 +74,16 @@ function mulberry32(seed: number): () => number {
 function* fixtures(): Generator<Fixture> {
   for (const [index, flavour] of FLAVOURS.entries()) {
     const seed = (SEED + index) >>> 0;
-    yield {
+    const fixture = {
       name: `synthetic/${flavour}`,
       bytes: syntheticDocx(flavour, 48, seed),
       seed,
       corpus: false,
     };
+    yield fixture;
+    if (NO_WINDOW_FLAVOURS.includes(flavour)) {
+      yield { ...fixture, name: `${fixture.name} (no window)`, noWindow: true };
+    }
   }
   yield {
     name: 'synthetic/page-restarts',
@@ -153,7 +160,12 @@ function firstDifference(actual: unknown, expected: unknown, path = 'page'): str
   return null;
 }
 
-function expectPages(hosts: Hosts, oracle: RetainedFrame, context: string): void {
+function expectPages(
+  hosts: Hosts,
+  oracle: RetainedFrame,
+  context: string,
+  window: [number, number] | undefined
+): void {
   for (const [chain, frame] of Object.entries(hosts)) {
     expect(frame, `${context} chain=${chain} page=-1 key=frame`).not.toBeNull();
     const pages = frame!.displayList.pages;
@@ -161,6 +173,12 @@ function expectPages(hosts: Hosts, oracle: RetainedFrame, context: string): void
       oracle.displayList.pages.length
     );
     for (const [index, expected] of oracle.displayList.pages.entries()) {
+      if (window === undefined || (index >= window[0] && index < window[1])) {
+        expect(
+          pages[index]?.unbuilt,
+          `${context} chain=${chain} page=${index} key=unbuilt`
+        ).not.toBe(true);
+      }
       try {
         expect(pages[index], `${context} chain=${chain} page=${index}`).toEqual(expected);
       } catch (error) {
@@ -217,7 +235,7 @@ test('viewport frames match a cold rebuild after every resident edit and scroll'
   const excluded: string[] = [];
   const failures: string[] = [];
   for (const fixture of fixtures()) {
-    const { name, bytes, seed, corpus } = fixture;
+    const { name, bytes, seed, corpus, noWindow = false } = fixture;
     attempted += 1;
     const exclusion = BASELINE_EXCLUSIONS.find(([excluded]) => excluded === name);
     const session = await createResidentEngineSession();
@@ -276,9 +294,9 @@ test('viewport frames match a cold rebuild after every resident edit and scroll'
       const hosts: Hosts = { owned: null, copying: null };
       const retainBuiltPages = seed % 3 === 0;
       const setWindow = () => {
-        session.setDisplayWindow(...window);
+        if (!noWindow) session.setDisplayWindow(...window);
         session.setDisplayRetainBuiltPages(retainBuiltPages);
-        session.setWindowedIncrementalBuilds(true);
+        session.setWindowedIncrementalBuilds(!noWindow);
       };
       setWindow();
       session.layoutDocumentWithRegionsRetained(input);
@@ -321,12 +339,28 @@ test('viewport frames match a cold rebuild after every resident edit and scroll'
         hosts.owned!.displayList.pages
       );
       try {
-        expectPages(hosts, baseline, context);
+        expectPages(hosts, baseline, context, noWindow ? undefined : window);
       } catch (error) {
         if (!exclusion) throw error;
         excluded.push(`${name}: ${exclusion[1]}`);
         continue;
       }
+      const expectColdPages = async () => {
+        const oracle = await coldFrame(
+          session,
+          input,
+          fontChains,
+          mediaSources,
+          hosts.owned!.displayList.pages
+        );
+        expectPages(
+          hosts,
+          oracle,
+          context,
+          noWindow ? undefined : window
+        );
+        return oracle;
+      };
       const random = mulberry32(seed);
       const pick = (limit: number) => Math.floor(random() * limit);
       for (let step = 0; step < steps; step++) {
@@ -346,15 +380,20 @@ test('viewport frames match a cold rebuild after every resident edit and scroll'
             session.buildDisplayPagesFrame(indices, hosts.owned!.frameEpoch),
             context
           );
+          await expectColdPages();
           const release = hosts
             .owned!.displayList.pages.filter(
-              (page) => !page.unbuilt && (page.pageIndex < window[0] || page.pageIndex >= window[1])
+              (page) =>
+                !noWindow &&
+                !page.unbuilt &&
+                (page.pageIndex < window[0] || page.pageIndex >= window[1])
             )
             .map((page) => page.pageIndex);
           if (release.length > 0) {
             const frame = session.releaseDisplayPagesFrame(release, hosts.owned!.frameEpoch);
             expect(frame, `${context} page=-1 key=release`).not.toBeNull();
             present(session, hosts, frame!, context);
+            await expectColdPages();
           }
         } else {
           const paragraphs = session.geometryReader.positionOutline!('body')!.body!.paragraphs;
@@ -417,12 +456,14 @@ test('viewport frames match a cold rebuild after every resident edit and scroll'
             }
             if (delta.operations.some(({ kind }) => kind === 'shift-range')) rangeFrames += 1;
           }
+          const oracle = await expectColdPages();
+          if (step === RECOVERY_STEP) {
+            context = `${context} frame=recovery`;
+            const delta = present(session, hosts, session.buildDisplayPagesFrame([], 0), context);
+            expect(delta.full, `${context} page=-1 key=full`).toBe(true);
+            expectPages(hosts, oracle, context, noWindow ? undefined : window);
+          }
         }
-        expectPages(
-          hosts,
-          await coldFrame(session, input, fontChains, mediaSources, hosts.owned!.displayList.pages),
-          context
-        );
         totalSteps += 1;
       }
       documents += 1;
@@ -456,7 +497,8 @@ test('viewport frames match a cold rebuild after every resident edit and scroll'
     `document=selection seed=${SEED} step=-1 op=coverage page=-1 key=documents`
   ).toBeGreaterThanOrEqual(
     FLAVOURS.length +
-      1 -
+      1 +
+      NO_WINDOW_FLAVOURS.length -
       excluded.filter((name) => name.startsWith('synthetic/')).length
   );
   expect(

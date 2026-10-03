@@ -6,6 +6,7 @@
 //! counts and byte lengths; the browser decoder rejects any mismatch before a
 //! page reaches canvas replay.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -756,6 +757,24 @@ struct PrepareOptions {
     full: bool,
 }
 
+/// `snapshots` with every deferred position shift folded in, borrowed when
+/// none is deferred.
+fn materialized_snapshots(snapshots: &[FramePageSnapshot]) -> Cow<'_, [FramePageSnapshot]> {
+    if snapshots.iter().all(|snapshot| snapshot.position_base == 0) {
+        return Cow::Borrowed(snapshots);
+    }
+    Cow::Owned(
+        snapshots
+            .iter()
+            .cloned()
+            .map(|mut snapshot| {
+                snapshot.materialize_positions();
+                snapshot
+            })
+            .collect(),
+    )
+}
+
 fn prepare_pages<'a>(
     list: &'a DisplayList,
     previous: &[FramePageSnapshot],
@@ -768,6 +787,8 @@ fn prepare_pages<'a>(
         match_anchors,
         full,
     } = options;
+    let materialized = materialized_snapshots(previous);
+    let previous: &[FramePageSnapshot] = &materialized;
     let anchors = page_anchors(list);
     // Anchors are unique within one snapshot list (page_anchors suffixes an
     // occurrence counter), so keyed lookups replace the old per-page scans.
@@ -2413,6 +2434,45 @@ mod tests {
                 "fill": "#000", "fragmentDocEnd": 6
             }));
         serde_json::from_value(value).unwrap()
+    }
+
+    /// The general encoders compare against range-shifted snapshots as the host holds them.
+    #[test]
+    fn general_encoders_fold_deferred_shifts_before_comparing() {
+        let before = range_shift_built_list();
+        let count = before.pages.len();
+        let mut next_id = 0;
+        let (full, mut snapshots) =
+            encode_frame_delta(&before, &[], placeholder_epochs(1), true, &mut next_id).unwrap();
+        let mut retained = HashMap::new();
+        apply_placeholder_test_frame(&full, &mut retained);
+        let shifted = shifted_body_list(&before, 0..count, 1);
+        let bytes = encode_frame_delta_changes(
+            &shifted,
+            &mut snapshots,
+            placeholder_epochs(2),
+            DisplayChanges {
+                rebuilt: &[],
+                repositioned: &[],
+                shifts: &[PageShiftRun {
+                    start: 0,
+                    end: count,
+                    delta: 1,
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(apply_placeholder_test_frame(&bytes, &mut retained), shifted);
+        let rebuilt: HashSet<usize> = (0..count).collect();
+        let (bytes, _) = encode_frame_delta_incremental(
+            &before,
+            &snapshots,
+            placeholder_epochs(3),
+            &mut next_id,
+            &rebuilt,
+        )
+        .unwrap();
+        assert_eq!(apply_placeholder_test_frame(&bytes, &mut retained), before);
     }
 
     /// Built pages, placeholders and inert extensions decode identically through both encoders.
