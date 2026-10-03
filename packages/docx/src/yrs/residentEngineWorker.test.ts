@@ -45,7 +45,7 @@ beforeAll(async () => {
       export const preloadEditWasmFrom = (source) => testHarness.preloadFrom(source);
     `,
     '../layout/render/glyphCache':
-      'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; } }',
+      'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; testHarness.glyphCacheCreations += 1; } }',
     '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.memories;',
     '../layout/render/frameDelta': `
       export { applyFrameDeltaOwned } from ${JSON.stringify(frameDelta)};
@@ -110,6 +110,9 @@ function worker() {
   };
   const harness = {
     initializations: 0,
+    glyphCacheCreations: 0,
+    clearFontCalls: 0,
+    fontIds: [] as number[],
     sessionsCreated: 0,
     wasmReady: false,
     failWarm: null as Error | null,
@@ -164,7 +167,20 @@ function worker() {
       directBatchesApplied() {
         return 0;
       },
-      clearFonts() {},
+      clearFonts() {
+        harness.clearFontCalls += 1;
+        harness.fontIds = [];
+      },
+      registerFont(_bytes: Uint8Array) {
+        const id = harness.fontIds.length;
+        harness.fontIds.push(id);
+        return id;
+      },
+      registerSubstituteFont(_base: number, _family: string) {
+        const id = harness.fontIds.length;
+        harness.fontIds.push(id);
+        return id;
+      },
       layoutDocumentJson() {},
       layoutDocumentWithRegionsRetained() {},
       retainedHeadersFootersJson(): string | undefined {
@@ -449,6 +465,58 @@ test('a visible page request supersedes the remaining background slices', async 
   expect((await visible).ok).toBe(true);
   expect(calls).toEqual([[0, 1, 2, 3], [8]]);
   expect(w.answered).toEqual([1, 2, 3]);
+});
+
+test('font suffixes preserve ids and glyph caches; mismatches require a full snapshot', async () => {
+  const w = worker();
+  await w.bootstrap();
+  await w.attach([1]);
+  const font = new Uint8Array([1]);
+  const sync = (
+    fontsRevision: number,
+    fonts: YrsResidentWorkerSnapshot['fonts'],
+    fontsBaseRevision?: number
+  ) => {
+    const base = w.harness.delta!.frameEpoch;
+    w.harness.delta = {
+      ...w.harness.delta!, frameEpoch: base + 1, baseFrameEpoch: base, operations: [],
+    };
+    return w.send({
+      type: 'sync',
+      extras: '',
+      expectedFrameEpoch: base,
+      paintCaret: false,
+      snapshot: {
+        clientId: 1,
+        state: new Uint8Array(),
+        selection: null,
+        fonts,
+        fontsRevision,
+        ...(fontsBaseRevision === undefined ? {} : { fontsBaseRevision }),
+        renderInputs: [],
+        measureInputs: [],
+        layoutInput: '',
+        layoutWithRegions: false,
+        layoutRevision: 1,
+      },
+    });
+  };
+  expect((await sync(1, [font], 0)).ok).toBe(true);
+  expect((await sync(2, [{ substituteOf: 0, family: 'Calibri' }], 1)).ok).toBe(true);
+  expect(w.harness.fontIds).toEqual([0, 1]);
+  expect(w.harness.clearFontCalls).toBe(1);
+  expect(w.harness.glyphCacheCreations).toBe(1);
+  const beforeMismatch = w.harness.delta;
+  expect(await sync(3, [font], 0)).toMatchObject({
+    ok: false, error: 'Resident engine worker font base revision mismatch',
+  });
+  expect(w.harness.fontIds).toEqual([0, 1]);
+  expect(w.harness.clearFontCalls).toBe(1);
+  w.harness.delta = beforeMismatch;
+  expect((await sync(3, [font])).ok).toBe(true);
+  expect(w.harness.fontIds).toEqual([0]);
+  expect(w.harness.clearFontCalls).toBe(2);
+  expect(w.harness.glyphCacheCreations).toBe(2);
 });
 
 describe('resident display page release', () => {

@@ -25,6 +25,11 @@ import type { DocxReadParagraphsRequest, DocxReadParagraphsResult } from './edit
 import type { ProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
 
 /** @internal */
+export interface ResidentEngineWorkerFontSync {
+  fontsBaseRevision?: number;
+}
+
+/** @internal */
 export type ResidentProposalOperation =
   | { kind: 'propose'; request: DocxProposalRequest }
   | { kind: 'setStates'; request: DocxProposalStateRequest }

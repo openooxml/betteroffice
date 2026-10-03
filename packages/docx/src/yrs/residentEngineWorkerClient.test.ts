@@ -142,6 +142,29 @@ function setup() {
   return { worker, client };
 }
 
+test('a font base mismatch forgets optimistic revisions, including queued snapshots', async () => {
+  const { worker, client } = setup();
+  const bootstrap = client.bootstrap({ ...snapshot, fontsRevision: 1 }, '');
+  worker.reply(frameReply(worker.lastId()));
+  await bootstrap;
+  const first = client.sync({ ...snapshot, fontsRevision: 2, fontsBaseRevision: 1 }, '', 0);
+  const firstId = worker.lastId();
+  const queued = client.sync({ ...snapshot, fontsRevision: 3, fontsBaseRevision: 2 }, '', 0);
+  const queuedId = worker.lastId();
+  expect(client.syncedFontsRevision()).toBe(3);
+  worker.reply({ id: firstId, ok: false, error: 'Resident engine worker font base revision mismatch' });
+  await expect(first).rejects.toThrow('font base revision mismatch');
+  expect(client.syncedFontsRevision()).toBeNull();
+  worker.reply(frameReply(queuedId));
+  await queued;
+  expect(client.syncedFontsRevision()).toBeNull();
+  const full = client.sync({ ...snapshot, fontsRevision: 3 }, '', 0);
+  worker.reply(frameReply(worker.lastId()));
+  await full;
+  expect(client.syncedFontsRevision()).toBe(3);
+  client.destroy();
+});
+
 test('pending proposal and navigation reads keep background page builds waiting', async () => {
   const { worker, client } = setup();
   const bootstrap = client.bootstrap(snapshot, '');

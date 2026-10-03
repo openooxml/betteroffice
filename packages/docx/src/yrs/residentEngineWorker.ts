@@ -792,10 +792,15 @@ function hydrate(
   session.setPartialDocument(snapshot.partialDocument === true);
   previewFinalPages = snapshot.partialDocument === true ? 0 : null;
   if (!snapshot.workerAuthoritative) session.loadMediaSources(snapshot.mediaSources ?? '');
+  if (snapshot.fontsBaseRevision !== undefined && snapshot.fontsBaseRevision !== fontsRevision) {
+    throw new Error('Resident engine worker font base revision mismatch');
+  }
   if (snapshot.fontsRevision !== fontsRevision) {
-    // A mismatched revision always carries the full font set (the client only
-    // omits fonts when it knows this session's applied revision matches).
-    session.clearFonts();
+    if (snapshot.fontsBaseRevision === undefined) {
+      session.clearFonts();
+      glyphCache = null;
+    }
+    fontsRevision = -1;
     for (const font of snapshot.fonts) {
       if (font instanceof Uint8Array) session.registerFont(font);
       else session.registerSubstituteFont(font.substituteOf, font.family);

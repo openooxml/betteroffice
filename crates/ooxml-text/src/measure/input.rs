@@ -36,6 +36,7 @@
 //! `floatingZones` and `paragraphYOffset` are optional; absent means no float
 //! context. See [`FloatZoneIn`] for their coordinate space.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
 use serde::Deserialize;
@@ -114,8 +115,87 @@ pub enum FontChains<'a> {
     BTree(&'a BTreeMap<String, Vec<u32>>),
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct FontChainDependencies(BTreeMap<String, Option<Vec<u32>>>);
+
+thread_local! {
+    static FONT_CHAIN_READS: RefCell<Vec<FontChainDependencies>> = const { RefCell::new(Vec::new()) };
+}
+
+struct FontChainReadScope;
+
+impl Drop for FontChainReadScope {
+    fn drop(&mut self) {
+        FONT_CHAIN_READS.with(|reads| {
+            reads.borrow_mut().pop();
+        });
+    }
+}
+
+impl FontChainDependencies {
+    pub fn capture<T>(measure: impl FnOnce() -> T) -> (T, Self) {
+        FONT_CHAIN_READS.with(|reads| reads.borrow_mut().push(Self::default()));
+        let scope = FontChainReadScope;
+        let measured = measure();
+        let dependencies = FONT_CHAIN_READS
+            .with(|reads| std::mem::take(reads.borrow_mut().last_mut().expect("font read scope")));
+        drop(scope);
+        dependencies.record();
+        (measured, dependencies)
+    }
+
+    pub fn matches(&self, chains: FontChains<'_>) -> bool {
+        self.0
+            .iter()
+            .all(|(key, ids)| chains.lookup(key) == ids.as_deref())
+    }
+
+    pub fn extend(&mut self, other: &Self) {
+        for (key, ids) in &other.0 {
+            if !self.0.contains_key(key) {
+                self.0.insert(key.clone(), ids.clone());
+            }
+        }
+    }
+
+    pub fn record(&self) {
+        FONT_CHAIN_READS.with(|reads| {
+            if let Some(dependencies) = reads.borrow_mut().last_mut() {
+                dependencies.extend(self);
+            }
+        });
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        self.0
+            .iter()
+            .map(|(key, ids)| {
+                key.len()
+                    + std::mem::size_of::<(String, Option<Vec<u32>>)>()
+                    + ids
+                        .as_ref()
+                        .map_or(0, |ids| ids.len() * std::mem::size_of::<u32>())
+            })
+            .sum()
+    }
+}
+
 impl FontChains<'_> {
     fn get(&self, key: &str) -> Option<&[u32]> {
+        let ids = self.lookup(key);
+        FONT_CHAIN_READS.with(|reads| {
+            if let Some(dependencies) = reads.borrow_mut().last_mut() {
+                if !dependencies.0.contains_key(key) {
+                    dependencies
+                        .0
+                        .insert(key.to_owned(), ids.map(<[u32]>::to_vec));
+                }
+            }
+        });
+        ids
+    }
+
+    fn lookup(&self, key: &str) -> Option<&[u32]> {
         match self {
             FontChains::Hash(map) => map.get(key).map(Vec::as_slice),
             FontChains::BTree(map) => map.get(key).map(Vec::as_slice),
