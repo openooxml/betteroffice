@@ -290,6 +290,64 @@ test('input that does not hold idle tasks selects the input budget without postp
   expect(host.timerCount).toBe(0);
 });
 
+test('notBefore holds background tasks without delaying foreground messages', async () => {
+  const host = fakeHost();
+  const order: string[] = [];
+  host.scheduler.submit({
+    lane: 'input', userInput: true, holdsIdleTasks: true, run: () => { order.push('input'); },
+  });
+  host.scheduler.schedule({
+    kind: 'completion', version: 0, generation: 0, idleAfterInputMs: 300,
+    notBefore: () => 1000,
+    run: () => { order.push('complete'); return 'done'; },
+  });
+  await host.flush();
+  expect(order).toEqual(['input']);
+  expect(host.timerCount).toBe(1);
+  host.advance(300);
+  host.scheduler.submit({ lane: 'interactive', run: () => { order.push('read'); } });
+  await host.flush();
+  expect(order).toEqual(['input', 'read']);
+  const turns = host.turnCount;
+  host.advance(699);
+  await host.flush();
+  expect(order).toEqual(['input', 'read']);
+  expect(host.turnCount).toBe(turns);
+  host.advance(1);
+  await host.flush();
+  expect(order).toEqual(['input', 'read', 'complete']);
+  expect(host.timerCount).toBe(0);
+});
+
+test('notBefore is re-read when timers fire and foreground messages wake the scheduler', async () => {
+  const host = fakeHost();
+  const order: string[] = [];
+  let notBefore = 300;
+  host.scheduler.schedule({
+    kind: 'completion', version: 0, generation: 0,
+    notBefore: () => notBefore,
+    run: () => { order.push('complete'); return 'done'; },
+  });
+  await host.flush();
+  expect(order).toEqual([]);
+  expect(host.timerCount).toBe(1);
+  notBefore = 600;
+  host.advance(300);
+  await host.flush();
+  expect(order).toEqual([]);
+  expect(host.timerCount).toBe(1);
+  const turns = host.turnCount;
+  host.advance(299);
+  await host.flush();
+  expect(order).toEqual([]);
+  expect(host.turnCount).toBe(turns);
+  notBefore = 0;
+  host.scheduler.submit({ lane: 'interactive', run: () => { order.push('read'); } });
+  await host.flush();
+  expect(order).toEqual(['read', 'complete']);
+  expect(host.timerCount).toBe(0);
+});
+
 test('mutations bump both stamps before running and reframes bump only generation', async () => {
   const { scheduler, flush } = fakeHost();
   const stamps: number[][] = [];

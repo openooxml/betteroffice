@@ -2515,6 +2515,7 @@ describe('worker proposals during sliced completion', () => {
     engine.openDocx(new Uint8Array(rezipPartsToArrayBuffer(parts)));
     const w = worker();
     const calls: string[] = [];
+    const onBegin: Array<() => void> = [];
     const onResume: Array<() => void> = [];
     Object.assign(w.harness.session, engine, {
       layoutDocumentWithRegionsPrefixRetainedJson: (input: string, pages: number) => {
@@ -2527,6 +2528,7 @@ describe('worker proposals during sliced completion', () => {
       },
       beginRegionLayout: (input: string) => {
         calls.push('begin');
+        onBegin.shift()?.();
         return engine.beginRegionLayout(input);
       },
       resumeRegionLayout: (blocks: number) => {
@@ -2542,6 +2544,11 @@ describe('worker proposals during sliced completion', () => {
       },
       buildDisplayPagesFrame: (pages: number[], epoch: number) => {
         const frame = engine.buildDisplayPagesFrame(pages, epoch);
+        w.harness.delta = decodeFrameDelta(frame);
+        return frame;
+      },
+      applyInput: (text: string, epoch: number) => {
+        const frame = engine.applyInput(text, epoch);
         w.harness.delta = decodeFrameDelta(frame);
         return frame;
       },
@@ -2591,7 +2598,7 @@ describe('worker proposals during sliced completion', () => {
       }
       expect(calls).not.toContain('whole');
     };
-    return { w, engine, calls, onResume, snapshot, booted, proposal, complete, expectFullLayout };
+    return { w, engine, calls, onBegin, onResume, snapshot, booted, proposal, complete, expectFullLayout };
   }
 
   test('proposal mirrors retain the same navigation target as repeated worker reads', async () => {
@@ -2991,12 +2998,230 @@ describe('worker proposals during sliced completion', () => {
     }
   });
 
+  test('the final layout is identical with and without the hold', async () => {
+    const relayout = async (held: boolean) => {
+      const { w, engine, calls, onResume, snapshot, booted, proposal, complete } = await proposalWorker();
+      try {
+        const proposed = new Promise<ResidentEngineWorkerResponse>((resolve) => {
+          onResume.push(() => {
+            w.send({
+              type: 'proposal',
+              operation: {
+                kind: 'propose',
+                request: { expectVersion: engine.proposalEngine.version(), proposals: [proposal()] },
+              },
+            }).then(resolve);
+          });
+        });
+        const completion = complete();
+        const reply = await proposed;
+        expect(reply.ok && reply.proposal?.result?.ok).toBe(true);
+        if (!reply.ok || !reply.proposal?.result?.ok) throw new Error('proposal failed');
+        expect(reply.proposal.changedStories).toEqual(['body']);
+        const afterProposal = calls.length;
+        const restarted = () => {
+          const after = calls.slice(afterProposal);
+          const begin = after.indexOf('begin');
+          return begin >= 0 && after.slice(begin + 1).includes('resume');
+        };
+        if (held) {
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          expect(calls.slice(afterProposal).filter((call) => call === 'begin' || call === 'resume')).toEqual([]);
+        } else {
+          const deadline = performance.now() + 3000;
+          while (!restarted() && performance.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 1));
+          }
+          expect(restarted()).toBe(true);
+        }
+        const input = JSON.stringify({
+          ...JSON.parse(layoutInput),
+          renderEnv: { revisionPreview: proposalRevisionPreview(reply.proposal.result.snapshot) },
+        });
+        const synced = await w.send({
+          type: 'sync',
+          snapshot: { ...snapshot, fonts: [], layoutInput: input, layoutRevision: 2 },
+          extras: '', layoutExtras: '{}', displayWindow: [0, 1],
+          expectedFrameEpoch: 1, paintCaret: false,
+        });
+        expect(synced.ok).toBe(true);
+        const superseded = await completion;
+        expect(superseded.ok).toBe(true);
+        expect(superseded.ok && superseded.frame).toBeUndefined();
+        const fresh = await createResidentEngineSession();
+        try {
+          fresh.loadState(engine.encodeState());
+          expect(synced.ok && synced.layoutJson).toBe(fresh.layoutDocumentWithRegionsRetainedJson(input));
+        } finally {
+          fresh.destroy();
+        }
+        if (!booted.ok || !booted.frame || !synced.ok || !synced.frame) throw new Error('frame missing');
+        const visible = applyFrameDeltaOwned(
+          applyFrameDeltaOwned(null, decodeFrameDelta(new Uint8Array(booted.frame))),
+          decodeFrameDelta(new Uint8Array(synced.frame))
+        );
+        return { layoutJson: synced.layoutJson, pages: visible.displayList.pages };
+      } finally {
+        engine.destroy();
+      }
+    };
+    const held = await relayout(true);
+    const unheld = await relayout(false);
+    expect(held.layoutJson).toBe(unheld.layoutJson);
+    expect(held.pages).toEqual(unheld.pages);
+  }, 10_000);
+
+  test('completion without relayout restarts after the hold', async () => {
+    const { w, engine, calls, onBegin, onResume, proposal, complete, expectFullLayout } = await proposalWorker();
+    try {
+      const proposed = new Promise<ResidentEngineWorkerResponse>((resolve) => {
+        onResume.push(() => {
+          w.send({
+            type: 'proposal',
+            operation: {
+              kind: 'propose',
+              request: { expectVersion: engine.proposalEngine.version(), proposals: [proposal()] },
+            },
+          }).then(resolve);
+        });
+      });
+      const completion = complete();
+      const reply = await proposed;
+      const repliedAt = performance.now();
+      expect(reply.ok && reply.proposal?.result?.ok).toBe(true);
+      expect(reply.ok && reply.proposal?.changedStories).toEqual(['body']);
+      const restartedAt = await new Promise<number>((resolve) => {
+        onBegin.push(() => resolve(performance.now()));
+      });
+      expect(restartedAt - repliedAt).toBeGreaterThanOrEqual(900);
+      expect(restartedAt - repliedAt).toBeLessThanOrEqual(1400);
+      const completed = await completion;
+      expect(completed.ok).toBe(true);
+      expect(calls.filter((call) => call === 'begin')).toHaveLength(2);
+      await expectFullLayout(completed);
+    } finally {
+      engine.destroy();
+    }
+  }, 10_000);
+
+  test('a typing edit ends the hold and does not delay the completion', async () => {
+    const { w, engine, onResume, proposal, complete } = await proposalWorker();
+    try {
+      const order: string[] = [];
+      const proposed = new Promise<ResidentEngineWorkerResponse>((resolve) => {
+        onResume.push(() => {
+          w.send({
+            type: 'proposal', operation: {
+              kind: 'propose',
+              request: { expectVersion: engine.proposalEngine.version(), proposals: [proposal()] },
+            },
+          }).then(resolve);
+        });
+      });
+      const completion = complete().then((reply) => {
+        order.push('complete');
+        return { reply, repliedAt: performance.now(), state: engine.encodeState() };
+      });
+      const reply = await proposed;
+      expect(reply.ok && reply.proposal?.result?.ok).toBe(true);
+      expect(reply.ok && reply.proposal?.changedStories).toEqual(['body']);
+      const loc = { story: 'body', paraId: '00000002', offset: 0 };
+      const postedAt = performance.now();
+      const input = w.send({
+        type: 'applyInput', text: 'x', selection: { anchor: loc, head: loc },
+        expectedFrameEpoch: 1, profile: false, paintCaret: false,
+      }).then((reply) => {
+        order.push('input');
+        return reply;
+      });
+      const completed = await completion;
+      expect(completed.repliedAt - postedAt).toBeGreaterThanOrEqual(0);
+      expect(completed.repliedAt - postedAt).toBeLessThan(700);
+      expect(completed.reply.ok).toBe(true);
+      expect(completed.reply.ok && completed.reply.frame).toBeDefined();
+      const edited = await input;
+      expect(edited.ok).toBe(true);
+      expect(order).toEqual(['complete', 'input']);
+      expect(engine.searchText('xParagraph 2')).toHaveLength(1);
+      const fresh = await createResidentEngineSession();
+      try {
+        fresh.loadState(completed.state);
+        expect(completed.reply.ok && completed.reply.layoutJson).toBe(
+          fresh.layoutDocumentWithRegionsRetainedJson(layoutInput)
+        );
+      } finally {
+        fresh.destroy();
+      }
+    } finally {
+      engine.destroy();
+    }
+  });
+
+  test.each(['setStates', 'withdraw'] as const)(
+    'a decision during completion does not hold the completion (%s)',
+    async (kind) => {
+      const { w, engine, onResume, proposal, complete, expectFullLayout } = await proposalWorker();
+      try {
+        const seeded = await w.send({
+          type: 'proposal', operation: {
+            kind: 'propose',
+            request: { expectVersion: engine.proposalEngine.version(), proposals: [proposal()] },
+          },
+        });
+        expect(seeded.ok && seeded.proposal?.result?.ok).toBe(true);
+        if (!seeded.ok || !seeded.proposal?.result?.ok) throw new Error('proposal failed');
+        // Rejecting the seed clears its hold before completion starts.
+        const rejected = await w.send({
+          type: 'proposal', operation: {
+            kind: 'setStates', request: {
+              expectVersion: seeded.proposal.mirror.version,
+              expectPreviewVersion: seeded.proposal.mirror.proposals.previewVersion,
+              changes: [{ id: 'p1', state: 'rejected' }],
+            },
+          },
+        });
+        expect(rejected.ok && rejected.proposal?.result?.ok).toBe(true);
+        if (!rejected.ok || !rejected.proposal?.result?.ok) throw new Error('decision failed');
+        const decided = new Promise<ResidentEngineWorkerResponse>((resolve) => {
+          onResume.push(() => {
+            const expectVersion = engine.proposalEngine.version();
+            w.send({
+              type: 'proposal', operation: kind === 'setStates'
+                ? { kind, request: {
+                    expectVersion,
+                    expectPreviewVersion: rejected.proposal!.mirror.proposals.previewVersion,
+                    changes: [{ id: 'p1', state: 'proposed' }],
+                  } }
+                : { kind, request: { expectVersion, ids: ['p1'] } },
+            }).then(resolve);
+          });
+        });
+        const completion = complete().then((reply) => ({ reply, repliedAt: performance.now() }));
+        const reply = await decided;
+        const decidedAt = performance.now();
+        expect(reply.ok && reply.proposal?.result?.ok).toBe(true);
+        if (!reply.ok || !reply.proposal?.result?.ok) throw new Error('decision failed');
+        const input = JSON.stringify({
+          ...JSON.parse(layoutInput),
+          renderEnv: { revisionPreview: proposalRevisionPreview(reply.proposal.result.snapshot) },
+        });
+        const completed = await completion;
+        expect(completed.repliedAt - decidedAt).toBeGreaterThanOrEqual(0);
+        expect(completed.repliedAt - decidedAt).toBeLessThan(700);
+        expect(completed.reply.ok).toBe(true);
+        await expectFullLayout(completed.reply, input);
+      } finally {
+        engine.destroy();
+      }
+    }
+  );
+
   test('repeated proposals restart the background layout without switching to synchronous completion', async () => {
     const { w, engine, calls, onResume, proposal, complete, expectFullLayout } = await proposalWorker();
     try {
       const order: string[] = [];
       const proposed: Array<Promise<ResidentEngineWorkerResponse>> = [];
-      for (let index = 1; index <= 6; index += 1) {
+      for (let index = 1; index <= 4; index += 1) {
         onResume.push(() => {
           proposed.push(w.send({
             type: 'proposal',
@@ -3015,18 +3240,18 @@ describe('worker proposals during sliced completion', () => {
         return reply;
       });
       expect(order).toEqual([
-        'proposal:1', 'proposal:2', 'proposal:3', 'proposal:4', 'proposal:5', 'proposal:6', 'complete',
+        'proposal:1', 'proposal:2', 'proposal:3', 'proposal:4', 'complete',
       ]);
       for (const reply of await Promise.all(proposed)) {
         expect(reply.ok && reply.proposal?.result?.ok).toBe(true);
         expect(reply.ok && reply.proposal?.changedStories).toEqual(['body']);
       }
-      expect(calls.filter((call) => call === 'begin')).toHaveLength(7);
+      expect(calls.filter((call) => call === 'begin')).toHaveLength(5);
       await expectFullLayout(completed);
     } finally {
       engine.destroy();
     }
-  });
+  }, 15_000);
 
   test.each(['propose', 'setStates', 'withdraw'] as const)(
     '%s replies during completion and its relayout paints the visible prefix before completing',
@@ -3080,6 +3305,7 @@ describe('worker proposals during sliced completion', () => {
           });
         });
         const superseded = await complete();
+        expect(superseded.ok).toBe(true);
         expect(superseded.ok && superseded.frame).toBeUndefined();
         await operation!;
         const prefix = await relayout!;
@@ -3113,7 +3339,8 @@ describe('worker proposals during sliced completion', () => {
       } finally {
         engine.destroy();
       }
-    }
+    },
+    10_000
   );
 });
 

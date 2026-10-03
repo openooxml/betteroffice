@@ -132,9 +132,9 @@ interface SlicedCompletion {
 let slicedCompletion: SlicedCompletion | null = null;
 const COMPLETION_RESTARTS = 3;
 const COMPLETION_IDLE_MS = 300;
-// A proposal that changed the content or the preview of a provisional layout:
-// the host lays out again next, which replaces the completion, so its steps
-// wait for that sync until this time.
+// A proposal batch that changed the content or the preview of a provisional
+// layout: the host lays out again next, which replaces the completion, so its
+// steps wait for that sync until this time. Any other edit ends the wait.
 const RELAYOUT_WAIT_MS = 1000;
 let relayoutExpectedUntil = Number.NEGATIVE_INFINITY;
 const ALL_BLOCKS = 2 ** 32 - 1;
@@ -277,6 +277,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     request.type !== 'warm' &&
     !(request.type === 'proposal' && request.operation.kind === 'snapshot')
   ) supersedeBackgroundPageBuild();
+  if (
+    request.type === 'applyInput' || request.type === 'applyDelete' || request.type === 'applyUpdate' ||
+    (request.type === 'proposal' && request.operation.kind !== 'snapshot' && request.operation.kind !== 'propose')
+  ) relayoutExpectedUntil = Number.NEGATIVE_INFINITY;
   if (request.type === 'warm') {
     try {
       if (request.hostModule) {
@@ -446,7 +450,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     try {
       const registry = proposals ??= createProposalRegistry(session.proposalEngine);
       const previousVersion = session.proposalEngine.version();
-      const previousPreview = JSON.stringify(proposalRevisionPreview(registry.snapshot()));
+      const previousPreview = request.operation.kind === 'propose'
+        ? JSON.stringify(proposalRevisionPreview(registry.snapshot()))
+        : undefined;
       const since = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
       let result: DocxProposalResult | undefined;
       switch (request.operation.kind) {
@@ -502,7 +508,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         );
       }
       if (
-        incompleteLayout &&
+        request.operation.kind === 'propose' && incompleteLayout &&
         (changedStories.length > 0 || JSON.stringify(preview) !== previousPreview)
       ) relayoutExpectedUntil = performance.now() + RELAYOUT_WAIT_MS;
       reply(
