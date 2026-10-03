@@ -1012,15 +1012,18 @@ export function useRustDisplayList(
           frameEpoch: nextSnapshot.frame?.frameEpoch ?? null,
         });
         if (frameListenersRef.current.size === 0) return;
+        const generation = generationRef.current;
+        const current = (): boolean =>
+          !unmountedRef.current &&
+          generation === generationRef.current &&
+          snapshotRef.current === nextSnapshot &&
+          contentEpoch === contentEpochRef.current &&
+          samePageSizes(shownDisplayListRef.current, nextSnapshot.displayList);
         queueMicrotask(() => {
-          if (
-            snapshotRef.current !== nextSnapshot ||
-            contentEpoch !== contentEpochRef.current ||
-            !samePageSizes(shownDisplayListRef.current, nextSnapshot.displayList)
-          ) {
-            return;
+          for (const listener of [...frameListenersRef.current]) {
+            if (!current()) return;
+            if (frameListenersRef.current.has(listener)) listener(queries);
           }
-          for (const listener of [...frameListenersRef.current]) listener(queries);
         });
       };
       if (queries.isReady()) {

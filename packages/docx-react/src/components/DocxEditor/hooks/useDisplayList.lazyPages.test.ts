@@ -228,9 +228,10 @@ test('navigation refines to a distant line from a published frame with frozen qu
     const rect = display.queries!.anchorRect(position)!;
     expect(rect.pageIndex).toBe(last);
     expect(display.displayList!.pages[last]!.unbuilt).toBeFalsy();
-    const lineTop = pageTop(last) - scroller.scrollTop + rect.y;
-    expect(lineTop).toBeGreaterThanOrEqual(0);
-    expect(lineTop + rect.height).toBeLessThanOrEqual(400);
+    const lineCenter = (top: number) => pageTop(last) - top + rect.y + rect.height / 2;
+    expect(rect.height).toBeGreaterThan(0);
+    expect(lineCenter(scroller.scrollTop)).toBeCloseTo(200, 0);
+    expect(lineCenter(scrolls[0]!)).not.toBeCloseTo(200, 0);
     expect(result.current.displayListQueries).toBe(frozen);
     expect(displayWindowOf(display.queries)!.read()).toEqual([0, 5]);
   } finally {
