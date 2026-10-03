@@ -7,6 +7,8 @@ import { createResidentEngineSession } from './residentEngineSession';
 import { proposalRevisionPreview } from './proposals';
 import { createYrsSession } from './index';
 import { readResidentSearch } from './residentSearch';
+import { findBodyMatches } from './findMatches';
+import { createYrsInputPositionMap } from './inputPositionMap';
 import { createYrsPositionProjection, yrsLocToProjectedDisplayPosition } from './yrsPositionProjection';
 import { preloadEditWasm } from './wasm/index';
 import type { DecodedFrameDelta, FramePageOperation } from '../layout/render/frameDelta';
@@ -2688,6 +2690,34 @@ describe('worker proposals during sliced completion', () => {
       expect(calls.filter((call) => call === 'begin')).toHaveLength(1);
       await expectFullLayout(completed);
     } finally {
+      engine.destroy();
+    }
+  });
+
+  test('find matches read equals the replica and rejects a different version', async () => {
+    const { w, engine } = await proposalWorker();
+    const replica = await createYrsSession();
+    try {
+      replica.loadState(engine.encodeState());
+      const expectVersion = engine.proposalEngine.version();
+      const options = { matchCase: false, matchWholeWord: true };
+      const matches = findBodyMatches(replica, (loc) => yrsLocToProjectedDisplayPosition(
+        replica,
+        (root) => createYrsPositionProjection(replica, root),
+        loc,
+        'body',
+        (story) => createYrsInputPositionMap(story, replica.paragraphSpans(story))
+      ), 'paragraph', options);
+      expect(matches).toHaveLength(40);
+      const read = { kind: 'findMatches', searchText: 'paragraph', options, expectVersion } as const;
+      const reply = await w.send({ type: 'documentRead', read });
+      expect(reply.ok && reply.read).toEqual({ version: expectVersion, value: matches });
+      const stale = await w.send({
+        type: 'documentRead', read: { ...read, expectVersion: `${expectVersion}-stale` },
+      });
+      expect(stale.ok && stale.read).toEqual({ version: expectVersion, value: null });
+    } finally {
+      replica.destroy();
       engine.destroy();
     }
   });

@@ -14,6 +14,8 @@ import type {
   DocxDisplaySelectionText,
   DocxSelectionUnit,
 } from './viewerSelection';
+import type { FindOptions } from '../utils/findReplace';
+import type { DocxFindDisplayMatch } from './findMatches';
 import type { ResidentSearchResult } from './residentSearch';
 import type { DocxFindParagraphsOptions, DocxParagraphMatch } from './findParagraphs';
 import type { ResidentCaretPaintStyle } from './residentCaret';
@@ -62,6 +64,7 @@ export type ResidentDocumentRead =
   | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
   | { kind: 'readParagraphs'; request: DocxReadParagraphsRequest }
   | { kind: 'findText'; request: DocxFindTextRequest }
+  | { kind: 'findMatches'; searchText: string; options: FindOptions; expectVersion: string }
   | { kind: 'searchText'; query: string; caseSensitive: boolean; carry?: YrsStickyPosition | null }
   | ({ kind: 'findParagraphs'; query: string } & DocxFindParagraphsOptions)
   | { kind: 'stickyAnchors'; locs: YrsLoc[]; version: string }
@@ -90,6 +93,7 @@ export interface ResidentDocumentReadValues {
   resolveParagraphAnchors: { results: DocxParagraphAnchorResult[] };
   readParagraphs: DocxReadParagraphsResult;
   findText: DocxFindTextResult;
+  findMatches: DocxFindDisplayMatch[] | null;
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
   searchText: ResidentSearchResult;
   findParagraphs: DocxParagraphMatch[];

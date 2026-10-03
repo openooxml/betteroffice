@@ -1,13 +1,8 @@
-import { useCallback, useRef } from 'react';
-import type { YrsLoc, YrsSelection, YrsSession, YrsStoryRange } from '@betteroffice/docx/yrs';
+import { useCallback, useEffect, useRef } from 'react';
+import { findBodyMatches, type YrsSelection, type YrsStoryRange } from '@betteroffice/docx/yrs';
 import { DocxCommandAdmissionError } from '../../../commands/createDocxCommandStore';
 import type { DocxCommandResult } from '../../../commands/types';
-import {
-  findAllMatches,
-  type FindMatch,
-  type FindOptions,
-  type FindResult,
-} from '../../dialogs/findReplaceUtils';
+import type { FindMatch, FindOptions, FindResult } from '../../dialogs/findReplaceUtils';
 import type { useFindReplace } from '../../../hooks/useFindReplace';
 import type { PagedEditorRef } from '../PagedEditor';
 import { commandOutcome } from './useDocxCommands';
@@ -21,42 +16,6 @@ export type YrsFindMatch = FindMatch & {
 type YrsFindResult = FindResult & {
   matches: YrsFindMatch[];
 };
-
-function findMatchesInYrs(
-  session: YrsSession,
-  locToDisplayPosition: (loc: YrsLoc) => number | null,
-  searchText: string,
-  options: FindOptions
-): YrsFindMatch[] {
-  const matches: YrsFindMatch[] = [];
-  const paragraphs = session.paragraphs('body');
-  for (let paragraphIndex = 0; paragraphIndex < paragraphs.length; paragraphIndex += 1) {
-    const paragraph = paragraphs[paragraphIndex];
-    if (!paragraph.text) continue;
-    for (const match of findAllMatches(paragraph.text, searchText, options)) {
-      const startLoc = { story: 'body', paraId: paragraph.paraId, offset: match.start };
-      const endLoc = { story: 'body', paraId: paragraph.paraId, offset: match.end };
-      const displayFrom = locToDisplayPosition(startLoc);
-      const displayTo = locToDisplayPosition(endLoc);
-      if (displayFrom == null || displayTo == null || displayFrom >= displayTo) continue;
-      matches.push({
-        paragraphIndex,
-        contentIndex: 0,
-        startOffset: match.start,
-        endOffset: match.end,
-        text: paragraph.text.slice(match.start, match.end),
-        displayFrom,
-        displayTo,
-        yrsRange: {
-          story: 'body',
-          start: { paraId: paragraph.paraId, offset: match.start },
-          end: { paraId: paragraph.paraId, offset: match.end },
-        },
-      });
-    }
-  }
-  return matches;
-}
 
 function selects(selection: YrsSelection | null, range: YrsStoryRange): boolean {
   if (!selection || selection.anchor.story !== range.story || selection.head.story !== range.story) {
@@ -86,18 +45,28 @@ export function useFindReplaceBridge({
 }) {
   const findResultRef = useRef<FindResult | null>(null);
   const searchRef = useRef<{ text: string; options: FindOptions } | null>(null);
+  const generationRef = useRef(0);
+
+  useEffect(() => () => {
+    generationRef.current += 1;
+  }, []);
 
   const goToMatch = useCallback(
     (match: YrsFindMatch | undefined, index: number): FindMatch | null => {
       const editor = pagedEditorRef.current;
-      const session = editor?.getYrsSession();
-      if (!editor || !session || !match) return null;
+      if (!editor || !match) return null;
       try {
-        session.setSelection(
-          { story: match.yrsRange.story, ...match.yrsRange.start },
-          { story: match.yrsRange.story, ...match.yrsRange.end }
-        );
-        if (!editor.syncYrsInputState(false)) return null;
+        if (editor.isWorkerViewer?.()) {
+          editor.setSelection(match.displayFrom, match.displayTo);
+        } else {
+          const session = editor.getYrsSession();
+          if (!session) return null;
+          session.setSelection(
+            { story: match.yrsRange.story, ...match.yrsRange.start },
+            { story: match.yrsRange.story, ...match.yrsRange.end }
+          );
+          if (!editor.syncYrsInputState(false)) return null;
+        }
         editor.scrollToPosition(match.displayFrom);
       } catch (error) {
         console.error('Find navigation failed:', error);
@@ -113,17 +82,33 @@ export function useFindReplaceBridge({
 
   const handleFind = useCallback(
     (searchText: string, options: FindOptions): FindResult | null => {
+      const generation = ++generationRef.current;
       const editor = pagedEditorRef.current;
       const session = editor?.getYrsSession();
-      if (!editor || !session || !searchText.trim()) {
+      const viewer = editor?.isWorkerViewer?.() === true;
+      if (!editor || (!viewer && !session) || !searchText.trim()) {
         findResultRef.current = null;
         searchRef.current = null;
         findReplace.setMatches([], 0);
         return null;
       }
       searchRef.current = { text: searchText, options };
-      const matches = findMatchesInYrs(
-        session,
+      if (viewer) {
+        findResultRef.current = null;
+        findReplace.setMatches([], 0);
+        void editor.readViewerFindMatches(searchText, options).then((matches) => {
+          if (matches === null || generationRef.current !== generation ||
+            pagedEditorRef.current !== editor || editor.getYrsSession() !== session ||
+            !editor.isWorkerViewer()) return;
+          const result: YrsFindResult = { matches, totalCount: matches.length, currentIndex: 0 };
+          findResultRef.current = result;
+          findReplace.setMatches(matches, 0);
+          if (matches.length > 0) goToMatch(matches[0], 0);
+        }).catch(() => {});
+        return null;
+      }
+      const matches = findBodyMatches(
+        session!,
         (loc) => editor.yrsLocToDisplayPosition(loc),
         searchText,
         options
@@ -153,13 +138,14 @@ export function useFindReplaceBridge({
 
   const handleReplace = useCallback(
     async (replaceText: string): Promise<boolean> => {
+      if (pagedEditorRef.current?.isWorkerViewer?.()) return false;
       const result = await complete(() => {
         const editor = pagedEditorRef.current;
         const session = editor?.getYrsSession();
         const search = searchRef.current;
         if (!editor || !session || !search) return commandOutcome(false);
         const selection = session.selection();
-        const match = findMatchesInYrs(
+        const match = findBodyMatches(
           session,
           (loc) => editor.yrsLocToDisplayPosition(loc),
           search.text,
@@ -181,12 +167,13 @@ export function useFindReplaceBridge({
 
   const handleReplaceAll = useCallback(
     async (searchText: string, replaceText: string, options: FindOptions): Promise<number> => {
+      if (pagedEditorRef.current?.isWorkerViewer?.()) return 0;
       let replaced = 0;
       const result = await complete(() => {
         const editor = pagedEditorRef.current;
         const session = editor?.getYrsSession();
         if (!editor || !session || !searchText.trim()) return commandOutcome(false);
-        const matches = findMatchesInYrs(
+        const matches = findBodyMatches(
           session,
           (loc) => editor.yrsLocToDisplayPosition(loc),
           searchText,

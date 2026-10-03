@@ -14,7 +14,7 @@ import { DocxCommandAdmissionError } from '../../../commands/createDocxCommandSt
 import type { DocxCommandResult } from '../../../commands/types';
 import type { PagedEditorRef } from '../PagedEditor';
 import { createYrsPositionProjection } from '../internals/yrsPositionProjection';
-import { awaitWorkerOpenReplica, deferWorkerOpenReplica } from '../internals/workerOpenReplica';
+import { awaitWorkerOpenReplica, deferWorkerOpenReplica, workerOpenReplicaPending } from '../internals/workerOpenReplica';
 import { currentYrsToolbarSelection } from '../yrsToolbar';
 import {
   useDocxCommandBinding,
@@ -234,6 +234,104 @@ describe('editor command binding', () => {
     release();
     expect(code(await accept)).toBe('revision-not-found');
     expect(code(await reject)).toBe('revision-required');
+  });
+
+  async function workerViewer(selectedText: Promise<string>) {
+    const session = await createYrsSession({ clientId: 950 + sessions.length });
+    sessions.push(session);
+    const hydrate = mock(async () => () => {});
+    const request = mock(() => {});
+    const replica = deferWorkerOpenReplica(session, hydrate, () => {}, () => {}, {
+      active: () => true, request,
+    });
+    const readSelectedText = mock(() => selectedText);
+    const openFind = mock(() => {});
+    const openReplace = mock(() => {});
+    const editor = mount(session, {
+      experimentalWorkerOpen: true,
+      mode: 'viewing',
+      pagedEditorRef: { current: {
+        isWorkerViewer: () => true,
+        getYrsSession: () => session,
+        readSelectedText,
+      } as unknown as PagedEditorRef },
+      findReplace: { openFind, openReplace } as never,
+    });
+    editor.bridge.toolbarSelection = () => null;
+    editor.bridge.hasSelection = () => false;
+    const admit = mock(async () => { throw new Error('unexpected replica admission'); });
+    editor.bridge.runAfterPendingInput = admit;
+    return { ...editor, session, replica, hydrate, request, readSelectedText, openFind, openReplace, admit };
+  }
+
+  test('worker viewer find opens with worker selected text while the replica stays pending', async () => {
+    const editor = await workerViewer(Promise.resolve('Selected text'));
+    try {
+      const pending = editor.store.execute('find', null);
+      expect(pending).toBeInstanceOf(Promise);
+      expect(code(await pending)).toBe('opened');
+      expect(editor.openFind).toHaveBeenCalledWith('Selected text');
+      expect(editor.readSelectedText).toHaveBeenCalledTimes(1);
+      expect(editor.admit).not.toHaveBeenCalled();
+      expect(editor.request).not.toHaveBeenCalled();
+      expect(editor.hydrate).not.toHaveBeenCalled();
+      expect(workerOpenReplicaPending(editor.session)).toBe(true);
+    } finally {
+      editor.replica.cancel();
+    }
+  });
+
+  test('worker viewer replace is refused without requesting the replica', async () => {
+    const editor = await workerViewer(Promise.resolve('Selected text'));
+    try {
+      expect(code(await editor.store.execute('replace', null))).toBe('viewing-mode');
+      expect(editor.openReplace).not.toHaveBeenCalled();
+      expect(editor.readSelectedText).not.toHaveBeenCalled();
+      expect(editor.admit).not.toHaveBeenCalled();
+      expect(editor.request).not.toHaveBeenCalled();
+      expect(editor.hydrate).not.toHaveBeenCalled();
+      expect(workerOpenReplicaPending(editor.session)).toBe(true);
+    } finally {
+      editor.replica.cancel();
+    }
+  });
+
+  test('worker viewer find bounds its selected-text read to 500 ms', async () => {
+    const editor = await workerViewer(new Promise(() => {}));
+    try {
+      expect(code(await editor.store.execute('find', null))).toBe('opened');
+      expect(editor.openFind).toHaveBeenCalledWith('');
+      expect(editor.admit).not.toHaveBeenCalled();
+      expect(editor.request).not.toHaveBeenCalled();
+      expect(editor.hydrate).not.toHaveBeenCalled();
+    } finally {
+      editor.replica.cancel();
+    }
+  });
+
+  test('worker viewer find opens empty when its selected-text read rejects', async () => {
+    const selectedText = Promise.reject(new Error('read failed'));
+    void selectedText.catch(() => {});
+    const editor = await workerViewer(selectedText);
+    try {
+      expect(code(await editor.store.execute('find', null))).toBe('opened');
+      expect(editor.openFind).toHaveBeenCalledWith('');
+      expect(editor.request).not.toHaveBeenCalled();
+      expect(editor.hydrate).not.toHaveBeenCalled();
+    } finally {
+      editor.replica.cancel();
+    }
+  });
+
+  test('editor find and replace prefill from the synchronous Yrs selection', async () => {
+    const { session } = await newSession();
+    const openFind = mock(() => {});
+    const openReplace = mock(() => {});
+    const editor = mount(session, { findReplace: { openFind, openReplace } as never });
+    expect(code(await editor.store.execute('find', null))).toBe('opened');
+    expect(openFind).toHaveBeenCalledWith('Hello');
+    expect(code(await editor.store.execute('replace', null))).toBe('opened');
+    expect(openReplace).toHaveBeenCalledWith('Hello');
   });
 
   test('engine refusals fail the command instead of reporting a no-op', async () => {
