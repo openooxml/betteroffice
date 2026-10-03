@@ -142,6 +142,14 @@ function setup() {
   return { worker, client };
 }
 
+test('frame results preserve the document version and preview provenance', async () => {
+  const { worker, client } = setup();
+  const pending = client.bootstrap(snapshot, '');
+  worker.reply({ ...frameReply(worker.lastId()), documentVersion: 'preview', documentPreview: true });
+  expect(await pending).toMatchObject({ documentVersion: 'preview', documentPreview: true });
+  client.destroy();
+});
+
 test('a pending proposal keeps every page build waiting, a pending read only background builds', async () => {
   const { worker, client } = setup();
   const bootstrap = client.bootstrap(snapshot, '');

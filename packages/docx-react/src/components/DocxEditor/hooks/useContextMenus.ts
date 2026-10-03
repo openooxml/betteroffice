@@ -340,8 +340,9 @@ export function useContextMenus({
           break;
         }
         case 'copy': {
-          const session = paged.getYrsSession();
-          const text = session ? yrsSelectionPlainText(session) : '';
+          const read = paged.readSelectedText();
+          const session = read ? null : paged.getYrsSession();
+          const text = read ? await read.catch(() => '') : session ? yrsSelectionPlainText(session) : '';
           if (text) await navigator.clipboard.writeText(text).catch(() => undefined);
           break;
         }
