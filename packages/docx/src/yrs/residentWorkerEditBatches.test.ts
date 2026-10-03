@@ -97,12 +97,14 @@ test('font snapshots append suffixes, preserve worker ids and recover from a mis
   expect(queuedOmission.fonts).toEqual([]);
   expect(queuedOmission.fontsBaseRevision).toBe(substituteSuffix.fontsRevision);
   const queued = client.sync(queuedOmission, '{}', 0);
-  const failures = Promise.all([
-    expect(failed).rejects.toThrow('font base revision mismatch'),
-    expect(queued).rejects.toThrow('font base revision mismatch'),
-  ]);
+  const failures = [failed, queued].map((reply) =>
+    reply.then(
+      () => null,
+      (error: unknown) => String(error)
+    )
+  );
   worker.release();
-  await failures;
+  for (const failure of failures) expect(await failure).toContain('font base revision mismatch');
   expect(client.syncedFontsRevision()).toBeNull();
   for (const id of [0, appendedId]) {
     expect(worker.sessions[0]!.outlineGlyphJson(id, 36)).toBe(main.outlineGlyphJson(id, 36));
