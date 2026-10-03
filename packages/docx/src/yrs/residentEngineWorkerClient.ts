@@ -4,6 +4,7 @@ import type {
   YrsResidentWorkerSnapshot,
   YrsSelection,
 } from './index';
+import type { CollaborationCursor } from '../collaboration/types';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type {
   ResidentDocumentRead,
@@ -35,6 +36,8 @@ export interface ResidentEngineWorkerFrame {
   engineProfile?: YrsEngineApplyProfile;
   caret: YrsResidentCaretSnapshot;
   selection: YrsSelection | null;
+  /** The same selection as sticky positions, for the host to resolve against its content. */
+  selectionCursor?: CollaborationCursor | null;
   /** The presented frame carries the worker-painted caret line. */
   caretPainted: boolean;
   replayMs: number;
@@ -862,6 +865,7 @@ function frameResult(
     engineProfile: response.engineProfile,
     caret: response.caret,
     selection: response.selection,
+    selectionCursor: response.selectionCursor ?? null,
     caretPainted: response.caretPainted ?? false,
     replayMs: response.replayMs ?? 0,
     replayedPages: response.replayedPages ?? 0,

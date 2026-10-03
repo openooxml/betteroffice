@@ -1196,7 +1196,6 @@ export function useRustDisplayList(
         if (dropped()) return { frameEpoch: null, caretSynchronized: false };
         if (!result.applied) return null;
         const delta = workerDelta ?? decodeFrameDelta(result.frame);
-        const unmoved = sameYrsSelection(worker.engine.selection(), selection);
         suppressWorkerInvalidationRef.current += 1;
         try {
           for (const update of result.updates) worker.engine.applyLocalUpdate(update);
@@ -1213,15 +1212,12 @@ export function useRustDisplayList(
         }
         const nextFrame = applyFrameDeltaOwned(previous.frame, delta);
         mainFrameRef.current = null;
-        // Input moved off the middle of a surrogate pair leaves this peer's sticky caret inside
-        // it; take the worker's settled selection unless the caret or content moved meanwhile.
-        if (
-          unmoved &&
-          contentEpochRef.current === dispatchedEpoch &&
-          result.selection &&
-          !sameYrsSelection(result.selection, worker.engine.selection())
-        ) {
-          worker.engine.setSelection(result.selection.anchor, result.selection.head);
+        // Typing moved off the middle of a surrogate pair leaves this peer's sticky caret inside it.
+        const settled = result.selectionCursor
+          ? worker.engine.resolveSelection(result.selectionCursor)
+          : null;
+        if (settled && !sameYrsSelection(settled, worker.engine.selection())) {
+          worker.engine.setSelection(settled.anchor, settled.head);
         }
         const caret = residentCaretForSelection(
           result.caret,

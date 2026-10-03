@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 
+import type { CollaborationCursor } from '../collaboration/types';
 import type { YrsResidentCaretRect, YrsResidentWorkerSnapshot } from './index';
 import {
   createResidentEngineSession,
@@ -738,6 +739,17 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
               frame: session.applyInput(request.text, request.expectedFrameEpoch),
               profile: undefined,
             };
+    // Typing inside a surrogate pair lands before it and settles the caret after the text; the
+    // host's sticky caret stays inside the pair, so it takes this one.
+    let settled: CollaborationCursor | null = null;
+    if (request.type === 'applyInput') {
+      const sent = request.selection.head;
+      const head = session.selection()?.head;
+      const expected = sent.offset + request.text.length;
+      if (head && (head.paraId !== sent.paraId || head.offset !== expected)) {
+        settled = session.encodeSelection();
+      }
+    }
     await replyFrame(
       request.id,
       applied.frame,
@@ -749,7 +761,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       request.paintCaret,
       undefined,
       false,
-      request.type === 'applyDelete' ? session.residentDeletedUnits() : undefined
+      request.type === 'applyDelete' ? session.residentDeletedUnits() : undefined,
+      [],
+      settled
     );
   } catch (error) {
     if (trap) throw trap;
@@ -1293,7 +1307,8 @@ async function replyFrame(
   layoutJson?: string,
   layoutProvisional = false,
   deletedUnits?: number,
-  precedingPageFrames: Uint8Array[] = []
+  precedingPageFrames: Uint8Array[] = [],
+  selectionCursor: CollaborationCursor | null = null
 ): Promise<void> {
   applyWorkerFrame(bytes);
   const limit = provisionalFinalPages;
@@ -1354,6 +1369,7 @@ async function replyFrame(
       engineProfile,
       caret,
       selection,
+      ...(selectionCursor ? { selectionCursor } : {}),
       caretPainted,
       replayMs,
       replayedPages,

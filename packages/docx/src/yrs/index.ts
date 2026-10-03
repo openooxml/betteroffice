@@ -29,6 +29,7 @@ import type {
   DocxParagraphSavePlan,
 } from './paragraphIdentity';
 import { decodeS9Envelope, decodeS9EnvelopeValue } from '../docx/rustParseFacade';
+import { decodeEncodedSelection } from './encodedSelection';
 import type {
   CollaborationCursor,
   CollaborationReplica,
@@ -2109,20 +2110,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       cachedSelection = JSON.parse(session.selection()) as YrsSelection | null;
       return cloneSelection(cachedSelection);
     },
-    encodeSelection: () => {
-      const encoded = JSON.parse(session.encoded_selection()) as {
-        story: string;
-        anchor: number[];
-        head: number[];
-      } | null;
-      return encoded
-        ? {
-            story: encoded.story,
-            anchor: Uint8Array.from(encoded.anchor),
-            head: Uint8Array.from(encoded.head),
-          }
-        : null;
-    },
+    encodeSelection: () => decodeEncodedSelection(session.encoded_selection()),
     resolveSelection: (cursor) => {
       try {
         return JSON.parse(
