@@ -190,12 +190,12 @@ describe('command store execution', () => {
   }
 
   test('viewer mutations keep the origin and scope refusals ahead of the mode gate', async () => {
-    const { store, controller, harness } = setup({ readOnly: true, mode: 'viewing' });
+    const { controller, harness } = setup({ readOnly: true, mode: 'viewing' });
     harness.binding.isViewer = () => true;
     const admit = mock(() => new Promise<never>(() => {}));
     harness.state.admission = admit;
     const scope = { deny: () => 'permission-denied' as const, subscribe: () => () => {} };
-    expect(await store.scoped(scope).execute('bold', null)).toMatchObject({
+    expect(await controller.scoped(scope).execute('bold', null)).toMatchObject({
       ok: false, failure: { code: 'permission-denied' },
     });
     const deferred = controller.defer('bold', null, 'selection');
