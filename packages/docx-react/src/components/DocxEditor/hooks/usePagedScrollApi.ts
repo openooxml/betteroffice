@@ -66,6 +66,11 @@ function isUnbuiltPage(queries: DisplayListQueries, pageIndex: number): boolean 
   return queries.displayList?.pages[pageIndex]?.unbuilt === true;
 }
 
+/** The full layout is on screen, so a position it doesn't place never will be. */
+function isLaidOut(layout: Layout, queries: DisplayListQueries): boolean {
+  return !layout.partial && queries.pageCount() === layout.pages.length;
+}
+
 export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrollApiReturn {
   const {
     pagesContainerRef,
@@ -166,18 +171,62 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     scrollRectIntoView(rect, false);
   }, [clearPendingRefine, displayListQueries, scrollRectIntoView, yrsSession]);
 
+  const pendingPositionRef = useRef<{
+    position: number;
+    forParaIdScroll: boolean;
+    epoch: number | undefined;
+    session: YrsSession | null;
+    version: string | undefined;
+  } | null>(null);
   const scrollToPositionImpl = useCallback(
     (pmPos: number, forParaIdScroll = false) => {
+      pendingPositionRef.current = null;
       if (!Number.isInteger(pmPos) || pmPos < 0 || !displayListQueries) return;
       onNavigationIntent?.();
       clearPendingRefine();
       scrollAbortRef.current?.abort();
       scrollAbortRef.current = new AbortController();
       const rect = displayListQueries.anchorRect(pmPos);
-      if (rect) scrollAnchorIntoView(displayListQueries, rect, pmPos, !forParaIdScroll);
+      if (rect) {
+        scrollAnchorIntoView(displayListQueries, rect, pmPos, !forParaIdScroll);
+      } else if (layout && !isLaidOut(layout, displayListQueries)) {
+        pendingPositionRef.current = {
+          position: pmPos,
+          forParaIdScroll,
+          epoch: navigationEpoch?.(),
+          session: yrsSession,
+          version: yrsSession?.version(),
+        };
+      }
     },
-    [clearPendingRefine, displayListQueries, onNavigationIntent, scrollAnchorIntoView]
+    [
+      clearPendingRefine,
+      displayListQueries,
+      layout,
+      navigationEpoch,
+      onNavigationIntent,
+      scrollAnchorIntoView,
+      yrsSession,
+    ]
   );
+
+  useEffect(() => {
+    const pending = pendingPositionRef.current;
+    if (!pending || !displayListQueries) return;
+    if (
+      pending.session !== yrsSession ||
+      pending.epoch !== navigationEpoch?.() ||
+      pending.version !== yrsSession?.version()
+    ) {
+      pendingPositionRef.current = null;
+      return;
+    }
+    if (displayListQueries.anchorRect(pending.position)) {
+      scrollToPositionImpl(pending.position, pending.forParaIdScroll);
+    } else if (layout && isLaidOut(layout, displayListQueries)) {
+      pendingPositionRef.current = null;
+    }
+  }, [displayListQueries, layout, navigationEpoch, scrollToPositionImpl, yrsSession]);
 
   const revealPositionImpl = useCallback(
     (position: number, signal?: AbortSignal): RevealPositionOutcome => {

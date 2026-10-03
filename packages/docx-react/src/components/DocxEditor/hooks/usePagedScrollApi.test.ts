@@ -305,3 +305,64 @@ test('aborting a reveal stops following an unbuilt page after three seconds', as
     clock.mockRestore();
   }
 });
+
+function paginatingApi() {
+  const { scroller, host, scrolls } = pagedDom();
+  const navigation = { epoch: 0 };
+  const heading = { pageIndex: 8, x: 20, y: 500, width: 0, height: 16 };
+  const laidOut = { ...unbuiltQueries(true, heading), pageCount: () => 10 } as DisplayListQueries;
+  const paginating = { ...laidOut, anchorRect: () => null } as DisplayListQueries;
+  const hook = renderHook(
+    (props: Props) =>
+      usePagedScrollApi({
+        pagesContainerRef: { current: host },
+        yrsInputRef: { current: null },
+        yrsSession: props.session ?? null,
+        yrsLocToDisplayPosition: () => null,
+        getScrollContainer: () => scroller,
+        displayListQueries: props.queries,
+        layout: props.layout,
+        onNavigationIntent: () => {
+          navigation.epoch += 1;
+        },
+        navigationEpoch: () => navigation.epoch,
+      }),
+    { initialProps: { layout: layout(7, true), queries: paginating } as Props }
+  );
+  return { ...hook, scroller, scrolls, navigation, laidOut, paginating };
+}
+
+test('a position past a partial layout is scrolled to once the layout reaches it', async () => {
+  const { result, rerender, scroller, scrolls, laidOut, paginating } = paginatingApi();
+  await act(async () => result.current.scrollToPositionImpl(5000));
+  expect(scrolls).toHaveLength(0);
+  await act(async () => rerender({ layout: layout(9, true), queries: paginating }));
+  expect(scrolls).toHaveLength(0);
+  await act(async () => rerender({ layout: layout(10), queries: laidOut }));
+  expect(scrolls).toHaveLength(1);
+  const headingTop = 8000 - scroller.scrollTop + 500;
+  expect(headingTop).toBeGreaterThanOrEqual(0);
+  expect(headingTop).toBeLessThanOrEqual(400);
+  await act(async () => rerender({ layout: layout(10), queries: { ...laidOut } }));
+  expect(scrolls).toHaveLength(1);
+  scroller.remove();
+});
+
+test('a position waiting for the layout drops on a newer navigation, another session or a full layout without it', async () => {
+  const drops: Array<(api: ReturnType<typeof paginatingApi>) => void> = [
+    ({ navigation }) => {
+      navigation.epoch += 1;
+    },
+    ({ rerender, paginating }) =>
+      rerender({ layout: layout(9, true), queries: paginating, session: {} as YrsSession }),
+    ({ rerender, paginating }) => rerender({ layout: layout(10), queries: paginating }),
+  ];
+  for (const drop of drops) {
+    const api = paginatingApi();
+    await act(async () => api.result.current.scrollToPositionImpl(5000));
+    await act(async () => drop(api));
+    await act(async () => api.rerender({ layout: layout(10), queries: api.laidOut }));
+    expect(api.scrolls).toHaveLength(0);
+    api.scroller.remove();
+  }
+});
