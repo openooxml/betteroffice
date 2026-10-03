@@ -1166,6 +1166,32 @@ describe('queued snapshots', () => {
 });
 
 describe('sent snapshot state', () => {
+  test('rebootstrap ignores a pending sync reply and records the new bootstrap', async () => {
+    const { worker, client } = setup();
+    const bootstrap = client.bootstrap({ ...snapshot, fontsRevision: 1 }, '');
+    worker.reply(frameReply(worker.lastId()));
+    await bootstrap;
+    const sync = client.sync({ ...snapshot, fontsRevision: 2 }, '', 0, false, {
+      stateVector: new Uint8Array([2]),
+    });
+    const oldId = worker.lastId();
+    expect(client.syncedFontsRevision()).toBe(2);
+    expect(client.remoteStateVector()).toEqual(new Uint8Array([2]));
+    client.rebootstrap();
+    expect(client.syncedFontsRevision()).toBeNull();
+    expect(client.remoteStateVector()).toBeNull();
+    worker.reply({ ...frameReply(oldId), stateVector: new Uint8Array([9]).buffer });
+    await sync;
+    expect(client.syncedFontsRevision()).toBeNull();
+    expect(client.remoteStateVector()).toBeNull();
+    const next = client.bootstrap({ ...snapshot, fontsRevision: 3 }, '');
+    worker.reply({ ...frameReply(worker.lastId()), stateVector: new Uint8Array([3]).buffer });
+    await next;
+    expect(client.syncedFontsRevision()).toBe(3);
+    expect(client.remoteStateVector()).toEqual(new Uint8Array([3]));
+    client.destroy();
+  });
+
   test('a reply to an earlier request does not replace a later snapshot hint', async () => {
     const { worker, client } = setup();
     const bootstrap = client.bootstrap({ ...snapshot, fontsRevision: 1 }, '', {

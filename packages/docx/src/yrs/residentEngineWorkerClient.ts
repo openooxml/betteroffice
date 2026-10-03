@@ -277,7 +277,7 @@ export class ResidentEngineWorkerClient {
     this.bootstrapped = false;
     this.remoteVector = null;
     this.appliedFontsRevision = null;
-    this.lastSnapshotId = 0;
+    this.lastSnapshotId = this.nextId;
     this.revision = 0;
     this.keepSurfaces = true;
     // The bootstrap it asks for frees the worker's document, opened there or not.

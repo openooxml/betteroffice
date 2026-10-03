@@ -75,7 +75,7 @@ test('font snapshots append suffixes, preserve worker ids and recover from a mis
   const booted = await client.bootstrap(initial, '{}');
   const current = main.residentWorkerSnapshot({ knownFontsRevision: client.syncedFontsRevision() })!;
   expect(current.fonts).toEqual([]);
-  expect(current.fontsBaseRevision).toBe(client.syncedFontsRevision());
+  expect(current.fontsBaseRevision).toBe(client.syncedFontsRevision()!);
   const appendedId = main.registerFont(bytes);
   expect(appendedId).toBe(1);
   const suffix = main.residentWorkerSnapshot({ knownFontsRevision: client.syncedFontsRevision() })!;

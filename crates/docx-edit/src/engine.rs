@@ -2771,7 +2771,7 @@ impl EngineSession {
             &measurement.defaults,
             &measurement.compat,
             measurement.authoritative_shaping,
-            docx_layout::measure_font_cache_identity(),
+            docx_layout::measure_font_cache_identity(&measurement.font_chains),
         ))
         .map(|bytes| hash_bytes(&bytes))
         .map_err(|error| format!("fingerprint measurement config: {error}"))?;
@@ -6874,6 +6874,91 @@ mod tests {
             serde_json::to_vec(&warm).unwrap(),
             serde_json::to_vec(&cold).unwrap()
         );
+    }
+
+    #[test]
+    fn registered_chain_font_invalidates_synthetic_resident_measurements() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        assert_eq!(
+            docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap(),
+            0
+        );
+        let engine = EngineSession::new(9657);
+        let blocks = [json!({
+            "type": "paragraph", "content": [font_preflight_run("Latin", "Requested")]
+        })];
+        crate::seed::seed_blocks(engine.doc(), None, &[("body".to_owned(), &blocks)]).unwrap();
+        let mut request: serde_json::Value = serde_json::from_str(&small_page_request(0)).unwrap();
+        request["measurement"]["defaults"]["fontFamily"] = json!("Requested");
+        request["measurement"]["fontChains"] = json!({"requested|0|0": [1]});
+        let request = request.to_string();
+        engine.layout_document_with_regions_json(&request).unwrap();
+        let snapshot = |engine: &EngineSession| {
+            let pagination = engine.pagination.borrow();
+            (
+                serde_json::to_vec(&pagination.input.as_ref().unwrap().measured).unwrap(),
+                pagination.block_fingerprints.clone(),
+                serde_json::to_vec(&pagination.layout.as_ref().unwrap().pages).unwrap(),
+            )
+        };
+        let synthetic = snapshot(&engine);
+        let dependencies = {
+            let pagination = engine.pagination.borrow();
+            let BlockExtent::Paragraph(extent) =
+                &pagination.input.as_ref().unwrap().measured[0].measure
+            else {
+                panic!("paragraph expected");
+            };
+            assert_eq!(extent.lines[0].synthetic_fallback, Some(true));
+            pagination.measured_font_dependencies[0].clone()
+        };
+        assert_eq!(
+            docx_layout::register_measure_font_bytes(lowering_pages::OTHER_FONT).unwrap(),
+            1
+        );
+        let chains = BTreeMap::from([("requested|0|0".to_owned(), vec![1])]);
+        assert!(dependencies.matches(FontChains::BTree(&chains)));
+        engine.layout_document_with_regions_json(&request).unwrap();
+        let warm = snapshot(&engine);
+        assert_ne!(synthetic.0, warm.0);
+        {
+            let pagination = engine.pagination.borrow();
+            let BlockExtent::Paragraph(extent) =
+                &pagination.input.as_ref().unwrap().measured[0].measure
+            else {
+                panic!("paragraph expected");
+            };
+            assert_ne!(extent.lines[0].synthetic_fallback, Some(true));
+        }
+        let state = engine.doc().encode_state_as_update_v1();
+        docx_layout::with_private_measure_fonts(|| {
+            assert_eq!(
+                docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap(),
+                0
+            );
+            assert_eq!(
+                docx_layout::register_measure_font_bytes(lowering_pages::OTHER_FONT).unwrap(),
+                1
+            );
+            let cold = EngineSession::new(9658);
+            cold.doc().apply_update_v1(&state).unwrap();
+            cold.layout_document_with_regions_json(&request).unwrap();
+            assert_eq!(warm, snapshot(&cold));
+        });
+        assert_eq!(
+            docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap(),
+            2
+        );
+        let before = engine.stats();
+        engine.layout_document_with_regions_json(&request).unwrap();
+        let after = engine.stats();
+        assert_eq!(after.resident_measure_calls, before.resident_measure_calls);
+        assert_eq!(
+            after.resident_reused_blocks - before.resident_reused_blocks,
+            1
+        );
+        assert_eq!(warm, snapshot(&engine));
     }
 
     #[test]

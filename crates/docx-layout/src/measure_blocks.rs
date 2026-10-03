@@ -1438,9 +1438,9 @@ fn extent_cache_lookup(
             }
         }
         key.extend_from_slice(&config_fingerprint(config).to_le_bytes());
-        let (store, has_fonts) = crate::measure_font_cache_identity();
+        let (store, availability) = crate::measure_font_cache_identity(&config.font_chains);
         key.extend_from_slice(&store.to_le_bytes());
-        key.push(u8::from(has_fonts));
+        key.extend_from_slice(&availability.to_le_bytes());
         match EXTENT_CACHE.with(|cache| {
             cache
                 .borrow_mut()
@@ -3359,6 +3359,61 @@ mod tests {
             serde_json::to_vec(&warm).unwrap(),
             serde_json::to_vec(&cold).unwrap()
         );
+    }
+
+    #[test]
+    fn registered_chain_font_invalidates_synthetic_extents() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let regular = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        let appended = include_bytes!("../../docx-raster/tests/assets/Carlito-Regular.ttf");
+        assert_eq!(crate::register_measure_font_bytes(regular).unwrap(), 0);
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("requested|0|0".to_owned(), vec![1])]),
+            defaults: json!({"fontFamily": "Requested", "fontSize": 12}),
+            ..Default::default()
+        };
+        let paragraph: ParagraphBlock = serde_json::from_value(json!({
+            "id": "pending-font", "runs": [
+                {"kind": "text", "text": "Latin", "fontFamily": "Requested"}
+            ]
+        }))
+        .unwrap();
+        let (synthetic, dependencies) = FontChainDependencies::capture(|| {
+            measure_paragraph(&paragraph, 300.0, &config).unwrap()
+        });
+        assert_eq!(synthetic.lines[0].synthetic_fallback, Some(true));
+        assert!(matches!(
+            extent_cache_lookup(&paragraph, 300.0, &config, None, 0.0),
+            ExtentLookup::Hit(_)
+        ));
+        assert_eq!(crate::register_measure_font_bytes(appended).unwrap(), 1);
+        assert!(dependencies.matches(FontChains::BTree(&config.font_chains)));
+        assert!(matches!(
+            extent_cache_lookup(&paragraph, 300.0, &config, None, 0.0),
+            ExtentLookup::Miss(_)
+        ));
+        let before = EXTENT_MEASURE_CALLS.with(|calls| calls.get());
+        let warm = measure_paragraph(&paragraph, 300.0, &config).unwrap();
+        assert_eq!(EXTENT_MEASURE_CALLS.with(|calls| calls.get()) - before, 1);
+        assert_ne!(warm.lines[0].synthetic_fallback, Some(true));
+        assert_ne!(
+            serde_json::to_vec(&synthetic).unwrap(),
+            serde_json::to_vec(&warm).unwrap()
+        );
+        let cold = crate::with_private_measure_fonts(|| {
+            assert_eq!(crate::register_measure_font_bytes(regular).unwrap(), 0);
+            assert_eq!(crate::register_measure_font_bytes(appended).unwrap(), 1);
+            measure_paragraph(&paragraph, 300.0, &config).unwrap()
+        });
+        assert_eq!(
+            serde_json::to_vec(&warm).unwrap(),
+            serde_json::to_vec(&cold).unwrap()
+        );
+        assert_eq!(crate::register_measure_font_bytes(regular).unwrap(), 2);
+        let before = EXTENT_MEASURE_CALLS.with(|calls| calls.get());
+        assert_eq!(measure_paragraph(&paragraph, 300.0, &config).unwrap(), warm);
+        assert_eq!(EXTENT_MEASURE_CALLS.with(|calls| calls.get()), before);
     }
 
     #[test]
