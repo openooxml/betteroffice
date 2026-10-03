@@ -5,6 +5,7 @@ import type {
   YrsParagraphSpan,
   YrsRegionLayoutProgress,
   YrsResidentCaretSnapshot,
+  YrsResolvedCommentAnchor,
   YrsRevisionInfo,
   YrsSelection,
   YrsSelectionText,
@@ -58,6 +59,7 @@ export type ResidentEngineSession = Pick<
   | 'resumeRegionLayout'
   | 'selection'
   | 'selectionText'
+  | 'resolveComment'
   | 'searchText'
   | 'encodeStickyPosition'
   | 'resolveStickyPosition'
@@ -243,6 +245,8 @@ export async function createResidentEngineSession(
   return {
     proposalEngine,
     geometryReader,
+    resolveComment: (commentId) =>
+      JSON.parse(session.resolve_comment(commentId)) as YrsResolvedCommentAnchor[],
     paragraphSegments: (story, indices) =>
       JSON.parse(session.story_segment_units(story, Uint32Array.from(indices))) as YrsStorySegment[][],
     searchText: (query, options = {}) => {

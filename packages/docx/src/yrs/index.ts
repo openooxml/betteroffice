@@ -78,6 +78,7 @@ import type {
 export * from './edits';
 export * from './contentControls';
 export * from './readTypes';
+export * from './findParagraphs';
 export * from './structuredExport';
 export * from './pagedExport';
 export * from './inputPositionMap';

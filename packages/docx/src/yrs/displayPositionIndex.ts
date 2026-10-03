@@ -15,6 +15,8 @@ export type DisplayPositionReader = Pick<
   | 'paragraphSpans'
   | 'locateParagraph'
   | 'selectionText'
+  | 'resolveComment'
+  | 'listRevisions'
 >;
 
 /**

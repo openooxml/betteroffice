@@ -4,6 +4,7 @@ import type {
   YrsResidentCaretSnapshot,
   YrsResidentWorkerSnapshot,
   YrsSelection,
+  YrsSelectionText,
   YrsStickyPosition,
 } from './index';
 import type { PointPosition } from '../plugin-api';
@@ -14,6 +15,7 @@ import type {
   DocxSelectionUnit,
 } from './viewerSelection';
 import type { ResidentSearchResult } from './residentSearch';
+import type { DocxFindParagraphsOptions, DocxParagraphMatch } from './findParagraphs';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 import type {
@@ -55,6 +57,7 @@ export type ResidentDocumentRead =
   | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
   | { kind: 'readParagraphs'; request: DocxReadParagraphsRequest }
   | { kind: 'searchText'; query: string; caseSensitive: boolean; carry?: YrsStickyPosition | null }
+  | ({ kind: 'findParagraphs'; query: string } & DocxFindParagraphsOptions)
   | { kind: 'stickyAnchors'; locs: YrsLoc[]; version: string }
   | { kind: 'navigationTarget'; story: string; paraId: string }
   | { kind: 'pointPosition'; hit: PointPosition; expectVersion: string }
@@ -66,6 +69,9 @@ export type ResidentDocumentRead =
       expectVersion: string;
     }
   | { kind: 'selectionText'; story: string; anchor: number; head: number; expectVersion: string }
+  | { kind: 'selectionInfo'; story: string; anchor: number; head: number; expectVersion: string }
+  | { kind: 'commentTarget'; story: string; commentId: string; expectVersion: string }
+  | { kind: 'revisionTarget'; story: string; revisionId: string; expectVersion: string }
   | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string };
 
 /** @internal */
@@ -75,10 +81,14 @@ export interface ResidentDocumentReadValues {
   readParagraphs: DocxReadParagraphsResult;
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
   searchText: ResidentSearchResult;
+  findParagraphs: DocxParagraphMatch[];
   stickyAnchors: Array<YrsStickyPosition | null>;
   pointPosition: DocxResolvedPointPosition | null;
   selectionUnit: DocxDisplayRange | null;
   selectionText: DocxDisplaySelectionText | null;
+  selectionInfo: YrsSelectionText | null;
+  commentTarget: DocxDisplayRange | null;
+  revisionTarget: DocxDisplayRange | null;
   bookmarkPosition: number | null;
 }
 

@@ -2252,7 +2252,7 @@ describe('worker proposals during sliced completion', () => {
     import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
   )))));
 
-  async function proposalWorker(extraBody = '') {
+  async function proposalWorker(extraBody = '', comments?: string) {
     const parts: PartsMap = new Map();
     parts.set('[Content_Types].xml', toBytes(
       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
@@ -2266,6 +2266,12 @@ describe('worker proposals during sliced completion', () => {
     parts.set('word/document.xml', toBytes(
       `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>${body}<w:sectPr/></w:body></w:document>`
     ));
+    if (comments !== undefined) {
+      const types = new TextDecoder().decode(parts.get('[Content_Types].xml')!);
+      parts.set('[Content_Types].xml', toBytes(types.replace('</Types>', '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>')));
+      parts.set('word/_rels/document.xml.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/></Relationships>'));
+      parts.set('word/comments.xml', toBytes(`<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${comments}</w:comments>`));
+    }
     const engine = await createResidentEngineSession();
     engine.openDocx(new Uint8Array(rezipPartsToArrayBuffer(parts)));
     const w = worker();
@@ -2616,6 +2622,59 @@ describe('worker proposals during sliced completion', () => {
       expect(calls.filter((call) => call === 'begin')).toHaveLength(1);
       await expectFullLayout(completed);
     } finally {
+      engine.destroy();
+    }
+  });
+
+  test('viewer document reads reply with the current version and value', async () => {
+    const extraBody = '<w:p w14:paraId="00000100"><w:r><w:t xml:space="preserve">Before </w:t></w:r>' +
+      '<w:commentRangeStart w:id="1"/><w:r><w:t>the phrase</w:t></w:r><w:commentRangeEnd w:id="1"/>' +
+      '<w:r><w:commentReference w:id="1"/></w:r><w:r><w:t xml:space="preserve"> </w:t></w:r>' +
+      '<w:ins w:id="9" w:author="A" w:date="2026-10-01T00:00:00Z"><w:r><w:t>new</w:t></w:r></w:ins>' +
+      '<w:r><w:t xml:space="preserve"> after</w:t></w:r></w:p>';
+    const comments = '<w:comment w:id="1" w:author="Reviewer"><w:p><w:r><w:t>Check phrase</w:t></w:r></w:p></w:comment>';
+    const { w, engine } = await proposalWorker(extraBody, comments);
+    const main = await createYrsSession();
+    try {
+      main.loadState(engine.encodeState());
+      const version = engine.proposalEngine.version();
+      const projection = createYrsPositionProjection(main, 'body');
+      const position = (offset: number) => yrsLocToProjectedDisplayPosition(main, () => projection, {
+        story: 'body', paraId: '00000100', offset,
+      })!;
+      const revision = main.listRevisions().find((candidate) => candidate.kind === 'insertion')!;
+      const requests: Array<{ read: ResidentDocumentRead; value: unknown }> = [
+        {
+          read: { kind: 'findParagraphs', query: 'phrase', caseSensitive: true, limit: 1 },
+          value: [{ paraId: '00000100', match: 'phrase', before: 'Before the ', after: ' new after' }],
+        },
+        {
+          read: { kind: 'selectionInfo', story: 'body', anchor: position(17), head: position(7), expectVersion: version },
+          value: main.selectionText({
+            story: 'body', start: { paraId: '00000100', offset: 7 }, end: { paraId: '00000100', offset: 17 },
+          }),
+        },
+        {
+          read: { kind: 'commentTarget', story: 'body', commentId: '1', expectVersion: version },
+          value: { anchor: position(7), head: position(17) },
+        },
+        {
+          read: { kind: 'revisionTarget', story: 'body', revisionId: revision.revisionId, expectVersion: version },
+          value: { anchor: position(18), head: position(21) },
+        },
+      ];
+      for (const { read, value } of requests) {
+        const reply = await w.send({ type: 'documentRead', read });
+        expect(reply.ok).toBe(true);
+        expect(reply.ok && reply.read).toEqual({ version, value });
+        if ('expectVersion' in read) {
+          const stale = await w.send({ type: 'documentRead', read: { ...read, expectVersion: `${version}-stale` } });
+          expect(stale.ok).toBe(true);
+          expect(stale.ok && stale.read).toEqual({ version, value: null });
+        }
+      }
+    } finally {
+      main.destroy();
       engine.destroy();
     }
   });
