@@ -4,6 +4,7 @@ import type {
   YrsResidentWorkerSnapshot,
   YrsSelection,
 } from './index';
+import type { CollaborationCursor } from '../collaboration/types';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type {
   ResidentDocumentRead,
@@ -35,6 +36,8 @@ export interface ResidentEngineWorkerFrame {
   engineProfile?: YrsEngineApplyProfile;
   caret: YrsResidentCaretSnapshot;
   selection: YrsSelection | null;
+  /** The same selection as sticky positions, for the host to resolve against its content. */
+  selectionCursor?: CollaborationCursor | null;
   /** The presented frame carries the worker-painted caret line. */
   caretPainted: boolean;
   replayMs: number;
@@ -239,10 +242,10 @@ export class ResidentEngineWorkerClient {
     this.failureListener = listener;
   }
 
-  /** @internal Whether foreground document or frame work awaits its reply. */
-  frameRequestPending(): boolean {
+  /** @internal Whether foreground document or frame work awaits its reply; `reads: false` leaves document reads out. */
+  frameRequestPending(reads = true): boolean {
     for (const { type } of this.pending.values()) {
-      if (FRAME_REQUESTS.has(type)) return true;
+      if (FRAME_REQUESTS.has(type) && (reads || type !== 'documentRead')) return true;
     }
     return false;
   }
@@ -410,6 +413,30 @@ export class ResidentEngineWorkerClient {
       throw new ResidentWorkerFailureError('Resident engine worker omitted the document read');
     }
     return response.read as { version: string; value: ResidentDocumentReadValues[K] };
+  }
+
+  /**
+   * Reads the document at `expectVersion`. A later message may run first; the
+   * read then answers `superseded` when the document moved on meanwhile.
+   * @internal
+   */
+  async documentReadAt<K extends ResidentDocumentRead['kind']>(
+    read: ResidentDocumentRead & { kind: K },
+    expectVersion: string
+  ): Promise<
+    | { status: 'ok'; version: string; value: ResidentDocumentReadValues[K] }
+    | { status: 'superseded' }
+  > {
+    const response = await this.request({ type: 'documentRead', read, expectVersion });
+    if (response.superseded) return { status: 'superseded' };
+    if (!response.read) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted the document read');
+    }
+    const { version, value } = response.read as {
+      version: string;
+      value: ResidentDocumentReadValues[K];
+    };
+    return { status: 'ok', version, value };
   }
 
   /** @internal */
@@ -871,6 +898,7 @@ function frameResult(
     engineProfile: response.engineProfile,
     caret: response.caret,
     selection: response.selection,
+    selectionCursor: response.selectionCursor ?? null,
     caretPainted: response.caretPainted ?? false,
     replayMs: response.replayMs ?? 0,
     replayedPages: response.replayedPages ?? 0,

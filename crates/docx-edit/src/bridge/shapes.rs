@@ -760,10 +760,16 @@ fn shape_run_formatting(source: Option<&Value>) -> RunFormatting {
         output.insert("color".to_owned(), Value::String(color));
     }
     if let Some(size) = number_in(source, "fontSize") {
-        output.insert("fontSize".to_owned(), Value::from(size / 2.0));
+        output.insert(
+            "fontSize".to_owned(),
+            Value::from(super::font_size_pt(size)),
+        );
     }
     if let Some(size) = number_in(source, "fontSizeCs") {
-        output.insert("fontSizeCs".to_owned(), Value::from(size / 2.0));
+        output.insert(
+            "fontSizeCs".to_owned(),
+            Value::from(super::font_size_pt(size)),
+        );
     }
     if let Some(fonts) = source.get("fontFamily").and_then(object_value) {
         output.insert("fontSlots".to_owned(), Value::Object(fonts.clone()));

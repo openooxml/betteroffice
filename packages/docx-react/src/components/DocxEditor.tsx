@@ -2604,6 +2604,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               applyResidentDelete={canvasRenderer.applyDelete}
               displayListQueries={canvasRenderer.queries}
               resolveDisplayListQueries={canvasRenderer.resolveQueries}
+              pageNavigation={canvasRenderer.pageNavigation}
               canvasDisplayList={canvasRenderer.displayList}
               displayListFrameEpoch={canvasRenderer.frame?.frameEpoch ?? null}
               residentCaret={canvasRenderer.caret}
