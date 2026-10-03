@@ -304,9 +304,36 @@ impl<'a> RowBreaks<'a> {
             .fold(0.0, f64::max)
     }
 
-    /// The smallest per-cell slice of `row` from `consumed` on: one that holds
-    /// the first unbreakable stretch of every cell with content left.
+    /// The smallest per-cell slice of `row` from `consumed` on that the row loop
+    /// places in a column `capacity` tall: [`Self::every_cell_start`], or where no
+    /// such column starts every cell, the smallest slice any cell progresses in.
     pub(crate) fn first_cell_slice(&self, row: usize, consumed: f64, capacity: f64) -> Option<f64> {
+        self.every_cell_start(row, consumed, capacity).or_else(|| {
+            let minimum = self
+                .cells(row)?
+                .iter()
+                .filter_map(|cell| {
+                    let top = consumed.min(cell.end);
+                    cell.kept
+                        .iter()
+                        .copied()
+                        .find(|offset| *offset > top)
+                        .map(|offset| offset - top)
+                })
+                .min_by(f64::total_cmp)?;
+            let shared = snap_row_break(&self.kept, row, consumed, minimum);
+            (minimum <= capacity
+                && self
+                    .cell_slice(row, consumed, None, minimum, shared, false, capacity)
+                    .is_some())
+            .then_some(minimum)
+        })
+    }
+
+    /// The smallest per-cell slice of `row` from `consumed` on that holds the
+    /// first unbreakable stretch of every cell with content left, when a column
+    /// `capacity` tall holds it.
+    pub(crate) fn every_cell_start(&self, row: usize, consumed: f64, capacity: f64) -> Option<f64> {
         let minimum = self
             .cells(row)?
             .iter()

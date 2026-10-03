@@ -173,15 +173,16 @@ pub(crate) fn row_keep_chains(
 /// The height a keep-with-next row chain keeps on one page in a column
 /// `capacity` tall: its rows and the smallest slice of the row after it, as
 /// Word keeps a row with the next row's start, or that whole row when its
-/// paragraph rules leave no break in such a column. Per-cell starts are
-/// measured in a column `cell_capacity` tall.
+/// paragraph rules leave no break in such a column. The per-cell start of a
+/// row from `body_row` on is measured in a column `body_capacity` tall.
 pub(crate) fn row_keep_height(
     chain: Option<(f64, usize)>,
     block: &TableBlock,
     measure: &TableExtent,
     breaks: &RowBreaks,
     capacity: f64,
-    cell_capacity: f64,
+    body_row: usize,
+    body_capacity: f64,
     limited_by_float: bool,
 ) -> f64 {
     let Some((rows, follower)) = chain else {
@@ -191,7 +192,15 @@ pub(crate) fn row_keep_height(
     if !limited_by_float {
         slice = slice.min(
             breaks
-                .first_cell_slice(follower, 0.0, cell_capacity)
+                .first_cell_slice(
+                    follower,
+                    0.0,
+                    if follower >= body_row {
+                        body_capacity
+                    } else {
+                        capacity
+                    },
+                )
                 .unwrap_or(slice),
         );
     }
@@ -333,7 +342,12 @@ fn layout_table_with_position(
                     false,
                     body_capacity,
                 )
-                .filter(|slice| !slice.starved)
+                .filter(|slice| {
+                    !slice.starved
+                        || breaks
+                            .every_cell_start(header_row_count, 0.0, body_capacity)
+                            .is_none()
+                })
         } else {
             None
         };
@@ -364,7 +378,8 @@ fn layout_table_with_position(
                         measure,
                         &breaks,
                         room,
-                        room,
+                        header_row_count,
+                        body_capacity,
                         limited_by_float,
                     );
                     if keep > 0.0 && keep <= room {
@@ -444,7 +459,16 @@ fn layout_table_with_position(
                 measure,
                 &breaks,
                 chain_room,
-                chain_room,
+                if is_first_fragment {
+                    header_row_count
+                } else {
+                    0
+                },
+                if is_first_fragment {
+                    body_capacity
+                } else {
+                    chain_room
+                },
                 limited_by_float,
             );
             if (cur > start_row || consumed == 0.0)
@@ -535,17 +559,20 @@ fn layout_table_with_position(
                 )
             };
             // A row moves whole rather than leave a cell with content no line on
-            // the page, where a later column lets every cell start.
+            // the page, where a whole column lets every cell start.
             let cell_slice = match cell_slice {
-                Some(slice) if slice.starved && !paginator.has_float_bands() => {
+                Some(slice)
+                    if slice.starved
+                        && !paginator.has_float_bands()
+                        && breaks
+                            .every_cell_start(cur, start_off, row_capacity)
+                            .is_some() =>
+                {
                     if placeable > 0.0 || (row_end > start_row && !header_above_unavoidable_split) {
                         None
                     } else if row_end == start_row
                         && paginator.state(state_idx).pen_y
                             != paginator.state(state_idx).content_top
-                        && breaks
-                            .first_cell_slice(cur, start_off, row_capacity)
-                            .is_some()
                     {
                         paginator.advance_for_overflow();
                         continue 'rows;

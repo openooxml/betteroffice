@@ -1208,8 +1208,8 @@ fn a_row_moves_whole_when_a_staggered_widow_controlled_cell_has_no_line_on_the_p
     );
 }
 
-#[test]
-fn a_cell_line_taller_than_a_page_keeps_the_other_cells_splitting() {
+/// A row of a 20-line cell beside a cell whose one line is taller than a page.
+fn tall_line_table() -> Value {
     let mut table = two_cell_table(&[(20, 0.0, json!({})), (1, 0.0, json!({}))]);
     let cell = &mut table["measure"]["rows"][0]["cells"][1];
     cell["height"] = json!(120);
@@ -1218,7 +1218,12 @@ fn a_cell_line_taller_than_a_page_keeps_the_other_cells_splitting() {
     line["ascent"] = json!(100);
     line["descent"] = json!(20);
     line["lineHeight"] = json!(120);
-    let result = table_fragments(after_filler(2, table), None);
+    table
+}
+
+#[test]
+fn a_cell_line_taller_than_a_page_keeps_the_other_cells_splitting() {
+    let result = table_fragments(after_filler(2, tall_line_table()), None);
     assert_eq!(result[0].0, 0);
     assert_eq!(cell_windows(&result[0].1), [(0.0, 60.0), (0.0, 0.0)]);
     let mut bottom = 0.0;
@@ -1283,4 +1288,37 @@ fn a_keep_next_heading_moves_with_a_header_band_and_a_per_cell_row_chain() {
     }
     table["measure"]["totalHeight"] = json!(160);
     assert_eq!(heading_and_table_pages_after(1, table), (Some(1), Some(1)));
+}
+
+#[test]
+fn a_keep_next_heading_moves_with_a_row_whose_cell_line_is_taller_than_a_page() {
+    assert_eq!(
+        heading_and_table_pages_after(3, tall_line_table()),
+        (Some(1), Some(1))
+    );
+}
+
+#[test]
+fn repeated_headers_keep_a_keep_next_chain_into_a_per_cell_body_row() {
+    let headers = table_rows(&[
+        (1, json!({}), json!({"isHeader": true})),
+        (1, json!({"keepNext": true}), json!({"isHeader": true})),
+    ]);
+    let mut table = two_cell_table(&[
+        (6, 0.0, json!({"widowControl": false})),
+        (3, 10.0, json!({"keepLines": true})),
+    ]);
+    for key in ["block", "measure"] {
+        table[key]["rows"] = json!([
+            headers[key]["rows"][0],
+            headers[key]["rows"][1],
+            table[key]["rows"][0],
+        ]);
+    }
+    table["measure"]["totalHeight"] = json!(160);
+    let result = table_fragments(after_filler(1, table), None);
+    assert_eq!(result[0].0, 0);
+    assert_eq!(result[0].1["rowStart"], 0);
+    assert_eq!(result[0].1["rowEnd"], 3);
+    assert_eq!(cell_windows(&result[0].1), [(0.0, 40.0), (0.0, 30.0)]);
 }

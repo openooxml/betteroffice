@@ -335,25 +335,24 @@ fn table_leading_slice(
         .sum();
     let mut top = 0.0;
     let mut slice = first;
-    for (index, (row, keep)) in measure
+    for (row, keep) in measure
         .rows
         .iter()
         .zip(crate::hooks::row_keep_chains(block, measure))
         .take(headers + 1)
-        .enumerate()
     {
-        let cell_capacity = if index >= headers && headers > 0 && band <= capacity {
-            capacity - band
-        } else {
-            capacity
-        };
         let keep = crate::hooks::row_keep_height(
             keep,
             block,
             measure,
             &breaks,
             capacity,
-            cell_capacity,
+            headers,
+            if headers > 0 && band <= capacity {
+                capacity - band
+            } else {
+                capacity
+            },
             !split_first_row,
         );
         if keep > 0.0 && top + keep <= capacity {
