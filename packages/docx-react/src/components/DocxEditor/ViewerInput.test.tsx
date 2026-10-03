@@ -74,6 +74,7 @@ function NavigatingViewer({ props, inputRef, pagedRef }: {
     getYrsPositionProjection: () => null,
     displayPositionToYrsLoc: () => null,
     getPositionAtPoint: () => null,
+    navigateViewer: async () => false,
   });
   return <ViewerInput {...props} ref={inputRef} />;
 }
@@ -112,6 +113,19 @@ function mount(
     entry.request.kind === kind && 'expectVersion' in entry.request && entry.request.expectVersion === version);
   return { ref, view, show, answer, has, textarea: view.getByTestId('yrs-input') as HTMLTextAreaElement };
 }
+
+test('a missing viewer navigation leaves the selection gesture and pending copy untouched', async () => {
+  const pagedRef = createRef<PagedEditorRef>();
+  const { ref, answer } = mount(frame('A'), undefined, pagedRef);
+  act(() => ref.current!.setSelectionFromDisplay(1, 6));
+  const gesture = ref.current!.currentGesture!();
+  const copy = ref.current!.readSelectedText!()!;
+  expect(await pagedRef.current!.navigateViewer({ kind: 'paragraphTarget', paraId: 'missing' })).toBe(false);
+  expect(ref.current!.currentGesture!()).toBe(gesture);
+  expect(ref.current!.displaySelection()).toEqual({ anchor: 1, head: 6 });
+  await answer('selectionText', 'A', 'A', text('Alpha'));
+  expect(await copy).toBe('Alpha');
+});
 
 test('viewer publication uses ordered display positions, worker paragraph identity and the presented layout', async () => {
   const queries = frame('A');

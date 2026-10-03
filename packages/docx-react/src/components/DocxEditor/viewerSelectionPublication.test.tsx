@@ -1,9 +1,11 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
+import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
+import type { ResidentDocumentRead, ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import {
   residentWorkerFactory,
@@ -18,6 +20,10 @@ import {
   type SelectionState,
 } from '../../index';
 import { pagedDocx } from './__fixtures__/pagedDocx';
+import * as scrollApi from './hooks/usePagedScrollApi';
+import * as viewerReads from './internals/viewerRefReads';
+import { markPresented, stampWorkerFrameVersion } from './internals/layoutProvenance';
+import type { YrsInputRef } from './YrsInput';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -43,12 +49,122 @@ beforeAll(async () => {
 });
 afterEach(() => {
   cleanup();
+  mock.restore();
   globalThis.Worker = originalWorker;
   workers.length = 0;
 });
 afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
+
+async function navigationViewer() {
+  spyOn(wasm, 'editWasmModule').mockResolvedValue(new WebAssembly.Module(
+    new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+  ));
+  globalThis.Worker = class {
+    constructor() {
+      const worker = startWorker();
+      workers.push(worker);
+      return worker;
+    }
+  } as unknown as typeof Worker;
+  const ref = createRef<DocxEditorRef>();
+  const input: { current: YrsInputRef | null } = { current: null };
+  const scrolls: Array<ReturnType<typeof mock<(position: number, forParaIdScroll?: boolean) => void>>> = [];
+  const useScroll = scrollApi.usePagedScrollApi;
+  spyOn(scrollApi, 'usePagedScrollApi').mockImplementation((options) => {
+    const api = useScroll(options);
+    input.current = options.yrsInputRef.current;
+    const scroll = mock((_position: number, _forParaIdScroll?: boolean) => {});
+    scrolls.push(scroll);
+    return { ...api, scrollToPositionImpl: scroll };
+  });
+  const provider = { resolve: () => () => Promise.resolve(font.buffer.slice(
+    font.byteOffset, font.byteOffset + font.byteLength
+  ) as ArrayBuffer) };
+  const view = render(<DocxEditor
+    ref={ref} documentBuffer={await pagedDocx(1, 2)} readOnly experimentalWorkerOpen
+    previewFirstPage={false} measurementFontProvider={provider}
+  />);
+  await waitFor(() => expect(ref.current!.getEditorRef()?.isWorkerViewer()).toBe(true), { timeout: 20_000 });
+  await ref.current!.whenLayoutComplete({ timeoutMs: 20_000 });
+  await waitFor(() => expect(input.current).not.toBeNull());
+  return { ref, input, scrolls, view, worker: workers[0]! };
+}
+
+for (const gesture of ['keyboard', 'pointer']) {
+  test(`pending viewer navigation yields to a newer ${gesture} selection`, async () => {
+    const { ref, input, view, worker, scrolls } = await navigationViewer();
+    const paged = ref.current!.getEditorRef()!;
+    worker.hold();
+    const reads = worker.requests.filter((kind) => kind === 'documentRead').length;
+    const navigation = paged.navigateViewer({ kind: 'paragraphTarget', paraId: '00000002' });
+    await waitFor(() => expect(worker.requests.filter((kind) => kind === 'documentRead').length).toBeGreaterThan(reads));
+    if (gesture === 'keyboard') {
+      const textarea = view.getByTestId('yrs-input');
+      expect(view.container.contains(textarea)).toBe(false);
+      fireEvent.keyDown(textarea, { key: 'a', ctrlKey: true });
+    } else {
+      act(() => {
+        const next = input.current!.beginGesture!();
+        input.current!.setSelectionFromDisplay(2, 5, undefined, next);
+      });
+    }
+    const selection = paged.getSelectionRange();
+    const currentGesture = input.current!.currentGesture!();
+    const calls = scrolls.reduce((count, scroll) => count + scroll.mock.calls.length, 0);
+    await act(async () => worker.release());
+    expect(await navigation).toBe(false);
+    expect(input.current!.isGestureCurrent!(currentGesture)).toBe(true);
+    if (gesture === 'keyboard') {
+      expect(paged.getSelectionRange()!.from).toBe(0);
+      expect(paged.getSelectionRange()!.to).toBeGreaterThanOrEqual(selection!.to);
+    } else {
+      expect(paged.getSelectionRange()).toEqual(selection);
+    }
+    expect(scrolls.reduce((count, scroll) => count + scroll.mock.calls.length, 0)).toBe(calls);
+  }, 40_000);
+}
+
+test('viewer navigation re-reads a newer frame and applies with the latest scroll implementation', async () => {
+  const { ref, input, scrolls } = await navigationViewer();
+  let finish!: () => void;
+  const pending = new Promise<void>((resolve) => { finish = resolve; });
+  const host = document.createElement('div');
+  const frame = (version: string) => {
+    const queries = { displayList: {} } as DisplayListQueries;
+    stampWorkerFrameVersion(queries, version);
+    markPresented(host, queries.displayList);
+    return queries;
+  };
+  let queries = frame('v');
+  const versions: string[] = [];
+  const navigate = viewerReads.navigateViewer;
+  spyOn(viewerReads, 'navigateViewer').mockImplementation((access, target, apply, options) =>
+    navigate({
+      ...access, host: () => host, queries: () => queries,
+      awaitFrame: async () => { queries = frame('v2'); return queries; },
+      read: (async (request: ResidentDocumentRead) => {
+        if (!('expectVersion' in request)) throw new Error('Expected versioned read');
+        versions.push(request.expectVersion);
+        if (request.expectVersion === 'v') await pending;
+        return { version: 'v2', value: { anchor: 2, head: 5 } };
+      }) as ResidentEngineWorkerClient['documentRead'],
+    }, target, apply, options)
+  );
+  const selection = spyOn(input.current!, 'setSelectionFromDisplay');
+  const navigation = ref.current!.getEditorRef()!.navigateViewer({ kind: 'paragraphTarget', paraId: '00000002' });
+  const initial = scrolls.at(-1)!;
+  await act(async () => ref.current!.setZoom(1.25));
+  expect(scrolls.at(-1)).not.toBe(initial);
+  const latest = scrolls.at(-1)!;
+  await act(async () => finish());
+  expect(await navigation).toBe(true);
+  expect(versions).toEqual(['v', 'v2']);
+  expect(initial).not.toHaveBeenCalled();
+  expect(latest).toHaveBeenCalledWith(2, true);
+  expect(selection).toHaveBeenCalledWith(2, 2);
+}, 40_000);
 
 test('viewer selections reach the prop, ref subscribers and plugin snapshot, including clear', async () => {
   const compile = spyOn(wasm, 'editWasmModule').mockResolvedValue(new WebAssembly.Module(

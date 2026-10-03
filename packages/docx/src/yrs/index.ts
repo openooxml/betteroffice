@@ -87,6 +87,7 @@ export type { DocxResolvedPointPosition } from './pointPosition';
 export type { ResidentDocumentRead } from './residentEngineWorkerProtocol';
 export type {
   DocxDisplayRange,
+  DocxDisplaySelectionInfo,
   DocxDisplaySelectionText,
   DocxSelectionUnit,
 } from './viewerSelection';

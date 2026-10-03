@@ -246,10 +246,25 @@ describe('viewer selection reads', () => {
     }
   });
 
-  test('selection info rejects cross-story and unresolved display ranges', () => {
+  test('selection info preserves the visible text across two table cells', () => {
     const version = resident.geometryReader.version();
-    expect(resolveSelectionInfo(index, 'body', at('00000003', 1), at('00000004', 1), version)).toBeNull();
-    expect(resolveSelectionInfo(index, 'body', at('00000001', 1), at('00000003', 1), version)).toBeNull();
+    const anchor = at('00000003', 1);
+    const head = at('00000004', 1);
+    expect(resolveSelectionText(index, 'body', anchor, head, version)?.text).toBe('A1\tB1');
+    const expected = { paraId: null, selectedText: 'A1\tB1', paragraphText: '', before: '', after: '' };
+    expect(resolveSelectionInfo(index, 'body', anchor, head, version)).toEqual(expected);
+    expect(resolveSelectionInfo(index, 'body', head, anchor, version)).toEqual(expected);
+    expect(resolveSelectionInfo(index, 'body', anchor, head, `${version}-stale`)).toBeNull();
+  });
+
+  test('selection info preserves cross-story text and rejects unresolved display ranges', () => {
+    const version = resident.geometryReader.version();
+    const anchor = at('00000001', 1);
+    const head = at('00000003', 1);
+    expect(resolveSelectionInfo(index, 'body', anchor, head, version)).toEqual({
+      paraId: null, selectedText: resolveSelectionText(index, 'body', anchor, head, version)!.text,
+      paragraphText: '', before: '', after: '',
+    });
     expect(resolveSelectionInfo(index, 'missing', 0, 1, version)).toBeNull();
     expect(resolveSelectionInfo(index, 'body', -1, at('00000001', 1), version)).toBeNull();
     expect(resolveSelectionInfo(index, 'body', 0, index.projection('body')!.size + 1, version)).toBeNull();

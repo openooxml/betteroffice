@@ -176,6 +176,7 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
     runAfterPendingInput: async (operation) => operation(),
     hasPendingInput: () => false,
     beginGesture: () => controller.beginGesture(),
+    currentGesture: () => controller.currentGesture(),
     isGestureCurrent: (gesture) => controller.isCurrent(gesture),
     setSelectionFromDisplay: (anchor, head = anchor, _story, gesture) => controller.select(anchor, head, gesture),
     selectWordAtDisplay: (position) => controller.expand(position, 'word'),

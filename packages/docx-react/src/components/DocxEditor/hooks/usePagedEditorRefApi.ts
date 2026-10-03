@@ -250,10 +250,13 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     isWorkerViewer: () => viewerSelectionRef.current,
     readViewerSelectionInfo: () => viewerReadsRef.current.readViewerSelectionInfo?.() ?? Promise.resolve(null),
     navigateViewer: (target, options) => {
-      bumpInputEpochRef.current?.();
-      beforeNavigation();
-      const epoch = inputs.navigationEpochRef.current;
-      return viewerReadsRef.current.navigateViewer?.(target, options, () => inputs.navigationEpochRef.current === epoch) ?? Promise.resolve(false);
+      const epoch = ++inputs.navigationEpochRef.current;
+      const input = yrsInputRef.current;
+      const gesture = input?.currentGesture?.();
+      return viewerReadsRef.current.navigateViewer?.(target, options, () =>
+        inputs.navigationEpochRef.current === epoch &&
+        (gesture === undefined || (yrsInputRef.current === input && input?.isGestureCurrent?.(gesture) === true))
+      ) ?? Promise.resolve(false);
     },
     getYrsSession: () => yrsSessionRef.current,
     flushPendingInput: async () => {

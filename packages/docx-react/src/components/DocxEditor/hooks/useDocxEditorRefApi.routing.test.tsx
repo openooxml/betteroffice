@@ -183,6 +183,50 @@ test('viewer proposeChange returns false for empty input without starting a work
   expectNoReplica(host);
 });
 
+test('viewer proposeChange builds each queued request after the previous proposal settles', async () => {
+  const host = apiFor(true, true);
+  const identities = {
+    ...WORKER_IDENTITIES,
+    paragraphs: [...WORKER_IDENTITIES.paragraphs, {
+      ...WORKER_IDENTITIES.paragraphs[1]!,
+      session: { ...WORKER_IDENTITIES.paragraphs[1]!.session!, paraId: 'q' },
+    }],
+  };
+  const worker = workerFor(host, identities);
+  await worker.authority.initialize();
+  const firstStarted = deferred<void>();
+  const firstSettled = deferred<void>();
+  const secondStarted = deferred<DocxProposalRequest>();
+  let version = 'worker-v';
+  spyOn(worker.authority, 'geometry').mockImplementation(() => ({ ...worker.snapshot.geometry, version }));
+  const reads = spyOn(worker.authority, 'paragraphIdentities');
+  const propose = spyOn(worker.authority, 'propose').mockImplementation(async (request) => {
+    if (request.proposals[0]!.paragraph.kind !== 'session') throw new Error('Expected session paragraph');
+    if (request.proposals[0]!.paragraph.paraId === 'p') {
+      firstStarted.resolve();
+      await firstSettled.promise;
+      version = 'worker-v2';
+    } else {
+      secondStarted.resolve(request);
+    }
+    return { ok: true, snapshot: { version, previewVersion: 0, proposals: [] } };
+  });
+  for (const paraId of ['p', 'q']) {
+    expect(host.api.proposeChange({ paraId, search: 'hello', replaceWith: 'world', author: 'Host' })).toBe(true);
+  }
+  await firstStarted.promise;
+  await worker.authority.getProposals(async () => host.session.getProposals());
+  expect(reads).toHaveBeenCalledTimes(1);
+  expect(propose).toHaveBeenCalledTimes(1);
+  firstSettled.resolve();
+  const second = await secondStarted.promise;
+  expect(reads).toHaveBeenCalledTimes(2);
+  expect(propose).toHaveBeenCalledTimes(2);
+  expect(second.expectVersion).toBe('worker-v2');
+  expect(second.proposals[0]!.paragraph).toMatchObject({ paraId: 'q' });
+  expectNoReplica(host);
+});
+
 for (const failure of ['missing paragraph', 'refused proposal', 'rejected proposal']) {
   test(`viewer proposeChange warns once and swallows a ${failure}`, async () => {
     const warned = deferred<void>();
@@ -560,5 +604,5 @@ test('a newer paged navigation invalidates a pending worker navigation across re
   expect(await first).toBe(false);
   const second = hook.result.current.current!.navigateViewer(TARGETS[1]!);
   expect(await second).toBe(true);
-  expect(bump).toHaveBeenCalledTimes(2);
+  expect(bump).not.toHaveBeenCalled();
 });

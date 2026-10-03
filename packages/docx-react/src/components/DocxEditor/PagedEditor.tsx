@@ -1504,6 +1504,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         navigationEpoch,
         requestCanvasParagraphFlash,
       });
+    const scrollToPositionImplRef = useRef(scrollToPositionImpl);
+    scrollToPositionImplRef.current = scrollToPositionImpl;
+    const requestCanvasParagraphFlashRef = useRef(requestCanvasParagraphFlash);
+    requestCanvasParagraphFlashRef.current = requestCanvasParagraphFlash;
 
     // Display-list positions retain the document tree's integer coordinate
     // space. Build a lightweight index directly from the authoritative yrs
@@ -1986,7 +1990,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       },
       navigateViewer: async (target, options, current) => {
         const access = viewerReadAccess();
-        if (!access) return false;
+        const input = yrsInputRef.current;
+        const gesture = input?.currentGesture?.();
+        if (!access || !input || gesture === undefined) return false;
         const epoch = inputEpoch();
         let interrupted = false;
         const surface = getScrollContainer();
@@ -1994,12 +2000,17 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         const events = ['pointerdown', 'mousedown', 'touchstart', 'keydown', 'wheel'];
         for (const event of events) surface?.addEventListener(event, interrupt, { capture: true, passive: true });
         try {
-          return await navigateViewer({ ...access, current: () => access.current() && !interrupted && inputEpoch() === epoch && (current?.() ?? true) }, target,
+          return await navigateViewer({
+            ...access,
+            current: () => access.current() && !interrupted && inputEpoch() === epoch &&
+              yrsInputRef.current === input && input.isGestureCurrent?.(gesture) === true &&
+              (current?.() ?? true),
+          }, target,
             (range, flash) => {
               yrsInputRef.current?.setSelectionFromDisplay(range.anchor, target.kind === 'paragraphTarget' ? range.anchor : range.head);
-              scrollToPositionImpl(range.anchor, true);
+              scrollToPositionImplRef.current(range.anchor, true);
               if (target.kind === 'paragraphTarget' && flash?.highlight) {
-                requestCanvasParagraphFlash({ from: range.anchor, to: Math.max(range.anchor + 1, range.head), options: flash.highlight });
+                requestCanvasParagraphFlashRef.current({ from: range.anchor, to: Math.max(range.anchor + 1, range.head), options: flash.highlight });
               }
               yrsInputRef.current?.focus();
             }, options);

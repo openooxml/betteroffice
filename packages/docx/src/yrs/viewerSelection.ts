@@ -1,5 +1,5 @@
 import type { DocxTextRange } from './edits';
-import type { YrsCellLoc, YrsLoc, YrsSelectionText } from './index';
+import type { YrsCellLoc, YrsLoc } from './index';
 import { displayPositionToYrsLoc } from './inputPositionMap';
 import type { YrsPointerProjectionTarget } from './yrsPositionProjection';
 import { findWordBoundaries } from '../utils/textSelection';
@@ -27,6 +27,14 @@ export interface DocxDisplaySelectionText {
   text: string;
   /** The accepted-view range, or null when the selection spans stories. */
   range: DocxTextRange | null;
+}
+
+export interface DocxDisplaySelectionInfo {
+  paraId: string | null;
+  selectedText: string;
+  paragraphText: string;
+  before: string;
+  after: string;
 }
 
 interface ResolvedPosition {
@@ -198,19 +206,25 @@ export function resolveSelectionText(
   return { text: storyPlainText(reader, rootStory, startOffset, endOffset), range: null };
 }
 
-/** @internal The selection info for a display range within one story. */
+/** @internal The selection info for a display range. */
 export function resolveSelectionInfo(
   index: DisplayPositionIndex,
   rootStory: string,
   anchor: number,
   head: number,
   expectVersion: string
-): YrsSelectionText | null {
+): DocxDisplaySelectionInfo | null {
   const reader = index.reader;
   if (reader.version() !== expectVersion) return null;
   const a = resolvePosition(index, rootStory, anchor);
   const b = resolvePosition(index, rootStory, head);
-  if (!a || !b || a.loc.story !== b.loc.story) return null;
+  if (!a || !b) return null;
+  if (a.loc.story !== b.loc.story) {
+    const selection = resolveSelectionText(index, rootStory, anchor, head, expectVersion);
+    return selection ? {
+      paraId: null, selectedText: selection.text, paragraphText: '', before: '', after: '',
+    } : null;
+  }
   const [start, end] =
     storyOffsetForLoc(reader, a.loc) <= storyOffsetForLoc(reader, b.loc)
       ? [a.loc, b.loc]

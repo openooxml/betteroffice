@@ -4,13 +4,13 @@ import type {
   YrsResidentCaretSnapshot,
   YrsResidentWorkerSnapshot,
   YrsSelection,
-  YrsSelectionText,
   YrsStickyPosition,
 } from './index';
 import type { PointPosition } from '../plugin-api';
 import type { DocxResolvedPointPosition } from './pointPosition';
 import type {
   DocxDisplayRange,
+  DocxDisplaySelectionInfo,
   DocxDisplaySelectionText,
   DocxSelectionUnit,
 } from './viewerSelection';
@@ -89,7 +89,7 @@ export interface ResidentDocumentReadValues {
   pointPosition: DocxResolvedPointPosition | null;
   selectionUnit: DocxDisplayRange | null;
   selectionText: DocxDisplaySelectionText | null;
-  selectionInfo: YrsSelectionText | null;
+  selectionInfo: DocxDisplaySelectionInfo | null;
   paragraphTarget: DocxDisplayRange | null;
   commentTarget: DocxDisplayRange | null;
   revisionTarget: DocxDisplayRange | null;

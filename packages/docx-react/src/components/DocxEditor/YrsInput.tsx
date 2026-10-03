@@ -83,6 +83,7 @@ export interface YrsInputRef {
   /** The selection's plain text, for an input whose document lives in the worker. */
   readSelectedText?(): Promise<string> | null;
   beginGesture?(): number;
+  currentGesture?(): number;
   isGestureCurrent?(gesture: number): boolean;
 }
 

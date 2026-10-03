@@ -2646,7 +2646,7 @@ describe('worker proposals during sliced completion', () => {
       const requests: Array<{ read: ResidentDocumentRead; value?: unknown; text?: string }> = [
         {
           read: { kind: 'findText', request: { text: 'phrase', within: { kind: 'story', story: 'body' }, view: 'accepted', limit: 1 } },
-          value: main.findText({ text: 'phrase', within: { kind: 'story', story: 'body' }, view: 'accepted', limit: 1 }),
+          value: { ...main.findText({ text: 'phrase', within: { kind: 'story', story: 'body' }, view: 'accepted', limit: 1 }), version },
         },
         {
           read: { kind: 'findParagraphs', query: 'phrase', caseSensitive: true, limit: 1 },

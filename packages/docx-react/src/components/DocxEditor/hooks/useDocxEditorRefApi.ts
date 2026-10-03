@@ -549,6 +549,7 @@ export function useDocxEditorRefApi({
   hostSearch: DocxHostSearch;
 }) {
   const proposalWarningRef = useRef(false);
+  const proposalQueueRef = useRef(Promise.resolve());
   const opening = (): boolean => openingRef?.current === true;
   const pagedEditorRef = useMemo<React.RefObject<PagedEditorRef | null>>(
     () => ({
@@ -969,7 +970,7 @@ export function useDocxEditorRefApi({
       proposeChange: (options) => {
         if (!hostProposalsAllowed()) return api.proposeChange(options);
         if (!options.search && !options.replaceWith) return false;
-        void (async () => {
+        proposalQueueRef.current = proposalQueueRef.current.then(async () => {
           const session = pagedEditorRef.current?.getYrsSession();
           const authority = session ? registeredWorkerProposalAuthority(session) : null;
           if (!session || !authority) throw new Error('The worker proposal authority is unavailable');
@@ -993,7 +994,7 @@ export function useDocxEditorRefApi({
             }],
           });
           if (!result.ok) throw new Error(result.failure.message);
-        })().catch((error: unknown) => {
+        }).catch((error: unknown) => {
           if (proposalWarningRef.current) return;
           proposalWarningRef.current = true;
           console.warn('[DocxEditor] proposeChange:', error);
