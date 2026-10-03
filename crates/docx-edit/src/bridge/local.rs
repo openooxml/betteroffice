@@ -63,7 +63,14 @@ fn unsafe_value(key: &str, value: &Any) -> bool {
         || ["trPrChange", "tcPrChange"].contains(&key)
         || ["trackedIns", "trackedDel", "trIns", "trDel"].contains(&key)
         || ["hyperlink", "bookmarks", "comment", "cellMarker"].contains(&key)
-        || ["hidden", "vanish", "floating", "footnoteRefId", "endnoteRefId"].contains(&key)
+        || [
+            "hidden",
+            "vanish",
+            "floating",
+            "footnoteRefId",
+            "endnoteRefId",
+        ]
+        .contains(&key)
         || match value {
             Any::Map(map) => map.iter().any(|(key, value)| unsafe_value(key, value)),
             Any::Array(values) => values.iter().any(|value| unsafe_value("", value)),
@@ -139,7 +146,10 @@ impl LocalLowering {
         paragraph.rejected |= values.iter().any(|(key, value)| unsafe_value(key, value))
             || values.contains_key("sectPr")
             || values.contains_key("sectionBreakType")
-            || self.source.upgrade().is_some_and(|source| source.run_revision(story, &id));
+            || self
+                .source
+                .upgrade()
+                .is_some_and(|source| source.run_revision(story, &id));
         if paragraph.start_safe
             && end_safe
             && !paragraph.rejected
@@ -188,7 +198,9 @@ impl LocalLowering {
             let Some(LayoutBlock::Paragraph(paragraph)) = blocks.get(seed.slot) else {
                 return false;
             };
-            let start = map.spans.partition_point(|span| span.pm_start < seed.pm_start + 1);
+            let start = map
+                .spans
+                .partition_point(|span| span.pm_start < seed.pm_start + 1);
             let end = map.spans.partition_point(|span| {
                 span.pm_start < seed.pm_start + u64::from(seed.units()) + 2
             });
@@ -197,9 +209,10 @@ impl LocalLowering {
                 && map.spans[start..end]
                     .iter()
                     .all(|span| !span.atom && span.paragraph == seed.source)
-                && map.paragraphs.get(seed.source as usize).is_some_and(|(story, paragraph)| {
-                    *story == 0 && paragraph == id
-                })
+                && map
+                    .paragraphs
+                    .get(seed.source as usize)
+                    .is_some_and(|(story, paragraph)| *story == 0 && paragraph == id)
                 && ownership[seed.source as usize] == 1
         });
     }
@@ -251,7 +264,10 @@ impl LocalLowering {
         }
         let old_end = pm_start + u64::from(old_units) + 2;
         let segments = patch_segments(&seed.segments, edit)?;
-        let new_units: u32 = segments.iter().map(|segment| utf16_len(&segment.text)).sum();
+        let new_units: u32 = segments
+            .iter()
+            .map(|segment| utf16_len(&segment.text))
+            .sum();
         let expected_units = old_units
             .checked_sub(edit.removed)?
             .checked_add(utf16_len(&edit.text))?;
@@ -259,7 +275,10 @@ impl LocalLowering {
             || (old_units == 0) != (new_units == 0)
             || !effective_attributes_match(&segments, edit)
             || segments.iter().any(|segment| {
-                segment.attrs.iter().any(|(key, value)| unsafe_value(key, value))
+                segment
+                    .attrs
+                    .iter()
+                    .any(|(key, value)| unsafe_value(key, value))
             })
             || !comments_clear(txn, raw, raw + new_units)
         {
@@ -305,7 +324,10 @@ impl LocalLowering {
             paragraph.attrs = old.attrs.clone();
         }
         if !ordinary(&paragraph, pm_start, new_units)
-            || replacement.spans.iter().any(|span| span.atom || span.paragraph != source)
+            || replacement
+                .spans
+                .iter()
+                .any(|span| span.atom || span.paragraph != source)
         {
             return None;
         }
@@ -324,7 +346,9 @@ impl LocalLowering {
         for block in blocks[slot + 1..].iter_mut().chain(revealable) {
             shift.block(block).expect("validated position shift");
         }
-        let span_start = map.spans.partition_point(|span| span.pm_start < pm_start + 1);
+        let span_start = map
+            .spans
+            .partition_point(|span| span.pm_start < pm_start + 1);
         let span_end = map.spans.partition_point(|span| span.pm_start < old_end);
         shift.map(map).expect("validated map shift");
         map.spans.splice(span_start..span_end, replacement.spans);
@@ -435,7 +459,10 @@ fn patch_segments(segments: &[TextSegment], edit: &TextEdit) -> Option<Vec<TextS
 
 impl ParagraphSeed {
     fn units(&self) -> u32 {
-        self.segments.iter().map(|segment| utf16_len(&segment.text)).sum()
+        self.segments
+            .iter()
+            .map(|segment| utf16_len(&segment.text))
+            .sum()
     }
 }
 
@@ -443,7 +470,10 @@ fn ordinary(paragraph: &ParagraphBlock, start: u64, units: u32) -> bool {
     paragraph.pm_start == Some(start as f64)
         && paragraph.pm_end == Some((start + u64::from(units) + 2) as f64)
         && paragraph.sdt_groups.is_none()
-        && paragraph.attrs.as_ref().is_some_and(|attrs| attrs.horizontal_rules.is_empty())
+        && paragraph
+            .attrs
+            .as_ref()
+            .is_some_and(|attrs| attrs.horizontal_rules.is_empty())
         && paragraph.runs.iter().all(|run| match run {
             Run::Text(run) => run.inline_sdt_widget.is_none() && ordinary_formatting(&run.fmt),
             Run::Tab(run) => ordinary_formatting(&run.fmt),

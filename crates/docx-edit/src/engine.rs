@@ -2084,7 +2084,10 @@ impl EngineSession {
                 render.stories.get("body").is_some_and(|lowered| {
                     lowered.doc_epoch == before
                         && lowered.local.accepts_range(
-                            &txn, &paragraph.para_id, range.start, range.end,
+                            &txn,
+                            &paragraph.para_id,
+                            range.start,
+                            range.end,
                         )
                 })
             })
@@ -2173,7 +2176,9 @@ impl EngineSession {
         let map = Rc::get_mut(&mut lowered.map)?;
         let revealable = Rc::get_mut(&mut lowered.revealable_blocks)?;
         let txn = self.doc.yrs_doc().transact();
-        lowered.local.patch(blocks, map, revealable, &txn, env, &edit)?;
+        lowered
+            .local
+            .patch(blocks, map, revealable, &txn, env, &edit)?;
         lowered.doc_epoch = epoch;
         lowered.serialized_blocks = None;
         render.local_patches = render.local_patches.wrapping_add(1);
@@ -7335,11 +7340,24 @@ mod tests {
             )
             .bytes();
         let (engine, request) = local_patch_laid_out(&bytes, client_id, enabled);
-        let span = |id: &str| engine.doc().paragraph_index("body").unwrap().para_span(id).unwrap();
+        let span = |id: &str| {
+            engine
+                .doc()
+                .paragraph_index("body")
+                .unwrap()
+                .para_span(id)
+                .unwrap()
+        };
         let (start, _) = span(&placeholders["collapsed"]);
-        engine.doc().add_comment(
-            &[crate::StoryRange::new("body", start + 9, start + 9)], "A", "", Any::from("Collapsed"),
-        ).unwrap();
+        engine
+            .doc()
+            .add_comment(
+                &[crate::StoryRange::new("body", start + 9, start + 9)],
+                "A",
+                "",
+                Any::from("Collapsed"),
+            )
+            .unwrap();
         let native = json!({
             "shapeType": "rect", "size": {"width": 914400, "height": 457200},
             "children": [{"shapeType": "ellipse", "size": {"width": 91440, "height": 91440}}],
@@ -7378,9 +7396,15 @@ mod tests {
             }], &EditCtx::local("", "")).unwrap();
         }
         engine.render.replace(Default::default());
-        engine.layout_document_with_regions_retained_json(&request).unwrap();
+        engine
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap();
         engine.build_display_list_frame("{}", 0).unwrap();
-        assert!(!engine.render.borrow().stories["body"].revealable_blocks.is_empty());
+        assert!(
+            !engine.render.borrow().stories["body"]
+                .revealable_blocks
+                .is_empty()
+        );
         (engine, request, known)
     }
 
@@ -7393,7 +7417,13 @@ mod tests {
                 let (_, pilcrow) = index.para_span(&id).unwrap();
                 let start = index.para_at(pilcrow).unwrap().node_start;
                 let patched = eligible && start != pilcrow;
-                local_patch_step(&engine, &request, "body", (start, start, Some("😀")), patched);
+                local_patch_step(
+                    &engine,
+                    &request,
+                    "body",
+                    (start, start, Some("😀")),
+                    patched,
+                );
                 local_patch_step(&engine, &request, "body", (start, start + 2, None), patched);
             }
         }
@@ -7403,17 +7433,27 @@ mod tests {
     fn resident_typing_rejects_ranged_and_collapsed_comment_endpoints() {
         use super::lowering_fixture::{Package, para, run};
 
-        let bytes = Package::new(&format!("{}{}{}",
+        let bytes = Package::new(&format!(
+            "{}{}{}",
             para("10000001", &run("Before")),
             para("10000002", &run("Middle")),
             para("10000003", &run("After")),
-        )).bytes();
+        ))
+        .bytes();
         for (left, right) in [(0, 0), (3, 3), (6, 6), (0, 3), (3, 6)] {
             let (engine, request) = local_patch_laid_out(&bytes, 9621, true);
-            engine.doc().add_comment(
-                &[crate::StoryRange::new("body", 7 + left, 7 + right)], "A", "", Any::from("Remark"),
-            ).unwrap();
-            engine.layout_document_with_regions_retained_json(&request).unwrap();
+            engine
+                .doc()
+                .add_comment(
+                    &[crate::StoryRange::new("body", 7 + left, 7 + right)],
+                    "A",
+                    "",
+                    Any::from("Remark"),
+                )
+                .unwrap();
+            engine
+                .layout_document_with_regions_retained_json(&request)
+                .unwrap();
             for offset in [left, right, 1, 5] {
                 let at = 7 + offset;
                 local_patch_step(&engine, &request, "body", (at, at, Some("x")), false);
@@ -7430,18 +7470,29 @@ mod tests {
         use super::lowering_fixture::{Package, para, run};
         use crate::{EditCtx, RawOp};
 
-        let bytes = Package::new(&format!("{}{}",
+        let bytes = Package::new(&format!(
+            "{}{}",
             para("10000001", &run("Before")),
             para("10000002", &run("After")),
-        )).bytes();
+        ))
+        .bytes();
         let (engine, request) = local_patch_laid_out(&bytes, 9622, true);
-        engine.doc().apply_raw_ops("body", vec![RawOp::InsertEmbed {
-            index: 7,
-            kind: "pageBreak".to_owned(),
-            payload: Vec::new(),
-            attrs: Attrs::from([("hidden".into(), Any::Bool(true))]),
-        }], &EditCtx::local("", "")).unwrap();
-        engine.layout_document_with_regions_retained_json(&request).unwrap();
+        engine
+            .doc()
+            .apply_raw_ops(
+                "body",
+                vec![RawOp::InsertEmbed {
+                    index: 7,
+                    kind: "pageBreak".to_owned(),
+                    payload: Vec::new(),
+                    attrs: Attrs::from([("hidden".into(), Any::Bool(true))]),
+                }],
+                &EditCtx::local("", ""),
+            )
+            .unwrap();
+        engine
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap();
         local_patch_step(&engine, &request, "body", (0, 0, Some("x")), true);
         local_patch_step(&engine, &request, "body", (9, 9, Some("x")), false);
     }
@@ -7453,13 +7504,17 @@ mod tests {
         for embed in [
             image("rIdImage", "Picture"),
             r#"<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>"#.to_owned(),
-            r#"<w:fldSimple w:instr=" SEQ Figure "><w:r><w:t>1</w:t></w:r></w:fldSimple>"#.to_owned(),
+            r#"<w:fldSimple w:instr=" SEQ Figure "><w:r><w:t>1</w:t></w:r></w:fldSimple>"#
+                .to_owned(),
         ] {
-            let bytes = Package::new(&format!("{}{}{}",
+            let bytes = Package::new(&format!(
+                "{}{}{}",
                 para("10000001", &run("Before")),
                 para("10000002", &format!("{}{embed}{}", run("ab"), run("cd"))),
                 para("10000003", &run("After")),
-            )).rel("rIdImage", "image", "media/image1.png").bytes();
+            ))
+            .rel("rIdImage", "image", "media/image1.png")
+            .bytes();
             let (engine, request) = local_patch_laid_out(&bytes, 9623, true);
             local_patch_step(&engine, &request, "body", (9, 10, None), false);
             local_patch_step(&engine, &request, "body", (8, 8, Some("😀")), true);
@@ -7471,14 +7526,19 @@ mod tests {
 
     impl TypingRandom {
         fn pick(&mut self, limit: usize) -> usize {
-            self.0 = self.0
+            self.0 = self
+                .0
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1_442_695_040_888_963_407);
             ((self.0 >> 32) as usize) % limit
         }
     }
 
-    fn local_patch_text_segments(engine: &EngineSession, start: u32, end: u32) -> Vec<(u32, String)> {
+    fn local_patch_text_segments(
+        engine: &EngineSession,
+        start: u32,
+        end: u32,
+    ) -> Vec<(u32, String)> {
         use yrs::types::text::YChange;
         use yrs::{Out, Text, Transact};
 
@@ -7488,7 +7548,8 @@ mod tests {
         let mut segments = Vec::new();
         for diff in story.diff(&txn, YChange::identity) {
             let units = crate::out_len(&diff.insert);
-            if raw >= start && raw + units <= end
+            if raw >= start
+                && raw + units <= end
                 && let Out::Any(Any::String(text)) = diff.insert
             {
                 segments.push((raw, text.to_string()));
@@ -7508,12 +7569,21 @@ mod tests {
                 let index = engine.doc().paragraph_index("body").unwrap();
                 let txn = engine.doc().yrs_doc().transact();
                 let story = crate::story_ref(&txn, "body").unwrap();
-                known.iter().filter(|(_, eligible)| !**eligible).map(|(id, _)| {
-                    let (_, pilcrow) = index.para_span(id).unwrap();
-                    let start = index.para_at(pilcrow).unwrap().node_start;
-                    let offset = if pilcrow - start == 1 { 0 } else { 8 };
-                    (id.clone(), story.sticky_index(&txn, start + offset, Assoc::After).unwrap())
-                }).collect()
+                known
+                    .iter()
+                    .filter(|(_, eligible)| !**eligible)
+                    .map(|(id, _)| {
+                        let (_, pilcrow) = index.para_span(id).unwrap();
+                        let start = index.para_at(pilcrow).unwrap().node_start;
+                        let offset = if pilcrow - start == 1 { 0 } else { 8 };
+                        (
+                            id.clone(),
+                            story
+                                .sticky_index(&txn, start + offset, Assoc::After)
+                                .unwrap(),
+                        )
+                    })
+                    .collect()
             };
             let mut random = TypingRandom(seed + 1);
             for step in 0..25 {
@@ -7545,47 +7615,81 @@ mod tests {
                 let at = boundaries[offset];
                 let insert = random.pick(2) == 0 || boundaries.len() == 1;
                 let next = index.para_at(pilcrow + 1);
-                if step % 7 == 0 && eligible && pilcrow > start
+                if step % 7 == 0
+                    && eligible
+                    && pilcrow > start
                     && let Some(next) = next
                     && next.node_start == pilcrow + 1
                     && known.get(next.para_id.as_ref()) == Some(&true)
                     && next.pilcrow > next.node_start
                     && boundaries.contains(&(pilcrow - 1))
                 {
-                    let next_segments = local_patch_text_segments(&engine, next.node_start, next.pilcrow);
-                    if next_segments.first().is_some_and(|(_, text)| text.chars().next().unwrap().len_utf16() == 1) {
-                        local_patch_step(&engine, &request, "body", (pilcrow - 1, pilcrow + 2, None), false);
+                    let next_segments =
+                        local_patch_text_segments(&engine, next.node_start, next.pilcrow);
+                    if next_segments
+                        .first()
+                        .is_some_and(|(_, text)| text.chars().next().unwrap().len_utf16() == 1)
+                    {
+                        local_patch_step(
+                            &engine,
+                            &request,
+                            "body",
+                            (pilcrow - 1, pilcrow + 2, None),
+                            false,
+                        );
                         continue;
                     }
                 }
                 if insert {
                     let text = ["x", "\t", "😀"][random.pick(3)];
-                    local_patch_step(&engine, &request, "body", (at, at, Some(text)), eligible && pilcrow > start);
+                    local_patch_step(
+                        &engine,
+                        &request,
+                        "body",
+                        (at, at, Some(text)),
+                        eligible && pilcrow > start,
+                    );
                 } else {
                     let backwards = random.pick(2) == 0;
-                    let mut choices: Vec<_> = boundaries.iter().copied().filter(|other| {
-                        if backwards {
-                            *other < at && at - *other <= 3
-                        } else {
-                            *other > at && *other - at <= 3
-                        }
-                    }).collect();
+                    let mut choices: Vec<_> = boundaries
+                        .iter()
+                        .copied()
+                        .filter(|other| {
+                            if backwards {
+                                *other < at && at - *other <= 3
+                            } else {
+                                *other > at && *other - at <= 3
+                            }
+                        })
+                        .collect();
                     if choices.is_empty() {
-                        choices = boundaries.iter().copied().filter(|other| other.abs_diff(at) <= 3 && *other != at).collect();
+                        choices = boundaries
+                            .iter()
+                            .copied()
+                            .filter(|other| other.abs_diff(at) <= 3 && *other != at)
+                            .collect();
                     }
                     if choices.is_empty() {
-                        local_patch_step(&engine, &request, "body", (at, at, Some("x")), eligible && pilcrow > start);
+                        local_patch_step(
+                            &engine,
+                            &request,
+                            "body",
+                            (at, at, Some("x")),
+                            eligible && pilcrow > start,
+                        );
                         continue;
                     }
                     let other = choices[random.pick(choices.len())];
                     let (left, right) = (at.min(other), at.max(other));
-                    let acceptable = eligible && right - left < pilcrow - start
+                    let acceptable = eligible
+                        && right - left < pilcrow - start
                         && segments.iter().any(|(raw, text)| {
                             let end = *raw + text.encode_utf16().count() as u32;
                             if *raw > left || right > end {
                                 return false;
                             }
-                            let removed: Vec<_> = text.encode_utf16()
+                            let removed: Vec<_> = text
+                                .encode_utf16()
                                 .skip((left - *raw) as usize)
                                 .take((right - left) as usize)
                                 .collect();

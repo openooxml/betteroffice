@@ -40,9 +40,9 @@ impl PositionShift {
 
     fn id(&self, id: &mut String, prefix: &str, suffix: bool) -> Option<()> {
         let tail = id.strip_prefix(prefix)?;
-        let (number, rest) = tail.split_once(':').map_or((tail, ""), |(number, _)| {
-            (number, &tail[number.len()..])
-        });
+        let (number, rest) = tail
+            .split_once(':')
+            .map_or((tail, ""), |(number, _)| (number, &tail[number.len()..]));
         if !suffix && !rest.is_empty() {
             return None;
         }
@@ -148,7 +148,9 @@ impl PositionShift {
     }
 
     pub(super) fn map(&self, map: &mut LoweringMap) -> Option<()> {
-        let start = map.paragraph_blocks.partition_point(|(pm, _)| *pm < self.boundary);
+        let start = map
+            .paragraph_blocks
+            .partition_point(|(pm, _)| *pm < self.boundary);
         let table_start = map.tables.partition_point(|(pm, ..)| *pm < self.boundary);
         for pm in map.paragraph_blocks[start..]
             .iter_mut()
@@ -160,7 +162,9 @@ impl PositionShift {
                 *pm = next;
             }
         }
-        let start = map.spans.partition_point(|span| span.pm_start < self.boundary);
+        let start = map
+            .spans
+            .partition_point(|span| span.pm_start < self.boundary);
         for span in &mut map.spans[start..] {
             let pm_start = span.pm_start.checked_add_signed(self.delta)?;
             let pm_end = span.pm_end.checked_add_signed(self.delta)?;
