@@ -317,7 +317,11 @@ function paginatingApi(session?: YrsSession) {
     pageCount: () => 10,
     pageBounds: (pageIndex: number) => ({ pageIndex, x: 0, y: 0, width: 800, height: 1000 }),
   } as DisplayListQueries;
-  const paginating = { ...laidOut, pageCount: () => 7, anchorRect: () => null } as DisplayListQueries;
+  const paginating = {
+    ...laidOut,
+    pageCount: () => 7,
+    anchorRect: () => null,
+  } as DisplayListQueries;
   const hook = renderHook(
     (props: Props) =>
       usePagedScrollApi({
@@ -339,9 +343,11 @@ function paginatingApi(session?: YrsSession) {
 }
 
 test('a position past a partial layout is scrolled to once the layout reaches it', async () => {
-  const { result, rerender, scroller, scrolls, laidOut, paginating } = paginatingApi();
+  const api = paginatingApi();
+  const { result, rerender, scroller, scrolls, laidOut, paginating, navigation } = api;
   await act(async () => result.current.scrollToPositionImpl(5000));
   expect(scrolls).toHaveLength(0);
+  navigation.epoch += 1;
   await act(async () => rerender({ layout: layout(9, true), queries: paginating }));
   expect(scrolls).toHaveLength(0);
   await act(async () => rerender({ layout: layout(10), queries: laidOut }));
@@ -354,12 +360,12 @@ test('a position past a partial layout is scrolled to once the layout reaches it
   scroller.remove();
 });
 
-test('a waiting position drops on a newer navigation, another session or an edit', async () => {
+test('a waiting position drops on a user scroll, a new session, an edit or a later page', async () => {
   let version = '1';
   const session = { version: () => version } as unknown as YrsSession;
   const drops: Array<(api: ReturnType<typeof paginatingApi>) => void> = [
-    ({ navigation }) => {
-      navigation.epoch += 1;
+    ({ scroller }) => {
+      scroller.dispatchEvent(new Event('wheel'));
     },
     ({ rerender, paginating }) =>
       rerender({ layout: layout(9, true), queries: paginating, session: {} as YrsSession }),
@@ -395,5 +401,20 @@ test('a paragraph navigation that waits for the layout still focuses the input',
   await act(() => new Promise((resolve) => setTimeout(resolve, 100)));
   expect(scrolls).toHaveLength(1);
   expect(focused).toHaveLength(1);
+  scroller.remove();
+});
+
+test('a waiting position resumed onto an unbuilt page stops following it on an edit', async () => {
+  let version = '1';
+  const session = { version: () => version } as unknown as YrsSession;
+  const { result, rerender, scroller, scrolls, laidOut } = paginatingApi(session);
+  const placeholder = { pageIndex: 8, x: 20, y: 20, width: 0, height: 0 };
+  await act(async () => result.current.scrollToPositionImpl(5000));
+  const building = unbuiltQueries([0, 1, 2, 3, 4, 5, 6, 7], placeholder);
+  await act(async () => rerender({ layout: layout(10), queries: building, session }));
+  expect(scrolls).toHaveLength(1);
+  version = '2';
+  await act(async () => rerender({ layout: layout(10), queries: laidOut, session }));
+  expect(scrolls).toHaveLength(1);
   scroller.remove();
 });
