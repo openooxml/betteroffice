@@ -752,18 +752,18 @@ fn a_four_line_cell_splits_two_and_two_while_the_other_cell_finishes() {
 }
 
 #[test]
-fn a_three_line_widow_controlled_cell_stays_whole_while_another_splits() {
+fn a_row_moves_whole_when_a_widow_controlled_cell_has_no_line_on_the_page() {
     let measured = after_filler(
-        2,
-        two_cell_table(&[(4, 0.0, json!({})), (3, 4.4, json!({}))]),
+        4,
+        two_cell_table(&[(1, 0.0, json!({})), (2, 0.0, json!({}))]),
     );
     let result = table_fragments(measured.clone(), None);
-    assert_eq!(result[0].0, 0);
-    assert_eq!(cell_windows(&result[0].1), [(0.0, 40.0), (0.0, 0.0)]);
-    assert_eq!(cell_windows(&result[1].1), [(40.0, 80.0), (0.0, 64.4)]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].0, 1);
+    assert!(result[0].1["cellClips"].is_null());
     assert_eq!(
         placed_cell_lines(&measured),
-        [vec![(0, 0..2)], vec![(0, 2..4), (1, 0..3)]]
+        [vec![], vec![(0, 0..1), (1, 0..2)]]
     );
 }
 
@@ -1083,16 +1083,17 @@ fn a_fitting_shared_start_keeps_the_legacy_header_decision() {
 }
 
 #[test]
-fn keep_lines_in_one_cell_does_not_block_another_cells_split() {
+fn a_row_moves_whole_when_a_kept_cell_has_no_line_on_the_page() {
     let measured = after_filler(
         2,
         two_cell_table(&[(6, 0.0, json!({})), (4, 4.4, json!({"keepLines": true}))]),
     );
     let result = table_fragments(measured.clone(), None);
-    assert_eq!(cell_windows(&result[0].1), [(0.0, 60.0), (0.0, 0.0)]);
+    assert_eq!(result[0].0, 1);
+    assert_eq!(cell_windows(&result[0].1), [(0.0, 80.0), (0.0, 84.4)]);
     assert_eq!(
         placed_cell_lines(&measured),
-        [vec![(0, 0..3)], vec![(0, 3..6), (1, 0..4)]]
+        [vec![], vec![(0, 0..4), (1, 0..4)], vec![(0, 4..6)]]
     );
 }
 
@@ -1138,14 +1139,19 @@ fn an_unfinished_cell_can_progress_beyond_an_existing_shared_cut() {
 
 #[test]
 fn a_keep_next_heading_stays_with_a_per_cell_leading_slice() {
-    let table = two_cell_table(&[(4, 0.0, json!({})), (3, 4.4, json!({}))]);
-    assert_eq!(heading_and_table_pages_after(2, table), (Some(0), Some(0)));
+    let table = two_cell_table(&[(4, 0.0, json!({})), (6, 4.4, json!({}))]);
+    assert_eq!(heading_and_table_pages_after(1, table), (Some(0), Some(0)));
 }
 
 #[test]
-fn a_keep_next_row_stays_with_a_per_cell_leading_slice() {
+fn a_keep_next_heading_moves_with_a_row_a_cell_cannot_start_on_the_page() {
+    let table = two_cell_table(&[(4, 0.0, json!({})), (3, 4.4, json!({}))]);
+    assert_eq!(heading_and_table_pages_after(2, table), (Some(1), Some(1)));
+}
+
+fn keep_next_row_fragments(filler_lines: usize, cells: &[(usize, f64, Value)]) -> Vec<Value> {
     let heading = table_rows(&[(1, json!({"keepNext": true}), json!({}))]);
-    let mut table = two_cell_table(&[(4, 0.0, json!({})), (3, 4.4, json!({}))]);
+    let mut table = two_cell_table(cells);
     table["block"]["rows"]
         .as_array_mut()
         .unwrap()
@@ -1154,12 +1160,34 @@ fn a_keep_next_row_stays_with_a_per_cell_leading_slice() {
         .as_array_mut()
         .unwrap()
         .insert(0, heading["measure"]["rows"][0].clone());
-    table["measure"]["totalHeight"] = json!(100);
-    let result = table_fragments(after_filler(2, table), None);
+    let height = 20.0 + table["measure"]["rows"][1]["height"].as_f64().unwrap();
+    table["measure"]["totalHeight"] = json!(height);
+    table_fragments(after_filler(filler_lines, table), None)
+        .into_iter()
+        .map(|(page, mut fragment)| {
+            fragment["page"] = json!(page);
+            fragment
+        })
+        .collect()
+}
+
+#[test]
+fn a_keep_next_row_stays_with_a_per_cell_leading_slice() {
+    let result = keep_next_row_fragments(1, &[(4, 0.0, json!({})), (6, 4.4, json!({}))]);
     assert_eq!(result.len(), 2);
-    assert_eq!(result[0].0, 0);
-    assert_eq!(result[0].1["rowStart"], 0);
-    assert_eq!(result[0].1["rowEnd"], 2);
-    assert_eq!(result[0].1["height"], 60);
-    assert_eq!(cell_windows(&result[0].1), [(0.0, 40.0), (0.0, 0.0)]);
+    assert_eq!(result[0]["page"], 0);
+    assert_eq!(result[0]["rowStart"], 0);
+    assert_eq!(result[0]["rowEnd"], 2);
+    assert!((result[0]["height"].as_f64().unwrap() - 64.4).abs() < 0.01);
+    assert_eq!(cell_windows(&result[0]), [(0.0, 40.0), (0.0, 44.4)]);
+}
+
+#[test]
+fn a_keep_next_row_moves_with_a_row_a_cell_cannot_start_on_the_page() {
+    let result = keep_next_row_fragments(2, &[(4, 0.0, json!({})), (3, 4.4, json!({}))]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0]["page"], 1);
+    assert_eq!(result[0]["rowStart"], 0);
+    assert_eq!(result[0]["rowEnd"], 2);
+    assert!(result[0]["cellClips"].is_null());
 }

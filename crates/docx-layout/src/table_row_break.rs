@@ -304,19 +304,26 @@ impl<'a> RowBreaks<'a> {
             .fold(0.0, f64::max)
     }
 
+    /// The smallest per-cell slice of `row` from `consumed` on: one that holds
+    /// the first unbreakable stretch of every cell with content left.
     pub(crate) fn first_cell_slice(&self, row: usize, consumed: f64, capacity: f64) -> Option<f64> {
         let minimum = self
             .cells(row)?
             .iter()
             .filter_map(|cell| {
                 let top = consumed.min(cell.end);
-                cell.kept
+                let offsets = if cell.kept_oversized(top, capacity) {
+                    &cell.lines
+                } else {
+                    &cell.kept
+                };
+                offsets
                     .iter()
                     .copied()
                     .find(|offset| *offset > top)
                     .map(|offset| offset - top)
             })
-            .min_by(f64::total_cmp)?;
+            .max_by(f64::total_cmp)?;
         let shared = snap_row_break(&self.kept, row, consumed, minimum);
         (minimum <= capacity
             && self
@@ -381,6 +388,15 @@ impl<'a> RowBreaks<'a> {
             if !whole_lines && clip.bottom == clip.top && cell.kept_oversized(clip.top, capacity) {
                 clip.bottom = last_fitting(&cell.lines, clip.top);
             }
+        }
+        // A row splits only where every cell with content left places some of it.
+        if tops.is_none()
+            && cells
+                .iter()
+                .zip(&clips)
+                .any(|(cell, clip)| clip.bottom == clip.top && cell.end > clip.top)
+        {
+            return None;
         }
         let height = height(&clips);
         let complete = cells

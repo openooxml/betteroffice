@@ -600,6 +600,17 @@ fn layout_table_with_position(
                     clip_bottom = Some(start_off + slice);
                     last_row_partial = true;
                 }
+            } else if active_tops.is_none()
+                && !limited_by_float
+                && let Some(slice) = breaks.first_cell_slice(cur, start_off, row_capacity)
+            {
+                // Every cell starts in a whole column: move the row there.
+                if !paginator.has_float_bands()
+                    || !fit_moved_cursor(paginator, slice + header_overhead + pending_spacing)
+                {
+                    paginator.advance_for_overflow();
+                }
+                continue 'rows;
             } else {
                 // Paragraph rules that leave no break in a column yield to whole lines.
                 // If no line fits, overflow instead of looping.
