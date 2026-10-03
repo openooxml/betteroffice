@@ -221,6 +221,8 @@ export interface PagedEditorProps {
    */
   viewerDocumentRead?: ResidentEngineWorkerClient['documentRead'];
   onViewerCommentRangesChange?: (ranges: ViewerCommentRanges) => void;
+  /** Whether a viewer session's sidebar is shown, so its cards read from the worker. */
+  viewerSidebarActive?: boolean;
   /** Gap between pages in pixels. */
   pageGap?: number;
   /** Zoom level (1 = 100%). */
@@ -516,6 +518,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       readOnly = false,
       viewerDocumentRead: viewerDocumentReadProp,
       onViewerCommentRangesChange,
+      viewerSidebarActive = true,
       pageGap = DEFAULT_PAGE_GAP,
       zoom = 1,
       showHiddenText = false,
@@ -1765,7 +1768,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const lastAnchorEmitAtRef = useRef(0);
     const lastAnchorPositionsRef = useRef<Map<string, number> | null>(null);
     useViewerSidebarAnchors({
-      read: viewerDocumentRead,
+      read: viewerSidebarActive ? viewerDocumentRead : undefined,
       queries: displayListQueries,
       commentIds: sidebarCommentIds,
       zoom,

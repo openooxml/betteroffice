@@ -1,5 +1,13 @@
 import { expect, test, type Page } from 'playwright/test';
-import type { ViewerSidebarsProbe } from './docx-viewer-sidebars-harness';
+
+interface ViewerSidebarsProbe {
+  editor: { commands: { execute(command: string, payload: null): Promise<unknown> } } | null;
+  sessions: unknown[];
+  errors: string[];
+  sidebarOpen: boolean;
+  replica(): { started: boolean; loaded: boolean };
+  sessionReads(): Record<string, number>;
+}
 
 interface ViewerWindow {
   __viewerSidebarsProbe: ViewerSidebarsProbe;

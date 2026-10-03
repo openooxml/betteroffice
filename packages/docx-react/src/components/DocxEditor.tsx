@@ -2619,6 +2619,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               onAnchorPositionsChange={setAnchorPositions}
               onYrsTrackedChangesChange={setYrsTrackedChangesResult}
               onViewerCommentRangesChange={setViewerCommentRanges}
+              viewerSidebarActive={showCommentsSidebar || sidebarOpen}
               pluginRenderedDomContext={sidebarDomContext}
               pageWidthPx={pageWidthPx}
               expandedSidebarItem={expandedSidebarItem}

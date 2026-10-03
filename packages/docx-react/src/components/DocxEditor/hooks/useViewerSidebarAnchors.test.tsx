@@ -78,7 +78,7 @@ test('viewer anchors emit ranges and positions and reproject more pages from the
 
 test('a cancelled run cannot publish a delayed sidebar reply', async () => {
   const pending = new Map<string, (reply: { version: string; value: DocxSidebarRead }) => void>();
-  const read = ((request: ResidentDocumentRead) => new Promise((resolve) => {
+  const read = ((request: ResidentDocumentRead) => new Promise<unknown>((resolve) => {
     if ('expectVersion' in request) pending.set(request.expectVersion, resolve);
   })) as ResidentEngineWorkerClient['documentRead'];
   const view = setup(read);

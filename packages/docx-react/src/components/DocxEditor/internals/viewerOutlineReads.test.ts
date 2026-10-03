@@ -32,7 +32,7 @@ test('viewer headings map to outline positions and clicks navigate through the w
 
 test('a heading reply for a superseded frame is dropped', async () => {
   let complete!: (reply: { version: string; value: DocxOutlineHeading[] }) => void;
-  const read = (() => new Promise((resolve) => { complete = resolve; })) as ResidentEngineWorkerClient['documentRead'];
+  const read = (() => new Promise<unknown>((resolve) => { complete = resolve; })) as ResidentEngineWorkerClient['documentRead'];
   const reads = new ViewerOutlineReads(read);
   let version = 'A';
   const pending = reads.collect(version, () => version);
@@ -43,7 +43,7 @@ test('a heading reply for a superseded frame is dropped', async () => {
 
 test('only the latest refresh is applied even at the same version', async () => {
   const replies: Array<(reply: { version: string; value: DocxOutlineHeading[] }) => void> = [];
-  const read = (() => new Promise((resolve) => { replies.push(resolve); })) as ResidentEngineWorkerClient['documentRead'];
+  const read = (() => new Promise<unknown>((resolve) => { replies.push(resolve); })) as ResidentEngineWorkerClient['documentRead'];
   const reads = new ViewerOutlineReads(read);
   const first = reads.collect('A', () => 'A');
   const second = reads.collect('A', () => 'A');
@@ -57,7 +57,7 @@ test('a stale navigation reply cannot scroll the new frame', async () => {
   let complete!: (reply: { version: string; value: { loc: { story: string; paraId: string; offset: number }; position: number } }) => void;
   const read = ((request: ResidentDocumentRead) => request.kind === 'headings'
     ? Promise.resolve({ version: 'A', value: headings })
-    : new Promise((resolve) => { complete = resolve; })) as ResidentEngineWorkerClient['documentRead'];
+    : new Promise<unknown>((resolve) => { complete = resolve; })) as ResidentEngineWorkerClient['documentRead'];
   const reads = new ViewerOutlineReads(read);
   let version = 'A';
   await reads.collect(version, () => version);
@@ -74,7 +74,7 @@ test('a newer outline click supersedes a pending navigation at the same version'
   const pending: Array<(reply: { version: string; value: { loc: { story: string; paraId: string; offset: number }; position: number } }) => void> = [];
   const read = ((request: ResidentDocumentRead) => request.kind === 'headings'
     ? Promise.resolve({ version: 'A', value: headings })
-    : new Promise((resolve) => { pending.push(resolve); })) as ResidentEngineWorkerClient['documentRead'];
+    : new Promise<unknown>((resolve) => { pending.push(resolve); })) as ResidentEngineWorkerClient['documentRead'];
   const reads = new ViewerOutlineReads(read);
   await reads.collect('A', () => 'A');
   const positions: number[] = [];
