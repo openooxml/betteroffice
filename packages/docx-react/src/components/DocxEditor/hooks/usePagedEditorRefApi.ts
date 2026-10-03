@@ -524,8 +524,10 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   ]);
 
   useEffect(() => {
-    if (onReadyRef.current && yrsSession && replicaReady) onReadyRef.current(buildRefApi(inputs));
-  }, [layout, runLayoutPipeline, scrollToParaIdImpl, scrollToPageImpl, yrsSession, replicaReady]);
+    if (onReadyRef.current && yrsSession && (viewerSelectionRef.current ? layout !== null : replicaReady)) {
+      onReadyRef.current(buildRefApi(inputs));
+    }
+  }, [layout, runLayoutPipeline, scrollToParaIdImpl, scrollToPageImpl, yrsSession, replicaReady, viewerSelection]);
 }
 
 export interface UsePagedEditorCommandBridgeOptions {

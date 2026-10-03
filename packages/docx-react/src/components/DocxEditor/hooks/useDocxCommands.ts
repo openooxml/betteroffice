@@ -755,6 +755,10 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
     return {
       environment,
       ordered: (id, args) => {
+        if (
+          (id === 'reviewAccept' || id === 'reviewReject') &&
+          latest.current.pagedEditorRef.current?.isWorkerViewer() === true
+        ) return false;
         const session = latest.current.session;
         if (
           latest.current.experimentalWorkerOpen && session && workerOpenReplicaPending(session) &&

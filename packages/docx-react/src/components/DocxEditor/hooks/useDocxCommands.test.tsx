@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { DisplayList } from '@betteroffice/docx/layout/render';
@@ -14,6 +14,7 @@ import { DocxCommandAdmissionError } from '../../../commands/createDocxCommandSt
 import type { DocxCommandResult } from '../../../commands/types';
 import type { PagedEditorRef } from '../PagedEditor';
 import { createYrsPositionProjection } from '../internals/yrsPositionProjection';
+import { awaitWorkerOpenReplica, deferWorkerOpenReplica } from '../internals/workerOpenReplica';
 import { currentYrsToolbarSelection } from '../yrsToolbar';
 import {
   useDocxCommandBinding,
@@ -42,6 +43,7 @@ beforeAll(async () => {
 });
 afterEach(() => {
   cleanup();
+  mock.restore();
   console.error = quiet;
   for (const session of sessions.splice(0)) session.destroy();
 });
@@ -94,6 +96,7 @@ function mount(initial: YrsSession, overrides: Partial<DocxCommandInputs> = {}) 
     },
   } as unknown as PagedEditorCommandBridge & Record<string, unknown>;
   const editor = {
+    isWorkerViewer: () => false,
     getYrsSession: () => session,
     syncYrsInputState: () => true,
     yrsLocToDisplayPosition: (loc: { paraId: string; offset: number }) => {
@@ -188,6 +191,51 @@ function mount(initial: YrsSession, overrides: Partial<DocxCommandInputs> = {}) 
 }
 
 describe('editor command binding', () => {
+  for (const readOnly of [true, false]) {
+    test(`worker viewer revision decisions refuse ${readOnly ? 'read-only' : 'viewing-mode'} without input admission`, async () => {
+      const { session } = await newSession();
+      const hydrate = mock(async () => () => {});
+      const request = mock(() => {});
+      const fallback = mock(() => {});
+      const replica = deferWorkerOpenReplica(session, hydrate, fallback, () => {}, { active: () => true, request });
+      const editor = mount(session, {
+        readOnly, mode: 'viewing', experimentalWorkerOpen: true,
+        pagedEditorRef: { current: { isWorkerViewer: () => true } as PagedEditorRef },
+      });
+      const admit = spyOn(editor.bridge, 'runAfterPendingInput').mockImplementation(async (operation) => {
+        await awaitWorkerOpenReplica(session);
+        return operation();
+      });
+      expect(code(await editor.store.execute('reviewAccept', { revisionId: 'revision' }))).toBe(
+        readOnly ? 'read-only' : 'viewing-mode'
+      );
+      expect(code(await editor.store.execute('reviewReject', null))).toBe(
+        readOnly ? 'read-only' : 'viewing-mode'
+      );
+      expect(admit).not.toHaveBeenCalled();
+      expect(replica.started).toBe(false);
+      expect(request).not.toHaveBeenCalled();
+      expect(hydrate).not.toHaveBeenCalled();
+      expect(fallback).not.toHaveBeenCalled();
+    });
+  }
+
+  test('editor revision decisions remain ordered after pending input', async () => {
+    const { session } = await newSession();
+    const editor = mount(session);
+    const admit = spyOn(editor.bridge, 'runAfterPendingInput');
+    const release = editor.holdInput();
+    let settled = false;
+    const accept = editor.store.execute('reviewAccept', { revisionId: 'revision' });
+    const reject = editor.store.execute('reviewReject', null).then((result) => { settled = true; return result; });
+    expect(admit).toHaveBeenCalledTimes(2);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    release();
+    expect(code(await accept)).toBe('revision-not-found');
+    expect(code(await reject)).toBe('revision-required');
+  });
+
   test('engine refusals fail the command instead of reporting a no-op', async () => {
     const { session } = await newSession();
     console.error = () => {};

@@ -1,4 +1,7 @@
 import type {
+  DocxContentControlQuery,
+  DocxContentControlsOptions,
+  DocxContentControlsResult,
   DocxExportResult,
   DocxLayoutMap,
   DocxPageExportOptions,
@@ -95,6 +98,15 @@ export interface WorkerProposalAuthority {
     request: DocxFindTextRequest,
     main: () => Promise<DocxFindTextResult>
   ): Promise<DocxFindTextResult>;
+  listContentControls(
+    options: DocxContentControlsOptions | undefined,
+    main: () => Promise<DocxContentControlsResult>
+  ): Promise<DocxContentControlsResult>;
+  findContentControls(
+    query: DocxContentControlQuery,
+    options: DocxContentControlsOptions | undefined,
+    main: () => Promise<DocxContentControlsResult>
+  ): Promise<DocxContentControlsResult>;
   /**
    * Reads the layout request after the calls ahead of it, then the worker's export for it; null
    * when there is no request yet.
@@ -328,6 +340,16 @@ export function registerWorkerProposalAuthority(
     }, main),
     findText: (request, main) => route(async () => {
       const read = await worker.documentRead({ kind: 'findText', request });
+      assertCurrent();
+      return read.value;
+    }, main),
+    listContentControls: (options, main) => route(async () => {
+      const read = await worker.documentRead({ kind: 'listContentControls', options: options ?? {} });
+      assertCurrent();
+      return read.value;
+    }, main),
+    findContentControls: (query, options, main) => route(async () => {
+      const read = await worker.documentRead({ kind: 'findContentControls', query, options: options ?? {} });
       assertCurrent();
       return read.value;
     }, main),

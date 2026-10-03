@@ -33,6 +33,7 @@ import type {
 import type { DocxFindTextRequest, DocxFindTextResult, DocxReadParagraphsRequest, DocxReadParagraphsResult } from './edits';
 import type { ProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
 import type { DocxPageExportOptions } from './pagedExport';
+import type { DocxContentControlQuery, DocxContentControlsOptions, DocxContentControlsResult } from './contentControls';
 
 /** @internal */
 export type ResidentProposalOperation =
@@ -55,6 +56,8 @@ export interface ResidentProposalResponse {
 /** @internal */
 export type ResidentDocumentRead =
   | { kind: 'exportStructuredWithPages'; options: DocxPageExportOptions; currentRequest: string }
+  | { kind: 'listContentControls'; options: DocxContentControlsOptions }
+  | { kind: 'findContentControls'; query: DocxContentControlQuery; options: DocxContentControlsOptions }
   | { kind: 'paragraphIdentities' }
   | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
   | { kind: 'readParagraphs'; request: DocxReadParagraphsRequest }
@@ -81,6 +84,8 @@ export type ResidentDocumentRead =
 /** @internal */
 export interface ResidentDocumentReadValues {
   exportStructuredWithPages: string;
+  listContentControls: DocxContentControlsResult;
+  findContentControls: DocxContentControlsResult;
   paragraphIdentities: DocxParagraphIdentitySnapshot;
   resolveParagraphAnchors: { results: DocxParagraphAnchorResult[] };
   readParagraphs: DocxReadParagraphsResult;

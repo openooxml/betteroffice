@@ -518,6 +518,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       case 'exportStructuredWithPages':
         value = session.exportStructuredWithPagesJson(request.read.options, request.read.currentRequest);
         break;
+      case 'listContentControls':
+        value = session.listContentControls(request.read.options);
+        break;
+      case 'findContentControls':
+        value = session.findContentControls(request.read.query, request.read.options);
+        break;
       case 'paragraphIdentities':
         value = session.paragraphIdentities();
         break;

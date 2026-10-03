@@ -13,6 +13,7 @@ import type { DecodedFrameDelta, FramePageOperation } from '../layout/render/fra
 import type { DisplayPage } from '../layout/render/displayList';
 import type {
   DocxEditRequest,
+  DocxContentControlsResult,
   DocxParagraphAnchor,
   DocxProposalInput,
   YrsResidentCaretRect,
@@ -2251,6 +2252,44 @@ describe('worker proposals during sliced completion', () => {
   beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(
     import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
   )))));
+
+  test('content-control reads equal a main session opened from the same package', async () => {
+    const bytes = new Uint8Array(readFileSync(resolve(
+      import.meta.dir, '__fixtures__/content-controls/template.docx'
+    )));
+    const engine = await createResidentEngineSession(undefined, 97200);
+    const main = await createYrsSession({ clientId: 97200 });
+    const w = worker();
+    Object.assign(w.harness.session, engine);
+    const normalize = (result: DocxContentControlsResult) => ({ ...result, version: '<version>' });
+    try {
+      expect((await w.send({ type: 'open', bytes: bytes.buffer })).ok).toBe(true);
+      main.openDocx(bytes, true);
+      const listed = main.listContentControls();
+      if (!listed.ok) throw new Error(listed.failure.message);
+      expect(new Set(listed.content.controls.map(({ placement }) => placement))).toEqual(
+        new Set(['inline', 'block'])
+      );
+      const query = { kind: 'ooxmlId', ooxmlId: listed.content.controls[0]!.ooxmlId! } as const;
+      for (const options of [{}, { maxControls: 1 }, { stories: ['body'] as const }]) {
+        for (const read of [
+          { kind: 'listContentControls', options },
+          { kind: 'findContentControls', query, options },
+        ] satisfies ResidentDocumentRead[]) {
+          const reply = await w.send({ type: 'documentRead', read });
+          if (!reply.ok || !reply.read) throw new Error('expected a content-control read');
+          expect(normalize(reply.read.value as DocxContentControlsResult)).toEqual(normalize(
+            read.kind === 'listContentControls'
+              ? main.listContentControls(options)
+              : main.findContentControls(query, options)
+          ));
+        }
+      }
+    } finally {
+      main.destroy();
+      engine.destroy();
+    }
+  });
 
   async function proposalWorker(extraBody = '', comments?: string) {
     const parts: PartsMap = new Map();

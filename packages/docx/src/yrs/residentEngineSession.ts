@@ -26,6 +26,7 @@ import type {
 import type { ProposalGeometryReader, ProposalGeometryRevision } from './proposalGeometry';
 import type { DocxProposalSession } from './proposals';
 import type { DocxPageExportOptions } from './pagedExport';
+import type { DocxContentControlsResult } from './contentControls';
 import type { YrsPositionOutline } from './yrsPositionProjection';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
@@ -44,6 +45,8 @@ export type ResidentEngineSession = Pick<
   | 'clearFonts'
   | 'destroy'
   | 'encodeStateVector'
+  | 'findContentControls'
+  | 'listContentControls'
   | 'layoutDocumentJson'
   | 'layoutFontRequirementsJson'
   | 'layoutDocumentWithRegionsRetainedJson'
@@ -281,6 +284,14 @@ export async function createResidentEngineSession(
       JSON.parse(session.paragraph_identities()) as DocxParagraphIdentitySnapshot,
     exportStructuredWithPagesJson: (options, currentRequest) =>
       session.export_structured_with_pages_json(JSON.stringify(options), currentRequest),
+    listContentControls: (options = {}) =>
+      JSON.parse(
+        session.list_content_controls_json(JSON.stringify(options))
+      ) as DocxContentControlsResult,
+    findContentControls: (query, options = {}) =>
+      JSON.parse(
+        session.find_content_controls_json(JSON.stringify(query), JSON.stringify(options))
+      ) as DocxContentControlsResult,
     storiesChangedSince: (since) =>
       JSON.parse(session.stories_changed_since(since)) as { revision: number; stories: string[] },
     openDocx: (bytes, digest, generation) => {
