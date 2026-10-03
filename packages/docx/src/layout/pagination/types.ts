@@ -1310,6 +1310,7 @@ export type TableFragment = FragmentBase & {
    * visible band of that single row is `[clipTop, clipBottom)`.
    */
   clipBottom?: number;
+  cellClips?: { row: number; cell: number; top: number; bottom: number }[];
 };
 
 /**

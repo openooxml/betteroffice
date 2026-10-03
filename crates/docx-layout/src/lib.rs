@@ -448,6 +448,37 @@ pub fn update_resident_display_list_incremental_partial_observed(
     })
 }
 
+/// Page-scoped display update reporting retained suffix position shifts.
+#[allow(clippy::too_many_arguments)]
+pub fn update_resident_display_list_incremental_partial_shifts_observed(
+    pagination: &types::Input,
+    layout: &types::Layout,
+    resident: &mut display_list::ResidentDisplayInput,
+    previous: &mut display_list::DisplayList,
+    rebuilt_page_start: usize,
+    rebuilt_page_end: usize,
+    extra_pages: &[usize],
+    position_deltas: &std::collections::HashMap<String, i64>,
+    build: &dyn Fn(usize) -> bool,
+    observe_phase: &mut impl FnMut(),
+) -> Result<Option<display_list::IncrementalDisplayShifts>, String> {
+    with_measure_fonts(|store| {
+        display_list::update_resident_display_list_incremental_partial_with_fonts_shifts(
+            pagination,
+            layout,
+            &store.borrow(),
+            resident,
+            previous,
+            rebuilt_page_start,
+            rebuilt_page_end,
+            extra_pages,
+            position_deltas,
+            build,
+            observe_phase,
+        )
+    })
+}
+
 /// wasm compatibility wrapper. Resident engine users call
 /// [`build_display_list_value`] and keep the typed result.
 #[wasm_bindgen]
