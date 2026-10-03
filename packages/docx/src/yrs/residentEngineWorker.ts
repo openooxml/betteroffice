@@ -16,7 +16,21 @@ import {
   type DocxProposalResult,
 } from './proposals';
 import { computeProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
-import { readResidentSearch } from './residentSearch';
+import { findBodyMatches } from './findMatches';
+import { readResidentSearch, residentBodyPositions } from './residentSearch';
+import { findParagraphs } from './findParagraphs';
+import { DisplayPositionIndex } from './displayPositionIndex';
+import { resolveYrsPointPosition } from './pointPosition';
+import {
+  resolveBookmarkPosition,
+  resolveCommentTarget,
+  resolveParagraphTarget,
+  resolveRevisionTarget,
+  resolveSelectionInfo,
+  resolveSelectionText,
+  resolveSelectionUnit,
+} from './viewerSelection';
+import { readSidebar, readOutlineHeadings } from './sidebarReads';
 import { createResidentScheduler, type SchedulerMessage } from './residentScheduler';
 import { hasCachedYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import {
@@ -53,6 +67,21 @@ const scope = self as unknown as DedicatedWorkerGlobalScope;
 let resolveHostEditModule: (module: WebAssembly.Module | null) => void;
 let hostEditModule = nextHostEditModule();
 let session: ResidentEngineSession | null = null;
+let positionIndex: { session: ResidentEngineSession; index: DisplayPositionIndex } | null = null;
+
+function displayPositionIndex(current: ResidentEngineSession): DisplayPositionIndex {
+  if (positionIndex?.session !== current) {
+    positionIndex = {
+      session: current,
+      index: new DisplayPositionIndex({
+        ...current.geometryReader,
+        selectionText: current.selectionText,
+        resolveComment: current.resolveComment,
+      }),
+    };
+  }
+  return positionIndex.index;
+}
 let proposals: DocxProposalRegistry | null = null;
 let lastProposalMirrorVersion: string | null = null;
 let fontRequirements: {
@@ -72,6 +101,11 @@ let requestedRequirements: { owner: ResidentEngineSession; layoutInput: string }
 const REQUIREMENTS_CACHE_INPUTS = 8;
 /** Set while the session holds the document `open` seeded, with the heap limit it used. */
 let openedDocument: { heapLimitBytes?: number } | null = null;
+let openedVersion: string | null | undefined;
+/** A change before the whole document's first frame leaves no frame as opened. */
+function noteDocumentChange(): void {
+  if (openedVersion === undefined) openedVersion = null;
+}
 // The opened document is a display-only preview that an `open` of the whole package replaces.
 let previewing = false;
 /** Pages of a cut preview's layout that match the whole document's; null for a whole document. */
@@ -268,6 +302,7 @@ function trapped(id: number, error: WebAssembly.RuntimeError): void {
 }
 
 async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
+  if (session && request.type === 'sync') validateFontsBaseRevision(request.snapshot);
   if (
     request.type !== 'documentRead' && request.type !== 'fontRequirements' &&
     request.type !== 'encodeState' && request.type !== 'revisionCount' &&
@@ -331,6 +366,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     proposals?.destroy();
     proposals = null;
     session = opening;
+    if (request.previewBlocks === undefined) openedVersion = undefined;
     openedDocument = { heapLimitBytes: request.heapLimitBytes };
     previewing = request.previewBlocks !== undefined;
     const stateVector = exactBuffer(session.encodeStateVector());
@@ -340,6 +376,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'bootstrap') {
     if (!request.opened) {
       destroySession(request.keepSurfaces === true);
+      openedVersion = null;
       // The worker is a genuine yrs peer. Reusing the main replica's client id
       // makes a fast structural input race overlap one client's clock range and
       // corrupt the update; a fresh id lets yrs merge queued/local operations
@@ -540,6 +577,15 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     }
     let value: unknown;
     switch (request.read.kind) {
+      case 'exportStructuredWithPages':
+        value = session.exportStructuredWithPagesJson(request.read.options, request.read.currentRequest);
+        break;
+      case 'listContentControls':
+        value = session.listContentControls(request.read.options);
+        break;
+      case 'findContentControls':
+        value = session.findContentControls(request.read.query, request.read.options);
+        break;
       case 'paragraphIdentities':
         value = session.paragraphIdentities();
         break;
@@ -550,6 +596,17 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         break;
       case 'readParagraphs':
         value = engine.readParagraphs(request.read.request);
+        break;
+      case 'findText':
+        value = engine.findText(request.read.request);
+        break;
+      case 'findMatches':
+        value = engine.version() !== request.read.expectVersion ? null : findBodyMatches(
+          session.geometryReader,
+          residentBodyPositions(session.geometryReader),
+          request.read.searchText,
+          request.read.options
+        );
         break;
       case 'navigationTarget':
         value = resolveNavigationTarget(
@@ -569,6 +626,81 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           request.read.caseSensitive,
           request.read.carry
         );
+        break;
+      case 'pointPosition':
+        value = resolveYrsPointPosition(
+          displayPositionIndex(session),
+          request.read.hit,
+          request.read.expectVersion
+        );
+        break;
+      case 'findParagraphs':
+        value = findParagraphs(session.geometryReader, request.read.query, request.read);
+        break;
+      case 'selectionUnit':
+        value = resolveSelectionUnit(
+          displayPositionIndex(session),
+          request.read.story,
+          request.read.position,
+          request.read.unit,
+          request.read.expectVersion
+        );
+        break;
+      case 'selectionText':
+        value = resolveSelectionText(
+          displayPositionIndex(session),
+          request.read.story,
+          request.read.anchor,
+          request.read.head,
+          request.read.expectVersion
+        );
+        break;
+      case 'bookmarkPosition':
+        value = resolveBookmarkPosition(
+          displayPositionIndex(session),
+          request.read.story,
+          request.read.name,
+          request.read.expectVersion
+        );
+        break;
+      case 'selectionInfo':
+        value = resolveSelectionInfo(
+          displayPositionIndex(session),
+          request.read.story,
+          request.read.anchor,
+          request.read.head,
+          request.read.expectVersion
+        );
+        break;
+      case 'paragraphTarget':
+        value = resolveParagraphTarget(
+          displayPositionIndex(session),
+          request.read.story,
+          request.read.paraId,
+          request.read.expectVersion
+        );
+        break;
+      case 'commentTarget':
+        value = resolveCommentTarget(
+          displayPositionIndex(session),
+          request.read.story,
+          request.read.commentId,
+          request.read.expectVersion
+        );
+        break;
+      case 'revisionTarget':
+        value = resolveRevisionTarget(
+          displayPositionIndex(session),
+          request.read.story,
+          request.read.revisionId,
+          request.read.expectVersion
+        );
+        break;
+      case 'sidebar':
+        value = readSidebar(session.geometryReader, request.read.commentIds, request.read.expectVersion);
+        break;
+      case 'headings':
+        value = readOutlineHeadings(session.geometryReader, request.read.expectVersion);
         break;
       case 'stickyAnchors': {
         const currentSession = session;
@@ -746,6 +878,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'applyUpdate') {
+    noteDocumentChange();
     fontRequirements = null;
     session.applyUpdate(request.update);
     if (request.selection) session.setSelection(request.selection.anchor, request.selection.head);
@@ -784,6 +917,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   await completeProvisionalLayout();
+  noteDocumentChange();
   fontRequirements = null;
   // The edit replaces the pagination a cached completion's frame would paint.
   completedLayout = null;
@@ -858,6 +992,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
 }
 
+function validateFontsBaseRevision(snapshot: YrsResidentWorkerSnapshot): void {
+  if (snapshot.fontsBaseRevision !== undefined && snapshot.fontsBaseRevision !== fontsRevision) {
+    throw new Error('Resident engine worker font base revision mismatch');
+  }
+}
+
 /**
  * Loads a snapshot and runs its layout, over the first `provisionalPages`
  * pages only when given; returns the region layout reply, which a full pass
@@ -870,21 +1010,30 @@ function hydrate(
   loadState = true
 ): { layoutJson: string | null; provisional: boolean } {
   if (!session) throw new Error('Resident engine worker is not initialized');
+  validateFontsBaseRevision(snapshot);
   supersedeSlicedCompletion();
   incompleteLayout = null;
   clearProvisionalFinalPages();
   completedLayout = null;
   if (loadState && !snapshot.workerAuthoritative) {
+    noteDocumentChange();
     fontRequirements = null;
     session.loadState(snapshot.state);
   }
   session.setPartialDocument(snapshot.partialDocument === true);
   previewFinalPages = snapshot.partialDocument === true ? 0 : null;
-  if (!snapshot.workerAuthoritative) session.loadMediaSources(snapshot.mediaSources ?? '');
+  if (!snapshot.workerAuthoritative) {
+    session.loadMediaSources(snapshot.mediaSources ?? '');
+    session.loadNoteSeparators(snapshot.noteSeparators ?? new Uint8Array(0));
+  }
   if (snapshot.fontsRevision !== fontsRevision) {
-    // A mismatched revision always carries the full font set (the client only
-    // omits fonts when it knows this session's applied revision matches).
-    session.clearFonts();
+    if (snapshot.fontsBaseRevision === undefined) {
+      session.clearFonts();
+      glyphCache = null;
+      for (const pageId of activeOffscreenPageIds) pendingOffscreenPageIds.add(pageId);
+      intactBackBuffers.clear();
+    }
+    fontsRevision = -1;
     for (const font of snapshot.fonts) {
       if (font instanceof Uint8Array) session.registerFont(font);
       else session.registerSubstituteFont(font.substituteOf, font.family);
@@ -1330,7 +1479,9 @@ function destroySession(keepSurfaces = false): void {
   session?.destroy();
   lastProposalMirrorVersion = null;
   session = null;
+  positionIndex = null;
   openedDocument = null;
+  openedVersion = undefined;
   previewing = false;
   previewFinalPages = null;
   clearProvisionalFinalPages();
@@ -1387,6 +1538,13 @@ async function replyFrame(
   precedingPageFrames: Uint8Array[] = [],
   selectionCursor: CollaborationCursor | null = null
 ): Promise<void> {
+  const documentVersion = session?.proposalEngine.version();
+  const documentPreview = previewing;
+  if (!previewing && openedVersion === undefined && documentVersion !== undefined) {
+    openedVersion = documentVersion;
+  }
+  const documentAsOpened =
+    !previewing && documentVersion !== undefined && documentVersion === openedVersion;
   applyWorkerFrame(bytes);
   const limit = provisionalFinalPages;
   if (session && limit !== null && retainedFrame) {
@@ -1450,6 +1608,9 @@ async function replyFrame(
       replayMs,
       replayedPages,
       layoutRevision,
+      ...(documentVersion === undefined ? {} : { documentVersion }),
+      ...(documentPreview ? { documentPreview: true } : {}),
+      ...(documentAsOpened ? { documentAsOpened: true } : {}),
       ...(deletedUnits === undefined ? {} : { deletedUnits }),
       ...(stateVector ? { stateVector } : {}),
       ...(layoutJson !== undefined ? { layoutJson } : {}),

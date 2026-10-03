@@ -32,17 +32,9 @@ type SearchReader = Pick<
 > & { positionOutline?(root: string): YrsPositionOutline | null };
 
 /** @internal */
-export function readResidentSearch(
-  reader: SearchReader,
-  query: string,
-  caseSensitive: boolean,
-  carry?: YrsStickyPosition | null
-): ResidentSearchResult {
-  if (!query) return { matches: [], carried: -1 };
-  const hits = reader.searchText(query, { caseSensitive }).filter((hit) =>
-    hit.story === 'body' || hit.story.startsWith('body:')
-  );
-  if (hits.length === 0) return { matches: [], carried: -1 };
+export function residentBodyPositions(
+  reader: Pick<SearchReader, 'hasStory' | 'storySegments' | 'paragraphSpans' | 'positionOutline'>
+): (loc: YrsLoc) => number | null {
   const outline = reader.hasStory('body') ? reader.positionOutline?.('body') : null;
   const projection = outline ? createYrsLocProjectionFromOutline(outline) :
     createYrsPositionProjection(reader, 'body');
@@ -55,10 +47,25 @@ export function readResidentSearch(
     }
     return maps.get(story)!;
   };
-  const positionFor = (loc: YrsLoc): number | null =>
+  return (loc: YrsLoc): number | null =>
     loc.story === 'body' || loc.story.startsWith('body:')
       ? yrsLocToProjectedDisplayPosition(reader, () => projection, loc, 'body', inputMap)
       : null;
+}
+
+/** @internal */
+export function readResidentSearch(
+  reader: SearchReader,
+  query: string,
+  caseSensitive: boolean,
+  carry?: YrsStickyPosition | null
+): ResidentSearchResult {
+  if (!query) return { matches: [], carried: -1 };
+  const hits = reader.searchText(query, { caseSensitive }).filter((hit) =>
+    hit.story === 'body' || hit.story.startsWith('body:')
+  );
+  if (hits.length === 0) return { matches: [], carried: -1 };
+  const positionFor = residentBodyPositions(reader);
   const matches: ResidentSearchMatch[] = [];
   for (const hit of hits) {
     const loc = { story: hit.story, paraId: hit.paraId, offset: hit.start };

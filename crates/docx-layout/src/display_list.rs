@@ -1184,6 +1184,12 @@ pub struct ResidentDisplayInput {
     input: BuildInput,
 }
 
+impl ResidentDisplayInput {
+    pub fn font_chains(&self) -> &HashMap<String, Vec<u32>> {
+        &self.input.font_chains
+    }
+}
+
 impl std::fmt::Debug for ResidentDisplayInput {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -4378,7 +4384,6 @@ fn page_content_geometry(page: &PageIn) -> (DisplayBounds, Vec<DisplayBounds>) {
 }
 
 const NOTE_COLUMN_GAP_PX: f64 = 24.0;
-const NOTE_SEPARATOR_HEIGHT_PX: f64 = 12.0;
 /// note reference-label cap (display numbers / custom marks are tiny)
 pub const MAX_NOTE_LABEL_CHARS: usize = 64;
 
@@ -4588,7 +4593,11 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
         let column_width =
             ((content_width - (columns - 1) as f64 * NOTE_COLUMN_GAP_PX) / columns as f64).max(1.0);
         let mut separator_primitives = Vec::new();
-        if let Some(separator) = &area.separator {
+        if let Some(separator) = area
+            .separator
+            .as_ref()
+            .filter(|item| !item.blocks.is_empty())
+        {
             emit_note_item(
                 &mut separator_primitives,
                 separator,
@@ -4620,7 +4629,11 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
         let partitions = note_partitions(&area.notes, columns);
         for (column, notes) in partitions.into_iter().enumerate() {
             let x = page.margins.left + column as f64 * (column_width + NOTE_COLUMN_GAP_PX);
-            let mut cursor = y + NOTE_SEPARATOR_HEIGHT_PX;
+            let mut cursor = y + area
+                .separator
+                .as_ref()
+                .and_then(|separator| separator.height)
+                .unwrap_or(crate::footnotes::FOOTNOTE_SEPARATOR_HEIGHT);
             for note in notes {
                 cursor += emit_note_item(&mut primitives, note, kind, x, cursor, column_width, ctx);
             }
@@ -11017,11 +11030,12 @@ pub fn release_resident_display_pages(
     wanted.sort_unstable();
     wanted.dedup();
     let blocks = source_blocks_by_key(pagination, wanted.iter().map(|&index| &layout.pages[index]));
+    let mut transcoder = crate::transcode::Transcoder::default();
     let replacements = wanted
         .iter()
         .map(|&index| {
-            let page: PageIn =
-                convert_resident_value(&layout.pages[index], "resident display layout page")?;
+            let page = convert_resident_page(&mut transcoder, &layout.pages[index], false)
+                .map_err(|error| format!("parse resident display layout page: {error}"))?;
             let placeholder = unbuilt_page_with_span(
                 &page,
                 index,
@@ -11197,8 +11211,7 @@ fn resident_build_input_for(
     let extras: ResidentExtrasWire =
         serde_json::from_value(wire).map_err(|e| format!("parse resident display input: {e}"))?;
     let mut transcoder = crate::transcode::Transcoder::default();
-    let layout: LayoutIn = transcoder
-        .convert(layout)
+    let layout = convert_resident_layout(&mut transcoder, layout, pages)
         .map_err(|e| format!("parse resident display input: {e}"))?;
     let placed: Option<HashSet<Cow<'_, str>>> = pages.map(|pages| {
         pages
@@ -11247,6 +11260,108 @@ fn resident_build_input_for(
     })
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResidentPageMetadata<'a> {
+    size: &'a crate::types::Size,
+    margins: &'a crate::types::PageMargins,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body_margins: &'a Option<crate::types::PageMargins>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    columns: &'a Option<crate::types::ColumnLayout>,
+    section_id: &'a Option<String>,
+    section_index: Option<u64>,
+    section_page_index: Option<u64>,
+    section_page_number: Option<u64>,
+    page_label: &'a Option<String>,
+}
+
+fn convert_resident_page(
+    transcoder: &mut crate::transcode::Transcoder,
+    page: &crate::types::Page,
+    build: bool,
+) -> Result<PageIn, String> {
+    #[cfg(any(test, feature = "test-support"))]
+    let build = build || resident_conversion_test_support::force_full();
+    if build {
+        #[cfg(any(test, feature = "test-support"))]
+        resident_conversion_test_support::count_pages(1);
+        return transcoder.convert(page);
+    }
+    transcoder.convert(&ResidentPageMetadata {
+        size: &page.size,
+        margins: &page.margins,
+        body_margins: &page.body_margins,
+        columns: &page.columns,
+        section_id: &page.section_id,
+        section_index: page.section_index,
+        section_page_index: page.section_page_index,
+        section_page_number: page.section_page_number,
+        page_label: &page.page_label,
+    })
+}
+
+fn convert_resident_layout(
+    transcoder: &mut crate::transcode::Transcoder,
+    layout: &crate::types::Layout,
+    pages: Option<&HashSet<usize>>,
+) -> Result<LayoutIn, String> {
+    #[cfg(any(test, feature = "test-support"))]
+    let force_full = resident_conversion_test_support::force_full();
+    #[cfg(not(any(test, feature = "test-support")))]
+    let force_full = false;
+    if pages.is_none() || force_full {
+        #[cfg(any(test, feature = "test-support"))]
+        resident_conversion_test_support::count_pages(layout.pages.len());
+        return transcoder.convert(layout);
+    }
+    let pages = pages.unwrap();
+    Ok(LayoutIn {
+        pages: layout
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(index, page)| convert_resident_page(transcoder, page, pages.contains(&index)))
+            .collect::<Result<_, _>>()?,
+        partial: layout.partial,
+        cached_page_totals: layout.cached_page_totals,
+    })
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod resident_conversion_test_support {
+    use std::cell::Cell;
+
+    std::thread_local! {
+        static STATE: Cell<(bool, usize)> = const { Cell::new((false, 0)) };
+    }
+
+    pub(super) fn force_full() -> bool {
+        STATE.with(|state| state.get().0)
+    }
+
+    pub(super) fn count_pages(pages: usize) {
+        STATE.with(|state| {
+            let (force_full, converted) = state.get();
+            state.set((force_full, converted + pages));
+        });
+    }
+
+    pub fn with_layout_conversion<T>(force_full: bool, build: impl FnOnce() -> T) -> (T, usize) {
+        struct Restore((bool, usize));
+
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                STATE.with(|state| state.set(self.0));
+            }
+        }
+
+        let _restore = Restore(STATE.with(|state| state.replace((force_full, 0))));
+        let result = build();
+        (result, STATE.with(|state| state.get().1))
+    }
+}
+
 /// Rebuild only pages dirtied by incremental pagination, retain the remaining
 /// typed display pages, and patch absolute body positions on the converged
 /// suffix. The caller gates extras/page-count changes before selecting this
@@ -11286,11 +11401,7 @@ pub fn build_display_list_value_from_resident_incremental_with_fonts(
         page.page_index = page_index as u64;
         if page_index >= rebuilt_page_end {
             shift_page_body_positions(&mut page, position_deltas);
-            shift_unbuilt_span(
-                &mut page,
-                parsed.layout.pages.get(page_index),
-                position_deltas,
-            );
+            shift_unbuilt_span(&mut page, layout.pages.get(page_index), position_deltas);
         }
         pages.push(page);
     }
@@ -11362,7 +11473,7 @@ pub fn update_display_list_value_from_resident_incremental_with_fonts_observed(
     for (page_index, page) in previous.pages.iter_mut().enumerate().skip(rebuilt_page_end) {
         page.page_index = page_index as u64;
         shift_page_body_positions(page, position_deltas);
-        shift_unbuilt_span(page, parsed.layout.pages.get(page_index), position_deltas);
+        shift_unbuilt_span(page, layout.pages.get(page_index), position_deltas);
     }
     Ok(true)
 }
@@ -11514,8 +11625,6 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_shifts(
         .copied()
         .filter(|&page| build(page))
         .collect();
-    // Only a built page reads its blocks' display form; a placeholder takes its
-    // position span from the pagination blocks directly.
     refresh_resident_display_pages_reading(
         &mut resident.input,
         pagination,
@@ -11554,13 +11663,7 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_shifts(
         }
         page.page_index = page_index as u64;
         let body = shift_page_body_positions(page, position_deltas);
-        // The retained layout page may predate this edit, but a converged
-        // page holds the same blocks, which is all the shift reads.
-        let span = shift_unbuilt_span(
-            page,
-            resident.input.layout.pages.get(page_index),
-            position_deltas,
-        );
+        let span = shift_unbuilt_span(page, layout.pages.get(page_index), position_deltas);
         shifts.push(page_index, body.combine(span));
     }
     if built.len() < selected.len() {
@@ -11590,9 +11693,14 @@ fn refresh_resident_display_pages_reading(
     reading: &HashSet<usize>,
 ) -> Result<(), String> {
     let mut selected_blocks = HashSet::new();
+    let mut transcoder = crate::transcode::Transcoder::default();
     for page_index in rebuilt_pages {
-        let page: PageIn =
-            convert_resident_value(&layout.pages[page_index], "resident display layout page")?;
+        let page = convert_resident_page(
+            &mut transcoder,
+            &layout.pages[page_index],
+            reading.contains(&page_index),
+        )
+        .map_err(|error| format!("parse resident display layout page: {error}"))?;
         if reading.contains(&page_index) {
             for fragment in &layout.pages[page_index].fragments {
                 selected_blocks.insert(resident_fragment_block_key(fragment));
@@ -11744,18 +11852,24 @@ impl DisplayShift {
 /// Moves an unbuilt page's position span with the blocks `layout_page` places.
 fn shift_unbuilt_span(
     page: &mut DisplayPage,
-    layout_page: Option<&PageIn>,
+    layout_page: Option<&crate::types::Page>,
     deltas: &HashMap<String, i64>,
 ) -> DisplayShift {
     let Some(span) = &mut page.position_span else {
         return DisplayShift::Inert;
     };
     let delta = layout_page
-        .and_then(|layout_page| {
-            layout_page
-                .fragments
-                .iter()
-                .find_map(fragment_block_key_ref)
+        .and_then(|layout_page| layout_page.fragments.first())
+        .map(|fragment| {
+            use crate::types::Fragment;
+            resident_block_id_key(match fragment {
+                Fragment::Paragraph(value) => &value.block_id,
+                Fragment::Table(value) => &value.block_id,
+                Fragment::Image(value) => &value.block_id,
+                Fragment::TextBox(value) => &value.block_id,
+                Fragment::Shape(value) => &value.block_id,
+                Fragment::Chart(value) => &value.block_id,
+            })
         })
         .and_then(|key| deltas.get(key.as_ref()))
         .filter(|&&delta| delta != 0);
@@ -12025,6 +12139,8 @@ mod tests {
 
     #[test]
     fn a_partial_resident_build_converts_only_built_pages_and_completes_to_a_full_build() {
+        use resident_conversion_test_support::with_layout_conversion;
+
         let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
         let mut names: Vec<String> = std::fs::read_dir(&fixtures)
             .unwrap()
@@ -12051,15 +12167,40 @@ mod tests {
                 &fonts,
             ))
             .unwrap();
-            let (mut resident, mut list) = build_resident_display_list_partial_with_fonts_observed(
-                &pagination,
-                &layout,
-                extras,
-                &fonts,
-                &|index| index == 0,
-                &mut || {},
-            )
-            .unwrap();
+            let build = || {
+                build_resident_display_list_partial_with_fonts_observed(
+                    &pagination,
+                    &layout,
+                    extras,
+                    &fonts,
+                    &|index| index == 0,
+                    &mut || {},
+                )
+                .unwrap()
+            };
+            let ((mut resident, mut list), converted) = with_layout_conversion(false, build);
+            let ((_, legacy), legacy_converted) = with_layout_conversion(true, build);
+            assert_eq!(converted, usize::from(!layout.pages.is_empty()), "{name}");
+            assert_eq!(legacy_converted, layout.pages.len(), "{name}");
+            assert_eq!(
+                serde_json::to_value(&list).unwrap(),
+                serde_json::to_value(&legacy).unwrap(),
+                "{name} placeholders"
+            );
+            assert_eq!(resident.input.layout.partial, layout.partial);
+            assert_eq!(
+                resident.input.layout.cached_page_totals,
+                layout.cached_page_totals
+            );
+            assert!(
+                resident
+                    .input
+                    .layout
+                    .pages
+                    .iter()
+                    .skip(1)
+                    .all(|page| { page.fragments.is_empty() && page.note_areas.is_empty() })
+            );
             if layout.pages.len() > 1 {
                 assert!(list.pages[1].unbuilt, "{name}");
                 if resident.input.measured.len() < pagination.measured.len() {
@@ -12088,6 +12229,334 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/table-splits-with-repeated-header.input.json");
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn selective_conversion_fixture() -> (crate::types::Input, crate::types::Layout, String) {
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let read = |name: &str| -> Value {
+            serde_json::from_str(
+                &std::fs::read_to_string(fixtures.join(format!("{name}.input.json"))).unwrap(),
+            )
+            .unwrap()
+        };
+        let mut pagination = table_split_fixture();
+        let crate::types::LayoutBlock::Table(table) = &mut pagination.measured[0].block else {
+            panic!("expected a table");
+        };
+        for (index, cell) in table
+            .rows
+            .iter_mut()
+            .flat_map(|row| &mut row.cells)
+            .enumerate()
+        {
+            for block in &mut cell.blocks {
+                if let crate::types::LayoutBlock::Paragraph(paragraph) = block {
+                    paragraph.pm_start = Some(1.0 + index as f64 * 10.0);
+                    paragraph.pm_end = Some(9.0 + index as f64 * 10.0);
+                }
+            }
+        }
+        let mut layout = crate::compute_layout_input(&mut pagination).unwrap();
+        assert!(layout.pages.len() > 1);
+        while layout.pages.len() < 4 {
+            layout.pages.push(layout.pages.last().unwrap().clone());
+        }
+        let mut float_input: crate::types::Input =
+            serde_json::from_value(read("floating-image-with-text-wrap")).unwrap();
+        let float_layout = crate::compute_layout_input(&mut float_input).unwrap();
+        let float = float_layout.pages[0]
+            .fragments
+            .iter()
+            .find(|fragment| matches!(fragment, crate::types::Fragment::Image(_)))
+            .unwrap()
+            .clone();
+        pagination.measured.extend(float_input.measured);
+        let notes = read("notes/two-footnotes")["layout"]["pages"][0]["noteAreas"].clone();
+        for (index, page) in layout.pages.iter_mut().enumerate() {
+            let section = usize::from(index >= 2);
+            page.number = index as u32 + 1;
+            page.size.w += section as f64 * 80.0;
+            page.size.h += section as f64 * 40.0;
+            page.body_margins = Some(page.margins.clone());
+            page.body_margins.as_mut().unwrap().top += 12.0;
+            page.body_anchor_margins = Some(page.margins.clone());
+            page.columns = Some(
+                serde_json::from_value(json!({
+                    "count": 2, "gap": 18, "equalWidth": false,
+                    "columns": [{"width": 120, "space": 24}, {"width": 180}]
+                }))
+                .unwrap(),
+            );
+            page.section_id = Some(format!("s{section}"));
+            page.section_index = Some(section as u64);
+            page.section_page_index = Some(index.saturating_sub(section * 2) as u64);
+            page.section_page_number = Some(index.saturating_sub(section * 2) as u64 + 1);
+            page.page_label = Some(if section == 0 {
+                ["i", "ii"][index].to_owned()
+            } else {
+                (index - 1).to_string()
+            });
+            page.page_numbering = Some(json!({
+                "format": if section == 0 { "lowerRoman" } else { "decimal" }, "start": 1
+            }));
+            page.header_footer_refs = Some(
+                serde_json::from_value(json!({
+                    "headerDefault": "header", "footerDefault": "footer"
+                }))
+                .unwrap(),
+            );
+            page.note_areas = Some(serde_json::from_value(notes.clone()).unwrap());
+            page.fragments.push(float.clone());
+        }
+        let band = |kind: &str| {
+            json!({
+                "rId": kind, "kind": kind, "type": "default", "height": 16, "flowHeight": 16,
+                "measured": [{
+                    "block": {"kind": "paragraph", "id": kind, "runs": [
+                        {"kind": "field", "fieldType": "PAGE", "fallback": "0"},
+                        {"kind": "field", "fieldType": "NUMPAGES", "fallback": "97"}
+                    ]},
+                    "measure": {"kind": "paragraph", "totalHeight": 16, "lines": [{
+                        "headRun": 0, "headChar": 0, "tailRun": 1, "tailChar": 2,
+                        "width": 60, "ascent": 11, "descent": 3, "lineHeight": 16
+                    }]}
+                }]
+            })
+        };
+        let extras = json!({
+            "contractVersion": 2,
+            "headersFooters": {"variants": [band("header"), band("footer")]}
+        })
+        .to_string();
+        (pagination, layout, extras)
+    }
+
+    #[test]
+    fn selective_resident_conversion_matches_legacy_across_refresh_release_and_completion() {
+        use resident_conversion_test_support::with_layout_conversion;
+
+        let (mut pagination, mut layout, extras) = selective_conversion_fixture();
+        let fonts = ooxml_text::FontStore::default();
+        let last = layout.pages.len() - 1;
+        let all: Vec<_> = (0..layout.pages.len()).collect();
+        for (partial, cached_page_totals) in [(false, false), (true, false), (true, true)] {
+            layout.partial = partial;
+            layout.cached_page_totals = cached_page_totals;
+            let build = || {
+                build_resident_display_list_partial_with_fonts_observed(
+                    &pagination,
+                    &layout,
+                    &extras,
+                    &fonts,
+                    &|index| index == 0 || index == last,
+                    &mut || {},
+                )
+                .unwrap()
+            };
+            let ((mut resident, mut list), converted) = with_layout_conversion(false, build);
+            let ((mut legacy_resident, mut legacy), legacy_converted) =
+                with_layout_conversion(true, build);
+            assert_eq!(converted, 2);
+            assert_eq!(legacy_converted, layout.pages.len());
+            let equal = |list: &DisplayList, legacy: &DisplayList| {
+                assert_eq!(
+                    serde_json::to_value(list).unwrap(),
+                    serde_json::to_value(legacy).unwrap()
+                );
+            };
+            equal(&list, &legacy);
+            assert!(list.pages[0].header.is_some() && list.pages[0].footer.is_some());
+            assert!(!list.pages[0].note_areas.is_empty());
+            assert!(
+                list.pages[0]
+                    .primitives
+                    .iter()
+                    .any(|p| matches!(p, Primitive::Image(_)))
+            );
+            let page = serde_json::to_value(&list.pages[0]).unwrap();
+            let total = if partial {
+                if cached_page_totals {
+                    "97".to_owned()
+                } else {
+                    String::new()
+                }
+            } else {
+                layout.pages.len().to_string()
+            };
+            for kind in ["header", "footer"] {
+                let primitives = page[kind]["primitives"].as_array().unwrap();
+                assert!(
+                    primitives
+                        .iter()
+                        .any(|p| p["field"]["category"] == "PAGE" && p["text"] == "i")
+                );
+                if !total.is_empty() {
+                    assert!(
+                        primitives
+                            .iter()
+                            .any(|p| p["field"]["category"] == "NUMPAGES" && p["text"] == total)
+                    );
+                } else {
+                    assert!(
+                        !primitives
+                            .iter()
+                            .any(|p| p["field"]["category"] == "NUMPAGES"
+                                && p["text"].as_str().is_some_and(|text| !text.is_empty()))
+                    );
+                }
+            }
+            let crate::types::LayoutBlock::Table(table) = &mut pagination.measured[0].block else {
+                panic!("expected a table");
+            };
+            for cell in table.rows.iter_mut().flat_map(|row| &mut row.cells) {
+                for block in &mut cell.blocks {
+                    if let crate::types::LayoutBlock::Paragraph(paragraph) = block {
+                        paragraph.pm_start = paragraph.pm_start.map(|position| position + 3.0);
+                        paragraph.pm_end = paragraph.pm_end.map(|position| position + 3.0);
+                    }
+                }
+            }
+            layout.pages[1].body_margins.as_mut().unwrap().top += 4.0;
+            let deltas = HashMap::from([("50".to_owned(), 3)]);
+            let suffix_span = list.pages[2].position_span.unwrap();
+            let refresh = |resident: &mut ResidentDisplayInput, list: &mut DisplayList| {
+                update_resident_display_list_incremental_partial_with_fonts_observed(
+                    &pagination,
+                    &layout,
+                    &fonts,
+                    resident,
+                    list,
+                    0,
+                    2,
+                    &[last],
+                    &deltas,
+                    &|index| index == 0,
+                    &mut || {},
+                )
+                .unwrap()
+            };
+            let (updated, converted) =
+                with_layout_conversion(false, || refresh(&mut resident, &mut list));
+            assert!(updated);
+            assert_eq!(converted, 1);
+            let (updated, converted) =
+                with_layout_conversion(true, || refresh(&mut legacy_resident, &mut legacy));
+            assert!(updated);
+            assert_eq!(converted, 3);
+            equal(&list, &legacy);
+            assert_eq!(
+                list.pages[2].position_span,
+                Some([suffix_span[0] + 3, suffix_span[1] + 3])
+            );
+            let full = build_display_list(
+                &resident_build_input(&pagination, &layout, &extras).unwrap(),
+                &fonts,
+            );
+            for (force_full, resident, list) in [
+                (false, &mut resident, &mut list),
+                (true, &mut legacy_resident, &mut legacy),
+            ] {
+                with_layout_conversion(force_full, || {
+                    build_resident_display_pages_with_fonts(
+                        &pagination,
+                        &layout,
+                        &fonts,
+                        resident,
+                        list,
+                        &all,
+                    )
+                    .unwrap()
+                });
+                equal(list, &full);
+            }
+            let (released, converted) = with_layout_conversion(false, || {
+                release_resident_display_pages(&pagination, &layout, &mut resident, &mut list, &all)
+                    .unwrap()
+            });
+            assert_eq!(released, all);
+            assert_eq!(converted, 0);
+            let (_, converted) = with_layout_conversion(true, || {
+                release_resident_display_pages(
+                    &pagination,
+                    &layout,
+                    &mut legacy_resident,
+                    &mut legacy,
+                    &all,
+                )
+                .unwrap()
+            });
+            assert_eq!(converted, all.len());
+            equal(&list, &legacy);
+            assert!(
+                resident
+                    .input
+                    .layout
+                    .pages
+                    .iter()
+                    .all(|page| page.fragments.is_empty() && page.note_areas.is_empty())
+            );
+            build_resident_display_pages_with_fonts(
+                &pagination,
+                &layout,
+                &fonts,
+                &mut resident,
+                &mut list,
+                &all,
+            )
+            .unwrap();
+            equal(&list, &full);
+        }
+    }
+
+    #[test]
+    fn native_unbuilt_span_shifts_match_converted_block_keys() {
+        use crate::types::{BlockId, Fragment};
+
+        let (_, mut layout, _) = selective_conversion_fixture();
+        for id in [
+            BlockId::Num(50.0),
+            BlockId::Num(-0.0),
+            BlockId::Num(-42.0),
+            BlockId::Num(50.5),
+            BlockId::Num(1e30),
+            BlockId::Num(f64::NAN),
+            BlockId::Num(f64::INFINITY),
+            BlockId::Str("50".to_owned()),
+            BlockId::Str("50.0".to_owned()),
+        ] {
+            let Fragment::Table(table) = &mut layout.pages[0].fragments[0] else {
+                panic!("expected a table");
+            };
+            table.block_id = id;
+            let converted: PageIn = convert_resident_value(&layout.pages[0], "page").unwrap();
+            let key = converted
+                .fragments
+                .iter()
+                .find_map(fragment_block_key_ref)
+                .unwrap()
+                .into_owned();
+            let metadata = convert_resident_page(
+                &mut crate::transcode::Transcoder::default(),
+                &layout.pages[0],
+                false,
+            )
+            .unwrap();
+            assert!(metadata.fragments.is_empty());
+            let mut page = unbuilt_page_with_span(&metadata, 0, Some([10, 20]));
+            shift_unbuilt_span(
+                &mut page,
+                Some(&layout.pages[0]),
+                &HashMap::from([(key.clone(), 7)]),
+            );
+            assert_eq!(page.position_span, Some([17, 27]));
+            let missing = if key == "0" { "unplaced" } else { "0" };
+            shift_unbuilt_span(
+                &mut page,
+                Some(&layout.pages[0]),
+                &HashMap::from([(missing.to_owned(), 9)]),
+            );
+            assert_eq!(page.position_span, Some([17, 27]));
+        }
     }
 
     /// Source lookup keeps the first required block and excludes unplaced keys.
@@ -12648,8 +13117,13 @@ mod tests {
             fragment_block_key_ref(&layout.fragments[0]),
             Some(Cow::Borrowed("a"))
         ));
+        let (_, mut native, _) = selective_conversion_fixture();
+        let crate::types::Fragment::Table(table) = &mut native.pages[0].fragments[0] else {
+            panic!("expected a table");
+        };
+        table.block_id = crate::types::BlockId::Str("a".to_owned());
         assert_eq!(
-            shift_unbuilt_span(&mut page, Some(&layout), &deltas),
+            shift_unbuilt_span(&mut page, native.pages.first(), &deltas),
             DisplayShift::Uniform(3)
         );
         assert_eq!(page.position_span, Some([13, 23]));

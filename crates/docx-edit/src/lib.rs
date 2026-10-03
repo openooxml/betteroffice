@@ -535,6 +535,11 @@ pub(crate) enum UpdateOrigin {
     Host,
 }
 
+struct SourceNoteSeparators {
+    source: Arc<seed::SourceMetadata>,
+    state: Result<Option<Arc<[u8]>>, String>,
+}
+
 /// A single yrs replica of the DOCX editing model.
 pub struct EditingDoc {
     doc: Doc,
@@ -559,6 +564,8 @@ pub struct EditingDoc {
     source: Mutex<Option<identity::SourcePackage>>,
     media: Mutex<Option<Arc<docx_parse::media::MediaTable>>>,
     media_sources: Mutex<media::MediaSources>,
+    source_note_separators: Mutex<Option<SourceNoteSeparators>>,
+    loaded_note_separator_state: Mutex<Option<Arc<[u8]>>>,
     seen: identity::SeenCell,
     scan_cache: identity::ScanCache,
     story_revisions: Arc<Mutex<StoryRevisions>>,
@@ -615,6 +622,8 @@ impl EditingDoc {
             source: Mutex::new(None),
             media: Mutex::new(None),
             media_sources: Mutex::default(),
+            source_note_separators: Mutex::default(),
+            loaded_note_separator_state: Mutex::default(),
             seen,
             scan_cache: identity::ScanCache::default(),
             story_revisions,
@@ -709,13 +718,11 @@ impl EditingDoc {
     /// Cached segment geometry for `story_id`, rebuilt when the doc changes.
     #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
     pub(crate) fn segment_index(&self, story_id: &str) -> EditResult<Arc<SegmentIndex>> {
-        // Sampling before the read txn lets a racing commit tag the fresh index
-        // stale rather than serve a pre-commit snapshot as current.
         let epoch = self.committed_epoch();
         if let Some(index) = self.segment_indexes.lock().unwrap().get(story_id, epoch) {
             return Ok(index);
         }
-        self.build_story_indexes(story_id, epoch)
+        self.build_story_indexes(story_id)
             .map(|(segments, _)| segments)
     }
 
@@ -724,16 +731,18 @@ impl EditingDoc {
         if let Some(index) = self.paragraph_indexes.lock().unwrap().get(story_id, epoch) {
             return Ok(index);
         }
-        self.build_story_indexes(story_id, epoch)
+        self.build_story_indexes(story_id)
             .map(|(_, paragraphs)| paragraphs)
     }
 
     fn build_story_indexes(
         &self,
         story_id: &str,
-        epoch: u64,
     ) -> EditResult<(Arc<SegmentIndex>, Arc<ParagraphIndex>)> {
         let txn = self.doc.transact();
+        // Commits bump the epoch while they hold the store's write lock, so this read txn pins it
+        // to the snapshot being indexed.
+        let epoch = self.committed_epoch();
         let story = story_ref(&txn, story_id)?;
         let (segments, paragraphs) = build_indexes(&story, &txn);
         drop(txn);
@@ -750,28 +759,37 @@ impl EditingDoc {
         Ok((segments, paragraphs))
     }
 
-    pub(crate) fn advance_paragraph_index_after_text_insert(
+    pub(crate) fn advance_indexes_after_text_insert(
         &self,
         story_id: &str,
         before: u64,
         after: u64,
         index: u32,
-        units: u32,
+        text: &str,
     ) {
         if before.checked_add(1) != Some(after) {
             return;
         }
-        let mut indexes = self.paragraph_indexes.lock().unwrap();
-        let Some(mut paragraphs) = indexes.take(story_id, before) else {
-            return;
-        };
-        if Arc::make_mut(&mut paragraphs).shift_for_text_insert(index, units) {
-            indexes.insert(story_id, after, paragraphs);
+        {
+            let mut indexes = self.paragraph_indexes.lock().unwrap();
+            if let Some(mut paragraphs) = indexes.take(story_id, before) {
+                if Arc::make_mut(&mut paragraphs)
+                    .shift_for_text_insert(index, text.encode_utf16().count() as u32)
+                {
+                    indexes.insert(story_id, after, paragraphs);
+                }
+            }
+        }
+        let mut indexes = self.segment_indexes.lock().unwrap();
+        if let Some(mut segments) = indexes.take(story_id, before) {
+            if Arc::make_mut(&mut segments).shift_for_text_insert(index, text) {
+                indexes.insert(story_id, after, segments);
+            }
         }
     }
 
-    /// Advances the cached paragraph index after a single plain text deletion.
-    pub(crate) fn advance_paragraph_index_after_text_delete(
+    /// Advances cached story indexes after a single plain text deletion.
+    pub(crate) fn advance_indexes_after_text_delete(
         &self,
         story_id: &str,
         before: u64,
@@ -782,12 +800,19 @@ impl EditingDoc {
         if before.checked_add(1) != Some(after) {
             return;
         }
-        let mut indexes = self.paragraph_indexes.lock().unwrap();
-        let Some(mut paragraphs) = indexes.take(story_id, before) else {
-            return;
-        };
-        if Arc::make_mut(&mut paragraphs).shift_for_text_delete(start, end) {
-            indexes.insert(story_id, after, paragraphs);
+        {
+            let mut indexes = self.paragraph_indexes.lock().unwrap();
+            if let Some(mut paragraphs) = indexes.take(story_id, before) {
+                if Arc::make_mut(&mut paragraphs).shift_for_text_delete(start, end) {
+                    indexes.insert(story_id, after, paragraphs);
+                }
+            }
+        }
+        let mut indexes = self.segment_indexes.lock().unwrap();
+        if let Some(mut segments) = indexes.take(story_id, before) {
+            if Arc::make_mut(&mut segments).shift_for_text_delete(start, end) {
+                indexes.insert(story_id, after, segments);
+            }
         }
     }
 
@@ -865,6 +890,87 @@ impl EditingDoc {
         let mut current = self.media_sources.lock().unwrap();
         if *current != sources {
             *current = sources;
+        }
+    }
+
+    /// The separator notes as a yrs v1 update for replicas without the source.
+    #[doc(hidden)]
+    pub fn note_separator_state(&self) -> Result<Option<Arc<[u8]>>, String> {
+        let Some(source) = self.source_metadata() else {
+            return Ok(self.loaded_note_separator_state.lock().unwrap().clone());
+        };
+        let mut cache = self.source_note_separators.lock().unwrap();
+        if cache
+            .as_ref()
+            .is_none_or(|cached| !Arc::ptr_eq(&cached.source, &source))
+        {
+            let state = Self::derive_note_separator_state(&source);
+            *cache = Some(SourceNoteSeparators { source, state });
+        }
+        cache.as_ref().unwrap().state.clone()
+    }
+
+    fn derive_note_separator_state(
+        source: &seed::SourceMetadata,
+    ) -> Result<Option<Arc<[u8]>>, String> {
+        fn replace_marks(value: &mut serde_json::Value) {
+            if matches!(
+                value.get("type").and_then(serde_json::Value::as_str),
+                Some("separator" | "continuationSeparator")
+            ) {
+                *value = serde_json::json!({"type": "text", "text": "\u{200b}"});
+            } else {
+                match value {
+                    serde_json::Value::Array(values) => values.iter_mut().for_each(replace_marks),
+                    serde_json::Value::Object(values) => {
+                        values.values_mut().for_each(replace_marks)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut stories = Vec::new();
+        for kind in ["footnote", "endnote"] {
+            if let Some(paragraphs) = source.read().note_separator_paragraphs.get(kind)
+                && !paragraphs.is_empty()
+            {
+                let mut paragraphs = paragraphs.clone();
+                paragraphs.iter_mut().for_each(replace_marks);
+                stories.push((kind.to_owned(), paragraphs));
+            }
+        }
+        if stories.is_empty() {
+            return Ok(None);
+        }
+        let scratch = EditingDoc::new(0);
+        seed::seed_blocks(
+            &scratch,
+            Some(source),
+            &stories
+                .iter()
+                .map(|(kind, paragraphs)| (kind.clone(), paragraphs.as_slice()))
+                .collect::<Vec<_>>(),
+        )?;
+        Ok(Some(scratch.encode_state_as_update_v1().into()))
+    }
+
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+    pub(crate) fn has_note_separator_state(&self, state: &[u8]) -> bool {
+        self.loaded_note_separator_state
+            .lock()
+            .unwrap()
+            .as_deref()
+            .unwrap_or_default()
+            == state
+    }
+
+    /// Replaces loaded separator notes, preserving their Arc when the bytes match.
+    #[doc(hidden)]
+    pub fn set_note_separator_state(&self, state: Option<Arc<[u8]>>) {
+        let state = state.filter(|state| !state.is_empty());
+        let mut current = self.loaded_note_separator_state.lock().unwrap();
+        if current.as_deref() != state.as_deref() {
+            *current = state;
         }
     }
 

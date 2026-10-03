@@ -47,6 +47,8 @@ export interface DocxPluginEditorAccess {
   commands(): DocxCommandController | null;
   layout(): { queries: DisplayListQueries | null; complete: boolean; failed: boolean };
   subscribeLayout(listener: () => void): () => void;
+  /** Whether the document is open for viewing only, with no copy on this thread. */
+  viewer?(): boolean;
 }
 
 const LAYOUT_WAIT_MS = 30_000;
@@ -409,7 +411,8 @@ export function createPluginClients(
               : 'No rendered layout shows this version yet'
           );
         }
-        if (options.focus && workerProposalAuthority(session)) {
+        const viewer = access.viewer?.() === true;
+        if (options.focus && !viewer && workerProposalAuthority(session)) {
           const refused = await replicaReady(session);
           if (refused) return refused;
           if (request.signal.aborted) {
@@ -430,8 +433,12 @@ export function createPluginClients(
           );
         }
         if (options.focus) {
-          session.setSelection(located.loc);
-          editor.syncYrsInputState(false);
+          if (viewer) {
+            editor.setSelection(located.position);
+          } else {
+            session.setSelection(located.loc);
+            editor.syncYrsInputState(false);
+          }
           editor.focus();
         }
         return { ok: true };

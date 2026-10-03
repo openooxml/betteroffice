@@ -2,7 +2,7 @@ use super::*;
 
 #[derive(Debug, Default)]
 pub(crate) struct LocalLowering {
-    pub(super) blocked: bool,
+    pub(crate) blocked: bool,
     pub(super) source: std::sync::Weak<crate::seed::SourceMetadata>,
     pub(super) seeds: BTreeMap<String, ParagraphSeed>,
     identities: BTreeSet<String>,
@@ -194,6 +194,14 @@ impl LocalLowering {
         for (_, source) in &map.paragraph_blocks {
             ownership[*source as usize] += 1;
         }
+        for (slot, block) in blocks.iter().enumerate() {
+            if let LayoutBlock::Paragraph(paragraph) = block
+                && let BlockId::Str(id) = &paragraph.id
+                && let Some(seed) = self.seeds.get_mut(id)
+            {
+                seed.slot = slot;
+            }
+        }
         self.seeds.retain(|id, seed| {
             let Some(LayoutBlock::Paragraph(paragraph)) = blocks.get(seed.slot) else {
                 return false;
@@ -299,7 +307,7 @@ impl LocalLowering {
             );
             units += utf16_len(&segment.text);
         }
-        let mut replacement = LoweringMap::default();
+        let mut replacement = super::preview::LoweringOutput::default();
         let mut paragraph = flush_paragraph(
             runs,
             pilcrow,
@@ -351,7 +359,8 @@ impl LocalLowering {
             .partition_point(|span| span.pm_start < pm_start + 1);
         let span_end = map.spans.partition_point(|span| span.pm_start < old_end);
         shift.map(map).expect("validated map shift");
-        map.spans.splice(span_start..span_end, replacement.spans);
+        map.spans
+            .splice(span_start..span_end, replacement.map.spans);
         for seed in self.seeds.values_mut() {
             if seed.raw_start > raw {
                 seed.raw_start = (i64::from(seed.raw_start) + delta) as u32;

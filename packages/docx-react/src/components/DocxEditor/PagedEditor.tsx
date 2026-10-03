@@ -25,6 +25,15 @@ import {
   type YrsInputRef,
   type YrsStoredFormatting,
 } from './YrsInput';
+import { useViewerSidebarAnchors } from './hooks/useViewerSidebarAnchors';
+import {
+  sidebarAnchorProjectY,
+  SIDEBAR_ANCHOR_EMIT_MS,
+  SIDEBAR_ANCHOR_STALE_MS,
+} from './internals/sidebarAnchorProjection';
+import { EMPTY_TRACKED_CHANGES_RESULT, type ViewerCommentRanges } from './internals/viewerSidebarReads';
+import { ViewerInput } from './ViewerInput';
+import type { ViewerSelectionChange } from './internals/viewerSelectionController';
 import { CanvasSelectionOverlay } from './overlays/CanvasSelectionOverlay';
 import { RemotePresenceOverlay } from './overlays/RemotePresenceOverlay';
 import { CanvasCellSelectionOverlay } from './overlays/CanvasCellSelectionOverlay';
@@ -39,14 +48,12 @@ import {
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import {
   computeAnchorPositionsFromYrs,
-  displayPageCanvases,
-  effectiveZoom,
-  resolveDisplayPageClientRect,
   type TrackedChangesResult,
   type DisplayList,
   type DisplayListQueries,
-  type DisplayListRect,
 } from '@betteroffice/docx/layout/render';
+import type { DocxFindDisplayMatch } from '@betteroffice/docx/yrs';
+import type { FindOptions } from '@betteroffice/docx/utils/findReplace';
 import type { ParagraphHighlightOptions, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
 
 // Layout bridge
@@ -72,6 +79,7 @@ import {
   type YrsRenderEnv,
   type YrsResidentCaretSnapshot,
   type YrsSession,
+  type ResidentEngineWorkerClient,
 } from '@betteroffice/docx/yrs';
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import { resolveImageLayoutAttrs } from '@betteroffice/docx/docx';
@@ -145,7 +153,15 @@ import { SidebarRevisionReads } from './internals/sidebarRevisionReads';
 import { storySegmentSource, YrsStorySegmentCache } from './internals/yrsStorySegmentCache';
 import { partEditStory, type NoteEdit, type PartEdit } from './partEdit';
 import type { DocxEditorCollaborationOptions, DocxPointPosition } from './types';
-import { positionAtClientPoint } from './internals/pointPosition';
+import {
+  positionAtClientPoint,
+  readViewerPositionAtClientPoint,
+  ViewerPointPositions,
+} from './internals/pointPosition';
+import { isPresented, onPresented, presentedWorkerVersion } from './internals/layoutProvenance';
+import { navigateViewer, readViewerFindMatches, readViewerSelectionInfo, type ViewerNavigationTarget } from './internals/viewerRefReads';
+import type { DocxSelectionInfo } from '../DocxEditor';
+import { readAt } from './internals/viewerReads';
 
 export { DEFAULT_PAGE_WIDTH };
 
@@ -209,6 +225,14 @@ export interface PagedEditorProps {
   firstPageFooterContent?: HeaderFooter | null;
   /** Whether the editor is read-only. */
   readOnly?: boolean;
+  /**
+   * A viewer session's reads of the document the resident worker holds. The session holds no
+   * document on this thread: selection, copy and point reads go to the worker.
+   */
+  viewerDocumentRead?: ResidentEngineWorkerClient['documentRead'];
+  onViewerCommentRangesChange?: (ranges: ViewerCommentRanges) => void;
+  /** Whether a viewer session's sidebar is shown, so its cards read from the worker. */
+  viewerSidebarActive?: boolean;
   /** Gap between pages in pixels. */
   pageGap?: number;
   /** Zoom level (1 = 100%). */
@@ -223,6 +247,7 @@ export interface PagedEditorProps {
   onSelectionChange?: (from: number, to: number) => void;
   /** Yrs-authoritative toolbar state, emitted while standard yrs input is active. */
   onYrsSelectionChange?: (selection: YrsToolbarSelection) => void;
+  onViewerSelectionChange?: (selection: ViewerSelectionChange) => void;
   /** Callback when editor is ready. */
   onReady?: (ref: PagedEditorRef) => void;
   /** Callback when rendered DOM context is ready. */
@@ -385,6 +410,8 @@ export interface PagedEditorRef {
   deleteSelection(): void;
   /** Select the full active Yrs story. */
   selectAll(): void;
+  /** A viewer session's selected text, read from the document worker; null elsewhere. */
+  readSelectedText(): Promise<string> | null;
   /** Get the current display-position selection. */
   getSelectionRange(): { from: number; to: number } | null;
   /**
@@ -399,6 +426,22 @@ export interface PagedEditorRef {
    * version; retry after {@link flushPendingInput} or on the next frame.
    */
   getPositionAtPoint(clientX: number, clientY: number): DocxPointPosition | null;
+  /**
+   * The text under a client point, read through the document's owner: the worker in a viewer
+   * session. Null outside text or when the painted layout changes version before the answer.
+   */
+  readPositionAtPoint(clientX: number, clientY: number): Promise<DocxPointPosition | null>;
+  /** Whether this view currently reads its document from the worker. */
+  isWorkerViewer(): boolean;
+  /** Reads the display selection from the worker. */
+  readViewerSelectionInfo(): Promise<DocxSelectionInfo | null>;
+  readViewerFindMatches(
+    searchText: string,
+    options: FindOptions
+  ): Promise<{ version: string; matches: DocxFindDisplayMatch[] } | null>;
+  /** Resolves, selects and reveals a worker-owned range. */
+  navigateViewer(target: ViewerNavigationTarget, options?: ScrollToParaIdOptions): Promise<boolean>;
+
   /** Live authoritative yrs session. */
   getYrsSession(): YrsSession | null;
   /** Commits accepted input and selection; waits for active IME composition. */
@@ -432,6 +475,8 @@ export interface PagedEditorRef {
    * `null` while the fonts it needs are not ready. @internal
    */
   getLayoutRequest(): string | null;
+  /** @internal */
+  readLayoutRequest(): Promise<string | null>;
   /** Force re-layout; `onHost` keeps the pass on this thread. */
   relayout(options?: { onHost?: boolean }): void;
   /** Scroll the visible pages to bring a display position into view. */
@@ -480,13 +525,6 @@ export interface PagedEditorRef {
 // COMPONENT (module-scope helpers live in per-domain files — see imports)
 // =============================================================================
 
-const SIDEBAR_ANCHOR_EMIT_MS = 150;
-const SIDEBAR_ANCHOR_STALE_MS = 400;
-const EMPTY_TRACKED_CHANGES_RESULT: TrackedChangesResult = {
-  entries: [],
-  commentToRevision: new Map(),
-};
-
 /**
  * PagedEditor - Main paginated editing component.
  */
@@ -503,6 +541,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       firstPageHeaderContent,
       firstPageFooterContent,
       readOnly = false,
+      viewerDocumentRead: viewerDocumentReadProp,
+      onViewerCommentRangesChange,
+      viewerSidebarActive = true,
       pageGap = DEFAULT_PAGE_GAP,
       zoom = 1,
       showHiddenText = false,
@@ -510,6 +551,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onYrsHistoryChange,
       onSelectionChange,
       onYrsSelectionChange,
+      onViewerSelectionChange,
       onYrsPartSelectionChange,
       onReady,
       onRenderedDomContextReady,
@@ -560,6 +602,17 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       canvasOverlayTarget = null,
       commandBridgeRef,
     } = props;
+    // A viewer whose document fell back to this thread selects through the copy it holds here.
+    const viewerDocumentRead =
+      viewerDocumentReadProp &&
+      !(
+        displayListQueries &&
+        presentedWorkerVersion(displayListQueries) === null &&
+        yrsCore.session &&
+        !workerOpenReplicaPending(yrsCore.session)
+      )
+        ? viewerDocumentReadProp
+        : undefined;
     const yrsStyleResolver = useMemo(() => (styles ? createStyleResolver(styles) : null), [styles]);
 
     // Resolve the scroll container: prefer parent-provided ref, fallback to own container
@@ -653,6 +706,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // when parent passes unstable callback references
     const onSelectionChangeRef = useRef(onSelectionChange);
     const onYrsSelectionChangeRef = useRef(onYrsSelectionChange);
+    const onViewerSelectionChangeRef = useRef(onViewerSelectionChange);
     const onYrsPartSelectionChangeRef = useRef(onYrsPartSelectionChange);
     const onYrsContentChangeRef = useRef(onYrsContentChange);
     const onYrsHistoryChangeRef = useRef(onYrsHistoryChange);
@@ -660,6 +714,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // Keep refs in sync with latest props
     onSelectionChangeRef.current = onSelectionChange;
     onYrsSelectionChangeRef.current = onYrsSelectionChange;
+    onViewerSelectionChangeRef.current = onViewerSelectionChange;
     onYrsPartSelectionChangeRef.current = onYrsPartSelectionChange;
     onYrsContentChangeRef.current = onYrsContentChange;
     onYrsHistoryChangeRef.current = onYrsHistoryChange;
@@ -728,6 +783,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       cancelPendingScrollRestore,
       navigationEpoch,
       getLayoutRequest,
+      readLayoutRequest,
     } = useLayoutPipeline({
       onError,
       document,
@@ -788,6 +844,63 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     });
     const updateSelectionOverlayRef = useRef(updateSelectionOverlay);
     updateSelectionOverlayRef.current = updateSelectionOverlay;
+    const handleViewerSelectionChange = useCallback((selection: ViewerSelectionChange) => {
+      if (yrsInputRef.current?.displaySelection()) {
+        updateSelectionOverlayRef.current();
+      } else {
+        setSelectionRects((current) => (current.length === 0 ? current : []));
+        setCaretPosition((current) => (current === null ? current : null));
+      }
+      onViewerSelectionChangeRef.current?.(selection);
+    }, [setCaretPosition, setSelectionRects]);
+    const viewerDocumentReadRef = useRef(viewerDocumentRead);
+    viewerDocumentReadRef.current = viewerDocumentRead;
+    const viewerSessionRef = useRef(yrsCore.session);
+    viewerSessionRef.current = yrsCore.session;
+    const viewerMountedRef = useRef(true);
+    useEffect(() => {
+      viewerMountedRef.current = true;
+      return () => { viewerMountedRef.current = false; };
+    }, []);
+    const viewerQueriesRef = useRef(displayListQueries);
+    viewerQueriesRef.current = displayListQueries;
+    const viewerFrameListenersRef = useRef(new Set<() => void>());
+    useEffect(() => {
+      for (const listener of viewerFrameListenersRef.current) listener();
+    }, [displayListQueries]);
+    useEffect(() => onPresented(() => {
+      for (const listener of viewerFrameListenersRef.current) listener();
+    }), []);
+    const awaitViewerFrame = useCallback((previous: DisplayListQueries | null | undefined, timeoutMs: number): Promise<DisplayListQueries | null> =>
+      new Promise((resolve) => {
+        const listeners = viewerFrameListenersRef.current;
+        const finish = (queries: DisplayListQueries | null): void => {
+          clearTimeout(timer);
+          listeners.delete(check);
+          resolve(queries);
+        };
+        const check = (): void => {
+          const queries = viewerQueriesRef.current;
+          const nextVersion = presentedWorkerVersion(queries);
+          if (queries && nextVersion !== null && queries !== previous && isPresented(canvasHostRef?.current, queries.displayList)) {
+            finish(queries);
+          }
+        };
+        const timer = setTimeout(() => finish(null), timeoutMs);
+        listeners.add(check);
+        check();
+      }), [canvasHostRef]);
+    const [viewerPointPositions] = useState(() => new ViewerPointPositions());
+    const resolveViewerBookmark = useCallback(async (name: string): Promise<number | null> => {
+      const read = viewerDocumentReadRef.current;
+      const expectVersion = presentedWorkerVersion(viewerQueriesRef.current);
+      if (!read || expectVersion === null) return null;
+      const reply = await readAt(read, { kind: 'bookmarkPosition', story: 'body', name, expectVersion });
+      return reply.status === 'ok' &&
+        presentedWorkerVersion(viewerQueriesRef.current) === expectVersion
+        ? reply.value
+        : null;
+    }, []);
 
     // Route body focus to the yrs textarea input surface.
     const focusBodyInput = useCallback((): void => {
@@ -1412,6 +1525,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         navigationEpoch,
         requestCanvasParagraphFlash,
       });
+    const scrollToPositionImplRef = useRef(scrollToPositionImpl);
+    scrollToPositionImplRef.current = scrollToPositionImpl;
+    const requestCanvasParagraphFlashRef = useRef(requestCanvasParagraphFlash);
+    requestCanvasParagraphFlashRef.current = requestCanvasParagraphFlash;
 
     // Display-list positions retain the document tree's integer coordinate
     // space. Build a lightweight index directly from the authoritative yrs
@@ -1503,16 +1620,21 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     } = usePagesPointer({
       pagesContainerRef,
       yrsInputRef,
-      yrsSession: yrsCore.session!,
+      yrsSession: viewerDocumentRead ? null : yrsCore.session!,
       yrsRootStory: activeYrsRootStory,
+      viewerSelection: viewerDocumentRead !== undefined,
+      resolveBookmarkPosition: viewerDocumentRead ? resolveViewerBookmark : undefined,
       getYrsPositionProjection,
       applyYrsCommand,
       syncYrsInputState,
       readOnly,
-      replicaPending: () =>
-        !!yrsCore.experimentalWorkerOpen && !(yrsCore.replicaReadyRef?.current ?? yrsCore.replicaReady),
-      replicaReady: yrsCore.replicaReady,
-      requestReplica: yrsCore.requestReplica,
+      replicaPending: viewerDocumentRead
+        ? undefined
+        : () =>
+            !!yrsCore.experimentalWorkerOpen &&
+            !(yrsCore.replicaReadyRef?.current ?? yrsCore.replicaReady),
+      replicaReady: viewerDocumentRead ? true : yrsCore.replicaReady,
+      requestReplica: viewerDocumentRead ? undefined : yrsCore.requestReplica,
       partEdit,
       displayListQueries,
       canvasHostRef,
@@ -1691,9 +1813,23 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const anchorEmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const lastAnchorEmitAtRef = useRef(0);
     const lastAnchorPositionsRef = useRef<Map<string, number> | null>(null);
+    useViewerSidebarAnchors({
+      read: viewerSidebarActive ? viewerDocumentRead : undefined,
+      queries: displayListQueries,
+      commentIds: sidebarCommentIds,
+      zoom,
+      canvasHostRef,
+      pagesContainerRef,
+      overlayTarget: canvasOverlayTarget,
+      document,
+      onPositions: onAnchorPositionsChange,
+      onTracked: onYrsTrackedChangesChange,
+      onRanges: onViewerCommentRangesChange,
+    });
     const sidebarReadsRef = useRef<SidebarRevisionReads | null>(null);
     sidebarReadsRef.current ??= new SidebarRevisionReads();
     useEffect(() => {
+      if (viewerDocumentRead) return;
       const session = yrsCore.session;
       if (!session || !yrsCore.replicaReady || !displayListQueries || !onAnchorPositionsChange) {
         return;
@@ -1710,24 +1846,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         }
         const target = canvasOverlayTarget ?? host?.parentElement ?? null;
         if (!target) return;
-        const targetRect = target.getBoundingClientRect();
-        const targetZoom = effectiveZoom(target);
-        const canvasByPage = new Map<number, HTMLCanvasElement>();
-        for (const canvas of displayPageCanvases(host)) {
-          const pageIndex = Number(canvas.dataset.pageIndex);
-          if (Number.isFinite(pageIndex)) canvasByPage.set(pageIndex, canvas);
-        }
-        const projectY = (rect: DisplayListRect): number | null => {
-          const pageRect =
-            canvasByPage.get(rect.pageIndex)?.getBoundingClientRect() ??
-            resolveDisplayPageClientRect(host, displayListQueries, rect.pageIndex);
-          const pageSize = displayListQueries.pageSize(rect.pageIndex);
-          if (!pageRect || !pageSize || pageSize.height <= 0) return null;
-          return (
-            (pageRect.top - targetRect.top + rect.y * (pageRect.height / pageSize.height)) /
-            (zoom * targetZoom)
-          );
-        };
+        const projectY = sidebarAnchorProjectY(host, target, displayListQueries, zoom);
         const { version, revisions } = sidebarReads.revisions(session);
         if (sidebarCommentIds.length === 0 && revisions.length === 0) {
           sidebarReads.deliver(
@@ -1797,6 +1916,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         }
       };
     }, [
+      viewerDocumentRead,
       canvasHostRef,
       canvasOverlayTarget,
       currentStorySegments,
@@ -1867,7 +1987,61 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     };
 
     // Imperative-handle setup — exposes PagedEditorRef + mirrors via onReady.
+    const viewerReadAccess = () => {
+      const read = viewerDocumentReadRef.current;
+      const session = viewerSessionRef.current;
+      if (!read || !session) return null;
+      return {
+        read,
+        story: activeYrsRootStory,
+        host: () => canvasHostRef?.current,
+        queries: () => viewerQueriesRef.current,
+        awaitFrame: awaitViewerFrame,
+        current: () => viewerMountedRef.current && viewerSessionRef.current === session && viewerDocumentReadRef.current === read,
+        selection: () => yrsInputRef.current?.displaySelection() ?? null,
+      };
+    };
+
     usePagedEditorRefApi({
+      readViewerFindMatches: async (searchText, options) => {
+        const access = viewerReadAccess();
+        return access ? readViewerFindMatches(access, searchText, options) : null;
+      },
+      readViewerSelectionInfo: async () => {
+        const access = viewerReadAccess();
+        return access ? readViewerSelectionInfo(access) : null;
+      },
+      navigateViewer: async (target, options, current) => {
+        const access = viewerReadAccess();
+        const input = yrsInputRef.current;
+        const gesture = input?.currentGesture?.();
+        if (!access || !input || gesture === undefined) return false;
+        const epoch = inputEpoch();
+        let interrupted = false;
+        const surface = getScrollContainer();
+        const interrupt = () => { interrupted = true; };
+        const events = ['pointerdown', 'mousedown', 'touchstart', 'keydown', 'wheel'];
+        for (const event of events) surface?.addEventListener(event, interrupt, { capture: true, passive: true });
+        try {
+          return await navigateViewer({
+            ...access,
+            current: () => access.current() && !interrupted && inputEpoch() === epoch &&
+              yrsInputRef.current === input && input.isGestureCurrent?.(gesture) === true &&
+              (current?.() ?? true),
+          }, target,
+            (range, flash) => {
+              yrsInputRef.current?.setSelectionFromDisplay(range.anchor, target.kind === 'paragraphTarget' ? range.anchor : range.head);
+              scrollToPositionImplRef.current(range.anchor, true);
+              if (target.kind === 'paragraphTarget' && flash?.highlight) {
+                requestCanvasParagraphFlashRef.current({ from: range.anchor, to: Math.max(range.anchor + 1, range.head), options: flash.highlight });
+              }
+              yrsInputRef.current?.focus();
+            }, options);
+        } finally {
+          for (const event of events) surface?.removeEventListener(event, interrupt, true);
+        }
+      },
+      viewerSelection: viewerDocumentRead !== undefined,
       bumpInputEpoch,
       inputEpoch,
       readerSurface: getScrollContainer,
@@ -1876,6 +2050,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       layout,
       runLayoutPipeline,
       getLayoutRequest,
+      readLayoutRequest,
       scrollToPositionImpl,
       revealPositionImpl,
       scrollToParaIdImpl,
@@ -1895,18 +2070,51 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       getYrsPositionProjection: () => getYrsPositionProjection('body'),
       displayPositionToYrsLoc,
       getPositionAtPoint: (clientX, clientY) =>
-        positionAtClientPoint(
+        viewerDocumentRead
+          ? viewerPointPositions.positionAt(
+              viewerDocumentRead,
+              canvasHostRef?.current,
+              displayListQueries,
+              zoom,
+              clientX,
+              clientY
+            )
+          : positionAtClientPoint(
           {
             getYrsSession: () => yrsCore.session,
             displayPositionToYrsLoc,
             hasPendingInput: () => yrsInputRef.current?.hasPendingInput() ?? false,
           },
-          canvasHostRef?.current,
-          displayListQueries,
-          zoom,
-          clientX,
-          clientY
-        ),
+            canvasHostRef?.current,
+            displayListQueries,
+            zoom,
+            clientX,
+            clientY
+          ),
+      readPositionAtPoint: async (clientX, clientY) =>
+        viewerDocumentRead
+          ? readViewerPositionAtClientPoint(
+              viewerDocumentRead,
+              canvasHostRef?.current,
+              displayListQueries,
+              zoom,
+              clientX,
+              clientY,
+              () => viewerQueriesRef.current,
+              awaitViewerFrame
+            )
+          : positionAtClientPoint(
+              {
+                getYrsSession: () => yrsCore.session,
+                displayPositionToYrsLoc,
+                hasPendingInput: () => yrsInputRef.current?.hasPendingInput() ?? false,
+              },
+              canvasHostRef?.current,
+              displayListQueries,
+              zoom,
+              clientX,
+              clientY
+            ),
     });
 
     usePagedEditorCommandBridge({
@@ -1972,43 +2180,55 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         onMouseDown={handleContainerMouseDown}
       >
         {/* Hidden textarea input surface that writes directly to yrs. */}
-        <YrsInput
-          ref={yrsInputRef}
-          enabled
-          readOnly={readOnly || (!!partEdit && activeYrsRootStory === 'body')}
-          replicaReadyRef={yrsCore.experimentalWorkerOpen ? yrsCore.replicaReadyRef : undefined}
-          requestReplica={yrsCore.experimentalWorkerOpen ? yrsCore.requestReplica : undefined}
-          inputEpoch={inputEpoch}
-          applyPendingSelection={applyPendingSelection}
-          seedSelection={!yrsCore.hydrateOnDemand}
-          session={yrsCore.session}
-          story={activeYrsRootStory}
-          isSuggesting={isSuggesting}
-          author={author}
-          inputPositionMap={yrsInputPositionMap}
-          displayPositionToLoc={yrsDisplayPositionToLoc}
-          resolveDisplayTarget={resolveYrsDisplayTarget}
-          locToDisplayPosition={yrsLocToDisplayPosition}
-          nextParagraphStyleId={(styleId) => yrsStyleResolver?.getNextStyleId(styleId) ?? null}
-          displayListQueries={activeYrsRootStory === 'body' ? displayListQueries : null}
-          resolveDisplayListQueries={
-            activeYrsRootStory === 'body' ? resolveDisplayListQueries : undefined
-          }
-          displayListFrameEpoch={displayListFrameEpoch}
-          residentCaret={residentCaret}
-          residentCaretAuthoritative={residentCaretAuthoritative}
-          layoutUpdateOrigin={layoutUpdateOrigin}
-          canvasHostRef={canvasHostRef ?? pagesContainerRef}
-          onStateChange={handleYrsStateChange}
-          onDirectInput={publishYrsDirectInput}
-          applyResidentInput={applyResidentInput}
-          applyResidentDelete={applyResidentDelete}
-          onFocusChange={setIsFocused}
-          onPendingInputChange={notifyStateListeners}
-          onCaretInput={activeYrsRootStory === 'body' ? onCaretInput : undefined}
-          onCaretInputDispatched={activeYrsRootStory === 'body' ? onCaretInputDispatched : undefined}
-          onCaretInterrupt={handleLocalCaretInterrupt}
-        />
+        {viewerDocumentRead ? (
+          <ViewerInput
+            ref={yrsInputRef}
+            read={viewerDocumentRead}
+            story={activeYrsRootStory}
+            queries={displayListQueries ?? null}
+            document={yrsCore.session}
+            onSelectionChange={handleViewerSelectionChange}
+            onFocusChange={setIsFocused}
+          />
+        ) : (
+          <YrsInput
+            ref={yrsInputRef}
+            enabled
+            readOnly={readOnly || (!!partEdit && activeYrsRootStory === 'body')}
+            replicaReadyRef={yrsCore.experimentalWorkerOpen ? yrsCore.replicaReadyRef : undefined}
+            requestReplica={yrsCore.experimentalWorkerOpen ? yrsCore.requestReplica : undefined}
+            inputEpoch={inputEpoch}
+            applyPendingSelection={applyPendingSelection}
+            seedSelection={!yrsCore.hydrateOnDemand}
+            session={yrsCore.session}
+            story={activeYrsRootStory}
+            isSuggesting={isSuggesting}
+            author={author}
+            inputPositionMap={yrsInputPositionMap}
+            displayPositionToLoc={yrsDisplayPositionToLoc}
+            resolveDisplayTarget={resolveYrsDisplayTarget}
+            locToDisplayPosition={yrsLocToDisplayPosition}
+            nextParagraphStyleId={(styleId) => yrsStyleResolver?.getNextStyleId(styleId) ?? null}
+            displayListQueries={activeYrsRootStory === 'body' ? displayListQueries : null}
+            resolveDisplayListQueries={
+              activeYrsRootStory === 'body' ? resolveDisplayListQueries : undefined
+            }
+            displayListFrameEpoch={displayListFrameEpoch}
+            residentCaret={residentCaret}
+            residentCaretAuthoritative={residentCaretAuthoritative}
+            layoutUpdateOrigin={layoutUpdateOrigin}
+            canvasHostRef={canvasHostRef ?? pagesContainerRef}
+            onStateChange={handleYrsStateChange}
+            onDirectInput={publishYrsDirectInput}
+            applyResidentInput={applyResidentInput}
+            applyResidentDelete={applyResidentDelete}
+            onFocusChange={setIsFocused}
+            onPendingInputChange={notifyStateListeners}
+            onCaretInput={activeYrsRootStory === 'body' ? onCaretInput : undefined}
+            onCaretInputDispatched={activeYrsRootStory === 'body' ? onCaretInputDispatched : undefined}
+            onCaretInterrupt={handleLocalCaretInterrupt}
+          />
+        )}
 
         <div ref={viewportLayoutRef} style={{ display: 'contents' }}>
           <div
@@ -2059,7 +2279,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
 
           {canvasOverlayTarget && displayListQueries && !partEdit && (
             <CanvasCellSelectionOverlay
-              session={yrsCore.session}
+              session={viewerDocumentRead ? null : yrsCore.session}
               positionProjection={getYrsPositionProjection('body')}
               overlayTarget={canvasOverlayTarget}
               canvasHostRef={interactionPageHostRef}
