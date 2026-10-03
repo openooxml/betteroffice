@@ -1,5 +1,17 @@
 # @betteroffice/demo
 
+## 0.0.15
+
+### Patch Changes
+
+- Updated dependencies [26e7db6]
+- Updated dependencies [8a86196]
+- Updated dependencies [654df3c]
+- Updated dependencies [d8fe3c0]
+- Updated dependencies [f305310]
+  - @betteroffice/docx-react@0.4.3
+  - @betteroffice/docx@0.4.3
+
 ## 0.0.14
 
 ### Patch Changes

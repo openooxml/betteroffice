@@ -1,5 +1,17 @@
 # @betteroffice/docx-react
 
+## 0.4.3
+
+### Patch Changes
+
+- 26e7db6: Plugin overlays get their positions when a document opened in a background tab is shown, without a scroll.
+- 8a86196: Double-clicking a header or footer on any page of an editable document opens that header or footer for editing.
+- 654df3c: With a header or footer open for editing, clicking another header or footer switches to it directly, without scrolling the page.
+- f305310: With `experimentalWorkerOpen`, page counts stay whole while proposals are accepted, rejected or undone.
+- Updated dependencies [d8fe3c0]
+  - @betteroffice/docx@0.4.3
+  - @betteroffice/docx-i18n@0.4.3
+
 ## 0.4.2
 
 ### Patch Changes
