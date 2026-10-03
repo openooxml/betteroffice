@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use docx_parse::paragraph_identity::{
     ParagraphOccurrence, allocate_paragraph_id_where, format_paragraph_id, parse_paragraph_id,
 };
+use ooxml_opc::PackageBytes;
 use yrs::branch::Branch;
 use yrs::types::text::YChange;
 use yrs::types::{Delta, EntryChange, Event};
@@ -361,7 +362,7 @@ struct Seeded {
 /// Identity index of the retained source package, reconstructible from its bytes.
 pub(crate) struct SourceIndex {
     package_sha256: String,
-    bytes: Arc<[u8]>,
+    bytes: PackageBytes,
     occupied: BTreeSet<u32>,
     /// Story parts in package order.
     parts: Vec<SourcePart>,
@@ -373,13 +374,13 @@ pub(crate) struct SourceIndex {
 }
 
 impl SourceIndex {
-    pub(crate) fn bytes(&self) -> Arc<[u8]> {
-        Arc::clone(&self.bytes)
+    pub(crate) fn bytes(&self) -> PackageBytes {
+        self.bytes.clone()
     }
 
     pub(crate) fn new(
         package_sha256: String,
-        bytes: Arc<[u8]>,
+        bytes: PackageBytes,
         occupied: BTreeSet<u32>,
         inputs: Vec<SourcePartInput>,
         comment_references: BTreeSet<u32>,
@@ -530,7 +531,7 @@ impl SourceIndex {
 /// The retained source package: its bytes, and their digest when known,
 /// until an identity read needs the index.
 pub(crate) enum SourcePackage {
-    Pending(Arc<[u8]>, Option<String>),
+    Pending(PackageBytes, Option<String>),
     Ready(Arc<SourceIndex>),
 }
 

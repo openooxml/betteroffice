@@ -25,6 +25,7 @@ metafile = ["dep:ooxml-metafile"]
 base64 = "0.22"
 ooxml-opc.workspace = true
 indexmap = { version = "2", features = ["serde"] }
+memchr = "2"
 ooxml-drawingml = { workspace = true, features = ["chart"] }
 ooxml-metafile = { workspace = true, features = ["svg"], optional = true }
 quick-xml = { version = "0.41", features = ["encoding"] }
