@@ -134,6 +134,7 @@ export class XlsxDocument {
      * Start queuing origin-prefixed Yrs update events for polling.
      */
     startUpdateObservation(): void;
+    storedCellAddressesJson(args: string): string;
     /**
      * undo the last transaction; returns `{"applied":bool,"sheetInfo":{...}}`.
      */
@@ -219,6 +220,7 @@ export interface InitOutput {
     readonly xlsxdocument_setRangeNumberFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_sheetInfoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_startUpdateObservation: (a: number) => [number, number];
+    readonly xlsxdocument_storedCellAddressesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_undoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_validateEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_version: () => [number, number];

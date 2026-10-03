@@ -21,6 +21,60 @@ fn cell(address: &str) -> CellRef {
 }
 
 #[test]
+fn stored_cell_pages_include_formatted_blanks_and_sparse_far_cells() {
+    let mut sheet = Sheet::new("Data");
+    for address in ["A1", "B1", "XFD1048576"] {
+        sheet.set_cell(
+            cell(address),
+            Cell {
+                value: CellValue::Number { value: 1.0 },
+                ..Cell::default()
+            },
+        );
+    }
+    sheet.set_cell(
+        cell("A2"),
+        Cell {
+            style: Some(0),
+            ..Cell::default()
+        },
+    );
+    let mut model = WorkbookModel::default();
+    model.styles.cell_xfs.push(Default::default());
+    model.sheets.push(sheet);
+    let workbook = Workbook::from_model(model).unwrap();
+
+    let (first, more) = workbook.stored_cell_addresses(SheetId(0), None, 2).unwrap();
+    assert_eq!(first, vec![cell("A1"), cell("B1")]);
+    assert!(more);
+    let (second, more) = workbook
+        .stored_cell_addresses(SheetId(0), first.last().copied(), 2)
+        .unwrap();
+    assert_eq!(second, vec![cell("A2"), cell("XFD1048576")]);
+    assert!(!more);
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened
+            .stored_cell_addresses(SheetId(0), None, 10)
+            .unwrap()
+            .0,
+        vec![cell("A1"), cell("B1"), cell("A2"), cell("XFD1048576")]
+    );
+    assert!(workbook.stored_cell_addresses(SheetId(0), None, 0).is_err());
+    assert!(
+        workbook
+            .stored_cell_addresses(SheetId(0), None, 10_001)
+            .is_err()
+    );
+    assert!(
+        workbook
+            .stored_cell_addresses(SheetId(0), Some(CellRef::new(MAX_ROWS, 0)), 1)
+            .is_err()
+    );
+    assert!(workbook.stored_cell_addresses(SheetId(1), None, 1).is_err());
+}
+
+#[test]
 fn text_search_uses_formatted_values_and_stable_cell_order() {
     let mut first = Sheet::new("Data");
     first.set_cell(
