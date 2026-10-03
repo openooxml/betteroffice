@@ -336,11 +336,12 @@ export interface RustDisplayListQueryEngine {
 }
 
 let enginePromise: Promise<RustDisplayListEngine & RustDisplayListQueryEngine> | null = null;
+let loadedEngine: (RustDisplayListEngine & RustDisplayListQueryEngine) | null = null;
 
 function loadEngine(): Promise<RustDisplayListEngine & RustDisplayListQueryEngine> {
   enginePromise ??= import('../wasm/index').then(async (m) => {
     await m.preloadLayoutWasm();
-    return {
+    return (loadedEngine = {
     buildDisplayListJson: m.buildDisplayListJson,
     hitTestRegionsJson: m.hitTestRegionsJson,
     verticalMoveJson: m.verticalMoveJson,
@@ -356,9 +357,14 @@ function loadEngine(): Promise<RustDisplayListEngine & RustDisplayListQueryEngin
     verticalMoveByHandle: m.verticalMoveByHandle,
     rangeRectsByHandle: m.rangeRectsByHandle,
     rangeRectsRegionByHandle: m.rangeRectsRegionByHandle,
-  };
+  });
   });
   return enginePromise;
+}
+
+/** The wasm query surface once {@link loadRustDisplayListQueryEngine} has loaded it, else null. */
+export function loadedRustDisplayListQueryEngine(): RustDisplayListQueryEngine | null {
+  return loadedEngine;
 }
 
 /**
