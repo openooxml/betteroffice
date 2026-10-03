@@ -606,6 +606,24 @@ pub fn reservation_surplus_pages(
     Some(pages)
 }
 
+/// The larger reservation of every page `left` and `right` reserve differently.
+fn alternating_reservations(
+    left: &OrderedMap<u32, f64>,
+    right: &OrderedMap<u32, f64>,
+) -> OrderedMap<u32, f64> {
+    let mut alternating = OrderedMap::new();
+    for (page, _) in left.iter().chain(right.iter()) {
+        let (a, b) = (
+            left.get(page).copied().unwrap_or(0.0),
+            right.get(page).copied().unwrap_or(0.0),
+        );
+        if a != b {
+            alternating.set(*page, a.max(b));
+        }
+    }
+    alternating
+}
+
 fn merge_reserved_heights(
     left: &OrderedMap<u32, f64>,
     right: &OrderedMap<u32, f64>,
@@ -640,21 +658,36 @@ where
     }
 
     let mut layout = initial_layout;
-    let mut converged = false;
+    let mut settled = false;
+    let mut held = OrderedMap::new();
+    let mut before: Option<OrderedMap<u32, f64>> = None;
     for _ in 0..MAX_FOOTNOTE_LAYOUT_PASSES {
         layout = layout_with_reserved(&reserved)?;
         page_note_map = map_notes_to_pages(&layout.pages, refs, regions);
         columns = footnote_columns_by_page(&layout.pages, regions);
-        let next = calculate_note_reserved_heights(&page_note_map, contents, &columns);
+        let mut next = merge_reserved_heights(
+            &calculate_note_reserved_heights(&page_note_map, contents, &columns),
+            &held,
+        );
         if reserved_heights_equal(&reserved, &next) {
             reserved = next;
-            converged = true;
+            settled = true;
             break;
         }
-        reserved = next;
+        // A reference that fits only while its page reserves nothing for its note moves to the
+        // next page, as Word moves a line whose note does not fit below it.
+        if before
+            .as_ref()
+            .is_some_and(|before| reserved_heights_equal(before, &next))
+        {
+            held = merge_reserved_heights(&held, &alternating_reservations(&reserved, &next));
+            next = merge_reserved_heights(&next, &held);
+        }
+        before = Some(std::mem::replace(&mut reserved, next));
     }
+    let converged = settled && held.is_empty();
 
-    if !converged {
+    if !settled {
         let mut fallback = reserved;
         let mut covered = false;
         for _ in 0..MAX_FOOTNOTE_LAYOUT_PASSES {
@@ -1172,7 +1205,7 @@ mod tests {
     }
 
     #[test]
-    fn alternating_reservations_keep_one_covering_every_page() {
+    fn a_reference_alternating_between_pages_settles_on_the_later_one() {
         let on_first = layout(vec![
             page(1, 0, vec![paragraph_fragment(0.0, 10.0)]),
             page(2, 0, Vec::new()),
@@ -1189,8 +1222,10 @@ mod tests {
             row_index: None,
         }];
         let contents = vec![content(1, NoteKind::Footnote, 20.0)];
+        let mut passes = 0;
         let result = stabilize_note_layout(
             |reserved| {
+                passes += 1;
                 Ok(if reserved.get(&1).is_some() {
                     on_second.clone()
                 } else {
@@ -1205,6 +1240,8 @@ mod tests {
         .unwrap();
 
         assert!(!result.converged);
+        assert_eq!(passes, 3);
+        assert_eq!(result.page_note_map.get(&2), Some(&vec![1]));
         assert_eq!(result.reserved_heights.get(&1), Some(&32.0));
         assert_eq!(result.reserved_heights.get(&2), Some(&32.0));
         let required =
