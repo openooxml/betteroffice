@@ -194,30 +194,6 @@ async function assertReplica(page: Page, readOnly: boolean, sidebarOpen = false)
   }
 }
 
-async function view(page: Page) {
-  return page.evaluate(() => (window as unknown as ProbeWindow).__workerProposalProbe.view());
-}
-
-async function assertHydration(
-  page: Page,
-  before: ReturnType<WorkerProposalProbe['view']>,
-  options: { checkLayoutOrder?: boolean } = {}
-) {
-  await expect.poll(async () => {
-    const current = await status(page);
-    return { encodeState: current.encodeState, pending: current.pending };
-  }).toEqual({ encodeState: 1, pending: false });
-  const current = await status(page);
-  expect(current.layoutComplete).not.toBeNull();
-  expect(current.firstEncodeState).not.toBeNull();
-  if (options.checkLayoutOrder !== false) {
-    expect(current.firstEncodeState!).toBeGreaterThan(current.layoutComplete!);
-  }
-  const after = await view(page);
-  expect(Math.abs(after.scrollTop - before.scrollTop)).toBeLessThanOrEqual(1);
-  expect(after.selection).toEqual(before.selection);
-}
-
 async function openEditor(page: Page, readOnly: boolean, options = '') {
   await page.goto(`/docx-worker-proposals.html?readOnly=${readOnly}&${options}`);
   await expect(page.locator('canvas[data-page-index="0"]')).toBeVisible({ timeout: 120_000 });
