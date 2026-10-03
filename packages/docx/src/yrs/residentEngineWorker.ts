@@ -952,7 +952,10 @@ function hydrate(
   }
   session.setPartialDocument(snapshot.partialDocument === true);
   previewFinalPages = snapshot.partialDocument === true ? 0 : null;
-  if (!snapshot.workerAuthoritative) session.loadMediaSources(snapshot.mediaSources ?? '');
+  if (!snapshot.workerAuthoritative) {
+    session.loadMediaSources(snapshot.mediaSources ?? '');
+    session.loadNoteSeparators(snapshot.noteSeparators ?? new Uint8Array(0));
+  }
   if (snapshot.fontsRevision !== fontsRevision) {
     if (snapshot.fontsBaseRevision === undefined) {
       session.clearFonts();

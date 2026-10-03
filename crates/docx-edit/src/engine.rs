@@ -5,13 +5,14 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{DefaultHasher, Hasher as _};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use docx_layout::display_list::DisplayList;
 use docx_layout::footnotes::{
-    FOOTNOTE_COLUMN_GAP_PX, OrderedMap, apply_note_presentation, assign_note_presentations,
-    attach_note_areas, build_note_presentations, calculate_note_reserved_heights,
-    collect_note_refs, footnote_columns_by_page, map_note_anchors_to_pages, map_notes_to_pages,
-    reservation_surplus_pages, stabilize_note_layout, stamp_note_pages,
+    FOOTNOTE_COLUMN_GAP_PX, NoteKind, NoteSeparatorHeights, OrderedMap, apply_note_presentation,
+    assign_note_presentations, attach_note_areas, build_note_presentations,
+    calculate_note_reserved_heights, collect_note_refs, map_note_anchors_to_pages,
+    map_notes_to_pages, reservation_surplus_pages, stabilize_note_layout, stamp_note_pages,
 };
 use docx_layout::header_footer::{
     HeaderFooterKind, HeaderFooterMetrics, HeaderFooterPayload, HeaderFooterType,
@@ -73,6 +74,14 @@ struct RenderState {
     stories: HashMap<String, LoweredStory>,
     cache_hits: u64,
     cache_misses: u64,
+}
+
+struct LoweredNoteSeparators {
+    state: Arc<[u8]>,
+    doc: EditingDoc,
+    env: RenderEnv,
+    blocks: HashMap<String, Rc<Vec<LayoutBlock>>>,
+    revealable: HashMap<String, Rc<Vec<LayoutBlock>>>,
 }
 
 #[derive(Debug)]
@@ -1068,6 +1077,7 @@ pub struct EngineSession {
     // observer before the Rc epoch source is released.
     _doc_epoch_observer: Subscription,
     render: RefCell<RenderState>,
+    note_separators: RefCell<Option<LoweredNoteSeparators>>,
     preview_font_requirements: RefCell<Option<PreviewFontRequirements>>,
     measurement: RefCell<MeasurementState>,
     regions: RefCell<Option<ResidentRegionState>>,
@@ -2046,6 +2056,7 @@ impl EngineSession {
             doc_epoch,
             _doc_epoch_observer: observer,
             render: RefCell::new(RenderState::default()),
+            note_separators: RefCell::new(None),
             preview_font_requirements: RefCell::new(None),
             measurement: RefCell::new(MeasurementState::default()),
             regions: RefCell::new(None),
@@ -2455,7 +2466,17 @@ impl EngineSession {
         {
             let request =
                 serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
-            let fingerprint = font_requirements_fingerprint(request)?;
+            let separators = self
+                .doc
+                .note_separator_state()?
+                .map_or(0, |state| hash_bytes(&state));
+            let fingerprint = hash_bytes(
+                &[
+                    font_requirements_fingerprint(request)?.to_le_bytes(),
+                    separators.to_le_bytes(),
+                ]
+                .concat(),
+            );
             let epoch = self.doc_epoch();
             let cached = self
                 .preview_font_requirements
@@ -2512,6 +2533,28 @@ impl EngineSession {
                     .flatten()
                     .map(|r_id| format!("hf:{r_id}")),
                 );
+            }
+            for (kind, name) in [
+                (NoteKind::Footnote, "footnote"),
+                (NoteKind::Endnote, "endnote"),
+            ] {
+                if notes
+                    .contents
+                    .iter()
+                    .any(|content| content.note_kind == kind)
+                    && let Some(blocks) = self.lower_note_separator(name, &render_env)?
+                {
+                    if cache_key.is_some() {
+                        collector.collect_preview(blocks.iter(), default_family);
+                        if let Some(revealable) =
+                            self.note_separator_revealable(name, &render_env)?
+                        {
+                            collector.collect_preview(revealable.iter(), default_family);
+                        }
+                    } else {
+                        collector.collect(blocks.iter(), default_family);
+                    }
+                }
             }
             let note_stories: BTreeMap<_, _> = notes
                 .contents
@@ -3105,7 +3148,12 @@ impl EngineSession {
         // Placement only zeroes contextual spacing, which every pass applies
         // again, so the note passes replay the body arena in place. Page-side
         // wrapping rewrites shapes per pass, so it replays a copy instead.
-        let base_input = (!refs.is_empty()
+        let mut separator_heights = input
+            .options
+            .note_separator_heights
+            .clone()
+            .unwrap_or_default();
+        let mut base_input = (!refs.is_empty()
             && resident_body
             && input.measured.iter().any(|measured| {
                 matches!(&measured.block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape))
@@ -3135,7 +3183,7 @@ impl EngineSession {
         let presentations = build_note_presentations(&refs, &initial_layout.pages, &regions);
         assign_note_presentations(&mut notes.contents, &presentations);
         if resident_body {
-            self.measure_resident_notes(
+            let measured_separator_heights = self.measure_resident_notes(
                 &mut notes.contents,
                 &refs,
                 &initial_layout,
@@ -3145,6 +3193,17 @@ impl EngineSession {
                     .as_ref()
                     .expect("resident body required render environment"),
             )?;
+            separator_heights
+                .footnote
+                .extend(measured_separator_heights.footnote);
+            separator_heights
+                .endnote
+                .extend(measured_separator_heights.endnote);
+        }
+        if separator_heights != NoteSeparatorHeights::default() {
+            for input in base_input.iter_mut().chain(arena.iter_mut()) {
+                input.options.note_separator_heights = Some(separator_heights.clone());
+            }
         }
         let stabilized = stabilize_note_layout(
             |reserved| {
@@ -3171,6 +3230,7 @@ impl EngineSession {
             },
             &refs,
             &notes.contents,
+            &separator_heights,
             initial_layout,
             &regions,
         )
@@ -3213,14 +3273,22 @@ impl EngineSession {
         apply_document_regions_tracked(layout, &regions, &mut restamped_pages);
         let page_note_map = map_notes_to_pages(&layout.pages, &refs, &regions);
         stamp_note_pages(layout, &page_note_map, &regions);
-        attach_note_areas(layout, &page_note_map, &notes.contents, &regions);
+        attach_note_areas(
+            layout,
+            &page_note_map,
+            &notes.contents,
+            &separator_heights,
+            &regions,
+        );
         let note_settlement = if notes_converged {
             NoteSettlement::Converged
         } else {
             let required = calculate_note_reserved_heights(
                 &page_note_map,
                 &notes.contents,
-                &footnote_columns_by_page(&layout.pages, &regions),
+                &layout.pages,
+                &separator_heights,
+                &regions,
             );
             match reservation_surplus_pages(&stabilized.reserved_heights, &required) {
                 Some(numbers) => NoteSettlement::Covering(
@@ -3362,6 +3430,179 @@ impl EngineSession {
         hash_bytes(&bytes)
     }
 
+    fn lower_note_separator(
+        &self,
+        kind: &str,
+        render_env: &RenderEnv,
+    ) -> Result<Option<Rc<Vec<LayoutBlock>>>, String> {
+        let Some(state) = self.doc.note_separator_state()? else {
+            self.note_separators.borrow_mut().take();
+            return Ok(None);
+        };
+        let mut cache = self.note_separators.borrow_mut();
+        if cache
+            .as_ref()
+            .is_none_or(|cached| !Arc::ptr_eq(&cached.state, &state) || cached.env != *render_env)
+        {
+            let scratch = EditingDoc::new(1);
+            scratch
+                .apply_update_v1(&state)
+                .map_err(|error| error.to_string())?;
+            *cache = Some(LoweredNoteSeparators {
+                state,
+                doc: scratch,
+                env: render_env.clone(),
+                blocks: HashMap::new(),
+                revealable: HashMap::new(),
+            });
+        }
+        let cached = cache.as_mut().expect("separator cache initialized");
+        if let Some(blocks) = cached.blocks.get(kind) {
+            return Ok(Some(Rc::clone(blocks)));
+        }
+        if cached.doc.story_len(kind).is_err() {
+            return Ok(None);
+        }
+        let blocks = Rc::new(
+            crate::bridge::yrs_doc_to_layout_blocks(&cached.doc, kind, render_env)
+                .map_err(|error| error.to_string())?,
+        );
+        cached.blocks.insert(kind.to_owned(), Rc::clone(&blocks));
+        Ok(Some(blocks))
+    }
+
+    /// The separator blocks a revision preview can reveal, for the preview font superset.
+    fn note_separator_revealable(
+        &self,
+        kind: &str,
+        render_env: &RenderEnv,
+    ) -> Result<Option<Rc<Vec<LayoutBlock>>>, String> {
+        if self.lower_note_separator(kind, render_env)?.is_none() {
+            return Ok(None);
+        }
+        let mut cache = self.note_separators.borrow_mut();
+        let cached = cache.as_mut().expect("separator cache initialized");
+        if let Some(blocks) = cached.revealable.get(kind) {
+            return Ok(Some(Rc::clone(blocks)));
+        }
+        let mut local = crate::bridge::local::LocalLowering::new(false);
+        let (_, _, revealable) = yrs_doc_to_mapped_layout_blocks_with_revealable(
+            &cached.doc,
+            kind,
+            render_env,
+            &mut local,
+        )
+        .map_err(|error| error.to_string())?;
+        let revealable = Rc::new(revealable);
+        cached
+            .revealable
+            .insert(kind.to_owned(), Rc::clone(&revealable));
+        Ok(Some(revealable))
+    }
+
+    fn measure_note_separators(
+        &self,
+        contents: &[docx_layout::footnotes::NoteContent],
+        layout: &Layout,
+        regions: &DocumentRegions,
+        measurement: &docx_layout::measure_blocks::MeasurementConfig,
+        render_env: &RenderEnv,
+    ) -> Result<NoteSeparatorHeights, String> {
+        use docx_layout::paragraph_spacing::{
+            apply_contextual_spacing_blocks, get_spacing_after, get_spacing_before,
+        };
+
+        let mut heights = NoteSeparatorHeights::default();
+        let Some(first_page) = layout.pages.first() else {
+            return Ok(heights);
+        };
+        let sections: BTreeSet<_> = (0..regions.sections.len())
+            .chain(layout.pages.iter().map(|page| page.region_section_index))
+            .collect();
+        let mut first_pages = HashMap::new();
+        for page in &layout.pages {
+            first_pages.entry(page.region_section_index).or_insert(page);
+        }
+        for (kind, name) in [
+            (NoteKind::Footnote, "footnote"),
+            (NoteKind::Endnote, "endnote"),
+        ] {
+            if !contents.iter().any(|content| content.note_kind == kind) {
+                continue;
+            }
+            let Some(lowered) = self.lower_note_separator(name, render_env)? else {
+                continue;
+            };
+            let mut measured_heights = HashMap::new();
+            for &section_index in &sections {
+                let page = first_pages.get(&section_index).copied();
+                let section = regions
+                    .sections
+                    .get(section_index)
+                    .or_else(|| regions.sections.last());
+                let size = page
+                    .map(|page| &page.size)
+                    .or_else(|| section.and_then(|section| section.page_size.as_ref()))
+                    .unwrap_or(&first_page.size);
+                let margins = page
+                    .map(|page| page.body_margins.as_ref().unwrap_or(&page.margins))
+                    .or_else(|| section.and_then(|section| section.margins.as_ref()))
+                    .unwrap_or(&first_page.margins);
+                let width = (size.w - margins.left - margins.right).max(1.0);
+                let line_px = regions.paragraph_spacing_line_px(section_index);
+                let grid_pitch = regions.doc_grid_snap_pitch_px(section_index);
+                let key = (
+                    width.to_bits(),
+                    line_px.to_bits(),
+                    grid_pitch.map(f64::to_bits),
+                );
+                let height = if let Some(&height) = measured_heights.get(&key) {
+                    height
+                } else {
+                    let mut blocks = lowered.as_ref().clone();
+                    for block in &mut blocks {
+                        resolve_line_unit_spacing(block, line_px);
+                        resolve_doc_grid_pitch(block, grid_pitch);
+                    }
+                    apply_contextual_spacing_blocks(&mut blocks);
+                    let measures = docx_layout::measure_blocks::measure_blocks(
+                        &mut blocks,
+                        width,
+                        measurement,
+                    )?;
+                    let mut height = 0.0;
+                    let mut previous_after = 0.0_f64;
+                    for (block, measure) in blocks.iter().zip(&measures) {
+                        if let (LayoutBlock::Paragraph(paragraph), BlockExtent::Paragraph(extent)) =
+                            (block, measure)
+                        {
+                            height += previous_after.max(get_spacing_before(paragraph))
+                                + extent
+                                    .lines
+                                    .iter()
+                                    .map(|line| line.line_height)
+                                    .sum::<f64>();
+                            previous_after = get_spacing_after(paragraph);
+                        } else {
+                            height += previous_after
+                                + docx_layout::measure_blocks::extent_height(measure);
+                            previous_after = 0.0;
+                        }
+                    }
+                    height += previous_after;
+                    measured_heights.insert(key, height);
+                    height
+                };
+                match kind {
+                    NoteKind::Footnote => &mut heights.footnote,
+                    NoteKind::Endnote => &mut heights.endnote,
+                }
+                .insert(section_index, height);
+            }
+        }
+        Ok(heights)
+    }
+
     fn measure_resident_notes(
         &self,
         contents: &mut [docx_layout::footnotes::NoteContent],
@@ -3370,7 +3611,9 @@ impl EngineSession {
         regions: &DocumentRegions,
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
         render_env: &RenderEnv,
-    ) -> Result<(), String> {
+    ) -> Result<NoteSeparatorHeights, String> {
+        let separator_heights =
+            self.measure_note_separators(contents, layout, regions, measurement, render_env)?;
         let anchors = map_note_anchors_to_pages(&layout.pages, refs);
         for content in contents {
             let Some(page_number) = anchors
@@ -3423,7 +3666,7 @@ impl EngineSession {
             content.blocks = blocks;
             content.measures = measures;
         }
-        Ok(())
+        Ok(separator_heights)
     }
 
     fn measure_header_footer_payload(
@@ -10081,7 +10324,11 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let note = &output["layout"]["pages"][0]["noteAreas"][0]["notes"][0];
+        let area = &output["layout"]["pages"][0]["noteAreas"][0];
+        let note = &area["notes"][0];
+        let separator_height = area["separator"]["height"]
+            .as_f64()
+            .unwrap_or(docx_layout::footnotes::FOOTNOTE_SEPARATOR_HEIGHT);
 
         assert_eq!(output["notesConverged"], true);
         assert_eq!(
@@ -10095,7 +10342,7 @@ mod tests {
             output["layout"]["pages"][0]["footnoteReservedHeight"]
                 .as_f64()
                 .unwrap()
-                > docx_layout::footnotes::FOOTNOTE_SEPARATOR_HEIGHT
+                > separator_height
         );
     }
 
@@ -11044,6 +11291,498 @@ mod tests {
             ("word/document.xml".to_owned(), document.into_bytes()),
         ])
         .expect("zip the fixture")
+    }
+
+    fn layout_with_note_separator(
+        kind: &str,
+        separator: Option<&str>,
+    ) -> (EngineSession, serde_json::Value) {
+        let mut body = format!(
+            r#"<w:p><w:r><w:t>BODY 01</w:t></w:r><w:r><w:{kind}Reference w:id="1"/></w:r></w:p>"#
+        );
+        for index in 1..=54 {
+            body.push_str(&format!(
+                "<w:p><w:r><w:t>FILLER {index:02}</w:t></w:r></w:p>"
+            ));
+        }
+        body.push_str(r#"<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>"#);
+        layout_note_separator_document(
+            kind,
+            separator,
+            &body,
+            serde_json::json!([{"sectionId": "main", "properties": {
+                "pageWidth": 11906, "pageHeight": 16838,
+                "marginTop": 1440, "marginRight": 1440, "marginBottom": 1440, "marginLeft": 1440
+            }}]),
+            &[1],
+        )
+    }
+
+    fn layout_note_separator_document(
+        kind: &str,
+        separator: Option<&str>,
+        body: &str,
+        sections: serde_json::Value,
+        note_ids: &[i64],
+    ) -> (EngineSession, serde_json::Value) {
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let styles = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:rPr><w:sz w:val="24"/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="Separator"><w:name w:val="Separator"/><w:pPr><w:spacing w:before="0" w:after="0" w:line="276" w:lineRule="auto"/></w:pPr><w:rPr><w:sz w:val="22"/></w:rPr></w:style>"#;
+        let separator = separator
+            .map(|paragraphs| {
+                format!(r#"<w:{kind} w:id="-1" w:type="separator">{paragraphs}</w:{kind}>"#)
+            })
+            .unwrap_or_default();
+        let note_content: String = note_ids
+            .iter()
+            .map(|id| format!(r#"<w:{kind} w:id="{id}"><w:p><w:r><w:{kind}Ref/></w:r><w:r><w:t>NOTE {id:02}</w:t></w:r></w:p></w:{kind}>"#))
+            .collect();
+        let notes = format!(
+            r#"<w:{kind}s xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{separator}<w:{kind} w:id="0" w:type="continuationSeparator"><w:p><w:pPr><w:spacing w:line="1920" w:lineRule="exact"/></w:pPr><w:r><w:continuationSeparator/></w:r></w:p></w:{kind}>{note_content}</w:{kind}s>"#
+        );
+        let mut parts = ooxml_opc::unzip_parts(&docx_bytes(styles, body)).unwrap();
+        for (path, bytes) in &mut parts {
+            let addition = match path.as_str() {
+                "[Content_Types].xml" => Some((
+                    "</Types>",
+                    format!(
+                        r#"<Override PartName="/word/{kind}s.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.{kind}s+xml"/></Types>"#
+                    ),
+                )),
+                "word/_rels/document.xml.rels" => Some((
+                    "</Relationships>",
+                    format!(
+                        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}s" Target="{kind}s.xml"/></Relationships>"#
+                    ),
+                )),
+                _ => None,
+            };
+            if let Some((closing, replacement)) = addition {
+                *bytes = String::from_utf8(bytes.clone())
+                    .unwrap()
+                    .replace(closing, &replacement)
+                    .into_bytes();
+            }
+        }
+        parts.push((format!("word/{kind}s.xml"), notes.into_bytes()));
+        let engine = EngineSession::new(312);
+        crate::seed::seed_from_docx(engine.doc(), &ooxml_opc::rezip_parts(&parts).unwrap())
+            .unwrap();
+        let contents: Vec<_> = note_ids
+            .iter()
+            .map(|id| serde_json::json!({"id": id, "noteKind": kind, "height": 0}))
+            .collect();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": {"sections": sections},
+            "notes": {"contents": contents},
+            "measurement": {
+                "fontChains": {"liberation sans|0|0": [font_id]},
+                "defaults": {"fontSize": 12, "fontFamily": "Liberation Sans"},
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        });
+        let mut output: serde_json::Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        (engine, output["layout"].take())
+    }
+
+    #[test]
+    fn a_twelve_point_separator_keeps_body_lines_on_one_page() {
+        let (_, layout) = layout_with_note_separator(
+            "footnote",
+            Some(
+                r#"<w:p><w:pPr><w:spacing w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:separator/></w:r></w:p>"#,
+            ),
+        );
+        assert_eq!(layout["pages"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_taller_separator_moves_body_lines_to_the_next_page() {
+        let (engine, _) = layout_with_note_separator(
+            "footnote",
+            Some(
+                r#"<w:p><w:pPr><w:spacing w:line="960" w:lineRule="exact"/></w:pPr><w:r><w:separator/></w:r></w:p>"#,
+            ),
+        );
+        let pagination = engine.pagination.borrow();
+        let input = pagination.input.as_ref().unwrap();
+        let layout = pagination.layout.as_ref().unwrap();
+        let last_page_text: Vec<_> = layout
+            .pages
+            .last()
+            .unwrap()
+            .fragments
+            .iter()
+            .filter_map(|fragment| {
+                let Fragment::Paragraph(fragment) = fragment else {
+                    return None;
+                };
+                input.measured.iter().find_map(|measured| {
+                    let LayoutBlock::Paragraph(block) = &measured.block else {
+                        return None;
+                    };
+                    (block.id == fragment.block_id).then(|| {
+                        block
+                            .runs
+                            .iter()
+                            .filter_map(|run| match run {
+                                Run::Text(text) => Some(text.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<String>()
+                    })
+                })
+            })
+            .collect();
+        assert_eq!(
+            (layout.pages.len(), last_page_text),
+            (2, vec!["FILLER 53".to_owned(), "FILLER 54".to_owned()])
+        );
+    }
+
+    #[test]
+    fn replicated_separator_state_preserves_note_heights_and_body_breaks() {
+        let page_breaks = |layout: &serde_json::Value| {
+            layout["pages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|page| {
+                    (
+                        page["fragments"].clone(),
+                        page["footnoteReservedHeight"].clone(),
+                        page["noteAreas"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|area| area["separator"]["height"].clone())
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        for kind in ["footnote", "endnote"] {
+            for line in [960, 1440] {
+                let separator = format!(
+                    r#"<w:p><w:pPr><w:spacing w:line="{line}" w:lineRule="exact"/></w:pPr><w:r><w:separator/></w:r></w:p>"#
+                );
+                let (opener, layout) = layout_with_note_separator(kind, Some(&separator));
+                let request = opener
+                    .regions
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .request_json
+                    .clone();
+                let replica = EngineSession::new(313);
+                replica
+                    .doc()
+                    .apply_update_v1(&opener.doc().encode_state_as_update_v1())
+                    .unwrap();
+                assert!(replica.doc().source_metadata().is_none());
+                let fallback: serde_json::Value = serde_json::from_str(
+                    &replica.layout_document_with_regions_json(&request).unwrap(),
+                )
+                .unwrap();
+                for area in fallback["layout"]["pages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|page| page["noteAreas"].as_array().into_iter().flatten())
+                {
+                    assert!(area.get("separator").is_none());
+                    let notes_height: f64 = area["notes"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|note| note["height"].as_f64().unwrap())
+                        .sum();
+                    assert_eq!(area["height"].as_f64().unwrap() - notes_height, 12.0);
+                }
+                replica
+                    .doc()
+                    .set_note_separator_state(opener.doc().note_separator_state().unwrap());
+                let replicated: serde_json::Value = serde_json::from_str(
+                    &replica.layout_document_with_regions_json(&request).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    replicated["layout"]["pages"].as_array().unwrap().len(),
+                    layout["pages"].as_array().unwrap().len()
+                );
+                assert_eq!(page_breaks(&replicated["layout"]), page_breaks(&layout));
+                if kind == "footnote" {
+                    assert_eq!(layout["pages"].as_array().unwrap().len(), 2);
+                    assert_eq!(fallback["layout"]["pages"].as_array().unwrap().len(), 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn equal_separator_state_keeps_the_lowering_and_empty_state_clears_it() {
+        let (opener, _) = layout_with_note_separator(
+            "footnote",
+            Some(
+                r#"<w:p><w:pPr><w:spacing w:line="960" w:lineRule="exact"/></w:pPr><w:r><w:rPr><w:sz w:val="144"/></w:rPr><w:separator/></w:r></w:p>"#,
+            ),
+        );
+        let state = opener.doc().note_separator_state().unwrap().unwrap();
+        assert!(Arc::ptr_eq(
+            &state,
+            &opener.doc().note_separator_state().unwrap().unwrap()
+        ));
+        let replica = EngineSession::new(313);
+        replica
+            .doc()
+            .set_note_separator_state(Some(Arc::clone(&state)));
+        let env = RenderEnv::default();
+        let lowered = replica
+            .lower_note_separator("footnote", &env)
+            .unwrap()
+            .unwrap();
+        let equal: Arc<[u8]> = Arc::from(state.as_ref());
+        assert!(!Arc::ptr_eq(&state, &equal));
+        replica.doc().set_note_separator_state(Some(equal));
+        assert!(Arc::ptr_eq(
+            &state,
+            &replica.doc().note_separator_state().unwrap().unwrap()
+        ));
+        assert!(
+            replica
+                .lower_note_separator("endnote", &env)
+                .unwrap()
+                .is_none()
+        );
+        assert!(Rc::ptr_eq(
+            &lowered,
+            &replica
+                .lower_note_separator("footnote", &env)
+                .unwrap()
+                .unwrap()
+        ));
+        replica
+            .doc()
+            .set_note_separator_state(Some(Arc::<[u8]>::from([])));
+        assert!(replica.doc().note_separator_state().unwrap().is_none());
+        assert!(
+            replica
+                .lower_note_separator("footnote", &env)
+                .unwrap()
+                .is_none()
+        );
+        assert!(replica.note_separators.borrow().is_none());
+    }
+
+    #[test]
+    fn three_separator_paragraphs_reserve_three_lines() {
+        let paragraph =
+            r#"<w:p><w:pPr><w:pStyle w:val="Separator"/></w:pPr><w:r><w:separator/></w:r></w:p>"#;
+        let (_, single) = layout_with_note_separator("footnote", Some(paragraph));
+        let (_, triple) = layout_with_note_separator("footnote", Some(&paragraph.repeat(3)));
+        let separator_reservation = |layout: &serde_json::Value| {
+            let page = &layout["pages"][0];
+            let area = &page["noteAreas"][0];
+            page["footnoteReservedHeight"].as_f64().unwrap()
+                - area["notes"][0]["height"].as_f64().unwrap()
+        };
+        assert!(
+            (separator_reservation(&triple) - 3.0 * separator_reservation(&single)).abs() < 0.01
+        );
+    }
+
+    #[test]
+    fn a_separator_run_font_sizes_the_line_above_its_paragraph_default() {
+        let separator = |size| {
+            format!(
+                r#"<w:p><w:pPr><w:spacing w:line="240" w:lineRule="auto"/><w:rPr><w:sz w:val="20"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="{size}"/></w:rPr><w:separator/></w:r></w:p>"#
+            )
+        };
+        let (_, small) = layout_with_note_separator("footnote", Some(&separator(20)));
+        let (_, large) = layout_with_note_separator("footnote", Some(&separator(72)));
+        let height = |layout: &serde_json::Value| {
+            layout["pages"][0]["noteAreas"][0]["separator"]["height"]
+                .as_f64()
+                .unwrap()
+        };
+        assert!(height(&large) >= 48.0);
+        assert!(height(&large) > 3.0 * height(&small));
+        let page = &large["pages"][0];
+        assert_eq!(
+            page["footnoteReservedHeight"].as_f64().unwrap(),
+            height(&large) + page["noteAreas"][0]["notes"][0]["height"].as_f64().unwrap()
+        );
+    }
+
+    #[test]
+    fn adjacent_separator_paragraph_spacing_collapses() {
+        for (contextual, expected) in [("", 72.0), ("<w:contextualSpacing/>", 42.0)] {
+            let paragraphs = format!(
+                r#"<w:p><w:pPr>{contextual}<w:spacing w:before="60" w:after="300" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:separator/></w:r></w:p><w:p><w:pPr>{contextual}<w:spacing w:before="450" w:after="90" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:separator/></w:r></w:p>"#
+            );
+            let (_, layout) = layout_with_note_separator("footnote", Some(&paragraphs));
+            let page = &layout["pages"][0];
+            let area = &page["noteAreas"][0];
+            assert_eq!(area["separator"]["height"], expected);
+            assert_eq!(
+                page["footnoteReservedHeight"].as_f64().unwrap(),
+                expected + area["notes"][0]["height"].as_f64().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn separator_reservations_follow_each_sections_content_width() {
+        let separator = r#"<w:p><w:pPr><w:spacing w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:separator/></w:r><w:r><w:t>A separator paragraph that wraps only in the narrow section.</w:t></w:r></w:p>"#;
+        for kind in ["footnote", "endnote"] {
+            let body = format!(
+                r#"<w:p><w:r><w:t>Wide section</w:t></w:r><w:r><w:{kind}Reference w:id="1"/></w:r></w:p><w:p><w:pPr><w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr></w:pPr></w:p><w:p><w:r><w:t>Narrow section</w:t></w:r><w:r><w:{kind}Reference w:id="2"/></w:r></w:p><w:sectPr><w:pgSz w:w="4320" w:h="15840"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>"#
+            );
+            let (engine, layout) = layout_note_separator_document(
+                kind,
+                Some(separator),
+                &body,
+                serde_json::json!([
+                    {"sectionId": "wide", "properties": {
+                        "pageWidth": 12240, "pageHeight": 15840,
+                        "marginTop": 720, "marginRight": 720, "marginBottom": 720, "marginLeft": 720
+                    }},
+                    {"sectionId": "narrow", "properties": {
+                        "pageWidth": 4320, "pageHeight": 15840,
+                        "marginTop": 720, "marginRight": 720, "marginBottom": 720, "marginLeft": 720
+                    }}
+                ]),
+                &[1, 2],
+            );
+            let pages = layout["pages"].as_array().unwrap();
+            assert_eq!(pages.len(), 2);
+            assert_eq!(pages[0]["sectionIndex"], 0);
+            assert_eq!(pages[1]["sectionIndex"], 1);
+            let pagination = engine.pagination.borrow();
+            let heights = pagination
+                .input
+                .as_ref()
+                .unwrap()
+                .options
+                .note_separator_heights
+                .as_ref()
+                .unwrap();
+            let note_kind = if kind == "footnote" {
+                NoteKind::Footnote
+            } else {
+                NoteKind::Endnote
+            };
+            assert_eq!(heights.height(note_kind, 0), 16.0);
+            assert!(heights.height(note_kind, 1) > heights.height(note_kind, 0));
+            if kind == "endnote" {
+                assert!(pages[0].get("noteAreas").is_none());
+                assert_eq!(
+                    pages[1]["noteAreas"][0]["notes"].as_array().unwrap().len(),
+                    2
+                );
+            }
+            for page in pages {
+                let Some(areas) = page["noteAreas"].as_array() else {
+                    continue;
+                };
+                let area = &areas[0];
+                let section = page["sectionIndex"].as_u64().unwrap() as usize;
+                let separator_height = heights.height(note_kind, section);
+                assert_eq!(area["separator"]["height"], separator_height);
+                assert!(area["separator"].get("blocks").is_none());
+                let note_height: f64 = area["notes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|note| note["height"].as_f64().unwrap())
+                    .sum();
+                assert_eq!(
+                    page["footnoteReservedHeight"].as_f64().unwrap(),
+                    separator_height + note_height
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn note_text_is_painted_below_the_measured_separator() {
+        let text_offset = |separator: Option<&str>| {
+            let (engine, layout) = layout_with_note_separator("footnote", separator);
+            engine.build_display_list_frame("{}", 0).unwrap();
+            let baseline = engine
+                .with_display_list(|list| {
+                    list.pages[0].note_areas[0]
+                        .primitives
+                        .iter()
+                        .find_map(|primitive| match primitive {
+                            docx_layout::display_list::Primitive::Text(run) => {
+                                run.baseline_y.as_f64()
+                            }
+                            docx_layout::display_list::Primitive::GlyphRun(run) => {
+                                run.glyphs.first().map(|glyph| glyph.y)
+                            }
+                            _ => None,
+                        })
+                })
+                .flatten()
+                .unwrap();
+            baseline - layout["pages"][0]["noteAreas"][0]["y"].as_f64().unwrap()
+        };
+        let measured = text_offset(Some(
+            r#"<w:p><w:pPr><w:spacing w:line="960" w:lineRule="exact"/></w:pPr><w:r><w:separator/></w:r></w:p>"#,
+        ));
+        assert!((measured - text_offset(None) - (64.0 - 12.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_missing_separator_keeps_twelve_pixels_of_reservation() {
+        let (engine, layout) = layout_with_note_separator("footnote", None);
+        assert_eq!(layout["pages"][0]["footnoteReservedHeight"], 16.0 + 12.0);
+        assert!(
+            layout["pages"][0]["noteAreas"][0]
+                .get("separator")
+                .is_none()
+        );
+        let pagination = engine.pagination.borrow();
+        let options = serde_json::to_value(&pagination.input.as_ref().unwrap().options).unwrap();
+        assert!(options.get("noteSeparatorHeights").is_none());
+    }
+
+    #[test]
+    fn a_separator_without_paragraphs_keeps_twelve_pixels_of_reservation() {
+        let (_, layout) = layout_with_note_separator("footnote", Some(""));
+        assert_eq!(layout["pages"][0]["footnoteReservedHeight"], 16.0 + 12.0);
+        assert!(
+            layout["pages"][0]["noteAreas"][0]
+                .get("separator")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn endnotes_reserve_their_own_separator_height() {
+        let (_, layout) = layout_with_note_separator(
+            "endnote",
+            Some(
+                r#"<w:p><w:pPr><w:spacing w:line="960" w:lineRule="exact"/></w:pPr><w:r><w:separator/></w:r></w:p>"#,
+            ),
+        );
+        let area = layout["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|page| page["noteAreas"].as_array().into_iter().flatten())
+            .find(|area| area["kind"] == "endnote")
+            .unwrap();
+        assert_eq!(area["height"], 64.0 + 16.0);
     }
 
     #[test]

@@ -48,6 +48,7 @@ export type ResidentEngineSession = Pick<
   | 'layoutFontRequirementsJson'
   | 'layoutDocumentWithRegionsRetainedJson'
   | 'loadMediaSources'
+  | 'loadNoteSeparators'
   | 'loadState'
   | 'setPartialDocument'
   | 'measureParagraphJson'
@@ -368,6 +369,7 @@ export async function createResidentEngineSession(
     },
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
     loadMediaSources: (json) => session.load_media_sources(json),
+    loadNoteSeparators: (state) => session.load_note_separators(state),
     loadState: (update) => {
       geometryStories.clear();
       session.load(update);
