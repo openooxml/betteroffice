@@ -327,7 +327,12 @@ fn table_leading_slice(
             first = first.min(band + slice);
         }
     }
-    let band: f64 = measure.rows.iter().take(headers).map(|row| row.height).sum();
+    let band: f64 = measure
+        .rows
+        .iter()
+        .take(headers)
+        .map(|row| row.height)
+        .sum();
     let mut top = 0.0;
     let mut slice = first;
     for (index, (row, keep)) in measure

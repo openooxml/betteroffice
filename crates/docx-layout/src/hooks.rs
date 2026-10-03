@@ -323,16 +323,17 @@ fn layout_table_with_position(
             && breaks.kept_oversized(header_row_count, 0.0, body_capacity);
         let header_budget = available_height - pending_spacing - header_rows_height;
         let cell_header_slice = if is_first_fragment && header_row_count > 0 && !limited_by_float {
-            breaks.cell_slice(
-                header_row_count,
-                0.0,
-                None,
-                header_budget,
-                snap_row_break(&breaks.kept, header_row_count, 0.0, header_budget),
-                false,
-                body_capacity,
-            )
-            .filter(|slice| !slice.starved)
+            breaks
+                .cell_slice(
+                    header_row_count,
+                    0.0,
+                    None,
+                    header_budget,
+                    snap_row_break(&breaks.kept, header_row_count, 0.0, header_budget),
+                    false,
+                    body_capacity,
+                )
+                .filter(|slice| !slice.starved)
         } else {
             None
         };
@@ -357,8 +358,15 @@ fn layout_table_with_position(
                     } else {
                         column_capacity
                     };
-                    let keep =
-                        row_keep_height(*chain, block, measure, &breaks, room, room, limited_by_float);
+                    let keep = row_keep_height(
+                        *chain,
+                        block,
+                        measure,
+                        &breaks,
+                        room,
+                        room,
+                        limited_by_float,
+                    );
                     if keep > 0.0 && keep <= room {
                         height = height.max(top + keep);
                     }
@@ -530,8 +538,7 @@ fn layout_table_with_position(
             // the page, where a later column lets every cell start.
             let cell_slice = match cell_slice {
                 Some(slice) if slice.starved && !paginator.has_float_bands() => {
-                    if placeable > 0.0 || (row_end > start_row && !header_above_unavoidable_split)
-                    {
+                    if placeable > 0.0 || (row_end > start_row && !header_above_unavoidable_split) {
                         None
                     } else if row_end == start_row
                         && paginator.state(state_idx).pen_y
