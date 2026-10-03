@@ -328,8 +328,7 @@ impl<'a> RowBreaks<'a> {
                 let bottom = offsets
                     .iter()
                     .copied()
-                    .filter(|offset| *offset > top && *offset <= top + budget)
-                    .next_back()
+                    .rfind(|offset| *offset > top && *offset <= top + budget)
                     .unwrap_or(top);
                 CellClip {
                     row,

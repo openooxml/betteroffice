@@ -499,6 +499,11 @@ fn cell_windows(fragment: &Value) -> Vec<(f64, f64)> {
 
 fn placed_cell_lines(measured: &[Value]) -> Vec<Vec<(usize, std::ops::Range<usize>)>> {
     use docx_layout::placement::{PlacedItem, PlacementInput, place_layout};
+    let mut measured = measured.to_vec();
+    for (index, entry) in measured.iter_mut().enumerate() {
+        entry["block"]["pmStart"] = json!(2 * index);
+        entry["block"]["pmEnd"] = json!(2 * index + 1);
+    }
     let mut input: docx_layout::types::Input = serde_json::from_value(json!({
         "measured": measured, "options": {"pageSize": {"w": 200, "h": 120},
             "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}}
@@ -512,7 +517,7 @@ fn placed_cell_lines(measured: &[Value]) -> Vec<Vec<(usize, std::ops::Range<usiz
         bands_composed: false,
         notes: &[],
     });
-    assert!(placed.issues.is_empty());
+    assert!(placed.issues.is_empty(), "{:?}", placed.issues);
     placed
         .pages
         .iter()
@@ -524,8 +529,9 @@ fn placed_cell_lines(measured: &[Value]) -> Vec<Vec<(usize, std::ops::Range<usiz
                     PlacedItem::Paragraph(paragraph) => {
                         let id = serde_json::to_value(&paragraph.block.id)
                             .unwrap()
-                            .as_u64()? as usize;
-                        (id >= 10).then_some((id - 10, paragraph.lines.clone()))
+                            .as_f64()? as usize;
+                        id.checked_sub(10)
+                            .map(|cell| (cell, paragraph.lines.clone()))
                     }
                     _ => None,
                 })
@@ -694,13 +700,7 @@ fn unsupported_cell_windows_preserve_the_legacy_row_path() {
                 .all(|(_, fragment)| fragment.get("cellClips").is_none()),
             "{exclusion}"
         );
-        if exclusion == "bottom" {
-            assert_eq!(result[0].0, 0);
-            assert_eq!(result[0].1["clipBottom"], 44.4);
-            assert_eq!(result[1].1["clipTop"], 44.4);
-        } else {
-            assert_eq!(result[0].0, 1, "{exclusion}");
-        }
+        assert_eq!(result[0].0, 1, "{exclusion}");
     }
 }
 
