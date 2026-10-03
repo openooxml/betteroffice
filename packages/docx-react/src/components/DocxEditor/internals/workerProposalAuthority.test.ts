@@ -838,7 +838,7 @@ test('paged exports send the current request and parse the worker result', async
     h.events.push(read.kind);
     return { version: 'worker-1', value: JSON.stringify(result) } as never;
   });
-  expect(await h.authority.exportStructuredWithPages(options, currentRequest, unusedMain)).toEqual(result);
+  expect(await h.authority.exportStructuredWithPages(options, async () => currentRequest, unusedMain)).toEqual(result);
   expect(h.worker.documentRead).toHaveBeenCalledWith({ kind: 'exportStructuredWithPages', options, currentRequest });
   expect(h.events).toEqual(['snapshot', 'exportStructuredWithPages']);
 });
@@ -856,10 +856,28 @@ test('paged exports queued after hand-over run the main continuation', async () 
     failure: { code: 'layout-unavailable', target: null, message: 'No layout is ready.' },
   } as const;
   const main = mock(async () => result);
-  const exportResult = h.authority.exportStructuredWithPages({ revisionView: 'markup' }, '{}', main);
+  const exportResult = h.authority.exportStructuredWithPages({ revisionView: 'markup' }, async () => '{}', main);
   await ready;
   expect(await exportResult).toEqual(result);
   expect(main).toHaveBeenCalledTimes(1);
   expect(h.worker.documentRead).not.toHaveBeenCalled();
   expect(h.events).toEqual(['snapshot', 'handOver']);
+});
+
+test('paged exports read their layout request after the calls queued ahead of them', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  h.worker.documentRead.mockImplementation(async (read) => {
+    h.events.push(read.kind);
+    return { version: 'worker-1', value: JSON.stringify({ ok: true }) } as never;
+  });
+  const ahead = h.authority.getProposals(unusedMain);
+  const read = h.authority.exportStructuredWithPages({ revisionView: 'markup' }, async () => {
+    h.events.push('request');
+    return null;
+  }, unusedMain);
+  await ahead;
+  expect(await read).toBeNull();
+  expect(h.events.indexOf('request')).toBeGreaterThan(h.events.indexOf('snapshot'));
+  expect(h.worker.documentRead).not.toHaveBeenCalled();
 });

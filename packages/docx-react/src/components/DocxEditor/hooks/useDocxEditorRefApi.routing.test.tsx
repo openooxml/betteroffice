@@ -465,7 +465,7 @@ test('viewer paged export returns the main result after hand-over without more w
   await ready;
   expect(await result).toEqual({ ...PAGE_REFUSAL, failure: { ...PAGE_REFUSAL.failure, code: 'unsupported-revision-layout' } });
   expect(worker.documentRead).not.toHaveBeenCalled();
-  expect(host.editor.readLayoutRequest).toHaveBeenCalledTimes(1);
+  expect(host.editor.readLayoutRequest).not.toHaveBeenCalled();
   expect(host.session.exportStructuredWithPagesFor).toHaveBeenCalledTimes(2);
   expect(host.editor.flushPendingInput).toHaveBeenCalledTimes(1);
   expect(settled).not.toHaveBeenCalled();

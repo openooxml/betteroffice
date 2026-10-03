@@ -451,28 +451,33 @@ async function exportWithPagesInWorker(
     version: session.version(),
     failure: { code: 'layout-unavailable', target: null, message },
   });
-  if (!authority.initialized) {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const ready = await Promise.race([
-      authority.initialize().then(() => true, () => true),
-      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), VIEWER_LAYOUT_WAIT_MS); }),
-    ]);
-    clearTimeout(timer);
-    editor();
-    if (!ready) return unavailable('The document is not laid out yet.');
-  }
   const attempt = async (): Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>> => {
-    request = await editor().readLayoutRequest();
     editor();
-    if (request === null && !workerOpenReplicaPending(session)) {
+    const read = authority.exportStructuredWithPages(
+      options,
+      async () => {
+        request = await editor().readLayoutRequest();
+        return request;
+      },
+      () => {
+        fellBack = true;
+        return exportWithPages(pagedEditorRef, options, experimentalWorkerOpen);
+      }
+    );
+    void read.catch(() => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      read,
+      new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), VIEWER_LAYOUT_WAIT_MS); }),
+    ]).finally(() => clearTimeout(timer));
+    editor();
+    if (result === 'timeout') return unavailable('The document is not laid out yet.');
+    if (result !== null) return result;
+    if (!workerOpenReplicaPending(session)) {
       fellBack = true;
       return exportWithPages(pagedEditorRef, options, experimentalWorkerOpen);
     }
-    if (request === null) return unavailable('The fonts this document uses are not loaded yet.');
-    return authority.exportStructuredWithPages(options, request, () => {
-      fellBack = true;
-      return exportWithPages(pagedEditorRef, options, experimentalWorkerOpen);
-    });
+    return unavailable('The fonts this document uses are not loaded yet.');
   };
   const showsMarkup = (): boolean => {
     if (request === null) return false;

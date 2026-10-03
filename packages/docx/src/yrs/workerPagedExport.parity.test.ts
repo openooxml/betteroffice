@@ -118,27 +118,46 @@ function leaves(
   return found;
 }
 
-/** The text of every story and the page map's pages, which source placement does not change. */
-function textAndPages(reply: PagedExport): unknown {
-  if (!reply.ok) return null;
-  const text = (value: unknown): string => {
-    if (Array.isArray(value)) return value.map(text).join('');
-    if (!value || typeof value !== 'object') return '';
-    const node = value as Record<string, unknown>;
-    if (node.kind === 'text' && typeof node.text === 'string') return node.text;
-    return Object.entries(node).filter(([key]) => key !== 'anchor').map(([, item]) => text(item)).join('');
-  };
-  return {
-    stories: reply.content.structured.stories.map((story) => text(story)),
-    pages: reply.content.layout.pages,
-  };
+const PLACEMENT = new Set(['id', 'nodeId', 'blockId', 'anchor']);
+const SOURCE_PLACED = new Set(['break', 'unsupported']);
+
+/**
+ * `value` without what only a seeded session can place from the package: source breaks and
+ * omitted inline source content, the ids and anchors their placement shifts, and the split of
+ * the text runs around them.
+ */
+function withoutSourcePlacement(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    const kept = value.filter((item) =>
+      !(item && typeof item === 'object' && SOURCE_PLACED.has(String((item as { kind?: unknown }).kind))));
+    const merged: unknown[] = [];
+    for (const item of kept.map(withoutSourcePlacement)) {
+      const previous = merged.at(-1) as Record<string, unknown> | undefined;
+      const current = item as Record<string, unknown> | null;
+      if (previous?.kind === 'text' && current?.kind === 'text' &&
+        JSON.stringify({ ...previous, text: '' }) === JSON.stringify({ ...current, text: '' })) {
+        merged[merged.length - 1] = { ...previous, text: `${previous.text}${current.text}` };
+      } else {
+        merged.push(item);
+      }
+    }
+    return merged;
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([key]) => !PLACEMENT.has(key))
+        .map(([key, item]) => [key, withoutSourcePlacement(item)])
+    );
+  }
+  return value;
 }
 
 /**
  * Whether `main` differs from `worker` only by source information a session that was not seeded
- * from the package lacks: comment authors and dates, or source breaks and omitted inline source
- * content, which `main` reports with a `provenance-unavailable` diagnostic and which leave every
- * story's text and the pages unchanged.
+ * from the package lacks: comment authors and dates (null in `main`) and, where `main` reports
+ * that it could not place them, source breaks and omitted inline source content. Everything
+ * else in the stories, the pages and the occurrences must match.
  */
 function sourceProvenanceGap(worker: PagedExport, main: PagedExport): boolean {
   if (!worker.ok || !main.ok) return false;
@@ -146,14 +165,22 @@ function sourceProvenanceGap(worker: PagedExport, main: PagedExport): boolean {
     ({ code }) => code === 'provenance-unavailable'
   );
   if (reported(worker)) return false;
+  const filled = JSON.parse(JSON.stringify(main)) as typeof main;
+  filled.content.structured.stories.forEach((story, index) => {
+    const ours = worker.content.structured.stories[index]?.comment;
+    if (!story.comment || !ours) return;
+    if (story.comment.author === null) story.comment.author = ours.author;
+    if (story.comment.date === null) story.comment.date = ours.date;
+  });
   if (reported(main)) {
-    return JSON.stringify(textAndPages(worker)) === JSON.stringify(textAndPages(main));
+    const comparable = ({ content }: typeof main) => JSON.stringify({
+      structured: withoutSourcePlacement({ ...content.structured, diagnostics: [] }),
+      pages: content.layout.pages,
+      occurrences: withoutSourcePlacement(content.layout.occurrences),
+    });
+    return comparable(worker) === comparable(filled);
   }
-  return leaves(worker, main).every(([path, ours, theirs]) =>
-    path === '$.content.layout.exportFingerprint' ||
-    (/^\$\.content\.structured\.stories\.\d+\.comment\.(author|date)$/.test(path) &&
-      theirs === null && typeof ours === 'string')
-  );
+  return leaves(worker, filled).every(([path]) => path === '$.content.layout.exportFingerprint');
 }
 
 /**

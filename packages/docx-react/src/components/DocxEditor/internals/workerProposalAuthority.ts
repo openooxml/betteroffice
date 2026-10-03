@@ -95,11 +95,15 @@ export interface WorkerProposalAuthority {
     request: DocxFindTextRequest,
     main: () => Promise<DocxFindTextResult>
   ): Promise<DocxFindTextResult>;
+  /**
+   * Reads the layout request after the calls ahead of it, then the worker's export for it; null
+   * when there is no request yet.
+   */
   exportStructuredWithPages(
     options: DocxPageExportOptions,
-    currentRequest: string,
+    currentRequest: () => Promise<string | null>,
     main: () => Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>>
-  ): Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>>;
+  ): Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>> | null>;
   /** Resolves against the document the host sees now. */
   navigationTarget(
     story: string,
@@ -327,8 +331,13 @@ export function registerWorkerProposalAuthority(
       assertCurrent();
       return read.value;
     }, main),
-    exportStructuredWithPages: (options, currentRequest, main) => route(async () => {
-      const read = await worker.documentRead({ kind: 'exportStructuredWithPages', options, currentRequest });
+    exportStructuredWithPages: (options, currentRequest, main) => route<
+      DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>> | null
+    >(async () => {
+      const request = await currentRequest();
+      assertCurrent();
+      if (request === null) return null;
+      const read = await worker.documentRead({ kind: 'exportStructuredWithPages', options, currentRequest: request });
       assertCurrent();
       return JSON.parse(read.value) as DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>;
     }, main),
