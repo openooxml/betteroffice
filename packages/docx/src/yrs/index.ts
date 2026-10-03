@@ -91,6 +91,13 @@ export type {
   DocxDisplaySelectionText,
   DocxSelectionUnit,
 } from './viewerSelection';
+export { readSidebar, readOutlineHeadings } from './sidebarReads';
+export type {
+  DocxSidebarReader,
+  DocxSidebarAnchorPoints,
+  DocxSidebarRead,
+  DocxOutlineHeading,
+} from './sidebarReads';
 export {
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,

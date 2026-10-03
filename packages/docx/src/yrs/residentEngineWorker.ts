@@ -28,6 +28,7 @@ import {
   resolveSelectionText,
   resolveSelectionUnit,
 } from './viewerSelection';
+import { readSidebar, readOutlineHeadings } from './sidebarReads';
 import { hasCachedYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import {
   presentOffscreenPageBackBuffer,
@@ -434,6 +435,11 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         case 'withdraw':
           result = registry.withdraw(request.operation.request);
           break;
+        case 'removeComment':
+          try {
+            session.applyRawOps('body', [{ op: 'removeComment', id: request.operation.id }]);
+          } catch {}
+          break;
       }
       committed = request.operation.kind !== 'snapshot';
       const changedStories = session.storiesChangedSince(since).stories;
@@ -619,6 +625,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           request.read.revisionId,
           request.read.expectVersion
         );
+        break;
+      case 'sidebar':
+        value = readSidebar(session.geometryReader, request.read.commentIds, request.read.expectVersion);
+        break;
+      case 'headings':
+        value = readOutlineHeadings(session.geometryReader, request.read.expectVersion);
         break;
       case 'stickyAnchors': {
         const currentSession = session;

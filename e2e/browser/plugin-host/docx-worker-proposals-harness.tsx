@@ -69,7 +69,10 @@ const probe = {
   },
   view(): ViewState {
     const scroller = document.querySelector<HTMLElement>('.docx-editor__scroll-container')!;
-    return { scrollTop: scroller.scrollTop, selection: this.session!.selection() };
+    return {
+      scrollTop: scroller.scrollTop,
+      selection: workerOpenReplicaPending(this.session!) ? null : this.session!.selection(),
+    };
   },
   async navigate(
     target: { story: string; paraId: string },

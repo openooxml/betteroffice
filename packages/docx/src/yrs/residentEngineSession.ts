@@ -23,6 +23,7 @@ import type {
   DocxParagraphAnchorResult,
   DocxParagraphIdentitySnapshot,
 } from './paragraphIdentity';
+import type { DocxSidebarReader } from './sidebarReads';
 import type { ProposalGeometryReader, ProposalGeometryRevision } from './proposalGeometry';
 import type { DocxProposalSession } from './proposals';
 import type { DocxPageExportOptions } from './pagedExport';
@@ -36,6 +37,7 @@ export type ResidentEngineSession = Pick<
   | 'applyDeleteProfiled'
   | 'applyInput'
   | 'applyInputProfiled'
+  | 'applyRawOps'
   | 'applyUpdate'
   | 'beginRegionLayout'
   | 'buildDisplayListFrame'
@@ -73,7 +75,7 @@ export type ResidentEngineSession = Pick<
   /** @internal */
   proposalEngine: DocxProposalSession;
   /** @internal */
-  geometryReader: ProposalGeometryReader;
+  geometryReader: ProposalGeometryReader & DocxSidebarReader;
   /** @internal The segments of the story's paragraphs at `indices`, each ending with its pilcrow. */
   paragraphSegments(story: string, indices: readonly number[]): YrsStorySegment[][];
   /** @internal */
@@ -123,23 +125,47 @@ export async function createResidentEngineSession(
 
   const geometrySpans = new Map<string, { revision: number; spans: YrsParagraphLength[] }>();
   const geometryOutlines = new Map<string, { version: string; outline: YrsPositionOutline | null }>();
+  const storyRevisions = new Map<string, number>();
+  let nativeStoryRevision = 0;
+  let storyRevision = 0;
 
-  const geometryStory = (story: string) => {
-    let cached = geometryStories.get(story);
-    const changes = JSON.parse(
-      session.stories_changed_since(cached?.revision ?? Number.MAX_SAFE_INTEGER)
-    ) as {
+  const syncStoryRevisions = (): number => {
+    const changes = JSON.parse(session.stories_changed_since(nativeStoryRevision)) as {
       revision: number;
       stories: string[];
     };
-    if (!cached || changes.stories.includes(story)) {
+    if (changes.revision !== nativeStoryRevision) {
+      nativeStoryRevision = changes.revision;
+      storyRevision += 1;
+      for (const story of changes.stories) storyRevisions.set(story, storyRevision);
+    }
+    return storyRevision;
+  };
+
+  const storiesChangedSince = (since: number) => {
+    const revision = syncStoryRevisions();
+    if (since >= revision) return { revision, stories: [] };
+    return {
+      revision,
+      stories: [...storyRevisions].filter(([, changed]) => changed > since)
+        .map(([story]) => story).sort(),
+    };
+  };
+
+  const storyChangedSince = (story: string, since: number): boolean =>
+    (storyRevisions.get(story) ?? 0) > since;
+
+  const geometryStory = (story: string) => {
+    const revision = syncStoryRevisions();
+    let cached = geometryStories.get(story);
+    if (!cached || storyChangedSince(story, cached.revision)) {
       cached = {
-        revision: changes.revision,
+        revision,
         segments: JSON.parse(session.story_segments(story)) as YrsStorySegment[],
       };
       geometryStories.set(story, cached);
     } else {
-      cached.revision = changes.revision;
+      cached.revision = revision;
     }
     return cached;
   };
@@ -197,23 +223,23 @@ export async function createResidentEngineSession(
       : {}),
   };
 
-  const geometryReader: ProposalGeometryReader = {
+  const geometryReader: ProposalGeometryReader & DocxSidebarReader = {
+    resolveComment: (id) => JSON.parse(session.resolve_comment(id)),
+    headings: (story) => JSON.parse(session.headings_json(story)),
     version: () => session.version(),
     hasStory: (story) => !LONE_SURROGATE.test(story) && session.has_story(story),
     storyIds: () => session.story_ids(),
     paragraphs: (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],
     paragraphIdCount: (story, paraId) => session.paragraph_id_count(story, paraId),
     paragraphSpans: (story) => {
+      const revision = syncStoryRevisions();
       const cached = geometrySpans.get(story);
-      const changes = JSON.parse(
-        session.stories_changed_since(cached?.revision ?? Number.MAX_SAFE_INTEGER)
-      ) as { revision: number; stories: string[] };
-      if (cached && !changes.stories.includes(story)) {
-        cached.revision = changes.revision;
+      if (cached && !storyChangedSince(story, cached.revision)) {
+        cached.revision = revision;
         return cached.spans;
       }
       const spans = JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[];
-      geometrySpans.set(story, { revision: changes.revision, spans });
+      geometrySpans.set(story, { revision, spans });
       return spans;
     },
     storySegments: (story) => geometryStory(story).segments,
@@ -281,8 +307,7 @@ export async function createResidentEngineSession(
       JSON.parse(session.paragraph_identities()) as DocxParagraphIdentitySnapshot,
     exportStructuredWithPagesJson: (options, currentRequest) =>
       session.export_structured_with_pages_json(JSON.stringify(options), currentRequest),
-    storiesChangedSince: (since) =>
-      JSON.parse(session.stories_changed_since(since)) as { revision: number; stories: string[] },
+    storiesChangedSince,
     openDocx: (bytes, digest, generation) => {
       geometryStories.clear();
       return resolveHostJsonCommentMedia(
@@ -360,6 +385,19 @@ export async function createResidentEngineSession(
       return session.apply_delete(direction, expectedFrameEpoch, count);
     },
     residentDeletedUnits: () => session.resident_deleted_units(),
+    applyRawOps: (story, ops) => {
+      geometryStories.clear();
+      const version = session.version();
+      try {
+        session.apply_raw_ops(story, JSON.stringify(ops));
+      } finally {
+        if (session.version() !== version) {
+          syncStoryRevisions();
+          storyRevision += 1;
+          storyRevisions.set(story, storyRevision);
+        }
+      }
+    },
     applyInputProfiled: (text, expectedFrameEpoch) => {
       ensureUndo();
       const frame = session.apply_input_profiled(text, expectedFrameEpoch);
@@ -398,6 +436,7 @@ export async function createResidentEngineSession(
       destroyed = true;
       listeners.clear();
       geometryStories.clear();
+      storyRevisions.clear();
       if (observing) session.clear_update_observer();
       session.free();
     },

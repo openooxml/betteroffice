@@ -164,6 +164,7 @@ export {
 export {
   computeAnchorPositionsFromDisplayList,
   computeAnchorPositionsFromYrs,
+  anchorPositionsFromPoints,
   mergeHfAnchorPositionsFromDisplayList,
   visitAnchorKeys,
   type AnchorEditorView,

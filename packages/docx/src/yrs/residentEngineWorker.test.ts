@@ -6,6 +6,8 @@ import { applyFrameDeltaOwned, decodeFrameDelta } from '../layout/render/frameDe
 import { createResidentEngineSession } from './residentEngineSession';
 import { proposalRevisionPreview } from './proposals';
 import { createYrsSession } from './index';
+import { readSidebar, readOutlineHeadings } from './sidebarReads';
+import { sidebarDocx } from './__fixtures__/sidebarDocx';
 import { readResidentSearch } from './residentSearch';
 import { createYrsPositionProjection, yrsLocToProjectedDisplayPosition } from './yrsPositionProjection';
 import { preloadEditWasm } from './wasm/index';
@@ -2252,7 +2254,7 @@ describe('worker proposals during sliced completion', () => {
     import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
   )))));
 
-  async function proposalWorker(extraBody = '', comments?: string) {
+  async function proposalWorker(extraBody = '', comments?: string, bytes?: Uint8Array) {
     const parts: PartsMap = new Map();
     parts.set('[Content_Types].xml', toBytes(
       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
@@ -2273,7 +2275,7 @@ describe('worker proposals during sliced completion', () => {
       parts.set('word/comments.xml', toBytes(`<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${comments}</w:comments>`));
     }
     const engine = await createResidentEngineSession();
-    engine.openDocx(new Uint8Array(rezipPartsToArrayBuffer(parts)));
+    engine.openDocx(bytes ?? new Uint8Array(rezipPartsToArrayBuffer(parts)));
     const w = worker();
     const calls: string[] = [];
     const onResume: Array<() => void> = [];
@@ -2326,7 +2328,8 @@ describe('worker proposals during sliced completion', () => {
       type: 'bootstrap', snapshot, extras: '', layoutExtras: '{}',
       provisionalPages: 1, displayWindow: [0, 1], expectedFrameEpoch: 0,
     });
-    expect(booted.ok && booted.layoutProvisional).toBe(true);
+    expect(booted.ok).toBe(true);
+    if (!bytes) expect(booted.ok && booted.layoutProvisional).toBe(true);
     const proposal = (index = 1): Extract<DocxProposalInput, { op: 'replaceText' }> => ({
       id: `p${index}`,
       paragraph: {
@@ -2378,6 +2381,36 @@ describe('worker proposals during sliced completion', () => {
       })));
       expect(preview).toMatchObject({ ok: false, failure: { code: 'unsupported-revision-layout' } });
     } finally {
+      engine.destroy();
+    }
+  });
+
+  test('sidebar and headings reads match a main session and reject stale versions', async () => {
+    const bytes = sidebarDocx();
+    const { w, engine } = await proposalWorker('', undefined, bytes);
+    const main = await createYrsSession();
+    try {
+      main.openDocx(bytes, true);
+      const version = engine.geometryReader.version();
+      const expected = {
+        sidebar: readSidebar(main, ['7', 'missing'], main.version()),
+        headings: readOutlineHeadings(main, main.version()),
+      };
+      for (const expectVersion of [version, 'stale']) {
+        const reads: ResidentDocumentRead[] = [
+          { kind: 'sidebar', commentIds: ['7', 'missing'], expectVersion },
+          { kind: 'headings', expectVersion },
+        ];
+        for (const read of reads) {
+          const reply = await w.send({ type: 'documentRead', read });
+          expect(reply).toMatchObject({ ok: true, read: {
+            version,
+            value: expectVersion === version ? expected[read.kind as keyof typeof expected] : null,
+          } });
+        }
+      }
+    } finally {
+      main.destroy();
       engine.destroy();
     }
   });
@@ -2648,6 +2681,39 @@ describe('worker proposals during sliced completion', () => {
       expect(order).toEqual(['snapshot', ...requests.map((read) => read.kind), 'complete']);
       expect(calls.filter((call) => call === 'begin')).toHaveLength(1);
       await expectFullLayout(completed);
+    } finally {
+      engine.destroy();
+    }
+  });
+
+  test('comment deletion removes only its worker anchor and missing ids are harmless', async () => {
+    const extraBody = [1, 2].map((id) =>
+      `<w:p w14:paraId="0000010${id}"><w:commentRangeStart w:id="${id}"/><w:r><w:t>Marked ${id}</w:t></w:r><w:commentRangeEnd w:id="${id}"/><w:r><w:commentReference w:id="${id}"/></w:r></w:p>`
+    ).join('');
+    const comments = [1, 2].map((id) =>
+      `<w:comment w:id="${id}" w:author="Reviewer"><w:p><w:r><w:t>Comment ${id}</w:t></w:r></w:p></w:comment>`
+    ).join('');
+    const { w, engine } = await proposalWorker(extraBody, comments);
+    try {
+      expect(engine.resolveComment('1')).not.toHaveLength(0);
+      const untouched = engine.resolveComment('2');
+      const reply = await w.send({ type: 'proposal', operation: { kind: 'removeComment', id: '1' } });
+      if (!reply.ok || !reply.proposal) throw new Error('expected comment deletion reply');
+      expect(reply.proposal.result).toBeUndefined();
+      expect(reply.proposal.changedStories.length).toBeGreaterThan(0);
+      expect(reply.proposal.updates.length).toBeGreaterThan(0);
+      let anchors: ReturnType<typeof engine.resolveComment> = [];
+      try { anchors = engine.resolveComment('1'); } catch {}
+      expect(anchors).toEqual([]);
+      expect(engine.resolveComment('2')).toEqual(untouched);
+      expect(readSidebar(engine.geometryReader, ['1'], engine.proposalEngine.version())!.comments)
+        .toEqual([{ id: '1', anchors: [] }]);
+
+      const version = engine.proposalEngine.version();
+      const missing = await w.send({ type: 'proposal', operation: { kind: 'removeComment', id: 'missing' } });
+      expect(missing).toMatchObject({ ok: true, proposal: { changedStories: [], updates: [] } });
+      expect(engine.proposalEngine.version()).toBe(version);
+      expect(engine.resolveComment('2')).toEqual(untouched);
     } finally {
       engine.destroy();
     }
