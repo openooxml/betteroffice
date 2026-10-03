@@ -173,8 +173,9 @@ pub(crate) fn row_keep_chains(
 /// The height a keep-with-next row chain keeps on one page in a column
 /// `capacity` tall: its rows and the smallest slice of the row after it, as
 /// Word keeps a row with the next row's start, or that whole row when its
-/// paragraph rules leave no break in such a column. The per-cell start of a
-/// row from `body_row` on is measured in a column `body_capacity` tall.
+/// paragraph rules leave no break in such a column. Where every-cell starts
+/// apply, the start of a row from `body_row` on is measured in a column
+/// `body_capacity` tall.
 pub(crate) fn row_keep_height(
     chain: Option<(f64, usize)>,
     block: &TableBlock,
@@ -195,7 +196,7 @@ pub(crate) fn row_keep_height(
                 .first_cell_slice(
                     follower,
                     0.0,
-                    if follower >= body_row {
+                    if follower >= body_row && breaks.every_cell_starts() {
                         body_capacity
                     } else {
                         capacity

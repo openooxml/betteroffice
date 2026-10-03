@@ -220,6 +220,10 @@ impl<'a> RowBreaks<'a> {
         self.every_cell_starts.set(enabled);
     }
 
+    pub(crate) fn every_cell_starts(&self) -> bool {
+        self.every_cell_starts.get()
+    }
+
     pub(crate) fn lines(&self) -> &TableRowBreakInfo {
         self.lines
             .get_or_init(|| row_break_info(self.block, self.measure, false))
