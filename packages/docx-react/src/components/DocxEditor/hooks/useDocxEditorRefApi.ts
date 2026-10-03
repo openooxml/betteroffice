@@ -446,6 +446,21 @@ async function exportWithPagesInWorker(
   };
   let request: string | null = null;
   let fellBack = false;
+  const unavailable = (message: string): DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>> => ({
+    ok: false,
+    version: session.version(),
+    failure: { code: 'layout-unavailable', target: null, message },
+  });
+  if (!authority.initialized) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ready = await Promise.race([
+      authority.initialize().then(() => true, () => true),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), VIEWER_LAYOUT_WAIT_MS); }),
+    ]);
+    clearTimeout(timer);
+    editor();
+    if (!ready) return unavailable('The document is not laid out yet.');
+  }
   const attempt = async (): Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>> => {
     request = await editor().readLayoutRequest();
     editor();
@@ -453,17 +468,7 @@ async function exportWithPagesInWorker(
       fellBack = true;
       return exportWithPages(pagedEditorRef, options, experimentalWorkerOpen);
     }
-    if (request === null) {
-      return {
-        ok: false,
-        version: session.version(),
-        failure: {
-          code: 'layout-unavailable',
-          target: null,
-          message: 'The fonts this document uses are not loaded yet.',
-        },
-      };
-    }
+    if (request === null) return unavailable('The fonts this document uses are not loaded yet.');
     return authority.exportStructuredWithPages(options, request, () => {
       fellBack = true;
       return exportWithPages(pagedEditorRef, options, experimentalWorkerOpen);

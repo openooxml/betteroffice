@@ -127,7 +127,11 @@ const WORKER_IDENTITIES: DocxParagraphIdentitySnapshot = {
   ],
 };
 
-function workerFor(host: ReturnType<typeof apiFor>, identities = WORKER_IDENTITIES) {
+function workerFor(
+  host: ReturnType<typeof apiFor>,
+  identities = WORKER_IDENTITIES,
+  laidOut: () => Promise<void> = async () => {}
+) {
   const snapshot: ResidentProposalReply = {
     mirror: { version: 'worker-v', proposals: { previewVersion: 0, entries: [] } },
     result: { ok: true, snapshot: { version: 'worker-v', previewVersion: 0, proposals: [] } },
@@ -142,7 +146,7 @@ function workerFor(host: ReturnType<typeof apiFor>, identities = WORKER_IDENTITI
     proposal,
     documentRead: documentRead as ResidentEngineWorkerClient['documentRead'],
     handOver: async () => ({ state: new Uint8Array(), version: 'worker-v', proposals: snapshot.mirror.proposals }),
-  }, { relayout: () => {}, current: () => true, laidOut: async () => {}, adopted: () => {}, handedOver: () => {}, contentChanged: () => {} });
+  }, { relayout: () => {}, current: () => true, laidOut, adopted: () => {}, handedOver: () => {}, contentChanged: () => {} });
   return { authority, proposal, documentRead, snapshot };
 }
 
@@ -396,6 +400,26 @@ test('viewer paged export does not retry an unsupported revision preview', async
   expect(await host.api.exportStructuredWithPages(PAGE_OPTIONS)).toEqual(refusal);
   expect(worker.documentRead).toHaveBeenCalledTimes(1);
   expect(settled).not.toHaveBeenCalled();
+  expectWorkerPageExport(host);
+});
+
+test('viewer paged export refuses when the worker never lays the document out in time', async () => {
+  const host = apiFor(true, true);
+  const worker = workerFor(host, WORKER_IDENTITIES, () => new Promise<void>(() => {}));
+  const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: () => void) => {
+    callback();
+    return 0;
+  }) as unknown as typeof setTimeout);
+  try {
+    expect(await host.api.exportStructuredWithPages({ ...PAGE_OPTIONS, expectLayoutVersion: 'layout-v' })).toEqual({
+      ok: false, version: 'v',
+      failure: { code: 'layout-unavailable', target: null, message: 'The document is not laid out yet.' },
+    });
+  } finally {
+    timeout.mockRestore();
+  }
+  expect(worker.documentRead).not.toHaveBeenCalled();
+  expect(host.editor.readLayoutRequest).not.toHaveBeenCalled();
   expectWorkerPageExport(host);
 });
 

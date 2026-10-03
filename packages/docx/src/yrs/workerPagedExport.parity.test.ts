@@ -113,17 +113,37 @@ function leaves(
   return found;
 }
 
+/** The text of every story and the page map's pages, which source placement does not change. */
+function textAndPages(reply: PagedExport): unknown {
+  if (!reply.ok) return null;
+  const text = (value: unknown): string => {
+    if (Array.isArray(value)) return value.map(text).join('');
+    if (!value || typeof value !== 'object') return '';
+    const node = value as Record<string, unknown>;
+    if (node.kind === 'text' && typeof node.text === 'string') return node.text;
+    return Object.entries(node).filter(([key]) => key !== 'anchor').map(([, item]) => text(item)).join('');
+  };
+  return {
+    stories: reply.content.structured.stories.map((story) => text(story)),
+    pages: reply.content.layout.pages,
+  };
+}
+
 /**
  * Whether `main` differs from `worker` only by source information a session that was not seeded
- * from the package lacks: break positions and inline source content (reported as a
- * `provenance-unavailable` diagnostic), or comment authors and dates.
+ * from the package lacks: comment authors and dates, or source breaks and omitted inline source
+ * content, which `main` reports with a `provenance-unavailable` diagnostic and which leave every
+ * story's text and the pages unchanged.
  */
 function sourceProvenanceGap(worker: PagedExport, main: PagedExport): boolean {
   if (!worker.ok || !main.ok) return false;
   const reported = (reply: typeof main) => reply.content.structured.diagnostics.some(
     ({ code }) => code === 'provenance-unavailable'
   );
-  if (reported(main)) return !reported(worker);
+  if (reported(worker)) return false;
+  if (reported(main)) {
+    return JSON.stringify(textAndPages(worker)) === JSON.stringify(textAndPages(main));
+  }
   return leaves(worker, main).every(([path, ours, theirs]) =>
     path === '$.content.layout.exportFingerprint' ||
     (/^\$\.content\.structured\.stories\.\d+\.comment\.(author|date)$/.test(path) &&
