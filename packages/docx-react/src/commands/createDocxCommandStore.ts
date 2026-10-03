@@ -351,12 +351,10 @@ export function createDocxCommandController(): DocxCommandController {
       return perform(env!);
     };
     const ordered = !isPluginCommandId(id) && current.ordered(id, args as never);
+    // A viewer has no edit peer to wait for: its gates refuse document changes at once.
+    const admitted = (deferred || ordered) && !(mutating && current.isViewer?.());
     try {
-      if (mutating && current.isViewer?.()) {
-        const state = compute(id, args, environment(false));
-        if (!state.enabled) return { ok: false, failure: state.disabledReason };
-      }
-      return await (deferred || ordered ? current.admit(attempt) : attempt());
+      return await (admitted ? current.admit(attempt) : attempt());
     } catch (error) {
       if (error instanceof DocxCommandAdmissionError) return failure(error.code, environment(false));
       console.error(`[docx commands] ${id} failed`, error);
