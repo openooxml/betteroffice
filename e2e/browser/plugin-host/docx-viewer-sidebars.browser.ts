@@ -1,12 +1,16 @@
 import { expect, test, type Page } from 'playwright/test';
 
 interface ViewerSidebarsProbe {
-  editor: { commands: { execute(command: string, payload: null): Promise<unknown> } } | null;
+  editor: {
+    commands: { execute(command: string, payload: null): Promise<unknown> };
+    setZoom(zoom: number): void;
+  } | null;
   sessions: unknown[];
   errors: string[];
   sidebarOpen: boolean;
   replica(): { started: boolean; loaded: boolean };
   sessionReads(): Record<string, number>;
+  commentAnchors(id: string): Promise<unknown[] | null>;
 }
 
 interface ViewerWindow {
@@ -109,5 +113,34 @@ test('expanding a viewer comment highlights it without session reads', async ({ 
   await openSidebar(page, firstCanvasAt);
   await page.locator('.docx-comment-card').click();
   await expect(page.locator('.docx-canvas-brighten-comment').first()).toBeVisible();
+  await expectUnchanged(page, before);
+});
+
+test('deleting a viewer comment removes its worker anchor without a document replica', async ({ page }) => {
+  const { before, firstCanvasAt } = await open(page);
+  await openSidebar(page, firstCanvasAt);
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as ViewerWindow).__viewerSidebarsProbe.commentAnchors('7')
+      .then((anchors) => anchors?.length ?? 0)
+  )).toBeGreaterThan(0);
+  const comment = page.locator('.docx-comment-card');
+  await comment.click();
+  await expect(page.locator('.docx-canvas-brighten-comment').first()).toBeVisible();
+  await comment.getByRole('button', { name: 'More options' }).click();
+  await comment.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+  await expect(comment).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as ViewerWindow).__viewerSidebarsProbe.commentAnchors('7')
+  )).toEqual([]);
+  await expect(page.locator('.docx-canvas-brighten-comment')).toHaveCount(0);
+
+  const canvas = page.locator('canvas[data-page-index="0"]');
+  const width = await canvas.evaluate((element) => element.getBoundingClientRect().width);
+  await page.evaluate(() => (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!.setZoom(1.1));
+  await expect.poll(() => canvas.evaluate((element) => element.getBoundingClientRect().width)).not.toBe(width);
+  await expect(comment).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as ViewerWindow).__viewerSidebarsProbe.commentAnchors('7')
+  )).toEqual([]);
   await expectUnchanged(page, before);
 });

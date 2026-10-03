@@ -435,6 +435,11 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         case 'withdraw':
           result = registry.withdraw(request.operation.request);
           break;
+        case 'removeComment':
+          try {
+            session.applyRawOps('body', [{ op: 'removeComment', id: request.operation.id }]);
+          } catch {}
+          break;
       }
       committed = request.operation.kind !== 'snapshot';
       const changedStories = session.storiesChangedSince(since).stories;
