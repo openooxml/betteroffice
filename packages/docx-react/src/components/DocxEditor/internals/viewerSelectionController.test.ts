@@ -74,6 +74,45 @@ test('R1: capture and unit channels keep only the newest queued read', async () 
   expect(controller.settledText()).toBe('Beta');
 });
 
+test('a settled capture retains its worker range and emits with unchanged endpoints', async () => {
+  const { controller, answer, issued } = setup();
+  const changes: Array<{ selection: ReturnType<ViewerSelectionController['displaySelection']>;
+    capture: DocxDisplaySelectionText | null }> = [];
+  controller.subscribe(() => changes.push({
+    selection: controller.displaySelection(), capture: controller.settledCapture(),
+  }));
+  controller.select(12, 1);
+  const range: NonNullable<DocxDisplaySelectionText['range']> = {
+    story: 'body', view: 'accepted',
+    start: { paraId: '00000001', offset: 0 },
+    end: { paraId: '00000002', offset: 4 },
+  };
+  expect(changes).toEqual([{ selection: { anchor: 12, head: 1 }, capture: null }]);
+  await answer('selectionText', 'A', { text: 'Alpha\nBeta', range });
+  expect(controller.settledCapture()).toEqual({ text: 'Alpha\nBeta', range });
+  expect(changes).toEqual([
+    { selection: { anchor: 12, head: 1 }, capture: null },
+    { selection: { anchor: 12, head: 1 }, capture: { text: 'Alpha\nBeta', range } },
+  ]);
+  expect(issued).toHaveLength(1);
+});
+
+test('a superseded capture cannot expose its range for the current revision', async () => {
+  const { controller, answer } = setup();
+  const gesture = controller.beginGesture();
+  controller.select(1, 6, gesture);
+  controller.select(1, 12, gesture);
+  await answer('selectionText', 'A', {
+    text: 'Alpha', range: { story: 'body', view: 'accepted',
+      start: { paraId: '00000001', offset: 0 }, end: { paraId: '00000001', offset: 5 } },
+  });
+  expect(controller.settledCapture()).toBeNull();
+  await answer('selectionText', 'A', captured('Alpha\nBeta'));
+  expect(controller.settledCapture()).toEqual(captured('Alpha\nBeta'));
+  controller.beginGesture();
+  expect(controller.settledCapture()).toBeNull();
+});
+
 test('a version change clears the selection, rejects its copy and ends its gesture', async () => {
   const { controller, answer, issued } = setup();
   controller.select(1, 6);
