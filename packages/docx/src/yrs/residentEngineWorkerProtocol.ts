@@ -16,6 +16,7 @@ import type {
 } from './viewerSelection';
 import type { FindOptions } from '../utils/findReplace';
 import type { DocxFindDisplayMatch } from './findMatches';
+import type { CollaborationCursor } from '../collaboration/types';
 import type { ResidentSearchResult } from './residentSearch';
 import type { DocxFindParagraphsOptions, DocxParagraphMatch } from './findParagraphs';
 import type { ResidentCaretPaintStyle } from './residentCaret';
@@ -164,7 +165,13 @@ export type ResidentEngineWorkerRequest =
   | { id: number; type: 'encodeState' }
   | { id: number; type: 'revisionCount' }
   | { id: number; type: 'proposal'; operation: ResidentProposalOperation }
-  | { id: number; type: 'documentRead'; read: ResidentDocumentRead }
+  | {
+      id: number;
+      type: 'documentRead';
+      read: ResidentDocumentRead;
+      /** Answered `superseded` instead when the document's version differs. */
+      expectVersion?: string;
+    }
   | {
       id: number;
       type: 'sync';
@@ -278,6 +285,8 @@ export type ResidentEngineWorkerResponse = (
       engineProfile?: YrsEngineApplyProfile;
       caret?: YrsResidentCaretSnapshot;
       selection?: YrsSelection | null;
+      /** The same selection as sticky positions, for the host to resolve against its content. */
+      selectionCursor?: CollaborationCursor | null;
       /** The presented frame carries the worker-painted caret line. */
       caretPainted?: boolean;
       replayMs?: number;

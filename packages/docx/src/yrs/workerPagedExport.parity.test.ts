@@ -373,9 +373,9 @@ describe("the worker's paged export equals a main-thread session's", () => {
     }
   }
   test('synthetic stories, revisions, comments, merged cell and image', async () => {
-    expect(await parity(synthetic())).toBeGreaterThan(0);
+    expect(await parity(synthetic())).toBe(0);
   }, TIMEOUT);
   test('synthetic after proposals', async () => {
-    expect(await parity(synthetic(), true)).toBeGreaterThan(0);
+    expect(await parity(synthetic(), true)).toBe(0);
   }, TIMEOUT);
 });

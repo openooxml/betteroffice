@@ -1,3 +1,4 @@
+import { decodeEncodedSelection } from './encodedSelection';
 import type {
   YrsEngineApplyProfile,
   YrsParagraph,
@@ -44,6 +45,7 @@ export type ResidentEngineSession = Pick<
   | 'releaseDisplayPagesFrame'
   | 'clearFonts'
   | 'destroy'
+  | 'encodeSelection'
   | 'encodeStateVector'
   | 'findContentControls'
   | 'listContentControls'
@@ -51,6 +53,7 @@ export type ResidentEngineSession = Pick<
   | 'layoutFontRequirementsJson'
   | 'layoutDocumentWithRegionsRetainedJson'
   | 'loadMediaSources'
+  | 'loadNoteSeparators'
   | 'loadState'
   | 'setPartialDocument'
   | 'measureParagraphJson'
@@ -362,6 +365,7 @@ export async function createResidentEngineSession(
           range.end.offset
         )
       ) as YrsSelectionText,
+    encodeSelection: () => decodeEncodedSelection(session.encoded_selection()),
     applyInput: (text, expectedFrameEpoch) => {
       ensureUndo();
       return session.apply_input(text, expectedFrameEpoch);
@@ -385,6 +389,7 @@ export async function createResidentEngineSession(
     },
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
     loadMediaSources: (json) => session.load_media_sources(json),
+    loadNoteSeparators: (state) => session.load_note_separators(state),
     loadState: (update) => {
       geometryStories.clear();
       session.load(update);

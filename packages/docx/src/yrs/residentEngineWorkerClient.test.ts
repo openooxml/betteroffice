@@ -150,21 +150,37 @@ test('frame results preserve the document version and preview provenance', async
   client.destroy();
 });
 
-test('pending proposal and navigation reads keep background page builds waiting', async () => {
+test('a pending proposal keeps every page build waiting, a pending read only background builds', async () => {
   const { worker, client } = setup();
   const bootstrap = client.bootstrap(snapshot, '');
   worker.reply(frameReply(worker.lastId()));
   await bootstrap;
   const proposal = client.proposal({ kind: 'snapshot' });
   expect(client.frameRequestPending()).toBe(true);
+  expect(client.frameRequestPending(false)).toBe(true);
   worker.reply({ id: worker.lastId(), ok: false, error: 'proposal failed' });
   await expect(proposal).rejects.toThrow('proposal failed');
   expect(client.frameRequestPending()).toBe(false);
   const read = client.documentRead({ kind: 'navigationTarget', story: 'body', paraId: 'p1' });
   expect(client.frameRequestPending()).toBe(true);
+  expect(client.frameRequestPending(false)).toBe(false);
   worker.reply({ id: worker.lastId(), ok: true, read: { version: 'v1', value: 'missing-target' } });
   expect(await read).toEqual({ version: 'v1', value: 'missing-target' });
   expect(client.frameRequestPending()).toBe(false);
+  client.destroy();
+});
+
+test('a version-checked read reports a superseded answer apart from a read value', async () => {
+  const { worker, client } = setup();
+  const read = () => client.documentReadAt({ kind: 'navigationTarget', story: 'body', paraId: 'p1' }, 'v1');
+  const current = read();
+  expect(worker.posted.at(-1)).toMatchObject({ type: 'documentRead', expectVersion: 'v1' });
+  worker.reply({ id: worker.lastId(), ok: true, read: { version: 'v1', value: 'missing-target' } });
+  expect(await current).toEqual({ status: 'ok', version: 'v1', value: 'missing-target' });
+  const stale = read();
+  worker.reply({ id: worker.lastId(), ok: true, superseded: true });
+  expect(await stale).toEqual({ status: 'superseded' });
+  expect(client.hasFailed()).toBe(false);
   client.destroy();
 });
 

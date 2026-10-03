@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 
+import type { CollaborationCursor } from '../collaboration/types';
 import type { YrsResidentCaretRect, YrsResidentWorkerSnapshot } from './index';
 import {
   createResidentEngineSession,
@@ -29,6 +30,7 @@ import {
   resolveSelectionText,
   resolveSelectionUnit,
 } from './viewerSelection';
+import { createResidentScheduler, type SchedulerMessage } from './residentScheduler';
 import { hasCachedYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import {
   presentOffscreenPageBackBuffer,
@@ -39,6 +41,7 @@ import {
 import {
   applyFrameDeltaOwned,
   decodeFrameDelta,
+  retainedFramePageById,
   type RetainedFrame,
 } from '../layout/render/frameDelta';
 import { GlyphCache } from '../layout/render/glyphCache';
@@ -117,7 +120,6 @@ let layoutRevision = 0;
 // -1 = no fonts applied yet (fresh session); hydrate skips re-registration
 // when the snapshot's revision matches what this session already holds.
 let fontsRevision = -1;
-let operations = Promise.resolve();
 let retainedFrame: RetainedFrame | null = null;
 let glyphCache: GlyphCache | null = null;
 const offscreenCanvases = new Map<string, OffscreenCanvas>();
@@ -156,15 +158,15 @@ interface SlicedCompletion {
   id: number;
   expectedFrameEpoch: number;
   paintCaret: boolean;
-  /** Body blocks a step measures, tuned toward `COMPLETION_SLICE_MS`. */
+  /** Body blocks per step. */
   blocks: number;
   begun: boolean;
   /** Times a change in between abandoned the pass. */
   restarts: number;
 }
 let slicedCompletion: SlicedCompletion | null = null;
-const COMPLETION_SLICE_MS = 24;
 const COMPLETION_RESTARTS = 3;
+const COMPLETION_IDLE_MS = 300;
 const ALL_BLOCKS = 2 ** 32 - 1;
 
 interface BackgroundPageBuild {
@@ -175,6 +177,7 @@ interface BackgroundPageBuild {
   offset: number;
   started: number;
   engineMs: number;
+  pagesPerSlice: number;
 }
 let backgroundPageBuild: BackgroundPageBuild | null = null;
 const BACKGROUND_SLICE_PAGES = 4;
@@ -192,7 +195,7 @@ scope.onmessage = (
     resolveHostEditModule(message.module instanceof WebAssembly.Module ? message.module : null);
     return;
   }
-  enqueue(() => handle(message), message.id);
+  scheduler.submit(classify(message));
 };
 scope.onmessageerror = () => resolveHostEditModule(null);
 
@@ -202,20 +205,67 @@ function nextHostEditModule(): Promise<WebAssembly.Module | null> {
   });
 }
 
-/** `current` drops an operation whose request was answered while it waited. */
-function enqueue(
-  operation: () => Promise<void> | void,
-  id: number,
-  current: () => boolean = () => true
-): void {
-  operations = operations
-    .then(() => {
-      if (!current()) return;
-      if (trap) throw trap;
-      handlingId = id;
-      return operation();
-    })
-    .catch((error) => replyFailure(id, error));
+function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
+  const run = () => runRequest(request);
+  switch (request.type) {
+    case 'applyInput':
+    case 'applyDelete':
+      return { lane: 'input', userInput: true, holdsIdleTasks: true, mutates: true, run };
+    case 'applyUpdate':
+      return { lane: 'collab', userInput: true, mutates: true, run };
+    case 'proposal':
+      if (request.operation.kind === 'snapshot') return { lane: 'interactive', run };
+      return {
+        lane: 'input', mutates: true,
+        ...(request.operation.kind === 'setStates' ? { userInput: true, holdsIdleTasks: true } : {}), run,
+      };
+    case 'open':
+    case 'bootstrap':
+    case 'sync':
+    case 'destroy':
+      return { lane: 'input', mutates: true, run };
+    case 'warm':
+      return { lane: 'input', run };
+    case 'documentRead':
+      return {
+        lane: 'interactive',
+        ...(request.expectVersion !== undefined ? { reorderable: true } : {}), run,
+      };
+    case 'fontRequirements':
+    case 'encodeState':
+    case 'revisionCount':
+      return { lane: 'interactive', run };
+    case 'buildPages':
+      return {
+        lane: 'interactive', reframes: true, key: 'pages', run,
+        ...(request.background ? {
+          replaceableBy: 'pages',
+          supersede: () => replyDropped({ id: request.id, ok: true, pageBuildSuperseded: true }),
+        } : {}),
+      };
+    case 'buildFrame':
+    case 'releasePages':
+    case 'completeLayout':
+    case 'attachCanvases':
+    case 'eraseCaret':
+      return { lane: 'interactive', reframes: true, run };
+  }
+}
+
+async function runRequest(request: ResidentEngineWorkerRequest): Promise<void> {
+  try {
+    if (trap) throw trap;
+    handlingId = request.id;
+    await handle(request);
+  } catch (error) {
+    replyFailure(request.id, error);
+  }
+}
+
+/** Answers a request that will not run; after a trap, as the trap's failure. */
+function replyDropped(response: ResidentEngineWorkerResponse & { ok: true }): void {
+  if (trap) replyFailure(response.id, trap);
+  else reply(response);
 }
 
 function replyFailure(id: number, error: unknown): void {
@@ -251,7 +301,12 @@ function trapped(id: number, error: WebAssembly.RuntimeError): void {
 }
 
 async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
-  supersedeBackgroundPageBuild();
+  if (
+    request.type !== 'documentRead' && request.type !== 'fontRequirements' &&
+    request.type !== 'encodeState' && request.type !== 'revisionCount' &&
+    request.type !== 'warm' &&
+    !(request.type === 'proposal' && request.operation.kind === 'snapshot')
+  ) supersedeBackgroundPageBuild();
   if (request.type === 'warm') {
     try {
       if (request.hostModule) {
@@ -514,6 +569,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'documentRead') {
     const engine = session.proposalEngine;
+    if (request.expectVersion !== undefined && engine.version() !== request.expectVersion) {
+      reply({ id: request.id, ok: true, superseded: true });
+      return;
+    }
     let value: unknown;
     switch (request.read.kind) {
       case 'exportStructuredWithPages':
@@ -702,9 +761,26 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         request: pages === request.pages ? request : { ...request, pages },
         owner: session, frameEpoch: request.expectedFrameEpoch,
         frames: [], offset: 0, started: performance.now(), engineMs: 0,
+        pagesPerSlice: BACKGROUND_SLICE_PAGES,
       };
       backgroundPageBuild = build;
-      scheduleBackgroundPageSlice(build);
+      scheduler.schedule({
+        kind: 'pageBuild', version: scheduler.version, generation: scheduler.generation,
+        onStale: () => 'cancel',
+        cancel: () => {
+          if (backgroundPageBuild === build) supersedeBackgroundPageBuild();
+        },
+        fail: (error) => {
+          if (backgroundPageBuild === build) backgroundPageBuild = null;
+          replyFailure(build.request.id, error);
+        },
+        run: async (budgetMs) => {
+          if (backgroundPageBuild !== build) return 'done';
+          if (trap) throw trap;
+          handlingId = build.request.id;
+          return (await backgroundPageSlice(build, budgetMs)) ? 'done' : 'yield';
+        },
+      });
       return;
     }
     setFrameDisplayWindow(session);
@@ -768,7 +844,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         begun: false,
         restarts: 0,
       };
-      scheduleCompletionSlice(slicedCompletion);
+      scheduleCompletion(slicedCompletion);
       return;
     }
     await completeProvisionalLayout();
@@ -864,6 +940,17 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
               frame: session.applyInput(request.text, request.expectedFrameEpoch),
               profile: undefined,
             };
+    // Typing inside a surrogate pair lands before it and settles the caret after the text; the
+    // host's sticky caret stays inside the pair, so it takes this one.
+    let settled: CollaborationCursor | null = null;
+    if (request.type === 'applyInput') {
+      const sent = request.selection.head;
+      const head = session.selection()?.head;
+      const expected = sent.offset + request.text.length;
+      if (head && (head.paraId !== sent.paraId || head.offset !== expected)) {
+        settled = session.encodeSelection();
+      }
+    }
     await replyFrame(
       request.id,
       applied.frame,
@@ -875,7 +962,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       request.paintCaret,
       undefined,
       false,
-      request.type === 'applyDelete' ? session.residentDeletedUnits() : undefined
+      request.type === 'applyDelete' ? session.residentDeletedUnits() : undefined,
+      [],
+      settled
     );
   } catch (error) {
     if (trap) throw trap;
@@ -918,7 +1007,10 @@ function hydrate(
   }
   session.setPartialDocument(snapshot.partialDocument === true);
   previewFinalPages = snapshot.partialDocument === true ? 0 : null;
-  if (!snapshot.workerAuthoritative) session.loadMediaSources(snapshot.mediaSources ?? '');
+  if (!snapshot.workerAuthoritative) {
+    session.loadMediaSources(snapshot.mediaSources ?? '');
+    session.loadNoteSeparators(snapshot.noteSeparators ?? new Uint8Array(0));
+  }
   if (snapshot.fontsRevision !== fontsRevision) {
     // A mismatched revision always carries the full font set (the client only
     // omits fonts when it knows this session's applied revision matches).
@@ -1140,37 +1232,38 @@ function nextTurn(callback: () => void): void {
   completionTurns.port2.postMessage(null);
 }
 
+const scheduler = createResidentScheduler({
+  now: () => performance.now(),
+  turn: (callback) => nextTurn(callback),
+  timer: (callback, ms) => {
+    const handle = setTimeout(callback, ms);
+    return () => clearTimeout(handle);
+  },
+  failed: () => {},
+});
+
 function supersedeBackgroundPageBuild(): void {
   const build = backgroundPageBuild;
   if (!build) return;
   backgroundPageBuild = null;
-  reply({ id: build.request.id, ok: true, pageBuildSuperseded: true });
+  replyDropped({ id: build.request.id, ok: true, pageBuildSuperseded: true });
 }
 
-function scheduleBackgroundPageSlice(build: BackgroundPageBuild): void {
-  nextTurn(() => {
-    if (backgroundPageBuild !== build) return;
-    enqueue(async () => {
-      try {
-        await backgroundPageSlice(build);
-      } catch (error) {
-        if (backgroundPageBuild === build) backgroundPageBuild = null;
-        throw error;
-      }
-    }, build.request.id, () => backgroundPageBuild === build);
-  });
-}
-
-async function backgroundPageSlice(build: BackgroundPageBuild): Promise<void> {
+async function backgroundPageSlice(build: BackgroundPageBuild, budgetMs: number): Promise<boolean> {
   if (session !== build.owner || (build.offset > 0 && retainedFrame?.frameEpoch !== build.frameEpoch)) {
     supersedeBackgroundPageBuild();
-    return;
+    return true;
   }
   setFrameDisplayWindow(build.owner);
   const started = performance.now();
-  const pages = build.request.pages.slice(build.offset, build.offset + BACKGROUND_SLICE_PAGES);
+  const pages = build.request.pages.slice(build.offset, build.offset + build.pagesPerSlice);
   const bytes = build.owner.buildDisplayPagesFrame(pages, build.frameEpoch);
-  build.engineMs += performance.now() - started;
+  const elapsed = performance.now() - started;
+  build.engineMs += elapsed;
+  build.pagesPerSlice = Math.min(
+    32,
+    Math.max(BACKGROUND_SLICE_PAGES, Math.round((pages.length * budgetMs) / Math.max(1, elapsed)))
+  );
   build.offset += pages.length;
   if (build.offset === build.request.pages.length) {
     backgroundPageBuild = null;
@@ -1178,35 +1271,34 @@ async function backgroundPageSlice(build: BackgroundPageBuild): Promise<void> {
       build.request.id, bytes, build.engineMs, [], undefined, build.started,
       false, build.request.paintCaret, undefined, false, undefined, build.frames
     );
-    return;
+    return true;
   }
   applyWorkerFrame(bytes);
   build.frameEpoch = retainedFrame!.frameEpoch;
   build.frames.push(bytes);
-  scheduleBackgroundPageSlice(build);
+  return false;
 }
 
-/** Queues the next step of `completion`, which a later completion supersedes. */
-function scheduleCompletionSlice(completion: SlicedCompletion): void {
-  nextTurn(() => {
-    if (slicedCompletion !== completion) return;
-    enqueue(
-      async () => {
-        try {
-          await completionSlice(completion);
-        } catch (error) {
-          if (slicedCompletion === completion) slicedCompletion = null;
-          throw error;
-        }
-      },
-      completion.id,
-      () => slicedCompletion === completion
-    );
+function scheduleCompletion(completion: SlicedCompletion): void {
+  scheduler.schedule({
+    kind: 'completion', version: scheduler.version, generation: scheduler.generation,
+    idleAfterInputMs: COMPLETION_IDLE_MS,
+    onStale: () => 'continue',
+    fail: (error) => {
+      if (slicedCompletion === completion) slicedCompletion = null;
+      replyFailure(completion.id, error);
+    },
+    run: async (budgetMs) => {
+      if (slicedCompletion !== completion) return 'done';
+      if (trap) throw trap;
+      handlingId = completion.id;
+      await completionSlice(completion, budgetMs);
+      return slicedCompletion === completion ? 'yield' : 'done';
+    },
   });
 }
 
-/** One bounded step of a sliced completion, which then queues the next. */
-async function completionSlice(completion: SlicedCompletion): Promise<void> {
+async function completionSlice(completion: SlicedCompletion, budgetMs: number): Promise<void> {
   if (!session || slicedCompletion !== completion || !incompleteLayout) return;
   let progress;
   if (!completion.begun) {
@@ -1240,17 +1332,15 @@ async function completionSlice(completion: SlicedCompletion): Promise<void> {
         }
         return;
       }
-      scheduleCompletionSlice(completion);
       return;
     }
     const elapsed = Math.max(1, performance.now() - started);
     completion.blocks = Math.min(
       8192,
-      Math.max(8, Math.round((completion.blocks * COMPLETION_SLICE_MS) / elapsed))
+      Math.max(8, Math.round((completion.blocks * budgetMs) / elapsed))
     );
   }
   if (progress.layoutJson === undefined) {
-    scheduleCompletionSlice(completion);
     return;
   }
   const { layoutInput: _input, ...request } = incompleteLayout;
@@ -1269,7 +1359,7 @@ async function completionSlice(completion: SlicedCompletion): Promise<void> {
 function supersedeSlicedCompletion(): void {
   const completion = slicedCompletion;
   slicedCompletion = null;
-  if (completion) reply({ id: completion.id, ok: true });
+  if (completion) replyDropped({ id: completion.id, ok: true });
 }
 
 /**
@@ -1405,6 +1495,10 @@ function forgetOffscreenPagePixels(pageId: string): void {
   }
 }
 
+function retainedPageByKey(frame: RetainedFrame, pageId: string) {
+  return /^\d+$/.test(pageId) ? retainedFramePageById(frame, BigInt(pageId)) : undefined;
+}
+
 function applyWorkerFrame(bytes: Uint8Array): void {
   retainedFrame = applyFrameDeltaOwned(retainedFrame, decodeFrameDelta(bytes));
   for (const pageId of retainedFrame.damagedPageIds) pendingOffscreenPageIds.add(pageId.toString());
@@ -1422,7 +1516,8 @@ async function replyFrame(
   layoutJson?: string,
   layoutProvisional = false,
   deletedUnits?: number,
-  precedingPageFrames: Uint8Array[] = []
+  precedingPageFrames: Uint8Array[] = [],
+  selectionCursor: CollaborationCursor | null = null
 ): Promise<void> {
   const documentVersion = session?.proposalEngine.version();
   const documentPreview = previewing;
@@ -1456,14 +1551,13 @@ async function replyFrame(
   // Pages no longer in the document drop their surfaces (their elements
   // unmounted main-side). An unbuilt page keeps its transferred canvas, which
   // can never be transferred again, and only loses its pixels.
-  const unbuiltByPageId = new Map(
-    retainedFrame.pages.map(({ pageId, page }) => [pageId.toString(), page.unbuilt === true])
-  );
   for (const pageId of pendingOffscreenPageIds) {
-    if (unbuiltByPageId.get(pageId) !== false) pendingOffscreenPageIds.delete(pageId);
+    const page = retainedPageByKey(retainedFrame, pageId);
+    if (!page || page.page.unbuilt === true) pendingOffscreenPageIds.delete(pageId);
   }
   for (const pageId of new Set([...offscreenCanvases.keys(), ...offscreenBackBuffers.keys()])) {
-    const unbuilt = unbuiltByPageId.get(pageId);
+    const page = retainedPageByKey(retainedFrame, pageId);
+    const unbuilt = page ? page.page.unbuilt === true : undefined;
     if (unbuilt === false) continue;
     const canvas = offscreenCanvases.get(pageId);
     if (unbuilt === undefined) offscreenCanvases.delete(pageId);
@@ -1490,6 +1584,7 @@ async function replyFrame(
       engineProfile,
       caret,
       selection,
+      ...(selectionCursor ? { selectionCursor } : {}),
       caretPainted,
       replayMs,
       replayedPages,
