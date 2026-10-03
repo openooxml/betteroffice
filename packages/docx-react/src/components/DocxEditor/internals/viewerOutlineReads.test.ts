@@ -57,16 +57,29 @@ test('a heading reply for a superseded frame is dropped', async () => {
   expect(await pending).toBeNull();
 });
 
-test('only the latest refresh is applied even at the same version', async () => {
+test('refreshes at one version share one read and a later version supersedes it', async () => {
   const replies: Array<(reply: { version: string; value: DocxOutlineHeading[] }) => void> = [];
-  const read = (() => new Promise<unknown>((resolve) => { replies.push(resolve); })) as ResidentEngineWorkerClient['documentRead'];
+  const requests: ResidentDocumentRead[] = [];
+  const read = ((request: ResidentDocumentRead) => {
+    requests.push(request);
+    return new Promise<unknown>((resolve) => { replies.push(resolve); });
+  }) as ResidentEngineWorkerClient['documentRead'];
   const reads = new ViewerOutlineReads(read);
-  const first = reads.collect('A', () => 'A');
-  const second = reads.collect('A', () => 'A');
-  replies[1]!({ version: 'A', value: headings });
-  expect(await second).not.toBeNull();
-  replies[0]!({ version: 'A', value: [] });
-  expect(await first).toBeNull();
+  let version = 'A';
+  const first = reads.collect('A', () => version);
+  const second = reads.collect('A', () => version);
+  expect(requests).toHaveLength(1);
+  replies[0]!({ version: 'A', value: headings });
+  expect(await first).toEqual(await second);
+  expect(await first).toHaveLength(2);
+  version = 'B';
+  const older = reads.collect('B', () => version);
+  const newer = reads.collect('C', () => 'C');
+  version = 'C';
+  replies[1]!({ version: 'B', value: headings });
+  replies[2]!({ version: 'C', value: [] });
+  expect(await older).toBeNull();
+  expect(await newer).toEqual([]);
 });
 
 test('a stale navigation reply cannot scroll the new frame', async () => {
