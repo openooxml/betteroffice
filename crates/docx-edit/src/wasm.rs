@@ -2245,12 +2245,20 @@ impl EditSession {
         docx_layout::outline_glyph_json(font_id, glyph_id)
     }
 
-    /// Hydrates this replica from an encoded yrs v1 update. The first load after opening a
-    /// replica is its baseline: the comments it brings in read their source fields.
+    /// Hydrates from a yrs v1 update. The first load after an unseeded open retains prior
+    /// comment writes and marks loaded fields differing from seed placeholders as authored.
     pub fn load(&self, update: &[u8]) -> Result<(), JsValue> {
+        let written = self.awaiting_comment_baseline.get().then(|| {
+            self.engine
+                .doc()
+                .source_metadata()
+                .map(|source| source.read().comment_writes.snapshot())
+                .unwrap_or_default()
+        });
         self.engine.doc().apply_update_v1(update).map_err(js_err)?;
-        if self.awaiting_comment_baseline.replace(false) {
-            self.engine.doc().clear_comment_writes();
+        if let Some(written) = written {
+            self.engine.doc().rebase_comment_writes(written);
+            self.awaiting_comment_baseline.set(false);
         }
         self.engine.doc().rotate_version(js_entropy());
         Ok(())
@@ -4092,6 +4100,7 @@ impl EditSession {
         revised: &[u8],
         options: &str,
     ) -> Result<String, JsValue> {
+        self.awaiting_comment_baseline.set(false);
         let options = match crate::compare::parse_options(options).map_err(js_err)? {
             Ok(options) => options,
             Err(diagnostic) => return crate::compare::refused_json(diagnostic).map_err(js_err),
@@ -4106,7 +4115,6 @@ impl EditSession {
         .map_err(js_err)?;
         let json = outcome.to_json(&options.limits).map_err(js_err)?;
         if let CompareOutcome::Applied(applied) = outcome {
-            self.awaiting_comment_baseline.set(false);
             self.docx_source.replace(Some(Arc::from(original)));
             self.docx_digest.replace(None);
             self.compared.replace(Some((applied, options.limits)));

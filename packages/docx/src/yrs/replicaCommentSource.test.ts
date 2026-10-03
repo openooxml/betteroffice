@@ -48,6 +48,14 @@ function editComment(session: YrsSession, id: string, author: string) {
   }]);
 }
 
+function expectEditedComment(session: YrsSession, id: string, author: string) {
+  const story = comments(session).content.stories.find((story) => story.comment?.id === id)!;
+  expect(story.comment).toMatchObject({ author, date: '2026-10-01T00:00:00Z' });
+  expect(story.blocks).toMatchObject([{
+    paragraph: { inlines: [{ kind: 'text', text: 'Updated comment' }] },
+  }]);
+}
+
 for (const fixture of FIXTURES) {
   const name = fixture.endsWith('/principal.docx') ? 'principal.docx' : 'structure.docx';
 
@@ -88,6 +96,50 @@ for (const fixture of FIXTURES) {
     });
   }
 
+  test(`authored comments in the loaded state survive the replica baseline: ${name}`, async () => {
+    const bytes = new Uint8Array(readFileSync(fixture));
+    const seeded = await createYrsSession({ clientId: 97105 });
+    const replica = await createYrsSession({ clientId: 97106 });
+    try {
+      seeded.openDocx(bytes, true);
+      const id = comments(seeded).content.stories[0]!.comment!.id;
+      editComment(seeded, id, 'Source author');
+      replica.openDocx(bytes, false);
+      replica.loadState(seeded.encodeState());
+      expectEditedComment(replica, id, 'Source author');
+      const otherComments = (session: YrsSession) => comments(session).content.stories.filter(
+        (story) => story.comment?.id !== id
+      );
+      expect(otherComments(replica)).toEqual(otherComments(seeded));
+    } finally {
+      replica.destroy();
+      seeded.destroy();
+    }
+  });
+
+  test(`comment updates before the replica baseline survive the first load: ${name}`, async () => {
+    const bytes = new Uint8Array(readFileSync(fixture));
+    const worker = await createResidentEngineSession();
+    const replica = await createYrsSession({ clientId: 97107 });
+    const peer = await createYrsSession({ clientId: 97108 });
+    try {
+      worker.openDocx(bytes);
+      peer.openDocx(bytes, false);
+      peer.loadState(worker.encodeState());
+      const id = comments(peer).content.stories[0]!.comment!.id;
+      editComment(peer, id, 'Peer author');
+      replica.openDocx(bytes, false);
+      replica.applyUpdate(peer.encodeState());
+      expectEditedComment(replica, id, 'Peer author');
+      replica.loadState(worker.encodeState());
+      expectEditedComment(replica, id, 'Peer author');
+    } finally {
+      peer.destroy();
+      replica.destroy();
+      worker.destroy();
+    }
+  });
+
   test(`comment writes after the replica baseline survive later loads and updates: ${name}`, async () => {
     const bytes = new Uint8Array(readFileSync(fixture));
     const worker = await createResidentEngineSession();
@@ -98,19 +150,16 @@ for (const fixture of FIXTURES) {
       replica.openDocx(bytes, false);
       replica.loadState(worker.encodeState());
       const id = comments(replica).content.stories[0]!.comment!.id;
-      const metadata = () => comments(replica).content.stories.find(
-        (story) => story.comment?.id === id
-      )!.comment;
       editComment(replica, id, 'Local author');
-      expect(metadata()).toMatchObject({ author: 'Local author', date: '2026-10-01T00:00:00Z' });
+      expectEditedComment(replica, id, 'Local author');
       replica.loadState(worker.encodeState());
-      expect(metadata()).toMatchObject({ author: 'Local author', date: '2026-10-01T00:00:00Z' });
+      expectEditedComment(replica, id, 'Local author');
 
       peer.openDocx(bytes, false);
       peer.loadState(replica.encodeState());
       editComment(peer, id, 'Peer author');
       replica.applyUpdate(peer.encodeState());
-      expect(metadata()).toMatchObject({ author: 'Peer author', date: '2026-10-01T00:00:00Z' });
+      expectEditedComment(replica, id, 'Peer author');
     } finally {
       peer.destroy();
       replica.destroy();

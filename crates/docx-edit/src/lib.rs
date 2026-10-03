@@ -52,6 +52,8 @@
 #[cfg(test)]
 extern crate self as docx_edit;
 
+#[cfg(feature = "wasm")]
+use std::collections::HashSet;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -665,10 +667,39 @@ impl EditingDoc {
     }
 
     #[cfg(feature = "wasm")]
-    pub(crate) fn clear_comment_writes(&self) {
-        if let Some(source) = self.source_metadata() {
-            source.read().comment_writes.clear();
+    pub(crate) fn rebase_comment_writes(&self, mut written: HashSet<(String, Option<String>)>) {
+        let Some(source) = self.source_metadata() else {
+            return;
+        };
+        let read = source.read();
+        let txn = self.doc.transact();
+        if let Some(comments) = txn.get_map(COMMENTS) {
+            for source_comment in &read.comments {
+                let Some(comment) = comments
+                    .get(&txn, &source_comment.id)
+                    .and_then(|value| value.cast::<MapRef>().ok())
+                else {
+                    continue;
+                };
+                for (key, placeholder) in [
+                    ("author", Any::String("".into())),
+                    ("date", Any::String("".into())),
+                    ("parentId", Any::Null),
+                    ("body", Any::Null),
+                    ("done", Any::Bool(false)),
+                ] {
+                    let authored = match comment.get(&txn, key) {
+                        Some(Out::Any(value)) => value != placeholder,
+                        Some(_) => true,
+                        None => false,
+                    };
+                    if authored {
+                        written.insert((source_comment.id.clone(), Some(key.to_owned())));
+                    }
+                }
+            }
         }
+        read.comment_writes.replace(written);
     }
 
     #[doc(hidden)]
