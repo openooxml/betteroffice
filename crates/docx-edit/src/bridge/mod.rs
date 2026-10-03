@@ -56,6 +56,7 @@ use super::{COMMENTS, DEL, EditError, EditingDoc, INS, decode_anchor, is_pilcrow
 use crate::list_marker::{ListState, compute_list_marker};
 
 pub(crate) mod local;
+mod positions;
 mod shapes;
 
 const AUTO_PARAGRAPH_SPACING_PX: f64 = 14.0;
@@ -344,10 +345,11 @@ pub(crate) fn yrs_doc_to_mapped_layout_blocks_with_revealable(
     local: &mut local::LocalLowering,
 ) -> Result<(Vec<LayoutBlock>, LoweringMap, Vec<LayoutBlock>), BridgeError> {
     let mut revealable = Some(Vec::new());
-    let (blocks, map) =
+    let (mut blocks, map) =
         yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut revealable, local)?;
-    local.finish(&blocks, &map);
-    Ok((blocks, map, revealable.unwrap_or_default()))
+    let mut revealable = revealable.unwrap_or_default();
+    local.finish(&mut blocks, &map, &mut revealable);
+    Ok((blocks, map, revealable))
 }
 
 fn yrs_doc_to_mapped_layout_blocks_inner(
@@ -374,16 +376,8 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
     };
     let source = doc.source_metadata();
     local.source = source.as_ref().map(Arc::downgrade).unwrap_or_default();
-    local.blocked |= source.as_ref().is_some_and(|source| {
-        source
-            .run_revision_stories()
-            .any(|story| story == "body" || story.starts_with("body:"))
-    });
     let mut list_state = ListState::new(source.map(|source| source.numbering()));
     let txn = doc.yrs_doc().transact();
-    local.blocked |= txn
-        .get_map(COMMENTS)
-        .is_some_and(|comments| comments.len(&txn) != 0);
     let mut active_stories = BTreeSet::new();
     let mut map = LoweringMap::default();
     let session = txn.get_map(crate::identity::SESSION);
@@ -397,7 +391,6 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
                 .collect()
         })
         .unwrap_or_default();
-    local.blocked |= has_sequence_metadata;
     let (mut blocks, _) = lower_story(
         &txn,
         story_id,
@@ -473,7 +466,20 @@ fn lower_story<T: ReadTxn>(
         let mut plain = local::ParagraphSeed::default();
         for diff in story.diff(txn, YChange::identity) {
             let attributes = diff.attributes.as_deref();
-            local.observe(&mut plain, &diff, txn, story_id);
+            let safe = at_block_boundary
+                && paragraph_runs.is_empty()
+                && paragraph_drawings.is_empty()
+                && field_join.is_none()
+                && pending_code_join.is_none()
+                && pending_hidden_field_blocks.is_empty()
+                && active_stories.len() == 1;
+            local.observe(
+                &mut plain,
+                &diff,
+                txn,
+                story_id,
+                (paragraph_start == story_index).then_some(safe),
+            );
             match diff.insert {
                 Out::Any(Any::String(text)) => {
                     let text = text.as_ref();
@@ -498,6 +504,7 @@ fn lower_story<T: ReadTxn>(
                         &pilcrow,
                         &values,
                         attributes,
+                        txn,
                         story_id,
                         (
                             paragraph_start,
@@ -505,7 +512,12 @@ fn lower_story<T: ReadTxn>(
                             blocks.len(),
                             map.paragraphs.len() as u32,
                         ),
-                        story_index + 1 == story.len(txn),
+                        field_join.is_none()
+                            && pending_code_join.is_none()
+                            && pending_hidden_field_blocks.is_empty()
+                            && !value_string(values.get("paraId"))
+                                .is_some_and(|id| hidden_field_blocks.contains(&id))
+                            && active_stories.len() == 1,
                     );
                     let para_id = value_string(values.get("paraId")).unwrap_or_default();
                     let code_join = pending_code_join.take();
@@ -1260,6 +1272,9 @@ fn lower_story<T: ReadTxn>(
                         index: story_index,
                     });
                 }
+            }
+            if at_block_boundary {
+                plain = local::ParagraphSeed::default();
             }
         }
 

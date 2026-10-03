@@ -71,6 +71,7 @@ struct RenderState {
     stories: HashMap<String, LoweredStory>,
     cache_hits: u64,
     cache_misses: u64,
+    local_patches: u64,
 }
 
 #[derive(Debug)]
@@ -2041,6 +2042,21 @@ impl EngineSession {
         let paragraph_epoch =
             (self.local_lowering.get() && text.is_some() && range.start == range.end)
                 .then(|| self.doc.committed_epoch());
+        let accepts_range = if lower_locally && self.local_lowering.get() && range.story == "body" {
+            let paragraphs = self.doc.paragraph_index("body")?;
+            let txn = self.doc.yrs_doc().transact();
+            let render = self.render.borrow();
+            paragraphs.para_at(range.start).is_some_and(|paragraph| {
+                render.stories.get("body").is_some_and(|lowered| {
+                    lowered.doc_epoch == before
+                        && lowered.local.accepts_range(
+                            &txn, &paragraph.para_id, range.start, range.end,
+                        )
+                })
+            })
+        } else {
+            false
+        };
         let mut attrs = None;
         let ctx = crate::EditCtx::local("", "");
         let receipt = match text {
@@ -2063,7 +2079,7 @@ impl EngineSession {
             );
         }
         let mut render = self.render.borrow_mut();
-        let eligible = lower_locally
+        let eligible = accepts_range
             && self.local_lowering.get()
             && (text.is_none() || range.start == range.end);
         if let Some(lowered) = render.stories.get_mut(&range.story) {
@@ -2094,23 +2110,20 @@ impl EngineSession {
             || epoch != lowered.doc_epoch.wrapping_add(1)
             || lowered.env != *env
             || lowered.media != self.doc.media_sources()
-            || !lowered.revealable_blocks.is_empty()
             || !lowered.local.matches_source(&self.doc)
-            || self.regions.borrow().as_ref().is_some_and(|state| {
-                state.fast_path.as_ref().is_none_or(|fast| {
-                    !fast.notes_clear || fast.regions.sections.is_empty() || fast.render_env != *env
-                })
-            })
         {
             return None;
         }
         self.pagination.borrow_mut().input_lowering = None;
         let blocks = Rc::get_mut(&mut lowered.blocks)?;
         let map = Rc::get_mut(&mut lowered.map)?;
+        let revealable = Rc::get_mut(&mut lowered.revealable_blocks)?;
         let txn = self.doc.yrs_doc().transact();
-        lowered.local.patch(blocks, map, &txn, env, &edit)?;
+        lowered.local.patch(blocks, map, revealable, &txn, env, &edit)?;
         lowered.doc_epoch = epoch;
         lowered.serialized_blocks = None;
+        render.local_patches = render.local_patches.wrapping_add(1);
+        self.preview_font_requirements.borrow_mut().take();
         Some(())
     }
 
@@ -6684,12 +6697,14 @@ mod tests {
             (
                 serde_json::to_string(lowered.blocks.as_ref()).unwrap(),
                 lowered.map.as_ref().clone(),
+                serde_json::to_string(lowered.revealable_blocks.as_ref()).unwrap(),
                 serde_json::to_string(&pagination.input.as_ref().unwrap().measured).unwrap(),
                 pagination.block_fingerprints.clone(),
                 serde_json::to_string(&pagination.layout.as_ref().unwrap().pages).unwrap(),
             )
         };
         let before = Rc::as_ptr(&engine.render.borrow().stories["body"].blocks);
+        let patches = engine.render.borrow().local_patches;
         if text.is_none() && start == end {
             let ctx = crate::EditCtx::local("", "");
             let position = Position::new(story, start);
@@ -6704,6 +6719,11 @@ mod tests {
             .unwrap_or_else(|error| panic!("{story} [{start}, {end}) {text:?}: {error}"));
         let after = Rc::as_ptr(&engine.render.borrow().stories["body"].blocks);
         let incremental = snapshot(engine);
+        assert_eq!(
+            engine.render.borrow().local_patches - patches,
+            u64::from(patched && enabled),
+            "{story} [{start}, {end}) {text:?} enabled={enabled}",
+        );
         macro_rules! cold {
             ($($field:ident)+) => {{
                 let ($($field,)+) = ($(engine.$field.replace(Default::default()),)+);
@@ -6824,7 +6844,7 @@ mod tests {
         empty.layout_document_with_regions_json(&request).unwrap();
         empty.build_display_list_frame("{}", 0).unwrap();
         for (end, text) in [(1, None), (0, Some("😀")), (2, None), (0, Some("B"))] {
-            step(&empty, &request, "body", (0, end, text), true);
+            step(&empty, &request, "body", (0, end, text), false);
         }
         let cell = |id, text| format!("<w:tc><w:tcPr/>{}</w:tc>", para(id, &run(text)));
         let table_body = format!(
@@ -6852,13 +6872,13 @@ mod tests {
         ];
         for (name, package) in packages {
             let (engine, request) = laid_out(&package.bytes(), 9602);
-            let patched = matches!(name, "table" | "list" | "mixed");
+            let patched = matches!(name, "table" | "list" | "mixed" | "contextual");
             step(&engine, &request, "body", (0, 0, Some("x")), patched);
             if name == "table" {
                 step(&engine, &request, "body", (11, 11, Some("😀")), true);
                 step(&engine, &request, "body:t0:r0c1", (2, 2, Some("x")), false);
             } else if name == "contextual" {
-                step(&engine, &request, "body", (8, 8, Some("x")), false);
+                step(&engine, &request, "body", (8, 8, Some("x")), true);
             }
         }
         let bold = Package::new(&para(
@@ -7021,7 +7041,7 @@ mod tests {
                 assert_eq!(attrs.list_marker_bold, Some(true));
                 assert_eq!(attrs.list_marker_color.as_deref(), Some("#FF0000"));
             }
-            let patched = !name.starts_with("tracked");
+            let patched = !name.starts_with("tracked") && name != "empty list";
             for offset in 0..=width {
                 for inserted in ["x", "😀"] {
                     let (engine, request) = laid_out(&bytes, 9608);
@@ -7054,7 +7074,7 @@ mod tests {
                     "../tests/fixtures/field-code-paragraphs/body-field-code-paragraphs.docx"
                 )
                 .as_slice(),
-                false,
+                true,
             ),
             (
                 include_bytes!("../tests/fixtures/suppressed-list-markers.docx").as_slice(),
@@ -7062,7 +7082,7 @@ mod tests {
             ),
             (
                 include_bytes!("../tests/fixtures/page-fragments/pages.docx").as_slice(),
-                false,
+                true,
             ),
             (
                 include_bytes!("../tests/fixtures/footnote-anchor.docx").as_slice(),
@@ -7071,6 +7091,362 @@ mod tests {
         ] {
             let (engine, request) = laid_out(bytes, 9603);
             step(&engine, &request, "body", (0, 0, Some("x")), patched);
+        }
+    }
+
+    fn local_patch_fixture_paragraph(
+        body: &mut String,
+        known: &mut BTreeMap<String, bool>,
+        properties: &str,
+        content: &str,
+        eligible: bool,
+    ) -> String {
+        let id = format!("{:08X}", 0x10000001 + known.len());
+        body.push_str(&format!(
+            r#"<w:p w14:paraId="{id}"><w:pPr>{properties}</w:pPr>{content}</w:p>"#,
+        ));
+        known.insert(id.clone(), eligible);
+        id
+    }
+
+    fn local_patch_rich_laid_out(
+        client_id: u64,
+        enabled: bool,
+    ) -> (EngineSession, String, BTreeMap<String, bool>) {
+        use super::lowering_fixture::{Package, image, para, run};
+        use crate::{EditCtx, RawOp};
+
+        let mut body = String::new();
+        let mut known = BTreeMap::new();
+        let ordinary = run("abc😀def");
+        let mut placeholders = BTreeMap::new();
+        let features = [
+            ("bookmark", "", r#"<w:bookmarkStart w:id="0" w:name="mark"/><w:r><w:t>Bookmark</w:t></w:r><w:bookmarkEnd w:id="0"/>"#.to_owned(), false),
+            ("comment", "", r#"<w:commentRangeStart w:id="0"/><w:r><w:t>Comment</w:t></w:r><w:commentRangeEnd w:id="0"/>"#.to_owned(), false),
+            ("collapsed", "", run("Collapsed"), false),
+            ("hyperlink", "", format!(r#"<w:hyperlink w:anchor="mark">{}</w:hyperlink>"#, run("Link")), false),
+            ("hidden", "", r#"<w:r><w:rPr><w:vanish/></w:rPr><w:t>Hidden</w:t></w:r>"#.to_owned(), false),
+            ("image", "", image("rIdImage", "Inline picture"), false),
+            ("field", "", r#"<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>"#.to_owned(), false),
+            ("sequence", "", r#"<w:fldSimple w:instr=" SEQ Figure "><w:r><w:t>1</w:t></w:r></w:fldSimple>"#.to_owned(), false),
+            ("tracked", "", format!(r#"<w:ins w:id="1" w:author="A">{}</w:ins>"#, run("Inserted")), false),
+            ("revision", "", r#"<w:r><w:rPr><w:b/><w:rPrChange w:id="2" w:author="A"><w:rPr/></w:rPrChange></w:rPr><w:t>Revised</w:t></w:r>"#.to_owned(), false),
+            ("contextual", r#"<w:contextualSpacing/><w:spacing w:after="240"/>"#, run("Contextual"), true),
+            ("section", r#"<w:sectPr><w:type w:val="nextPage"/><w:cols w:num="2"/></w:sectPr>"#, run("Section"), false),
+            ("note", "", r#"<w:r><w:footnoteReference w:id="1"/></w:r>"#.to_owned(), false),
+            ("checkbox", "", format!(r#"<w:sdt><w:sdtPr><w:id w:val="42"/><w14:checkbox><w14:checked w14:val="0"/></w14:checkbox></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>"#, run("☐")), false),
+            ("linebreak", "", r#"<w:r><w:br/></w:r>"#.to_owned(), false),
+            ("native", "", String::new(), false),
+            ("floating", "", String::new(), false),
+            ("chart", "", String::new(), false),
+            ("rule", "", String::new(), false),
+        ];
+        for (name, properties, content, eligible) in features {
+            local_patch_fixture_paragraph(&mut body, &mut known, "", &ordinary, true);
+            let id = local_patch_fixture_paragraph(
+                &mut body,
+                &mut known,
+                properties,
+                &format!("{}{content}{}", run("Guarded "), run(" tail")),
+                eligible,
+            );
+            placeholders.insert(name, id);
+            local_patch_fixture_paragraph(&mut body, &mut known, "", &ordinary, true);
+        }
+        local_patch_fixture_paragraph(&mut body, &mut known, "", &ordinary, true);
+        body.push_str(&format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="2400" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc>{}<w:tbl><w:tblPr><w:tblW w:w="1200" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="1200"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>{}</w:tc></w:tr></w:tbl>"#,
+            para("30000001", &run("Outer😀cell")),
+            para("30000002", &run("Inner\tcell")),
+            para("30000003", &run("Cell tail")),
+        ));
+        local_patch_fixture_paragraph(&mut body, &mut known, "", &ordinary, true);
+        body.push_str(&format!(
+            r#"<w:sdt><w:sdtPr><w:id w:val="43"/><w:tag w:val="block"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>"#,
+            para("30000004", &run("Control😀text")),
+        ));
+        local_patch_fixture_paragraph(&mut body, &mut known, "", &ordinary, true);
+        let drawing_only = local_patch_fixture_paragraph(&mut body, &mut known, "", "", false);
+        local_patch_fixture_paragraph(&mut body, &mut known, "", &ordinary, true);
+        let page = local_patch_fixture_paragraph(&mut body, &mut known, "", &ordinary, true);
+        local_patch_fixture_paragraph(&mut body, &mut known, "", &ordinary, true);
+        let column = local_patch_fixture_paragraph(&mut body, &mut known, "", &ordinary, true);
+        local_patch_fixture_paragraph(&mut body, &mut known, "", &ordinary, true);
+        local_patch_fixture_paragraph(&mut body, &mut known, "", &local_patch_mixed_runs(), true);
+        local_patch_fixture_paragraph(&mut body, &mut known, "", "", true);
+        local_patch_fixture_paragraph(&mut body, &mut known, "", &ordinary, true);
+        let bytes = Package::new(&body)
+            .rel("rIdImage", "image", "media/image1.png")
+            .part(
+                "comments.xml", "rIdComments", "comments", "comments",
+                &format!(r#"<w:comments {}><w:comment w:id="0" w:author="A">{}</w:comment></w:comments>"#, lowering_fixture::NS, para("40000001", &run("Remark"))),
+            )
+            .part(
+                "footnotes.xml", "rIdFootnotes", "footnotes", "footnotes",
+                &format!(r#"<w:footnotes {}><w:footnote w:id="1">{}</w:footnote></w:footnotes>"#, lowering_fixture::NS, para("40000002", &run("Footnote"))),
+            )
+            .bytes();
+        let (engine, request) = local_patch_laid_out(&bytes, client_id, enabled);
+        let span = |id: &str| engine.doc().paragraph_index("body").unwrap().para_span(id).unwrap();
+        let (start, _) = span(&placeholders["collapsed"]);
+        engine.doc().add_comment(
+            &[crate::StoryRange::new("body", start + 9, start + 9)], "A", "", Any::from("Collapsed"),
+        ).unwrap();
+        let native = json!({
+            "shapeType": "rect", "size": {"width": 914400, "height": 457200},
+            "children": [{"shapeType": "ellipse", "size": {"width": 91440, "height": 91440}}],
+        });
+        let text_shape = json!({
+            "shapeType": "rect", "size": {"width": 914400, "height": 457200},
+            "textBody": {"content": [{"type": "paragraph", "content": [{
+                "type": "run", "content": [{"type": "text", "text": "Shape text"}],
+            }]}]},
+            "children": [{
+                "shapeType": "rect", "size": {"width": 91440, "height": 91440},
+                "textBody": {"content": [{"type": "paragraph", "content": [{
+                    "type": "run", "content": [{"type": "text", "text": "Child text"}],
+                }]}]},
+            }],
+        });
+        let mut floating = text_shape.clone();
+        floating["position"] = json!({
+            "horizontal": {"relativeTo": "column", "posOffset": 0},
+            "vertical": {"relativeTo": "paragraph", "posOffset": 0},
+        });
+        floating["wrap"] = json!({"type": "none"});
+        for (id, kind, payload, offset) in [
+            (placeholders["native"].as_str(), "shape", vec![("shapeJson".to_owned(), Any::from(native.to_string()))], Some(8)),
+            (placeholders["floating"].as_str(), "shape", vec![("shapeJson".to_owned(), Any::from(floating.to_string()))], Some(8)),
+            (placeholders["chart"].as_str(), "chart", vec![("chartJson".to_owned(), Any::from(json!({"chartType": "bar", "series": []}).to_string()))], Some(8)),
+            (placeholders["rule"].as_str(), "horizontalRule", vec![("rule".to_owned(), Any::from_json(&json!({"width": 914400, "height": 9525, "alignment": "center", "noShade": true, "color": "000000", "xml": ""}).to_string()).unwrap())], Some(8)),
+            (drawing_only.as_str(), "shape", vec![("shapeJson".to_owned(), Any::from(text_shape.to_string()))], Some(0)),
+            (page.as_str(), "pageBreak", Vec::new(), None),
+            (column.as_str(), "columnBreak", Vec::new(), None),
+        ] {
+            let (start, pilcrow) = span(id);
+            let index = offset.map_or(pilcrow + 1, |offset| start + offset);
+            engine.doc().apply_raw_ops("body", vec![RawOp::InsertEmbed {
+                index, kind: kind.to_owned(), payload, attrs: Attrs::new(),
+            }], &EditCtx::local("", "")).unwrap();
+        }
+        engine.render.replace(Default::default());
+        engine.layout_document_with_regions_retained_json(&request).unwrap();
+        engine.build_display_list_frame("{}", 0).unwrap();
+        assert!(!engine.render.borrow().stories["body"].revealable_blocks.is_empty());
+        (engine, request, known)
+    }
+
+    #[test]
+    fn resident_typing_beside_rich_paragraphs_matches_cold_full() {
+        for enabled in [false, true] {
+            let (engine, request, known) = local_patch_rich_laid_out(9620, enabled);
+            for (id, eligible) in known {
+                let index = engine.doc().paragraph_index("body").unwrap();
+                let (_, pilcrow) = index.para_span(&id).unwrap();
+                let start = index.para_at(pilcrow).unwrap().node_start;
+                let patched = eligible && start != pilcrow;
+                local_patch_step(&engine, &request, "body", (start, start, Some("😀")), patched);
+                local_patch_step(&engine, &request, "body", (start, start + 2, None), patched);
+            }
+        }
+    }
+
+    #[test]
+    fn resident_typing_rejects_ranged_and_collapsed_comment_endpoints() {
+        use super::lowering_fixture::{Package, para, run};
+
+        let bytes = Package::new(&format!("{}{}{}",
+            para("10000001", &run("Before")),
+            para("10000002", &run("Middle")),
+            para("10000003", &run("After")),
+        )).bytes();
+        for (left, right) in [(0, 0), (3, 3), (6, 6), (0, 3), (3, 6)] {
+            let (engine, request) = local_patch_laid_out(&bytes, 9621, true);
+            engine.doc().add_comment(
+                &[crate::StoryRange::new("body", 7 + left, 7 + right)], "A", "", Any::from("Remark"),
+            ).unwrap();
+            engine.layout_document_with_regions_retained_json(&request).unwrap();
+            for offset in [left, right, 1, 5] {
+                let at = 7 + offset;
+                local_patch_step(&engine, &request, "body", (at, at, Some("x")), false);
+                local_patch_step(&engine, &request, "body", (at, at + 1, None), false);
+            }
+            local_patch_step(&engine, &request, "body", (0, 0, Some("😀")), true);
+            local_patch_step(&engine, &request, "body", (0, 2, None), true);
+            local_patch_step(&engine, &request, "body", (15, 15, Some("x")), true);
+        }
+    }
+
+    #[test]
+    fn resident_typing_rejects_unsafe_inherited_insertion_attributes() {
+        use super::lowering_fixture::{Package, para, run};
+        use crate::{EditCtx, RawOp};
+
+        let bytes = Package::new(&format!("{}{}",
+            para("10000001", &run("Before")),
+            para("10000002", &run("After")),
+        )).bytes();
+        let (engine, request) = local_patch_laid_out(&bytes, 9622, true);
+        engine.doc().apply_raw_ops("body", vec![RawOp::InsertEmbed {
+            index: 7,
+            kind: "pageBreak".to_owned(),
+            payload: Vec::new(),
+            attrs: Attrs::from([("hidden".into(), Any::Bool(true))]),
+        }], &EditCtx::local("", "")).unwrap();
+        engine.layout_document_with_regions_retained_json(&request).unwrap();
+        local_patch_step(&engine, &request, "body", (0, 0, Some("x")), true);
+        local_patch_step(&engine, &request, "body", (9, 9, Some("x")), false);
+    }
+
+    #[test]
+    fn resident_typing_recertifies_after_removing_an_embed() {
+        use super::lowering_fixture::{Package, image, para, run};
+
+        for embed in [
+            image("rIdImage", "Picture"),
+            r#"<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>"#.to_owned(),
+            r#"<w:fldSimple w:instr=" SEQ Figure "><w:r><w:t>1</w:t></w:r></w:fldSimple>"#.to_owned(),
+        ] {
+            let bytes = Package::new(&format!("{}{}{}",
+                para("10000001", &run("Before")),
+                para("10000002", &format!("{}{embed}{}", run("ab"), run("cd"))),
+                para("10000003", &run("After")),
+            )).rel("rIdImage", "image", "media/image1.png").bytes();
+            let (engine, request) = local_patch_laid_out(&bytes, 9623, true);
+            local_patch_step(&engine, &request, "body", (9, 10, None), false);
+            local_patch_step(&engine, &request, "body", (8, 8, Some("😀")), true);
+            local_patch_step(&engine, &request, "body", (8, 10, None), true);
+        }
+    }
+
+    struct TypingRandom(u64);
+
+    impl TypingRandom {
+        fn pick(&mut self, limit: usize) -> usize {
+            self.0 = self.0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((self.0 >> 32) as usize) % limit
+        }
+    }
+
+    fn local_patch_text_segments(engine: &EngineSession, start: u32, end: u32) -> Vec<(u32, String)> {
+        use yrs::types::text::YChange;
+        use yrs::{Out, Text, Transact};
+
+        let txn = engine.doc().yrs_doc().transact();
+        let story = crate::story_ref(&txn, "body").unwrap();
+        let mut raw = 0;
+        let mut segments = Vec::new();
+        for diff in story.diff(&txn, YChange::identity) {
+            let units = crate::out_len(&diff.insert);
+            if raw >= start && raw + units <= end
+                && let Out::Any(Any::String(text)) = diff.insert
+            {
+                segments.push((raw, text.to_string()));
+            }
+            raw += units;
+        }
+        segments
+    }
+
+    #[test]
+    fn resident_typing_per_paragraph_seeded_streams_match_cold_full() {
+        use yrs::{Assoc, IndexedSequence};
+
+        for seed in 0..40 {
+            let (engine, request, known) = local_patch_rich_laid_out(9630 + seed, true);
+            let guards: BTreeMap<_, _> = {
+                let index = engine.doc().paragraph_index("body").unwrap();
+                let txn = engine.doc().yrs_doc().transact();
+                let story = crate::story_ref(&txn, "body").unwrap();
+                known.iter().filter(|(_, eligible)| !**eligible).map(|(id, _)| {
+                    let (_, pilcrow) = index.para_span(id).unwrap();
+                    let start = index.para_at(pilcrow).unwrap().node_start;
+                    let offset = if pilcrow - start == 1 { 0 } else { 8 };
+                    (id.clone(), story.sticky_index(&txn, start + offset, Assoc::After).unwrap())
+                }).collect()
+            };
+            let mut random = TypingRandom(seed + 1);
+            for step in 0..25 {
+                let paragraphs = engine.doc().paragraphs("body").unwrap();
+                let paragraph = &paragraphs[random.pick(paragraphs.len())];
+                let index = engine.doc().paragraph_index("body").unwrap();
+                let (start, pilcrow) = index.para_span(&paragraph.para_id).unwrap();
+                let start = index.para_at(pilcrow).unwrap().node_start.max(start);
+                let eligible = known[&paragraph.para_id];
+                let segments = local_patch_text_segments(&engine, start, pilcrow);
+                let mut boundaries = vec![start];
+                for (raw, text) in &segments {
+                    let mut at = *raw;
+                    for ch in text.chars() {
+                        at += ch.len_utf16() as u32;
+                        boundaries.push(at);
+                    }
+                }
+                boundaries.sort_unstable();
+                boundaries.dedup();
+                if !eligible {
+                    let prefix_end = {
+                        let txn = engine.doc().yrs_doc().transact();
+                        guards[&paragraph.para_id].get_offset(&txn).unwrap().index
+                    };
+                    boundaries.retain(|at| *at <= prefix_end);
+                }
+                let offset = random.pick(boundaries.len());
+                let at = boundaries[offset];
+                let insert = random.pick(2) == 0 || boundaries.len() == 1;
+                let next = index.para_at(pilcrow + 1);
+                if step % 7 == 0 && eligible && pilcrow > start
+                    && let Some(next) = next
+                    && next.node_start == pilcrow + 1
+                    && known.get(next.para_id.as_ref()) == Some(&true)
+                    && next.pilcrow > next.node_start
+                    && boundaries.contains(&(pilcrow - 1))
+                {
+                    let next_segments = local_patch_text_segments(&engine, next.node_start, next.pilcrow);
+                    if next_segments.first().is_some_and(|(_, text)| text.chars().next().unwrap().len_utf16() == 1) {
+                        local_patch_step(&engine, &request, "body", (pilcrow - 1, pilcrow + 2, None), false);
+                        continue;
+                    }
+                }
+                if insert {
+                    let text = ["x", "\t", "😀"][random.pick(3)];
+                    local_patch_step(&engine, &request, "body", (at, at, Some(text)), eligible && pilcrow > start);
+                } else {
+                    let backwards = random.pick(2) == 0;
+                    let mut choices: Vec<_> = boundaries.iter().copied().filter(|other| {
+                        if backwards {
+                            *other < at && at - *other <= 3
+                        } else {
+                            *other > at && *other - at <= 3
+                        }
+                    }).collect();
+                    if choices.is_empty() {
+                        choices = boundaries.iter().copied().filter(|other| other.abs_diff(at) <= 3 && *other != at).collect();
+                    }
+                    if choices.is_empty() {
+                        local_patch_step(&engine, &request, "body", (at, at, Some("x")), eligible && pilcrow > start);
+                        continue;
+                    }
+                    let other = choices[random.pick(choices.len())];
+                    let (left, right) = (at.min(other), at.max(other));
+                    let acceptable = eligible && right - left < pilcrow - start
+                        && segments.iter().any(|(raw, text)| {
+                            let end = *raw + text.encode_utf16().count() as u32;
+                            if *raw > left || right > end {
+                                return false;
+                            }
+                            let removed: Vec<_> = text.encode_utf16()
+                                .skip((left - *raw) as usize)
+                                .take((right - left) as usize)
+                                .collect();
+                            String::from_utf16(&removed).is_ok_and(|text| text.chars().count() == 1)
+                                && !(segments.len() > 1 && *raw == left && end == right)
+                        });
+                    local_patch_step(&engine, &request, "body", (left, right, None), acceptable);
+                }
+            }
         }
     }
 
@@ -7278,7 +7654,7 @@ mod tests {
                 let after = Rc::as_ptr(&engines[1].render.borrow().stories["body"].blocks);
                 assert_eq!(
                     before == after,
-                    !(paragraph == 0 && matches!(offset, 2 | 4 | 6)),
+                    offset != 0 && !(paragraph == 0 && matches!(offset, 2 | 4 | 6)),
                     "paragraph {paragraph} delete {offset}"
                 );
                 let frames = frames();

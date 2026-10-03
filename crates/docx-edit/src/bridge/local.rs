@@ -5,6 +5,7 @@ pub(crate) struct LocalLowering {
     pub(super) blocked: bool,
     pub(super) source: std::sync::Weak<crate::seed::SourceMetadata>,
     pub(super) seeds: BTreeMap<String, ParagraphSeed>,
+    identities: BTreeSet<String>,
     pub(crate) edit: Option<TextEdit>,
 }
 
@@ -17,6 +18,9 @@ pub(super) struct ParagraphSeed {
     pilcrow: Option<MapRef>,
     mark_attrs: Option<Attrs>,
     pm_start: u64,
+    start_safe: bool,
+    rejected: bool,
+    values: BTreeMap<String, Any>,
 }
 
 #[derive(Clone, Debug)]
@@ -55,11 +59,11 @@ fn unsafe_value(key: &str, value: &Any) -> bool {
     if matches!(value, Any::Null | Any::Undefined | Any::Bool(false)) {
         return false;
     }
-    [INS, DEL, "pPrIns", "pPrDel", "pPrChange"].contains(&key)
+    [INS, DEL, "pPrIns", "pPrDel", "pPrChange", "rPrChange"].contains(&key)
         || ["trPrChange", "tcPrChange"].contains(&key)
         || ["trackedIns", "trackedDel", "trIns", "trDel"].contains(&key)
         || ["hyperlink", "bookmarks", "comment", "cellMarker"].contains(&key)
-        || ["hidden", "vanish", "contextualSpacing", "floating"].contains(&key)
+        || ["hidden", "vanish", "floating", "footnoteRefId", "endnoteRefId"].contains(&key)
         || match value {
             Any::Map(map) => map.iter().any(|(key, value)| unsafe_value(key, value)),
             Any::Array(values) => values.iter().any(|value| unsafe_value("", value)),
@@ -81,17 +85,20 @@ impl LocalLowering {
         diff: &yrs::types::text::Diff<YChange>,
         txn: &T,
         story: &str,
+        boundary: Option<bool>,
     ) {
-        if self.blocked {
+        if self.blocked || story != "body" {
             return;
         }
+        if let Some(safe) = boundary {
+            paragraph.start_safe = safe;
+        }
         let attrs = diff.attributes.as_deref();
-        self.blocked |= attrs
+        paragraph.rejected |= attrs
             .into_iter()
             .flatten()
             .any(|(key, value)| unsafe_value(key, value));
         match &diff.insert {
-            Out::Any(Any::String(_)) if story != "body" => {}
             Out::Any(Any::String(text)) => {
                 if let Some(last) = paragraph.segments.last_mut()
                     && same_attributes(&last.attrs, attrs)
@@ -105,65 +112,112 @@ impl LocalLowering {
                 }
             }
             Out::YMap(mark) if is_pilcrow(mark, txn) => {}
-            Out::YMap(mark) => {
-                let values = pilcrow_values(mark, txn);
-                self.blocked |= values.iter().any(|(key, value)| unsafe_value(key, value))
-                    || value_string(values.get("_kind")).as_deref() != Some("table");
-                *paragraph = ParagraphSeed::default();
-            }
-            _ => self.blocked = true,
+            _ => paragraph.rejected = true,
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn observe_pilcrow(
+    pub(super) fn observe_pilcrow<T: ReadTxn>(
         &mut self,
         paragraph: &mut ParagraphSeed,
         mark: &MapRef,
         values: &BTreeMap<String, Any>,
         attrs: Option<&Attrs>,
+        txn: &T,
         story: &str,
         (start, pm_start, slot, source): (u32, u64, usize, u32),
-        last: bool,
+        end_safe: bool,
     ) {
         if self.blocked {
             return;
         }
-        self.blocked |= values.iter().any(|(key, value)| unsafe_value(key, value));
-        let sectioned = values.contains_key("sectPr") || values.contains_key("sectionBreakType");
-        self.blocked |= sectioned && (story != "body" || !last);
-        if story == "body" && !sectioned && !self.blocked {
+        let id = value_string(values.get("paraId")).unwrap_or_default();
+        self.blocked |= !self.identities.insert(id.clone());
+        if self.blocked || story != "body" {
+            return;
+        }
+        paragraph.rejected |= values.iter().any(|(key, value)| unsafe_value(key, value))
+            || values.contains_key("sectPr")
+            || values.contains_key("sectionBreakType")
+            || self.source.upgrade().is_some_and(|source| source.run_revision(story, &id));
+        if paragraph.start_safe
+            && end_safe
+            && !paragraph.rejected
+            && !id.is_empty()
+            && comments_clear(txn, start, start + paragraph.units())
+        {
             paragraph.raw_start = start;
             paragraph.pm_start = pm_start;
             paragraph.slot = slot;
             paragraph.source = source;
             paragraph.pilcrow = Some(mark.clone());
             paragraph.mark_attrs = attrs.cloned();
-            let seed = std::mem::take(paragraph);
-            self.seeds
-                .insert(value_string(values.get("paraId")).unwrap_or_default(), seed);
+            paragraph.values = values.clone();
+            self.seeds.insert(id, std::mem::take(paragraph));
         }
         *paragraph = ParagraphSeed::default();
     }
 
-    pub(super) fn finish(&mut self, blocks: &[LayoutBlock], map: &LoweringMap) {
+    pub(super) fn finish(
+        &mut self,
+        blocks: &mut [LayoutBlock],
+        map: &LoweringMap,
+        revealable: &mut [LayoutBlock],
+    ) {
+        self.identities.clear();
         if self.blocked {
             self.seeds.clear();
             return;
         }
         let mut identities = BTreeSet::new();
         self.blocked |= map.paragraphs.iter().any(|(_, id)| !identities.insert(id));
-        self.blocked |= !blocks.iter().all(shiftable);
+        let shift = super::positions::PositionShift::new(0, 0, false);
+        self.blocked |= blocks
+            .iter_mut()
+            .chain(revealable)
+            .any(|block| shift.block(block).is_none());
         if self.blocked {
             self.seeds.clear();
             return;
         }
-        self.seeds.retain(|_, seed| {
+        let mut ownership = vec![0_u32; map.paragraphs.len()];
+        for (_, source) in &map.paragraph_blocks {
+            ownership[*source as usize] += 1;
+        }
+        self.seeds.retain(|id, seed| {
             let Some(LayoutBlock::Paragraph(paragraph)) = blocks.get(seed.slot) else {
                 return false;
             };
-            paragraph.pm_start == Some(seed.pm_start as f64) && paragraph.attrs.is_some()
+            let start = map.spans.partition_point(|span| span.pm_start < seed.pm_start + 1);
+            let end = map.spans.partition_point(|span| {
+                span.pm_start < seed.pm_start + u64::from(seed.units()) + 2
+            });
+            ordinary(paragraph, seed.pm_start, seed.units())
+                && matches!(&paragraph.id, BlockId::Str(block_id) if block_id == id)
+                && map.spans[start..end]
+                    .iter()
+                    .all(|span| !span.atom && span.paragraph == seed.source)
+                && map.paragraphs.get(seed.source as usize).is_some_and(|(story, paragraph)| {
+                    *story == 0 && paragraph == id
+                })
+                && ownership[seed.source as usize] == 1
         });
+    }
+
+    pub(crate) fn accepts_range<T: ReadTxn>(
+        &self,
+        txn: &T,
+        paragraph: &str,
+        start: u32,
+        end: u32,
+    ) -> bool {
+        self.seeds.get(paragraph).is_some_and(|seed| {
+            let paragraph_end = seed.raw_start + seed.units();
+            start >= seed.raw_start
+                && end >= start
+                && end <= paragraph_end
+                && comments_clear(txn, seed.raw_start, paragraph_end)
+        })
     }
 
     pub(crate) fn matches_source(&self, doc: &EditingDoc) -> bool {
@@ -180,6 +234,7 @@ impl LocalLowering {
         &mut self,
         blocks: &mut [LayoutBlock],
         map: &mut LoweringMap,
+        revealable: &mut [LayoutBlock],
         txn: &T,
         env: &RenderEnv,
         edit: &TextEdit,
@@ -188,13 +243,28 @@ impl LocalLowering {
         let pilcrow = seed.pilcrow.as_ref()?;
         let (raw, slot, source) = (seed.raw_start, seed.slot, seed.source);
         let pm_start = seed.pm_start;
-        let old_units: u32 = seed
-            .segments
-            .iter()
-            .map(|segment| utf16_len(&segment.text))
-            .sum();
+        let old_units = seed.units();
+        if pilcrow_values(pilcrow, txn) != seed.values
+            || !edit.text.is_empty() && edit.attributes.is_none()
+        {
+            return None;
+        }
         let old_end = pm_start + u64::from(old_units) + 2;
         let segments = patch_segments(&seed.segments, edit)?;
+        let new_units: u32 = segments.iter().map(|segment| utf16_len(&segment.text)).sum();
+        let expected_units = old_units
+            .checked_sub(edit.removed)?
+            .checked_add(utf16_len(&edit.text))?;
+        if new_units != expected_units
+            || (old_units == 0) != (new_units == 0)
+            || !effective_attributes_match(&segments, edit)
+            || segments.iter().any(|segment| {
+                segment.attrs.iter().any(|(key, value)| unsafe_value(key, value))
+            })
+            || !comments_clear(txn, raw, raw + new_units)
+        {
+            return None;
+        }
         let delta = i64::from(utf16_len(&edit.text)) - i64::from(edit.removed);
         let mut runs = Vec::new();
         let mut units = 0;
@@ -234,32 +304,29 @@ impl LocalLowering {
         {
             paragraph.attrs = old.attrs.clone();
         }
-        seed.segments = segments;
-        blocks[slot] = LayoutBlock::Paragraph(paragraph);
-        for block in &mut blocks[slot + 1..] {
-            shift_block(block, delta);
-        }
-        for pm in map
-            .paragraph_blocks
-            .iter_mut()
-            .map(|(pm, _)| pm)
-            .chain(map.tables.iter_mut().map(|(pm, ..)| pm))
-            .filter(|pm| **pm > pm_start)
+        if !ordinary(&paragraph, pm_start, new_units)
+            || replacement.spans.iter().any(|span| span.atom || span.paragraph != source)
         {
-            *pm = (*pm as i64 + delta) as u64;
+            return None;
         }
-        let span_start = map
-            .spans
-            .partition_point(|span| span.pm_start < pm_start + 1);
+        let shift = super::positions::PositionShift::new(old_end, delta, false);
+        for block in blocks[slot + 1..].iter_mut().chain(revealable.iter_mut()) {
+            shift.block(block)?;
+        }
+        shift.map(map)?;
+        for later in self.seeds.values().filter(|seed| seed.raw_start > raw) {
+            u32::try_from(i64::from(later.raw_start) + delta).ok()?;
+            later.pm_start.checked_add_signed(delta)?;
+        }
+        self.seeds.get_mut(&edit.paragraph)?.segments = segments;
+        blocks[slot] = LayoutBlock::Paragraph(paragraph);
+        let shift = super::positions::PositionShift::new(old_end, delta, true);
+        for block in blocks[slot + 1..].iter_mut().chain(revealable) {
+            shift.block(block).expect("validated position shift");
+        }
+        let span_start = map.spans.partition_point(|span| span.pm_start < pm_start + 1);
         let span_end = map.spans.partition_point(|span| span.pm_start < old_end);
-        for span in &mut map.spans[span_end..] {
-            span.pm_start = (span.pm_start as i64 + delta) as u64;
-            span.pm_end = (span.pm_end as i64 + delta) as u64;
-            if map.paragraphs[span.paragraph as usize].0 == 0 {
-                span.raw_start = (i64::from(span.raw_start) + delta) as u32;
-                span.raw_end = (i64::from(span.raw_end) + delta) as u32;
-            }
-        }
+        shift.map(map).expect("validated map shift");
         map.spans.splice(span_start..span_end, replacement.spans);
         for seed in self.seeds.values_mut() {
             if seed.raw_start > raw {
@@ -269,6 +336,27 @@ impl LocalLowering {
         }
         Some(())
     }
+}
+
+fn effective_attributes_match(segments: &[TextSegment], edit: &TextEdit) -> bool {
+    if edit.text.is_empty() {
+        return true;
+    }
+    let Some(attrs) = edit.attributes.as_ref() else {
+        return false;
+    };
+    let Some(end) = edit.offset.checked_add(utf16_len(&edit.text)) else {
+        return false;
+    };
+    let mut offset = 0;
+    for segment in segments {
+        let next = offset + utf16_len(&segment.text);
+        if offset < end && edit.offset < next && !same_attributes(&segment.attrs, Some(attrs)) {
+            return false;
+        }
+        offset = next;
+    }
+    end <= offset
 }
 
 fn patch_segments(segments: &[TextSegment], edit: &TextEdit) -> Option<Vec<TextSegment>> {
@@ -345,59 +433,63 @@ fn patch_segments(segments: &[TextSegment], edit: &TextEdit) -> Option<Vec<TextS
     Some(merged)
 }
 
-fn shift_pair(start: &mut Option<f64>, end: &mut Option<f64>, delta: i64) {
-    for position in [start, end].into_iter().flatten() {
-        *position += delta as f64;
+impl ParagraphSeed {
+    fn units(&self) -> u32 {
+        self.segments.iter().map(|segment| utf16_len(&segment.text)).sum()
     }
 }
 
-fn shiftable(block: &LayoutBlock) -> bool {
-    match block {
-        LayoutBlock::Paragraph(paragraph) => {
-            paragraph
-                .attrs
-                .as_ref()
-                .is_none_or(|attrs| attrs.horizontal_rules.is_empty())
-                && paragraph
-                    .runs
-                    .iter()
-                    .all(|run| matches!(run, Run::Text(_) | Run::Tab(_) | Run::LineBreak(_)))
-        }
-        LayoutBlock::Table(table) => table
-            .rows
-            .iter()
-            .flat_map(|row| &row.cells)
-            .flat_map(|cell| &cell.blocks)
-            .all(shiftable),
-        LayoutBlock::SectionBreak(_) => true,
-        _ => false,
-    }
+fn ordinary(paragraph: &ParagraphBlock, start: u64, units: u32) -> bool {
+    paragraph.pm_start == Some(start as f64)
+        && paragraph.pm_end == Some((start + u64::from(units) + 2) as f64)
+        && paragraph.sdt_groups.is_none()
+        && paragraph.attrs.as_ref().is_some_and(|attrs| attrs.horizontal_rules.is_empty())
+        && paragraph.runs.iter().all(|run| match run {
+            Run::Text(run) => run.inline_sdt_widget.is_none() && ordinary_formatting(&run.fmt),
+            Run::Tab(run) => ordinary_formatting(&run.fmt),
+            Run::LineBreak(_) => true,
+            Run::Image(_) | Run::Field(_) | Run::Unsupported => false,
+        })
 }
 
-fn shift_block(block: &mut LayoutBlock, delta: i64) {
-    match block {
-        LayoutBlock::Paragraph(paragraph) => {
-            shift_pair(&mut paragraph.pm_start, &mut paragraph.pm_end, delta);
-            for run in &mut paragraph.runs {
-                match run {
-                    Run::Text(run) => shift_pair(&mut run.pm_start, &mut run.pm_end, delta),
-                    Run::Tab(run) => shift_pair(&mut run.pm_start, &mut run.pm_end, delta),
-                    Run::LineBreak(run) => shift_pair(&mut run.pm_start, &mut run.pm_end, delta),
-                    _ => unreachable!("certified plain text"),
-                }
+fn ordinary_formatting(formatting: &RunFormatting) -> bool {
+    formatting.hyperlink.is_none()
+        && formatting.comment_ids.is_none()
+        && formatting.footnote_ref_id.is_none()
+        && formatting.endnote_ref_id.is_none()
+        && formatting.hidden != Some(true)
+        && formatting.is_insertion != Some(true)
+        && formatting.is_deletion != Some(true)
+        && formatting.change_revision_id.is_none()
+}
+
+fn comments_clear<T: ReadTxn>(txn: &T, start: u32, end: u32) -> bool {
+    let Some(comments) = txn.get_map(COMMENTS) else {
+        return false;
+    };
+    for (_, value) in comments.iter(txn) {
+        let Out::YMap(comment) = value else {
+            continue;
+        };
+        let Some(Out::Any(Any::Array(anchors))) = comment.get(txn, "anchors") else {
+            return false;
+        };
+        for encoded in anchors.iter() {
+            let Ok(anchor) = decode_anchor(encoded) else {
+                return false;
+            };
+            if anchor.story != "body" {
+                continue;
+            }
+            let (Some(left), Some(right)) =
+                (anchor.start.get_offset(txn), anchor.end.get_offset(txn))
+            else {
+                return false;
+            };
+            if left.index.min(right.index) <= end && left.index.max(right.index) >= start {
+                return false;
             }
         }
-        LayoutBlock::Table(table) => {
-            shift_pair(&mut table.pm_start, &mut table.pm_end, delta);
-            for row in &mut table.rows {
-                for cell in &mut row.cells {
-                    for block in &mut cell.blocks {
-                        shift_block(block, delta);
-                    }
-                }
-            }
-        }
-        LayoutBlock::SectionBreak(_) => {}
-        _ => unreachable!("certified body blocks"),
     }
+    true
 }
