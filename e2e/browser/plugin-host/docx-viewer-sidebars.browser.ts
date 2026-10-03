@@ -60,7 +60,8 @@ async function openSidebar(page: Page, firstCanvasAt: number) {
 }
 
 async function expectUnchanged(page: Page, before: Awaited<ReturnType<typeof status>>) {
-  expect(await status(page)).toEqual({ ...before, replica: { started: false, loaded: false }, errors: [] });
+  const reads = Object.fromEntries(Object.keys(before.reads).map((method) => [method, 0]));
+  expect(await status(page)).toEqual({ ...before, reads, replica: { started: false, loaded: false }, errors: [] });
 }
 
 test('viewer comment and tracked-change cards are placed without a document replica', async ({ page }) => {

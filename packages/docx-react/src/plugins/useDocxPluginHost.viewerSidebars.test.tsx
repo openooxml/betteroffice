@@ -21,6 +21,8 @@ function queries(version: string, y = 20): DisplayListQueries {
     pageCount: () => 1,
     pageSize: () => ({ width: 100, height: 200 }),
     anchorRect: () => ({ pageIndex: 0, x: 0, y, width: 1, height: 10 }),
+    sourceState: () => ({ status: 'ready' }),
+    whenReady: () => Promise.resolve(),
   } as unknown as DisplayListQueries;
   stampWorkerFrameVersion(result, version);
   return result;
@@ -93,7 +95,7 @@ test('managed viewer cards cache worker targets and reproject without accessing 
 
 test('a navigation reply for a superseded viewer version cannot place its card', async () => {
   const pending: Array<(reply: { version: string; value: { loc: { story: string; paraId: string; offset: number }; position: number } }) => void> = [];
-  const read = (() => new Promise((resolve) => { pending.push(resolve); })) as ResidentEngineWorkerClient['documentRead'];
+  const read = (() => new Promise<unknown>((resolve) => { pending.push(resolve); })) as ResidentEngineWorkerClient['documentRead'];
   const view = setup(read);
   const { result, rerender } = renderHook(useDocxPluginHost, { initialProps: view.options });
   await waitFor(() => expect(pending).toHaveLength(1));

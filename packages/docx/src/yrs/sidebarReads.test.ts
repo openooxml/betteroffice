@@ -72,7 +72,7 @@ test('outline headings have trimmed text and the editor display positions', asyn
     for (const heading of headings) {
       const loc = { story: heading.story, paraId: heading.paraId, offset: 0 };
       expect(heading.position).toBe(projection.locToDisplayPoint(loc)!.position);
-      expect(heading.position).toBe(editorProjection!.positionForLoc(loc));
+      expect<number | null>(heading.position).toBe(editorProjection!.positionForLoc(loc));
     }
     expect(readOutlineHeadings(session, 'stale')).toBeNull();
   } finally {

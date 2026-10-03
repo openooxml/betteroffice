@@ -72,7 +72,7 @@ test('more pages at the same version reproject anchors without another read', as
 
 test('a superseded reply is dropped and does not deliver tracked changes', async () => {
   let complete!: (reply: { version: string; value: DocxSidebarRead }) => void;
-  const read = (() => new Promise((resolve) => { complete = resolve; })) as ResidentEngineWorkerClient['documentRead'];
+  const read = (() => new Promise<unknown>((resolve) => { complete = resolve; })) as ResidentEngineWorkerClient['documentRead'];
   const reads = new ViewerSidebarReads(read);
   let shown = queries('A');
   const pending = reads.sidebar('A', ['7'], () => presentedWorkerVersion(shown));
@@ -98,7 +98,7 @@ test('comment ids retain request order and a changed list reads again', async ()
 
 test('empty sidebars deliver the shared empty tracked result', () => {
   const reads = new ViewerSidebarReads((async () => ({ version: 'A', value: null })) as ResidentEngineWorkerClient['documentRead']);
-  let result: TrackedChangesResult | null = null;
+  let result = null as TrackedChangesResult | null;
   reads.deliver('A', { comments: [], revisions: [], trackedChanges: { entries: [], commentToRevision: [] } },
     (next) => { result = next; });
   expect(result).toBe(EMPTY_TRACKED_CHANGES_RESULT);
