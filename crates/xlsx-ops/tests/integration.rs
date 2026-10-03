@@ -101,6 +101,65 @@ fn full_workbook_round_trip_via_undo_stack() {
 }
 
 #[test]
+fn hidden_custom_dimensions_follow_deletions_and_undo() {
+    let mut wb = Workbook::default();
+    let mut sheet = Sheet::new("Sized");
+    sheet.col_widths.insert(2, 0.0);
+    sheet.hidden_col_widths.insert(2, 24.0);
+    sheet.row_heights.insert(3, 0.0);
+    sheet.hidden_row_heights.insert(3, 30.0);
+    wb.sheets.push(sheet);
+    let baseline = wb.clone();
+
+    let tx = Transaction::new(
+        vec![
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+        ],
+        Provenance::User,
+    );
+    let mut stack = UndoStack::new();
+    stack.commit(&mut wb, &tx).unwrap();
+    assert_eq!(wb.sheets[0].hidden_col_widths.get(&1), Some(&24.0));
+    assert_eq!(wb.sheets[0].hidden_row_heights.get(&2), Some(&30.0));
+    stack.undo(&mut wb).unwrap();
+    assert_eq!(wb, baseline);
+    stack.redo(&mut wb).unwrap();
+    assert_eq!(wb.sheets[0].hidden_col_widths.get(&1), Some(&24.0));
+    assert_eq!(wb.sheets[0].hidden_row_heights.get(&2), Some(&30.0));
+
+    let delete_hidden = Transaction::new(
+        vec![
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 2,
+                count: 1,
+            },
+        ],
+        Provenance::User,
+    );
+    stack.commit(&mut wb, &delete_hidden).unwrap();
+    assert!(wb.sheets[0].hidden_col_widths.is_empty());
+    assert!(wb.sheets[0].hidden_row_heights.is_empty());
+    stack.undo(&mut wb).unwrap();
+    assert_eq!(wb.sheets[0].hidden_col_widths.get(&1), Some(&24.0));
+    assert_eq!(wb.sheets[0].hidden_row_heights.get(&2), Some(&30.0));
+}
+
+#[test]
 fn merge_replaces_intersections_and_undo_restores_them() {
     let cases = [
         (

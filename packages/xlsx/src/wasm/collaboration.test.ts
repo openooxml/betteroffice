@@ -359,6 +359,50 @@ describe('wasm collaboration', () => {
     }
   });
 
+  it('preserves hidden custom dimensions through peers, undo, and saved XLSX', () => {
+    const source = collaborative(6051);
+    const peer = collaborative(6052);
+    try {
+      expect(source.applyOps([
+        { type: 'setColWidth', sheet: 0, col: 0, width: 24 },
+        { type: 'setRowHeight', sheet: 0, row: 0, height: 30 },
+      ]).applied).toBe(true);
+      peer.applyUpdate(source.encodeStateAsUpdate(peer.encodeStateVector()));
+      const visible = source.cellPosition(0, 1, 1);
+      expect(peer.cellPosition(0, 1, 1)).toEqual(visible);
+
+      expect(source.applyOps([
+        { type: 'setColVisibility', sheet: 0, col: 0, hidden: true },
+        { type: 'setRowVisibility', sheet: 0, row: 0, hidden: true },
+      ]).applied).toBe(true);
+      peer.applyUpdate(source.encodeStateAsUpdate(peer.encodeStateVector()));
+      const hidden = source.cellPosition(0, 1, 1);
+      expect(hidden.x).toBeLessThan(visible.x);
+      expect(hidden.y).toBeLessThan(visible.y);
+      expect(peer.cellPosition(0, 1, 1)).toEqual(hidden);
+
+      const reopened = openWorkbook(source.save());
+      try {
+        expect(reopened.cellPosition(0, 1, 1)).toEqual(hidden);
+        expect(reopened.applyOps([
+          { type: 'setColVisibility', sheet: 0, col: 0, hidden: false },
+          { type: 'setRowVisibility', sheet: 0, row: 0, hidden: false },
+        ]).applied).toBe(true);
+        expect(reopened.cellPosition(0, 1, 1)).toEqual(visible);
+      } finally {
+        reopened.dispose();
+      }
+
+      source.undo();
+      peer.applyUpdate(source.encodeStateAsUpdate(peer.encodeStateVector()));
+      expect(source.cellPosition(0, 1, 1)).toEqual(visible);
+      expect(peer.cellPosition(0, 1, 1)).toEqual(visible);
+    } finally {
+      source.dispose();
+      peer.dispose();
+    }
+  });
+
   it('drags a chart in a collaborative session and converges the peer', () => {
     const source = collaborativeCharts(6101);
     const target = collaborativeCharts(6102);

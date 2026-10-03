@@ -445,6 +445,36 @@ fn hidden_rows_and_columns_have_zero_render_extent() {
     assert_eq!(sheet.col_widths.get(&3), Some(&0.0));
     assert_eq!(sheet.row_heights.get(&1), Some(&0.0));
     assert_eq!(sheet.row_heights.get(&2), Some(&0.0));
+    assert_eq!(sheet.hidden_col_widths.get(&1), Some(&12.5));
+    assert_eq!(sheet.hidden_col_widths.get(&2), Some(&12.5));
+    assert_eq!(sheet.hidden_col_widths.get(&3), None);
+    assert_eq!(sheet.hidden_row_heights.get(&1), Some(&30.0));
+    assert_eq!(sheet.hidden_row_heights.get(&2), None);
+}
+
+#[test]
+fn hiding_resized_axes_writes_visibility_without_erasing_authored_sizes() {
+    let body = r#"<cols><col min="1" max="1" width="24" customWidth="1"/></cols><sheetData><row r="1" ht="30" customHeight="1"><c r="A1"><v>1</v></c></row></sheetData>"#;
+    let parsed = parse_workbook_with_package(&package(body, &[], false)).unwrap();
+    let mut workbook = parsed.workbook;
+    let sheet = &mut workbook.sheets[0];
+    sheet.col_widths.insert(0, 0.0);
+    sheet.row_heights.insert(0, 0.0);
+    sheet.hidden_col_widths.insert(0, 24.0);
+    sheet.hidden_row_heights.insert(0, 30.0);
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let xml = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+    assert!(
+        xml.contains(r#"width="24" customWidth="1" hidden="1""#),
+        "{xml}"
+    );
+    assert!(
+        xml.contains(r#"ht="30" customHeight="1" hidden="1""#),
+        "{xml}"
+    );
+    let reopened = parse_workbook(&saved).unwrap();
+    assert_eq!(reopened.sheets[0].hidden_col_widths.get(&0), Some(&24.0));
+    assert_eq!(reopened.sheets[0].hidden_row_heights.get(&0), Some(&30.0));
 }
 
 /// a negative `<col>` width is unrenderable, so the model narrows it to zero
