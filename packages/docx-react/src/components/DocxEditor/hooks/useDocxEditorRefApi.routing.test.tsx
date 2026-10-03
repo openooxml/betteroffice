@@ -40,7 +40,7 @@ const PAGE_REQUEST = JSON.stringify({ renderEnv: {} });
 const PAGE_EXPORT = {
   ok: true, version: 'worker-v',
   content: { structured: {}, layout: { documentVersion: 'worker-v', layoutVersion: 'layout-v', pages: [] } },
-} as Awaited<ReturnType<DocxEditorRef['exportStructuredWithPages']>>;
+} as unknown as Awaited<ReturnType<DocxEditorRef['exportStructuredWithPages']>>;
 const PAGE_REFUSAL = {
   ok: false, version: 'worker-v',
   failure: { code: 'stale-layout', target: null, message: 'The layout is stale.' },
@@ -395,7 +395,7 @@ test('viewer paged export does not retry an unsupported revision preview', async
   const host = apiFor(true, true, settled);
   const worker = workerFor(host);
   host.editor.readLayoutRequest.mockResolvedValue(JSON.stringify({ renderEnv: { revisionPreview: { proposal: 'accept' } } }));
-  const refusal = { ...PAGE_REFUSAL, failure: { ...PAGE_REFUSAL.failure, code: 'unsupported-revision-layout' } };
+  const refusal = { ...PAGE_REFUSAL, failure: { ...PAGE_REFUSAL.failure, code: 'unsupported-revision-layout' as const } };
   worker.documentRead.mockResolvedValue({ version: 'worker-v', value: JSON.stringify(refusal) });
   expect(await host.api.exportStructuredWithPages(PAGE_OPTIONS)).toEqual(refusal);
   expect(worker.documentRead).toHaveBeenCalledTimes(1);

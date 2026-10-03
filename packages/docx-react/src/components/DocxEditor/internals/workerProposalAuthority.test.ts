@@ -1,6 +1,9 @@
 import { expect, mock, test } from 'bun:test';
 import {
   proposalSetIdentity,
+  type DocxExportResult,
+  type DocxLayoutMap,
+  type DocxPagedStructuredContent,
   type DocxProposalRequest,
   type DocxProposalResult,
   type DocxProposalSnapshot,
@@ -830,7 +833,7 @@ test('paged exports send the current request and parse the worker result', async
   const result = {
     ok: true, version: 'worker-1',
     content: { structured: {}, layout: { documentVersion: 'worker-1', layoutVersion: 'layout-1', pages: [] } },
-  };
+  } as unknown as DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>;
   h.worker.documentRead.mockImplementation(async (read) => {
     h.events.push(read.kind);
     return { version: 'worker-1', value: JSON.stringify(result) } as never;

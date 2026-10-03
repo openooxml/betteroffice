@@ -8,7 +8,12 @@ import { preloadEditWasm } from '../wasm/edit';
 import { createYrsSession, decodeDocxHostJson, type YrsSession } from './index';
 import type { DocxLayoutMap, DocxPageExportOptions, DocxPagedStructuredContent } from './pagedExport';
 import type { DocxParagraphIdentitySnapshot } from './paragraphIdentity';
-import { createProposalRegistry, type DocxProposalSession } from './proposals';
+import {
+  createProposalRegistry,
+  type DocxProposalRequest,
+  type DocxProposalResult,
+  type DocxProposalSession,
+} from './proposals';
 import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
 import type { DocxStorySelection } from './readTypes';
 import type { DocxExportResult } from './structuredExport';
@@ -219,9 +224,10 @@ async function seededOf(bytes: Uint8Array, clientId: number, request: string): P
 }
 
 function propose(
-  session: DocxProposalSession,
+  session: Pick<DocxProposalSession, 'readParagraphs'>,
   identities: DocxParagraphIdentitySnapshot,
-  expectVersion: string
+  expectVersion: string,
+  submit: (request: DocxProposalRequest) => DocxProposalResult
 ): void {
   const paragraphs = identities.paragraphs
     .flatMap(({ session: anchor }) => anchor?.story === 'body' ? [anchor] : []);
@@ -234,29 +240,24 @@ function propose(
   const replacement = paragraphs.find(({ paraId }) => paraId === first.paraId)!;
   const insertion = paragraphs.find(({ paraId }) => paraId !== first.paraId);
   if (!insertion) throw new Error('expected a second paragraph to insert into');
-  const registry = createProposalRegistry(session);
-  try {
-    const result = registry.propose({
-      expectVersion,
-      proposals: [
-        {
-          id: 'replacement', paragraph: replacement, suggest: SUGGEST,
-          op: 'replaceText', search: first.text, replaceWith: 'Replacement text',
-        },
-        {
-          id: 'insertion', paragraph: insertion, suggest: SUGGEST,
-          op: 'insertText', at: 'end', text: ' Added text',
-        },
-      ],
-    });
-    if (!result.ok) throw new Error(result.failure.message);
-    expect(result.snapshot.proposals).toHaveLength(2);
-    expect(result.snapshot.proposals.every(
-      ({ changed, revisionIds }) => changed && revisionIds.length > 0
-    )).toBe(true);
-  } finally {
-    registry.destroy();
-  }
+  const result = submit({
+    expectVersion,
+    proposals: [
+      {
+        id: 'replacement', paragraph: replacement, suggest: SUGGEST,
+        op: 'replaceText', search: first.text, replaceWith: 'Replacement text',
+      },
+      {
+        id: 'insertion', paragraph: insertion, suggest: SUGGEST,
+        op: 'insertText', at: 'end', text: ' Added text',
+      },
+  ],
+  });
+  if (!result.ok) throw new Error(result.failure.message);
+  expect(result.snapshot.proposals).toHaveLength(2);
+  expect(result.snapshot.proposals.every(
+    ({ changed, revisionIds }) => changed && revisionIds.length > 0
+  )).toBe(true);
 }
 
 /** Compares the worker's export with a seeded main-thread session (strict) and with today's replica. */
@@ -273,8 +274,13 @@ async function parity(bytes: Uint8Array, afterProposal = false): Promise<number>
     if (afterProposal) {
       const exported = workerExport(worker, OPTIONS[0]!, request);
       if (!exported.ok) throw new Error(exported.failure.message);
-      propose(worker.proposalEngine, worker.paragraphIdentities(), exported.version);
-      propose(seeded, seeded.paragraphIdentities(), seeded.version());
+      const registry = createProposalRegistry(worker.proposalEngine);
+      try {
+        propose(worker.proposalEngine, worker.paragraphIdentities(), exported.version, (request) => registry.propose(request));
+      } finally {
+        registry.destroy();
+      }
+      propose(seeded, seeded.paragraphIdentities(), seeded.version(), (request) => seeded.proposeChanges(request));
       worker.layoutDocumentWithRegionsRetainedJson(request);
       seeded.layoutDocumentWithRegionsRetainedJson(request);
       const relaid = workerExport(worker, OPTIONS[0]!, request);
