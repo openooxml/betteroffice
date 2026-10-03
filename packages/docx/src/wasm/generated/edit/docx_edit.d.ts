@@ -602,6 +602,7 @@ export class EditSession {
      * another replica seeded them from.
      */
     load_media_sources(json: string): void;
+    load_note_separators(state: Uint8Array): void;
     /**
      * `{"start","end"}` — the paragraph's span in story-global UTF-16 units.
      * `end` is the index of its own pilcrow, so `end - start` is the
@@ -639,6 +640,7 @@ export class EditSession {
      * when it seeded none.
      */
     media_sources_json(): string;
+    note_separators_state(): Uint8Array;
     /**
      * The media type of [`EditSession::media_bytes`].
      */

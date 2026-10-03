@@ -791,7 +791,10 @@ function hydrate(
   }
   session.setPartialDocument(snapshot.partialDocument === true);
   previewFinalPages = snapshot.partialDocument === true ? 0 : null;
-  if (!snapshot.workerAuthoritative) session.loadMediaSources(snapshot.mediaSources ?? '');
+  if (!snapshot.workerAuthoritative) {
+    session.loadMediaSources(snapshot.mediaSources ?? '');
+    session.loadNoteSeparators(snapshot.noteSeparators ?? new Uint8Array(0));
+  }
   if (snapshot.fontsRevision !== fontsRevision) {
     // A mismatched revision always carries the full font set (the client only
     // omits fonts when it knows this session's applied revision matches).

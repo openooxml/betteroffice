@@ -148,6 +148,7 @@ function worker() {
     session: {
       loadState() {},
       loadMediaSources(_json: string) {},
+      loadNoteSeparators(_state: Uint8Array) {},
       setPartialDocument() {},
       setDisplayWindow(start: number, end: number) {
         harness.displayWindows.push([start, end]);
@@ -1240,6 +1241,48 @@ describe('resident worker layout ownership', () => {
     });
     await w.send({ type: 'sync', expectedFrameEpoch: 0, extras: '{}', paintCaret: false, snapshot });
     expect(loaded).toEqual(['{"sources":1}', '']);
+  });
+
+  test('lays out the note separators a snapshot carries, clears absent ones, and preserves worker-owned ones', async () => {
+    const w = worker();
+    const loaded: Uint8Array[] = [];
+    Object.assign(w.harness.session, {
+      loadNoteSeparators: (state: Uint8Array) => loaded.push(state),
+      layoutDocumentWithRegionsRetainedJson: () =>
+        JSON.stringify({ layout: { pages: [] }, notesConverged: true }),
+    });
+    const snapshot: YrsResidentWorkerSnapshot = {
+      clientId: 1,
+      state: new Uint8Array(),
+      fontsRevision: 0,
+      fonts: [],
+      renderInputs: [],
+      measureInputs: [],
+      layoutInput: '{}',
+      layoutWithRegions: true,
+      layoutRevision: 1,
+      selection: null,
+    };
+    const noteSeparators = new Uint8Array([1, 2, 3]);
+    await w.send({
+      type: 'bootstrap',
+      expectedFrameEpoch: 0,
+      extras: '{}',
+      snapshot: { ...snapshot, noteSeparators },
+    });
+    expect(loaded[0]).toBe(noteSeparators);
+    await w.send({ type: 'sync', expectedFrameEpoch: 0, extras: '{}', paintCaret: false, snapshot });
+    expect(loaded).toEqual([noteSeparators, new Uint8Array(0)]);
+    for (const workerSnapshot of [{ ...snapshot, noteSeparators }, snapshot]) {
+      await w.send({
+        type: 'sync',
+        expectedFrameEpoch: 0,
+        extras: '{}',
+        paintCaret: false,
+        snapshot: { ...workerSnapshot, workerAuthoritative: true },
+      });
+    }
+    expect(loaded).toHaveLength(2);
   });
 
   test('finishes a provisional layout on request and before other work', async () => {

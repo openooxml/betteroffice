@@ -685,6 +685,8 @@ export interface YrsResidentWorkerSnapshot {
   partialDocument?: boolean;
   /** Which seeded `data:` image sources lay out as `media:{n}` tokens. @internal */
   mediaSources?: string;
+  /** The opened package's footnote/endnote separator notes, for replicas without its source. @internal */
+  noteSeparators?: Uint8Array;
 }
 
 /**
@@ -1065,6 +1067,8 @@ export interface YrsSession extends CollaborationReplica {
    * snapshot's `mediaSources` names. @internal
    */
   loadMediaSources(json: string): void;
+  /** Loads the opened package's separator notes for this replica. @internal */
+  loadNoteSeparators(state: Uint8Array): void;
   /**
    * Seeds stories and returns paragraph IDs in document order. Seeding a
    * document that has no opening yet starts one; see {@link beginOpening}.
@@ -1955,6 +1959,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       const mirrored = workerDocumentVersion !== null;
       const selectionJson = mirrored ? 'null' : session.selection();
       const mediaSources = mirrored ? undefined : session.media_sources_json();
+      const noteSeparators = mirrored ? undefined : session.note_separators_state();
       const fontsCurrent = options?.knownFontsRevision === residentFontsRevision;
       let state: Uint8Array | null = null;
       if (!mirrored && options?.knownStateVector) {
@@ -1985,6 +1990,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         layoutRevision: residentLayoutRevision,
         ...(partialDocument ? { partialDocument: true } : {}),
         ...(mediaSources ? { mediaSources } : {}),
+        ...(noteSeparators?.length ? { noteSeparators } : {}),
       };
     },
     residentWorkerProbe: () => {
@@ -2027,6 +2033,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       return bytes && mimeType ? { bytes, mimeType } : null;
     },
     loadMediaSources: (json) => session.load_media_sources(json),
+    loadNoteSeparators: (state) => session.load_note_separators(state),
     mediaDataUrl,
     mediaScope: () => mediaScope,
     materializeDocx: () => {

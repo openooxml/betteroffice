@@ -75,7 +75,8 @@ struct RenderState {
 }
 
 struct LoweredNoteSeparators {
-    source: Arc<crate::seed::SourceMetadata>,
+    state: Arc<[u8]>,
+    doc: EditingDoc,
     env: RenderEnv,
     blocks: HashMap<String, Rc<Vec<LayoutBlock>>>,
 }
@@ -3280,17 +3281,22 @@ impl EngineSession {
         kind: &str,
         render_env: &RenderEnv,
     ) -> Result<Option<Rc<Vec<LayoutBlock>>>, String> {
-        let Some(source) = self.doc.source_metadata() else {
+        let Some(state) = self.doc.note_separator_state()? else {
             self.note_separators.borrow_mut().take();
             return Ok(None);
         };
         let mut cache = self.note_separators.borrow_mut();
         if cache
             .as_ref()
-            .is_none_or(|cached| !Arc::ptr_eq(&cached.source, &source) || cached.env != *render_env)
+            .is_none_or(|cached| !Arc::ptr_eq(&cached.state, &state) || cached.env != *render_env)
         {
+            let scratch = EditingDoc::new(1);
+            scratch
+                .apply_update_v1(&state)
+                .map_err(|error| error.to_string())?;
             *cache = Some(LoweredNoteSeparators {
-                source: Arc::clone(&source),
+                state,
+                doc: scratch,
                 env: render_env.clone(),
                 blocks: HashMap::new(),
             });
@@ -3299,31 +3305,11 @@ impl EngineSession {
         if let Some(blocks) = cached.blocks.get(kind) {
             return Ok(Some(Rc::clone(blocks)));
         }
-        let Some(paragraphs) = source.read().note_separator_paragraphs.get(kind) else {
+        if cached.doc.story_len(kind).is_err() {
             return Ok(None);
-        };
-        fn replace_marks(value: &mut serde_json::Value) {
-            if matches!(
-                value.get("type").and_then(serde_json::Value::as_str),
-                Some("separator" | "continuationSeparator")
-            ) {
-                *value = serde_json::json!({"type": "text", "text": "\u{200b}"});
-            } else {
-                match value {
-                    serde_json::Value::Array(values) => values.iter_mut().for_each(replace_marks),
-                    serde_json::Value::Object(values) => {
-                        values.values_mut().for_each(replace_marks)
-                    }
-                    _ => {}
-                }
-            }
         }
-        let mut paragraphs = paragraphs.clone();
-        paragraphs.iter_mut().for_each(replace_marks);
-        let scratch = EditingDoc::new(0);
-        crate::seed::seed_blocks(&scratch, Some(&source), &[(kind.to_owned(), &paragraphs)])?;
         let blocks = Rc::new(
-            crate::bridge::yrs_doc_to_layout_blocks(&scratch, kind, render_env)
+            crate::bridge::yrs_doc_to_layout_blocks(&cached.doc, kind, render_env)
                 .map_err(|error| error.to_string())?,
         );
         cached.blocks.insert(kind.to_owned(), Rc::clone(&blocks));
@@ -3359,6 +3345,7 @@ impl EngineSession {
             let Some(lowered) = self.lower_note_separator(name, render_env)? else {
                 continue;
             };
+            let mut measured_heights = HashMap::new();
             for &section_index in &sections {
                 let page = layout
                     .pages
@@ -3377,37 +3364,50 @@ impl EngineSession {
                     .or_else(|| section.and_then(|section| section.margins.as_ref()))
                     .unwrap_or(&first_page.margins);
                 let width = (size.w - margins.left - margins.right).max(1.0);
-                let mut blocks = lowered.as_ref().clone();
-                for block in &mut blocks {
-                    resolve_line_unit_spacing(
-                        block,
-                        regions.paragraph_spacing_line_px(section_index),
-                    );
-                    resolve_doc_grid_pitch(block, regions.doc_grid_snap_pitch_px(section_index));
-                }
-                apply_contextual_spacing_blocks(&mut blocks);
-                let measures =
-                    docx_layout::measure_blocks::measure_blocks(&mut blocks, width, measurement)?;
-                let mut height = 0.0;
-                let mut previous_after = 0.0_f64;
-                for (block, measure) in blocks.iter().zip(&measures) {
-                    if let (LayoutBlock::Paragraph(paragraph), BlockExtent::Paragraph(extent)) =
-                        (block, measure)
-                    {
-                        height += previous_after.max(get_spacing_before(paragraph))
-                            + extent
-                                .lines
-                                .iter()
-                                .map(|line| line.line_height)
-                                .sum::<f64>();
-                        previous_after = get_spacing_after(paragraph);
-                    } else {
-                        height +=
-                            previous_after + docx_layout::measure_blocks::extent_height(measure);
-                        previous_after = 0.0;
+                let line_px = regions.paragraph_spacing_line_px(section_index);
+                let grid_pitch = regions.doc_grid_snap_pitch_px(section_index);
+                let key = (
+                    width.to_bits(),
+                    line_px.to_bits(),
+                    grid_pitch.map(f64::to_bits),
+                );
+                let height = if let Some(&height) = measured_heights.get(&key) {
+                    height
+                } else {
+                    let mut blocks = lowered.as_ref().clone();
+                    for block in &mut blocks {
+                        resolve_line_unit_spacing(block, line_px);
+                        resolve_doc_grid_pitch(block, grid_pitch);
                     }
-                }
-                height += previous_after;
+                    apply_contextual_spacing_blocks(&mut blocks);
+                    let measures = docx_layout::measure_blocks::measure_blocks(
+                        &mut blocks,
+                        width,
+                        measurement,
+                    )?;
+                    let mut height = 0.0;
+                    let mut previous_after = 0.0_f64;
+                    for (block, measure) in blocks.iter().zip(&measures) {
+                        if let (LayoutBlock::Paragraph(paragraph), BlockExtent::Paragraph(extent)) =
+                            (block, measure)
+                        {
+                            height += previous_after.max(get_spacing_before(paragraph))
+                                + extent
+                                    .lines
+                                    .iter()
+                                    .map(|line| line.line_height)
+                                    .sum::<f64>();
+                            previous_after = get_spacing_after(paragraph);
+                        } else {
+                            height += previous_after
+                                + docx_layout::measure_blocks::extent_height(measure);
+                            previous_after = 0.0;
+                        }
+                    }
+                    height += previous_after;
+                    measured_heights.insert(key, height);
+                    height
+                };
                 match kind {
                     NoteKind::Footnote => &mut heights.footnote,
                     NoteKind::Endnote => &mut heights.endnote,
@@ -10084,6 +10084,140 @@ mod tests {
             (layout.pages.len(), last_page_text),
             (2, vec!["FILLER 53".to_owned(), "FILLER 54".to_owned()])
         );
+    }
+
+    #[test]
+    fn replicated_separator_state_preserves_note_heights_and_body_breaks() {
+        let page_breaks = |layout: &serde_json::Value| {
+            layout["pages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|page| {
+                    (
+                        page["fragments"].clone(),
+                        page["footnoteReservedHeight"].clone(),
+                        page["noteAreas"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|area| area["separator"]["height"].clone())
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        for kind in ["footnote", "endnote"] {
+            for line in [960, 1440] {
+                let separator = format!(
+                    r#"<w:p><w:pPr><w:spacing w:line="{line}" w:lineRule="exact"/></w:pPr><w:r><w:separator/></w:r></w:p>"#
+                );
+                let (opener, layout) = layout_with_note_separator(kind, Some(&separator));
+                let request = opener
+                    .regions
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .request_json
+                    .clone();
+                let replica = EngineSession::new(313);
+                replica
+                    .doc()
+                    .apply_update_v1(&opener.doc().encode_state_as_update_v1())
+                    .unwrap();
+                assert!(replica.doc().source_metadata().is_none());
+                let fallback: serde_json::Value = serde_json::from_str(
+                    &replica.layout_document_with_regions_json(&request).unwrap(),
+                )
+                .unwrap();
+                for area in fallback["layout"]["pages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|page| page["noteAreas"].as_array().into_iter().flatten())
+                {
+                    assert!(area.get("separator").is_none());
+                    let notes_height: f64 = area["notes"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|note| note["height"].as_f64().unwrap())
+                        .sum();
+                    assert_eq!(area["height"].as_f64().unwrap() - notes_height, 12.0);
+                }
+                replica
+                    .doc()
+                    .set_note_separator_state(opener.doc().note_separator_state().unwrap());
+                let replicated: serde_json::Value = serde_json::from_str(
+                    &replica.layout_document_with_regions_json(&request).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    replicated["layout"]["pages"].as_array().unwrap().len(),
+                    layout["pages"].as_array().unwrap().len()
+                );
+                assert_eq!(page_breaks(&replicated["layout"]), page_breaks(&layout));
+                if kind == "footnote" {
+                    assert_eq!(layout["pages"].as_array().unwrap().len(), 2);
+                    assert_eq!(fallback["layout"]["pages"].as_array().unwrap().len(), 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn equal_separator_state_keeps_the_lowering_and_empty_state_clears_it() {
+        let (opener, _) = layout_with_note_separator(
+            "footnote",
+            Some(
+                r#"<w:p><w:pPr><w:spacing w:line="960" w:lineRule="exact"/></w:pPr><w:r><w:rPr><w:sz w:val="144"/></w:rPr><w:separator/></w:r></w:p>"#,
+            ),
+        );
+        let state = opener.doc().note_separator_state().unwrap().unwrap();
+        assert!(Arc::ptr_eq(
+            &state,
+            &opener.doc().note_separator_state().unwrap().unwrap()
+        ));
+        let replica = EngineSession::new(313);
+        replica
+            .doc()
+            .set_note_separator_state(Some(Arc::clone(&state)));
+        let env = RenderEnv::default();
+        let lowered = replica
+            .lower_note_separator("footnote", &env)
+            .unwrap()
+            .unwrap();
+        let equal: Arc<[u8]> = Arc::from(state.as_ref());
+        assert!(!Arc::ptr_eq(&state, &equal));
+        replica.doc().set_note_separator_state(Some(equal));
+        assert!(Arc::ptr_eq(
+            &state,
+            &replica.doc().note_separator_state().unwrap().unwrap()
+        ));
+        assert!(
+            replica
+                .lower_note_separator("endnote", &env)
+                .unwrap()
+                .is_none()
+        );
+        assert!(Rc::ptr_eq(
+            &lowered,
+            &replica
+                .lower_note_separator("footnote", &env)
+                .unwrap()
+                .unwrap()
+        ));
+        replica
+            .doc()
+            .set_note_separator_state(Some(Arc::<[u8]>::from([])));
+        assert!(replica.doc().note_separator_state().unwrap().is_none());
+        assert!(
+            replica
+                .lower_note_separator("footnote", &env)
+                .unwrap()
+                .is_none()
+        );
+        assert!(replica.note_separators.borrow().is_none());
     }
 
     #[test]
