@@ -47,12 +47,11 @@ export function useFindReplaceBridge({
   const searchRef = useRef<{ text: string; options: FindOptions } | null>(null);
   const generationRef = useRef(0);
   const viewerVersionRef = useRef<string | null>(null);
-  const openRef = useRef(findReplace.state.isOpen);
-  openRef.current = findReplace.state.isOpen;
+  const isOpen = findReplace.state.isOpen;
 
   useEffect(() => () => {
     generationRef.current += 1;
-  }, []);
+  }, [isOpen]);
 
   const goToMatch = useCallback(
     (match: YrsFindMatch | undefined, index: number): FindMatch | null => {
@@ -89,7 +88,7 @@ export function useFindReplaceBridge({
       const session = editor.getYrsSession();
       void editor.readViewerFindMatches(searchText, options).then((read) => {
         const current = pagedEditorRef.current;
-        if (read === null || generationRef.current !== generation || !openRef.current ||
+        if (read === null || generationRef.current !== generation ||
           !current?.isWorkerViewer() || current.getYrsSession() !== session) return;
         const { matches } = read;
         const index = matches.length > 0 ? pick(matches.length) : 0;
@@ -140,13 +139,16 @@ export function useFindReplaceBridge({
 
   const step = useCallback((next: (current: number, count: number) => number): FindMatch | null => {
     const result = findResultRef.current as YrsFindResult | null;
-    if (!result?.matches.length) return null;
     const editor = pagedEditorRef.current;
     const search = searchRef.current;
-    if (editor?.isWorkerViewer?.() && search && editor.getYrsSession()?.version() !== viewerVersionRef.current) {
-      searchViewer(editor, search.text, search.options, (count) => next(Math.min(result.currentIndex, count - 1), count));
+    if (result && search && editor?.isWorkerViewer?.() &&
+      editor.getYrsSession()?.version() !== viewerVersionRef.current) {
+      searchViewer(editor, search.text, search.options, (count) =>
+        result.matches.length > 0 ? next(Math.min(result.currentIndex, count - 1), count) : 0
+      );
       return null;
     }
+    if (!result?.matches.length) return null;
     const index = next(result.currentIndex, result.matches.length);
     return goToMatch(result.matches[index], index);
   }, [goToMatch, pagedEditorRef, searchViewer]);

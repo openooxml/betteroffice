@@ -135,7 +135,7 @@ test('null worker result leaves the viewer results empty', async () => {
   expect(editor.setSelection).not.toHaveBeenCalled();
 });
 
-for (const change of ['editor', 'session', 'viewer', 'closed', 'unmount'] as const) {
+for (const change of ['editor', 'session', 'viewer', 'closed', 'reopened', 'unmount'] as const) {
   test(`viewer result is ignored after changing ${change}`, async () => {
     const { hook, editor, pagedEditorRef, findReplace } = mount();
     const pending = deferred<Read>();
@@ -144,8 +144,12 @@ for (const change of ['editor', 'session', 'viewer', 'closed', 'unmount'] as con
     if (change === 'editor') pagedEditorRef.current = null;
     if (change === 'session') editor.getYrsSession.mockReturnValue({} as YrsSession);
     if (change === 'viewer') editor.isWorkerViewer.mockReturnValue(false);
-    if (change === 'closed') {
+    if (change === 'closed' || change === 'reopened') {
       findReplace.state.isOpen = false;
+      hook.rerender();
+    }
+    if (change === 'reopened') {
+      findReplace.state.isOpen = true;
       hook.rerender();
     }
     if (change === 'unmount') hook.unmount();
@@ -179,6 +183,19 @@ test('viewer next and previous search again when the document version changed', 
   expect(editor.setSelection).toHaveBeenLastCalledWith(15, 19);
   act(() => { expect(hook.result.current.handleFindPrevious()).toEqual(shifted[0]); });
   expect(editor.readViewerFindMatches).toHaveBeenCalledTimes(2);
+});
+
+test('viewer next searches again after an empty result when the document version changed', async () => {
+  const { hook, editor, version } = mount();
+  editor.readViewerFindMatches.mockResolvedValueOnce({ version: 'v1', matches: [] });
+  await act(async () => { hook.result.current.handleFind('word', options); });
+  act(() => { expect(hook.result.current.handleFindNext()).toBeNull(); });
+  expect(editor.readViewerFindMatches).toHaveBeenCalledTimes(1);
+  version.mockReturnValue('v2');
+  await act(async () => { expect(hook.result.current.handleFindNext()).toBeNull(); });
+  expect(editor.readViewerFindMatches).toHaveBeenCalledTimes(2);
+  expect(hook.result.current.findResultRef.current).toEqual({ matches, totalCount: 2, currentIndex: 0 });
+  expect(editor.setSelection).toHaveBeenLastCalledWith(1, 5);
 });
 
 test('editor find remains synchronous and maps and selects Yrs ranges', () => {
