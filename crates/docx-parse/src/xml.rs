@@ -220,6 +220,10 @@ impl<'a> ParseBudget<'a> {
         )
     }
 
+    pub(crate) fn paragraph_count(&self) -> usize {
+        self.paragraphs
+    }
+
     /// Charge one table before parsing its grid and rows.
     pub fn charge_table(&mut self, part: &str) -> Result<(), ParseError> {
         charge(&mut self.tables, 1, self.limits.max_tables, "tables", part)

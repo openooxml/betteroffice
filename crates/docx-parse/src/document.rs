@@ -585,7 +585,7 @@ pub fn parse_document_body(
     document: &XmlElement,
     parser: &mut StoryParser<'_, '_>,
 ) -> Result<DocumentBody, ParseError> {
-    parse_document_body_impl(document, parser, true, None, None).map(|(body, _)| body)
+    parse_document_body_impl(document, parser, true, None, None, None).map(|(body, _, _)| body)
 }
 
 /// Parses a body without cloning blocks into section content.
@@ -593,8 +593,10 @@ pub(crate) fn parse_document_body_compact(
     document: &XmlElement,
     parser: &mut StoryParser<'_, '_>,
     body_blocks: Option<usize>,
-) -> Result<DocumentBody, ParseError> {
-    parse_document_body_impl(document, parser, false, body_blocks, None).map(|(body, _)| body)
+    paragraph_budget: Option<usize>,
+) -> Result<(DocumentBody, bool), ParseError> {
+    parse_document_body_impl(document, parser, false, body_blocks, None, paragraph_budget)
+        .map(|(body, _, budget_stopped)| (body, budget_stopped))
 }
 
 pub(crate) fn parse_document_body_compact_with_read(
@@ -602,8 +604,16 @@ pub(crate) fn parse_document_body_compact_with_read(
     parser: &mut StoryParser<'_, '_>,
     body_blocks: Option<usize>,
     kept_children: usize,
-) -> Result<(DocumentBody, usize), ParseError> {
-    parse_document_body_impl(document, parser, false, body_blocks, Some(kept_children))
+    paragraph_budget: Option<usize>,
+) -> Result<(DocumentBody, usize, bool), ParseError> {
+    parse_document_body_impl(
+        document,
+        parser,
+        false,
+        body_blocks,
+        Some(kept_children),
+        paragraph_budget,
+    )
 }
 
 fn parse_document_body_impl(
@@ -612,15 +622,22 @@ fn parse_document_body_impl(
     clone_section_content: bool,
     body_blocks: Option<usize>,
     read_limit: Option<usize>,
-) -> Result<(DocumentBody, usize), ParseError> {
+    paragraph_budget: Option<usize>,
+) -> Result<(DocumentBody, usize, bool), ParseError> {
     if document.local_name() != "document" {
-        return Ok((DocumentBody::default(), 0));
+        return Ok((DocumentBody::default(), 0, false));
     }
     let Some(body) = document.child("w", "body") else {
-        return Ok((DocumentBody::default(), 0));
+        return Ok((DocumentBody::default(), 0, false));
     };
-    let (content, read) =
-        parser.parse_blocks_until_with_read_limit(body, 0, false, body_blocks, read_limit)?;
+    let (content, read, budget_stopped) = parser.parse_blocks_until_with_read_limit(
+        body,
+        0,
+        false,
+        body_blocks,
+        read_limit,
+        paragraph_budget,
+    )?;
     // A body cut short ends inside the section whose properties the next
     // section-ending paragraph carries.
     let cut_section = body_blocks.and_then(|_| {
@@ -655,6 +672,7 @@ fn parse_document_body_impl(
             comments: None,
         },
         read,
+        budget_stopped,
     ))
 }
 

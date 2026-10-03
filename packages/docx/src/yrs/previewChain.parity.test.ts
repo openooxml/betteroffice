@@ -46,14 +46,24 @@ interface Built {
   provisional: boolean;
   layoutPages: number;
   pages: DisplayPage[];
+  paragraphs: number;
 }
 
-async function build(bytes: Uint8Array, preview: boolean): Promise<Built> {
+async function build(bytes: Uint8Array, preview: boolean, paragraphBudget?: number): Promise<Built> {
   const session = await createResidentEngineSession();
   try {
-    const hostJson = preview ? session.openDocxPreview(bytes, 200) : session.openDocx(bytes);
+    const hostJson = preview
+      ? session.openDocxPreview(bytes, 200, paragraphBudget)
+      : session.openDocx(bytes);
     if (hostJson === null) {
-      return { refused: true, wholeBody: false, provisional: false, layoutPages: 0, pages: [] };
+      return {
+        refused: true,
+        wholeBody: false,
+        provisional: false,
+        layoutPages: 0,
+        pages: [],
+        paragraphs: 0,
+      };
     }
     const host = decodeDocxHostJson(hostJson, bytes);
     const document = host.document;
@@ -105,16 +115,36 @@ async function build(bytes: Uint8Array, preview: boolean): Promise<Built> {
       provisional: layout.provisional === true,
       layoutPages: layout.layout.pages.length,
       pages: applyFrameDelta(null, decodeFrameDelta(frame)).displayList.pages,
+      paragraphs: session.paragraphIdentities().paragraphs.length,
     };
   } finally {
     session.destroy();
   }
 }
 
+test('weighted table preview builds exactly the first two full-layout pages with fewer paragraphs', async () => {
+  const bytes = syntheticDocx('plain', 44, 17, { tableDense: true });
+  const weighted = await build(bytes, true, 256);
+  const blockCount = await build(bytes, true);
+  const full = await build(bytes, false);
+  expect(weighted.refused).toBe(false);
+  expect(weighted.wholeBody).toBe(false);
+  expect(weighted.paragraphs).toBeLessThan(blockCount.paragraphs);
+  const built = weighted.pages.filter((page) => page.unbuilt !== true);
+  expect(built).toHaveLength(2);
+  expect(built.map((page) => page.pageIndex)).toEqual([0, 1]);
+  for (const page of built) {
+    expect(full.pages[page.pageIndex]).toBeDefined();
+    expect(full.pages[page.pageIndex]?.unbuilt).not.toBe(true);
+    expect(page).toEqual(full.pages[page.pageIndex]);
+  }
+});
+
 async function comparePreview(
-  bytes: Uint8Array
+  bytes: Uint8Array,
+  paragraphBudget?: number
 ): Promise<{ built: DisplayPage[]; wholeBody: boolean; provisional: boolean; fullPages: number }> {
-  const preview = await build(bytes, true);
+  const preview = await build(bytes, true, paragraphBudget);
   expect(preview.refused).toBe(false);
   const full = await build(bytes, false);
   const built = preview.pages.filter((page) => page.unbuilt !== true);
@@ -148,15 +178,17 @@ const fixtures = readdirSync(CORPUS, { recursive: true, encoding: 'utf8' })
   .filter((name) => name.endsWith('.docx'))
   .sort();
 for (const name of fixtures) {
-  test(`worker preview matches full layout: ${name}`, async () => {
-    const bytes = new Uint8Array(readFileSync(resolve(CORPUS, name)));
-    if (basename(name) === 'wordprocessingml-comprehensive.docx') {
-      expect((await build(bytes, true)).refused).toBe(true);
-    } else {
-      const { built } = await comparePreview(bytes);
-      expect(built.length).toBeGreaterThan(0);
-    }
-  });
+  for (const paragraphBudget of [undefined, 256]) {
+    test(`worker preview matches full layout: ${name} budget ${paragraphBudget ?? 'none'}`, async () => {
+      const bytes = new Uint8Array(readFileSync(resolve(CORPUS, name)));
+      if (basename(name) === 'wordprocessingml-comprehensive.docx') {
+        expect((await build(bytes, true, paragraphBudget)).refused).toBe(true);
+      } else {
+        const { built } = await comparePreview(bytes, paragraphBudget);
+        expect(built.length).toBeGreaterThan(0);
+      }
+    });
+  }
 }
 
 for (const [index, flavour] of FLAVOURS.entries()) {

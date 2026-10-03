@@ -1,6 +1,9 @@
 use docx_parse::ParseLimits;
+use docx_parse::block::PREVIEW_MIN_BLOCKS;
 use docx_parse::s9::{
     S9ParseOptions, parse_docx_s9_preview_from_parts, parse_docx_s9_preview_from_parts_full_dom,
+    parse_docx_s9_preview_from_parts_full_dom_with_budget,
+    parse_docx_s9_preview_from_parts_with_budget,
 };
 
 const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#;
@@ -72,17 +75,45 @@ fn compare(body: &str, refused: bool) {
                 ..S9ParseOptions::default()
             };
             let limits = ParseLimits::default();
-            let actual =
+            let legacy =
                 parse_docx_s9_preview_from_parts(&parts, blocks, options.clone(), &limits).unwrap();
             let expected =
-                parse_docx_s9_preview_from_parts_full_dom(&parts, blocks, options, &limits)
+                parse_docx_s9_preview_from_parts_full_dom(&parts, blocks, options.clone(), &limits)
                     .unwrap();
-            assert_eq!(actual.is_none(), refused, "blocks={blocks}");
+            assert_eq!(legacy.is_none(), refused, "blocks={blocks}");
+            let legacy_json = serde_json::to_vec(&legacy).unwrap();
             assert_eq!(
-                serde_json::to_value(actual).unwrap(),
-                serde_json::to_value(expected).unwrap(),
+                legacy_json,
+                serde_json::to_vec(&expected).unwrap(),
                 "blocks={blocks}, source_ordinals={source_ordinals}"
             );
+            for paragraph_budget in [None, Some(32), Some(256)] {
+                let actual = parse_docx_s9_preview_from_parts_with_budget(
+                    &parts,
+                    blocks,
+                    options.clone(),
+                    &limits,
+                    paragraph_budget,
+                )
+                .unwrap();
+                let expected = parse_docx_s9_preview_from_parts_full_dom_with_budget(
+                    &parts,
+                    blocks,
+                    options.clone(),
+                    &limits,
+                    paragraph_budget,
+                )
+                .unwrap();
+                assert_eq!(actual.is_none(), refused);
+                assert_eq!(actual, expected, "blocks={blocks}, budget={paragraph_budget:?}");
+                if paragraph_budget.is_none() {
+                    let envelope = actual.as_ref().map(|(envelope, budget_stopped)| {
+                        assert!(!*budget_stopped);
+                        envelope
+                    });
+                    assert_eq!(serde_json::to_vec(&envelope).unwrap(), legacy_json);
+                }
+            }
         }
     }
 }
@@ -248,5 +279,227 @@ fn xml_limits_still_count_the_removed_tail() {
             parse_docx_s9_preview_from_parts_full_dom(&parts, 5, options.clone(), &limits)
                 .map(|value| serde_json::to_value(value).unwrap());
         assert_eq!(actual, expected, "{limits:?}");
+    }
+}
+
+fn table(rows: usize, cells: usize, cell_paragraphs: usize) -> String {
+    let content = (0..cell_paragraphs)
+        .map(|index| paragraph(index, "", ""))
+        .collect::<String>();
+    let cells = format!("<w:tc>{content}</w:tc>").repeat(cells);
+    format!(
+        "<w:tbl>{}</w:tbl>",
+        format!("<w:tr>{cells}</w:tr>").repeat(rows)
+    )
+}
+
+fn weighted_preview(body: &str, blocks: usize, budget: usize) -> (docx_parse::S9WireEnvelope, bool) {
+    let parts = package(body);
+    let options = S9ParseOptions {
+        determinism_seed: Some("7".repeat(64)),
+        ..S9ParseOptions::default()
+    };
+    let limits = ParseLimits::default();
+    let streaming = parse_docx_s9_preview_from_parts_with_budget(
+        &parts,
+        blocks,
+        options.clone(),
+        &limits,
+        Some(budget),
+    )
+    .unwrap()
+    .unwrap();
+    let dom = parse_docx_s9_preview_from_parts_full_dom_with_budget(
+        &parts,
+        blocks,
+        options,
+        &limits,
+        Some(budget),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(streaming, dom);
+    streaming
+}
+
+#[test]
+fn dense_tables_stop_at_the_first_complete_block_after_the_minimum() {
+    let mut body = (0..60)
+        .map(|index| format!("{}{}", table(4, 3, 2), paragraph(index, "", "")))
+        .collect::<String>();
+    body.push_str(&paragraph(0, "", "").repeat(620));
+    for (budget, expected_blocks) in [(256, PREVIEW_MIN_BLOCKS), (430, 35)] {
+        let (preview, stopped) = weighted_preview(&body, 200, budget);
+        assert!(stopped);
+        let content = &preview.document.package.document.content;
+        assert_eq!(content.len(), expected_blocks);
+        for block in content.iter().step_by(2) {
+            let docx_parse::BlockContent::Table(table) = block else {
+                panic!("table");
+            };
+            assert_eq!(table.rows.len(), 4);
+            for row in &table.rows {
+                assert_eq!(row.cells.len(), 3);
+                for cell in &row.cells {
+                    assert_eq!(cell.content.len(), 2);
+                    assert!(cell.content.iter().all(|block| matches!(
+                        block,
+                        docx_parse::BlockContent::Paragraph(_)
+                    )));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn nested_table_and_sdt_paragraphs_charge_the_budget() {
+    let p = paragraph(0, "", "");
+    let nested = format!(
+        "<w:tbl><w:tr><w:tc>{p}{}{p}</w:tc></w:tr></w:tbl>",
+        table(1, 2, 2)
+    );
+    let sdt = format!(
+        "<w:sdt><w:sdtPr/><w:sdtContent>{p}{}{p}</w:sdtContent></w:sdt>",
+        table(1, 2, 2)
+    );
+    for block in [nested, sdt] {
+        let body = format!("{}{block}{}", p.repeat(32), p.repeat(620));
+        let (preview, stopped) = weighted_preview(&body, 200, 38);
+        assert!(stopped);
+        assert_eq!(preview.document.package.document.content.len(), 33);
+    }
+}
+
+#[test]
+fn text_box_paragraphs_charge_the_budget() {
+    let p = paragraph(0, "", "");
+    let drawing = format!(
+        r#"<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData><wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:txbx><w:txbxContent>{}</w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#,
+        p.repeat(5),
+    );
+    let body = format!(
+        "{}{}{}",
+        p.repeat(32),
+        paragraph(32, "", &drawing),
+        p.repeat(620)
+    );
+    let (preview, stopped) = weighted_preview(&body, 200, 38);
+    assert!(stopped);
+    assert_eq!(preview.document.package.document.content.len(), 33);
+}
+
+#[test]
+fn a_field_spanning_the_budget_closes_before_the_cut() {
+    for end in [40, 450] {
+        let body = (0..620)
+            .map(|index| {
+                let runs = match index {
+                    30 => {
+                        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> IF 1 = 1 </w:instrText></w:r>"#
+                    }
+                    31 => r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+                    index if index == end => r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+                    _ => "",
+                };
+                paragraph(index, "", runs)
+            })
+            .collect::<String>();
+        let (preview, stopped) = weighted_preview(&body, 200, 32);
+        assert!(stopped);
+        assert_eq!(preview.document.package.document.content.len(), end + 1);
+        let parts = package(&body);
+        let expected = parse_docx_s9_preview_from_parts(
+            &parts,
+            end + 1,
+            S9ParseOptions {
+                determinism_seed: Some("7".repeat(64)),
+                ..S9ParseOptions::default()
+            },
+            &ParseLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(preview, expected);
+    }
+}
+
+#[test]
+fn a_giant_first_table_is_kept_whole() {
+    let body = format!("{}{}", table(100, 3, 2), paragraph(0, "", "").repeat(620));
+    for (blocks, expected_blocks, budget_stopped) in [(1, 1, false), (200, PREVIEW_MIN_BLOCKS, true)] {
+        let (preview, stopped) = weighted_preview(&body, blocks, 256);
+        assert_eq!(stopped, budget_stopped);
+        let content = &preview.document.package.document.content;
+        assert_eq!(content.len(), expected_blocks);
+        let docx_parse::BlockContent::Table(table) = &content[0] else {
+            panic!("table");
+        };
+        assert_eq!(table.rows.len(), 100);
+        assert!(table.rows.iter().all(|row| {
+            row.cells.len() == 3 && row.cells.iter().all(|cell| cell.content.len() == 2)
+        }));
+    }
+}
+
+#[test]
+fn sparse_text_still_stops_at_the_block_limit() {
+    let body = (0..300)
+        .map(|index| paragraph(index, "", ""))
+        .collect::<String>();
+    let (preview, stopped) = weighted_preview(&body, 200, 256);
+    assert!(!stopped);
+    assert_eq!(preview.document.package.document.content.len(), 200);
+    let parts = package(&body);
+    let legacy = parse_docx_s9_preview_from_parts(
+        &parts,
+        200,
+        S9ParseOptions {
+            determinism_seed: Some("7".repeat(64)),
+            ..S9ParseOptions::default()
+        },
+        &ParseLimits::default(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&preview).unwrap(),
+        serde_json::to_vec(&legacy).unwrap()
+    );
+}
+
+#[test]
+fn weighted_cuts_keep_the_next_section_properties() {
+    for section_index in [80, 500] {
+        let body = (0..620)
+            .map(|index| {
+                let properties = if index == section_index {
+                    r#"<w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rHeader"/><w:pgSz w:w="18000" w:h="24000"/></w:sectPr></w:pPr>"#
+                } else {
+                    ""
+                };
+                format!("{}{}", table(4, 3, 2), paragraph(index, properties, ""))
+            })
+            .collect::<String>();
+        let (preview, stopped) = weighted_preview(&body, 200, 256);
+        assert!(stopped);
+        assert_eq!(
+            preview.document.package.document.content.len(),
+            PREVIEW_MIN_BLOCKS
+        );
+        let properties =
+            serde_json::to_value(preview.document.package.document.final_section_properties)
+                .unwrap();
+        assert!(properties.to_string().contains("18000"));
+    }
+}
+
+#[test]
+fn empty_blocks_still_have_weight_and_zero_budget_obeys_the_minimum() {
+    let body = "<w:sdt><w:sdtContent/></w:sdt>".repeat(620);
+    for (budget, expected_blocks) in [(0, PREVIEW_MIN_BLOCKS), (40, 40)] {
+        let (preview, stopped) = weighted_preview(&body, 200, budget);
+        assert!(stopped);
+        assert_eq!(preview.document.package.document.content.len(), expected_blocks);
     }
 }

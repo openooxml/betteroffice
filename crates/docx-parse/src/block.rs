@@ -102,6 +102,8 @@ pub struct StoryParser<'a, 'limits> {
     pub part: &'a str,
 }
 
+pub const PREVIEW_MIN_BLOCKS: usize = 32;
+
 impl StoryParser<'_, '_> {
     pub fn parse_blocks(
         &mut self,
@@ -123,7 +125,8 @@ impl StoryParser<'_, '_> {
         in_header_footer: bool,
         limit: Option<usize>,
     ) -> Result<(Vec<BlockContent>, usize), ParseError> {
-        self.parse_blocks_until_with_read_limit(parent, depth, in_header_footer, limit, None)
+        self.parse_blocks_until_with_read_limit(parent, depth, in_header_footer, limit, None, None)
+            .map(|(content, read, _)| (content, read))
     }
 
     pub(crate) fn parse_blocks_until_with_read_limit(
@@ -133,23 +136,39 @@ impl StoryParser<'_, '_> {
         in_header_footer: bool,
         limit: Option<usize>,
         read_limit: Option<usize>,
-    ) -> Result<(Vec<BlockContent>, usize), ParseError> {
+        paragraph_budget: Option<usize>,
+    ) -> Result<(Vec<BlockContent>, usize, bool), ParseError> {
         self.budget.check_nesting_depth(depth, self.part)?;
         let mut content = Vec::new();
         let mut records: Vec<FieldRecord> = Vec::new();
         let mut open_fields: Vec<OpenField> = Vec::new();
         let mut read = 0;
+        let mut weight = 0usize;
+        let mut budget_stopped = false;
 
         for child in transparent_children(parent, false) {
-            if read_limit.is_some_and(|limit| read >= limit)
-                || (limit.is_some_and(|limit| content.len() >= limit) && open_fields.is_empty())
+            if read_limit.is_some_and(|limit| read >= limit) {
+                break;
+            }
+            let budget_reached = paragraph_budget.is_some_and(|budget| weight >= budget)
+                && content.len() >= PREVIEW_MIN_BLOCKS;
+            if open_fields.is_empty()
+                && (limit.is_some_and(|limit| content.len() >= limit) || budget_reached)
             {
+                budget_stopped = budget_reached;
                 break;
             }
             read += 1;
+            let paragraphs_before = self.budget.paragraph_count();
             if !typed_block(child) {
                 if let Some(raw) = crate::inline::raw_foreign_node(child, self.budget) {
                     content.push(BlockContent::RawXml(Arc::new(raw)));
+                    weight = weight.saturating_add(
+                        self.budget
+                            .paragraph_count()
+                            .saturating_sub(paragraphs_before)
+                            .max(1),
+                    );
                 }
                 continue;
             }
@@ -216,6 +235,12 @@ impl StoryParser<'_, '_> {
                 }
             }
             content.push(parsed);
+            weight = weight.saturating_add(
+                self.budget
+                    .paragraph_count()
+                    .saturating_sub(paragraphs_before)
+                    .max(1),
+            );
 
             if !events.unmatched_modes.is_empty() {
                 let candidates = top_level_complex_field_indices(&content[parsed_index]);
@@ -240,7 +265,7 @@ impl StoryParser<'_, '_> {
         }
 
         attach_recorded_field_blocks(&mut content, records);
-        Ok((content, read))
+        Ok((content, read, budget_stopped))
     }
 
     fn parse_block_sdt(
