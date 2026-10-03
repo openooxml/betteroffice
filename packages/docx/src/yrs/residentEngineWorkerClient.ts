@@ -16,8 +16,11 @@ import type {
   ResidentProposalResponse,
 } from './residentEngineWorkerProtocol';
 import type { DocxProposalRegistryState } from './proposals';
+import type { Comment } from '../types/content';
+import type { Document } from '../types/document';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 import { editWasmModule } from './wasm/index';
+import { restoreProjectionBase } from './yrsToDocument';
 
 /** @internal */
 export interface ResidentProposalReply
@@ -143,6 +146,7 @@ export class ResidentEngineWorkerClient {
   private readonly pending = new Map<number, PendingRequest>();
   private watchdog: ReturnType<typeof setTimeout> | null = null;
   private nextId = 1;
+  private readonly savedRequests = new WeakMap<ArrayBuffer, number>();
   private terminalError: Error | null = null;
   private ready = false;
   private revision = 0;
@@ -429,6 +433,49 @@ export class ResidentEngineWorkerClient {
       throw new ResidentWorkerFailureError('Resident engine worker omitted its state');
     }
     return new Uint8Array(response.state);
+  }
+
+  /** @internal Saves the opened document in the worker; see the `save` request. */
+  async save(request: {
+    source: Uint8Array;
+    hostJson: string;
+    host: Document;
+    comments: Comment[];
+  }): Promise<{ bytes: ArrayBuffer; full: boolean }> {
+    const source = request.source.slice();
+    const response = await this.request(
+      {
+        type: 'save',
+        source: source.buffer,
+        hostJson: request.hostJson,
+        host: request.host,
+        comments: request.comments,
+      },
+      [source.buffer]
+    );
+    if (!(response.saved?.bytes instanceof ArrayBuffer) || typeof response.saved.full !== 'boolean') {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted the saved document');
+    }
+    this.savedRequests.set(response.saved.bytes, response.id);
+    return response.saved;
+  }
+
+  /** @internal */
+  async savedBase(bytes: ArrayBuffer): Promise<Document> {
+    const saveId = this.savedRequests.get(bytes);
+    if (saveId === undefined) {
+      throw new ResidentWorkerFailureError('The resident worker has no matching saved document');
+    }
+    const response = await this.request({ type: 'savedBase', saveId });
+    if (
+      !response.savedBase ||
+      response.savedBase.saveId !== saveId ||
+      !response.savedBase.base?.document ||
+      !Array.isArray(response.savedBase.base.blocks)
+    ) {
+      throw new ResidentWorkerFailureError('The saved projection no longer matches the recorded save');
+    }
+    return { ...restoreProjectionBase(response.savedBase.base), originalBuffer: bytes };
   }
 
   async revisionCount(): Promise<number> {

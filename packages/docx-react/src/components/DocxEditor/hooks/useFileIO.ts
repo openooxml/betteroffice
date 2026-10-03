@@ -1,23 +1,7 @@
 import { useCallback, useRef } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
-import type { Document } from '@betteroffice/docx/types/document';
-import {
-  createDocx,
-  injectReplyRangeMarkers,
-  injectTCReplyRangeMarkers,
-  repackDocx,
-} from '@betteroffice/docx/docx';
 import { readDocxFileFromInput, type DocxInput } from '@betteroffice/docx/utils';
-import {
-  captureSessionSave,
-  editorSaveKeys,
-  ownProjectedParagraphs,
-  sessionSourcePackage,
-  writeSessionSave,
-  yrsToDocument,
-  type DocxSessionSave,
-  type YrsSession,
-} from '@betteroffice/docx/yrs';
+import { adoptEditorSave, saveEditorDocument, type YrsSession } from '@betteroffice/docx/yrs';
 import { openPrintWindow } from '@betteroffice/docx';
 import {
   rasterizeDisplayListPages,
@@ -26,13 +10,58 @@ import {
 } from '@betteroffice/docx/layout/render';
 import type { PagedEditorRef } from '../PagedEditor';
 import { flushedSession } from '../editorBatches';
-import { dirtyProjectionStory } from './useYrsCoreSession';
+import {
+  recordWorkerOpenSave,
+  trackWorkerOpenSave,
+  workerOpenSave,
+} from '../internals/workerOpenSave';
 import type { DocxEditorProps } from '../../DocxEditor';
 import type { DocxImageInsert, DocxSaveOutcome } from './useDocxCommands';
 
 const INSERT_IMAGE_MAX_WIDTH_PX = 612;
-const lastSaveSessions = new WeakSet<YrsSession>();
-const editorSaves = new WeakMap<YrsSession, ArrayBuffer>();
+
+/**
+ * Saves in the resident worker that holds the document while its main-thread
+ * replica has not started loading; null when the worker does not save it.
+ */
+function saveInWorker(
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  comments: Comment[]
+): Promise<{ session: YrsSession; buffer: ArrayBuffer } | null> | null {
+  const before = pagedEditorRef.current?.getYrsSession();
+  return before && workerOpenSave(before) ? workerSave(pagedEditorRef, before, comments) : null;
+}
+
+async function workerSave(
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  before: YrsSession,
+  comments: Comment[]
+): Promise<{ session: YrsSession; buffer: ArrayBuffer } | null> {
+  const { session } = await flushedSession(pagedEditorRef, false, false);
+  const pending = session === before ? workerOpenSave(session)?.(comments) : null;
+  return pending ? trackWorkerOpenSave(session, adoptWorkerSave(pagedEditorRef, session, pending)) : null;
+}
+
+async function adoptWorkerSave(
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  session: YrsSession,
+  pending: Promise<{ bytes: ArrayBuffer; full: boolean }>
+): Promise<{ session: YrsSession; buffer: ArrayBuffer } | null> {
+  let saved: Awaited<typeof pending>;
+  try {
+    saved = await pending;
+  } catch (error) {
+    if (pagedEditorRef.current?.getYrsSession() !== session) throw error;
+    console.warn('[DocxEditor] The resident worker could not save; saving on the main thread', error);
+    return null;
+  }
+  if (pagedEditorRef.current?.getYrsSession() !== session) {
+    throw new Error('The document changed while saving');
+  }
+  adoptEditorSave(session, saved.full ? { full: true } : { full: false, saved: saved.bytes });
+  recordWorkerOpenSave(session, saved.bytes);
+  return { session, buffer: saved.bytes };
+}
 
 function toFileIOError(error: unknown, fallbackMessage: string): Error {
   return error instanceof Error ? error : new Error(fallbackMessage);
@@ -95,95 +124,6 @@ export interface DocxPrintJob {
   cancel(): void;
 }
 
-/** Writes the editor's document, through the session save when it has one. */
-async function writeEditorDocument(
-  document: Document,
-  session: YrsSession | null,
-  capture: DocxSessionSave | null,
-  comments: Comment[],
-  injectedMarkers: boolean
-): Promise<ArrayBuffer> {
-  const original = document.originalBuffer;
-  if (!original) return createDocx(document);
-  if (!session || !capture) return repackDocx(document);
-  const source = sessionSourcePackage(session);
-  const keys = editorSaveKeys(document, comments);
-  if (
-    !source ||
-    keys.metadata !== source.keys.metadata ||
-    source.keys.commentIds.some((id) => !new Set(keys.commentIds).has(id)) ||
-    lastSaveSessions.has(session) ||
-    (original !== editorSaves.get(session) && !sameBytes(original, source.buffer))
-  ) {
-    lastSaveSessions.add(session);
-    const { bytes } = await writeSessionSave(session, document, capture, original, {}, () => false);
-    return bytes.buffer as ArrayBuffer;
-  }
-  const commentsChanged = keys.comments !== source.keys.comments;
-  const bodyPart = capture.identities.paragraphs
-    .find(({ session: anchor, source }) => anchor?.story === 'body' && source)
-    ?.source?.partUri.slice(1);
-  const patches = (part: string): boolean =>
-    (!commentsChanged || part !== 'word/comments.xml') &&
-    (!injectedMarkers || (bodyPart !== undefined && part !== bodyPart));
-  const { bytes } = await writeSessionSave(
-    session,
-    document,
-    capture,
-    source.buffer,
-    {},
-    patches,
-    true,
-    () => true
-  );
-  const saved = bytes.buffer as ArrayBuffer;
-  editorSaves.set(session, saved);
-  return saved;
-}
-
-function sameBytes(a: ArrayBuffer, b: ArrayBuffer): boolean {
-  if (a === b) return true;
-  if (a.byteLength !== b.byteLength) return false;
-  const left = new Uint8Array(a);
-  const right = new Uint8Array(b);
-  for (let index = 0; index < left.length; index += 1) {
-    if (left[index] !== right[index]) return false;
-  }
-  return true;
-}
-
-/**
- * `document` with the comments a save writes, the stories they are anchored
- * in projected again with them: the editor projects its host's comments.
- * With replies, its body paragraphs are its own for their range markers.
- */
-function withSavedComments(document: Document, session: YrsSession, comments: Comment[]): Document {
-  const base: Document = {
-    ...document,
-    package: { ...document.package, document: { ...document.package.document, comments } },
-  };
-  const storyIds = new Set<string>();
-  for (const comment of comments) {
-    try {
-      for (const anchor of session.resolveComment(String(comment.id))) {
-        storyIds.add(dirtyProjectionStory(anchor.story));
-      }
-    } catch {
-      // Replies and comments whose anchors are gone hold no range.
-    }
-  }
-  const saved = storyIds.size > 0 ? yrsToDocument(session, base, { storyIds }) : base;
-  if (!comments.some((comment) => comment.parentId != null)) return saved;
-  const body = saved.package.document;
-  return {
-    ...saved,
-    package: {
-      ...saved.package,
-      document: { ...body, content: ownProjectedParagraphs(body.content) },
-    },
-  };
-}
-
 /**
  * File-IO surface of the editor: save (to buffer), download, print, open
  * a DOCX from disk, insert an image from disk. The two file <input> refs
@@ -236,29 +176,17 @@ export function useFileIO({
     async (): Promise<ArrayBuffer | null> => {
       try {
         if (!pagedEditorRef.current) return null;
+        const pendingInWorker = saveInWorker(pagedEditorRef, comments);
+        const inWorker = pendingInWorker && (await pendingInWorker);
+        if (inWorker) {
+          onSave?.(inWorker.buffer);
+          return inWorker.buffer;
+        }
         const { editor, session } = await flushedSession(pagedEditorRef);
         if (session.isDisplayOnly?.()) throw new Error('The document is still opening');
         const projected = editor.getDocument();
         if (!projected) return null;
-        const capture = projected.originalBuffer ? captureSessionSave(session) : null;
-        const document = withSavedComments(projected, session, comments);
-
-        // Inject commentRangeStart/End for reply comments that share the parent's range.
-        // Pages/Word require every comment (including replies) to have range markers in document.xml.
-        const injectedReplies = injectReplyRangeMarkers(document.package.document.content, comments);
-        // Also inject range markers for comments that reply to tracked changes.
-        const injectedTCReplies = injectTCReplyRangeMarkers(
-          document.package.document.content,
-          comments
-        );
-
-        const buffer = await writeEditorDocument(
-          document,
-          session,
-          capture,
-          comments,
-          injectedReplies || injectedTCReplies
-        );
+        const buffer = await saveEditorDocument(session, projected, comments);
         if (pagedEditorRef.current?.getYrsSession() !== session) {
           throw new Error('The document changed while saving');
         }

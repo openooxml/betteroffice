@@ -32,6 +32,8 @@ export interface WorkerProposalAuthority {
   /** The session mirrors the worker registry and version. */
   readonly initialized: boolean;
   restart(): void;
+  /** Runs a worker save in turn with the proposal calls, then mirrors the version it leaves. */
+  save<T>(task: () => Promise<T>): Promise<T>;
   /** Initializes once; rejects when the worker cannot answer. */
   initialize(): Promise<void>;
   /** Mirrored geometry until hand-over. */
@@ -241,6 +243,25 @@ export function registerWorkerProposalAuthority(
       snapshotPosted = false;
       hooks.relayout();
       notify();
+    },
+    save(task) {
+      if (failure) return Promise.reject(failure.error);
+      const handedOver = () => new Error('The document is being handed over to its replica');
+      if (handingOver) return Promise.reject(handedOver());
+      return enqueue(async () => {
+        if (handingOver) throw handedOver();
+        const previous = mirror?.version;
+        const result = await task();
+        if (initialized && !handingOver) {
+          try {
+            const reply = await worker.proposal({ kind: 'snapshot' });
+            assertCurrent();
+            store(reply);
+            if (reply.mirror.version !== previous) hooks.relayout();
+          } catch {}
+        }
+        return result;
+      });
     },
     initialize() {
       if (failure) return Promise.reject(failure.error);

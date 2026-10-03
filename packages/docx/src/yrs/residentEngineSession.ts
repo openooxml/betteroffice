@@ -24,6 +24,9 @@ import type {
 import type { ProposalGeometryReader, ProposalGeometryRevision } from './proposalGeometry';
 import type { DocxProposalSession } from './proposals';
 import type { YrsPositionOutline } from './yrsPositionProjection';
+import type { ResidentSaveRecord } from './residentSave';
+import type { Comment } from '../types/content';
+import type { Document } from '../types/document';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
 
@@ -93,6 +96,17 @@ export type ResidentEngineSession = Pick<
   layoutDocumentWithRegionsRetained(input: string): void;
   /** The retained region layout's `headersFooters` JSON, when it has any. */
   retainedHeadersFootersJson(): string | undefined;
+  /**
+   * @internal Saves the document opened from `source` (`hostJson` its `open` reply) as the
+   * editor saves its replica, see `saveResidentDocument`; `record` holds the earlier saves.
+   */
+  save(
+    source: Uint8Array,
+    hostJson: string,
+    host: Document,
+    comments: Comment[],
+    record: ResidentSaveRecord
+  ): Promise<ArrayBuffer>;
 };
 
 export async function createResidentEngineSession(
@@ -290,6 +304,10 @@ export async function createResidentEngineSession(
           );
     },
     encodeState: () => session.encode_state(),
+    save: async (source, hostJson, host, comments, record) => {
+      const { saveResidentDocument } = await import('./residentSave');
+      return saveResidentDocument(session, clientId, source, hostJson, host, comments, record);
+    },
     revisionCount: (excluding) =>
       (JSON.parse(session.list_revisions()) as { revisionId: string }[]).filter(
         (revision) => !excluding?.has(revision.revisionId)

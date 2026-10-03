@@ -1,0 +1,559 @@
+import { afterAll, afterEach, beforeAll, describe, expect, it, setSystemTime } from 'bun:test';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
+import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
+import type { Comment } from '../types/content';
+import type { Document } from '../types/document';
+import { applyFrameDeltaOwned, decodeFrameDelta } from '../layout/render/frameDelta';
+import { preloadEditWasm } from '../wasm/edit';
+import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
+import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
+import {
+  adoptEditorSave,
+  hostSaveMetadata,
+  mergeDocxHostMetadata,
+  saveEditorDocument,
+} from './editorSave';
+import type { DocxEditRequest } from './edits';
+import { createYrsSession, decodeDocxHostJson, type YrsSession } from './index';
+import { createProposalRegistry, type DocxProposalInput } from './proposals';
+import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
+import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
+import type { ResidentSaveRecord } from './residentSave';
+import { yrsToDocument } from './yrsToDocument';
+
+const ROOT = resolve(import.meta.dir, '../../../..');
+const FIXTURES = [
+  'crates/docx-edit/tests/fixtures',
+  'crates/betteroffice-docx/tests/corpus/fixtures',
+  'packages/docx/src/yrs/__fixtures__',
+];
+const TIMEOUT = Number(process.env.WORKER_SAVE_TIMEOUT_MS ?? 120_000);
+const NS =
+  'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
+  'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
+const OFFICE = 'application/vnd.openxmlformats-officedocument';
+const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const SUGGEST = { author: 'Host', date: '2026-09-29T12:00:00Z' };
+const FONT = resolve(ROOT, 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf');
+const LAYOUT = JSON.stringify({
+  bodyStory: 'body',
+  regions: { sections: [{ sectionId: 'main', properties: {} }] },
+  measurement: { defaults: { fontSize: 11, fontFamily: 'Liberation Sans' } },
+  renderEnv: {},
+});
+
+let startWorker: () => InProcessResidentWorker;
+beforeAll(async () => {
+  // Saves stamp docProps/core.xml with the current time.
+  setSystemTime(new Date('2026-10-02T12:00:00Z'));
+  await preloadEditWasm(
+    new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')))
+  );
+  await preloadOpcWasm(
+    new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm')))
+  );
+  startWorker = await residentWorkerFactory();
+});
+
+afterAll(() => {
+  setSystemTime();
+});
+
+const owned: Array<{ destroy(): void }> = [];
+afterEach(() => {
+  for (const session of owned.splice(0)) session.destroy();
+});
+
+/** The first part where two packages differ, and where; null when they are byte-identical. */
+function difference(actual: Uint8Array, expected: Uint8Array): string | null {
+  if (actual.length === expected.length && actual.every((byte, at) => byte === expected[at])) return null;
+  const a = unzipContainer(actual);
+  const b = unzipContainer(expected);
+  const names = [...new Set([...Object.keys(a), ...Object.keys(b)])].sort();
+  for (const name of names) {
+    const x = a[name];
+    const y = b[name];
+    if (!x || !y) return `${name}: ${x ? 'only in actual' : 'only in expected'}`;
+    if (x.length === y.length && x.every((byte, at) => byte === y[at])) continue;
+    let at = 0;
+    while (at < x.length && x[at] === y[at]) at += 1;
+    if (process.env.WORKER_SAVE_NUMBERS_ONLY) return `part ${names.indexOf(name)} at ${at}`;
+    const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes.subarray(Math.max(0, at - 80), at + 80));
+    return `${name} at ${at}:\n  actual   ${text(x)}\n  expected ${text(y)}`;
+  }
+  return `zip container only (${actual.length} vs ${expected.length} bytes)`;
+}
+
+function documents(): string[] {
+  const roots = process.env.WORKER_SAVE_DOCS
+    ? [resolve(process.env.WORKER_SAVE_DOCS)]
+    : FIXTURES.map((dir) => join(ROOT, dir));
+  const found: string[] = [];
+  const visit = (path: string) => {
+    if (statSync(path).isDirectory()) {
+      for (const entry of readdirSync(path).sort()) visit(join(path, entry));
+    } else if (path.endsWith('.docx')) {
+      found.push(path);
+    }
+  };
+  for (const root of roots) visit(root);
+  return found;
+}
+
+function paragraph(paraId: string, text: string): string {
+  return `<w:p w14:paraId="${paraId}"><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+}
+
+function synthetic(first = paragraph('0000B001', 'Alpha beta gamma.')): Uint8Array {
+  const parts: PartsMap = new Map();
+  const set = (name: string, content: string) => parts.set(name, toBytes(content));
+  set(
+    '[Content_Types].xml',
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${OFFICE}.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="${OFFICE}.wordprocessingml.header+xml"/></Types>`
+  );
+  set(
+    '_rels/.rels',
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`
+  );
+  set(
+    'word/_rels/document.xml.rels',
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH1" Type="${REL}/header" Target="header1.xml"/></Relationships>`
+  );
+  set('word/header1.xml', `<w:hdr ${NS}>${paragraph('0000A001', 'Header text')}</w:hdr>`);
+  set(
+    'word/document.xml',
+    `<w:document ${NS} xmlns:r="${REL}"><w:body>` +
+      first +
+      paragraph('0000B002', 'Delta epsilon zeta.') +
+      paragraph('0000B003', 'Eta theta iota.') +
+      `<w:sectPr><w:headerReference w:type="default" r:id="rIdH1"/></w:sectPr></w:body></w:document>`
+  );
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
+interface Opened {
+  bytes: Uint8Array;
+  resident: ResidentEngineSession;
+  hostJson: string;
+  host: Document;
+  record: ResidentSaveRecord;
+}
+
+async function open(bytes: Uint8Array): Promise<Opened> {
+  const resident = await createResidentEngineSession();
+  owned.push(resident);
+  const hostJson = resident.openDocx(bytes.slice());
+  return { bytes, resident, hostJson, host: decodeDocxHostJson(hostJson, bytes).document, record: { full: false } };
+}
+
+/** The worker's save, its inputs crossing as they do in a message. */
+async function workerSave(opened: Opened, comments: Comment[] = hostComments(opened)): Promise<Uint8Array<ArrayBuffer>> {
+  return new Uint8Array(
+    await opened.resident.save(
+      opened.bytes.slice(),
+      opened.hostJson,
+      structuredClone(hostSaveMetadata(opened.host)),
+      structuredClone(comments),
+      opened.record
+    )
+  );
+}
+
+/** The main-thread replica the editor hydrates from the worker and saves. */
+class Replica {
+  constructor(
+    readonly session: YrsSession,
+    private readonly host: Document,
+    private base: Document | null = null
+  ) {}
+
+  async save(comments: Comment[]): Promise<Uint8Array<ArrayBuffer>> {
+    const base = this.base ?? this.session.materializeDocx();
+    if (!base) throw new Error('the replica has no package');
+    const projected = yrsToDocument(this.session, mergeDocxHostMetadata(base, this.host));
+    this.base = projected;
+    const buffer = await saveEditorDocument(this.session, projected, comments);
+    projected.originalBuffer = buffer;
+    return new Uint8Array(buffer);
+  }
+}
+
+async function hydrate(
+  opened: Opened,
+  saved?: { client: ResidentEngineWorkerClient; bytes: ArrayBuffer; full: boolean }
+): Promise<Replica> {
+  const session = await createYrsSession();
+  owned.push(session);
+  const update = saved ? await saved.client.encodeState() : opened.resident.encodeState();
+  const base = saved ? await saved.client.savedBase(saved.bytes) : null;
+  session.openDocx(opened.bytes.slice(), false);
+  session.loadState(update);
+  if (saved) {
+    adoptEditorSave(session, saved.full ? { full: true } : { full: false, saved: saved.bytes });
+  }
+  return new Replica(session, opened.host, base);
+}
+
+function hostComments(opened: Opened): Comment[] {
+  return opened.host.package.document.comments ?? [];
+}
+
+function firstParagraph(
+  read: (story: string) => { ok: boolean; paragraphs?: Array<{ paraId: string; text: string }> },
+  story: string
+): string | null {
+  const result = read(story);
+  return result.ok ? (result.paragraphs?.find((entry) => entry.text.length > 0)?.paraId ?? null) : null;
+}
+
+function insertion(
+  read: (story: string) => { ok: boolean; paragraphs?: Array<{ paraId: string; text: string }> },
+  host: Document,
+  version: string
+): DocxEditRequest | null {
+  const header = [...(host.package.headers?.keys() ?? [])][0];
+  const steps: DocxEditRequest['steps'][number][] = [];
+  for (const story of ['body', ...(header === undefined ? [] : [`hf:${header}`])]) {
+    const paraId = firstParagraph(read, story);
+    if (paraId) {
+      steps.push({ op: 'insertText', target: { kind: 'paragraph', story, paraId }, at: 'end', text: ' edited' });
+    }
+  }
+  return steps.length > 0 ? { expectVersion: version, steps } : null;
+}
+
+function residentEdit(opened: Opened): boolean {
+  const engine = opened.resident.proposalEngine;
+  const request = insertion(
+    (story) => engine.readParagraphs({ story, view: 'accepted' }),
+    opened.host,
+    engine.version()
+  );
+  if (!request) return false;
+  const result = engine.applyEdits(request);
+  if (!result.ok) throw new Error(`the edit was refused: ${JSON.stringify(result)}`);
+  return true;
+}
+
+function replicaEdit(replica: Replica, host: Document): void {
+  const session = replica.session;
+  const request = insertion(
+    (story) => session.readParagraphs({ story, view: 'accepted' }),
+    host,
+    session.version()
+  );
+  if (!request) return;
+  const result = session.applyEdits(request);
+  if (!result.ok) throw new Error(`the edit was refused: ${JSON.stringify(result)}`);
+}
+
+describe('worker save', () => {
+  it('equals the replica save on the synthetic fixture: no edit, edits, two saves', async () => {
+    const opened = await open(synthetic());
+    const replica = await hydrate(opened);
+    expect(difference(await workerSave(opened), await replica.save(hostComments(opened)))).toBeNull();
+    expect(residentEdit(opened)).toBe(true);
+    replicaEdit(replica, opened.host);
+    expect(difference(await workerSave(opened), await replica.save(hostComments(opened)))).toBeNull();
+    expect(difference(await workerSave(opened), await replica.save(hostComments(opened)))).toBeNull();
+  });
+
+  it('equals the replica save after host proposals are accepted and rejected', async () => {
+    const opened = await open(synthetic());
+    const registry = createProposalRegistry(opened.resident.proposalEngine);
+    const replace = (id: string, paraId: string, search: string, replaceWith: string): DocxProposalInput => ({
+      id,
+      paragraph: { kind: 'persisted', story: { partUri: '/word/document.xml', kind: 'body' }, paraId },
+      suggest: SUGGEST,
+      op: 'replaceText',
+      search,
+      replaceWith,
+    });
+    const proposed = registry.propose({
+      expectVersion: opened.resident.proposalEngine.version(),
+      proposals: [
+        replace('a', '0000B001', 'beta', 'BETA'),
+        replace('b', '0000B002', 'epsilon', 'EPSILON'),
+        replace('c', '0000B003', 'theta', 'THETA'),
+      ],
+    });
+    expect(proposed.ok).toBe(true);
+    const decided = registry.setStates({
+      expectVersion: opened.resident.proposalEngine.version(),
+      expectPreviewVersion: registry.snapshot().previewVersion,
+      changes: [
+        { id: 'a', state: 'accepted' },
+        { id: 'b', state: 'rejected' },
+      ],
+    });
+    expect(decided.ok).toBe(true);
+    const replica = await hydrate(opened);
+    expect(difference(await workerSave(opened), await replica.save(hostComments(opened)))).toBeNull();
+  });
+
+  it('equals the replica save with the host comments and a reply', async () => {
+    const bytes = new Uint8Array(
+      readFileSync(join(ROOT, 'packages/docx/src/yrs/__fixtures__/comment-ranges/structure.docx'))
+    );
+    const opened = await open(bytes);
+    const comments = hostComments(opened);
+    const parent = comments.find((comment) => comment.parentId === undefined);
+    if (!parent) throw new Error('the fixture has no comment');
+    const reply: Comment = {
+      id: Math.max(...comments.map((comment) => comment.id)) + 1,
+      author: 'Host',
+      date: '2026-09-29T12:00:00Z',
+      content: parent.content,
+      parentId: parent.id,
+    };
+    const replica = await hydrate(opened);
+    const first = await workerSave(opened, [...comments, reply]);
+    expect(difference(first, await replica.save([...comments, reply]))).toBeNull();
+    const second = await workerSave(opened, [...comments, reply]);
+    expect(difference(second, await replica.save([...comments, reply]))).toBeNull();
+    const body = (bytes: Uint8Array) => new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
+    expect(body(second)).toBe(body(first));
+    expect(body(second).split(`<w:commentRangeStart w:id="${reply.id}"/>`)).toHaveLength(2);
+  });
+
+  it('equals a replica that hydrates after the worker saved', async () => {
+    const reference = await open(synthetic());
+    const replica = await hydrate(reference);
+    replicaEdit(replica, reference.host);
+    const first = await replica.save(hostComments(reference));
+    replicaEdit(replica, reference.host);
+    const second = await replica.save(hostComments(reference));
+
+    const bytes = synthetic();
+    const worker = startWorker();
+    const client = new ResidentEngineWorkerClient(worker);
+    owned.push(client);
+    const { hostJson } = await client.open(bytes);
+    const opened: Opened = {
+      bytes,
+      resident: worker.sessions[0]!,
+      hostJson,
+      host: decodeDocxHostJson(hostJson, bytes).document,
+      record: { full: false },
+    };
+    expect(residentEdit(opened)).toBe(true);
+    const saved = await client.save({
+      source: bytes, hostJson, host: hostSaveMetadata(opened.host), comments: hostComments(opened),
+    });
+    expect(difference(new Uint8Array(saved.bytes), first)).toBeNull();
+    const late = await hydrate(opened, { ...saved, client });
+    replicaEdit(late, opened.host);
+    expect(difference(await late.save(hostComments(opened)), second)).toBeNull();
+  });
+
+  for (const path of documents()) {
+    const name = relative(ROOT, path);
+    it(
+      `equals the replica save, before and after an edit: ${name}`,
+      async () => {
+        const opened = await open(new Uint8Array(readFileSync(path)));
+        const replica = await hydrate(opened);
+        expect(difference(await workerSave(opened), await replica.save(hostComments(opened)))).toBeNull();
+        if (!residentEdit(opened)) return;
+        replicaEdit(replica, opened.host);
+        expect(difference(await workerSave(opened), await replica.save(hostComments(opened)))).toBeNull();
+      },
+      TIMEOUT
+    );
+  }
+});
+
+describe('worker save request', () => {
+  it('saves typed input and decided proposals as the replica saves them', async () => {
+    const bytes = synthetic();
+    const main = await createYrsSession();
+    owned.push(main);
+    main.openDocx(bytes, true);
+    main.registerFont(new Uint8Array(readFileSync(FONT)));
+    main.adoptResidentWorkerLayout!(LAYOUT);
+    const client = new ResidentEngineWorkerClient(startWorker());
+    owned.push(client);
+    const { hostJson } = await client.open(bytes);
+    const host = decodeDocxHostJson(hostJson, bytes).document;
+    const booted = await client.bootstrap(
+      { ...main.residentWorkerSnapshot()!, workerAuthoritative: true },
+      '{}',
+      { opened: true, layoutExtras: '{}' }
+    );
+    const frame = applyFrameDeltaOwned(null, decodeFrameDelta(booted.frame));
+    const caret = { story: 'body', paraId: '0000B003', offset: 3 };
+    const typed = await client.applyInput(' typed', { anchor: caret, head: caret }, frame.frameEpoch);
+    expect(typed.applied).toBe(true);
+    const initial = await client.proposal({ kind: 'snapshot' });
+    const proposed = await client.proposal({
+      kind: 'propose',
+      request: {
+        expectVersion: initial.mirror.version,
+        proposals: [
+          {
+            id: 'a',
+            paragraph: { kind: 'persisted', story: { kind: 'body', partUri: '/word/document.xml' }, paraId: '0000B001' },
+            suggest: SUGGEST,
+            op: 'replaceText',
+            search: 'beta',
+            replaceWith: 'BETA',
+          },
+        ],
+      },
+    });
+    expect(proposed.result?.ok).toBe(true);
+    const accepted = await client.proposal({
+      kind: 'setStates',
+      request: {
+        expectVersion: proposed.mirror.version,
+        expectPreviewVersion: proposed.mirror.proposals.previewVersion,
+        changes: [{ id: 'a', state: 'accepted' }],
+      },
+    });
+    expect(accepted.result?.ok).toBe(true);
+
+    const replicaSession = await createYrsSession();
+    owned.push(replicaSession);
+    replicaSession.openDocx(bytes, false);
+    replicaSession.loadState(await client.encodeState());
+    const replica = new Replica(replicaSession, host);
+    const request = { source: bytes, hostJson, host: hostSaveMetadata(host), comments: [] };
+    const first = await client.save(request);
+    expect(difference(new Uint8Array(first.bytes), await replica.save([]))).toBeNull();
+    const second = await client.save(request);
+    expect(difference(new Uint8Array(second.bytes), await replica.save([]))).toBeNull();
+    expect(second.full).toBe(first.full);
+  });
+
+  it('keeps the saved raw inline offset when the replica hydrates after two worker saves', async () => {
+    const bytes = synthetic(
+      '<w:p w14:paraId="0000B001"><w:r><w:t>abcdefghij</w:t></w:r>' +
+        '<x:mark xmlns:x="urn:example"/><w:r><w:t>klm</w:t></w:r></w:p>'
+    );
+    const reference = await open(bytes);
+    const replica = await hydrate(reference);
+    const worker = startWorker();
+    const client = new ResidentEngineWorkerClient(worker);
+    owned.push(client);
+    const { hostJson } = await client.open(bytes);
+    const opened: Opened = {
+      bytes,
+      resident: worker.sessions[0]!,
+      hostJson,
+      host: decodeDocxHostJson(hostJson, bytes).document,
+      record: { full: false },
+    };
+    const request = { source: bytes, hostJson, host: hostSaveMetadata(opened.host), comments: [] };
+    const xml = (bytes: Uint8Array) =>
+      new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
+    const rawOffset = (xml: string) => {
+      const at = xml.indexOf('<x:mark');
+      expect(at).toBeGreaterThanOrEqual(0);
+      return [...xml.slice(0, at).matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>/g)]
+        .reduce((length, match) => length + match[1]!.length, 0);
+    };
+    const initial = replica.session.materializeDocx()?.package.document.content[0];
+    if (initial?.type !== 'paragraph') throw new Error('the fixture has no paragraph');
+    expect(initial.content.some((child) => child.type === 'rawXml')).toBe(true);
+    expect(rawOffset(xml(bytes))).toBe(10);
+    const edit = (step: DocxEditRequest['steps'][number]) => {
+      for (const engine of [replica.session, opened.resident.proposalEngine]) {
+        const result = engine.applyEdits({
+          expectVersion: engine.version(),
+          history: 'none',
+          steps: [step],
+        });
+        expect(result.ok).toBe(true);
+      }
+    };
+    edit({
+      op: 'deleteText',
+      target: {
+        kind: 'range',
+        story: 'body',
+        start: { paraId: '0000B001', offset: 3 },
+        end: { paraId: '0000B001', offset: 13 },
+        view: 'accepted',
+      },
+    });
+    expect(replica.session.paragraphs('body')[0]!.text).toBe('abc');
+    const first = new Uint8Array((await client.save(request)).bytes);
+    const firstReplica = await replica.save([]);
+    expect(rawOffset(xml(first))).toBe(3);
+    expect(xml(first)).toBe(xml(firstReplica));
+    expect(difference(first, firstReplica)).toBeNull();
+
+    edit({
+      op: 'insertText',
+      target: { kind: 'paragraph', story: 'body', paraId: '0000B001' },
+      at: 'end',
+      text: 'ABCDEFGHIJ',
+    });
+    expect(replica.session.paragraphs('body')[0]!.text).toBe('abcABCDEFGHIJ');
+    const second = await client.save(request);
+    const secondReplica = await replica.save([]);
+    expect(Object.keys(second).sort()).toEqual(['bytes', 'full']);
+    expect(worker.requests).not.toContain('savedBase');
+    expect(rawOffset(xml(new Uint8Array(second.bytes)))).toBe(3);
+    expect(xml(new Uint8Array(second.bytes))).toBe(xml(secondReplica));
+    expect(difference(new Uint8Array(second.bytes), secondReplica)).toBeNull();
+
+    const late = await hydrate(opened, { ...second, client });
+    expect(worker.requests.filter((type) => type === 'savedBase')).toHaveLength(1);
+    const expected = await replica.save([]);
+    const workerSave = new Uint8Array((await client.save(request)).bytes);
+    const lateSave = await late.save([]);
+    expect(xml(workerSave)).toBe(xml(expected));
+    expect(difference(workerSave, expected)).toBeNull();
+    expect(xml(lateSave)).toBe(xml(expected));
+    expect(difference(lateSave, expected)).toBeNull();
+  });
+
+  it('refuses a saved base that does not match the recorded save', async () => {
+    const bytes = synthetic();
+    const client = new ResidentEngineWorkerClient(startWorker());
+    owned.push(client);
+    const { hostJson } = await client.open(bytes);
+    const host = decodeDocxHostJson(hostJson, bytes).document;
+    const request = { source: bytes, hostJson, host: hostSaveMetadata(host), comments: [] };
+    const first = await client.save(request);
+    const second = await client.save(request);
+    await expect(client.savedBase(first.bytes)).rejects.toThrow(
+      'The saved projection no longer matches the recorded save'
+    );
+    const base = await client.savedBase(second.bytes);
+    expect(base.originalBuffer).toBe(second.bytes);
+    expect(difference(new Uint8Array((await client.save(request)).bytes), new Uint8Array(second.bytes))).toBeNull();
+  });
+
+  it('saves a replica reopened from the source after an unchanged worker save like the worker', async () => {
+    const bytes = synthetic(
+      '<w:p w14:paraId="0000B001"><w:r><w:t>abcdefghij</w:t></w:r>' +
+        '<x:mark xmlns:x="urn:example"/><w:r><w:t>klm</w:t></w:r></w:p>'
+    );
+    const client = new ResidentEngineWorkerClient(startWorker());
+    owned.push(client);
+    const { hostJson } = await client.open(bytes);
+    const host = decodeDocxHostJson(hostJson, bytes).document;
+    const request = { source: bytes, hostJson, host: hostSaveMetadata(host), comments: [] };
+    const saved = await client.save(request);
+    const session = await createYrsSession();
+    owned.push(session);
+    session.openDocx(bytes.slice(), true);
+    adoptEditorSave(session, saved.full ? { full: true } : { full: false, saved: saved.bytes });
+    const materialized = session.materializeDocx();
+    if (!materialized) throw new Error('the replica has no package');
+    const reopened = new Replica(session, host, { ...materialized, originalBuffer: saved.bytes });
+    const expected = new Uint8Array((await client.save(request)).bytes);
+    expect(difference(await reopened.save([]), expected)).toBeNull();
+  });
+
+  it('refuses a save without an opened document', async () => {
+    const client = new ResidentEngineWorkerClient(startWorker());
+    owned.push(client);
+    await expect(
+      client.save({ source: synthetic(), hostJson: '{}', host: hostSaveMetadata({ package: { document: { content: [] } } }), comments: [] })
+    ).rejects.toThrow('has no opened document');
+  });
+});

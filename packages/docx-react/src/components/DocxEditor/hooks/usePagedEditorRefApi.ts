@@ -228,12 +228,13 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     displayPositionToYrsLoc: (position) => displayPositionToYrsLocRef.current(position),
     getPositionAtPoint: (clientX, clientY) => getPositionAtPointRef.current(clientX, clientY),
     getYrsSession: () => yrsSessionRef.current,
-    flushPendingInput: async () => {
+    flushPendingInput: async (awaitReplica = true) => {
       const session = yrsSessionRef.current;
       const input = yrsInputRef.current;
       if (!input || !session) throw new Error('The editor input is unavailable');
       const pending = input.flushPendingInput();
-      const ready = workerOpenEnabledRef.current ? awaitWorkerOpenReplica(session) : undefined;
+      const ready =
+        awaitReplica && workerOpenEnabledRef.current ? awaitWorkerOpenReplica(session) : undefined;
       await (ready ? Promise.all([pending, ready]) : pending);
       if (session !== yrsSessionRef.current || !yrsInputRef.current) {
         throw new Error('The document changed while flushing input');

@@ -1,18 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LayoutBlock } from '@betteroffice/docx/layout/pagination';
-import type {
-  Document,
-  Endnote,
-  Footnote,
-  HeaderFooter,
-  Section,
-} from '@betteroffice/docx/types/document';
+import type { Document } from '@betteroffice/docx/types/document';
 import type {
   YrsDocxHost,
   YrsInputPositionMap,
   YrsLoc,
   YrsRenderEnv,
   YrsSession,
+} from '@betteroffice/docx/yrs';
+import {
+  dirtyProjectionStory,
+  hostSaveMetadata,
+  mergeDocxHostMetadata,
 } from '@betteroffice/docx/yrs';
 import type { DocxEditorCollaborationOptions } from '../types';
 import type { OpenInWorker, OpenPreviewInWorker, WorkerOpenedDocument } from './useDisplayList';
@@ -24,13 +23,23 @@ import {
   ensureWorkerOpenReplica,
   requestWorkerOpenReplica,
   workerOpenReplicaPending,
+  workerOpenReplicaStarted,
 } from '../internals/workerOpenReplica';
+import {
+  awaitWorkerOpenSaves,
+  peekWorkerOpenSave,
+  registerWorkerOpenSave,
+  takeWorkerOpenSave,
+  type WorkerOpenSave,
+} from '../internals/workerOpenSave';
 import {
   beginWorkerProposalHandover,
   registerWorkerProposalAuthority,
   registeredWorkerProposalAuthority,
   workerProposalFailure,
 } from '../internals/workerProposalAuthority';
+
+export { dirtyProjectionStory, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
 
 type YrsFacadeModule = typeof import('@betteroffice/docx/yrs');
 
@@ -142,73 +151,6 @@ const REPLICA_OPEN_WAIT_MS = 5000;
  */
 const FULL_OPEN_TIMEOUT_MS = 10_000;
 
-function mergeHeaderFooterMaps(
-  full: Map<string, HeaderFooter> | undefined,
-  host: Map<string, HeaderFooter> | undefined
-): Map<string, HeaderFooter> | undefined {
-  if (host === undefined) return undefined;
-  return new Map(
-    [...host].map(([relationshipId, metadata]) => {
-      const existing = full?.get(relationshipId);
-      return [relationshipId, existing ? { ...metadata, content: existing.content } : metadata];
-    })
-  );
-}
-
-function mergeNotes<T extends Footnote | Endnote>(
-  full: T[] | undefined,
-  host: T[] | undefined
-): T[] | undefined {
-  if (host === undefined) return undefined;
-  return host.map((metadata) => {
-    const existing = full?.find((note) => note.id === metadata.id);
-    return existing ? { ...existing, ...metadata, content: existing.content } : metadata;
-  });
-}
-
-function mergeSections(
-  full: Section[] | undefined,
-  host: Section[] | undefined
-): Section[] | undefined {
-  if (host === undefined) return undefined;
-  return host.map((metadata, index) => {
-    const existing =
-      full?.find((section) => section.id !== undefined && section.id === metadata.id) ??
-      full?.[index];
-    return existing ? { ...metadata, content: existing.content } : metadata;
-  });
-}
-
-export function mergeDocxHostMetadata(full: Document, host: Document): Document {
-  const fullPackage = full.package;
-  const hostPackage = host.package;
-  return {
-    ...full,
-    contractVersion: host.contractVersion ?? full.contractVersion,
-    originalBuffer: full.originalBuffer ?? host.originalBuffer,
-    warnings: host.warnings,
-    package: {
-      ...fullPackage,
-      contractVersion: hostPackage.contractVersion ?? fullPackage.contractVersion,
-      styles: hostPackage.styles,
-      theme: hostPackage.theme,
-      settings: hostPackage.settings,
-      fontTable: hostPackage.fontTable,
-      relationships: hostPackage.relationships,
-      headers: mergeHeaderFooterMaps(fullPackage.headers, hostPackage.headers),
-      footers: mergeHeaderFooterMaps(fullPackage.footers, hostPackage.footers),
-      footnotes: mergeNotes(fullPackage.footnotes, hostPackage.footnotes),
-      endnotes: mergeNotes(fullPackage.endnotes, hostPackage.endnotes),
-      document: {
-        ...fullPackage.document,
-        sections: mergeSections(fullPackage.document.sections, hostPackage.document.sections),
-        finalSectionProperties: hostPackage.document.finalSectionProperties,
-        comments: hostPackage.document.comments,
-      },
-    },
-  };
-}
-
 /** A display-only session of the first pages of `bytes`, or null when it cannot open. */
 async function openPreview(
   yrs: YrsFacadeModule,
@@ -314,13 +256,6 @@ export function warmCompatibilityBase(
   }
 }
 
-/** Story a direct-input edit dirties: the hf/note root it sits in, everything else the body. */
-export function dirtyProjectionStory(activeStory: string): string {
-  return ['hf:', 'fn:', 'en:'].some((prefix) => activeStory.startsWith(prefix))
-    ? activeStory.split(':', 2).join(':')
-    : 'body';
-}
-
 /**
  * Frees sessions the editor let go of. Consumers' effects in the commit that replaces a session
  * still run with the session they rendered, and `held` names sessions still shown after it (a
@@ -415,6 +350,8 @@ export function useYrsCoreSession(
   // Asks the worker whether the document has tracked changes, once per session.
   const revisionQueryRef = useRef<(() => void) | null>(null);
   const workerLaidOutRef = useRef<(() => void) | null>(null);
+  /** The worker's save of a worker-opened session; it takes saves once the worker has drawn a frame. */
+  const workerSaverRef = useRef<{ session: YrsSession; save: WorkerOpenSave } | null>(null);
   // An on-demand replica loads once wanted and past the point main's automatic load waits for.
   const replicaGateRef = useRef<{ reached: boolean; wanted: boolean } | null>(null);
   const requestReplicaRef = useRef<(() => void) | null>(null);
@@ -728,9 +665,14 @@ export function useYrsCoreSession(
                 const handover = beginWorkerProposalHandover(next);
                 const handedOver = handover ? await handover : null;
                 const update = handedOver ? handedOver.state : await worker.encodeState();
+                const saves = awaitWorkerOpenSaves(next);
+                if (saves) await saves;
+                const saved = peekWorkerOpenSave(next);
+                const savedBase = saved ? await worker.savedBase(saved) : null;
                 return () => {
                   next.openDocx(source, false);
                   next.loadState(update);
+                  if (savedBase) compatibilityBaseRef.current = savedBase;
                   handedOver?.complete();
                 };
               },
@@ -766,6 +708,21 @@ export function useYrsCoreSession(
               },
               { active: () => hydrateOnDemandRef.current, request }
             );
+            const save: WorkerOpenSave = (comments) => {
+              const host = documentRef.current;
+              if (!host) return null;
+              const authority = registeredWorkerProposalAuthority(next);
+              const post = () => worker.save(
+                { source, hostJson: worker.hostJson, host: hostSaveMetadata(host), comments },
+                () =>
+                  !stale() &&
+                  sessionRef.current === next &&
+                  workerOpenReplicaPending(next) &&
+                  !workerOpenReplicaStarted(next)
+              );
+              return authority ? authority.save(post) : post();
+            };
+            workerSaverRef.current = { session: next, save };
             if (workerOpenRef.current?.workerProposals) {
               let laidOut = new Promise<void>((resolve) => {
                 workerLaidOutRef.current = resolve;
@@ -888,6 +845,7 @@ export function useYrsCoreSession(
       revisionQueryRef.current = null;
       workerLaidOutRef.current?.();
       workerLaidOutRef.current = null;
+      workerSaverRef.current = null;
       replicaGateRef.current = null;
       requestReplicaRef.current = null;
       if (replicaWaitTimerRef.current !== null) clearTimeout(replicaWaitTimerRef.current);
@@ -933,6 +891,9 @@ export function useYrsCoreSession(
       (handoffFrom && options?.shownEngine !== session)
     ) return;
     workerLaidOutRef.current?.();
+    if (workerSaverRef.current?.session === session) {
+      registerWorkerOpenSave(session, workerSaverRef.current.save);
+    }
     const authority = registeredWorkerProposalAuthority(session);
     if (authority) {
       void authority.initialize().catch((error) => {
@@ -1132,7 +1093,10 @@ export function useYrsCoreSession(
     if (!enabledRef.current || previewingRef.current || !live || !facade || !base) return null;
     try {
       if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(live);
-      const compatibilityBase = compatibilityBaseRef.current ?? live.materializeDocx();
+      const materialized = compatibilityBaseRef.current ?? live.materializeDocx();
+      const workerSaved = takeWorkerOpenSave(live);
+      const compatibilityBase =
+        materialized && workerSaved ? { ...materialized, originalBuffer: workerSaved } : materialized;
       if (compatibilityBase) {
         base = mergeDocxHostMetadata(compatibilityBase, base);
       }
@@ -1140,7 +1104,7 @@ export function useYrsCoreSession(
       const projected = facade.yrsToDocument(
         live,
         base,
-        dirtyStories.size > 0 ? { storyIds: new Set(dirtyStories) } : undefined
+        dirtyStories.size > 0 && !workerSaved ? { storyIds: new Set(dirtyStories) } : undefined
       );
       dirtyStories.clear();
       if (compatibilityBase) compatibilityBaseRef.current = projected;
