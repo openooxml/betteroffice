@@ -3,4 +3,4 @@
 "@betteroffice/docx": patch
 ---
 
-Read-only and viewing editors select, copy and resolve points through the document worker, without a main-thread document copy. Adds `readPositionAtPoint` to the editor ref.
+Documents opened read-only or for viewing with `experimentalWorkerOpen` select, copy and resolve points through the document worker, without a main-thread document copy. Adds `readPositionAtPoint` to the editor ref.
