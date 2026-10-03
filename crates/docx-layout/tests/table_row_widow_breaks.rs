@@ -671,6 +671,7 @@ fn unsupported_cell_windows_preserve_the_legacy_row_path() {
         "nestedFloatingImage",
         "floatingTable",
         "anchoredShape",
+        "unanchoredShape",
         "anchoredTextBox",
         "anchoredChart",
         "anchoredImageBlock",
@@ -752,9 +753,10 @@ fn unsupported_cell_windows_preserve_the_legacy_row_path() {
                         .push(image);
                 }
             }
-            "anchoredShape" | "anchoredTextBox" | "anchoredChart" | "anchoredImageBlock" => {
+            "anchoredShape" | "unanchoredShape" | "anchoredTextBox" | "anchoredChart"
+            | "anchoredImageBlock" => {
                 let kind = match exclusion {
-                    "anchoredShape" => "shape",
+                    "anchoredShape" | "unanchoredShape" => "shape",
                     "anchoredTextBox" => "textBox",
                     "anchoredChart" => "chart",
                     _ => "image",
@@ -762,11 +764,15 @@ fn unsupported_cell_windows_preserve_the_legacy_row_path() {
                 let mut drawing = json!({"kind": kind, "id": 50, "width": 20, "height": 10,
                     "position": {"vertical": {"relativeTo": "paragraph", "posOffset": 50}}});
                 match exclusion {
-                    "anchoredShape" => {
+                    "anchoredShape" | "unanchoredShape" => {
                         drawing["shapeType"] = json!("rect");
                         drawing["geometryPath"] = json!([]);
                         drawing["children"] = json!([]);
-                        drawing["wrapType"] = json!("behind");
+                        if exclusion == "anchoredShape" {
+                            drawing["wrapType"] = json!("behind");
+                        } else {
+                            drawing.as_object_mut().unwrap().remove("position");
+                        }
                     }
                     "anchoredTextBox" => drawing["content"] = json!([]),
                     "anchoredChart" => drawing["chart"] = json!({}),

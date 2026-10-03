@@ -9528,32 +9528,36 @@ pub(crate) fn emit_table_fragment(
         }
 
         let content_stamp_from = prims.len();
-        let windowed_lines = frag.cell_clips.as_ref().is_some_and(|clips| {
+        let cell_window = frag.cell_clips.as_ref().and_then(|clips| {
             clips
                 .iter()
-                .any(|clip| clip.row == g.row_index && clip.cell == g.cell_index)
+                .find(|clip| clip.row == g.row_index && clip.cell == g.cell_index)
         });
+        let windowed_lines = cell_window.is_some();
         let (content_y, content_clip_top, content_clip_bottom) =
             plan.cell_content_window(frag, g, paint);
-        if frag.cell_clips.is_none() || content_clip_bottom > content_clip_top {
-            emit_cell_content(
-                prims,
-                cell,
-                measure,
-                &CellPaintRef::from(p.g),
-                cx,
-                content_y,
-                p.cell_h,
-                is_first_col,
-                content_clip_top,
-                content_clip_bottom,
-                windowed_lines,
-                ctx,
-                p.selectable,
-                &cell_ref,
-                &block_ref,
-            );
-        }
+        let continues_on_next =
+            if frag.cell_clips.is_none() || content_clip_bottom > content_clip_top {
+                emit_cell_content(
+                    prims,
+                    cell,
+                    measure,
+                    &CellPaintRef::from(p.g),
+                    cx,
+                    content_y,
+                    p.cell_h,
+                    is_first_col,
+                    content_clip_top,
+                    content_clip_bottom,
+                    windowed_lines,
+                    ctx,
+                    p.selectable,
+                    &cell_ref,
+                    &block_ref,
+                )
+            } else {
+                false
+            };
 
         let cell_clip_top = cy.max(clip_top_y);
         let cell_clip_bottom = (cy + p.cell_h).min(clip_bottom_y);
@@ -9563,6 +9567,16 @@ pub(crate) fn emit_table_fragment(
             w: Some(px(p.g.width)),
             h: Some(px((cell_clip_bottom - cell_clip_top).max(0.0))),
         };
+        let line_clip_top = if cell_window.is_some_and(|clip| clip.top > 0.0) {
+            content_clip_top.max(cell_clip_top)
+        } else {
+            cell_clip_top
+        };
+        let line_clip_bottom = if continues_on_next {
+            content_clip_bottom.min(cell_clip_bottom)
+        } else {
+            cell_clip_bottom
+        };
         let clip_id = format!("clip-{table_id}-r{}-c{}", p.g.row_index, p.g.column_index);
         for (index, primitive) in prims.iter_mut().enumerate().skip(cell_stamp_from) {
             if windowed_lines
@@ -9570,8 +9584,8 @@ pub(crate) fn emit_table_fragment(
                 && let Primitive::Line(line) = primitive
             {
                 let mut line_clip = cell_clip.clone();
-                line_clip.y = Some(px(content_clip_top));
-                line_clip.h = Some(px((content_clip_bottom - content_clip_top).max(0.0)));
+                line_clip.y = Some(px(line_clip_top));
+                line_clip.h = Some(px((line_clip_bottom - line_clip_top).max(0.0)));
                 apply_clip_group(&mut line.attrs, clip_id.clone(), line_clip);
             } else if let Some(attrs) = doc_attrs_mut(primitive) {
                 apply_clip_group(attrs, clip_id.clone(), cell_clip.clone());
@@ -9696,6 +9710,7 @@ struct CellContentFrame {
     content_x: f64,
     content_top: f64,
     content_width: f64,
+    content_end: f64,
     clip_top_y: f64,
     clip_bottom_y: f64,
     /// Index-aligned with the cell's blocks.
@@ -9852,6 +9867,13 @@ fn cell_content_frame<'m>(
             content_x: cx + border_left + pad_left,
             content_top: cy + border_top + pad_top + v_offset,
             content_width,
+            content_end: cy
+                + border_top
+                + pad_top
+                + v_offset
+                + content_height
+                + pad_bottom
+                + border_bottom,
             clip_top_y,
             clip_bottom_y,
             block_tops,
@@ -9878,7 +9900,7 @@ fn emit_cell_content(
     selectable: bool,
     cell_ref: &TableCellRef,
     block_ref: &BlockRef,
-) {
+) -> bool {
     let stamp_from = prims.len();
     let Some((frame, cell_measure)) = cell_content_frame(
         cell,
@@ -9891,7 +9913,7 @@ fn emit_cell_content(
         clip_top_y,
         clip_bottom_y,
     ) else {
-        return;
+        return false;
     };
     let CellContentFrame {
         rotation,
@@ -9899,6 +9921,7 @@ fn emit_cell_content(
         content_x,
         content_top,
         content_width,
+        content_end,
         clip_top_y,
         clip_bottom_y,
         block_tops,
@@ -9976,6 +9999,7 @@ fn emit_cell_content(
                 before,
                 clip_top_y,
                 clip_bottom_y,
+                windowed_lines,
                 selectable,
                 Some(cell_ref),
             );
@@ -10001,7 +10025,15 @@ fn emit_cell_content(
             // Preserve the nested table's own inner `cell` refs so the mirror can
             // surface its table semantics; only clip to the outer cell fragment
             // and strip doc positions on a vmerge continuation repaint.
-            postprocess_cell_primitives(prims, before, clip_top_y, clip_bottom_y, selectable, None);
+            postprocess_cell_primitives(
+                prims,
+                before,
+                clip_top_y,
+                clip_bottom_y,
+                windowed_lines,
+                selectable,
+                None,
+            );
         } else if let (BlockIn::Image(image), MeasureIn::Image(image_measure)) = (cell_block, m) {
             let image_x = content_x;
             let image_y = content_top + block_tops[i];
@@ -10034,6 +10066,7 @@ fn emit_cell_content(
                 before,
                 clip_top_y,
                 clip_bottom_y,
+                windowed_lines,
                 selectable,
                 Some(cell_ref),
             );
@@ -10059,6 +10092,7 @@ fn emit_cell_content(
                 before,
                 clip_top_y,
                 clip_bottom_y,
+                windowed_lines,
                 selectable,
                 Some(cell_ref),
             );
@@ -10088,6 +10122,7 @@ fn emit_cell_content(
                 before,
                 clip_top_y,
                 clip_bottom_y,
+                windowed_lines,
                 selectable,
                 Some(cell_ref),
             );
@@ -10115,6 +10150,7 @@ fn emit_cell_content(
                 before,
                 clip_top_y,
                 clip_bottom_y,
+                windowed_lines,
                 selectable,
                 Some(cell_ref),
             );
@@ -10139,12 +10175,7 @@ fn emit_cell_content(
     if windowed_lines {
         let mut index = stamp_from;
         while index < prims.len() {
-            let (mut top, mut bottom) = primitive_v_extent(&prims[index]);
-            if let Primitive::Line(line) = &prims[index] {
-                let half_stroke = num_f64(&line.stroke_width) / 2.0;
-                top -= half_stroke;
-                bottom += half_stroke;
-            }
+            let (top, bottom) = primitive_painted_v_extent(&prims[index]);
             if bottom <= clip_top_y || top >= clip_bottom_y {
                 prims.remove(index);
             } else {
@@ -10155,6 +10186,7 @@ fn emit_cell_content(
     if rotated {
         rotate_cell_content(&mut prims[stamp_from..], physical, rotation);
     }
+    windowed_lines && content_end > clip_bottom_y + 1e-6
 }
 
 fn rotate_cell_content(primitives: &mut [Primitive], cell: (f64, f64, f64, f64), rotation: f64) {
@@ -10282,12 +10314,17 @@ fn postprocess_cell_primitives(
     start: usize,
     clip_top_y: f64,
     clip_bottom_y: f64,
+    windowed_lines: bool,
     selectable: bool,
     cell_ref: Option<&TableCellRef>,
 ) {
     let mut k = start;
     while k < prims.len() {
-        let (top, bottom) = primitive_v_extent(&prims[k]);
+        let (top, bottom) = if windowed_lines {
+            primitive_painted_v_extent(&prims[k])
+        } else {
+            primitive_v_extent(&prims[k])
+        };
         if bottom < clip_top_y || top > clip_bottom_y {
             prims.remove(k);
         } else {
@@ -10669,6 +10706,31 @@ impl<'a> From<&'a GridCell> for CellPaintRef {
             width: g.width,
         }
     }
+}
+
+fn primitive_painted_v_extent(p: &Primitive) -> (f64, f64) {
+    let (top, bottom) = primitive_v_extent(p);
+    let Primitive::Line(line) = p else {
+        return (top, bottom);
+    };
+    let width = num_f64(&line.stroke_width);
+    let border_width = width.max(0.5);
+    let outset = match line.border_style {
+        Some(DisplayBorderStyle::Double) => {
+            border_width / 2.0 + (border_width / 3.0).max(0.5) / 2.0
+        }
+        Some(DisplayBorderStyle::Triple) => border_width + (border_width / 3.0).max(0.5) / 2.0,
+        Some(DisplayBorderStyle::ThinThick | DisplayBorderStyle::ThickThin) => {
+            (border_width * 0.45 + (border_width * 0.25).max(0.5) / 2.0)
+                .max(border_width * 0.3 + (border_width * 0.55).max(0.75) / 2.0)
+        }
+        Some(DisplayBorderStyle::Wave) => border_width.max(1.0) / 2.0 + border_width / 2.0,
+        Some(DisplayBorderStyle::DoubleWave) => {
+            border_width.max(1.0) * 1.5 + (border_width / 2.0).max(0.5) / 2.0
+        }
+        _ => width / 2.0,
+    };
+    (top - outset, bottom + outset)
 }
 
 fn primitive_v_extent(p: &Primitive) -> (f64, f64) {

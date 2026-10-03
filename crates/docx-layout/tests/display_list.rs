@@ -3287,8 +3287,16 @@ fn paragraph_borders_enclose_a_hanging_first_line() {
 }
 
 fn per_cell_split_input(right_lines: usize) -> serde_json::Value {
+    per_cell_split_cells(&[
+        (if right_lines < 6 { 4 } else { 6 }, 0.0),
+        (right_lines, 4.4),
+    ])
+}
+
+/// A filler paragraph, then a one-row table whose cells hold one paragraph of
+/// `(lines, space before)` each.
+fn per_cell_split_cells(spec: &[(usize, f64)]) -> serde_json::Value {
     use serde_json::json;
-    let left_lines = if right_lines < 6 { 4 } else { 6 };
     let paragraph = |id: usize, count: usize, before: f64| {
         json!({
             "kind": "paragraph", "id": id, "pmStart": id, "pmEnd": id + count * 10,
@@ -3305,20 +3313,35 @@ fn per_cell_split_input(right_lines: usize) -> serde_json::Value {
                 "lineHeight": 20})).collect::<Vec<_>>()
         })
     };
+    let width = if spec.len() > 2 { 70.0 } else { 100.0 };
+    let heights: Vec<f64> = spec
+        .iter()
+        .map(|(lines, before)| *lines as f64 * 20.0 + before)
+        .collect();
+    let row_height = heights.iter().copied().fold(0.0, f64::max);
+    let cells: Vec<_> = spec
+        .iter()
+        .enumerate()
+        .map(|(index, (lines, before))| {
+            json!({"id": index, "background": "#eeeeee",
+                "blocks": [paragraph(100 * (index + 1), *lines, *before)]})
+        })
+        .collect();
+    let measures: Vec<_> = spec
+        .iter()
+        .zip(&heights)
+        .map(|((lines, _), height)| {
+            json!({"width": width, "height": height, "blocks": [extent(*lines)]})
+        })
+        .collect();
     json!({
         "measured": [
             {"block": paragraph(1, 2, 0.0), "measure": extent(2)},
-            {"block": {"kind": "table", "id": 7, "columnWidths": [100, 100],
-                "rows": [{"id": 0, "cells": [
-                    {"id": 0, "background": "#eeeeee", "blocks": [paragraph(100, left_lines, 0.0)]},
-                    {"id": 1, "background": "#eeeeee", "blocks": [paragraph(200, right_lines, 4.4)]}
-                ]}]},
-             "measure": {"kind": "table", "columnWidths": [100, 100], "totalWidth": 200,
-                "totalHeight": (right_lines as f64 * 20.0 + 4.4).max(left_lines as f64 * 20.0),
-                "rows": [{"height": (right_lines as f64 * 20.0 + 4.4).max(left_lines as f64 * 20.0), "cells": [
-                    {"width": 100, "height": left_lines * 20, "blocks": [extent(left_lines)]},
-                    {"width": 100, "height": right_lines as f64 * 20.0 + 4.4, "blocks": [extent(right_lines)]}
-                ]}]}}
+            {"block": {"kind": "table", "id": 7, "columnWidths": vec![width; spec.len()],
+                "rows": [{"id": 0, "cells": cells}]},
+             "measure": {"kind": "table", "columnWidths": vec![width; spec.len()],
+                "totalWidth": width * spec.len() as f64, "totalHeight": row_height,
+                "rows": [{"height": row_height, "cells": measures}]}}
         ],
         "options": {"pageSize": {"w": 240, "h": 120},
             "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}}
@@ -3456,6 +3479,150 @@ fn per_cell_window_keeps_and_clips_a_paragraph_border_at_its_bottom() {
         .unwrap();
     assert_eq!(clip.y.as_ref().unwrap().as_f64(), Some(top));
     assert!((clip.h.as_ref().unwrap().as_f64().unwrap() - height).abs() < 0.01);
+}
+
+#[test]
+fn per_cell_window_keeps_a_completed_paragraph_border_inside_the_physical_cell_clip() {
+    use serde_json::json;
+    let mut input = per_cell_split_cells(&[(6, 0.0), (6, 4.4), (2, 0.0)]);
+    input["measured"][1]["block"]["rows"][0]["cells"][2]["blocks"][0]["attrs"]["borders"] =
+        json!({"bottom": {"style": "single", "width": 2, "space": 0, "color": "#123456"}});
+    input["layout"] =
+        serde_json::from_str(&docx_layout::layout_to_json(&input.to_string()).unwrap()).unwrap();
+    let fragment = input["layout"]["pages"][0]["fragments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fragment| fragment["kind"] == "table")
+        .unwrap();
+    let window = fragment["cellClips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|clip| clip["cell"] == 2)
+        .unwrap();
+    assert_eq!(window["top"].as_f64(), Some(0.0));
+    assert_eq!(
+        window["bottom"],
+        input["measured"][1]["measure"]["rows"][0]["cells"][2]["height"]
+    );
+    let top = fragment["y"].as_f64().unwrap();
+    let window_bottom = top + window["bottom"].as_f64().unwrap();
+    let physical_bottom = top + fragment["height"].as_f64().unwrap();
+    assert!(physical_bottom > window_bottom + 1.0);
+    let dl = build_dl(&input.to_string());
+    assert_eq!(dl.pages.len(), 2);
+    let borders: Vec<_> = dl.pages[0]
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Primitive::Line(line)
+                if line.border_owner == Some(docx_layout::display_list::BorderOwner::Paragraph)
+                    && line.color == "#123456" =>
+            {
+                Some(line)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(borders.len(), 1);
+    let border = borders[0];
+    assert_eq!(border.y1, border.y2);
+    assert!((border.y1.as_f64().unwrap() - window_bottom).abs() < 0.01);
+    assert_eq!(border.stroke_width.as_f64(), Some(2.0));
+    let clip = border
+        .attrs
+        .clip_group
+        .as_ref()
+        .unwrap()
+        .clip
+        .as_ref()
+        .unwrap();
+    let clip_top = clip.y.as_ref().unwrap().as_f64().unwrap();
+    let clip_bottom = clip_top + clip.h.as_ref().unwrap().as_f64().unwrap();
+    assert_eq!(clip_top, top);
+    assert!((clip_bottom - physical_bottom).abs() < 0.01);
+    assert!(border.y1.as_f64().unwrap() + 1.0 <= clip_bottom);
+}
+
+#[test]
+fn per_cell_windows_keep_border_strokes_overlapping_their_edges() {
+    use serde_json::json;
+    for (style, space) in [
+        ("single", 0.5),
+        ("double", 1.2),
+        ("triple", 2.2),
+        ("thinThick", 1.1),
+        ("thickThin", 1.1),
+        ("wave", 1.75),
+        ("doubleWave", 3.4),
+    ] {
+        for edge in ["top", "bottom"] {
+            let mut input = per_cell_split_input(2);
+            let mut borders = json!({});
+            borders[edge] = json!({"style": style, "width": 2,
+                "space": if edge == "top" { 4.4 + space } else { space }, "color": "#123456"});
+            input["measured"][1]["block"]["rows"][0]["cells"][1]["blocks"][0]["attrs"]["borders"] =
+                borders;
+            input["layout"] =
+                serde_json::from_str(&docx_layout::layout_to_json(&input.to_string()).unwrap())
+                    .unwrap();
+            let fragment = input["layout"]["pages"][0]["fragments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|fragment| fragment["kind"] == "table")
+                .unwrap();
+            let window = fragment["cellClips"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|clip| clip["cell"] == 1)
+                .unwrap();
+            let top = fragment["y"].as_f64().unwrap();
+            let bottom = top + window["bottom"].as_f64().unwrap() - window["top"].as_f64().unwrap();
+            let dl = build_dl(&input.to_string());
+            let borders: Vec<_> = dl.pages[0]
+                .primitives
+                .iter()
+                .filter_map(|primitive| match primitive {
+                    Primitive::Line(line)
+                        if line.border_owner
+                            == Some(docx_layout::display_list::BorderOwner::Paragraph)
+                            && line.color == "#123456" =>
+                    {
+                        Some(line)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(borders.len(), 1, "{style} {edge}");
+            let border = borders[0];
+            let centre = if edge == "top" {
+                top - space
+            } else {
+                bottom + space
+            };
+            assert!(
+                (border.y1.as_f64().unwrap() - centre).abs() < 0.01,
+                "{style} {edge}"
+            );
+            assert_eq!(border.y1, border.y2);
+            let clip = border
+                .attrs
+                .clip_group
+                .as_ref()
+                .unwrap()
+                .clip
+                .as_ref()
+                .unwrap();
+            assert_eq!(clip.y.as_ref().unwrap().as_f64(), Some(top));
+            assert!(
+                (clip.h.as_ref().unwrap().as_f64().unwrap() - (bottom - top)).abs() < 0.01,
+                "{style} {edge}"
+            );
+        }
+    }
 }
 
 #[test]

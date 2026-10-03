@@ -175,7 +175,7 @@ fn minimum_height_governs(
     content > 0.0 && minimum + padding >= content
 }
 
-fn cell_has_anchored_drawing(blocks: &[LayoutBlock]) -> bool {
+fn cell_has_drawing(blocks: &[LayoutBlock]) -> bool {
     blocks.iter().any(|block| match block {
         LayoutBlock::Paragraph(paragraph) => paragraph.runs.iter().any(|run| {
             matches!(run, Run::Image(image) if image.position.is_some()
@@ -183,28 +183,12 @@ fn cell_has_anchored_drawing(blocks: &[LayoutBlock]) -> bool {
         }),
         LayoutBlock::Table(table) => {
             table.floating.is_some()
-                || table.rows.iter().any(|row| {
-                    row.cells
-                        .iter()
-                        .any(|cell| cell_has_anchored_drawing(&cell.blocks))
-                })
+                || table
+                    .rows
+                    .iter()
+                    .any(|row| row.cells.iter().any(|cell| cell_has_drawing(&cell.blocks)))
         }
-        LayoutBlock::Image(image) => image.anchor.as_ref().is_some_and(|anchor| {
-            anchor.is_anchored == Some(true)
-                || anchor.position.is_some()
-                || is_floating_image(anchor.wrap_type.as_deref(), None)
-        }),
-        LayoutBlock::Shape(shape) => shape.position.is_some(),
-        LayoutBlock::TextBox(text_box) => {
-            text_box.position.is_some()
-                || is_floating_image(
-                    text_box.wrap_type.as_deref(),
-                    text_box.display_mode.as_deref(),
-                )
-                || text_box.wrap_type.as_deref() == Some("topAndBottom")
-        }
-        LayoutBlock::Chart(chart) => chart.position.is_some(),
-        _ => false,
+        _ => true,
     })
 }
 
@@ -257,7 +241,7 @@ impl<'a> RowBreaks<'a> {
                                         None | Some("lrTb")
                                     )
                                     || !crate::footnotes::collect_note_refs(&cell.blocks).is_empty()
-                                    || cell_has_anchored_drawing(&cell.blocks)
+                                    || cell_has_drawing(&cell.blocks)
                             })
                         {
                             return None;
