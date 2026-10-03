@@ -733,6 +733,27 @@ impl EditingDoc {
         }
     }
 
+    /// Advances the cached paragraph index after a single plain text deletion.
+    pub(crate) fn advance_paragraph_index_after_text_delete(
+        &self,
+        story_id: &str,
+        before: u64,
+        after: u64,
+        start: u32,
+        end: u32,
+    ) {
+        if before.checked_add(1) != Some(after) {
+            return;
+        }
+        let mut indexes = self.paragraph_indexes.lock().unwrap();
+        let Some(mut paragraphs) = indexes.take(story_id, before) else {
+            return;
+        };
+        if Arc::make_mut(&mut paragraphs).shift_for_text_delete(start, end) {
+            indexes.insert(story_id, after, paragraphs);
+        }
+    }
+
     /// Shared `ops::snapshot` for `story_id`, rebuilt per committed epoch.
     pub(crate) fn chunk_snapshot<T: ReadTxn>(
         &self,

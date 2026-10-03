@@ -3146,10 +3146,10 @@ impl BlockRef {
 }
 
 /// Returns the canonical string key for a block identifier.
-fn block_key(id: &Value) -> String {
+fn block_key(id: &Value) -> Cow<'_, str> {
     match id {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
+        Value::String(s) => Cow::Borrowed(s),
+        other => Cow::Owned(other.to_string()),
     }
 }
 
@@ -4986,7 +4986,7 @@ fn build_display_list_selected(
         serde_json::from_value::<RenderOptionsIn>(input.options.clone()).unwrap_or_default();
 
     // Index measured blocks by canonical block key.
-    let mut by_id: HashMap<String, &MeasuredBlockIn> = HashMap::new();
+    let mut by_id: HashMap<Cow<'_, str>, &MeasuredBlockIn> = HashMap::new();
     for mb in &input.measured {
         let key = match &mb.block {
             BlockIn::Paragraph(p) => block_key(&p.id),
@@ -5061,7 +5061,7 @@ fn build_display_list_selected(
                     {
                         continue;
                     }
-                    let Some(measured) = by_id.get(&block_key(&fragment.block_id)) else {
+                    let Some(measured) = by_id.get(block_key(&fragment.block_id).as_ref()) else {
                         continue;
                     };
                     let BlockIn::Paragraph(block) = &measured.block else {
@@ -5081,7 +5081,7 @@ fn build_display_list_selected(
                     }
                 }
                 FragmentIn::Shape(fragment) => {
-                    let Some(measured) = by_id.get(&block_key(&fragment.block_id)) else {
+                    let Some(measured) = by_id.get(block_key(&fragment.block_id).as_ref()) else {
                         continue;
                     };
                     if let BlockIn::Shape(block) = &measured.block
@@ -5113,7 +5113,7 @@ fn build_display_list_selected(
         // Paragraph border grouping uses neighboring fragment borders.
         let para_borders_of = |frag: &FragmentIn| -> Option<ParaBordersIn> {
             if let FragmentIn::Paragraph(p) = frag
-                && let Some(mb) = by_id.get(&block_key(&p.block_id))
+                && let Some(mb) = by_id.get(block_key(&p.block_id).as_ref())
                 && let BlockIn::Paragraph(b) = &mb.block
             {
                 return b.attrs.as_ref().and_then(|a| a.borders.clone());
@@ -5125,7 +5125,7 @@ fn build_display_list_selected(
         for (i, frag) in page.fragments.iter().enumerate() {
             match frag {
                 FragmentIn::Paragraph(pf) => {
-                    let Some(mb) = by_id.get(&block_key(&pf.block_id)) else {
+                    let Some(mb) = by_id.get(block_key(&pf.block_id).as_ref()) else {
                         prev_para_borders = None;
                         continue;
                     };
@@ -5154,7 +5154,7 @@ fn build_display_list_selected(
                 }
                 FragmentIn::Table(tf) => {
                     prev_para_borders = None;
-                    let Some(mb) = by_id.get(&block_key(&tf.block_id)) else {
+                    let Some(mb) = by_id.get(block_key(&tf.block_id).as_ref()) else {
                         continue;
                     };
                     let (BlockIn::Table(block), MeasureIn::Table(measure)) =
@@ -5166,7 +5166,7 @@ fn build_display_list_selected(
                 }
                 FragmentIn::Image(imf) => {
                     prev_para_borders = None;
-                    let block = by_id.get(&block_key(&imf.block_id)).and_then(|mb| {
+                    let block = by_id.get(block_key(&imf.block_id).as_ref()).and_then(|mb| {
                         if let BlockIn::Image(b) = &mb.block {
                             Some(b)
                         } else {
@@ -5203,7 +5203,7 @@ fn build_display_list_selected(
                 }
                 FragmentIn::TextBox(tf) => {
                     prev_para_borders = None;
-                    let Some(mb) = by_id.get(&block_key(&tf.block_id)) else {
+                    let Some(mb) = by_id.get(block_key(&tf.block_id).as_ref()) else {
                         continue;
                     };
                     let (BlockIn::TextBox(block), MeasureIn::TextBox(measure)) =
@@ -5215,7 +5215,7 @@ fn build_display_list_selected(
                 }
                 FragmentIn::Shape(sf) => {
                     prev_para_borders = None;
-                    let Some(mb) = by_id.get(&block_key(&sf.block_id)) else {
+                    let Some(mb) = by_id.get(block_key(&sf.block_id).as_ref()) else {
                         continue;
                     };
                     let BlockIn::Shape(block) = &mb.block else {
@@ -5227,7 +5227,7 @@ fn build_display_list_selected(
                 }
                 FragmentIn::Chart(cf) => {
                     prev_para_borders = None;
-                    let Some(mb) = by_id.get(&block_key(&cf.block_id)) else {
+                    let Some(mb) = by_id.get(block_key(&cf.block_id).as_ref()) else {
                         continue;
                     };
                     let BlockIn::Chart(block) = &mb.block else {
@@ -5246,7 +5246,7 @@ fn build_display_list_selected(
         for frag in &page.fragments {
             if let FragmentIn::Paragraph(pf) = frag
                 && float_paragraphs.insert((block_key(&pf.block_id), pf.x.to_bits()))
-                && let Some(mb) = by_id.get(&block_key(&pf.block_id))
+                && let Some(mb) = by_id.get(block_key(&pf.block_id).as_ref())
                 && let BlockIn::Paragraph(block) = &mb.block
             {
                 emit_paragraph_floating_images(&mut prims, block, pf.y, &float_geom, false);
@@ -9604,8 +9604,8 @@ pub(crate) fn emit_table_fragment(
         };
         if let Some(attrs) = attrs {
             if let Some(inner) = &mut attrs.table {
-                if inner.table_id != table_id && inner.parent_table_id.is_none() {
-                    inner.parent_table_id = Some(table_id.clone());
+                if inner.table_id.as_str() != table_id.as_ref() && inner.parent_table_id.is_none() {
+                    inner.parent_table_id = Some(table_id.clone().into_owned());
                 }
             } else {
                 attrs.table = Some(Box::new(metadata.clone()));
@@ -10738,7 +10738,15 @@ pub fn build_resident_display_list_partial_with_fonts_observed(
         .into_iter()
         .map(|page| (page.page_index as usize, page))
         .collect();
-    let blocks = source_blocks_by_key(pagination);
+    let blocks = source_blocks_by_key(
+        pagination,
+        layout
+            .pages
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !selected.contains(index))
+            .map(|(_, page)| page),
+    );
     let pages = input
         .layout
         .pages
@@ -10825,7 +10833,7 @@ pub fn release_resident_display_pages(
         .collect();
     wanted.sort_unstable();
     wanted.dedup();
-    let blocks = source_blocks_by_key(pagination);
+    let blocks = source_blocks_by_key(pagination, wanted.iter().map(|&index| &layout.pages[index]));
     let replacements = wanted
         .iter()
         .map(|&index| {
@@ -10848,28 +10856,37 @@ pub fn release_resident_display_pages(
 }
 
 fn prune_resident_display_measured(resident: &mut ResidentDisplayInput, list: &DisplayList) {
-    let keys: HashSet<String> = list
+    let keys: HashSet<Cow<'_, str>> = list
         .pages
         .iter()
         .zip(&resident.input.layout.pages)
         .filter(|(page, _)| !page.unbuilt)
-        .flat_map(|(_, page)| page.fragments.iter().filter_map(fragment_block_key))
+        .flat_map(|(_, page)| page.fragments.iter().filter_map(fragment_block_key_ref))
         .collect();
-    resident
-        .input
-        .measured
-        .retain(|measured| measured_block_key(measured).is_some_and(|key| keys.contains(&key)));
+    resident.input.measured.retain(|measured| {
+        measured_block_key(measured).is_some_and(|key| keys.contains(key.as_ref()))
+    });
 }
 
-/// The pagination's rendered measured blocks by key, first occurrence winning
-/// as in [`build_display_list_selected`].
-fn source_blocks_by_key(
-    pagination: &crate::types::Input,
-) -> HashMap<String, &crate::types::MeasuredBlock> {
+/// The affected pages' source blocks by canonical key, first occurrence winning.
+fn source_blocks_by_key<'a, 'b>(
+    pagination: &'a crate::types::Input,
+    pages: impl IntoIterator<Item = &'b crate::types::Page>,
+) -> HashMap<Cow<'a, str>, &'a crate::types::MeasuredBlock> {
+    let mut pending: HashSet<_> = pages
+        .into_iter()
+        .flat_map(|page| &page.fragments)
+        .map(resident_fragment_block_key)
+        .collect();
     let mut blocks = HashMap::new();
     for measured in &pagination.measured {
-        if let Some(key) = resident_block_key(&measured.block) {
-            blocks.entry(key.into_owned()).or_insert(measured);
+        if pending.is_empty() {
+            break;
+        }
+        if let Some(key) = resident_block_key(&measured.block)
+            && pending.remove(key.as_ref())
+        {
+            blocks.insert(key, measured);
         }
     }
     blocks
@@ -10910,7 +10927,7 @@ fn unbuilt_page_with_span(
 /// out-of-range one is an error.
 fn layout_page_position_span(
     page: &crate::types::Page,
-    blocks: &HashMap<String, &crate::types::MeasuredBlock>,
+    blocks: &HashMap<Cow<'_, str>, &crate::types::MeasuredBlock>,
 ) -> Result<Option<[i64; 2]>, String> {
     use crate::types::{Fragment, LayoutBlock, TableRow};
     fn block(block: &LayoutBlock, positions: &mut Vec<Option<f64>>) {
@@ -11000,11 +11017,11 @@ fn resident_build_input_for(
     let layout: LayoutIn = transcoder
         .convert(layout)
         .map_err(|e| format!("parse resident display input: {e}"))?;
-    let placed: Option<HashSet<String>> = pages.map(|pages| {
+    let placed: Option<HashSet<Cow<'_, str>>> = pages.map(|pages| {
         pages
             .iter()
             .filter_map(|&index| layout.pages.get(index))
-            .flat_map(|page| page.fragments.iter().filter_map(fragment_block_key))
+            .flat_map(|page| page.fragments.iter().filter_map(fragment_block_key_ref))
             .collect()
     });
     let measured = pagination
@@ -11018,6 +11035,7 @@ fn resident_build_input_for(
         .map(|measured| transcoder.convert(measured))
         .collect::<Result<Vec<MeasuredBlockIn>, _>>()
         .map_err(|e| format!("parse resident display input: {e}"))?;
+    drop(placed);
     let options = transcoder
         .convert(&pagination.options)
         .map_err(|e| format!("parse resident display input: {e}"))?;
@@ -11332,7 +11350,12 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_shifts(
         previous.pages[page_index] = page;
     }
     if built.len() < selected.len() {
-        let blocks = source_blocks_by_key(pagination);
+        let blocks = source_blocks_by_key(
+            pagination,
+            selected
+                .difference(&built)
+                .map(|&index| &layout.pages[index]),
+        );
         for &page_index in selected.difference(&built) {
             previous.pages[page_index] = unbuilt_page_with_span(
                 &resident.input.layout.pages[page_index],
@@ -11388,10 +11411,8 @@ fn refresh_resident_display_pages_reading(
         let page: PageIn =
             convert_resident_value(&layout.pages[page_index], "resident display layout page")?;
         if reading.contains(&page_index) {
-            for fragment in &page.fragments {
-                if let Some(key) = fragment_block_key(fragment) {
-                    selected_blocks.insert(key);
-                }
+            for fragment in &layout.pages[page_index].fragments {
+                selected_blocks.insert(resident_fragment_block_key(fragment));
             }
         }
         input.layout.pages[page_index] = page;
@@ -11404,7 +11425,9 @@ fn refresh_resident_display_pages_reading(
         .measured
         .iter()
         .enumerate()
-        .filter_map(|(index, measured)| measured_block_key(measured).map(|key| (key, index)))
+        .filter_map(|(index, measured)| {
+            measured_block_key(measured).map(|key| (key.into_owned(), index))
+        })
         .collect();
     let mut pending_blocks = selected_blocks;
     for measured in &pagination.measured {
@@ -11456,6 +11479,20 @@ fn resident_block_key(block: &crate::types::LayoutBlock) -> Option<Cow<'_, str>>
     }
 }
 
+/// Borrows pagination fragment ids with the resident display key text.
+fn resident_fragment_block_key(fragment: &crate::types::Fragment) -> Cow<'_, str> {
+    use crate::types::Fragment;
+    let id = match fragment {
+        Fragment::Paragraph(value) => &value.block_id,
+        Fragment::Table(value) => &value.block_id,
+        Fragment::Image(value) => &value.block_id,
+        Fragment::TextBox(value) => &value.block_id,
+        Fragment::Shape(value) => &value.block_id,
+        Fragment::Chart(value) => &value.block_id,
+    };
+    resident_block_id_key(id)
+}
+
 /// [`block_key`] of `id` once transcoded, which reads an integral number back
 /// as an integer.
 fn resident_block_id_key(id: &crate::types::BlockId) -> Cow<'_, str> {
@@ -11473,7 +11510,8 @@ fn resident_block_id_key(id: &crate::types::BlockId) -> Cow<'_, str> {
     }
 }
 
-fn measured_block_key(measured: &MeasuredBlockIn) -> Option<String> {
+/// Borrows rendered measured block ids with their canonical key text.
+fn measured_block_key(measured: &MeasuredBlockIn) -> Option<Cow<'_, str>> {
     match &measured.block {
         BlockIn::Paragraph(value) => Some(block_key(&value.id)),
         BlockIn::Table(value) => Some(block_key(&value.id)),
@@ -11483,10 +11521,6 @@ fn measured_block_key(measured: &MeasuredBlockIn) -> Option<String> {
         BlockIn::Chart(value) => Some(block_key(&value.id)),
         BlockIn::Unsupported => None,
     }
-}
-
-fn fragment_block_key(fragment: &FragmentIn) -> Option<String> {
-    fragment_block_key_ref(fragment).map(Cow::into_owned)
 }
 
 /// Borrows string block ids while preserving their canonical key text.
@@ -11500,10 +11534,7 @@ fn fragment_block_key_ref(fragment: &FragmentIn) -> Option<Cow<'_, str>> {
         FragmentIn::Chart(value) => &value.block_id,
         FragmentIn::Unsupported => return None,
     };
-    Some(match id {
-        Value::String(value) => Cow::Borrowed(value),
-        other => Cow::Owned(other.to_string()),
-    })
+    Some(block_key(id))
 }
 
 /// Classifies effective position changes without revisiting primitives.
@@ -11876,6 +11907,33 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
+    /// Source lookup keeps the first required block and excludes unplaced keys.
+    #[test]
+    fn source_block_lookup_is_scoped_and_keeps_the_first_occurrence() {
+        let mut pagination = table_split_fixture();
+        let crate::types::LayoutBlock::Table(table) = &mut pagination.measured[0].block else {
+            panic!("expected a table");
+        };
+        table.id = crate::types::BlockId::Str("selected".to_owned());
+        let layout = crate::compute_layout_input(&mut pagination).unwrap();
+        let duplicate = pagination.measured[0].clone();
+        let mut unplaced = duplicate.clone();
+        let crate::types::LayoutBlock::Table(table) = &mut unplaced.block else {
+            panic!("expected a table");
+        };
+        table.id = crate::types::BlockId::Str("unplaced".to_owned());
+        pagination.measured.insert(0, unplaced);
+        pagination.measured.push(duplicate);
+        let blocks = source_blocks_by_key(&pagination, &layout.pages[..1]);
+        assert!(std::ptr::eq(blocks["selected"], &pagination.measured[1]));
+        assert!(!blocks.contains_key("unplaced"));
+        assert!(matches!(
+            blocks.keys().find(|key| key.as_ref() == "selected"),
+            Some(Cow::Borrowed("selected")),
+        ));
+        assert!(source_blocks_by_key(&pagination, std::iter::empty()).is_empty());
+    }
+
     #[test]
     fn releasing_resident_pages_prunes_exclusive_blocks_and_keeps_a_split_table() {
         let mut pagination = table_split_fixture();
@@ -12048,6 +12106,7 @@ mod tests {
             .measured
             .iter()
             .filter_map(measured_block_key)
+            .map(Cow::into_owned)
             .collect::<Vec<_>>();
         let last = layout.pages.len() - 1;
         assert!(last > 0);
@@ -12080,6 +12139,7 @@ mod tests {
                 .measured
                 .iter()
                 .filter_map(measured_block_key)
+                .map(Cow::into_owned)
                 .collect::<Vec<_>>(),
             measured
         );
@@ -12421,7 +12481,7 @@ mod tests {
             .unwrap();
             assert_eq!(
                 fragment_block_key_ref(&fragment).unwrap().as_ref(),
-                block_key(&id)
+                block_key(&id).as_ref()
             );
         }
         assert_eq!(

@@ -154,9 +154,44 @@ impl ParagraphIndex {
         }
         true
     }
+
+    /// Shifts paragraph positions after deleting content within one paragraph.
+    pub(crate) fn shift_for_text_delete(&mut self, start: u32, end: u32) -> bool {
+        if start >= end {
+            return false;
+        }
+        let slot = self.paras.partition_point(|para| para.pilcrow < start);
+        let Some(para) = self.paras.get_mut(slot) else {
+            return false;
+        };
+        if start < para.node_start || end > para.pilcrow {
+            return false;
+        }
+        let units = end - start;
+        para.pilcrow -= units;
+        for para in &mut self.paras[slot + 1..] {
+            para.start -= units;
+            para.pilcrow -= units;
+            para.node_start -= units;
+        }
+        true
+    }
 }
 
 impl SegmentIndex {
+    /// Whether a nonempty range contains only plain text units.
+    pub(crate) fn is_text_range(&self, start: u32, end: u32) -> bool {
+        if start >= end || end > self.len {
+            return false;
+        }
+        let slot = self.segs.partition_point(|seg| seg.start <= start);
+        slot > 0
+            && self.segs[slot - 1..]
+                .iter()
+                .take_while(|seg| seg.start < end)
+                .all(|seg| matches!(seg.kind, SegKind::Text(_)))
+    }
+
     /// The segment covering `pos`, if any.
     pub(crate) fn segment_at(&self, pos: u32) -> Option<&Seg> {
         if pos >= self.len {
@@ -170,7 +205,7 @@ impl SegmentIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EditCtx, EditingDoc, FormatPolicy, Position, RawOp, SegmentContent};
+    use crate::{EditCtx, EditingDoc, FormatPolicy, Position, RawOp, SegmentContent, StoryRange};
     use yrs::{Map, Transact};
 
     /// The pre-index paragraph walk, kept as the reference oracle.
@@ -409,6 +444,45 @@ mod tests {
         }
     }
 
+    /// Short text deletions preserve the full paragraph index geometry.
+    #[test]
+    fn paragraph_index_text_delete_matches_full_build_at_every_range() {
+        for doc in [seeded_doc(), plain_doc_with_repeated_ids()] {
+            let original = fresh_paragraph_index(&doc, "body");
+            let state = doc.encode_state_as_update_v1();
+            let ctx = EditCtx::local("", "");
+            let len = doc.story_len("body").unwrap();
+            for start in 0..len {
+                for end in start + 1..=start.saturating_add(3).min(len) {
+                    let mut shifted = original.clone();
+                    let edited = EditingDoc::new(17);
+                    edited.apply_verbatim_v1(&state).unwrap();
+                    edited
+                        .delete_range(&ctx, StoryRange::new("body", start, end))
+                        .unwrap();
+                    let eligible = original
+                        .para_at(start)
+                        .is_some_and(|para| para.node_start <= start && end <= para.pilcrow);
+                    let advanced = shifted.shift_for_text_delete(start, end);
+                    assert_eq!(advanced, eligible, "range {start}..{end}");
+                    if advanced {
+                        assert_paragraph_indexes_eq(
+                            &shifted,
+                            &fresh_paragraph_index(&edited, "body"),
+                        );
+                    } else {
+                        assert_paragraph_indexes_eq(&shifted, &original);
+                    }
+                }
+            }
+            for (start, end) in [(0, 0), (2, 1), (len, len + 1)] {
+                let mut shifted = original.clone();
+                assert!(!shifted.shift_for_text_delete(start, end));
+                assert_paragraph_indexes_eq(&shifted, &original);
+            }
+        }
+    }
+
     #[test]
     fn paragraph_index_advances_after_text_insert_and_rebuilds_segments() {
         let doc = seeded_doc();
@@ -421,6 +495,32 @@ mod tests {
         let after = doc.committed_epoch();
         assert_eq!(after, before + 1);
         doc.advance_paragraph_index_after_text_insert("body", before, after, 1, 2);
+        let shifted = doc
+            .paragraph_indexes
+            .lock()
+            .unwrap()
+            .get("body", after)
+            .unwrap();
+        let cached = doc.paragraph_index("body").unwrap();
+        assert!(Arc::ptr_eq(&shifted, &cached));
+        assert_paragraph_indexes_eq(&cached, &fresh_paragraph_index(&doc, "body"));
+        assert_paragraph_indexes_eq(&original, &expected_original);
+        assert_index_matches_segments(&doc, "body");
+    }
+
+    /// A single deletion advances paragraphs while segments rebuild independently.
+    #[test]
+    fn paragraph_index_advances_after_text_delete_and_rebuilds_segments() {
+        let doc = seeded_doc();
+        let original = doc.paragraph_index("body").unwrap();
+        let expected_original = fresh_paragraph_index(&doc, "body");
+        let ctx = EditCtx::local("", "");
+        let before = doc.committed_epoch();
+        doc.delete_range(&ctx, StoryRange::new("body", 1, 2))
+            .unwrap();
+        let after = doc.committed_epoch();
+        assert_eq!(after, before + 1);
+        doc.advance_paragraph_index_after_text_delete("body", before, after, 1, 2);
         let shifted = doc
             .paragraph_indexes
             .lock()
@@ -464,6 +564,55 @@ mod tests {
             &fresh_paragraph_index(&doc, "body"),
         );
         assert_index_matches_segments(&doc, "body");
+    }
+
+    /// Two commits cannot advance an index built before either deletion.
+    #[test]
+    fn paragraph_index_rebuilds_when_text_delete_spans_two_epochs() {
+        let doc = seeded_doc();
+        doc.paragraph_index("body").unwrap();
+        let ctx = EditCtx::local("", "");
+        let before = doc.committed_epoch();
+        for _ in 0..2 {
+            doc.delete_range(&ctx, StoryRange::new("body", 0, 1))
+                .unwrap();
+        }
+        let after = doc.committed_epoch();
+        assert_eq!(after, before + 2);
+        doc.advance_paragraph_index_after_text_delete("body", before, after, 0, 1);
+        assert!(
+            doc.paragraph_indexes
+                .lock()
+                .unwrap()
+                .get("body", after)
+                .is_none()
+        );
+        assert_paragraph_indexes_eq(
+            &doc.paragraph_index("body").unwrap(),
+            &fresh_paragraph_index(&doc, "body"),
+        );
+        assert_index_matches_segments(&doc, "body");
+    }
+
+    /// Plain text ranges exclude embeds, pilcrows and invalid bounds.
+    #[test]
+    fn segment_index_plain_text_ranges_match_segment_kinds() {
+        let doc = seeded_doc();
+        let segments = doc.segment_index("body").unwrap();
+        let len = doc.story_len("body").unwrap();
+        for start in 0..=len {
+            for end in start..=len + 1 {
+                let expected = start < end
+                    && (start..end)
+                        .all(|pos| reference_seg_kind(&doc, "body", pos) == Some("text"));
+                assert_eq!(
+                    segments.is_text_range(start, end),
+                    expected,
+                    "range {start}..{end}"
+                );
+            }
+        }
+        assert!(!segments.is_text_range(2, 1));
     }
 
     #[test]

@@ -22,7 +22,7 @@ use docx_layout::paragraph_spacing::resolve_doc_grid_pitch;
 use docx_layout::paragraph_spacing::resolve_line_unit_spacing;
 use docx_layout::place::LayoutCheckpoint;
 use docx_layout::regions::{
-    DocumentRegions, RegionLayoutInput, apply_document_regions, apply_section_geometry,
+    DocumentRegions, RegionLayoutInput, apply_document_regions_tracked, apply_section_geometry,
     apply_section_geometry_to_blocks, effective_header_footer_refs,
 };
 use docx_layout::types::{
@@ -929,6 +929,8 @@ struct PaginationState {
     rebuilt_page_ranges: Vec<std::ops::Range<usize>>,
     position_deltas: HashMap<String, i64>,
     last_incremental: bool,
+    /// Pages whose stamps changed since the last display build, when known.
+    restamped_pages: Option<BTreeSet<usize>>,
     layout_epoch: u64,
     pagination_calls: u64,
     incremental_pagination_calls: u64,
@@ -1181,20 +1183,19 @@ fn page_stamps_match(
 
 /// Which pages a full display build compiles: all of them without a window,
 /// otherwise the window plus every page the previous list had built.
-fn full_build_pages(display: &DisplayState, page_count: usize) -> Vec<bool> {
-    let Some(window) = &display.window else {
-        return vec![true; page_count];
-    };
-    (0..page_count)
-        .map(|index| {
-            window.contains(&index)
-                || display
-                    .list
-                    .as_ref()
-                    .and_then(|list| list.pages.get(index))
-                    .is_some_and(|page| !page.unbuilt)
-        })
-        .collect()
+fn full_build_pages(display: &DisplayState, page_count: usize) -> Option<BTreeSet<usize>> {
+    let window = display.window.as_ref()?;
+    let mut pages: BTreeSet<_> = (window.start..window.end.min(page_count)).collect();
+    if let Some(list) = &display.list {
+        pages.extend(
+            list.pages
+                .iter()
+                .enumerate()
+                .take(page_count)
+                .filter_map(|(index, page)| (!page.unbuilt).then_some(index)),
+        );
+    }
+    Some(pages)
 }
 
 /// A whole-document placement pass, as one rebuilt page range.
@@ -1231,48 +1232,49 @@ impl CaretExtent {
     }
 }
 
+/// Selects the window and caret pages among the rebuilt pages.
 fn window_build_pages(
     display: &DisplayState,
     layout: &Layout,
-    rebuilt_pages: &HashSet<usize>,
+    rebuilt_pages: impl IntoIterator<Item = usize>,
     caret: Option<CaretExtent>,
-) -> Vec<bool> {
+) -> Option<BTreeSet<usize>> {
     if !display.windowed_incremental_builds
         || display.window.is_none()
         || display.retain_built_pages
     {
         return full_build_pages(display, layout.pages.len());
     }
-    layout
-        .pages
-        .iter()
-        .enumerate()
-        .map(|(index, page)| {
-            let caret_page = || {
-                caret.is_some_and(|caret| {
-                    matches!(caret, CaretExtent::Unmapped)
-                        || page.fragments.iter().any(|fragment| {
-                            let (start, end) = match fragment {
-                                Fragment::Paragraph(value) => (value.pm_start, value.pm_end),
-                                Fragment::Table(value) => (value.pm_start, value.pm_end),
-                                Fragment::Image(value) => (value.pm_start, value.pm_end),
-                                Fragment::Shape(value) => (value.pm_start, value.pm_end),
-                                Fragment::Chart(value) => (value.pm_start, value.pm_end),
-                                Fragment::TextBox(value) => (value.pm_start, value.pm_end),
-                            };
-                            start
-                                .zip(end)
-                                .is_some_and(|(start, end)| caret.holds(start, end))
-                        })
-                })
+    let window = display.window.as_ref()?;
+    let mut pages: BTreeSet<_> = (window.start..window.end.min(layout.pages.len())).collect();
+    if let Some(caret) = caret {
+        for index in rebuilt_pages {
+            let Some(page) = layout.pages.get(index) else {
+                continue;
             };
-            display
-                .window
-                .as_ref()
-                .is_some_and(|window| window.contains(&index))
-                || (rebuilt_pages.contains(&index) && caret_page())
-        })
-        .collect()
+            if pages.contains(&index) {
+                continue;
+            }
+            if matches!(caret, CaretExtent::Unmapped)
+                || page.fragments.iter().any(|fragment| {
+                    let (start, end) = match fragment {
+                        Fragment::Paragraph(value) => (value.pm_start, value.pm_end),
+                        Fragment::Table(value) => (value.pm_start, value.pm_end),
+                        Fragment::Image(value) => (value.pm_start, value.pm_end),
+                        Fragment::Shape(value) => (value.pm_start, value.pm_end),
+                        Fragment::Chart(value) => (value.pm_start, value.pm_end),
+                        Fragment::TextBox(value) => (value.pm_start, value.pm_end),
+                    };
+                    start
+                        .zip(end)
+                        .is_some_and(|(start, end)| caret.holds(start, end))
+                })
+            {
+                pages.insert(index);
+            }
+        }
+    }
+    Some(pages)
 }
 
 /// With windowed builds on, compile the window and a mapped caret's page,
@@ -1281,11 +1283,11 @@ fn windowed_full_build_pages(
     display: &DisplayState,
     layout: &Layout,
     caret: Option<CaretExtent>,
-) -> Vec<bool> {
+) -> Option<BTreeSet<usize>> {
     window_build_pages(
         display,
         layout,
-        &(0..layout.pages.len()).collect(),
+        0..layout.pages.len(),
         caret.filter(|caret| matches!(caret, CaretExtent::Position(_))),
     )
 }
@@ -2038,9 +2040,23 @@ impl EngineSession {
         lower_locally: bool,
     ) -> crate::OpResult<crate::Receipt> {
         let before = self.doc_epoch();
-        let paragraph_epoch =
-            (self.local_lowering.get() && text.is_some() && range.start == range.end)
-                .then(|| self.doc.committed_epoch());
+        let paragraph_epoch = (self.local_lowering.get()
+            && (text.is_none() || range.start == range.end))
+            .then(|| self.doc.committed_epoch());
+        let plain_text_delete = if paragraph_epoch.is_some() && text.is_none() {
+            let segments = self.doc.segment_index(&range.story)?;
+            segments.is_text_range(range.start, range.end)
+                && (segments
+                    .segment_at(range.end)
+                    .is_none_or(|segment| !matches!(segment.kind, crate::segments::SegKind::Embed))
+                    || self
+                        .doc
+                        .paragraph_index(&range.story)?
+                        .para_at(range.start)
+                        .is_some_and(|paragraph| range.start > paragraph.node_start))
+        } else {
+            false
+        };
         let mut attrs = None;
         let ctx = crate::EditCtx::local("", "");
         let receipt = match text {
@@ -2053,14 +2069,29 @@ impl EngineSession {
             )?,
             None => self.doc.delete_range(&ctx, range.clone())?,
         };
-        if let (Some(before), Some(text)) = (paragraph_epoch, text) {
-            self.doc.advance_paragraph_index_after_text_insert(
-                &range.story,
-                before,
-                self.doc.committed_epoch(),
-                range.start,
-                text.encode_utf16().count() as u32,
-            );
+        if let Some(before) = paragraph_epoch {
+            match text {
+                Some(text) => self.doc.advance_paragraph_index_after_text_insert(
+                    &range.story,
+                    before,
+                    self.doc.committed_epoch(),
+                    range.start,
+                    text.encode_utf16().count() as u32,
+                ),
+                None if plain_text_delete
+                    && receipt.new_para_ids.is_empty()
+                    && receipt.revision_ids.is_empty() =>
+                {
+                    self.doc.advance_paragraph_index_after_text_delete(
+                        &range.story,
+                        before,
+                        self.doc.committed_epoch(),
+                        range.start,
+                        range.end,
+                    );
+                }
+                None => {}
+            }
         }
         let mut render = self.render.borrow_mut();
         let eligible = lower_locally
@@ -3002,6 +3033,7 @@ impl EngineSession {
                 matches!(&measured.block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape))
             }))
         .then(|| input.clone());
+        let mut restamped_pages = Vec::new();
         let (mut initial_layout, mut arena) = if refs.is_empty() {
             self.layout_document_value_with_fingerprints(
                 input,
@@ -3021,7 +3053,7 @@ impl EngineSession {
                 docx_layout::place::layout_document(&mut input).map_err(layout_error_message)?;
             (layout, Some(input))
         };
-        apply_document_regions(&mut initial_layout, &regions);
+        apply_document_regions_tracked(&mut initial_layout, &regions, &mut restamped_pages);
         let presentations = build_note_presentations(&refs, &initial_layout.pages, &regions);
         assign_note_presentations(&mut notes.contents, &presentations);
         if resident_body {
@@ -3056,7 +3088,7 @@ impl EngineSession {
                     stabilize_shape_wrapping(pass, &regions, &measurement)?;
                 }
                 let mut layout = docx_layout::place::layout_document(pass)?;
-                apply_document_regions(&mut layout, &regions);
+                apply_document_regions_tracked(&mut layout, &regions, &mut restamped_pages);
                 Ok(layout)
             },
             &refs,
@@ -3083,6 +3115,7 @@ impl EngineSession {
                 Some((revision_preview_key, &revision_preview, main_body)),
                 cached_page_totals,
             )?;
+            restamped_pages.clear();
         } else {
             self.pagination.borrow_mut().layout = Some(stabilized.layout);
         }
@@ -3099,7 +3132,7 @@ impl EngineSession {
         }
         layout.partial = provisional || self.partial_document.get();
         layout.cached_page_totals = cached_page_totals;
-        apply_document_regions(layout, &regions);
+        apply_document_regions_tracked(layout, &regions, &mut restamped_pages);
         let page_note_map = map_notes_to_pages(&layout.pages, &refs, &regions);
         stamp_note_pages(layout, &page_note_map, &regions);
         attach_note_areas(layout, &page_note_map, &notes.contents, &regions);
@@ -3118,6 +3151,9 @@ impl EngineSession {
             })
             .transpose()?;
         pagination.note_changed_pages = note_changed_pages;
+        if let Some(pages) = &mut pagination.restamped_pages {
+            pages.extend(restamped_pages);
+        }
         let serial = pagination.layout_epoch;
         let headers_footers = measured_value.or_else(|| regions.headers_footers.clone());
         let notes_clear = notes.contents.is_empty() && refs.is_empty();
@@ -3514,6 +3550,12 @@ impl EngineSession {
         self.resumable.replace(None);
         self.capture.borrow_mut().take();
         let input_options_fingerprint = options_fingerprint(&input)?;
+        let previous_page_count = self
+            .pagination
+            .borrow()
+            .layout
+            .as_ref()
+            .map(|layout| layout.pages.len());
         let mut incremental = false;
         let mut deltas = HashMap::new();
         let run = {
@@ -3621,6 +3663,7 @@ impl EngineSession {
         // Every pass over part of a package, the resident edit paths' too.
         layout.partial = self.partial_document.get();
         layout.cached_page_totals = cached_page_totals;
+        let same_page_count = previous_page_count == Some(layout.pages.len());
         pagination.layout = Some(layout);
         pagination.checkpoints = run.checkpoints;
         pagination.block_fingerprints = block_fingerprints;
@@ -3635,6 +3678,9 @@ impl EngineSession {
         pagination.rebuilt_page_ranges = rebuilt_page_ranges;
         pagination.position_deltas = deltas;
         pagination.last_incremental = incremental;
+        if !incremental || !same_page_count {
+            pagination.restamped_pages = None;
+        }
         pagination.layout_epoch = pagination.layout_epoch.wrapping_add(1);
         pagination.pagination_calls = pagination.pagination_calls.wrapping_add(1);
         pagination.incremental_pagination_calls = pagination
@@ -4266,8 +4312,12 @@ impl EngineSession {
             .layout
             .as_mut()
             .expect("layout retained after successful pagination");
-        apply_document_regions(layout, &regions);
+        let mut restamped_pages = Vec::new();
+        apply_document_regions_tracked(layout, &regions, &mut restamped_pages);
         let unchanged = layout.pages.len() == previous_pages;
+        if let Some(pages) = &mut pagination.restamped_pages {
+            pages.extend(restamped_pages);
+        }
         drop(pagination);
         if unchanged && let Some(capture) = previous_capture {
             self.capture.replace(Some(LayoutCapture {
@@ -4412,6 +4462,7 @@ impl EngineSession {
         display.resident_input = None;
         display.frame_epoch = display.frame_epoch.wrapping_add(1);
         display.display_builds = display.display_builds.wrapping_add(1);
+        self.pagination.borrow_mut().restamped_pages = Some(BTreeSet::new());
         Ok(display_json)
     }
 
@@ -4478,20 +4529,27 @@ impl EngineSession {
                     .first()
                     .cloned()
                     .unwrap_or(pagination.rebuilt_page_start..pagination.rebuilt_page_end);
-                let restamped = display
-                    .list
-                    .as_ref()
-                    .filter(|list| list.pages.len() == layout.pages.len())
-                    .map(|list| {
-                        list.pages
-                            .iter()
-                            .zip(&layout.pages)
-                            .enumerate()
-                            .filter(|(_, (shown, page))| !page_stamps_match(shown, page))
-                            .map(|(index, _)| index)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
+                let restamped = match &pagination.restamped_pages {
+                    Some(pages) => pages
+                        .iter()
+                        .copied()
+                        .filter(|&index| index < layout.pages.len())
+                        .collect::<Vec<_>>(),
+                    None => display
+                        .list
+                        .as_ref()
+                        .filter(|list| list.pages.len() == layout.pages.len())
+                        .map(|list| {
+                            list.pages
+                                .iter()
+                                .zip(&layout.pages)
+                                .enumerate()
+                                .filter(|(_, (shown, page))| !page_stamps_match(shown, page))
+                                .map(|(index, _)| index)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
+                };
                 let note_pages: Vec<usize> = pagination
                     .rebuilt_page_ranges
                     .iter()
@@ -4505,7 +4563,8 @@ impl EngineSession {
                     .collect();
                 let rebuilt_pages: HashSet<usize> =
                     first.clone().chain(note_pages.iter().copied()).collect();
-                let build = window_build_pages(&display, layout, &rebuilt_pages, caret);
+                let build =
+                    window_build_pages(&display, layout, rebuilt_pages.iter().copied(), caret);
                 let shifts = if let DisplayState {
                     list: Some(previous),
                     resident_input: Some(resident_input),
@@ -4521,7 +4580,7 @@ impl EngineSession {
                         first.end,
                         &note_pages,
                         &pagination.position_deltas,
-                        &|index| build.get(index).copied().unwrap_or(true),
+                        &|index| build.as_ref().is_none_or(|pages| pages.contains(&index)),
                         observe_display_phase,
                     )?
                 } else {
@@ -4535,7 +4594,7 @@ impl EngineSession {
                             input,
                             layout,
                             extras_json,
-                            &|index| build.get(index).copied().unwrap_or(true),
+                            &|index| build.as_ref().is_none_or(|pages| pages.contains(&index)),
                             observe_display_phase,
                         )?;
                     display.resident_input = Some(resident_input);
@@ -4544,7 +4603,7 @@ impl EngineSession {
                 let rebuilt_display_pages = if incremental {
                     rebuilt_pages
                         .iter()
-                        .filter(|&&index| build.get(index).copied().unwrap_or(true))
+                        .filter(|&&index| build.as_ref().is_none_or(|pages| pages.contains(&index)))
                         .count()
                 } else {
                     rebuilt_pages.len()
@@ -4562,7 +4621,7 @@ impl EngineSession {
                         input,
                         layout,
                         extras_json,
-                        &|index| build.get(index).copied().unwrap_or(true),
+                        &|index| build.as_ref().is_none_or(|pages| pages.contains(&index)),
                         observe_display_phase,
                     )?;
                 display.resident_input = Some(resident_input);
@@ -4575,6 +4634,7 @@ impl EngineSession {
                 )
             }
         };
+        self.pagination.borrow_mut().restamped_pages = Some(BTreeSet::new());
         observe_display_phase();
         let mut display = self.display.borrow_mut();
         display.frame_epoch = display
@@ -10542,6 +10602,165 @@ mod tests {
         .unwrap()
     }
 
+    /// Collapsed backspaces retain cached paragraphs and exact windowed frames.
+    #[test]
+    fn windowed_backspaces_keep_the_paragraph_index_and_match_a_full_build() {
+        use std::sync::Arc;
+        use yrs::{Assoc, IndexedSequence};
+
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let engine = EngineSession::new(219);
+        engine.set_local_lowering(true);
+        crate::seed::seed_from_docx(
+            engine.doc(),
+            &docx_bytes(
+                "",
+                &"<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(49),
+            ),
+        )
+        .unwrap();
+        let paragraph = engine.doc().paragraphs("body").unwrap().remove(24);
+        let start = engine
+            .doc()
+            .paragraph_index("body")
+            .unwrap()
+            .para_span(&paragraph.para_id)
+            .unwrap()
+            .0;
+        let at = start + 7;
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", at),
+                "😀x",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        engine
+            .layout_document_with_regions_json(&small_page_request(font))
+            .unwrap();
+        let initial = engine.build_display_list_frame("{}", 0).unwrap();
+        let caret_page = {
+            let pagination = engine.pagination.borrow();
+            let layout = pagination.layout.as_ref().unwrap();
+            assert!(layout.pages.len() >= 4);
+            layout
+                .pages
+                .iter()
+                .position(|page| {
+                    page.fragments.iter().any(|fragment| {
+                        matches!(fragment, Fragment::Paragraph(value)
+                            if block_key(&value.block_id) == paragraph.para_id)
+                    })
+                })
+                .unwrap()
+        };
+        let txn = engine.doc().yrs_doc().transact();
+        let story = crate::story_ref(&txn, "body").unwrap();
+        let head = story.sticky_index(&txn, at + 3, Assoc::After).unwrap();
+        drop(txn);
+        engine.set_resident_caret_head(Some(("body".to_owned(), head)));
+        engine.set_display_window(Some(caret_page..caret_page + 1));
+        engine.set_windowed_incremental_builds(true);
+        engine.doc().paragraph_index("body").unwrap();
+        let mut retained = HashMap::new();
+        let initial = crate::frame_delta::apply_placeholder_test_frame(&initial, &mut retained);
+        assert_eq!(initial, full_display_build(&engine, "{}"));
+
+        for units in [1, 2] {
+            let txn = engine.doc().yrs_doc().transact();
+            let end = engine
+                .resident_caret_head
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .1
+                .get_offset(&txn)
+                .unwrap()
+                .index;
+            drop(txn);
+            let before = engine.doc().committed_epoch();
+            engine
+                .edit_resident_text(crate::StoryRange::new("body", end - units, end), None, true)
+                .unwrap();
+            let after = engine.doc().committed_epoch();
+            assert_eq!(after, before + 1);
+            let shifted = engine
+                .doc()
+                .paragraph_indexes
+                .lock()
+                .unwrap()
+                .get("body", after)
+                .expect("the delete advances the cached paragraph index");
+            let epoch = engine.display.borrow().binary_frame_epoch;
+            let frame = engine.apply_and_layout("body", epoch).unwrap();
+            assert!(engine.pagination.borrow().last_incremental);
+            assert!(Arc::ptr_eq(
+                &shifted,
+                &engine.doc().paragraph_index("body").unwrap(),
+            ));
+            let expected = full_display_build(&engine, "{}");
+            assert_eq!(engine.with_display_list(Clone::clone).unwrap(), expected);
+            assert_eq!(
+                crate::frame_delta::apply_placeholder_test_frame(&frame, &mut retained),
+                expected,
+            );
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    /// Embed removals and paragraph merges leave the paragraph cache stale.
+    #[test]
+    fn resident_structural_deletes_do_not_advance_the_paragraph_index() {
+        for (kind, start, end) in [("sdt", 1, 2), ("pilcrow", 1, 2), ("pageBreak", 0, 1)] {
+            let engine = EngineSession::new(222);
+            engine.set_local_lowering(true);
+            let ctx = crate::EditCtx::local("", "");
+            engine
+                .doc()
+                .create_story("body", "ABC", "Normal", "left")
+                .unwrap();
+            if kind == "pilcrow" {
+                engine
+                    .doc()
+                    .split_paragraph(&ctx, crate::Position::new("body", 1), None)
+                    .unwrap();
+            } else {
+                engine
+                    .doc()
+                    .apply_raw_ops(
+                        "body",
+                        vec![crate::RawOp::InsertEmbed {
+                            index: 1,
+                            kind: kind.to_owned(),
+                            payload: vec![("embedId".to_owned(), yrs::Any::from("control-1"))],
+                            attrs: Default::default(),
+                        }],
+                        &ctx,
+                    )
+                    .unwrap();
+            }
+            engine.doc().paragraph_index("body").unwrap();
+            let before = engine.doc().committed_epoch();
+            engine
+                .edit_resident_text(crate::StoryRange::new("body", start, end), None, true)
+                .unwrap();
+            let after = engine.doc().committed_epoch();
+            assert_eq!(after, before + 1);
+            assert!(
+                engine
+                    .doc()
+                    .paragraph_indexes
+                    .lock()
+                    .unwrap()
+                    .get("body", after)
+                    .is_none()
+            );
+        }
+    }
+
     /// Windowed edits shift a suffix once and later page builds encode only requested pages.
     #[test]
     fn windowed_edit_range_shifts_decode_to_full_build_and_keep_page_builds_scoped() {
@@ -11518,10 +11737,9 @@ mod tests {
         };
         let rebuilt: HashSet<usize> = (0..layout.pages.len()).collect();
         let built = |caret| {
-            window_build_pages(&display, layout, &rebuilt, caret)
-                .into_iter()
-                .enumerate()
-                .filter_map(|(index, built)| built.then_some(index))
+            let build = window_build_pages(&display, layout, rebuilt.iter().copied(), caret);
+            (0..layout.pages.len())
+                .filter(|index| build.as_ref().is_none_or(|pages| pages.contains(index)))
                 .collect::<Vec<_>>()
         };
         let Some(Fragment::Paragraph(last)) = layout.pages[0].fragments.last() else {
@@ -11868,12 +12086,25 @@ mod tests {
 
     #[test]
     fn a_retained_page_whose_stamps_changed_is_rebuilt() {
-        let (engine, extras) = paged_filler_engine(208, 48);
+        let (engine, extras, _) = paged_region_engine(
+            208,
+            &format!(
+                "<w:p><w:r><w:t>Editable paragraph</w:t></w:r></w:p>{}",
+                "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(48)
+            ),
+        );
         engine.build_display_list_frame(&extras, 0).unwrap();
         let pages = engine.with_display_list(|list| list.pages.len()).unwrap();
         assert!(pages >= 4, "the fixture must span several pages");
         let last = pages - 1;
-        // As when a section's first page moved: the last page shows other numbering.
+        engine
+            .pagination
+            .borrow_mut()
+            .layout
+            .as_mut()
+            .unwrap()
+            .pages[last]
+            .page_label = Some("i".to_owned());
         engine.display.borrow_mut().list.as_mut().unwrap().pages[last].page_label =
             Some("i".to_owned());
 
@@ -11890,7 +12121,21 @@ mod tests {
             .unwrap();
         let incremental_builds = engine.stats().incremental_display_builds;
         let epoch = engine.display.borrow().binary_frame_epoch;
-        engine.apply_and_layout("body", epoch).unwrap();
+        assert!(
+            engine
+                .apply_and_layout_regions_resident("body", &mut |_| {})
+                .unwrap()
+        );
+        assert!(
+            engine
+                .pagination
+                .borrow()
+                .restamped_pages
+                .as_ref()
+                .unwrap()
+                .contains(&last)
+        );
+        engine.build_display_list_frame(&extras, epoch).unwrap();
         assert_eq!(
             engine.stats().incremental_display_builds,
             incremental_builds + 1
@@ -11906,6 +12151,89 @@ mod tests {
         assert_eq!(
             engine.with_display_list(Clone::clone).unwrap().pages,
             full_display_build(&engine, &extras).pages
+        );
+        docx_layout::clear_measure_fonts();
+    }
+
+    /// Unchanged page stamps leave an empty tracked set after a frame.
+    #[test]
+    fn an_edit_without_stamp_changes_clears_restamped_pages_after_the_frame() {
+        let (engine, extras, _) = paged_region_engine(
+            220,
+            &"<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(48),
+        );
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let initial = engine.with_display_list(Clone::clone).unwrap();
+        engine
+            .edit_resident_text(crate::StoryRange::new("body", 3, 3), Some("x"), true)
+            .unwrap();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        let pagination = engine.pagination.borrow();
+        assert!(pagination.last_incremental);
+        assert_eq!(pagination.restamped_pages, Some(BTreeSet::new()));
+        let layout = pagination.layout.as_ref().unwrap();
+        assert_eq!(initial.pages.len(), layout.pages.len());
+        assert!(
+            initial
+                .pages
+                .iter()
+                .zip(&layout.pages)
+                .all(|(shown, page)| page_stamps_match(shown, page))
+        );
+        drop(pagination);
+        assert_eq!(
+            engine.with_display_list(Clone::clone).unwrap(),
+            full_display_build(&engine, &extras),
+        );
+        docx_layout::clear_measure_fonts();
+    }
+
+    /// Page count changes invalidate tracking until the full display build.
+    #[test]
+    fn a_page_count_change_makes_restamped_pages_unknown_before_the_frame() {
+        let (engine, extras) = paged_filler_engine(221, 48);
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let pages = engine.with_display_list(|list| list.pages.len()).unwrap();
+        assert_eq!(
+            engine.pagination.borrow().restamped_pages,
+            Some(BTreeSet::new()),
+        );
+        engine
+            .edit_resident_text(
+                crate::StoryRange::new("body", 3, 3),
+                Some(&" additional text".repeat(240)),
+                true,
+            )
+            .unwrap();
+        let resident = engine.resident_layout_input("body").unwrap();
+        engine
+            .layout_document_value_with_fingerprints(
+                resident.input,
+                resident.block_fingerprints,
+                None,
+                false,
+            )
+            .unwrap();
+        let pagination = engine.pagination.borrow();
+        assert!(pagination.last_incremental);
+        assert!(pagination.layout.as_ref().unwrap().pages.len() > pages);
+        assert_eq!(pagination.restamped_pages, None);
+        drop(pagination);
+        let incremental_builds = engine.stats().incremental_display_builds;
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.build_display_list_frame(&extras, epoch).unwrap();
+        assert_eq!(
+            engine.stats().incremental_display_builds,
+            incremental_builds
+        );
+        assert_eq!(
+            engine.pagination.borrow().restamped_pages,
+            Some(BTreeSet::new()),
+        );
+        assert_eq!(
+            engine.with_display_list(Clone::clone).unwrap(),
+            full_display_build(&engine, &extras),
         );
         docx_layout::clear_measure_fonts();
     }
