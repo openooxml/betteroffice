@@ -12,6 +12,7 @@ import {
   type InProcessResidentWorker,
 } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
 import {
+  DocxAsyncOnlyError,
   DocxEditor,
   defineDocxPlugin,
   type DocxEditorRef,
@@ -69,12 +70,13 @@ async function navigationViewer() {
     }
   } as unknown as typeof Worker;
   const ref = createRef<DocxEditorRef>();
-  const input: { current: YrsInputRef | null } = { current: null };
+  let inputRef: { readonly current: YrsInputRef | null } | null = null;
+  const input = { get current() { return inputRef?.current ?? null; } };
   const scrolls: Array<ReturnType<typeof mock<(position: number, forParaIdScroll?: boolean) => void>>> = [];
   const useScroll = scrollApi.usePagedScrollApi;
   spyOn(scrollApi, 'usePagedScrollApi').mockImplementation((options) => {
     const api = useScroll(options);
-    input.current = options.yrsInputRef.current;
+    inputRef = options.yrsInputRef;
     const scroll = mock((_position: number, _forParaIdScroll?: boolean) => {});
     scrolls.push(scroll);
     return { ...api, scrollToPositionImpl: scroll };
@@ -82,12 +84,20 @@ async function navigationViewer() {
   const provider = { resolve: () => () => Promise.resolve(font.buffer.slice(
     font.byteOffset, font.byteOffset + font.byteLength
   ) as ArrayBuffer) };
+  const context: { current: DocxPluginContext<null> | null } = { current: null };
+  const plugin = defineDocxPlugin({
+    id: 'test.viewer-navigation',
+    createState: () => null,
+    initialize: (next) => { context.current = next; },
+    onEvent: (next) => { context.current = next; },
+  });
   const view = render(<DocxEditor
     ref={ref} documentBuffer={await pagedDocx(1, 2)} readOnly experimentalWorkerOpen
-    previewFirstPage={false} measurementFontProvider={provider}
+    previewFirstPage={false} measurementFontProvider={provider} plugins={[plugin]}
   />);
-  await waitFor(() => expect(ref.current!.getEditorRef()?.isWorkerViewer()).toBe(true), { timeout: 20_000 });
+  await waitFor(() => expect(() => ref.current!.getDocument()).toThrow(DocxAsyncOnlyError), { timeout: 20_000 });
   await ref.current!.whenLayoutComplete({ timeoutMs: 20_000 });
+  await waitFor(() => expect(context.current?.snapshot.layout).toBeTruthy(), { timeout: 20_000 });
   await waitFor(() => expect(input.current).not.toBeNull());
   return { ref, input, scrolls, view, worker: workers[0]! };
 }
@@ -95,10 +105,9 @@ async function navigationViewer() {
 for (const gesture of ['keyboard', 'pointer']) {
   test(`pending viewer navigation yields to a newer ${gesture} selection`, async () => {
     const { ref, input, view, worker, scrolls } = await navigationViewer();
-    const paged = ref.current!.getEditorRef()!;
     worker.hold();
     const reads = worker.requests.filter((kind) => kind === 'documentRead').length;
-    const navigation = paged.navigateViewer({ kind: 'paragraphTarget', paraId: '00000002' });
+    const navigation = ref.current!.scrollToParagraph('00000002');
     await waitFor(() => expect(worker.requests.filter((kind) => kind === 'documentRead').length).toBeGreaterThan(reads));
     if (gesture === 'keyboard') {
       const textarea = view.getByTestId('yrs-input');
@@ -110,19 +119,21 @@ for (const gesture of ['keyboard', 'pointer']) {
         input.current!.setSelectionFromDisplay(2, 5, undefined, next);
       });
     }
-    const selection = paged.getSelectionRange();
+    const selection = input.current!.displaySelection();
     const currentGesture = input.current!.currentGesture!();
     const calls = scrolls.reduce((count, scroll) => count + scroll.mock.calls.length, 0);
     await act(async () => worker.release());
     expect(await navigation).toBe(false);
     expect(input.current!.isGestureCurrent!(currentGesture)).toBe(true);
+    const after = input.current!.displaySelection()!;
     if (gesture === 'keyboard') {
-      expect(paged.getSelectionRange()!.from).toBe(0);
-      expect(paged.getSelectionRange()!.to).toBeGreaterThanOrEqual(selection!.to);
+      expect(Math.min(after.anchor, after.head)).toBe(0);
+      expect(Math.max(after.anchor, after.head)).toBeGreaterThanOrEqual(Math.max(selection!.anchor, selection!.head));
     } else {
-      expect(paged.getSelectionRange()).toEqual(selection);
+      expect(after).toEqual({ anchor: 2, head: 5 });
     }
     expect(scrolls.reduce((count, scroll) => count + scroll.mock.calls.length, 0)).toBe(calls);
+    expect(worker.requests).not.toContain('encodeState');
   }, 40_000);
 }
 
@@ -153,7 +164,7 @@ test('viewer navigation re-reads a newer frame and applies with the latest scrol
     }, target, apply, options)
   );
   const selection = spyOn(input.current!, 'setSelectionFromDisplay');
-  const navigation = ref.current!.getEditorRef()!.navigateViewer({ kind: 'paragraphTarget', paraId: '00000002' });
+  const navigation = ref.current!.scrollToParagraph('00000002');
   const initial = scrolls.at(-1)!;
   await act(async () => ref.current!.setZoom(1.25));
   expect(scrolls.at(-1)).not.toBe(initial);
