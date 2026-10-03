@@ -1191,6 +1191,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     yrsSeedGeneration,
     isCurrentLoad,
     acceptHostDocument,
+    notifyDocumentFramePresented,
     failHostDocument,
     reportLayoutError: reportDocumentLayoutError,
     fontAliases,
@@ -1311,7 +1312,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     const offPresented = onPresented((displayList, options) => {
       const shown = shownRef.current;
       if (displayList !== shown.displayList) return;
-      if (shown.engine) notifyFramePresented(shown.engine);
+      if (shown.engine) {
+        notifyFramePresented(shown.engine);
+        notifyDocumentFramePresented(shown.engine);
+      }
       if (
         firstPagePendingRef.current &&
         !awaitingDocument() &&
@@ -1347,7 +1351,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       offPresented();
       offFailed();
     };
-  }, [awaitingDocument, notifyFramePresented]);
+  }, [awaitingDocument, notifyFramePresented, notifyDocumentFramePresented]);
   sessionGenerationRef.current = yrsCore.sessionGeneration;
   // Content listeners project the document on every edit; warm its base once
   // the first pages are on screen so neither opening nor the first key pays.

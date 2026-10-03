@@ -20,6 +20,9 @@ import type { PagedEditorRef } from '../PagedEditor';
 import type { CommentIdAllocator } from '../commentFactories';
 import { DocumentLoadGeneration } from './documentLoadGeneration';
 
+/** Bounds the wait for a presented frame before picker fonts are probed; hidden tabs get no frames. */
+export const PICKER_FONTS_FALLBACK_MS = 2000;
+
 /**
  * Document lifecycle: load buffer / pre-parsed doc, react to
  * `documentBuffer` / `document` prop changes, and extract any baked-in
@@ -87,10 +90,41 @@ export function useDocumentLoader({
   // registered different faces under the same name.
   const [fontAliases, setFontAliases] = useState<ReadonlyMap<string, string>>(NO_FONT_ALIASES);
   const skippedFontsRef = useRef<SkippedFonts | null>(null);
+  const pendingDocumentFontsRef = useRef<{
+    session: Pick<YrsSession, 'onUpdate'> | undefined;
+    presented: boolean;
+    frameId: number | null;
+    taskTimer: ReturnType<typeof setTimeout> | null;
+    fallbackTimer: ReturnType<typeof setTimeout> | null;
+    probe: () => void;
+  } | null>(null);
+
+  const cancelPendingDocumentFonts = useCallback(() => {
+    const pending = pendingDocumentFontsRef.current;
+    if (pending) {
+      if (pending.frameId !== null) cancelAnimationFrame(pending.frameId);
+      if (pending.taskTimer !== null) clearTimeout(pending.taskTimer);
+      if (pending.fallbackTimer !== null) clearTimeout(pending.fallbackTimer);
+    }
+    pendingDocumentFontsRef.current = null;
+  }, []);
+
+  const notifyDocumentFramePresented = useCallback((engine: unknown) => {
+    const pending = pendingDocumentFontsRef.current;
+    if (!pending || pending.presented || (pending.session && pending.session !== engine)) return;
+    pending.presented = true;
+    pending.frameId = requestAnimationFrame(() => {
+      pending.frameId = requestAnimationFrame(() => {
+        pending.frameId = null;
+        pending.taskTimer = setTimeout(pending.probe, 0);
+      });
+    });
+  }, []);
 
   const loadParsedDocument = useCallback(
     (doc: Document, seedBytes?: Uint8Array) => {
       const generation = loadGeneration.begin();
+      cancelPendingDocumentFonts();
       resetForNewDocument();
       setYrsSeedDocument(doc);
       setYrsSeedBytes(seedBytes?.slice() ?? null);
@@ -114,12 +148,21 @@ export function useDocumentLoader({
         })
       );
     },
-    [loadGeneration, resetForNewDocument, history, setLoadingState, setDocumentFonts, fontScope]
+    [
+      loadGeneration,
+      cancelPendingDocumentFonts,
+      resetForNewDocument,
+      history,
+      setLoadingState,
+      setDocumentFonts,
+      fontScope,
+    ]
   );
 
   const loadBuffer = useCallback(
     async (buffer: DocxInput) => {
       const generation = loadGeneration.begin();
+      cancelPendingDocumentFonts();
       resetForNewDocument();
       setLoadingState({ isLoading: true, parseError: null });
       setFontAliases(NO_FONT_ALIASES);
@@ -139,7 +182,14 @@ export function useDocumentLoader({
         onError?.(error instanceof Error ? error : new Error(message));
       }
     },
-    [loadGeneration, resetForNewDocument, history, onError, setLoadingState]
+    [
+      loadGeneration,
+      cancelPendingDocumentFonts,
+      resetForNewDocument,
+      history,
+      onError,
+      setLoadingState,
+    ]
   );
 
   const acceptHostDocument = useCallback(
@@ -164,17 +214,35 @@ export function useDocumentLoader({
       previewDocumentRef.current = options?.preview ? doc : null;
       history.reset(doc);
       setLoadingState({ isLoading: false, parseError: null });
-      const embeddedFamilies = getEmbeddedFontFamilies(doc.package.fontTable);
-      const documentFonts = [
-        ...getRenderableDocumentFonts(doc, { embeddedFamilies }),
-        ...selectRenderableFonts(host.referencedFonts, { embeddedFamilies }),
-      ];
-      setDocumentFonts(
-        [...new Map(documentFonts.map((font) => [font.name.toLowerCase(), font])).values()]
-      );
       // A preview's font loads stop once the full document is accepted.
       const isCurrent = () =>
         loadGeneration.isCurrent(generation) && hostDocumentsRef.current === accepted;
+      const pendingDocumentFonts: NonNullable<typeof pendingDocumentFontsRef.current> = {
+        session,
+        presented: false,
+        frameId: null,
+        taskTimer: null,
+        fallbackTimer: null,
+        probe: () => {
+          if (!isCurrent() || pendingDocumentFontsRef.current !== pendingDocumentFonts) return;
+          const embeddedFamilies = getEmbeddedFontFamilies(doc.package.fontTable);
+          const documentFonts = [
+            ...getRenderableDocumentFonts(doc, { embeddedFamilies }),
+            ...selectRenderableFonts(host.referencedFonts, { embeddedFamilies }),
+          ];
+          if (!isCurrent() || pendingDocumentFontsRef.current !== pendingDocumentFonts) return;
+          cancelPendingDocumentFonts();
+          setDocumentFonts(
+            [...new Map(documentFonts.map((font) => [font.name.toLowerCase(), font])).values()]
+          );
+        },
+      };
+      cancelPendingDocumentFonts();
+      pendingDocumentFontsRef.current = pendingDocumentFonts;
+      pendingDocumentFonts.fallbackTimer = setTimeout(
+        pendingDocumentFonts.probe,
+        PICKER_FONTS_FALLBACK_MS
+      );
       // A preview never changes, so what its first pages skip stays skipped.
       const skipped = new Set(
         session || options?.preview ? host.unusedScriptFonts?.map(fontKey) : undefined
@@ -212,7 +280,14 @@ export function useDocumentLoader({
         }
       );
     },
-    [loadGeneration, history, setDocumentFonts, setLoadingState, fontScope]
+    [
+      loadGeneration,
+      cancelPendingDocumentFonts,
+      history,
+      setDocumentFonts,
+      setLoadingState,
+      fontScope,
+    ]
   );
 
   const failHostDocument = useCallback(
@@ -226,6 +301,7 @@ export function useDocumentLoader({
         return;
       }
       loadGeneration.fail(generation);
+      cancelPendingDocumentFonts();
       // A preview's first pages, or a document that failed to show, are not
       // the document the load opened.
       if (options?.opened || previewDocumentRef.current) {
@@ -237,7 +313,7 @@ export function useDocumentLoader({
       setLoadingState({ isLoading: false, parseError: error.message });
       onError?.(error);
     },
-    [loadGeneration, history, onError, setLoadingState]
+    [loadGeneration, cancelPendingDocumentFonts, history, onError, setLoadingState]
   );
 
   const isCurrentLoad = useCallback(
@@ -308,8 +384,9 @@ export function useDocumentLoader({
   useEffect(
     () => () => {
       loadGeneration.invalidate();
+      cancelPendingDocumentFonts();
     },
-    [loadGeneration]
+    [loadGeneration, cancelPendingDocumentFonts]
   );
 
   return {
@@ -320,6 +397,7 @@ export function useDocumentLoader({
     yrsSeedGeneration,
     isCurrentLoad,
     acceptHostDocument,
+    notifyDocumentFramePresented,
     failHostDocument,
     reportLayoutError,
     fontAliases,
