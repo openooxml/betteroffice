@@ -1191,3 +1191,96 @@ fn a_keep_next_row_moves_with_a_row_a_cell_cannot_start_on_the_page() {
     assert_eq!(result[0]["rowEnd"], 2);
     assert!(result[0]["cellClips"].is_null());
 }
+
+#[test]
+fn a_row_moves_whole_when_a_staggered_widow_controlled_cell_has_no_line_on_the_page() {
+    let measured = after_filler(
+        2,
+        two_cell_table(&[(4, 0.0, json!({})), (3, 4.4, json!({}))]),
+    );
+    let result = table_fragments(measured.clone(), None);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].0, 1);
+    assert!(result[0].1["cellClips"].is_null());
+    assert_eq!(
+        placed_cell_lines(&measured),
+        [vec![], vec![(0, 0..4), (1, 0..3)]]
+    );
+}
+
+#[test]
+fn a_cell_line_taller_than_a_page_keeps_the_other_cells_splitting() {
+    let mut table = two_cell_table(&[(20, 0.0, json!({})), (1, 0.0, json!({}))]);
+    let cell = &mut table["measure"]["rows"][0]["cells"][1];
+    cell["height"] = json!(120);
+    cell["blocks"][0]["totalHeight"] = json!(120);
+    let line = &mut cell["blocks"][0]["lines"][0];
+    line["ascent"] = json!(100);
+    line["descent"] = json!(20);
+    line["lineHeight"] = json!(120);
+    let result = table_fragments(after_filler(2, table), None);
+    assert_eq!(result[0].0, 0);
+    assert_eq!(cell_windows(&result[0].1), [(0.0, 60.0), (0.0, 0.0)]);
+    let mut bottom = 0.0;
+    for (_, fragment) in &result {
+        let (top, end) = cell_windows(fragment)[0];
+        assert_eq!(top, bottom);
+        bottom = end;
+    }
+    assert_eq!(bottom, 400.0);
+}
+
+#[test]
+fn pages_with_float_bands_keep_the_per_cell_split() {
+    let input = json!({
+        "measured": after_filler(
+            20,
+            two_cell_table(&[(4, 0.0, json!({})), (3, 4.4, json!({}))]),
+        ),
+        "options": {
+            "pageSize": {"w": 240, "h": 500},
+            "margins": {"top": 20, "right": 10, "bottom": 10, "left": 10},
+            "sectionPageFloatBands": [{"default": [], "first": [{"top": 20, "bottom": 30}]}],
+        },
+    });
+    let layout: Value =
+        serde_json::from_str(&docx_layout::layout_to_canonical_json(&input.to_string()).unwrap())
+            .unwrap();
+    let tables: Vec<_> = layout["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .flat_map(|(page, value)| {
+            value["fragments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|fragment| fragment["kind"] == "table")
+                .map(move |fragment| (page, fragment.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(tables.len(), 2);
+    assert_eq!(tables[0].0, 0);
+    assert_eq!(cell_windows(&tables[0].1), [(0.0, 40.0), (0.0, 0.0)]);
+    assert_eq!(cell_windows(&tables[1].1), [(40.0, 80.0), (0.0, 64.4)]);
+}
+
+#[test]
+fn a_keep_next_heading_moves_with_a_header_band_and_a_per_cell_row_chain() {
+    let ends = table_rows(&[
+        (1, json!({}), json!({"isHeader": true})),
+        (1, json!({"keepNext": true}), json!({})),
+    ]);
+    let mut table = two_cell_table(&[(6, 0.0, json!({})), (4, 10.0, json!({"keepLines": true}))]);
+    for key in ["block", "measure"] {
+        table[key]["rows"] = json!([
+            ends[key]["rows"][0],
+            ends[key]["rows"][1],
+            table[key]["rows"][0],
+        ]);
+    }
+    table["measure"]["totalHeight"] = json!(160);
+    assert_eq!(heading_and_table_pages_after(1, table), (Some(1), Some(1)));
+}

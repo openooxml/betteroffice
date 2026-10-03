@@ -328,7 +328,7 @@ impl<'a> RowBreaks<'a> {
         (minimum <= capacity
             && self
                 .cell_slice(row, consumed, None, minimum, shared, false, capacity)
-                .is_some())
+                .is_some_and(|slice| !slice.starved))
         .then_some(minimum)
     }
 
@@ -389,15 +389,11 @@ impl<'a> RowBreaks<'a> {
                 clip.bottom = last_fitting(&cell.lines, clip.top);
             }
         }
-        // A row splits only where every cell with content left places some of it.
-        if tops.is_none()
+        let starved = tops.is_none()
             && cells
                 .iter()
                 .zip(&clips)
-                .any(|(cell, clip)| clip.bottom == clip.top && cell.end > clip.top)
-        {
-            return None;
-        }
+                .any(|(cell, clip)| clip.bottom == clip.top && cell.end > clip.top);
         let height = height(&clips);
         let complete = cells
             .iter()
@@ -407,6 +403,7 @@ impl<'a> RowBreaks<'a> {
             clips,
             height,
             complete,
+            starved,
         })
     }
 
@@ -449,6 +446,7 @@ impl<'a> RowBreaks<'a> {
             clips,
             height: self.cell_remaining(row, tops),
             complete: true,
+            starved: false,
         }
     }
 
@@ -505,6 +503,8 @@ pub(crate) struct CellRowSlice {
     pub(crate) clips: Vec<CellClip>,
     pub(crate) height: f64,
     pub(crate) complete: bool,
+    /// A first slice that leaves a cell with content left no line on the page.
+    pub(crate) starved: bool,
 }
 
 fn cell_offsets(geometry: &CellRowGeometry, end: f64) -> Vec<f64> {
