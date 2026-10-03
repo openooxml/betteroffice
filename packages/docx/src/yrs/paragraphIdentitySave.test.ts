@@ -868,6 +868,7 @@ describe('paragraph identities across saves', () => {
     const opened = await open(fixture(), 7);
     const state = opened.encodeState();
     const identities = opened.paragraphIdentities();
+    expect(opened.paragraphIdentities()).toEqual(identities);
     for (const identity of identities.paragraphs) {
       const anchor = identity.session ?? identity.source!;
       expect(found(opened, anchor)).toEqual(anchor);
@@ -890,6 +891,12 @@ describe('paragraph identities across saves', () => {
       paraId: '4D5E6F7A',
     });
     expect(found(opened, comment.persisted!)).toEqual(comment.source!);
+    opened.paragraphs('body');
+    opened.listRevisions();
+    expect(opened.paragraphIdentities()).toEqual(identities);
+    const mutable = opened.paragraphIdentities();
+    mutable.paragraphs.length = 0;
+    expect(opened.paragraphIdentities()).toEqual(identities);
     expect(opened.encodeState()).toEqual(state);
 
     const detached = await session(10);
