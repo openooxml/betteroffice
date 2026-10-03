@@ -332,28 +332,37 @@ fn layout_table_with_position(
         } else {
             None
         };
-        let header_start_height = if let Some(slice) = cell_header_slice {
-            let tops: Vec<_> = slice.clips.iter().map(|clip| clip.top).collect();
-            let mut height = header_rows_height
-                + breaks.cell_fresh_slice(header_row_count, &tops, body_capacity);
-            let keep_height = row_keep_height(
-                keep_chains[header_row_count],
-                block,
-                measure,
-                &breaks,
-                body_capacity,
-                limited_by_float,
-            );
-            if keep_height > 0.0 && keep_height <= body_capacity {
-                height = height.max(header_rows_height + keep_height);
-            }
-            height
-        } else if first_body_kept_oversized {
+        let shared_start_height = if first_body_kept_oversized {
             header_rows_height + breaks.fresh_slice(header_row_count, 0.0, body_capacity)
         } else if first_fragment_height <= column_capacity {
             first_fragment_height
         } else {
             header_rows_height
+        };
+        // The per-cell start only replaces a shared start that would move the table,
+        // and still holds every keep-with-next chain the row loop would hold.
+        let header_start_height = match cell_header_slice {
+            Some(slice) if shared_start_height + pending_spacing > available_height => {
+                let tops: Vec<_> = slice.clips.iter().map(|clip| clip.top).collect();
+                let mut height = header_rows_height
+                    + breaks.cell_fresh_slice(header_row_count, &tops, body_capacity);
+                let mut top = 0.0;
+                for (index, chain) in keep_chains.iter().enumerate().take(header_row_count + 1) {
+                    let room = if index >= header_row_count {
+                        body_capacity
+                    } else {
+                        column_capacity
+                    };
+                    let keep =
+                        row_keep_height(*chain, block, measure, &breaks, room, limited_by_float);
+                    if keep > 0.0 && keep <= room {
+                        height = height.max(top + keep);
+                    }
+                    top += rows[index].height;
+                }
+                height
+            }
+            _ => shared_start_height,
         };
         if is_first_fragment
             && header_row_count > 0

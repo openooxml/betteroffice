@@ -481,6 +481,30 @@ fn after_filler(lines: usize, table: Value) -> Vec<Value> {
     vec![json!({"block": block, "measure": measure}), table]
 }
 
+/// (page, rowStart, rowEnd) of each table fragment of `table` after a five-line
+/// filler on 200 px tall pages; `legacy` also asserts that none carries cellClips.
+fn header_table_fragments(table: Value, legacy: bool) -> Vec<(usize, u64, u64)> {
+    let input = json!({
+        "measured": after_filler(5, table),
+        "options": {"pageSize": {"w": 240, "h": 220},
+            "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}},
+    });
+    let layout: Value =
+        serde_json::from_str(&docx_layout::layout_to_canonical_json(&input.to_string()).unwrap())
+            .unwrap();
+    let mut fragments = Vec::new();
+    for (page, value) in layout["pages"].as_array().unwrap().iter().enumerate() {
+        for fragment in value["fragments"].as_array().unwrap() {
+            if fragment["kind"] == "table" {
+                assert!(!legacy || fragment.get("cellClips").is_none());
+                let row = |key: &str| fragment[key].as_u64().unwrap();
+                fragments.push((page, row("rowStart"), row("rowEnd")));
+            }
+        }
+    }
+    fragments
+}
+
 fn cell_windows(fragment: &Value) -> Vec<(f64, f64)> {
     fragment["cellClips"]
         .as_array()
@@ -1014,35 +1038,52 @@ fn repeated_headers_move_with_an_offset_cell_keep_next_chain_without_a_header_on
         ends["measure"]["rows"][1],
     ]);
     table["measure"]["totalHeight"] = json!(164.4);
-    let input = json!({
-        "measured": after_filler(5, table),
-        "options": {"pageSize": {"w": 240, "h": 220},
-            "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}},
-    });
-    let layout: Value =
-        serde_json::from_str(&docx_layout::layout_to_canonical_json(&input.to_string()).unwrap())
-            .unwrap();
-    let fragments: Vec<_> = layout["pages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .enumerate()
-        .flat_map(|(page, value)| {
-            value["fragments"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|fragment| fragment["kind"] == "table")
-                .map(move |fragment| {
-                    (
-                        page,
-                        fragment["rowStart"].as_u64().unwrap(),
-                        fragment["rowEnd"].as_u64().unwrap(),
-                    )
-                })
-        })
-        .collect();
-    assert_eq!(fragments, [(1, 0, 3)]);
+    assert_eq!(header_table_fragments(table, false), [(1, 0, 3)]);
+}
+
+#[test]
+fn repeated_headers_move_with_a_keep_next_chain_starting_in_the_header_band() {
+    let ends = table_rows(&[
+        (1, json!({}), json!({"isHeader": true})),
+        (1, json!({"keepNext": true}), json!({"isHeader": true})),
+        (1, json!({}), json!({})),
+    ]);
+    let keep = json!({"keepNext": true});
+    let mut table = two_cell_table(&[(6, 0.0, keep.clone()), (6, 4.4, keep)]);
+    for key in ["block", "measure"] {
+        table[key]["rows"] = json!([
+            ends[key]["rows"][0],
+            ends[key]["rows"][1],
+            table[key]["rows"][0],
+            ends[key]["rows"][2],
+        ]);
+    }
+    table["measure"]["totalHeight"] = json!(184.4);
+    assert_eq!(header_table_fragments(table, false), [(1, 0, 4)]);
+}
+
+#[test]
+fn a_fitting_shared_start_keeps_the_legacy_header_decision() {
+    let ends = table_rows(&[
+        (1, json!({}), json!({"isHeader": true})),
+        (1, json!({}), json!({})),
+    ]);
+    let keep = json!({"keepNext": true});
+    let mut table = two_cell_table(&[(6, 0.0, keep.clone()), (6, 4.4, keep)]);
+    let (lead, lead_measure) = paragraph(20, 2, json!({}));
+    let (tail, tail_measure) =
+        paragraph(21, 4, json!({"keepNext": true, "spacing": {"before": 4.4}}));
+    table["block"]["rows"][0]["cells"][1]["blocks"] = json!([lead, tail]);
+    table["measure"]["rows"][0]["cells"][1]["blocks"] = json!([lead_measure, tail_measure]);
+    for key in ["block", "measure"] {
+        table[key]["rows"] = json!([
+            ends[key]["rows"][0],
+            table[key]["rows"][0],
+            ends[key]["rows"][1]
+        ]);
+    }
+    table["measure"]["totalHeight"] = json!(164.4);
+    assert_eq!(header_table_fragments(table, true), [(0, 0, 1), (1, 1, 3)]);
 }
 
 #[test]
