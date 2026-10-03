@@ -880,6 +880,16 @@ impl EditingDoc {
         Ok(Some(scratch.encode_state_as_update_v1().into()))
     }
 
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+    pub(crate) fn has_note_separator_state(&self, state: &[u8]) -> bool {
+        self.loaded_note_separator_state
+            .lock()
+            .unwrap()
+            .as_deref()
+            .unwrap_or_default()
+            == state
+    }
+
     /// Replaces loaded separator notes, preserving their Arc when the bytes match.
     #[doc(hidden)]
     pub fn set_note_separator_state(&self, state: Option<Arc<[u8]>>) {

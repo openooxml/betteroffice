@@ -2367,7 +2367,17 @@ impl EngineSession {
         {
             let request =
                 serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
-            let fingerprint = font_requirements_fingerprint(request)?;
+            let separators = self
+                .doc
+                .note_separator_state()?
+                .map_or(0, |state| hash_bytes(&state));
+            let fingerprint = hash_bytes(
+                &[
+                    font_requirements_fingerprint(request)?.to_le_bytes(),
+                    separators.to_le_bytes(),
+                ]
+                .concat(),
+            );
             let epoch = self.doc_epoch();
             let cached = self
                 .preview_font_requirements
@@ -3335,6 +3345,10 @@ impl EngineSession {
         let sections: BTreeSet<_> = (0..regions.sections.len())
             .chain(layout.pages.iter().map(|page| page.region_section_index))
             .collect();
+        let mut first_pages = HashMap::new();
+        for page in &layout.pages {
+            first_pages.entry(page.region_section_index).or_insert(page);
+        }
         for (kind, name) in [
             (NoteKind::Footnote, "footnote"),
             (NoteKind::Endnote, "endnote"),
@@ -3347,10 +3361,7 @@ impl EngineSession {
             };
             let mut measured_heights = HashMap::new();
             for &section_index in &sections {
-                let page = layout
-                    .pages
-                    .iter()
-                    .find(|page| page.region_section_index == section_index);
+                let page = first_pages.get(&section_index).copied();
                 let section = regions
                     .sections
                     .get(section_index)

@@ -2357,6 +2357,9 @@ impl EditSession {
 
     /// Loads separator notes from a yrs v1 update; empty clears them.
     pub fn load_note_separators(&self, state: &[u8]) -> Result<(), JsValue> {
+        if self.engine.doc().has_note_separator_state(state) {
+            return Ok(());
+        }
         let state = if state.is_empty() {
             None
         } else {
