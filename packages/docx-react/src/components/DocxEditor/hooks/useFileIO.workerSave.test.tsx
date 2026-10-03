@@ -309,7 +309,7 @@ test('an editor waits for an in-flight peer load before flushing and saving', as
   expect(opened.errors).toEqual([]);
 });
 
-test.each([true, false])('worker save unavailable with viewer=%s', async (viewer) => {
+test.each([true, false])('worker save unavailable with viewer=%s (a viewer reports it and never requests its copy)', async (viewer) => {
   const opened = await workerOpened(viewer);
   registerWorkerOpenSave(opened.session, {
     available: () => true,

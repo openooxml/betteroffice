@@ -1,7 +1,11 @@
 import { useCallback, useRef } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
 import { readDocxFileFromInput, type DocxInput } from '@betteroffice/docx/utils';
-import { ResidentWorkerSaveUnavailableError, saveEditorDocument } from '@betteroffice/docx/yrs';
+import {
+  ResidentWorkerSaveUnavailableError,
+  saveEditorDocument,
+  type YrsSession,
+} from '@betteroffice/docx/yrs';
 import { openPrintWindow } from '@betteroffice/docx';
 import {
   rasterizeDisplayListPages,
@@ -10,7 +14,12 @@ import {
 } from '@betteroffice/docx/layout/render';
 import type { PagedEditorRef } from '../PagedEditor';
 import { flushedSession } from '../editorBatches';
-import { awaitWorkerOpenReplica, requestWorkerOpenReplica, workerOpenReplicaStarted } from '../internals/workerOpenReplica';
+import {
+  awaitWorkerOpenReplica,
+  requestWorkerOpenReplica,
+  workerOpenReplicaPending,
+  workerOpenReplicaStarted,
+} from '../internals/workerOpenReplica';
 import { registeredWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import { workerOpenSave } from '../internals/workerOpenSave';
 import { isWorkerViewer } from '../internals/workerViewer';
@@ -18,6 +27,48 @@ import type { DocxEditorProps } from '../../DocxEditor';
 import type { DocxImageInsert, DocxSaveOutcome } from './useDocxCommands';
 
 const INSERT_IMAGE_MAX_WIDTH_PX = 612;
+
+/**
+ * Saves in the document's worker; null when the save falls back to the main
+ * thread. A viewer whose copy has not loaded saves in its worker or not at all.
+ */
+async function saveInWorker(
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  session: YrsSession,
+  viewer: boolean,
+  comments: Comment[],
+  assertCurrent: () => void
+): Promise<ArrayBuffer | null> {
+  const saver = workerOpenSave(session);
+  const workerOnly = viewer && workerOpenReplicaPending(session);
+  if (!saver || (!viewer && !saver.available())) {
+    if (workerOnly) throw new ResidentWorkerSaveUnavailableError('No document worker');
+    return null;
+  }
+  let peer: YrsSession | undefined;
+  if (!viewer && workerOpenReplicaStarted(session)) {
+    await awaitWorkerOpenReplica(session);
+    peer = (await flushedSession(pagedEditorRef)).session;
+    assertCurrent();
+  }
+  const task = () => {
+    assertCurrent();
+    if (!viewer && !saver.available()) {
+      throw new ResidentWorkerSaveUnavailableError('No document worker');
+    }
+    return saver.save(comments, peer);
+  };
+  try {
+    const authority = registeredWorkerProposalAuthority(session);
+    const buffer = await (authority ? authority.save(task) : task());
+    assertCurrent();
+    return buffer;
+  } catch (error) {
+    assertCurrent();
+    if (viewer ? workerOnly : !(error instanceof ResidentWorkerSaveUnavailableError)) throw error;
+    return null;
+  }
+}
 
 function toFileIOError(error: unknown, fallbackMessage: string): Error {
   return error instanceof Error ? error : new Error(fallbackMessage);
@@ -136,42 +187,21 @@ export function useFileIO({
       try {
         if (!pagedEditorRef.current) return null;
         const viewer = viewerSession ?? isWorkerViewer(pagedEditorRef.current);
-        const saver = initialSession ? workerOpenSave(initialSession) : null;
         const assertCurrent = () => {
           if (pagedEditorRef.current?.getYrsSession() !== initialSession) {
             throw new Error('The document changed while saving');
           }
         };
-        if (viewer || saver?.available()) {
-          if (!saver || !initialSession) throw new Error('No document worker');
-          let peer: typeof initialSession;
-          if (!viewer && workerOpenReplicaStarted(initialSession)) {
-            await awaitWorkerOpenReplica(initialSession);
-            peer = (await flushedSession(pagedEditorRef)).session;
+        if (initialSession) {
+          const inWorker = await saveInWorker(pagedEditorRef, initialSession, viewer, comments, assertCurrent);
+          if (inWorker) {
+            onSave?.(inWorker);
+            return inWorker;
+          }
+          if (!viewer && workerOpenSave(initialSession)) {
+            await requestWorkerOpenReplica(initialSession);
             assertCurrent();
           }
-          const task = () => {
-            assertCurrent();
-            if (!viewer && !saver.available()) throw new ResidentWorkerSaveUnavailableError('No document worker');
-            return saver.save(comments, peer);
-          };
-          let buffer: ArrayBuffer | undefined;
-          try {
-            const authority = registeredWorkerProposalAuthority(initialSession);
-            buffer = await (authority ? authority.save(task) : task());
-            assertCurrent();
-          } catch (error) {
-            assertCurrent();
-            if (viewer || !(error instanceof ResidentWorkerSaveUnavailableError)) throw error;
-          }
-          if (buffer) {
-            onSave?.(buffer);
-            return buffer;
-          }
-        }
-        if (saver && initialSession) {
-          await requestWorkerOpenReplica(initialSession);
-          assertCurrent();
         }
         const { editor, session } = await flushedSession(pagedEditorRef);
         assertCurrent();

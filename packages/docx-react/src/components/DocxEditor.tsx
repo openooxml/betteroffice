@@ -1383,7 +1383,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     handleImageFileChange,
   } = useFileIO({
     pagedEditorRef,
-    viewerSession: viewerReads,
+    viewerSession,
     resolveImage: canvasRenderer.resolveImage,
     shownImageResolver: canvasRenderer.imageResolverForShownFrame,
     fontFamilies: fontAliases,
