@@ -588,6 +588,24 @@ fn reserved_heights_cover(
         .all(|(page, height)| reserved.get(page).copied().unwrap_or(0.0) >= *height)
 }
 
+/// The pages `reserved` keeps more note space on than `required` asks for, in page order, or
+/// `None` when some page's notes need more than `reserved` keeps.
+pub fn reservation_surplus_pages(
+    reserved: &OrderedMap<u32, f64>,
+    required: &OrderedMap<u32, f64>,
+) -> Option<Vec<u32>> {
+    if !reserved_heights_cover(reserved, required) {
+        return None;
+    }
+    let mut pages: Vec<u32> = reserved
+        .iter()
+        .filter(|(page, height)| *height > required.get(page).copied().unwrap_or(0.0))
+        .map(|(page, _)| *page)
+        .collect();
+    pages.sort_unstable();
+    Some(pages)
+}
+
 fn merge_reserved_heights(
     left: &OrderedMap<u32, f64>,
     right: &OrderedMap<u32, f64>,
@@ -1151,6 +1169,54 @@ mod tests {
         assert_eq!(passes, 2);
         assert_eq!(result.reserved_heights.get(&2), Some(&32.0));
         assert_eq!(result.layout.pages[1].footnote_ids, Some(vec![1.0]));
+    }
+
+    #[test]
+    fn alternating_reservations_keep_one_covering_every_page() {
+        let on_first = layout(vec![
+            page(1, 0, vec![paragraph_fragment(0.0, 10.0)]),
+            page(2, 0, Vec::new()),
+        ]);
+        let on_second = layout(vec![
+            page(1, 0, Vec::new()),
+            page(2, 0, vec![paragraph_fragment(0.0, 10.0)]),
+        ]);
+        let refs = vec![NoteRefLocation {
+            note_id: 1,
+            note_kind: NoteKind::Footnote,
+            pm_pos: 5.0,
+            table_block_id: None,
+            row_index: None,
+        }];
+        let contents = vec![content(1, NoteKind::Footnote, 20.0)];
+        let result = stabilize_note_layout(
+            |reserved| {
+                Ok(if reserved.get(&1).is_some() {
+                    on_second.clone()
+                } else {
+                    on_first.clone()
+                })
+            },
+            &refs,
+            &contents,
+            on_first.clone(),
+            &DocumentRegions::default(),
+        )
+        .unwrap();
+
+        assert!(!result.converged);
+        assert_eq!(result.reserved_heights.get(&1), Some(&32.0));
+        assert_eq!(result.reserved_heights.get(&2), Some(&32.0));
+        let required =
+            calculate_note_reserved_heights(&result.page_note_map, &contents, &OrderedMap::new());
+        assert_eq!(
+            reservation_surplus_pages(&result.reserved_heights, &required),
+            Some(vec![1])
+        );
+        assert_eq!(
+            reservation_surplus_pages(&required, &result.reserved_heights),
+            None
+        );
     }
 
     #[test]

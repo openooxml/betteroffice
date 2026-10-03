@@ -1366,6 +1366,93 @@ fn notes_that_never_settle_are_refused() {
     );
 }
 
+/// A first page whose last line holds a footnote reference: reserving the note on that page
+/// pushes the line to the next page, which leaves the first page nothing to reserve.
+fn alternating_note_docx() -> Vec<u8> {
+    let exact =
+        r#"<w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr>"#;
+    let body = format!(
+        "{}{}<w:sectPr><w:pgSz w:w=\"7200\" w:h=\"5760\"/><w:pgMar w:top=\"720\" w:right=\"720\" w:bottom=\"720\" w:left=\"720\" w:header=\"300\" w:footer=\"300\" w:gutter=\"0\"/></w:sectPr>",
+        (0..16)
+            .map(|index| fixture::p(
+                &format!("6100{index:04X}"),
+                &format!("{exact}{}", fixture::r(&format!("line {index}")))
+            ))
+            .collect::<String>(),
+        fixture::p(
+            "00000001",
+            &format!(
+                r#"{exact}{}<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="1"/></w:r>"#,
+                fixture::r("Anchor")
+            )
+        )
+    );
+    let note: String = (0..3)
+        .map(|index| {
+            fixture::p(
+                &format!("5100{index:04X}"),
+                &fixture::r(&format!("note line {index}")),
+            )
+        })
+        .collect();
+    fixture::with_body_and_note(&body, &note)
+}
+
+#[test]
+fn alternating_notes_export_the_covering_layout_with_a_diagnostic() {
+    let bytes = alternating_note_docx();
+    let (engine, request) = fixture::laid_out(&bytes, 7);
+    let relaid: serde_json::Value = serde_json::from_str(
+        &engine
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(relaid["notesConverged"], false);
+    let mut snapshot_options = options(RevisionView::Markup);
+    snapshot_options.include_geometry = Some(true);
+    let snapshot = |engine: &EngineSession| {
+        serde_json::to_string(
+            &engine
+                .export_snapshot_with_pages(&snapshot_options)
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let first = snapshot(&engine);
+    let (other, _) = fixture::laid_out(&bytes, 99);
+    assert_eq!(first, snapshot(&other));
+    engine
+        .layout_document_with_regions_retained_json(&request)
+        .unwrap();
+    assert_eq!(first, snapshot(&engine));
+
+    let map = export(&engine, &options(RevisionView::Markup)).layout;
+    assert_eq!(map.pages.len(), 2);
+    let fallback: Vec<Option<u32>> = map
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == PageDiagnosticCode::NoteLayoutFallback)
+        .map(|diagnostic| diagnostic.page_index)
+        .collect();
+    assert_eq!(fallback, vec![Some(0)]);
+    let note_pages: Vec<u32> = map
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.story == "fn:1")
+        .map(|occurrence| occurrence.page_index)
+        .collect();
+    assert_eq!(note_pages, vec![1]);
+    let (converging, _) = fixture::laid_out(&fixture::unrevised_docx(), 5);
+    assert!(
+        export(&converging, &options(RevisionView::Markup))
+            .layout
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != PageDiagnosticCode::NoteLayoutFallback)
+    );
+}
+
 #[test]
 fn a_page_holding_two_sections_has_an_occurrence_for_each() {
     let geometry = r#"<w:pgSz w:w="7200" w:h="5760"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="300" w:footer="300" w:gutter="0"/>"#;

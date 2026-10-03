@@ -9,8 +9,9 @@ use std::rc::Rc;
 use docx_layout::display_list::DisplayList;
 use docx_layout::footnotes::{
     FOOTNOTE_COLUMN_GAP_PX, OrderedMap, apply_note_presentation, assign_note_presentations,
-    attach_note_areas, build_note_presentations, collect_note_refs, map_note_anchors_to_pages,
-    map_notes_to_pages, stabilize_note_layout, stamp_note_pages,
+    attach_note_areas, build_note_presentations, calculate_note_reserved_heights,
+    collect_note_refs, footnote_columns_by_page, map_note_anchors_to_pages, map_notes_to_pages,
+    reservation_surplus_pages, stabilize_note_layout, stamp_note_pages,
 };
 use docx_layout::header_footer::{
     HeaderFooterKind, HeaderFooterMetrics, HeaderFooterPayload, HeaderFooterType,
@@ -147,11 +148,23 @@ struct LayoutCapture {
     serial: u64,
     /// The generation of the measurement fonts the layout measured with.
     fonts: (u64, usize),
-    notes_converged: bool,
+    note_settlement: NoteSettlement,
     /// The environment every story of the pass was lowered with.
     render_env: RenderEnv,
     headers_footers: Option<Rc<HeaderFooterPayload>>,
     notes: Rc<Vec<docx_layout::footnotes::NoteContent>>,
+}
+
+/// How the note reservations of a layout pass settled.
+#[derive(Debug)]
+enum NoteSettlement {
+    /// The reservations are a fixed point of the layout.
+    Converged,
+    /// The note passes alternated, and the layout keeps a reservation that covers every page's
+    /// notes; these page indexes reserve more than their notes take.
+    Covering(Vec<usize>),
+    /// Some page's notes take more space than the layout reserves for them.
+    Unsettled,
 }
 
 struct RegionPass {
@@ -3103,6 +3116,27 @@ impl EngineSession {
         let page_note_map = map_notes_to_pages(&layout.pages, &refs, &regions);
         stamp_note_pages(layout, &page_note_map, &regions);
         attach_note_areas(layout, &page_note_map, &notes.contents, &regions);
+        let note_settlement = if notes_converged {
+            NoteSettlement::Converged
+        } else {
+            let required = calculate_note_reserved_heights(
+                &page_note_map,
+                &notes.contents,
+                &footnote_columns_by_page(&layout.pages, &regions),
+            );
+            match reservation_surplus_pages(&stabilized.reserved_heights, &required) {
+                Some(numbers) => NoteSettlement::Covering(
+                    layout
+                        .pages
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, page)| numbers.contains(&page.number))
+                        .map(|(index, _)| index)
+                        .collect(),
+                ),
+                None => NoteSettlement::Unsettled,
+            }
+        };
         let note_changed_pages: Vec<usize> = note_page_keys(Some(layout))
             .iter()
             .enumerate()
@@ -3170,7 +3204,7 @@ impl EngineSession {
                 version: self.doc.version(),
                 serial,
                 fonts,
-                notes_converged,
+                note_settlement,
                 render_env,
                 headers_footers: measured_headers_footers.map(Rc::new),
                 notes: Rc::new(notes.contents),
@@ -4985,12 +5019,16 @@ impl EngineSession {
                 "The layout is not the one expectLayoutVersion names.",
             ));
         }
-        if !capture.notes_converged {
-            return Err(refuse(
-                ExportFailureCode::LayoutNotConverged,
-                "Note placement did not settle in the retained layout.",
-            ));
-        }
+        let note_fallback_pages: &[usize] = match &capture.note_settlement {
+            NoteSettlement::Converged => &[],
+            NoteSettlement::Covering(pages) => pages,
+            NoteSettlement::Unsettled => {
+                return Err(refuse(
+                    ExportFailureCode::LayoutNotConverged,
+                    "Note placement did not settle in the retained layout.",
+                ));
+            }
+        };
         if !capture.render_env.revision_preview.is_empty() {
             return Err(refuse(
                 ExportFailureCode::UnsupportedRevisionLayout,
@@ -5200,6 +5238,7 @@ impl EngineSession {
                 headers_footers: capture.headers_footers.as_deref(),
                 bands_composed: region_state.headers_footers.is_some(),
                 notes: &capture.notes,
+                note_fallback_pages,
                 maps: &maps,
                 display: display.as_ref(),
             },
