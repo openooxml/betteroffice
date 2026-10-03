@@ -406,17 +406,28 @@ test('a paragraph navigation that waits for the layout still focuses the input',
   scroller.remove();
 });
 
-test('a waiting position resumed onto an unbuilt page stops following it on an edit', async () => {
+test('a waiting position resumed onto an unbuilt page stops following it on an edit or a key press', async () => {
   let version = '1';
   const session = { version: () => version } as unknown as YrsSession;
-  const { result, rerender, scroller, scrolls, laidOut } = paginatingApi(session);
   const placeholder = { pageIndex: 8, x: 20, y: 20, width: 0, height: 0 };
-  await act(async () => result.current.scrollToPositionImpl(5000));
-  const building = unbuiltQueries([0, 1, 2, 3, 4, 5, 6, 7], placeholder);
-  await act(async () => rerender({ layout: layout(10), queries: building, session }));
-  expect(scrolls).toHaveLength(1);
-  version = '2';
-  await act(async () => rerender({ layout: layout(10), queries: laidOut, session }));
-  expect(scrolls).toHaveLength(1);
-  scroller.remove();
+  const drops = [
+    () => {
+      version = '2';
+    },
+    () => {
+      document.body.dispatchEvent(new Event('keydown', { bubbles: true }));
+    },
+  ];
+  for (const drop of drops) {
+    version = '1';
+    const { result, rerender, scroller, scrolls, laidOut } = paginatingApi(session);
+    await act(async () => result.current.scrollToPositionImpl(5000));
+    const building = unbuiltQueries([0, 1, 2, 3, 4, 5, 6, 7], placeholder);
+    await act(async () => rerender({ layout: layout(10), queries: building, session }));
+    expect(scrolls).toHaveLength(1);
+    await act(async () => drop());
+    await act(async () => rerender({ layout: layout(10), queries: laidOut, session }));
+    expect(scrolls).toHaveLength(1);
+    scroller.remove();
+  }
 });

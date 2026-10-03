@@ -135,6 +135,10 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
         for (const type of USER_SCROLL_EVENTS) {
           scroller.addEventListener(type, clearPendingRefine, listening);
         }
+        scroller.ownerDocument.addEventListener('keydown', clearPendingRefine, {
+          ...listening,
+          capture: true,
+        });
         const until = performance.now() + REFINE_WINDOW_MS;
         pendingRefineRef.current = { position, pageIndex: rect.pageIndex, until, stop };
       }
