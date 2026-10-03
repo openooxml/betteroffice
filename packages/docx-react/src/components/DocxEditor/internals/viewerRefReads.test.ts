@@ -33,7 +33,7 @@ function accessFor(read: unknown) {
 test('find reads matches at the presented worker version without a selection', async () => {
   const read = mock(async () => ({ version: 'A', value: matches }));
   const { access } = accessFor(read);
-  expect(await readViewerFindMatches(access, 'word', options)).toEqual(matches);
+  expect(await readViewerFindMatches(access, 'word', options)).toEqual({ version: 'A', matches });
   expect(read).toHaveBeenCalledWith({ kind: 'findMatches', searchText: 'word', options, expectVersion: 'A' });
   expect(access.awaitFrame).not.toHaveBeenCalled();
 });
@@ -41,7 +41,7 @@ test('find reads matches at the presented worker version without a selection', a
 test('a superseded find retries against the next presented frame', async () => {
   const read = mock(async (_request: ResidentDocumentRead) => ({ version: 'B', value: matches }));
   const { access } = accessFor(read);
-  expect(await readViewerFindMatches(access, 'word', options)).toEqual(matches);
+  expect(await readViewerFindMatches(access, 'word', options)).toEqual({ version: 'B', matches });
   expect(read.mock.calls).toEqual([
     [{ kind: 'findMatches', searchText: 'word', options, expectVersion: 'A' }],
     [{ kind: 'findMatches', searchText: 'word', options, expectVersion: 'B' }],
@@ -59,7 +59,7 @@ test('find retries when the frame changes before an otherwise current reply', as
     }
     return { version: 'B', value: matches };
   }) as ResidentEngineWorkerClient['documentRead'];
-  expect(await readViewerFindMatches(access, 'word', options)).toEqual(matches);
+  expect(await readViewerFindMatches(access, 'word', options)).toEqual({ version: 'B', matches });
   expect(reads).toBe(2);
 });
 
@@ -92,7 +92,7 @@ test('find returns null when the viewer stops being current', async () => {
 test('find returns null without a presented frame and accepts empty matches', async () => {
   const read = mock(async () => ({ version: 'A', value: [] }));
   const { access } = accessFor(read);
-  expect(await readViewerFindMatches(access, 'word', options)).toEqual([]);
+  expect(await readViewerFindMatches(access, 'word', options)).toEqual({ version: 'A', matches: [] });
   access.host = () => null;
   expect(await readViewerFindMatches(access, 'word', options)).toBeNull();
   expect(read).toHaveBeenCalledTimes(1);

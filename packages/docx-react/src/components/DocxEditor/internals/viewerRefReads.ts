@@ -83,7 +83,7 @@ export async function readViewerFindMatches(
   access: ViewerRefReadAccess,
   searchText: string,
   options: FindOptions
-): Promise<DocxFindDisplayMatch[] | null> {
+): Promise<{ version: string; matches: DocxFindDisplayMatch[] } | null> {
   const deadline = Date.now() + 10_000;
   for (let attempt = 0; attempt < 5 && access.current(); attempt += 1) {
     const queries = access.queries();
@@ -93,7 +93,9 @@ export async function readViewerFindMatches(
       kind: 'findMatches', searchText, options, expectVersion,
     }), deadline);
     if (!access.current() || !outcome) return null;
-    if (outcome.status === 'ok' && frameVersion(access, access.queries()) === expectVersion) return outcome.value;
+    if (outcome.status === 'ok' && outcome.value && frameVersion(access, access.queries()) === expectVersion) {
+      return { version: expectVersion, matches: outcome.value };
+    }
     if (attempt === 4 || !await beforeDeadline(access.awaitFrame(queries, deadline - Date.now()), deadline)) return null;
   }
   return null;

@@ -23,6 +23,7 @@ function match(startOffset: number, text = 'word'): DocxFindDisplayMatch {
   };
 }
 const matches = [match(0), match(10)];
+type Read = { version: string; matches: DocxFindDisplayMatch[] } | null;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -35,23 +36,26 @@ function mount(viewer = true) {
     if (viewer) throw new Error('unexpected replica read');
     return [{ paraId: 'p', text: 'word Word wording' }];
   });
-  const session = { paragraphs, setSelection: mock(() => {}) } as unknown as YrsSession;
+  const version = mock(() => 'v1');
+  const session = { paragraphs, setSelection: mock(() => {}), version } as unknown as YrsSession;
   const editor = {
     isWorkerViewer: mock(() => viewer),
     getYrsSession: mock(() => session),
-    readViewerFindMatches: mock(async () => matches as DocxFindDisplayMatch[] | null),
+    readViewerFindMatches: mock(async (): Promise<Read> => ({ version: 'v1', matches })),
     setSelection: mock(() => {}),
     scrollToPosition: mock(() => {}),
     syncYrsInputState: mock(() => true),
     yrsLocToDisplayPosition: mock((loc: { offset: number }) => loc.offset + 1),
   };
   const pagedEditorRef = { current: editor as unknown as PagedEditorRef | null };
-  const findReplace = { setMatches: mock(() => {}), goToMatch: mock((_index: number) => {}) };
+  const findReplace = {
+    setMatches: mock(() => {}), goToMatch: mock((_index: number) => {}), state: { isOpen: true },
+  };
   const complete = mock(async () => ({ ok: true, status: 'executed' } as const));
   const hook = renderHook(() => useFindReplaceBridge({
     pagedEditorRef, findReplace: findReplace as unknown as ReturnType<typeof useFindReplace>, complete,
   }));
-  return { hook, editor, session, paragraphs, pagedEditorRef, findReplace, complete };
+  return { hook, editor, session, version, paragraphs, pagedEditorRef, findReplace, complete };
 }
 
 test('viewer find publishes worker matches and selects and scrolls without reading the replica', async () => {
@@ -71,16 +75,16 @@ test('viewer find publishes worker matches and selects and scrolls without readi
 
 test('viewer find ignores a result superseded by a second search', async () => {
   const { hook, editor, findReplace } = mount();
-  const first = deferred<DocxFindDisplayMatch[] | null>();
-  const second = deferred<DocxFindDisplayMatch[] | null>();
+  const first = deferred<Read>();
+  const second = deferred<Read>();
   editor.readViewerFindMatches.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
   act(() => {
     hook.result.current.handleFind('word', options);
     hook.result.current.handleFind('next', options);
   });
   const next = [match(20, 'next')];
-  await act(async () => { second.resolve(next); });
-  await act(async () => { first.resolve(matches); });
+  await act(async () => { second.resolve({ version: 'v1', matches: next }); });
+  await act(async () => { first.resolve({ version: 'v1', matches }); });
   expect(findReplace.setMatches).toHaveBeenLastCalledWith(next, 0);
   expect(hook.result.current.findResultRef.current?.matches).toEqual(next);
   expect(editor.setSelection).toHaveBeenCalledTimes(1);
@@ -110,13 +114,13 @@ test('viewer replacements refuse before completing or reading the replica', asyn
 
 test('empty search clears results and invalidates a pending viewer search', async () => {
   const { hook, editor, findReplace } = mount();
-  const pending = deferred<DocxFindDisplayMatch[] | null>();
+  const pending = deferred<Read>();
   editor.readViewerFindMatches.mockReturnValueOnce(pending.promise);
   act(() => {
     hook.result.current.handleFind('word', options);
     hook.result.current.handleFind('  ', options);
   });
-  await act(async () => { pending.resolve(matches); });
+  await act(async () => { pending.resolve({ version: 'v1', matches }); });
   expect(hook.result.current.findResultRef.current).toBeNull();
   expect(findReplace.setMatches).toHaveBeenLastCalledWith([], 0);
   expect(editor.setSelection).not.toHaveBeenCalled();
@@ -131,21 +135,51 @@ test('null worker result leaves the viewer results empty', async () => {
   expect(editor.setSelection).not.toHaveBeenCalled();
 });
 
-for (const change of ['editor', 'session', 'viewer', 'unmount'] as const) {
+for (const change of ['editor', 'session', 'viewer', 'closed', 'unmount'] as const) {
   test(`viewer result is ignored after changing ${change}`, async () => {
-    const { hook, editor, pagedEditorRef } = mount();
-    const pending = deferred<DocxFindDisplayMatch[] | null>();
+    const { hook, editor, pagedEditorRef, findReplace } = mount();
+    const pending = deferred<Read>();
     editor.readViewerFindMatches.mockReturnValueOnce(pending.promise);
     act(() => { hook.result.current.handleFind('word', options); });
     if (change === 'editor') pagedEditorRef.current = null;
     if (change === 'session') editor.getYrsSession.mockReturnValue({} as YrsSession);
     if (change === 'viewer') editor.isWorkerViewer.mockReturnValue(false);
+    if (change === 'closed') {
+      findReplace.state.isOpen = false;
+      hook.rerender();
+    }
     if (change === 'unmount') hook.unmount();
-    await act(async () => { pending.resolve(matches); });
+    await act(async () => { pending.resolve({ version: 'v1', matches }); });
     expect(editor.setSelection).not.toHaveBeenCalled();
     expect(hook.result.current.findResultRef.current).toBeNull();
   });
 }
+
+test('a viewer result still applies after the editor ref is rebuilt for the same session', async () => {
+  const { hook, editor, pagedEditorRef } = mount();
+  const pending = deferred<Read>();
+  editor.readViewerFindMatches.mockReturnValueOnce(pending.promise);
+  act(() => { hook.result.current.handleFind('word', options); });
+  pagedEditorRef.current = { ...editor } as unknown as PagedEditorRef;
+  await act(async () => { pending.resolve({ version: 'v1', matches }); });
+  expect(editor.setSelection).toHaveBeenCalledWith(1, 5);
+  expect(hook.result.current.findResultRef.current).toEqual({ matches, totalCount: 2, currentIndex: 0 });
+});
+
+test('viewer next and previous search again when the document version changed', async () => {
+  const { hook, editor, version, findReplace } = mount();
+  await act(async () => { hook.result.current.handleFind('word', options); });
+  const shifted = [match(4), match(14), match(24)];
+  version.mockReturnValue('v2');
+  editor.readViewerFindMatches.mockResolvedValueOnce({ version: 'v2', matches: shifted });
+  await act(async () => { expect(hook.result.current.handleFindNext()).toBeNull(); });
+  expect(editor.readViewerFindMatches).toHaveBeenCalledTimes(2);
+  expect(hook.result.current.findResultRef.current).toEqual({ matches: shifted, totalCount: 3, currentIndex: 1 });
+  expect(findReplace.setMatches).toHaveBeenLastCalledWith(shifted, 1);
+  expect(editor.setSelection).toHaveBeenLastCalledWith(15, 19);
+  act(() => { expect(hook.result.current.handleFindPrevious()).toEqual(shifted[0]); });
+  expect(editor.readViewerFindMatches).toHaveBeenCalledTimes(2);
+});
 
 test('editor find remains synchronous and maps and selects Yrs ranges', () => {
   const { hook, editor, session, findReplace } = mount(false);

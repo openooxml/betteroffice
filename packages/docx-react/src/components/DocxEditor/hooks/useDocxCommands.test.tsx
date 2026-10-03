@@ -147,6 +147,7 @@ function mount(initial: YrsSession, overrides: Partial<DocxCommandInputs> = {}) 
       openReplace: () => opened.push('replace'),
       setMatches: noop,
       goToMatch: noop,
+      state: { isOpen: true },
     } as never,
     save: async () => 'saved',
     reservePrint: () => ({ prepare: async () => {}, print: () => true, cancel: noop }),
@@ -255,7 +256,7 @@ describe('editor command binding', () => {
         getYrsSession: () => session,
         readSelectedText,
       } as unknown as PagedEditorRef },
-      findReplace: { openFind, openReplace } as never,
+      findReplace: { openFind, openReplace, state: { isOpen: true } } as never,
     });
     editor.bridge.toolbarSelection = () => null;
     editor.bridge.hasSelection = () => false;
@@ -327,7 +328,7 @@ describe('editor command binding', () => {
     const { session } = await newSession();
     const openFind = mock(() => {});
     const openReplace = mock(() => {});
-    const editor = mount(session, { findReplace: { openFind, openReplace } as never });
+    const editor = mount(session, { findReplace: { openFind, openReplace, state: { isOpen: true } } as never });
     expect(code(await editor.store.execute('find', null))).toBe('opened');
     expect(openFind).toHaveBeenCalledWith('Hello');
     expect(code(await editor.store.execute('replace', null))).toBe('opened');

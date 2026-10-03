@@ -711,6 +711,7 @@ test('a worker viewer reads content controls and refuses revision commands witho
 test('Find in a worker viewer steps through worker matches without the main-thread copy', async ({ page }) => {
   await instrument(page);
   await open(page, true);
+  const prepared = await prepare(page, true);
   const selection = () => page.evaluate(() =>
     (window as unknown as ProbeWindow).__workerProposalProbe.editor!.readSelectionInfo()
   );
@@ -725,10 +726,19 @@ test('Find in a worker viewer steps through worker matches without the main-thre
   await expect.poll(selection).toMatchObject({
     selectedText: 'paragraph 12:', paragraphText: 'Page 1 paragraph 12: Original text.',
   });
+  snapshotOf(await page.evaluate(
+    (request) => (window as unknown as ProbeWindow).__workerProposalProbe.editor!.proposeChanges(request),
+    { expectVersion: prepared.resolved.version, proposals: prepared.proposals.slice(0, 2) }
+  ));
   await input.press('Enter');
   await expect(dialog.locator('.docx-find-replace-dialog-status')).toHaveText(/\b2\b\D+\b6\b/);
   await expect.poll(selection).toMatchObject({
     selectedText: 'paragraph 12:', paragraphText: 'Page 2 paragraph 12: Original text.',
+  });
+  await input.press('Enter');
+  await expect(dialog.locator('.docx-find-replace-dialog-status')).toHaveText(/\b3\b\D+\b6\b/);
+  await expect.poll(selection).toMatchObject({
+    selectedText: 'paragraph 12:', paragraphText: 'Page 3 paragraph 12: Original text.',
   });
   const current = await status(page);
   expect(current.pending).toBe(true);

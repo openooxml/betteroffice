@@ -423,7 +423,10 @@ export interface PagedEditorRef {
   isWorkerViewer(): boolean;
   /** Reads the display selection from the worker. */
   readViewerSelectionInfo(): Promise<DocxSelectionInfo | null>;
-  readViewerFindMatches(searchText: string, options: FindOptions): Promise<DocxFindDisplayMatch[] | null>;
+  readViewerFindMatches(
+    searchText: string,
+    options: FindOptions
+  ): Promise<{ version: string; matches: DocxFindDisplayMatch[] } | null>;
   /** Resolves, selects and reveals a worker-owned range. */
   navigateViewer(target: ViewerNavigationTarget, options?: ScrollToParaIdOptions): Promise<boolean>;
 
