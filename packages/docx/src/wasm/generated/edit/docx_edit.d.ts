@@ -602,6 +602,9 @@ export class EditSession {
      * another replica seeded them from.
      */
     load_media_sources(json: string): void;
+    /**
+     * Loads separator notes from a yrs v1 update; empty clears them.
+     */
     load_note_separators(state: Uint8Array): void;
     /**
      * `{"start","end"}` — the paragraph's span in story-global UTF-16 units.
@@ -640,7 +643,6 @@ export class EditSession {
      * when it seeded none.
      */
     media_sources_json(): string;
-    note_separators_state(): Uint8Array;
     /**
      * The media type of [`EditSession::media_bytes`].
      */
@@ -667,6 +669,10 @@ export class EditSession {
      * Errors unless it is a non-negative safe integer.
      */
     constructor(client_id: number);
+    /**
+     * The separator notes for another replica; empty when the package has none.
+     */
+    note_separators_state(): Uint8Array;
     /**
      * Parses a DOCX package, optionally seeds its editable stories into this
      * replica, and retains the source bytes for
@@ -1614,6 +1620,7 @@ export interface InitOutput {
     readonly editsession_load: (a: number, b: number, c: number) => [number, number];
     readonly editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_load_media_sources: (a: number, b: number, c: number) => [number, number];
+    readonly editsession_load_note_separators: (a: number, b: number, c: number) => [number, number];
     readonly editsession_locate_paragraph: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_materialize_docx: (a: number) => [number, number, number, number];
     readonly editsession_measure_paragraph_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -1624,6 +1631,7 @@ export interface InitOutput {
     readonly editsession_merge_cells: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_new: (a: number) => [number, number, number];
+    readonly editsession_note_separators_state: (a: number) => [number, number, number, number];
     readonly editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly editsession_open_docx_preview: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
