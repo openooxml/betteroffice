@@ -6,6 +6,8 @@ import { applyFrameDeltaOwned, decodeFrameDelta } from '../layout/render/frameDe
 import { createResidentEngineSession } from './residentEngineSession';
 import { proposalRevisionPreview } from './proposals';
 import { createYrsSession } from './index';
+import { readSidebar, readOutlineHeadings } from './sidebarReads';
+import { sidebarDocx } from './__fixtures__/sidebarDocx';
 import { readResidentSearch } from './residentSearch';
 import { createYrsPositionProjection, yrsLocToProjectedDisplayPosition } from './yrsPositionProjection';
 import { preloadEditWasm } from './wasm/index';
@@ -2252,7 +2254,7 @@ describe('worker proposals during sliced completion', () => {
     import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
   )))));
 
-  async function proposalWorker(extraBody = '') {
+  async function proposalWorker(extraBody = '', bytes?: Uint8Array) {
     const parts: PartsMap = new Map();
     parts.set('[Content_Types].xml', toBytes(
       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
@@ -2267,7 +2269,7 @@ describe('worker proposals during sliced completion', () => {
       `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>${body}<w:sectPr/></w:body></w:document>`
     ));
     const engine = await createResidentEngineSession();
-    engine.openDocx(new Uint8Array(rezipPartsToArrayBuffer(parts)));
+    engine.openDocx(bytes ?? new Uint8Array(rezipPartsToArrayBuffer(parts)));
     const w = worker();
     const calls: string[] = [];
     const onResume: Array<() => void> = [];
@@ -2320,7 +2322,8 @@ describe('worker proposals during sliced completion', () => {
       type: 'bootstrap', snapshot, extras: '', layoutExtras: '{}',
       provisionalPages: 1, displayWindow: [0, 1], expectedFrameEpoch: 0,
     });
-    expect(booted.ok && booted.layoutProvisional).toBe(true);
+    expect(booted.ok).toBe(true);
+    if (!bytes) expect(booted.ok && booted.layoutProvisional).toBe(true);
     const proposal = (index = 1): Extract<DocxProposalInput, { op: 'replaceText' }> => ({
       id: `p${index}`,
       paragraph: {
@@ -2348,6 +2351,36 @@ describe('worker proposals during sliced completion', () => {
     };
     return { w, engine, calls, onResume, snapshot, booted, proposal, complete, expectFullLayout };
   }
+
+  test('sidebar and headings reads match a main session and reject stale versions', async () => {
+    const bytes = sidebarDocx();
+    const { w, engine } = await proposalWorker('', bytes);
+    const main = await createYrsSession();
+    try {
+      main.openDocx(bytes, true);
+      const version = engine.geometryReader.version();
+      const expected = {
+        sidebar: readSidebar(main, ['7', 'missing'], main.version()),
+        headings: readOutlineHeadings(main, main.version()),
+      };
+      for (const expectVersion of [version, 'stale']) {
+        const reads: ResidentDocumentRead[] = [
+          { kind: 'sidebar', commentIds: ['7', 'missing'], expectVersion },
+          { kind: 'headings', expectVersion },
+        ];
+        for (const read of reads) {
+          const reply = await w.send({ type: 'documentRead', read });
+          expect(reply).toMatchObject({ ok: true, read: {
+            version,
+            value: expectVersion === version ? expected[read.kind as keyof typeof expected] : null,
+          } });
+        }
+      }
+    } finally {
+      main.destroy();
+      engine.destroy();
+    }
+  });
 
   test('proposal mirrors retain the same navigation target as repeated worker reads', async () => {
     const { w, engine, proposal } = await proposalWorker();

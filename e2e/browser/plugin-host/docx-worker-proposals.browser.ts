@@ -106,6 +106,7 @@ interface WorkerProposalProbe {
 interface ProbeWindow {
   __workerProposalProbe: WorkerProposalProbe;
   __workerRequests: string[];
+  __workerReads: string[];
   __workerInstrumentation: {
     firstEncodeState: number | null;
     deliberateScroll: boolean;
@@ -122,6 +123,7 @@ async function instrument(page: Page) {
     const requests: string[] = [];
     const windowProbe = window as unknown as ProbeWindow;
     windowProbe.__workerRequests = requests;
+    windowProbe.__workerReads = [];
     const instrumentation = windowProbe.__workerInstrumentation = {
       firstEncodeState: null as number | null,
       deliberateScroll: false,
@@ -132,6 +134,10 @@ async function instrument(page: Page) {
     Worker.prototype.postMessage = function (message: unknown, ...args: unknown[]) {
       if (message && typeof message === 'object' && 'type' in message) {
         requests.push(String(message.type));
+        if (message.type === 'documentRead' && 'read' in message && message.read &&
+          typeof message.read === 'object' && 'kind' in message.read) {
+          windowProbe.__workerReads.push(String(message.read.kind));
+        }
         if (message.type === 'encodeState') {
           instrumentation.firstEncodeState ??= performance.now();
         }
@@ -180,11 +186,7 @@ async function assertReplica(page: Page, readOnly: boolean, sidebarOpen = false)
 }
 
 async function view(page: Page) {
-  const scroller = page.locator('.docx-editor__scroll-container');
-  return scroller.evaluate((element) => ({
-    scrollTop: element.scrollTop,
-    selection: (window as unknown as ProbeWindow).__workerProposalProbe.session!.selection(),
-  }));
+  return page.evaluate(() => (window as unknown as ProbeWindow).__workerProposalProbe.view());
 }
 
 async function assertHydration(
@@ -490,7 +492,7 @@ test('host proposals, overlay geometry and plugin navigation match the hydrated 
   expect((await status(page)).unexpectedScrolls).toBe(0);
 });
 
-test('opening the built-in sidebar hydrates the worker replica once and preserves host proposal records', async ({ page }) => {
+test('opening the built-in sidebar reads worker cards and preserves host proposal records', async ({ page }) => {
   await instrument(page);
   await open(page, true);
   const prepared = await prepare(page, true);
@@ -506,12 +508,9 @@ test('opening the built-in sidebar hydrates the worker replica once and preserve
   const openSidebar = () => page.evaluate(() =>
     (window as unknown as ProbeWindow).__workerProposalProbe.toggleSidebar()
   );
-  const beforeHydration = await view(page);
   expect(await openSidebar()).toMatchObject({ ok: true });
   await expect.poll(async () => (await status(page)).sidebarOpen).toBe(true);
-  await expect.poll(async () => (await status(page)).pending).toBe(false);
-  expect((await status(page)).encodeState).toBe(1);
-  await assertHydration(page, beforeHydration);
+  await assertReplica(page, true, true);
   const after = await getProposals(page);
   expect(after.previewVersion).toBe(before.previewVersion);
   expect(after.proposals).toEqual(before.proposals);
@@ -520,6 +519,7 @@ test('opening the built-in sidebar hydrates the worker replica once and preserve
   await expect(sidebar).toHaveCSS('opacity', '1');
   const cards = sidebar.locator('.docx-tracked-change-card');
   await expect(cards).toHaveCount(after.proposals.length);
+  expect(await page.evaluate(() => (window as unknown as ProbeWindow).__workerReads)).toContain('sidebar');
   for (let index = 0; index < after.proposals.length; index += 1) {
     await expect(cards.nth(index)).toBeVisible();
     await expect(cards.nth(index)).toContainText(SUGGEST.author);
@@ -531,7 +531,8 @@ test('opening the built-in sidebar hydrates the worker replica once and preserve
   await expect.poll(async () => (await status(page)).sidebarOpen).toBe(true);
   expect(await getProposals(page)).toEqual(after);
   const current = await status(page);
-  expect(current.encodeState).toBe(1);
+  expect(current.encodeState).toBe(0);
+  expect(current.pending).toBe(true);
   expect(current.hydratedBeforeSidebar).toBe(false);
   expect(current.errors).toEqual([]);
   expect(current.unexpectedScrolls).toBe(0);
@@ -555,30 +556,29 @@ test('existing revisions keep the controlled sidebar and host replica closed', a
   expect((await status(page)).unexpectedScrolls).toBe(0);
 });
 
-test('existing revisions open the sidebar and hydrate once', async ({ page }) => {
+test('existing revisions open worker sidebar cards without a replica', async ({ page }) => {
   await instrument(page);
   await openEditor(page, true, 'revisions=1');
   await expect.poll(async () => (await status(page)).sidebarOpen).toBe(true);
-  await expect.poll(async () => (await status(page)).pending).toBe(false);
-  const beforeHydration = (await status(page)).beforeSidebarOpen;
-  expect(beforeHydration).not.toBeNull();
-  await assertHydration(page, beforeHydration!, { checkLayoutOrder: false });
+  await assertReplica(page, true, true);
   const requests = await page.evaluate(() => (window as unknown as ProbeWindow).__workerRequests);
   expect(requests.indexOf('revisionCount')).toBeGreaterThanOrEqual(0);
-  expect(requests.indexOf('encodeState')).toBeGreaterThan(requests.indexOf('revisionCount'));
+  expect(requests).not.toContain('encodeState');
   const sidebar = page.locator('.docx-unified-sidebar');
   await expect(sidebar).toBeAttached();
   await expect(sidebar).toHaveCSS('opacity', '1');
   await expect(sidebar.locator('.docx-tracked-change-card')).toBeVisible();
   await expect(page.locator('.docx-tracked-change-card')).toHaveCount(1);
   await expect(page.locator('.docx-tracked-change-card')).toContainText('Document reviewer');
+  expect(await page.evaluate(() => (window as unknown as ProbeWindow).__workerReads)).toContain('sidebar');
   expect((await getProposals(page)).proposals).toEqual([]);
   const current = await status(page);
   expect(current.openedInWorker).toBe(true);
   expect(current.captures).toBe(1);
   expect(current.sidebarOpenChanges).toEqual([true]);
   expect(current.revisionCount).toBe(1);
-  expect(current.encodeState).toBe(1);
+  expect(current.encodeState).toBe(0);
+  expect(current.pending).toBe(true);
   expect(current.hydratedBeforeSidebar).toBe(false);
   expect(current.errors).toEqual([]);
   expect(current.unexpectedScrolls).toBe(0);

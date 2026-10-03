@@ -98,6 +98,7 @@ export function DocxEditorPagedArea({
   anchorPositions,
   onAnchorPositionsChange,
   onYrsTrackedChangesChange,
+  onViewerCommentRangesChange,
   pluginRenderedDomContext,
   pageWidthPx,
   expandedSidebarItem,
@@ -193,6 +194,7 @@ export function DocxEditorPagedArea({
   anchorPositions: Map<string, number>;
   onAnchorPositionsChange: (positions: Map<string, number>) => void;
   onYrsTrackedChangesChange: (result: TrackedChangesResult) => void;
+  onViewerCommentRangesChange?: PagedEditorProps['onViewerCommentRangesChange'];
   pluginRenderedDomContext: RenderedDomContext | null | undefined;
   pageWidthPx: number;
   expandedSidebarItem: string | null;
@@ -475,6 +477,7 @@ export function DocxEditorPagedArea({
         onAnchorPositionsChange={onAnchorPositionsChange}
         sidebarCommentIds={sidebarCommentIds}
         onYrsTrackedChangesChange={onYrsTrackedChangesChange}
+        onViewerCommentRangesChange={onViewerCommentRangesChange}
         onTotalPagesChange={onTotalPagesChange}
         onLayoutComputed={onLayoutComputed}
         layoutInWorker={layoutInWorker}

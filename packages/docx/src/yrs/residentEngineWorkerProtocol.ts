@@ -13,6 +13,7 @@ import type {
   DocxDisplaySelectionText,
   DocxSelectionUnit,
 } from './viewerSelection';
+import type { DocxSidebarRead, DocxOutlineHeading } from './sidebarReads';
 import type { ResidentSearchResult } from './residentSearch';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
@@ -66,7 +67,9 @@ export type ResidentDocumentRead =
       expectVersion: string;
     }
   | { kind: 'selectionText'; story: string; anchor: number; head: number; expectVersion: string }
-  | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string };
+  | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string }
+  | { kind: 'sidebar'; commentIds: string[]; expectVersion: string }
+  | { kind: 'headings'; expectVersion: string };
 
 /** @internal */
 export interface ResidentDocumentReadValues {
@@ -80,6 +83,8 @@ export interface ResidentDocumentReadValues {
   selectionUnit: DocxDisplayRange | null;
   selectionText: DocxDisplaySelectionText | null;
   bookmarkPosition: number | null;
+  sidebar: DocxSidebarRead | null;
+  headings: DocxOutlineHeading[] | null;
 }
 
 /** How long a warm waits for the host's compiled module before loading the engine itself. */
