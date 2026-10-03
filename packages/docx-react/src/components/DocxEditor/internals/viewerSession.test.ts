@@ -39,6 +39,14 @@ test('a viewer session switched to editing keeps the editing input when switched
   expect(result.current).toBe(false);
 });
 
+test('a viewer session leaves the viewer input when worker-open is turned off', () => {
+  const { result, rerender } = session(true);
+  rerender({ workerOpen: false, workerProposals: true, generation: 1 });
+  expect(result.current).toBe(false);
+  rerender({ workerOpen: true, workerProposals: true, generation: 1 });
+  expect(result.current).toBe(false);
+});
+
 test('the next document opened while viewing is a viewer session again', () => {
   const { result, rerender } = session(false);
   rerender({ workerOpen: true, workerProposals: true, generation: 1 });

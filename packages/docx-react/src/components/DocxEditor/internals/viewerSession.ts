@@ -2,8 +2,8 @@ import { useState } from 'react';
 
 /**
  * Whether the loaded document is a viewer session: opened read-only in the worker, so it has no
- * main-thread edit peer. A session opened for editing, or switched to editing once, keeps the
- * editing input when it is switched to viewing.
+ * main-thread edit peer. A session opened for editing, or switched to editing or out of worker-open
+ * once, keeps the editing input when it is switched to viewing.
  */
 export function useViewerSession(workerOpen: boolean, workerProposals: boolean, generation: number): boolean {
   const [opened, setOpened] = useState({ generation, viewer: workerOpen && workerProposals });
@@ -12,7 +12,7 @@ export function useViewerSession(workerOpen: boolean, workerProposals: boolean, 
     setOpened(next);
     return next.viewer;
   }
-  if (opened.viewer && !workerProposals) {
+  if (opened.viewer && !(workerOpen && workerProposals)) {
     setOpened({ generation, viewer: false });
     return false;
   }
