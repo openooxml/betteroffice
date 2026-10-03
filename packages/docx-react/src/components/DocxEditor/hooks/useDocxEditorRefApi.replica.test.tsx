@@ -66,7 +66,7 @@ function apiFor(
     insertText: (text: string) => inputRef.current?.insertText(text),
     syncYrsInputState: () => { events.push('sync'); return true; },
     getLayout: () => null,
-    getLayoutRequest: () => null,
+    getLayoutRequest: () => null, readLayoutRequest: async () => null,
     scrollToPosition: () => {},
     getPositionAtPoint: () => null,
     displayPositionToYrsLoc: () => null,

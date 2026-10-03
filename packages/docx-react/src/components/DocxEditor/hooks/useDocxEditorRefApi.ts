@@ -36,6 +36,7 @@ import {
   requestOnDemandWorkerOpenReplica,
   requestWorkerOpenReplica,
   workerOpenReplicaOnDemand,
+  workerOpenReplicaPending,
 } from '../internals/workerOpenReplica';
 import {
   handedOverRequest,
@@ -359,6 +360,7 @@ function storyOffset(session: YrsSession, loc: YrsLoc): number {
 
 /** How long a paged export waits for fonts and a layout of the flushed document. */
 const LAYOUT_WAIT_MS = 2_000;
+const VIEWER_LAYOUT_WAIT_MS = 60_000;
 const LAYOUT_POLL_MS = 16;
 const LAYOUT_REFUSALS: ReadonlySet<string> = new Set([
   'stale-document',
@@ -425,6 +427,84 @@ async function exportWithPages(
   while (!result.ok && LAYOUT_REFUSALS.has(result.failure.code) && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, LAYOUT_POLL_MS));
     result = attempt();
+  }
+  return result;
+}
+
+async function exportWithPagesInWorker(
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  session: YrsSession,
+  authority: WorkerProposalAuthority,
+  options: DocxPageExportOptions,
+  settledDisplayList: ((relayout: null, timeoutMs: number | null, scope?: 'document' | 'window') => Promise<DisplayList>) | undefined,
+  experimentalWorkerOpen = false
+): Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>> {
+  const editor = (): PagedEditorRef => {
+    const current = pagedEditorRef.current;
+    if (!current || current.getYrsSession() !== session) {
+      throw new Error('The document changed while it was being laid out');
+    }
+    return current;
+  };
+  let request: string | null = null;
+  let fellBack = false;
+  const unavailable = (message: string): DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>> => ({
+    ok: false,
+    version: session.version(),
+    failure: { code: 'layout-unavailable', target: null, message },
+  });
+  const attempt = async (): Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>> => {
+    editor();
+    const read = authority.exportStructuredWithPages(
+      options,
+      async () => {
+        request = await editor().readLayoutRequest();
+        return request;
+      },
+      () => {
+        fellBack = true;
+        return exportWithPages(pagedEditorRef, options, experimentalWorkerOpen);
+      }
+    );
+    void read.catch(() => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      read,
+      new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), VIEWER_LAYOUT_WAIT_MS); }),
+    ]).finally(() => clearTimeout(timer));
+    editor();
+    if (result === 'timeout') return unavailable('The document is not laid out yet.');
+    if (result !== null) return result;
+    if (!workerOpenReplicaPending(session)) {
+      fellBack = true;
+      return exportWithPages(pagedEditorRef, options, experimentalWorkerOpen);
+    }
+    return unavailable('The fonts this document uses are not loaded yet.');
+  };
+  const showsMarkup = (): boolean => {
+    if (request === null) return false;
+    const preview = (JSON.parse(request) as { renderEnv?: { revisionPreview?: object } })
+      .renderEnv?.revisionPreview;
+    return !preview || Object.keys(preview).length === 0;
+  };
+  let result = await attempt();
+  if (fellBack || options.expectLayoutVersion !== undefined) return result;
+  if (
+    !result.ok &&
+    (LAYOUT_REFUSALS.has(result.failure.code) ||
+      (result.failure.code === 'unsupported-revision-layout' && showsMarkup()))
+  ) {
+    await settledDisplayList?.(
+      null, VIEWER_LAYOUT_WAIT_MS, experimentalWorkerOpen ? 'window' : 'document'
+    ).catch(() => {});
+    result = await attempt();
+    if (fellBack) return result;
+  }
+  const deadline = Date.now() + LAYOUT_WAIT_MS;
+  while (!result.ok && LAYOUT_REFUSALS.has(result.failure.code) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, LAYOUT_POLL_MS));
+    result = await attempt();
+    if (fellBack) return result;
   }
   return result;
 }
@@ -692,7 +772,15 @@ export function useDocxEditorRefApi({
         return proposalAuthority()?.getProposals(main) ?? main();
       },
 
-      exportStructuredWithPages: (options) => exportWithPages(pagedEditorRef, options, experimentalWorkerOpen),
+      exportStructuredWithPages: (options) => {
+        const session = viewer() ? pagedEditorRef.current?.getYrsSession() : null;
+        const authority = session && workerOpenReplicaPending(session)
+          ? registeredWorkerProposalAuthority(session)
+          : null;
+        return session && authority
+          ? exportWithPagesInWorker(pagedEditorRef, session, authority, options, settledDisplayList, experimentalWorkerOpen)
+          : exportWithPages(pagedEditorRef, options, experimentalWorkerOpen);
+      },
       getPositionAtPoint: (clientX, clientY) =>
         pagedEditorRef.current?.getPositionAtPoint(clientX, clientY) ?? null,
       readPositionAtPoint: async (clientX, clientY) =>
@@ -969,6 +1057,7 @@ export function useDocxEditorRefApi({
       applyEdits: async (request) => editRefusal(request) ?? api.applyEdits(request),
       validateEdits: async (request) => editRefusal(request) ?? api.validateEdits(request),
       findText: direct.findText,
+      exportStructuredWithPages: direct.exportStructuredWithPages,
       proposeChange: (options) => {
         if (!hostProposalsAllowed()) return api.proposeChange(options);
         if (!options.search && !options.replaceWith) return false;

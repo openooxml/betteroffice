@@ -47,7 +47,7 @@ beforeAll(async () => {
       export const preloadEditWasmFrom = (source) => testHarness.preloadFrom(source);
     `,
     '../layout/render/glyphCache':
-      'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; } }',
+      'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; testHarness.glyphCacheCreations += 1; } }',
     '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.memories;',
     '../layout/render/frameDelta': `
       export { applyFrameDeltaOwned, retainedFramePageById } from ${JSON.stringify(frameDelta)};
@@ -114,6 +114,12 @@ function worker() {
   const harness = {
     now: () => performance.now(),
     initializations: 0,
+    glyphCacheCreations: 0,
+    clearFontCalls: 0,
+    fontIds: [] as number[],
+    loadedStates: [] as Uint8Array[],
+    loadedMediaSources: [] as string[],
+    partialDocuments: [] as boolean[],
     sessionsCreated: 0,
     wasmReady: false,
     failWarm: null as Error | null,
@@ -151,10 +157,16 @@ function worker() {
     memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
       proposalEngine: { version: () => 'v' },
-      loadState() {},
-      loadMediaSources(_json: string) {},
+      loadState(state: Uint8Array) {
+        harness.loadedStates.push(state);
+      },
+      loadMediaSources(json: string) {
+        harness.loadedMediaSources.push(json);
+      },
       loadNoteSeparators(_state: Uint8Array) {},
-      setPartialDocument() {},
+      setPartialDocument(partial: boolean) {
+        harness.partialDocuments.push(partial);
+      },
       setDisplayWindow(start: number, end: number) {
         harness.displayWindows.push([start, end]);
       },
@@ -170,7 +182,20 @@ function worker() {
       directBatchesApplied() {
         return 0;
       },
-      clearFonts() {},
+      clearFonts() {
+        harness.clearFontCalls += 1;
+        harness.fontIds = [];
+      },
+      registerFont(_bytes: Uint8Array) {
+        const id = harness.fontIds.length;
+        harness.fontIds.push(id);
+        return id;
+      },
+      registerSubstituteFont(_base: number, _family: string) {
+        const id = harness.fontIds.length;
+        harness.fontIds.push(id);
+        return id;
+      },
       layoutDocumentJson() {},
       layoutDocumentWithRegionsRetained() {},
       retainedHeadersFootersJson(): string | undefined {
@@ -317,6 +342,7 @@ function worker() {
     surfaces,
     answered,
     send,
+    delta,
     resetCalls() {
       harness.rasterized = [];
       harness.presented = [];
@@ -663,6 +689,132 @@ test('a visible page request supersedes the remaining background slices', async 
   expect((await visible).ok).toBe(true);
   expect(calls).toEqual([[0, 1, 2, 3], [8]]);
   expect(w.answered).toEqual([1, 2, 3]);
+});
+
+test('font suffixes preserve ids and glyph caches; mismatches require a full snapshot', async () => {
+  const w = worker();
+  expect(await w.bootstrap()).toMatchObject({ ok: true });
+  expect(await w.attach([1])).toMatchObject({ ok: true });
+  const font = new Uint8Array([1]);
+  const sync = (
+    fontsRevision: number,
+    fonts: YrsResidentWorkerSnapshot['fonts'],
+    fontsBaseRevision?: number
+  ) => {
+    return w.send({
+      type: 'sync',
+      extras: '',
+      expectedFrameEpoch: w.harness.delta!.baseFrameEpoch,
+      paintCaret: false,
+      snapshot: {
+        clientId: 1,
+        state: new Uint8Array(),
+        selection: null,
+        fonts,
+        fontsRevision,
+        ...(fontsBaseRevision === undefined ? {} : { fontsBaseRevision }),
+        renderInputs: [],
+        measureInputs: [],
+        layoutInput: '',
+        layoutWithRegions: false,
+        layoutRevision: 1,
+      },
+    });
+  };
+  w.delta([]);
+  expect(await sync(1, [font], 0)).toMatchObject({ ok: true });
+  w.delta([]);
+  expect(await sync(2, [{ substituteOf: 0, family: 'Calibri' }], 1)).toMatchObject({ ok: true });
+  w.delta([]);
+  expect(await sync(2, [], 2)).toMatchObject({ ok: true });
+  expect(w.harness.fontIds).toEqual([0, 1]);
+  expect(w.harness.clearFontCalls).toBe(1);
+  expect(w.harness.glyphCacheCreations).toBe(1);
+  const beforeMismatch = {
+    states: w.harness.loadedStates.length,
+    media: w.harness.loadedMediaSources.length,
+    partial: w.harness.partialDocuments.length,
+    windows: w.harness.displayWindows.length,
+  };
+  expect(await sync(3, [font], 0)).toMatchObject({
+    ok: false, error: 'Resident engine worker font base revision mismatch',
+  });
+  expect(await sync(2, [], 1)).toMatchObject({
+    ok: false, error: 'Resident engine worker font base revision mismatch',
+  });
+  expect(w.harness.fontIds).toEqual([0, 1]);
+  expect(w.harness.clearFontCalls).toBe(1);
+  expect(w.harness.glyphCacheCreations).toBe(1);
+  expect(w.harness.loadedStates).toHaveLength(beforeMismatch.states);
+  expect(w.harness.loadedMediaSources).toHaveLength(beforeMismatch.media);
+  expect(w.harness.partialDocuments).toHaveLength(beforeMismatch.partial);
+  expect(w.harness.displayWindows).toHaveLength(beforeMismatch.windows);
+  w.delta([]);
+  expect(await sync(3, [font])).toMatchObject({ ok: true });
+  expect(w.harness.fontIds).toEqual([0]);
+  expect(w.harness.clearFontCalls).toBe(2);
+  expect(w.harness.glyphCacheCreations).toBe(2);
+});
+
+test('full font sync repaints retained pages while suffix appends preserve their pixels', async () => {
+  for (const paintCaret of [false, true]) {
+    const w = worker();
+    expect(await w.bootstrap()).toMatchObject({ ok: true });
+    w.harness.caret = paintCaret ? caret(1) : null;
+    const sync = (
+      fontsRevision: number,
+      fonts: YrsResidentWorkerSnapshot['fonts'],
+      fontsBaseRevision?: number
+    ) => {
+      w.delta([]);
+      return w.send({
+        type: 'sync',
+        extras: '',
+        expectedFrameEpoch: w.harness.delta!.baseFrameEpoch,
+        paintCaret,
+        snapshot: {
+          clientId: 1,
+          state: new Uint8Array(),
+          selection: null,
+          fonts,
+          fontsRevision,
+          ...(fontsBaseRevision === undefined ? {} : { fontsBaseRevision }),
+          renderInputs: [],
+          measureInputs: [],
+          layoutInput: '',
+          layoutWithRegions: false,
+          layoutRevision: 1,
+        },
+      });
+    };
+    expect(await sync(1, [new Uint8Array([1])])).toMatchObject({ ok: true });
+    expect(await w.attach([1, 2])).toMatchObject({ ok: true });
+    expect(w.harness.rasterized).toEqual([1, 2]);
+    w.resetCalls();
+    expect(await sync(2, [new Uint8Array([2])])).toMatchObject({
+      ok: true,
+      replayedPages: 2,
+      caretPainted: paintCaret,
+    });
+    expect(w.harness.delta!.operations).toEqual([]);
+    expect(w.harness.rasterized).toEqual([1, 2]);
+    expect(w.harness.presented).toEqual([1, 2]);
+    expect(w.surfaces.get('1')!.pixels).toBe(paintCaret ? '1:100|caret:#000' : '1:100');
+    expect(w.surfaces.get('2')!.pixels).toBe('2:100');
+    w.resetCalls();
+    expect(await w.build([], 100, w.harness.caret)).toMatchObject({
+      ok: true,
+      replayedPages: 0,
+      caretPainted: paintCaret,
+    });
+    expect(await sync(3, [new Uint8Array([3])], 2)).toMatchObject({
+      ok: true,
+      replayedPages: 0,
+      caretPainted: paintCaret,
+    });
+    expect(w.harness.rasterized).toEqual([]);
+    expect(w.harness.presented).toEqual([]);
+  }
 });
 
 describe('resident display page release', () => {
@@ -2673,6 +2825,33 @@ describe('worker proposals during sliced completion', () => {
       }
     } finally {
       main.destroy();
+      engine.destroy();
+    }
+  });
+
+  test('paged export replies with the resident session export of its retained layout', async () => {
+    const { w, engine, complete } = await proposalWorker();
+    try {
+      const completed = await complete();
+      expect(completed.ok && completed.layoutProvisional).not.toBe(true);
+      const options = { revisionView: 'markup' } as const;
+      for (const currentRequest of [
+        layoutInput,
+        JSON.stringify({ ...JSON.parse(layoutInput), renderEnv: { revisionPreview: { '1': 'accepted' } } }),
+      ]) {
+        const reply = await w.send({
+          type: 'documentRead',
+          read: { kind: 'exportStructuredWithPages', options, currentRequest },
+        });
+        if (!reply.ok || !reply.read) throw new Error('expected a paged export read');
+        expect(reply.read.value).toBe(engine.exportStructuredWithPagesJson(options, currentRequest));
+        expect(JSON.parse(reply.read.value as string).version).toBe(reply.read.version);
+      }
+      const preview = JSON.parse(engine.exportStructuredWithPagesJson(options, JSON.stringify({
+        ...JSON.parse(layoutInput), renderEnv: { revisionPreview: { '1': 'accepted' } },
+      })));
+      expect(preview).toMatchObject({ ok: false, failure: { code: 'unsupported-revision-layout' } });
+    } finally {
       engine.destroy();
     }
   });

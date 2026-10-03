@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:
 import { useRef } from 'react';
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import type { Document } from '@betteroffice/docx/types/document';
-import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
+import type { DisplayList, DisplayListQueries } from '@betteroffice/docx/layout/render';
 import type {
   DocxFindTextRequest,
   DocxFindTextResult,
@@ -22,8 +22,8 @@ import type { EditorMode } from '../internals/editing-modes';
 import { resetDeprecatedViewerMembersForTests } from '../internals/deprecatedViewerMembers';
 import { markPresented, stampWorkerFrameVersion } from '../internals/layoutProvenance';
 import { navigateViewer, readViewerSelectionInfo, type ViewerNavigationTarget, type ViewerRefReadAccess } from '../internals/viewerRefReads';
-import { deferWorkerOpenReplica } from '../internals/workerOpenReplica';
-import { registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
+import { deferWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
+import { beginWorkerProposalHandover, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import { usePagedEditorRefApi } from './usePagedEditorRefApi';
 import { DocxAsyncOnlyError, DocxReplicaNotReadyError, routeViewerRefAccess, useDocxEditorRefApi } from './useDocxEditorRefApi';
 
@@ -35,9 +35,19 @@ afterEach(() => { cleanup(); mock.restore(); });
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 const INFO = { paraId: 'p', selectedText: 'hello', paragraphText: 'hello', before: '', after: '' };
+const PAGE_OPTIONS = { revisionView: 'markup' } as const;
+const PAGE_REQUEST = JSON.stringify({ renderEnv: {} });
+const PAGE_EXPORT = {
+  ok: true, version: 'worker-v',
+  content: { structured: {}, layout: { documentVersion: 'worker-v', layoutVersion: 'layout-v', pages: [] } },
+} as unknown as Awaited<ReturnType<DocxEditorRef['exportStructuredWithPages']>>;
+const PAGE_REFUSAL = {
+  ok: false, version: 'worker-v',
+  failure: { code: 'stale-layout', target: null, message: 'The layout is stale.' },
+} as const;
 const MATCHES = [{ paraId: 'p', match: 'hello', before: '', after: '' }];
 
-function apiFor(viewer = false, pendingReplica = false) {
+function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Parameters<typeof useDocxEditorRefApi>[0]['settledDisplayList']) {
   const events: string[] = [];
   const document = {} as Document;
   const state = { viewer, version: 'v' };
@@ -58,6 +68,8 @@ function apiFor(viewer = false, pendingReplica = false) {
     applyEdits: mock(() => ({ ok: true, applied: true, changedStories: ['body'] })),
     validateEdits: mock(() => ({ ok: true, version: state.version })),
     findText: mock(() => ({ ok: true, version: state.version, matches: [], truncated: false })),
+    exportStructuredWithPagesFor: mock((): Awaited<ReturnType<DocxEditorRef['exportStructuredWithPages']>> => PAGE_EXPORT),
+    layoutFontRequirementsJson: mock(() => '[]'),
   } as unknown as YrsSession;
   const hydrate = mock(async () => () => {});
   const fallback = mock(() => {});
@@ -77,6 +89,9 @@ function apiFor(viewer = false, pendingReplica = false) {
     scrollToChangeId: mock(() => { events.push('change'); return true; }),
     syncYrsInputState: () => { events.push('sync'); return true; },
     getLayout: () => null,
+    getLayoutRequest: mock((): string | null => PAGE_REQUEST),
+    readLayoutRequest: mock(async (): Promise<string | null> => PAGE_REQUEST),
+    relayout: mock(() => {}),
   };
   const pagedEditorRef = { current: editor as unknown as PagedEditorRef | null };
   const subscribers = new Set<(change: DocxDocumentChange) => void>();
@@ -84,7 +99,7 @@ function apiFor(viewer = false, pendingReplica = false) {
     const ref = useRef<DocxEditorRef>(null);
     useDocxEditorRefApi({
       ref, document, documentFromYrs: () => document, historyStateRef: { current: document }, pagedEditorRef,
-      experimentalWorkerOpen: pendingReplica,
+      experimentalWorkerOpen: pendingReplica, settledDisplayList,
       handleSave: async () => null, zoom: 1, setZoom: () => {},
       scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
       loadParsedDocument: () => {}, loadBuffer: async () => {},
@@ -112,7 +127,11 @@ const WORKER_IDENTITIES: DocxParagraphIdentitySnapshot = {
   ],
 };
 
-function workerFor(host: ReturnType<typeof apiFor>, identities = WORKER_IDENTITIES) {
+function workerFor(
+  host: ReturnType<typeof apiFor>,
+  identities = WORKER_IDENTITIES,
+  laidOut: () => Promise<void> = async () => {}
+) {
   const snapshot: ResidentProposalReply = {
     mirror: { version: 'worker-v', proposals: { previewVersion: 0, entries: [] } },
     result: { ok: true, snapshot: { version: 'worker-v', previewVersion: 0, proposals: [] } },
@@ -127,7 +146,7 @@ function workerFor(host: ReturnType<typeof apiFor>, identities = WORKER_IDENTITI
     proposal,
     documentRead: documentRead as ResidentEngineWorkerClient['documentRead'],
     handOver: async () => ({ state: new Uint8Array(), version: 'worker-v', proposals: snapshot.mirror.proposals }),
-  }, { relayout: () => {}, current: () => true, laidOut: async () => {}, adopted: () => {}, handedOver: () => {}, contentChanged: () => {} });
+  }, { relayout: () => {}, current: () => true, laidOut, adopted: () => {}, handedOver: () => {}, contentChanged: () => {} });
   return { authority, proposal, documentRead, snapshot };
 }
 
@@ -299,6 +318,177 @@ test('viewer findText reads through the worker authority without a replica', asy
   expect(worker.documentRead).toHaveBeenCalledWith({ kind: 'findText', request });
   expect(host.session.findText).not.toHaveBeenCalled();
   expectNoReplica(host);
+});
+
+function expectWorkerPageExport(host: ReturnType<typeof apiFor>) {
+  expectNoReplica(host);
+  expect(host.editor.getLayoutRequest).not.toHaveBeenCalled();
+  expect(host.editor.relayout).not.toHaveBeenCalled();
+  expect(host.session.exportStructuredWithPagesFor).not.toHaveBeenCalled();
+  expect(host.session.layoutFontRequirementsJson).not.toHaveBeenCalled();
+}
+
+test('viewer paged export reads the worker layout without a replica', async () => {
+  const host = apiFor(true, true);
+  const worker = workerFor(host);
+  worker.documentRead.mockResolvedValue({ version: 'worker-v', value: JSON.stringify(PAGE_EXPORT) });
+  expect(await host.api.exportStructuredWithPages(PAGE_OPTIONS)).toEqual(PAGE_EXPORT);
+  expect(worker.documentRead).toHaveBeenCalledWith({ kind: 'exportStructuredWithPages', options: PAGE_OPTIONS, currentRequest: PAGE_REQUEST });
+  expect(host.editor.readLayoutRequest).toHaveBeenCalledTimes(1);
+  expectWorkerPageExport(host);
+});
+
+test('viewer paged export refuses unavailable fonts after the poll budget', async () => {
+  const host = apiFor(true, true);
+  const worker = workerFor(host);
+  await worker.authority.initialize();
+  host.editor.readLayoutRequest.mockResolvedValue(null);
+  let now = 0;
+  spyOn(Date, 'now').mockImplementation(() => now += 1_000);
+  expect(await host.api.exportStructuredWithPages(PAGE_OPTIONS)).toEqual({
+    ok: false, version: 'worker-v',
+    failure: { code: 'layout-unavailable', target: null, message: 'The fonts this document uses are not loaded yet.' },
+  });
+  expect(host.editor.readLayoutRequest).toHaveBeenCalledTimes(3);
+  expect(worker.documentRead).not.toHaveBeenCalled();
+  expectWorkerPageExport(host);
+});
+
+for (const code of ['stale-document', 'stale-layout', 'layout-unavailable', 'unsupported-revision-layout'] as const) {
+  test(`viewer paged export waits for its own layout after ${code}`, async () => {
+    const waiting = deferred<DisplayList>();
+    const posted = deferred<void>();
+    const settled = mock(() => { posted.resolve(); return waiting.promise; });
+    const host = apiFor(true, true, settled);
+    const worker = workerFor(host);
+    worker.documentRead
+      .mockResolvedValueOnce({ version: 'worker-v', value: JSON.stringify({ ...PAGE_REFUSAL, failure: { ...PAGE_REFUSAL.failure, code } }) })
+      .mockResolvedValueOnce({ version: 'worker-v', value: JSON.stringify(PAGE_EXPORT) });
+    const result = host.api.exportStructuredWithPages(PAGE_OPTIONS);
+    await posted.promise;
+    expect(settled).toHaveBeenCalledWith(null, 60_000, 'window');
+    expect(worker.documentRead).toHaveBeenCalledTimes(1);
+    waiting.resolve({} as DisplayList);
+    expect(await result).toEqual(PAGE_EXPORT);
+    expect(worker.documentRead).toHaveBeenCalledTimes(2);
+    expectWorkerPageExport(host);
+  });
+}
+
+test('viewer paged export retries after its layout wait rejects', async () => {
+  const settled = mock(async () => { throw new Error('Layout wait timed out'); });
+  const host = apiFor(true, true, settled);
+  const worker = workerFor(host);
+  worker.documentRead
+    .mockResolvedValueOnce({ version: 'worker-v', value: JSON.stringify(PAGE_REFUSAL) })
+    .mockResolvedValueOnce({ version: 'worker-v', value: JSON.stringify(PAGE_EXPORT) });
+  expect(await host.api.exportStructuredWithPages(PAGE_OPTIONS)).toEqual(PAGE_EXPORT);
+  expect(settled).toHaveBeenCalledWith(null, 60_000, 'window');
+  expect(worker.documentRead).toHaveBeenCalledTimes(2);
+  expect(host.editor.getLayoutRequest).not.toHaveBeenCalled();
+  expect(host.editor.relayout).not.toHaveBeenCalled();
+  expect(host.editor.flushPendingInput).not.toHaveBeenCalled();
+});
+
+test('viewer paged export does not retry an unsupported revision preview', async () => {
+  const settled = mock(async () => ({} as DisplayList));
+  const host = apiFor(true, true, settled);
+  const worker = workerFor(host);
+  host.editor.readLayoutRequest.mockResolvedValue(JSON.stringify({ renderEnv: { revisionPreview: { proposal: 'accept' } } }));
+  const refusal = { ...PAGE_REFUSAL, failure: { ...PAGE_REFUSAL.failure, code: 'unsupported-revision-layout' as const } };
+  worker.documentRead.mockResolvedValue({ version: 'worker-v', value: JSON.stringify(refusal) });
+  expect(await host.api.exportStructuredWithPages(PAGE_OPTIONS)).toEqual(refusal);
+  expect(worker.documentRead).toHaveBeenCalledTimes(1);
+  expect(settled).not.toHaveBeenCalled();
+  expectWorkerPageExport(host);
+});
+
+test('viewer paged export refuses when the worker never lays the document out in time', async () => {
+  const host = apiFor(true, true);
+  const worker = workerFor(host, WORKER_IDENTITIES, () => new Promise<void>(() => {}));
+  const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: () => void) => {
+    callback();
+    return 0;
+  }) as unknown as typeof setTimeout);
+  try {
+    expect(await host.api.exportStructuredWithPages({ ...PAGE_OPTIONS, expectLayoutVersion: 'layout-v' })).toEqual({
+      ok: false, version: 'v',
+      failure: { code: 'layout-unavailable', target: null, message: 'The document is not laid out yet.' },
+    });
+  } finally {
+    timeout.mockRestore();
+  }
+  expect(worker.documentRead).not.toHaveBeenCalled();
+  expect(host.editor.readLayoutRequest).not.toHaveBeenCalled();
+  expectWorkerPageExport(host);
+});
+
+test('viewer paged export with an expected layout version makes exactly one worker read', async () => {
+  const settled = mock(async () => ({} as DisplayList));
+  const host = apiFor(true, true, settled);
+  const worker = workerFor(host);
+  worker.documentRead.mockResolvedValue({ version: 'worker-v', value: JSON.stringify(PAGE_REFUSAL) });
+  const options = { ...PAGE_OPTIONS, expectLayoutVersion: 'layout-v' };
+  expect(await host.api.exportStructuredWithPages(options)).toEqual(PAGE_REFUSAL);
+  expect(worker.documentRead).toHaveBeenCalledWith({ kind: 'exportStructuredWithPages', options, currentRequest: PAGE_REQUEST });
+  expect(worker.documentRead).toHaveBeenCalledTimes(1);
+  expect(settled).not.toHaveBeenCalled();
+  expectWorkerPageExport(host);
+});
+
+test('viewer paged export rejects a session replacement while waiting for layout', async () => {
+  const host = apiFor(true, true, async () => {
+    host.pagedEditorRef.current = null;
+    return {} as DisplayList;
+  });
+  const worker = workerFor(host);
+  worker.documentRead.mockResolvedValue({ version: 'worker-v', value: JSON.stringify(PAGE_REFUSAL) });
+  await expect(host.api.exportStructuredWithPages(PAGE_OPTIONS)).rejects.toThrow('The document changed while it was being laid out');
+  expect(worker.documentRead).toHaveBeenCalledTimes(1);
+  expectWorkerPageExport(host);
+});
+
+test('viewer paged export returns the main result after hand-over without more worker attempts', async () => {
+  const settled = mock(async () => ({} as DisplayList));
+  const host = apiFor(true, true, settled);
+  const worker = workerFor(host);
+  await worker.authority.initialize();
+  host.hydrate.mockImplementation(async () => {
+    const handover = await beginWorkerProposalHandover(host.session)!;
+    return () => { host.state.version = 'main-v'; handover.complete(); };
+  });
+  const ready = requestWorkerOpenReplica(host.session)!;
+  spyOn(host.session, 'exportStructuredWithPagesFor').mockReturnValue({
+    ...PAGE_REFUSAL, failure: { ...PAGE_REFUSAL.failure, code: 'unsupported-revision-layout' },
+  });
+  const result = host.api.exportStructuredWithPages(PAGE_OPTIONS);
+  await ready;
+  expect(await result).toEqual({ ...PAGE_REFUSAL, failure: { ...PAGE_REFUSAL.failure, code: 'unsupported-revision-layout' } });
+  expect(worker.documentRead).not.toHaveBeenCalled();
+  expect(host.editor.readLayoutRequest).not.toHaveBeenCalled();
+  expect(host.session.exportStructuredWithPagesFor).toHaveBeenCalledTimes(2);
+  expect(host.editor.flushPendingInput).toHaveBeenCalledTimes(1);
+  expect(settled).not.toHaveBeenCalled();
+});
+
+test('viewer paged export uses a main-thread copy that is already loaded', async () => {
+  const host = apiFor(true);
+  const worker = workerFor(host);
+  expect(await host.api.exportStructuredWithPages(PAGE_OPTIONS)).toEqual(PAGE_EXPORT);
+  expect(host.session.exportStructuredWithPagesFor).toHaveBeenCalledWith(PAGE_OPTIONS, PAGE_REQUEST);
+  expect(host.editor.readLayoutRequest).not.toHaveBeenCalled();
+  expect(worker.documentRead).not.toHaveBeenCalled();
+});
+
+test('editor paged export still flushes and reads the main session layout', async () => {
+  const host = apiFor();
+  const worker = workerFor(host);
+  expect(await host.api.exportStructuredWithPages(PAGE_OPTIONS)).toEqual(PAGE_EXPORT);
+  expect(host.session.exportStructuredWithPagesFor).toHaveBeenCalledWith(PAGE_OPTIONS, PAGE_REQUEST);
+  expect(host.editor.getLayoutRequest).toHaveBeenCalledTimes(1);
+  expect(host.editor.readLayoutRequest).not.toHaveBeenCalled();
+  expect(worker.documentRead).not.toHaveBeenCalled();
+  expect(host.events).toEqual(['flush']);
 });
 
 test('editor findText still flushes and reads the main session', async () => {
@@ -602,7 +792,7 @@ test('a newer paged navigation invalidates a pending worker navigation across re
     usePagedEditorRefApi({
       ref, viewerSelection: true, bumpInputEpoch: bump, yrsInputRef: { current: null },
       layout: null, yrsSession: {} as YrsSession, documentFromYrs: () => null,
-      runLayoutPipeline: () => {}, getLayoutRequest: () => null,
+      runLayoutPipeline: () => {}, getLayoutRequest: () => null, readLayoutRequest: async () => null,
       scrollToPositionImpl: () => {}, revealPositionImpl: () => 'scrolled',
       scrollToParaIdImpl: () => false, scrollToPageImpl: () => {},
       setIsFocused: () => {}, onReadyRef: { current: undefined },

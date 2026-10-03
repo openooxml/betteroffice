@@ -99,6 +99,7 @@ async function setup(options: {
   const editor = {
     getYrsSession: () => options.session,
     getLayoutRequest: options.request,
+    readLayoutRequest: async () => options.request(),
     flushPendingInput: async () => {
       events.push('flush');
       options.flush?.();

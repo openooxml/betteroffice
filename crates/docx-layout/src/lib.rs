@@ -98,6 +98,8 @@ pub mod table_row_break;
 
 mod typed_measure;
 
+use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 use wasm_bindgen::prelude::*;
 
 #[cfg(target_arch = "wasm32")]
@@ -792,6 +794,22 @@ pub fn measure_fonts_generation() -> (u64, usize) {
         let store = store.borrow();
         (store.id(), store.font_count())
     })
+}
+
+pub fn measure_font_cache_identity(chains: &BTreeMap<String, Vec<u32>>) -> (u64, u64) {
+    let (store, fonts) = measure_fonts_generation();
+    let mut missing = Vec::new();
+    for &id in chains.values().flatten() {
+        if id as usize >= fonts {
+            missing.push(id);
+        }
+    }
+    missing.sort_unstable();
+    missing.dedup();
+    let mut hash = std::hash::DefaultHasher::new();
+    (fonts == 0).hash(&mut hash);
+    missing.hash(&mut hash);
+    (store, hash.finish())
 }
 
 /// Runs `run` against an empty measurement font store of its own, then puts the
