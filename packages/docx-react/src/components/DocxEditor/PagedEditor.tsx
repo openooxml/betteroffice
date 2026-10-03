@@ -2179,7 +2179,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
 
           {canvasOverlayTarget && displayListQueries && !partEdit && (
             <CanvasCellSelectionOverlay
-              session={yrsCore.session}
+              session={viewerDocumentRead ? null : yrsCore.session}
               positionProjection={getYrsPositionProjection('body')}
               overlayTarget={canvasOverlayTarget}
               canvasHostRef={interactionPageHostRef}

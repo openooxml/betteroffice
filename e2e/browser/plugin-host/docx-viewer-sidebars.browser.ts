@@ -61,6 +61,9 @@ async function openSidebar(page: Page, firstCanvasAt: number) {
 
 async function expectUnchanged(page: Page, before: Awaited<ReturnType<typeof status>>) {
   const reads = Object.fromEntries(Object.keys(before.reads).map((method) => [method, 0]));
+  // The open path checks the first frame's caret against the main selection once.
+  reads.selection = before.reads.selection ?? 0;
+  expect(before.reads.selection ?? 0).toBeLessThanOrEqual(1);
   expect(await status(page)).toEqual({ ...before, reads, replica: { started: false, loaded: false }, errors: [] });
 }
 
