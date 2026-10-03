@@ -201,6 +201,11 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       for (const type of USER_SCROLL_EVENTS) {
         scroller.addEventListener(type, clearPendingPosition, listening);
       }
+      // the editor's input sits outside the scroll container
+      scroller.ownerDocument.addEventListener('keydown', clearPendingPosition, {
+        ...listening,
+        capture: true,
+      });
       pendingPositionRef.current = {
         position: pmPos,
         forParaIdScroll,

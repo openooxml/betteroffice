@@ -367,6 +367,9 @@ test('a waiting position drops on a user scroll, a new session, an edit or a lat
     ({ scroller }) => {
       scroller.dispatchEvent(new Event('wheel'));
     },
+    () => {
+      document.body.dispatchEvent(new Event('keydown', { bubbles: true }));
+    },
     ({ rerender, paginating }) =>
       rerender({ layout: layout(9, true), queries: paginating, session: {} as YrsSession }),
     () => {
@@ -380,7 +383,7 @@ test('a waiting position drops on a user scroll, a new session, an edit or a lat
     await act(async () => api.result.current.scrollToPositionImpl(5000));
     await act(async () => drop(api));
     await act(async () => api.rerender({ layout: layout(10), queries: api.laidOut, session }));
-    expect(api.scrolls).toEqual(drop === drops[3] ? [8300] : []);
+    expect(api.scrolls).toEqual(drop === drops[4] ? [8300] : []);
     api.scroller.remove();
   }
 });
