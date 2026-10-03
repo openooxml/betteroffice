@@ -387,6 +387,22 @@ impl CommentWrites {
         Self { written }
     }
 
+    #[cfg(feature = "wasm")]
+    pub(crate) fn snapshot(&self) -> HashSet<(String, Option<String>)> {
+        self.written
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    #[cfg(feature = "wasm")]
+    pub(crate) fn replace(&self, written: HashSet<(String, Option<String>)>) {
+        *self
+            .written
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = written;
+    }
+
     /// Whether `key` of comment `id` was written since the source was retained.
     pub(crate) fn written(&self, id: &str, key: &str) -> bool {
         let written = self
