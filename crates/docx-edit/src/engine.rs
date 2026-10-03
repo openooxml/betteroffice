@@ -36,10 +36,7 @@ use serde::Serialize;
 use yrs::{StickyIndex, Subscription, Transact};
 
 use crate::EditingDoc;
-use crate::bridge::{
-    BridgeError, LoweringMap, RenderEnv, RevisionPreview,
-    yrs_doc_to_mapped_layout_blocks_with_revealable,
-};
+use crate::bridge::{BridgeError, LoweringMap, RenderEnv, RevisionPreview};
 use crate::fingerprint::Fingerprint;
 use crate::frame_delta::{
     DisplayChanges, FrameEpochs, FramePageSnapshot, PageShiftRun, encode_frame_delta,
@@ -67,6 +64,7 @@ struct LoweredStory {
     /// Lazily serialized layout blocks.
     serialized_blocks: Option<String>,
     local: crate::bridge::local::LocalLowering,
+    preview: Option<Rc<crate::bridge::preview::PreviewUnits>>,
 }
 
 #[derive(Debug, Default)]
@@ -74,6 +72,8 @@ struct RenderState {
     stories: HashMap<String, LoweredStory>,
     cache_hits: u64,
     cache_misses: u64,
+    preview_patches: u64,
+    preview_fallbacks: u64,
 }
 
 struct LoweredNoteSeparators {
@@ -1000,6 +1000,8 @@ pub struct EngineStats {
     pub lowered_block_count: usize,
     pub lower_cache_hits: u64,
     pub lower_cache_misses: u64,
+    pub lower_preview_patches: u64,
+    pub lower_preview_fallbacks: u64,
     pub retained_measure_templates: usize,
     pub compatibility_measure_calls: u64,
     pub resident_measure_calls: u64,
@@ -2220,7 +2222,66 @@ impl EngineSession {
         lowered.local.patch(blocks, map, &txn, env, &edit)?;
         lowered.doc_epoch = epoch;
         lowered.serialized_blocks = None;
+        lowered.preview = None;
         Some(())
+    }
+
+    fn patch_preview_body(&self, epoch: u64, env: &RenderEnv) -> Option<()> {
+        let mut render = self.render.borrow_mut();
+        let lowered = render.stories.get_mut("body")?;
+        if lowered.doc_epoch != epoch
+            || lowered.media != self.doc.media_sources()
+            || !lowered.local.matches_source(&self.doc)
+            || lowered.env.revision_preview == env.revision_preview
+        {
+            return None;
+        }
+        let mut previous = lowered.env.clone();
+        previous.revision_preview = env.revision_preview.clone();
+        if previous != *env {
+            return None;
+        }
+        let changed = lowered
+            .env
+            .revision_preview
+            .keys()
+            .chain(env.revision_preview.keys())
+            .filter(|id| lowered.env.revision_preview.get(*id) != env.revision_preview.get(*id))
+            .cloned()
+            .collect();
+        let patched = (|| {
+            if !lowered.local.blocked {
+                return None;
+            }
+            let units = lowered.preview.as_ref()?;
+            if crate::bridge::preview::targets(units, &changed) {
+                let replays = crate::bridge::preview::replay(
+                    &self.doc,
+                    env,
+                    units,
+                    &changed,
+                    &lowered.blocks,
+                )?;
+                let mut units = units.as_ref().clone();
+                crate::bridge::preview::splice(
+                    replays,
+                    Rc::make_mut(&mut lowered.blocks),
+                    Rc::make_mut(&mut lowered.map),
+                    Rc::make_mut(&mut lowered.revealable_blocks),
+                    &mut units,
+                );
+                lowered.preview = Some(Rc::new(units));
+                lowered.serialized_blocks = None;
+            }
+            lowered.env = env.clone();
+            Some(())
+        })();
+        if patched.is_some() {
+            render.preview_patches = render.preview_patches.wrapping_add(1);
+        } else {
+            render.preview_fallbacks = render.preview_fallbacks.wrapping_add(1);
+        }
+        patched
     }
 
     /// Runs a callback with resident lowered blocks.
@@ -2255,8 +2316,10 @@ impl EngineSession {
         env: &RenderEnv,
     ) -> Result<(), BridgeError> {
         let mut local = crate::bridge::local::LocalLowering::new(self.local_lowering.get());
-        let (blocks, map, revealable_blocks) =
-            yrs_doc_to_mapped_layout_blocks_with_revealable(&self.doc, story, env, &mut local)?;
+        // Preview units serve later decisions, so a story's first lowering (the open) skips them.
+        let record = self.render.borrow().stories.contains_key(story);
+        let (blocks, map, revealable_blocks, preview) =
+            crate::bridge::preview::lower_recorded(&self.doc, story, env, &mut local, record)?;
         let mut render = self.render.borrow_mut();
         render.cache_misses = render.cache_misses.wrapping_add(1);
         render.stories.insert(
@@ -2270,6 +2333,7 @@ impl EngineSession {
                 revealable_blocks: Rc::new(revealable_blocks),
                 serialized_blocks: None,
                 local,
+                preview: preview.map(Rc::new),
             },
         );
         Ok(())
@@ -2302,7 +2366,10 @@ impl EngineSession {
         if self.story_is_resident(story, epoch, env) {
             let mut render = self.render.borrow_mut();
             render.cache_hits = render.cache_hits.wrapping_add(1);
-        } else if story != "body" || self.patch_lowered_body(epoch, env).is_none() {
+        } else if story != "body"
+            || (self.patch_preview_body(epoch, env).is_none()
+                && self.patch_lowered_body(epoch, env).is_none())
+        {
             self.lower_story_into_cache(story, epoch, env)?;
         }
         let (blocks, map) = {
@@ -2349,6 +2416,8 @@ impl EngineSession {
                 .sum(),
             lower_cache_hits: render.cache_hits,
             lower_cache_misses: render.cache_misses,
+            lower_preview_patches: render.preview_patches,
+            lower_preview_fallbacks: render.preview_fallbacks,
             retained_measure_templates: measurement.templates.len(),
             compatibility_measure_calls: measurement.compatibility_calls,
             resident_measure_calls: measurement.resident_measure_calls,
@@ -3486,11 +3555,12 @@ impl EngineSession {
             return Ok(Some(Rc::clone(blocks)));
         }
         let mut local = crate::bridge::local::LocalLowering::new(false);
-        let (_, _, revealable) = yrs_doc_to_mapped_layout_blocks_with_revealable(
+        let (_, _, revealable, _) = crate::bridge::preview::lower_recorded(
             &cached.doc,
             kind,
             render_env,
             &mut local,
+            false,
         )
         .map_err(|error| error.to_string())?;
         let revealable = Rc::new(revealable);
@@ -5793,6 +5863,11 @@ use crate::seed::fixture as lowering_fixture;
 mod lowering_pages;
 
 #[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/support/preview_fixture.rs"]
+mod preview_fixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -6281,6 +6356,8 @@ mod tests {
                 lowered_block_count: 1,
                 lower_cache_hits: 1,
                 lower_cache_misses: 1,
+                lower_preview_patches: 0,
+                lower_preview_fallbacks: 0,
                 retained_measure_templates: 0,
                 compatibility_measure_calls: 0,
                 resident_measure_calls: 0,
@@ -14965,5 +15042,503 @@ mod tests {
             Some(-1438.0)
         );
         docx_layout::clear_measure_fonts();
+    }
+
+    fn preview_mapped_snapshot(
+        blocks: &[LayoutBlock],
+        map: &LoweringMap,
+        revealable: &[LayoutBlock],
+    ) -> String {
+        let spans: Vec<_> = map
+            .spans
+            .iter()
+            .map(|span| {
+                (
+                    span.pm_start,
+                    span.pm_end,
+                    span.paragraph,
+                    span.raw_start,
+                    span.raw_end,
+                    span.atom,
+                )
+            })
+            .collect();
+        serde_json::to_string(&(
+            blocks,
+            &map.stories,
+            &map.paragraphs,
+            &map.paragraph_blocks,
+            spans,
+            &map.tables,
+            revealable,
+        ))
+        .unwrap()
+    }
+
+    fn preview_mapped_oracle(engine: &EngineSession, env: &RenderEnv) {
+        engine.lower_story_json("body", env).unwrap();
+        let actual = {
+            let render = engine.render.borrow();
+            let lowered = &render.stories["body"];
+            preview_mapped_snapshot(&lowered.blocks, &lowered.map, &lowered.revealable_blocks)
+        };
+        let (blocks, map, revealable) =
+            crate::bridge::yrs_doc_to_mapped_layout_blocks_with_revealable(
+                engine.doc(),
+                "body",
+                env,
+                &mut crate::bridge::local::LocalLowering::new(false),
+            )
+            .unwrap();
+        assert_eq!(actual, preview_mapped_snapshot(&blocks, &map, &revealable));
+    }
+
+    fn preview_seeded(bytes: &[u8]) -> EngineSession {
+        let engine = EngineSession::new(75210);
+        crate::seed_from_docx(engine.doc(), bytes).unwrap();
+        let primer = RenderEnv {
+            show_hidden_text: true,
+            ..RenderEnv::default()
+        };
+        engine.lower_story_json("body", &primer).unwrap();
+        engine
+    }
+
+    #[test]
+    fn preview_local_first_lowering_records_no_units() {
+        let engine = EngineSession::new(75211);
+        crate::seed_from_docx(engine.doc(), &preview_fixture::plain()).unwrap();
+        let id = preview_fixture::ids(&engine).remove(0);
+        preview_mapped_oracle(&engine, &RenderEnv::default());
+        assert!(engine.render.borrow().stories["body"].preview.is_none());
+        let before = engine.stats();
+        preview_mapped_oracle(
+            &engine,
+            &RenderEnv::default().with_revision_preview(&id, RevisionPreview::Accepted),
+        );
+        assert_eq!(
+            engine.stats().lower_preview_patches,
+            before.lower_preview_patches
+        );
+        assert!(engine.render.borrow().stories["body"].preview.is_some());
+        let before = engine.stats();
+        preview_mapped_oracle(
+            &engine,
+            &RenderEnv::default().with_revision_preview(&id, RevisionPreview::Rejected),
+        );
+        assert_eq!(
+            engine.stats().lower_preview_patches,
+            before.lower_preview_patches + 1
+        );
+    }
+
+    #[test]
+    fn preview_local_mapped_oracle_decision_streams() {
+        for (bytes, patches, fields) in [
+            (preview_fixture::plain(), true, false),
+            (preview_fixture::nested(), true, false),
+            (preview_fixture::breaks(), false, false),
+            (preview_fixture::drawings(), true, false),
+            (preview_fixture::fields(), true, true),
+            (preview_fixture::hidden_fields(), false, true),
+            (preview_fixture::sequence(), false, true),
+        ] {
+            for seed in 0..40 {
+                let engine = preview_seeded(&bytes);
+                if fields {
+                    preview_fixture::stamp_fields(&engine);
+                }
+                let ids = preview_fixture::ids(&engine);
+                assert!(!ids.is_empty());
+                let mut env = RenderEnv::default();
+                let mut random = preview_fixture::Random::new(seed);
+                preview_mapped_oracle(&engine, &env);
+                for _ in 0..24 {
+                    preview_fixture::decide(&mut env, &ids, &mut random);
+                    let before = engine.stats();
+                    preview_mapped_oracle(&engine, &env);
+                    if patches {
+                        assert_eq!(
+                            engine.stats().lower_preview_patches,
+                            before.lower_preview_patches + 1
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preview_local_mapped_oracle_edit_streams() {
+        for seed in 0..40 {
+            let engine = preview_seeded(&preview_fixture::plain());
+            let mut env = RenderEnv::default();
+            let mut random = preview_fixture::Random::new(seed);
+            preview_mapped_oracle(&engine, &env);
+            for _ in 0..24 {
+                let plain = crate::EditCtx::local("", "");
+                let suggesting = crate::EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting();
+                let ctx = if random.next() % 2 == 0 {
+                    &suggesting
+                } else {
+                    &plain
+                };
+                if random.next() % 2 == 0 {
+                    engine
+                        .doc()
+                        .insert_text(
+                            ctx,
+                            crate::Position::new("body", 1),
+                            "x",
+                            crate::FormatPolicy::Plain,
+                        )
+                        .unwrap();
+                } else {
+                    engine
+                        .doc()
+                        .delete_range(ctx, crate::StoryRange::new("body", 1, 2))
+                        .unwrap();
+                }
+                preview_mapped_oracle(&engine, &env);
+                let ids = preview_fixture::ids(&engine);
+                preview_fixture::decide(&mut env, &ids, &mut random);
+                let before = engine.stats();
+                preview_mapped_oracle(&engine, &env);
+                assert_eq!(
+                    engine.stats().lower_preview_patches,
+                    before.lower_preview_patches + 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn preview_local_mapped_oracle_corpus() {
+        for (name, bytes) in preview_fixture::corpus() {
+            let engine = preview_seeded(bytes);
+            let ids = preview_fixture::ids(&engine);
+            assert!(!ids.is_empty(), "{name}");
+            preview_mapped_oracle(&engine, &RenderEnv::default());
+            for id in &ids {
+                for decision in [RevisionPreview::Accepted, RevisionPreview::Rejected] {
+                    preview_mapped_oracle(
+                        &engine,
+                        &RenderEnv::default().with_revision_preview(id, decision),
+                    );
+                }
+            }
+            for seed in 0..40 {
+                let mut env = RenderEnv::default();
+                let mut random = preview_fixture::Random::new(seed);
+                for _ in 0..12 {
+                    preview_fixture::decide(&mut env, &ids, &mut random);
+                    preview_mapped_oracle(&engine, &env);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preview_local_preserves_shared_snapshots() {
+        let engine = preview_seeded(&preview_fixture::drawings());
+        let env = RenderEnv::default();
+        preview_mapped_oracle(&engine, &env);
+        let (blocks, map, revealable) = {
+            let render = engine.render.borrow();
+            let lowered = &render.stories["body"];
+            (
+                lowered.blocks.clone(),
+                lowered.map.clone(),
+                lowered.revealable_blocks.clone(),
+            )
+        };
+        let original = preview_mapped_snapshot(&blocks, &map, &revealable);
+        let env = env.with_revision_preview("1", RevisionPreview::Rejected);
+        let before = engine.stats();
+        preview_mapped_oracle(&engine, &env);
+        assert_eq!(
+            engine.stats().lower_preview_patches,
+            before.lower_preview_patches + 1
+        );
+        assert_eq!(
+            original,
+            preview_mapped_snapshot(&blocks, &map, &revealable)
+        );
+        let render = engine.render.borrow();
+        let lowered = &render.stories["body"];
+        assert!(!Rc::ptr_eq(&blocks, &lowered.blocks));
+        assert!(!Rc::ptr_eq(&map, &lowered.map));
+        assert!(!Rc::ptr_eq(&revealable, &lowered.revealable_blocks));
+    }
+
+    #[test]
+    fn preview_local_no_target_preserves_cache_values() {
+        let engine = preview_seeded(&preview_fixture::plain());
+        preview_mapped_oracle(&engine, &RenderEnv::default());
+        let (blocks, map, revealable, serialized, units) = {
+            let render = engine.render.borrow();
+            let lowered = &render.stories["body"];
+            (
+                lowered.blocks.clone(),
+                lowered.map.clone(),
+                lowered.revealable_blocks.clone(),
+                lowered.serialized_blocks.clone(),
+                lowered.preview.clone().unwrap(),
+            )
+        };
+        let env = RenderEnv::default().with_revision_preview("unused", RevisionPreview::Rejected);
+        let before = engine.stats();
+        preview_mapped_oracle(&engine, &env);
+        assert_eq!(
+            engine.stats().lower_preview_patches,
+            before.lower_preview_patches + 1
+        );
+        assert_eq!(engine.stats().lower_cache_misses, before.lower_cache_misses);
+        let render = engine.render.borrow();
+        let lowered = &render.stories["body"];
+        assert!(Rc::ptr_eq(&blocks, &lowered.blocks));
+        assert!(Rc::ptr_eq(&map, &lowered.map));
+        assert!(Rc::ptr_eq(&revealable, &lowered.revealable_blocks));
+        assert!(Rc::ptr_eq(&units, lowered.preview.as_ref().unwrap()));
+        assert_eq!(serialized, lowered.serialized_blocks);
+        assert_eq!(lowered.env, env);
+    }
+
+    #[test]
+    fn preview_local_live_text_seeds_fall_back() {
+        let bytes = preview_fixture::document(&preview_fixture::paragraph(
+            1,
+            &preview_fixture::run("Plain"),
+        ));
+        let engine = preview_seeded(&bytes);
+        engine.set_local_lowering(true);
+        preview_mapped_oracle(&engine, &RenderEnv::default());
+        assert!(!engine.render.borrow().stories["body"].local.blocked);
+        let before = engine.stats();
+        preview_mapped_oracle(
+            &engine,
+            &RenderEnv::default().with_revision_preview("unused", RevisionPreview::Accepted),
+        );
+        assert_eq!(
+            engine.stats().lower_preview_patches,
+            before.lower_preview_patches
+        );
+        assert_eq!(
+            engine.stats().lower_preview_fallbacks,
+            before.lower_preview_fallbacks + 1
+        );
+        assert!(!engine.render.borrow().stories["body"].local.blocked);
+    }
+
+    #[test]
+    fn preview_local_after_state_mismatch_discards_all_targets() {
+        let numbered = preview_fixture::paragraph(
+            1,
+            r#"<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Cell</w:t></w:r>"#,
+        );
+        let bytes = preview_fixture::document(&format!(
+            "{}{}{}",
+            preview_fixture::paragraph(
+                2,
+                &preview_fixture::revision("ins", "1", &preview_fixture::run("First"))
+            ),
+            preview_fixture::table(&numbered),
+            preview_fixture::paragraph(3, &preview_fixture::run("After"))
+        ));
+        let engine = preview_seeded(&bytes);
+        let stamp = Any::Map(std::sync::Arc::new(HashMap::from([(
+            "id".to_owned(),
+            Any::from("table"),
+        )])));
+        engine
+            .doc()
+            .apply_raw_ops(
+                "body",
+                vec![crate::RawOp::Format {
+                    index: 6,
+                    len: 1,
+                    attrs: [("ins".into(), stamp)].into(),
+                }],
+                &crate::EditCtx::local("", ""),
+            )
+            .unwrap();
+        preview_mapped_oracle(&engine, &RenderEnv::default());
+        let old = engine.render.borrow().stories["body"].blocks.clone();
+        let original = serde_json::to_string(&old).unwrap();
+        let env = RenderEnv::default()
+            .with_revision_preview("1", RevisionPreview::Rejected)
+            .with_revision_preview("table", RevisionPreview::Rejected);
+        let before = engine.stats();
+        preview_mapped_oracle(&engine, &env);
+        assert_eq!(
+            engine.stats().lower_preview_patches,
+            before.lower_preview_patches
+        );
+        assert_eq!(
+            engine.stats().lower_preview_fallbacks,
+            before.lower_preview_fallbacks + 1
+        );
+        assert_eq!(original, serde_json::to_string(&old).unwrap());
+    }
+
+    #[test]
+    fn preview_local_leading_tracked_break_falls_back() {
+        let engine = preview_seeded(&preview_fixture::document(&preview_fixture::paragraph(
+            1,
+            &preview_fixture::run("After"),
+        )));
+        let receipt = engine
+            .doc()
+            .insert_embed(
+                &crate::EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
+                crate::Position::new("body", 0),
+                "pageBreak",
+                vec![],
+            )
+            .unwrap();
+        preview_mapped_oracle(&engine, &RenderEnv::default());
+        let before = engine.stats();
+        let env = RenderEnv::default()
+            .with_revision_preview(&receipt.revision_ids[0], RevisionPreview::Rejected);
+        preview_mapped_oracle(&engine, &env);
+        assert_eq!(
+            engine.stats().lower_preview_patches,
+            before.lower_preview_patches
+        );
+        assert_eq!(
+            engine.stats().lower_preview_fallbacks,
+            before.lower_preview_fallbacks + 1
+        );
+    }
+
+    #[test]
+    fn preview_local_epoch_and_environment_changes_lower_fully() {
+        let engine = preview_seeded(&preview_fixture::plain());
+        preview_mapped_oracle(&engine, &RenderEnv::default());
+        let mut env = RenderEnv::default().with_revision_preview("1", RevisionPreview::Accepted);
+        env.show_hidden_text = true;
+        let before = engine.stats();
+        preview_mapped_oracle(&engine, &env);
+        assert_eq!(
+            engine.stats().lower_cache_misses,
+            before.lower_cache_misses + 1
+        );
+        assert_eq!(
+            engine.stats().lower_preview_patches,
+            before.lower_preview_patches
+        );
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 1),
+                "x",
+                crate::FormatPolicy::Plain,
+            )
+            .unwrap();
+        env.revision_preview
+            .insert("1".to_owned(), RevisionPreview::Rejected);
+        let before = engine.stats();
+        preview_mapped_oracle(&engine, &env);
+        assert_eq!(
+            engine.stats().lower_cache_misses,
+            before.lower_cache_misses + 1
+        );
+        assert_eq!(
+            engine.stats().lower_preview_patches,
+            before.lower_preview_patches
+        );
+    }
+
+    #[test]
+    fn preview_local_region_layout_matches_fresh_engine() {
+        let bytes = preview_fixture::breaks();
+        let engine = preview_seeded(&bytes);
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let mut request: serde_json::Value =
+            serde_json::from_str(&small_page_request(font)).unwrap();
+        engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        request["renderEnv"] = json!({"revisionPreview": {"1": "rejected"}});
+        let before = engine.stats();
+        let actual = engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        assert_eq!(
+            engine.stats().lower_preview_patches,
+            before.lower_preview_patches + 1
+        );
+        let fresh = preview_seeded(&bytes);
+        let expected = fresh
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        assert_eq!(actual, expected);
+    }
+    #[test]
+    fn preview_local_sequence_marker_without_fields_patches() {
+        use yrs::{Map, ReadTxn};
+        let engine = preview_seeded(&preview_fixture::plain());
+        let mut txn = engine.doc().transact_for(&crate::EditCtx::system(""));
+        let session = txn.get_map(crate::identity::SESSION).unwrap();
+        session.insert(
+            &mut txn,
+            crate::seed::OPAQUE_SEQUENCES,
+            Any::Array(Vec::new().into()),
+        );
+        drop(txn);
+        preview_mapped_oracle(&engine, &RenderEnv::default());
+        assert!(engine.render.borrow().stories["body"].preview.is_some());
+        let before = engine.stats();
+        preview_mapped_oracle(
+            &engine,
+            &RenderEnv::default().with_revision_preview("1", RevisionPreview::Rejected),
+        );
+        assert_eq!(
+            engine.stats().lower_preview_patches,
+            before.lower_preview_patches + 1
+        );
+    }
+
+    #[test]
+    fn preview_local_revision_attrs_block_text_seeds() {
+        for imported in [false, true] {
+            let bytes = if imported {
+                preview_fixture::plain()
+            } else {
+                preview_fixture::document(&preview_fixture::paragraph(
+                    1,
+                    &preview_fixture::run("Plain"),
+                ))
+            };
+            let engine = preview_seeded(&bytes);
+            engine.set_local_lowering(true);
+            let id = if imported {
+                "1".to_owned()
+            } else {
+                engine
+                    .doc()
+                    .insert_text(
+                        &crate::EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
+                        crate::Position::new("body", 1),
+                        "x",
+                        crate::FormatPolicy::Plain,
+                    )
+                    .unwrap()
+                    .revision_ids[0]
+                    .clone()
+            };
+            preview_mapped_oracle(&engine, &RenderEnv::default());
+            assert!(engine.render.borrow().stories["body"].local.blocked);
+            let before = engine.stats();
+            preview_mapped_oracle(
+                &engine,
+                &RenderEnv::default().with_revision_preview(id, RevisionPreview::Rejected),
+            );
+            assert_eq!(
+                engine.stats().lower_preview_patches,
+                before.lower_preview_patches + 1
+            );
+        }
     }
 }
