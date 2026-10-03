@@ -238,7 +238,8 @@ test('every public ref API is classified for replica access', async () => {
     'search', 'searchGoTo', 'searchNext', 'searchPrevious',
     'scrollToChangeId', 'scrollToCommentId', 'scrollToPage', 'scrollToParaId', 'scrollToPosition',
     'setParagraphStyle', 'setProposalStates', 'setZoom', 'validateEdits', 'whenLayoutComplete',
-    'withdrawProposals',
+    'withdrawProposals', 'readSelectionInfo', 'findParagraphs', 'scrollToParagraph', 'scrollToComment',
+    'scrollToChange', 'insertComment', 'insertCommentReply', 'onDocumentChange',
   ].sort());
 });
 

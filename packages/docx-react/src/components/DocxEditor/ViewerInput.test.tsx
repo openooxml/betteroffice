@@ -8,6 +8,8 @@ import { ViewerInput, type ViewerInputProps } from './ViewerInput';
 import type { YrsInputRef } from './YrsInput';
 import { usePagedEditorRefApi } from './hooks/usePagedEditorRefApi';
 import { stampWorkerFrameVersion } from './internals/layoutProvenance';
+import type { ViewerSelectionChange } from './internals/viewerSelectionController';
+import { layoutIdOf } from '../../plugins/geometry';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -72,6 +74,7 @@ function NavigatingViewer({ props, inputRef, pagedRef }: {
     getYrsPositionProjection: () => null,
     displayPositionToYrsLoc: () => null,
     getPositionAtPoint: () => null,
+    navigateViewer: async () => false,
   });
   return <ViewerInput {...props} ref={inputRef} />;
 }
@@ -79,7 +82,8 @@ function NavigatingViewer({ props, inputRef, pagedRef }: {
 function mount(
   queries: DisplayListQueries,
   documentKey: ViewerInputProps['document'] = { isDisplayOnly: () => false },
-  pagedRef?: RefObject<PagedEditorRef | null>
+  pagedRef?: RefObject<PagedEditorRef | null>,
+  onSelectionChange: ViewerInputProps['onSelectionChange'] = () => {}
 ) {
   const pending: Array<{
     request: ResidentDocumentRead;
@@ -89,7 +93,7 @@ function mount(
     pending.push({ request, resolve });
   })) as unknown as ResidentEngineWorkerClient['documentRead'];
   const ref = createRef<YrsInputRef>();
-  let props: ViewerInputProps = { read, story: 'body', queries, document: documentKey, onSelectionChange: () => {} };
+  let props: ViewerInputProps = { read, story: 'body', queries, document: documentKey, onSelectionChange };
   const element = () => pagedRef
     ? <NavigatingViewer props={props} inputRef={ref} pagedRef={pagedRef} />
     : <ViewerInput {...props} ref={ref} />;
@@ -109,6 +113,65 @@ function mount(
     entry.request.kind === kind && 'expectVersion' in entry.request && entry.request.expectVersion === version);
   return { ref, view, show, answer, has, textarea: view.getByTestId('yrs-input') as HTMLTextAreaElement };
 }
+
+test('a missing viewer navigation leaves the selection gesture and pending copy untouched', async () => {
+  const pagedRef = createRef<PagedEditorRef>();
+  const { ref, answer } = mount(frame('A'), undefined, pagedRef);
+  act(() => ref.current!.setSelectionFromDisplay(1, 6));
+  const gesture = ref.current!.currentGesture!();
+  const copy = ref.current!.readSelectedText!()!;
+  expect(await pagedRef.current!.navigateViewer({ kind: 'paragraphTarget', paraId: 'missing' })).toBe(false);
+  expect(ref.current!.currentGesture!()).toBe(gesture);
+  expect(ref.current!.displaySelection()).toEqual({ anchor: 1, head: 6 });
+  await answer('selectionText', 'A', 'A', text('Alpha'));
+  expect(await copy).toBe('Alpha');
+});
+
+test('viewer publication uses ordered display positions, worker paragraph identity and the presented layout', async () => {
+  const queries = frame('A');
+  const changes: ViewerSelectionChange[] = [];
+  const { ref, show, answer, has } = mount(queries, undefined, undefined, (selection) => changes.push(selection));
+  act(() => ref.current!.setSelectionFromDisplay(12, 1));
+  expect(changes.at(-1)).toEqual({
+    displayRange: { story: 'body', from: 1, to: 12, layoutId: layoutIdOf(queries) },
+    isMultiParagraph: false,
+  });
+  const count = changes.length;
+  await answer('selectionText', 'A', 'A', {
+    text: 'AlphaBeta', range: { story: 'body', view: 'accepted',
+      start: { paraId: '00000001', offset: 0 }, end: { paraId: '00000002', offset: 4 } },
+  });
+  expect(changes).toHaveLength(count + 1);
+  expect(changes.at(-1)?.isMultiParagraph).toBe(true);
+  const next = frame('A');
+  show(next);
+  expect(changes.at(-1)).toEqual({
+    displayRange: { story: 'body', from: 1, to: 12, layoutId: layoutIdOf(next) },
+    isMultiParagraph: true,
+  });
+  expect(has('selectionText', 'A')).toBe(false);
+  show(frame('B'));
+  expect(changes.at(-1)).toEqual({ displayRange: null, isMultiParagraph: false });
+});
+
+test.each([
+  ['Alpha\nBeta', null, true],
+  ['Alpha\tBeta', null, true],
+  ['Alpha', null, false],
+  ['Alpha\nBeta', {
+    story: 'body', view: 'accepted',
+    start: { paraId: '00000001', offset: 0 }, end: { paraId: '00000001', offset: 10 },
+  }, false],
+] satisfies Array<[string, DocxDisplaySelectionText['range'], boolean]>)(
+  'viewer capture classifies paragraph coverage for %p', async (value, range, isMultiParagraph) => {
+    const changes: ViewerSelectionChange[] = [];
+    const { ref, answer } = mount(frame('A'), undefined, undefined, (selection) => changes.push(selection));
+    act(() => ref.current!.setSelectionFromDisplay(1, 12));
+    expect(changes.at(-1)?.isMultiParagraph).toBe(false);
+    await answer('selectionText', 'A', 'A', { text: value, range });
+    expect(changes.at(-1)?.isMultiParagraph).toBe(isMultiParagraph);
+  }
+);
 
 test('a version change clears a viewer selection and rejects its pending copy', async () => {
   const { ref, show, answer, has } = mount(frame('A'));

@@ -1,4 +1,8 @@
 import type {
+  DocxFindTextRequest,
+  DocxFindTextResult,
+  DocxFindParagraphsOptions,
+  DocxParagraphMatch,
   DocxParagraphAnchor,
   DocxParagraphAnchorResult,
   DocxParagraphIdentitySnapshot,
@@ -78,6 +82,15 @@ export interface WorkerProposalAuthority {
       results: DocxParagraphAnchorResult[];
     }>
   ): Promise<{ version: string; results: DocxParagraphAnchorResult[] }>;
+  findParagraphs(
+    query: string,
+    options: DocxFindParagraphsOptions | undefined,
+    main: () => Promise<DocxParagraphMatch[]>
+  ): Promise<DocxParagraphMatch[]>;
+  findText(
+    request: DocxFindTextRequest,
+    main: () => Promise<DocxFindTextResult>
+  ): Promise<DocxFindTextResult>;
   /** Resolves against the document the host sees now. */
   navigationTarget(
     story: string,
@@ -295,6 +308,16 @@ export function registerWorkerProposalAuthority(
       assertCurrent();
       return { version: read.version, results: read.value.results };
     }, () => main(anchors)),
+    findParagraphs: (query, options, main) => route(async () => {
+      const read = await worker.documentRead({ kind: 'findParagraphs', query, ...options });
+      assertCurrent();
+      return read.value;
+    }, main),
+    findText: (request, main) => route(async () => {
+      const read = await worker.documentRead({ kind: 'findText', request });
+      assertCurrent();
+      return read.value;
+    }, main),
     navigationTarget: (story, paraId, main) => route(async () => {
       const local = resolveMirroredNavigationTarget(geometry, session.getProposals(), story, paraId);
       if (local !== null) return { version: geometry!.version, target: local };

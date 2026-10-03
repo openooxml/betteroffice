@@ -15,7 +15,12 @@ import type { RustFontChainsProvider } from './hooks/useRustMeasurement';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { DisplayList, DisplayListQueries } from '@betteroffice/docx/layout/render';
 import type { YrsResidentCaretSnapshot } from '@betteroffice/docx/yrs';
-import type { FontRequirementsInWorker, LayoutInWorker, ResidentFrameApplyResult } from './hooks/useDisplayList';
+import type {
+  DisplayPageNavigation,
+  FontRequirementsInWorker,
+  LayoutInWorker,
+  ResidentFrameApplyResult,
+} from './hooks/useDisplayList';
 import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import {
   InlineHeaderFooterEditor,
@@ -38,6 +43,7 @@ import type { DocxEditorCollaborationOptions } from './types';
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
 import { partEditStory, type NoteEdit, type PartEdit, type PartEditTarget } from './partEdit';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import type { ViewerSelectionChange } from './internals/viewerSelectionController';
 
 /**
  * Body of the editor: the paged editor host, its sidebar overlay
@@ -82,6 +88,7 @@ export function DocxEditorPagedArea({
   onYrsHistoryChange,
   onPagedSelectionChange,
   onYrsSelectionChange,
+  onViewerSelectionChange,
   onRenderedDomContextReady,
   pluginOverlays,
   onHyperlinkClick,
@@ -118,6 +125,7 @@ export function DocxEditorPagedArea({
   applyResidentDelete,
   displayListQueries,
   resolveDisplayListQueries,
+  pageNavigation,
   canvasDisplayList,
   displayListFrameEpoch,
   residentCaret,
@@ -168,6 +176,7 @@ export function DocxEditorPagedArea({
   onYrsHistoryChange?: (canUndo: boolean, canRedo: boolean) => void;
   onPagedSelectionChange: () => void;
   onYrsSelectionChange: (selection: YrsToolbarSelection) => void;
+  onViewerSelectionChange?: (selection: ViewerSelectionChange) => void;
   onRenderedDomContextReady:
     | ((ctx: RenderedDomContext, queries: DisplayListQueries) => void)
     | undefined;
@@ -219,6 +228,7 @@ export function DocxEditorPagedArea({
   /** Display-list query source while the canvas renderer paints (null on the DOM-painter path). */
   displayListQueries?: DisplayListQueries | null;
   resolveDisplayListQueries?: ResolveDisplayListQueries;
+  pageNavigation?: DisplayPageNavigation | null;
   canvasDisplayList?: DisplayList | null;
   displayListFrameEpoch?: number | null;
   residentCaret?: YrsResidentCaretSnapshot | null;
@@ -462,6 +472,7 @@ export function DocxEditorPagedArea({
         onYrsHistoryChange={onYrsHistoryChange}
         onSelectionChange={onPagedSelectionChange}
         onYrsSelectionChange={onYrsSelectionChange}
+        onViewerSelectionChange={onViewerSelectionChange}
         onYrsPartSelectionChange={(part, selection) => {
           if (partEditStory(part) === partStory) setPartSelection(selection);
         }}
@@ -490,6 +501,7 @@ export function DocxEditorPagedArea({
         applyResidentDelete={applyResidentDelete}
         displayListQueries={displayListQueries}
         resolveDisplayListQueries={resolveDisplayListQueries}
+        pageNavigation={pageNavigation}
         canvasDisplayList={canvasDisplayList}
         displayListFrameEpoch={displayListFrameEpoch}
         residentCaret={residentCaret}

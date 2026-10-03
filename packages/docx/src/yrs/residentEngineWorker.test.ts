@@ -30,7 +30,7 @@ import {
   type ResidentProposalOperation,
 } from './residentEngineWorkerProtocol';
 
-let startWorker: (scope: unknown, canvas: unknown, harness: unknown) => void;
+let startWorker: (scope: unknown, canvas: unknown, harness: unknown, clock: unknown) => void;
 
 beforeAll(async () => {
   const frameDelta = resolve(import.meta.dir, '../layout/render/frameDelta.ts');
@@ -50,7 +50,7 @@ beforeAll(async () => {
       'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; } }',
     '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.memories;',
     '../layout/render/frameDelta': `
-      export { applyFrameDeltaOwned } from ${JSON.stringify(frameDelta)};
+      export { applyFrameDeltaOwned, retainedFramePageById } from ${JSON.stringify(frameDelta)};
       export const decodeFrameDelta = () => testHarness.delta;
     `,
     '../layout/render/canvasBackend': `
@@ -86,6 +86,7 @@ beforeAll(async () => {
     'self',
     'OffscreenCanvas',
     'testHarness',
+    'performance',
     await result.outputs[0].text()
   ) as typeof startWorker;
 });
@@ -111,6 +112,7 @@ function worker() {
     },
   };
   const harness = {
+    now: () => performance.now(),
     initializations: 0,
     sessionsCreated: 0,
     wasmReady: false,
@@ -151,6 +153,7 @@ function worker() {
       proposalEngine: { version: () => 'v' },
       loadState() {},
       loadMediaSources(_json: string) {},
+      loadNoteSeparators(_state: Uint8Array) {},
       setPartialDocument() {},
       setDisplayWindow(start: number, end: number) {
         harness.displayWindows.push([start, end]);
@@ -262,7 +265,7 @@ function worker() {
       canvas.height = buffer.height;
     },
   };
-  startWorker(scope, Surface, harness);
+  startWorker(scope, Surface, harness, { now: () => harness.now() });
   function send(request: ResidentEngineWorkerRequestWithoutId) {
     const id = ++nextId;
     return new Promise<ResidentEngineWorkerResponse>((resolve) => {
@@ -401,6 +404,7 @@ test.each([false, true])(
   async (hostModule) => {
     const w = worker();
     await w.bootstrap(9);
+    w.harness.now = () => 0;
     const calls: number[][] = [];
     Object.assign(w.harness.session, {
       buildDisplayPagesFrame(pages: number[]) {
@@ -418,13 +422,220 @@ test.each([false, true])(
       expectedFrameEpoch: 1, paintCaret: false, background: true,
     });
     expect(response.ok).toBe(true);
-    expect(calls).toEqual([[0, 1, 2, 3], [4, 5, 6, 7], [8]]);
+    expect(calls).toEqual([[0, 1, 2, 3], [4, 5, 6, 7, 8]]);
     if (!response.ok) throw new Error(response.error);
-    expect(response.pageFrames?.map((frame) => new Uint8Array(frame)[0])).toEqual([2, 3, 4]);
-    expect(response.caret?.frameEpoch).toBe(4);
+    expect(response.pageFrames?.map((frame) => new Uint8Array(frame)[0])).toEqual([2, 3]);
+    expect(response.caret?.frameEpoch).toBe(3);
     expect(w.answered).toEqual([1, 2]);
   }
 );
+
+test('a document read between background page slices leaves the complete batch intact', async () => {
+  const w = worker();
+  await w.bootstrap(9);
+  w.harness.now = () => 0;
+  const calls: number[][] = [];
+  const order: string[] = [];
+  let read!: Promise<ResidentEngineWorkerResponse>;
+  Object.assign(w.harness.session, {
+    proposalEngine: { version: () => 'current' },
+    paragraphIdentities: () => ({ paragraphs: [] }),
+    buildDisplayPagesFrame(pages: number[]) {
+      calls.push(pages);
+      const bytes = w.harness.session.applyInput();
+      w.harness.delta = { ...w.harness.delta!, pageCount: 9 };
+      if (calls.length === 1) {
+        read = w.send({ type: 'documentRead', read: { kind: 'paragraphIdentities' } })
+          .then((reply) => { order.push('read'); return reply; });
+      }
+      return bytes;
+    },
+  });
+  const response = await w.send({
+    type: 'buildPages', pages: Array.from({ length: 9 }, (_, index) => index),
+    expectedFrameEpoch: 1, paintCaret: false, background: true,
+  }).then((reply) => { order.push('build'); return reply; });
+  expect(await read).toMatchObject({
+    ok: true, read: { version: 'current', value: { paragraphs: [] } },
+  });
+  expect(response.ok).toBe(true);
+  if (!response.ok) throw new Error(response.error);
+  expect(response.pageBuildSuperseded).toBeUndefined();
+  expect(calls).toEqual([[0, 1, 2, 3], [4, 5, 6, 7, 8]]);
+  expect(response.pageFrames?.map((frame) => new Uint8Array(frame)[0])).toEqual([2, 3]);
+  expect(response.caret?.frameEpoch).toBe(3);
+  expect(order).toEqual(['read', 'build']);
+  expect(w.answered).toEqual([1, 3, 2]);
+});
+
+test.each(['cancelled as stale', 'replaced while queued'])(
+  'a background page build %s after a trap is answered with the trap',
+  async (variant) => {
+    const w = worker();
+    await w.bootstrap(9);
+    w.harness.now = () => 0;
+    Object.assign(w.harness.session, {
+      proposalEngine: { version: () => 'current' },
+      paragraphIdentities: () => {
+        throw new WebAssembly.RuntimeError('unreachable');
+      },
+    });
+    const build = () => w.send({
+      type: 'buildPages', pages: Array.from({ length: 9 }, (_, index) => index),
+      expectedFrameEpoch: 1, paintCaret: false, background: true,
+    });
+    const read = () => w.send({ type: 'documentRead', read: { kind: 'paragraphIdentities' } });
+    const replies = variant === 'cancelled as stale'
+      ? [build(), read(), w.send({ type: 'applyUpdate', update: new Uint8Array([1]), selection: null })]
+      : (() => {
+          const trapped = read();
+          const queued = build();
+          return [trapped, queued, trapped.then(build)];
+        })();
+    for (const reply of await Promise.all(replies)) {
+      expect(!reply.ok && reply.terminal).toBe(true);
+    }
+    expect(new Set(w.answered).size).toBe(w.answered.length);
+  }
+);
+
+test('document reads skip stale versions and read the current version', async () => {
+  const w = worker();
+  await w.bootstrap();
+  let reads = 0;
+  Object.assign(w.harness.session, {
+    proposalEngine: { version: () => 'current' },
+    paragraphIdentities: () => {
+      reads += 1;
+      return { paragraphs: [] };
+    },
+  });
+  const stale = await w.send({
+    type: 'documentRead', expectVersion: 'stale', read: { kind: 'paragraphIdentities' },
+  });
+  expect(stale).toMatchObject({ ok: true, superseded: true });
+  expect(stale).not.toHaveProperty('read');
+  expect(reads).toBe(0);
+  const current = await w.send({
+    type: 'documentRead', expectVersion: 'current', read: { kind: 'paragraphIdentities' },
+  });
+  expect(current).toMatchObject({
+    ok: true, read: { version: 'current', value: { paragraphs: [] } },
+  });
+  expect(current).not.toHaveProperty('superseded');
+  expect(reads).toBe(1);
+});
+
+test.each([false, true])(
+  'input overtakes only version-checked reads behind a running request with expectVersion=%s',
+  async (checked) => {
+    const w = worker();
+    await w.bootstrap();
+    let version = 'before';
+    let reads = 0;
+    const applyInput = w.harness.session.applyInput;
+    Object.assign(w.harness.session, {
+      proposalEngine: { version: () => version },
+      paragraphIdentities: () => {
+        reads += 1;
+        return { paragraphs: [] };
+      },
+      applyInput: () => {
+        version = 'after';
+        return applyInput();
+      },
+    });
+    const entered = deferred();
+    const held = deferred();
+    const rasterize = w.harness.rasterize;
+    w.harness.rasterize = async (...args) => {
+      entered.resolve();
+      await held.promise;
+      return rasterize(...args);
+    };
+    const attached = w.attach([1]);
+    await entered.promise;
+    const read = w.send({
+      type: 'documentRead', read: { kind: 'paragraphIdentities' },
+      ...(checked ? { expectVersion: 'before' } : {}),
+    });
+    w.harness.caret = caret(1);
+    const loc = { story: 'body', paraId: 'p1', offset: 0 };
+    const input = w.send({
+      type: 'applyInput', text: 'x', selection: { anchor: loc, head: loc },
+      expectedFrameEpoch: 1, profile: false, paintCaret: false,
+    });
+    expect(w.answered).toEqual([1]);
+    expect(reads).toBe(0);
+    held.resolve();
+    const [surface, answer, edited] = await Promise.all([attached, read, input]);
+    expect(surface.ok).toBe(true);
+    expect(edited).toMatchObject({ ok: true, caret: { frameEpoch: 2 } });
+    expect(edited).toHaveProperty('frame');
+    if (checked) {
+      expect(answer).toMatchObject({ ok: true, superseded: true });
+      expect(answer).not.toHaveProperty('read');
+      expect(reads).toBe(0);
+      expect(w.answered).toEqual([1, 2, 4, 3]);
+    } else {
+      expect(answer).toMatchObject({
+        ok: true, read: { version: 'before', value: { paragraphs: [] } },
+      });
+      expect(reads).toBe(1);
+      expect(w.answered).toEqual([1, 2, 3, 4]);
+    }
+  }
+);
+
+test('fast background page slices grow beyond four pages and keep every frame', async () => {
+  const w = worker();
+  await w.bootstrap(50);
+  w.harness.now = () => 0;
+  const calls: number[][] = [];
+  Object.assign(w.harness.session, {
+    buildDisplayPagesFrame(pages: number[]) {
+      calls.push(pages);
+      const bytes = w.harness.session.applyInput();
+      w.harness.delta = { ...w.harness.delta!, pageCount: 50 };
+      return bytes;
+    },
+  });
+  const pages = Array.from({ length: 50 }, (_, index) => index);
+  const response = await w.send({
+    type: 'buildPages', pages, expectedFrameEpoch: 1, paintCaret: false, background: true,
+  });
+  expect(response.ok).toBe(true);
+  if (!response.ok) throw new Error(response.error);
+  expect(calls.map((slice) => slice.length)).toEqual([4, 32, 14]);
+  expect(calls.flat()).toEqual(pages);
+  expect(response.pageFrames?.map((frame) => new Uint8Array(frame)[0])).toEqual([2, 3, 4]);
+  expect(response.caret?.frameEpoch).toBe(4);
+  expect(w.answered).toEqual([1, 2]);
+});
+
+test('slow background page slices keep at least four pages', async () => {
+  const w = worker();
+  await w.bootstrap(12);
+  let clock = 0;
+  w.harness.now = () => clock;
+  const calls: number[][] = [];
+  Object.assign(w.harness.session, {
+    buildDisplayPagesFrame(pages: number[]) {
+      calls.push(pages);
+      clock += 100;
+      const bytes = w.harness.session.applyInput();
+      w.harness.delta = { ...w.harness.delta!, pageCount: 12 };
+      return bytes;
+    },
+  });
+  const pages = Array.from({ length: 12 }, (_, index) => index);
+  const response = await w.send({
+    type: 'buildPages', pages, expectedFrameEpoch: 1, paintCaret: false, background: true,
+  });
+  expect(response.ok).toBe(true);
+  expect(calls.map((slice) => slice.length)).toEqual([4, 4, 4]);
+  expect(calls.flat()).toEqual(pages);
+});
 
 test('a visible page request supersedes the remaining background slices', async () => {
   const w = worker();
@@ -634,14 +845,24 @@ describe('resident worker warmup', () => {
     return [...timers.values()].map((timer) => timer.ms);
   }
 
+  function hostWarm(w: ReturnType<typeof worker>) {
+    const started = deferred();
+    const preloadFrom = w.harness.preloadFrom;
+    w.harness.preloadFrom = (source) => {
+      started.resolve();
+      return preloadFrom(source);
+    };
+    return { reply: w.send({ type: 'warm', hostModule: true }), started: started.promise };
+  }
+
   test('waits for the host module outside the request queue and does not answer it', async () => {
     const w = worker();
     const module = new WebAssembly.Module(
       new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
     );
-    const warm = w.send({ type: 'warm', hostModule: true });
+    const { reply: warm, started } = hostWarm(w);
     const bootstrap = w.bootstrap();
-    await Promise.resolve();
+    await started;
     expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
     advanceTimers(RESIDENT_HOST_MODULE_WAIT_MS - 1);
     await Promise.resolve();
@@ -669,8 +890,8 @@ describe('resident worker warmup', () => {
     const moduleA = new WebAssembly.Module(bytes);
     const moduleB = new WebAssembly.Module(bytes);
     w.harness.failWarm = new Error('init failed');
-    const warm = w.send({ type: 'warm', hostModule: true });
-    await Promise.resolve();
+    const { reply: warm, started } = hostWarm(w);
+    await started;
     expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
     const firstTimers = [...timers.keys()];
     w.scope.onmessage({ data: { type: 'editModule', module: moduleA } });
@@ -682,8 +903,8 @@ describe('resident worker warmup', () => {
     expect(w.answered).toEqual([1]);
     expect(armedBudgets()).toEqual([]);
 
-    const retry = w.send({ type: 'warm', hostModule: true });
-    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    const { reply: retry, started: retryStarted } = hostWarm(w);
+    await retryStarted;
     expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
     expect([...timers.keys()]).not.toEqual(firstTimers);
     advanceTimers(RESIDENT_HOST_MODULE_WAIT_MS - 1);
@@ -703,8 +924,8 @@ describe('resident worker warmup', () => {
 
   test('falls back to the asset preload when the host sends null', async () => {
     const w = worker();
-    const warm = w.send({ type: 'warm', hostModule: true });
-    await Promise.resolve();
+    const { reply: warm, started } = hostWarm(w);
+    await started;
     expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
     w.scope.onmessage({ data: { type: 'editModule', module: null } });
     expect((await warm).ok).toBe(true);
@@ -717,8 +938,8 @@ describe('resident worker warmup', () => {
 
   test('falls back at once when the host sends a value that is not a module', async () => {
     const w = worker();
-    const warm = w.send({ type: 'warm', hostModule: true });
-    await Promise.resolve();
+    const { reply: warm, started } = hostWarm(w);
+    await started;
     expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
     expect(w.harness.preloadInputs).toEqual([]);
     expect(w.answered).toEqual([]);
@@ -733,8 +954,8 @@ describe('resident worker warmup', () => {
 
   test('falls back at once when the host module message cannot be received', async () => {
     const w = worker();
-    const warm = w.send({ type: 'warm', hostModule: true });
-    await Promise.resolve();
+    const { reply: warm, started } = hostWarm(w);
+    await started;
     expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
     w.scope.onmessageerror?.();
     expect((await warm).ok).toBe(true);
@@ -748,8 +969,8 @@ describe('resident worker warmup', () => {
     const module = new WebAssembly.Module(
       new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
     );
-    const warm = w.send({ type: 'warm', hostModule: true });
-    await Promise.resolve();
+    const { reply: warm, started } = hostWarm(w);
+    await started;
     expect(armedBudgets()).toEqual([RESIDENT_HOST_MODULE_WAIT_MS]);
     advanceTimers(RESIDENT_HOST_MODULE_WAIT_MS - 1);
     await Promise.resolve();
@@ -804,9 +1025,15 @@ describe('resident worker warmup', () => {
     const w = worker();
     const loading = deferred();
     w.harness.preloadBlock = loading.promise;
+    const started = deferred();
+    const preload = w.harness.preload;
+    w.harness.preload = async (...args) => {
+      started.resolve();
+      return preload(...args);
+    };
     const warm = w.send({ type: 'warm' });
     const bootstrap = w.bootstrap();
-    await Promise.resolve();
+    await started.promise;
     expect(w.harness.sessionsCreated).toBe(0);
     expect(w.answered).toEqual([]);
     loading.resolve();
@@ -1243,6 +1470,48 @@ describe('resident worker layout ownership', () => {
     });
     await w.send({ type: 'sync', expectedFrameEpoch: 0, extras: '{}', paintCaret: false, snapshot });
     expect(loaded).toEqual(['{"sources":1}', '']);
+  });
+
+  test('lays out the note separators a snapshot carries, clears absent ones, and preserves worker-owned ones', async () => {
+    const w = worker();
+    const loaded: Uint8Array[] = [];
+    Object.assign(w.harness.session, {
+      loadNoteSeparators: (state: Uint8Array) => loaded.push(state),
+      layoutDocumentWithRegionsRetainedJson: () =>
+        JSON.stringify({ layout: { pages: [] }, notesConverged: true }),
+    });
+    const snapshot: YrsResidentWorkerSnapshot = {
+      clientId: 1,
+      state: new Uint8Array(),
+      fontsRevision: 0,
+      fonts: [],
+      renderInputs: [],
+      measureInputs: [],
+      layoutInput: '{}',
+      layoutWithRegions: true,
+      layoutRevision: 1,
+      selection: null,
+    };
+    const noteSeparators = new Uint8Array([1, 2, 3]);
+    await w.send({
+      type: 'bootstrap',
+      expectedFrameEpoch: 0,
+      extras: '{}',
+      snapshot: { ...snapshot, noteSeparators },
+    });
+    expect(loaded[0]).toBe(noteSeparators);
+    await w.send({ type: 'sync', expectedFrameEpoch: 0, extras: '{}', paintCaret: false, snapshot });
+    expect(loaded).toEqual([noteSeparators, new Uint8Array(0)]);
+    for (const workerSnapshot of [{ ...snapshot, noteSeparators }, snapshot]) {
+      await w.send({
+        type: 'sync',
+        expectedFrameEpoch: 0,
+        extras: '{}',
+        paintCaret: false,
+        snapshot: { ...workerSnapshot, workerAuthoritative: true },
+      });
+    }
+    expect(loaded).toHaveLength(2);
   });
 
   test('finishes a provisional layout on request and before other work', async () => {
@@ -2026,6 +2295,26 @@ describe('sliced layout completion', () => {
     expect(calls).not.toContain('whole');
   });
 
+  test('a collaboration update restarts the completion without holding it for idle input', async () => {
+    const { w, calls, onResume, bootstrap } = steppedWorker();
+    await bootstrap();
+    let inputAt = 0;
+    onResume.push(() => {
+      inputAt = performance.now();
+      void w.send({ type: 'applyUpdate', update: new Uint8Array([1]), selection: null });
+    });
+    const completed = await w.send({
+      type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 4,
+    });
+    expect(performance.now() - inputAt).toBeLessThan(290);
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(completed).toHaveProperty('frame');
+    expect(calls.slice(0, 3)).toEqual(['begin', 'resume:4', 'update']);
+    expect(calls.filter((call) => call === 'begin')).toHaveLength(2);
+    expect(calls).not.toContain('whole');
+    expect(new Set(w.answered).size).toBe(w.answered.length);
+  });
+
   test('a glyph trap while a frame request finishes the pass answers both requests once', async () => {
     const { w, onResume, bootstrap } = steppedWorker(100);
     await bootstrap();
@@ -2254,7 +2543,7 @@ describe('worker proposals during sliced completion', () => {
     import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
   )))));
 
-  async function proposalWorker(extraBody = '', bytes?: Uint8Array) {
+  async function proposalWorker(extraBody = '', comments?: string, bytes?: Uint8Array) {
     const parts: PartsMap = new Map();
     parts.set('[Content_Types].xml', toBytes(
       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
@@ -2268,6 +2557,12 @@ describe('worker proposals during sliced completion', () => {
     parts.set('word/document.xml', toBytes(
       `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>${body}<w:sectPr/></w:body></w:document>`
     ));
+    if (comments !== undefined) {
+      const types = new TextDecoder().decode(parts.get('[Content_Types].xml')!);
+      parts.set('[Content_Types].xml', toBytes(types.replace('</Types>', '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>')));
+      parts.set('word/_rels/document.xml.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/></Relationships>'));
+      parts.set('word/comments.xml', toBytes(`<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${comments}</w:comments>`));
+    }
     const engine = await createResidentEngineSession();
     engine.openDocx(bytes ?? new Uint8Array(rezipPartsToArrayBuffer(parts)));
     const w = worker();
@@ -2354,7 +2649,7 @@ describe('worker proposals during sliced completion', () => {
 
   test('sidebar and headings reads match a main session and reject stale versions', async () => {
     const bytes = sidebarDocx();
-    const { w, engine } = await proposalWorker('', bytes);
+    const { w, engine } = await proposalWorker('', undefined, bytes);
     const main = await createYrsSession();
     try {
       main.openDocx(bytes, true);
@@ -2649,6 +2944,74 @@ describe('worker proposals during sliced completion', () => {
       expect(calls.filter((call) => call === 'begin')).toHaveLength(1);
       await expectFullLayout(completed);
     } finally {
+      engine.destroy();
+    }
+  });
+
+  test('viewer document reads reply with the current version and value', async () => {
+    const extraBody = '<w:p w14:paraId="00000100"><w:r><w:t xml:space="preserve">Before </w:t></w:r>' +
+      '<w:commentRangeStart w:id="1"/><w:r><w:t>the phrase</w:t></w:r><w:commentRangeEnd w:id="1"/>' +
+      '<w:r><w:commentReference w:id="1"/></w:r><w:r><w:t xml:space="preserve"> </w:t></w:r>' +
+      '<w:ins w:id="9" w:author="A" w:date="2026-10-01T00:00:00Z"><w:r><w:t>new</w:t></w:r></w:ins>' +
+      '<w:r><w:t xml:space="preserve"> after</w:t></w:r></w:p>';
+    const comments = '<w:comment w:id="1" w:author="Reviewer"><w:p><w:r><w:t>Check phrase</w:t></w:r></w:p></w:comment>';
+    const { w, engine } = await proposalWorker(extraBody, comments);
+    const main = await createYrsSession();
+    try {
+      main.loadState(engine.encodeState());
+      const version = engine.proposalEngine.version();
+      const projection = createYrsPositionProjection(main, 'body');
+      const position = (offset: number) => yrsLocToProjectedDisplayPosition(main, () => projection, {
+        story: 'body', paraId: '00000100', offset,
+      })!;
+      const revision = main.listRevisions().find((candidate) => candidate.kind === 'insertion')!;
+      const requests: Array<{ read: ResidentDocumentRead; value?: unknown; text?: string }> = [
+        {
+          read: { kind: 'findText', request: { text: 'phrase', within: { kind: 'story', story: 'body' }, view: 'accepted', limit: 1 } },
+          value: { ...main.findText({ text: 'phrase', within: { kind: 'story', story: 'body' }, view: 'accepted', limit: 1 }), version },
+        },
+        {
+          read: { kind: 'findParagraphs', query: 'phrase', caseSensitive: true, limit: 1 },
+          value: [{ paraId: '00000100', match: 'phrase', before: 'Before the ', after: ' new after' }],
+        },
+        {
+          read: { kind: 'selectionInfo', story: 'body', anchor: position(17), head: position(7), expectVersion: version },
+          value: main.selectionText({
+            story: 'body', start: { paraId: '00000100', offset: 7 }, end: { paraId: '00000100', offset: 17 },
+          }),
+        },
+        {
+          read: { kind: 'commentTarget', story: 'body', commentId: '1', expectVersion: version },
+          text: 'the phrase',
+        },
+        {
+          read: { kind: 'revisionTarget', story: 'body', revisionId: revision.revisionId, expectVersion: version },
+          text: 'new',
+        },
+      ];
+      for (const { read, value, text } of requests) {
+        const reply = await w.send({ type: 'documentRead', read });
+        expect(reply.ok).toBe(true);
+        if (text === undefined) {
+          expect(reply.ok && reply.read).toEqual({ version, value });
+        } else {
+          const range = reply.ok ? (reply.read!.value as { anchor: number; head: number } | null) : null;
+          expect(reply.ok && reply.read!.version).toBe(version);
+          expect(range).not.toBeNull();
+          const covered = await w.send({
+            type: 'documentRead',
+            read: { kind: 'selectionText', story: 'body', anchor: range!.anchor, head: range!.head, expectVersion: version },
+          });
+          expect(covered.ok && (covered.read!.value as { text: string } | null)?.text).toBe(text);
+        }
+        if ('expectVersion' in read) {
+          const stale = await w.send({ type: 'documentRead', read: { ...read, expectVersion: `${version}-stale` } });
+          expect(stale.ok).toBe(true);
+          expect(stale.ok && stale.read).toEqual({ version, value: null });
+        }
+      }
+    } finally {
+      main.destroy();
       engine.destroy();
     }
   });

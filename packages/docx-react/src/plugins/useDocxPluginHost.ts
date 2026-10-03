@@ -35,6 +35,7 @@ import { resolvePointPosition } from '../components/DocxEditor/internals/pointPo
 import { workerProposalAuthority } from '../components/DocxEditor/internals/workerProposalAuthority';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { SelectionState } from '../components/DocxEditor/types';
+import type { ViewerSelectionChange } from '../components/DocxEditor/internals/viewerSelectionController';
 import type { ReactSidebarItem } from '../plugin-api/types';
 import {
   createDocxPluginHost,
@@ -42,7 +43,7 @@ import {
   type DocxPluginHost,
 } from './createDocxPluginHost';
 import { resolveParagraph } from './createPluginClients';
-import { createPluginGeometry, pluginLayout } from './geometry';
+import { createPluginGeometry, pluginLayout, readPluginPositionAtPoint } from './geometry';
 import { managedSidebarItems } from './PluginSidebarItems';
 import { currentPreviewKey } from './proposalPreview';
 import type {
@@ -62,6 +63,7 @@ export interface UseDocxPluginHostOptions extends DocxEditorPluginProps {
   mode: EditorMode;
   /** Host `readOnly` or viewing mode. */
   readOnly: boolean;
+  viewerSelection?: boolean;
   commands: DocxCommandController;
   /** The authoritative session once a document is ready, else null. */
   session: YrsSession | null;
@@ -95,6 +97,7 @@ export interface DocxPluginHostBinding {
   beginLoad(): void;
   /** Publishes the current selection to plugins. */
   publishSelection(): void;
+  publishViewerSelection(selection: ViewerSelectionChange): void;
 }
 
 /** Owns the plugin host of one `DocxEditor` and binds it to the editor's authority. */
@@ -120,6 +123,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   };
   const layoutRef = useRef<DocxPluginLayout | null>(null);
   const formattingRef = useRef<SelectionState | null>(null);
+  const viewerSelectionRef = useRef<ViewerSelectionChange | null>(null);
   const layoutListeners = useRef(new Set<() => void>());
   const detachAuthority = useRef<(() => void) | null>(null);
 
@@ -224,6 +228,10 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
 
   const publishSelection = useCallback(() => {
     if (!latest.current.plugins?.length) return;
+    if (latest.current.viewerSelection) {
+      host.selectionChanged({ formatting: null, displayRange: viewerSelectionRef.current?.displayRange ?? null });
+      return;
+    }
     const editor = latest.current.pagedEditorRef.current;
     const range = editor?.getSelectionRange() ?? null;
     const layout = layoutRef.current;
@@ -235,6 +243,12 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
       displayRange:
         range && layout ? { story, from: range.from, to: range.to, layoutId: layout.id } : null,
     });
+  }, [host]);
+
+  const publishViewerSelection = useCallback((selection: ViewerSelectionChange) => {
+    viewerSelectionRef.current = selection;
+    if (!latest.current.plugins?.length) return;
+    host.selectionChanged({ formatting: null, displayRange: selection.displayRange });
   }, [host]);
 
   useEffect(() => {
@@ -361,7 +375,8 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
         heldCandidate() === created &&
         latest.current.zoom === currentLayout.zoom &&
         dom.context.pagesContainer.isConnected &&
-        (isPresented(dom.context.pagesContainer, shownList) || queriesCurrentRef.current)
+        (isPresented(dom.context.pagesContainer, shownList) || queriesCurrentRef.current),
+      (clientX, clientY) => readPluginPositionAtPoint(latest.current.pagedEditorRef, clientX, clientY)
     );
     return created;
     // `moved` rebuilds the geometry when its elements move without a new frame.
@@ -490,6 +505,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   );
 
   const beginLoad = useCallback(() => {
+    viewerSelectionRef.current = null;
     detachAuthority.current?.();
     host.close('document-replaced');
   }, [host]);
@@ -505,5 +521,6 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     onRenderedDomContext,
     beginLoad,
     publishSelection,
+    publishViewerSelection,
   };
 }

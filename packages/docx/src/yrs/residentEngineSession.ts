@@ -1,3 +1,4 @@
+import { decodeEncodedSelection } from './encodedSelection';
 import type {
   YrsEngineApplyProfile,
   YrsParagraph,
@@ -5,6 +6,7 @@ import type {
   YrsParagraphSpan,
   YrsRegionLayoutProgress,
   YrsResidentCaretSnapshot,
+  YrsResolvedCommentAnchor,
   YrsRevisionInfo,
   YrsSelection,
   YrsSelectionText,
@@ -42,11 +44,13 @@ export type ResidentEngineSession = Pick<
   | 'releaseDisplayPagesFrame'
   | 'clearFonts'
   | 'destroy'
+  | 'encodeSelection'
   | 'encodeStateVector'
   | 'layoutDocumentJson'
   | 'layoutFontRequirementsJson'
   | 'layoutDocumentWithRegionsRetainedJson'
   | 'loadMediaSources'
+  | 'loadNoteSeparators'
   | 'loadState'
   | 'setPartialDocument'
   | 'measureParagraphJson'
@@ -59,6 +63,7 @@ export type ResidentEngineSession = Pick<
   | 'resumeRegionLayout'
   | 'selection'
   | 'selectionText'
+  | 'resolveComment'
   | 'searchText'
   | 'encodeStickyPosition'
   | 'resolveStickyPosition'
@@ -246,6 +251,8 @@ export async function createResidentEngineSession(
   return {
     proposalEngine,
     geometryReader,
+    resolveComment: (commentId) =>
+      JSON.parse(session.resolve_comment(commentId)) as YrsResolvedCommentAnchor[],
     paragraphSegments: (story, indices) =>
       JSON.parse(session.story_segment_units(story, Uint32Array.from(indices))) as YrsStorySegment[][],
     searchText: (query, options = {}) => {
@@ -345,6 +352,7 @@ export async function createResidentEngineSession(
           range.end.offset
         )
       ) as YrsSelectionText,
+    encodeSelection: () => decodeEncodedSelection(session.encoded_selection()),
     applyInput: (text, expectedFrameEpoch) => {
       ensureUndo();
       return session.apply_input(text, expectedFrameEpoch);
@@ -368,6 +376,7 @@ export async function createResidentEngineSession(
     },
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
     loadMediaSources: (json) => session.load_media_sources(json),
+    loadNoteSeparators: (state) => session.load_note_separators(state),
     loadState: (update) => {
       geometryStories.clear();
       session.load(update);

@@ -33,6 +33,7 @@ import {
 } from './internals/sidebarAnchorProjection';
 import { EMPTY_TRACKED_CHANGES_RESULT, type ViewerCommentRanges } from './internals/viewerSidebarReads';
 import { ViewerInput } from './ViewerInput';
+import type { ViewerSelectionChange } from './internals/viewerSelectionController';
 import { CanvasSelectionOverlay } from './overlays/CanvasSelectionOverlay';
 import { RemotePresenceOverlay } from './overlays/RemotePresenceOverlay';
 import { CanvasCellSelectionOverlay } from './overlays/CanvasCellSelectionOverlay';
@@ -97,7 +98,12 @@ import {
   createRenderedDomContext,
 } from '../../plugin-api/RenderedDomContext';
 import { useLayoutPipeline } from './hooks/useLayoutPipeline';
-import type { FontRequirementsInWorker, LayoutInWorker, ResidentFrameApplyResult } from './hooks/useDisplayList';
+import type {
+  DisplayPageNavigation,
+  FontRequirementsInWorker,
+  LayoutInWorker,
+  ResidentFrameApplyResult,
+} from './hooks/useDisplayList';
 import { workerOpenReplicaPending } from './internals/workerOpenReplica';
 import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import { useRustMeasurement, type RustFontChainsProvider } from './hooks/useRustMeasurement';
@@ -151,6 +157,8 @@ import {
   ViewerPointPositions,
 } from './internals/pointPosition';
 import { isPresented, onPresented, presentedWorkerVersion } from './internals/layoutProvenance';
+import { navigateViewer, readViewerSelectionInfo, type ViewerNavigationTarget } from './internals/viewerRefReads';
+import type { DocxSelectionInfo } from '../DocxEditor';
 import { readAt } from './internals/viewerReads';
 
 export { DEFAULT_PAGE_WIDTH };
@@ -237,6 +245,7 @@ export interface PagedEditorProps {
   onSelectionChange?: (from: number, to: number) => void;
   /** Yrs-authoritative toolbar state, emitted while standard yrs input is active. */
   onYrsSelectionChange?: (selection: YrsToolbarSelection) => void;
+  onViewerSelectionChange?: (selection: ViewerSelectionChange) => void;
   /** Callback when editor is ready. */
   onReady?: (ref: PagedEditorRef) => void;
   /** Callback when rendered DOM context is ready. */
@@ -348,6 +357,7 @@ export interface PagedEditorProps {
    */
   displayListQueries?: DisplayListQueries | null;
   resolveDisplayListQueries?: ResolveDisplayListQueries;
+  pageNavigation?: DisplayPageNavigation | null;
   canvasDisplayList?: DisplayList | null;
   displayListFrameEpoch?: number | null;
   residentCaret?: YrsResidentCaretSnapshot | null;
@@ -419,6 +429,13 @@ export interface PagedEditorRef {
    * session. Null outside text or when the painted layout changes version before the answer.
    */
   readPositionAtPoint(clientX: number, clientY: number): Promise<DocxPointPosition | null>;
+  /** Whether this view currently reads its document from the worker. */
+  isWorkerViewer(): boolean;
+  /** Reads the display selection from the worker. */
+  readViewerSelectionInfo(): Promise<DocxSelectionInfo | null>;
+  /** Resolves, selects and reveals a worker-owned range. */
+  navigateViewer(target: ViewerNavigationTarget, options?: ScrollToParaIdOptions): Promise<boolean>;
+
   /** Live authoritative yrs session. */
   getYrsSession(): YrsSession | null;
   /** Commits accepted input and selection; waits for active IME composition. */
@@ -526,6 +543,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onYrsHistoryChange,
       onSelectionChange,
       onYrsSelectionChange,
+      onViewerSelectionChange,
       onYrsPartSelectionChange,
       onReady,
       onRenderedDomContextReady,
@@ -563,6 +581,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       rustFontChainsProviderRef,
       displayListQueries = null,
       resolveDisplayListQueries,
+      pageNavigation,
       canvasDisplayList = null,
       displayListFrameEpoch = null,
       residentCaret = null,
@@ -679,6 +698,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // when parent passes unstable callback references
     const onSelectionChangeRef = useRef(onSelectionChange);
     const onYrsSelectionChangeRef = useRef(onYrsSelectionChange);
+    const onViewerSelectionChangeRef = useRef(onViewerSelectionChange);
     const onYrsPartSelectionChangeRef = useRef(onYrsPartSelectionChange);
     const onYrsContentChangeRef = useRef(onYrsContentChange);
     const onYrsHistoryChangeRef = useRef(onYrsHistoryChange);
@@ -686,6 +706,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // Keep refs in sync with latest props
     onSelectionChangeRef.current = onSelectionChange;
     onYrsSelectionChangeRef.current = onYrsSelectionChange;
+    onViewerSelectionChangeRef.current = onViewerSelectionChange;
     onYrsPartSelectionChangeRef.current = onYrsPartSelectionChange;
     onYrsContentChangeRef.current = onYrsContentChange;
     onYrsHistoryChangeRef.current = onYrsHistoryChange;
@@ -814,16 +835,24 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     });
     const updateSelectionOverlayRef = useRef(updateSelectionOverlay);
     updateSelectionOverlayRef.current = updateSelectionOverlay;
-    const handleViewerSelectionChange = useCallback(() => {
+    const handleViewerSelectionChange = useCallback((selection: ViewerSelectionChange) => {
       if (yrsInputRef.current?.displaySelection()) {
         updateSelectionOverlayRef.current();
       } else {
         setSelectionRects((current) => (current.length === 0 ? current : []));
         setCaretPosition((current) => (current === null ? current : null));
       }
+      onViewerSelectionChangeRef.current?.(selection);
     }, [setCaretPosition, setSelectionRects]);
     const viewerDocumentReadRef = useRef(viewerDocumentRead);
     viewerDocumentReadRef.current = viewerDocumentRead;
+    const viewerSessionRef = useRef(yrsCore.session);
+    viewerSessionRef.current = yrsCore.session;
+    const viewerMountedRef = useRef(true);
+    useEffect(() => {
+      viewerMountedRef.current = true;
+      return () => { viewerMountedRef.current = false; };
+    }, []);
     const viewerQueriesRef = useRef(displayListQueries);
     viewerQueriesRef.current = displayListQueries;
     const viewerFrameListenersRef = useRef(new Set<() => void>());
@@ -1186,8 +1215,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           } else if (command.type === 'insertImage') {
             const at = session.selection()?.head;
             if (!at) return false;
-            session.insertImage(at, command.image, structuralAuthor);
-            session.setSelection({ ...at, offset: at.offset + 1 });
+            const landed = session.insertImage(at, command.image, structuralAuthor).range;
+            session.setSelection(
+              landed ? { story: landed.story, ...landed.end } : { ...at, offset: at.offset + 1 }
+            );
           } else if (command.type === 'contentControlValue') {
             const node = positionProjection.nodeAt(command.pmPos);
             const embedId = command.embedId ?? (node ? yrsEmbedIdForProjectedNode(node) : null);
@@ -1242,8 +1273,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
                 const receipt = session.replaceRange(range, command.displayText, structuralAuthor);
                 range = receipt.range ?? insertedRange;
               } else {
-                session.insertText(at, command.displayText, structuralAuthor);
-                range = insertedRange;
+                range =
+                  session.insertText(at, command.displayText, structuralAuthor).range ??
+                  insertedRange;
               }
             }
             if (
@@ -1477,12 +1509,17 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         yrsLocToDisplayPosition,
         getScrollContainer,
         displayListQueries,
+        pageNavigation,
         layout,
         canvasHostRef,
         onNavigationIntent: cancelPendingScrollRestore,
         navigationEpoch,
         requestCanvasParagraphFlash,
       });
+    const scrollToPositionImplRef = useRef(scrollToPositionImpl);
+    scrollToPositionImplRef.current = scrollToPositionImpl;
+    const requestCanvasParagraphFlashRef = useRef(requestCanvasParagraphFlash);
+    requestCanvasParagraphFlashRef.current = requestCanvasParagraphFlash;
 
     // Display-list positions retain the document tree's integer coordinate
     // space. Build a lightweight index directly from the authoritative yrs
@@ -1941,7 +1978,56 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     };
 
     // Imperative-handle setup — exposes PagedEditorRef + mirrors via onReady.
+    const viewerReadAccess = () => {
+      const read = viewerDocumentReadRef.current;
+      const session = viewerSessionRef.current;
+      if (!read || !session) return null;
+      return {
+        read,
+        story: activeYrsRootStory,
+        host: () => canvasHostRef?.current,
+        queries: () => viewerQueriesRef.current,
+        awaitFrame: awaitViewerFrame,
+        current: () => viewerMountedRef.current && viewerSessionRef.current === session && viewerDocumentReadRef.current === read,
+        selection: () => yrsInputRef.current?.displaySelection() ?? null,
+      };
+    };
+
     usePagedEditorRefApi({
+      readViewerSelectionInfo: async () => {
+        const access = viewerReadAccess();
+        return access ? readViewerSelectionInfo(access) : null;
+      },
+      navigateViewer: async (target, options, current) => {
+        const access = viewerReadAccess();
+        const input = yrsInputRef.current;
+        const gesture = input?.currentGesture?.();
+        if (!access || !input || gesture === undefined) return false;
+        const epoch = inputEpoch();
+        let interrupted = false;
+        const surface = getScrollContainer();
+        const interrupt = () => { interrupted = true; };
+        const events = ['pointerdown', 'mousedown', 'touchstart', 'keydown', 'wheel'];
+        for (const event of events) surface?.addEventListener(event, interrupt, { capture: true, passive: true });
+        try {
+          return await navigateViewer({
+            ...access,
+            current: () => access.current() && !interrupted && inputEpoch() === epoch &&
+              yrsInputRef.current === input && input.isGestureCurrent?.(gesture) === true &&
+              (current?.() ?? true),
+          }, target,
+            (range, flash) => {
+              yrsInputRef.current?.setSelectionFromDisplay(range.anchor, target.kind === 'paragraphTarget' ? range.anchor : range.head);
+              scrollToPositionImplRef.current(range.anchor, true);
+              if (target.kind === 'paragraphTarget' && flash?.highlight) {
+                requestCanvasParagraphFlashRef.current({ from: range.anchor, to: Math.max(range.anchor + 1, range.head), options: flash.highlight });
+              }
+              yrsInputRef.current?.focus();
+            }, options);
+        } finally {
+          for (const event of events) surface?.removeEventListener(event, interrupt, true);
+        }
+      },
       viewerSelection: viewerDocumentRead !== undefined,
       bumpInputEpoch,
       inputEpoch,

@@ -29,6 +29,7 @@ import type {
   DocxParagraphSavePlan,
 } from './paragraphIdentity';
 import { decodeS9Envelope, decodeS9EnvelopeValue } from '../docx/rustParseFacade';
+import { decodeEncodedSelection } from './encodedSelection';
 import type {
   CollaborationCursor,
   CollaborationReplica,
@@ -78,6 +79,7 @@ import type {
 export * from './edits';
 export * from './contentControls';
 export * from './readTypes';
+export * from './findParagraphs';
 export * from './structuredExport';
 export * from './pagedExport';
 export * from './inputPositionMap';
@@ -86,6 +88,7 @@ export type { DocxResolvedPointPosition } from './pointPosition';
 export type { ResidentDocumentRead } from './residentEngineWorkerProtocol';
 export type {
   DocxDisplayRange,
+  DocxDisplaySelectionInfo,
   DocxDisplaySelectionText,
   DocxSelectionUnit,
 } from './viewerSelection';
@@ -499,7 +502,10 @@ export interface YrsRevisionReceipt {
   revisionId: string | null;
 }
 
-/** Where the replacement text landed; after the struck-out text when suggesting. */
+/**
+ * Where an edit landed, in whole characters: the inserted text (after the struck-out text when
+ * suggesting), or what a delete left (collapsed when plain, the struck-out text when suggesting).
+ */
 export interface YrsReplaceReceipt extends YrsRevisionReceipt {
   range?: YrsStoryRange;
 }
@@ -700,6 +706,8 @@ export interface YrsResidentWorkerSnapshot {
   partialDocument?: boolean;
   /** Which seeded `data:` image sources lay out as `media:{n}` tokens. @internal */
   mediaSources?: string;
+  /** The opened package's footnote/endnote separator notes, for replicas without its source. @internal */
+  noteSeparators?: Uint8Array;
 }
 
 /**
@@ -1080,6 +1088,8 @@ export interface YrsSession extends CollaborationReplica {
    * snapshot's `mediaSources` names. @internal
    */
   loadMediaSources(json: string): void;
+  /** Loads the opened package's separator notes for this replica. @internal */
+  loadNoteSeparators(state: Uint8Array): void;
   /**
    * Seeds stories and returns paragraph IDs in document order. Seeding a
    * document that has no opening yet starts one; see {@link beginOpening}.
@@ -1184,12 +1194,12 @@ export interface YrsSession extends CollaborationReplica {
   /** Sets the table-wide preferred width in twips. */
   setTableWidth(table: YrsTableLoc, widthTwips: number): YrsTableReceipt;
   /** Inserts paragraph-break-free text. Suggesting mode mints a revision. */
-  insertText(at: YrsLoc, text: string, suggesting?: YrsAuthor): YrsRevisionReceipt;
+  insertText(at: YrsLoc, text: string, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /**
    * Deletes a range (plain) or marks it as a suggested deletion (suggesting).
    * A range spanning paragraphs also merges them (pilcrow-as-character).
    */
-  deleteRange(range: YrsStoryRange, suggesting?: YrsAuthor): YrsRevisionReceipt;
+  deleteRange(range: YrsStoryRange, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /** Replaces a range with text in one transaction (one shared revision when suggesting). */
   replaceRange(range: YrsStoryRange, text: string, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /**
@@ -1220,7 +1230,7 @@ export interface YrsSession extends CollaborationReplica {
     at: YrsLoc,
     image: Readonly<Record<string, unknown>>,
     suggesting?: YrsAuthor
-  ): YrsRevisionReceipt;
+  ): YrsReplaceReceipt;
   /**
    * Sets the value of a content-control embed addressed by stable payload id. A string fills a
    * text control's content as one version-checked step and throws when the fill is refused.
@@ -1970,6 +1980,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       const mirrored = workerDocumentVersion !== null;
       const selectionJson = mirrored ? 'null' : session.selection();
       const mediaSources = mirrored ? undefined : session.media_sources_json();
+      const noteSeparators = mirrored ? undefined : session.note_separators_state();
       const fontsCurrent = options?.knownFontsRevision === residentFontsRevision;
       let state: Uint8Array | null = null;
       if (!mirrored && options?.knownStateVector) {
@@ -2000,6 +2011,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         layoutRevision: residentLayoutRevision,
         ...(partialDocument ? { partialDocument: true } : {}),
         ...(mediaSources ? { mediaSources } : {}),
+        ...(noteSeparators?.length ? { noteSeparators } : {}),
       };
     },
     residentWorkerProbe: () => {
@@ -2042,6 +2054,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       return bytes && mimeType ? { bytes, mimeType } : null;
     },
     loadMediaSources: (json) => session.load_media_sources(json),
+    loadNoteSeparators: (state) => session.load_note_separators(state),
     mediaDataUrl,
     mediaScope: () => mediaScope,
     materializeDocx: () => {
@@ -2121,20 +2134,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       cachedSelection = JSON.parse(session.selection()) as YrsSelection | null;
       return cloneSelection(cachedSelection);
     },
-    encodeSelection: () => {
-      const encoded = JSON.parse(session.encoded_selection()) as {
-        story: string;
-        anchor: number[];
-        head: number[];
-      } | null;
-      return encoded
-        ? {
-            story: encoded.story,
-            anchor: Uint8Array.from(encoded.anchor),
-            head: Uint8Array.from(encoded.head),
-          }
-        : null;
-    },
+    encodeSelection: () => decodeEncodedSelection(session.encoded_selection()),
     resolveSelection: (cursor) => {
       try {
         return JSON.parse(
@@ -2322,7 +2322,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
               suggesting?.name,
               suggesting?.date
             )
-          ) as YrsRevisionReceipt
+          ) as YrsReplaceReceipt
       );
     },
     deleteRange: (range, suggesting) => {
@@ -2339,7 +2339,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
               suggesting?.name,
               suggesting?.date
             )
-          ) as YrsRevisionReceipt
+          ) as YrsReplaceReceipt
       );
     },
     replaceRange: (range, text, suggesting) => {
@@ -2478,7 +2478,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
               suggesting?.name,
               suggesting?.date
             )
-          ) as YrsRevisionReceipt
+          ) as YrsReplaceReceipt
       );
     },
     setContentControlValue: (embedId, value) => {

@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
 import type {
   LineSpacingRule,
   ParagraphAlignment,
@@ -10,6 +10,7 @@ import type {
 import type { SelectionState, TableContextInfo } from '../types';
 import { resolveColorToHex } from '@betteroffice/docx/utils';
 import type { YrsToolbarSelection } from '../yrsToolbar';
+import type { ViewerSelectionChange } from '../internals/viewerSelectionController';
 
 interface BorderSpec {
   style: string;
@@ -202,5 +203,22 @@ export function useSelectionTracker({
     [handleSelectionChange]
   );
 
-  return { handleSelectionChange, handleYrsSelectionChange };
+  const lastViewerSelection = useRef<string | null>(null);
+  const handleViewerSelectionChange = useCallback((selection: ViewerSelectionChange) => {
+    const key = JSON.stringify(selection);
+    if (lastViewerSelection.current === key) return;
+    lastViewerSelection.current = key;
+    const range = selection.displayRange;
+    handleSelectionChange({
+      hasSelection: range !== null && range.from !== range.to,
+      isMultiParagraph: selection.isMultiParagraph,
+      textFormatting: {},
+      paragraphFormatting: {},
+      styleId: null,
+      startParagraphIndex: -1,
+      endParagraphIndex: -1,
+    });
+  }, [handleSelectionChange]);
+
+  return { handleSelectionChange, handleYrsSelectionChange, handleViewerSelectionChange };
 }
