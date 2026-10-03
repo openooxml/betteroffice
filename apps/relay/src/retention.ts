@@ -1,3 +1,5 @@
+import { decodeStateVector, decodeUpdate, diffUpdate, encodeStateVectorFromUpdate, mergeUpdates } from "yjs";
+
 const TOP_LEVEL_SYNC = 0;
 const TOP_LEVEL_AWARENESS = 1;
 const TOP_LEVEL_AUTH = 2;
@@ -19,6 +21,7 @@ interface DocumentMessage {
 
 interface DecodedFrame {
   documents: DocumentMessage[];
+  queries: Uint8Array[];
   hasAuth: boolean;
 }
 
@@ -93,6 +96,7 @@ function decodeFrame(frame: Uint8Array): DecodedFrame | null {
   if (frame.byteLength === 0) return null;
   const decoder = new FrameDecoder(frame);
   const documents: DocumentMessage[] = [];
+  const queries: Uint8Array[] = [];
   let hasAuth = false;
   let messageCount = 0;
 
@@ -112,7 +116,8 @@ function decodeFrame(frame: Uint8Array): DecodedFrame | null {
       ) {
         return null;
       }
-      if (subtype !== SYNC_STEP_1) documents.push({ subtype, payload });
+      if (subtype === SYNC_STEP_1) queries.push(payload);
+      else documents.push({ subtype, payload });
     } else if (type === TOP_LEVEL_AWARENESS) {
       if (decoder.readVarUint8Array() === null) return null;
     } else if (type === TOP_LEVEL_AUTH) {
@@ -131,7 +136,7 @@ function decodeFrame(frame: Uint8Array): DecodedFrame | null {
     }
   }
 
-  return { documents, hasAuth };
+  return { documents, queries, hasAuth };
 }
 
 export function classifyFrame(frame: Uint8Array): FrameKind {
@@ -166,95 +171,164 @@ function retainDocumentMessages(frame: Uint8Array): Uint8Array | null {
   return encodeFrame(parts);
 }
 
-function bytesEqual(first: Uint8Array, second: Uint8Array): boolean {
-  if (first.byteLength !== second.byteLength) return false;
-  return first.every((byte, index) => byte === second[index]);
-}
-
 export interface RetainedEntry {
   seq: number;
   bytes: Uint8Array;
 }
 
-/** The storage writes that bring the persisted log back in line with memory. */
+export interface Checkpoint extends RetainedEntry {
+  version: 1;
+}
+
 export interface LogMutation {
   puts: readonly RetainedEntry[];
   deletes: readonly number[];
+  checkpoint?: Checkpoint;
+}
+
+export class RoomCapacityError extends Error {}
+
+function syncFrame(subtype: number, payload: Uint8Array): Uint8Array {
+  return encodeFrame([Uint8Array.of(0, subtype), encodeVarUint(payload.length), payload]);
+}
+
+function payloads(frame: Uint8Array): Uint8Array[] {
+  const decoded = decodeFrame(frame);
+  if (!decoded || decoded.hasAuth) throw new Error("Invalid stored collaboration frame");
+  for (const message of decoded.documents) decodeUpdate(message.payload);
+  for (const vector of decoded.queries) decodeStateVector(vector);
+  return decoded.documents.map(message => message.payload);
 }
 
 export class RetainedUpdateLog {
   private updates: RetainedEntry[] = [];
+  private base: Checkpoint | undefined;
   private retainedBytes = 0;
   private nextSeq = 0;
+  private mergedUpdate: Uint8Array | undefined;
 
   constructor(
     private readonly maxCount: number,
     private readonly maxBytes: number,
+    private readonly maxEntryBytes = 64 * 1024,
   ) {}
 
-  restore(stored: readonly RetainedEntry[]): LogMutation | null {
+  restore(stored: readonly RetainedEntry[], checkpoint?: Checkpoint): LogMutation | null {
     this.clear();
+    if (checkpoint) {
+      if (checkpoint.version !== 1 || !Number.isSafeInteger(checkpoint.seq) || checkpoint.seq < 0 ||
+        checkpoint.bytes.byteLength > this.maxBytes || payloads(checkpoint.bytes).length !== 1) {
+        throw new Error("Invalid relay checkpoint");
+      }
+      this.base = { ...checkpoint, bytes: checkpoint.bytes.slice() };
+      this.nextSeq = checkpoint.seq + 1;
+    }
     const puts: RetainedEntry[] = [];
     const deletes: number[] = [];
-    for (const entry of [...stored].sort((first, second) => first.seq - second.seq)) {
+    for (const entry of [...stored].sort((a, b) => a.seq - b.seq)) {
+      if (!Number.isSafeInteger(entry.seq) || entry.seq < 0) throw new Error("Invalid update sequence");
       this.nextSeq = Math.max(this.nextSeq, entry.seq + 1);
-      const retained =
-        entry.bytes.byteLength <= this.maxBytes
-          ? retainDocumentMessages(entry.bytes)
-          : null;
-      if (!retained || retained.byteLength > this.maxBytes) {
-        deletes.push(entry.seq);
-        continue;
-      }
-      if (!bytesEqual(retained, entry.bytes)) {
-        puts.push({ seq: entry.seq, bytes: retained });
-      }
+      if (this.base && entry.seq <= this.base.seq) { deletes.push(entry.seq); continue; }
+      try { payloads(entry.bytes); } catch { deletes.push(entry.seq); continue; }
+      const retained = retainDocumentMessages(entry.bytes);
+      if (!retained) { deletes.push(entry.seq); continue; }
+      if (retained.byteLength > this.maxBytes) throw new RoomCapacityError("Stored update exceeds room capacity");
+      if (retained.length !== entry.bytes.length) puts.push({ seq: entry.seq, bytes: retained });
       this.updates.push({ seq: entry.seq, bytes: retained });
-      this.retainedBytes += retained.byteLength;
-      deletes.push(...this.trim());
+      this.retainedBytes += retained.length;
     }
-
-    const evicted = new Set(deletes);
-    const rewrites = puts.filter((entry) => !evicted.has(entry.seq));
-    if (rewrites.length === 0 && deletes.length === 0) return null;
-    return { puts: rewrites, deletes };
+    if (this.needsCheckpoint()) {
+      const compacted = this.checkpoint()!;
+      return { ...compacted, deletes: [...deletes, ...compacted.deletes] };
+    }
+    return puts.length || deletes.length ? { puts, deletes } : null;
   }
 
   retain(update: Uint8Array): LogMutation | null {
-    if (update.byteLength > this.maxBytes) return null;
+    payloads(update);
     const retained = retainDocumentMessages(update);
-    if (!retained || retained.byteLength > this.maxBytes) return null;
-    const entry: RetainedEntry = { seq: this.nextSeq++, bytes: retained };
+    if (!retained) return null;
+    if (retained.byteLength > this.maxBytes) throw new RoomCapacityError("Update exceeds room capacity");
+    if (!Number.isSafeInteger(this.nextSeq + 1)) throw new RoomCapacityError("Room sequence exhausted");
+    const entry = { seq: this.nextSeq, bytes: retained };
+    const candidate = [...this.updates, entry];
+    if (candidate.length >= this.maxCount || retained.length + this.retainedBytes + (this.base?.bytes.length ?? 0) > this.maxBytes || retained.length > this.maxEntryBytes) {
+      const mutation = this.compact(candidate);
+      this.adoptCheckpoint(mutation.checkpoint!);
+      return mutation;
+    }
+    this.nextSeq++;
     this.updates.push(entry);
-    this.retainedBytes += retained.byteLength;
-    return { puts: [entry], deletes: this.trim() };
+    this.mergedUpdate = undefined;
+    this.retainedBytes += retained.length;
+    return { puts: [entry], deletes: [] };
+  }
+
+  checkpoint(): LogMutation | null {
+    if (this.updates.length === 0) return null;
+    const mutation = this.compact(this.updates);
+    this.adoptCheckpoint(mutation.checkpoint!);
+    return mutation;
+  }
+
+  syncRequest(): Uint8Array {
+    return syncFrame(0, encodeStateVectorFromUpdate(this.merged()));
+  }
+
+  responses(frame: Uint8Array): Uint8Array[] {
+    const queries = decodeFrame(frame)?.queries ?? [];
+    if (queries.length === 0) return [];
+    if (queries.length > 1) throw new Error("Only one state-vector query is allowed per frame");
+    decodeStateVector(queries[0]);
+    const response = syncFrame(1, diffUpdate(this.merged(), queries[0]));
+    if (response.length > this.maxBytes) throw new RoomCapacityError("Sync response exceeds room capacity");
+    return [response];
   }
 
   replay(send: (update: Uint8Array) => void): void {
+    if (this.base) send(this.base.bytes.slice());
     for (const entry of this.updates) send(entry.bytes.slice());
   }
 
   snapshot(): Uint8Array[] {
-    return this.updates.map((entry) => entry.bytes.slice());
+    const frames: Uint8Array[] = [];
+    this.replay(frame => frames.push(frame));
+    return frames;
   }
 
   clear(): void {
     this.updates = [];
+    this.base = undefined;
     this.retainedBytes = 0;
     this.nextSeq = 0;
+    this.mergedUpdate = undefined;
   }
 
-  private trim(): number[] {
-    const evicted: number[] = [];
-    while (
-      this.updates.length > this.maxCount ||
-      this.retainedBytes > this.maxBytes
-    ) {
-      const removed = this.updates.shift();
-      if (!removed) break;
-      this.retainedBytes -= removed.bytes.byteLength;
-      evicted.push(removed.seq);
-    }
-    return evicted;
+  private needsCheckpoint(): boolean {
+    return this.updates.length >= this.maxCount ||
+      this.retainedBytes + (this.base?.bytes.length ?? 0) > this.maxBytes ||
+      this.updates.some(entry => entry.bytes.length > this.maxEntryBytes);
+  }
+
+  private merged(entries: readonly RetainedEntry[] = this.updates): Uint8Array {
+    if (entries === this.updates && this.mergedUpdate) return this.mergedUpdate;
+    const updates = [...(this.base ? payloads(this.base.bytes) : []), ...entries.flatMap(entry => payloads(entry.bytes))];
+    const merged = updates.length ? mergeUpdates(updates) : Uint8Array.of(0, 0);
+    if (entries === this.updates) this.mergedUpdate = merged;
+    return merged;
+  }
+
+  private compact(entries: readonly RetainedEntry[]): LogMutation {
+    const bytes = syncFrame(1, this.merged(entries));
+    if (bytes.length > this.maxBytes) throw new RoomCapacityError("Checkpoint exceeds room capacity; export the document before continuing");
+    return { puts: [], deletes: entries.map(entry => entry.seq), checkpoint: { version: 1, seq: entries.at(-1)!.seq, bytes } };
+  }
+
+  private adoptCheckpoint(checkpoint: Checkpoint): void {
+    this.base = checkpoint;
+    this.mergedUpdate = undefined;
+    this.updates = [];
+    this.retainedBytes = 0;
+    this.nextSeq = checkpoint.seq + 1;
   }
 }

@@ -1,393 +1,378 @@
-import { afterEach, describe, expect, mock, setSystemTime, test } from "bun:test";
+import { afterEach, describe, expect, mock, setSystemTime, spyOn, test } from 'bun:test';
+import * as Y from 'yjs';
+import { decodeMessages, encodeSyncStep1, encodeSyncStep2, encodeUpdate } from '../../../packages/docx/src/collaboration/protocol';
+import { documentFrame, rehydrate } from './fixtures';
+import { updateKey } from '../src/persistence';
 
-mock.module("cloudflare:workers", () => ({
+mock.module('cloudflare:workers', () => ({
   DurableObject: class {
-    protected readonly ctx: unknown;
-    protected readonly env: unknown;
-
-    constructor(ctx: unknown, env: unknown) {
-      this.ctx = ctx;
-      this.env = env;
-    }
+    constructor(protected readonly ctx: unknown, protected readonly env: unknown) {}
   },
 }));
-
-const { CollaborationRoom } = await import("../src/index");
-
-function frame(...parts: readonly Uint8Array[]): Uint8Array {
-  const bytes = new Uint8Array(
-    parts.reduce((length, part) => length + part.byteLength, 0),
-  );
-  let offset = 0;
-  for (const part of parts) {
-    bytes.set(part, offset);
-    offset += part.byteLength;
-  }
-  return bytes;
-}
+const { CollaborationRoom } = await import('../src/index');
 
 function createSocket() {
-  return { send: mock((_: unknown) => {}), close: mock(() => {}) };
+  const socket = { readyState: 1, send: mock((_: unknown) => {}), close: mock((..._: unknown[]) => { socket.readyState = 3; }) };
+  return socket;
 }
-
-type FakeSocket = ReturnType<typeof createSocket>;
-
+type Socket = ReturnType<typeof createSocket>;
 (globalThis as { WebSocketPair?: unknown }).WebSocketPair = function () {
   return { 0: createSocket(), 1: createSocket() };
 };
-
-const UPGRADE = new Request("https://relay.test/room/a", {
-  headers: { Upgrade: "websocket" },
-});
-
-function updateKey(seq: number): string {
-  return `update:${String(seq).padStart(16, "0")}`;
-}
+const UPGRADE = new Request('https://relay.test/room/a', { headers: { Upgrade: 'websocket' } });
 
 function createRoom(seed: Iterable<[string, unknown]> = []) {
   const sender = createSocket();
   const peer = createSocket();
-  const sockets: FakeSocket[] = [sender, peer];
+  const sockets: Socket[] = [sender, peer];
   const rows = new Map<string, unknown>(seed);
-  const putKeys: string[][] = [];
-  const deletedKeys: string[][] = [];
   const pending: Promise<unknown>[] = [];
   const alarms: number[] = [];
-  const deleteAll = mock(async () => {
-    rows.clear();
-  });
+  let unavailable = false;
+  let failWrite = false;
+  let failDelete = false;
+  let beforeCommit: (() => Promise<void>) | undefined;
   let initialization = Promise.resolve();
+  const storageFor = (data: Map<string, unknown>) => ({
+    get: async (key: string | string[]) => {
+      if (unavailable) throw new Error('Storage unavailable');
+      return Array.isArray(key) ? new Map(key.filter(k => data.has(k)).map(k => [k, data.get(k)])) : data.get(key);
+    },
+    list: async ({ prefix }: { prefix: string }) => new Map([...data].filter(([key]) => key.startsWith(prefix)).sort()),
+    put: async (key: string | Record<string, unknown>, value?: unknown) => {
+      if (failWrite || unavailable) throw new Error('Injected storage failure');
+      const entries = typeof key === 'string' ? [[key, value] as const] : Object.entries(key);
+      expect(entries.length).toBeLessThanOrEqual(128);
+      for (const [name, bytes] of entries) {
+        if (bytes instanceof Uint8Array) expect(bytes.length).toBeLessThanOrEqual(64 * 1024);
+        data.set(name, structuredClone(bytes));
+      }
+    },
+    delete: async (key: string | string[]) => {
+      if (failDelete) throw new Error('Injected delete failure');
+      const keys = Array.isArray(key) ? key : [key];
+      expect(keys.length).toBeLessThanOrEqual(128);
+      for (const name of keys) data.delete(name);
+      return keys.length;
+    },
+  });
+  const storage = {
+    ...storageFor(rows),
+    transaction: async (run: (tx: ReturnType<typeof storageFor>) => Promise<void>) => {
+      const staged = new Map(rows);
+      await run(storageFor(staged));
+      await beforeCommit?.();
+      rows.clear();
+      for (const [key, value] of staged) rows.set(key, value);
+    },
+    getAlarm: async () => { if (unavailable) throw new Error('Storage unavailable'); return null; },
+    setAlarm: async (time: number) => { if (unavailable) throw new Error('Storage unavailable'); alarms.push(time); },
+    deleteAll: async () => { rows.clear(); },
+  };
   const state = {
-    storage: {
-      get: async (key: string) => rows.get(key),
-      list: async ({ prefix }: { prefix: string }) =>
-        new Map(
-          [...rows]
-            .filter(([key]) => key.startsWith(prefix))
-            .sort(([first], [second]) => (first < second ? -1 : 1)),
-        ),
-      put: async (
-        keyOrBatch: string | Record<string, Uint8Array>,
-        value?: Uint8Array,
-      ) => {
-        if (typeof keyOrBatch === "string") {
-          rows.set(keyOrBatch, value);
-          putKeys.push([keyOrBatch]);
-          return;
-        }
-        for (const [key, bytes] of Object.entries(keyOrBatch)) {
-          rows.set(key, bytes);
-        }
-        putKeys.push(Object.keys(keyOrBatch));
-      },
-      delete: async (keys: string | readonly string[]) => {
-        const batch = typeof keys === "string" ? [keys] : [...keys];
-        for (const key of batch) rows.delete(key);
-        deletedKeys.push(batch);
-        return batch.length;
-      },
-      getAlarm: async () => null,
-      setAlarm: async (time: number) => {
-        alarms.push(time);
-      },
-      deleteAll,
-    },
-    blockConcurrencyWhile: (initialize: () => Promise<void>) => {
-      initialization = initialize();
-    },
-    acceptWebSocket: (socket: FakeSocket) => {
-      sockets.push(socket);
-    },
+    storage,
+    blockConcurrencyWhile: (initialize: () => Promise<void>) => { initialization = initialize(); },
+    acceptWebSocket: (socket: Socket) => sockets.push(socket),
     getWebSockets: () => sockets,
-    waitUntil: (promise: Promise<unknown>) => {
-      pending.push(promise);
-    },
+    waitUntil: (promise: Promise<unknown>) => pending.push(promise),
   };
   const room = new CollaborationRoom(state as never, {} as never);
-  return {
-    alarms,
-    deleteAll,
-    deletedKeys,
-    initialization,
-    peer,
-    pending,
-    putKeys,
-    room,
-    rows,
-    sender,
-    sockets,
+  return { room, sender, peer, sockets, rows, pending, initialization, storage, alarms,
+    fail: (operation: 'put' | 'delete' | 'all' = 'put') => { if (operation === 'put') failWrite = true; else if (operation === 'all') unavailable = true; else failDelete = true; },
+    recover: () => { unavailable = false; failWrite = false; failDelete = false; },
+    onCommit: (callback?: () => Promise<void>) => { beforeCommit = callback; },
   };
 }
-
-async function join(harness: ReturnType<typeof createRoom>) {
+type Harness = ReturnType<typeof createRoom>;
+async function flush(harness: Harness) { await Promise.all(harness.pending); }
+function send(harness: Harness, frame: Uint8Array) { harness.room.webSocketMessage(harness.sender as never, frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength) as ArrayBuffer); }
+async function join(harness: Harness) {
   await harness.room.fetch(UPGRADE);
-  return harness.sockets[harness.sockets.length - 1];
+  return harness.sockets.at(-1)!;
+}
+function frames(socket: Socket): Uint8Array[] {
+  return socket.send.mock.calls.map(([bytes]) => bytes).filter((bytes): bytes is Uint8Array => bytes instanceof Uint8Array);
 }
 
-describe("CollaborationRoom.webSocketMessage", () => {
-  test("broadcasts original mixed bytes and persists only sync messages", async () => {
-    const document = Uint8Array.of(0, 2, 2, 10, 11);
-    const awareness = Uint8Array.of(1, 1, 12);
-    const mixed = frame(document, awareness);
-    const harness = createRoom();
-    await harness.initialization;
+afterEach(() => { setSystemTime(); mock.restore(); });
 
-    harness.room.webSocketMessage(
-      harness.sender as never,
-      mixed.buffer as ArrayBuffer,
-    );
-    await Promise.all(harness.pending);
-
-    expect(harness.peer.send).toHaveBeenCalledTimes(1);
-    expect(harness.peer.send.mock.calls[0][0]).toEqual(mixed);
-    expect(harness.sender.send).not.toHaveBeenCalled();
-    expect(harness.putKeys).toEqual([[updateKey(0)]]);
-    expect(harness.rows.get(updateKey(0))).toEqual(document);
+describe('CollaborationRoom', () => {
+  test('persists document updates before broadcasting and skips awareness', async () => {
+    const h = createRoom();
+    await h.initialization;
+    const document = documentFrame();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    h.onCommit(() => gate);
+    send(h, document);
+    await Promise.resolve();
+    expect(h.peer.send).not.toHaveBeenCalled();
+    release();
+    await flush(h);
+    expect(h.rows.get(updateKey(0))).toEqual(document);
+    expect(frames(h.peer)).toEqual([document]);
+    expect(h.sender.send).not.toHaveBeenCalled();
+    send(h, Uint8Array.of(1, 1, 12));
+    await flush(h);
+    expect(h.rows.size).toBe(1);
+    expect(frames(h.peer)).toHaveLength(2);
   });
 
-  test("closes only the sender on a malformed frame and broadcasts nothing", async () => {
-    const document = Uint8Array.of(0, 2, 1, 13);
-    const malformed = frame(document, Uint8Array.of(1, 2, 14));
-    const harness = createRoom();
-    await harness.initialization;
-
-    expect(() =>
-      harness.room.webSocketMessage(
-        harness.sender as never,
-        malformed.buffer as ArrayBuffer,
-      ),
-    ).not.toThrow();
-
-    expect(harness.sender.close).toHaveBeenCalledTimes(1);
-    expect(harness.sender.close.mock.calls[0][0]).toBe(1002);
-    expect(harness.peer.send).not.toHaveBeenCalled();
-    expect(harness.peer.close).not.toHaveBeenCalled();
-    expect(harness.pending).toEqual([]);
-    expect(harness.rows.size).toBe(0);
+  test('does not treat a disconnected peer as a persistence failure', async () => {
+    const h = createRoom();
+    await h.initialization;
+    h.peer.readyState = 3;
+    h.peer.send.mockImplementation(() => { throw new Error('Socket already closed'); });
+    send(h, documentFrame());
+    await flush(h);
+    h.room.webSocketClose(h.peer as never, 1000, '', true);
+    await h.room.checkpoint();
+    expect(h.rows.has('checkpoint')).toBe(true);
+    expect(h.sender.close).not.toHaveBeenCalled();
   });
 
-  test("closes only the sender on a client-origin auth denial", async () => {
-    const auth = Uint8Array.of(2, 0, 2, 104, 105);
-    const harness = createRoom();
-    await harness.initialization;
-
-    harness.room.webSocketMessage(
-      harness.sender as never,
-      auth.buffer as ArrayBuffer,
-    );
-
-    expect(harness.sender.close).toHaveBeenCalledTimes(1);
-    expect(harness.sender.close.mock.calls[0][0]).toBe(1008);
-    expect(harness.peer.send).not.toHaveBeenCalled();
-    expect(harness.peer.close).not.toHaveBeenCalled();
-    expect(harness.rows.size).toBe(0);
+  test('refuses malformed payloads and auth without persisting or broadcasting them', async () => {
+    const h = createRoom();
+    await h.initialization;
+    for (const frame of [Uint8Array.of(0x80), Uint8Array.of(0, 2, 1, 255), Uint8Array.of(2, 0, 1, 65)]) send(h, frame);
+    await flush(h);
+    expect(h.sender.close).toHaveBeenCalledTimes(3);
+    expect(h.peer.send).not.toHaveBeenCalled();
+    expect(h.rows.size).toBe(0);
   });
 
-  test("broadcasts awareness-only frames without retaining them", async () => {
-    const awareness = Uint8Array.of(1, 1, 12);
-    const harness = createRoom();
-    await harness.initialization;
-
-    harness.room.webSocketMessage(
-      harness.sender as never,
-      awareness.buffer as ArrayBuffer,
-    );
-
-    expect(harness.sender.close).not.toHaveBeenCalled();
-    expect(harness.peer.send).toHaveBeenCalledTimes(1);
-    expect(harness.peer.send.mock.calls[0][0]).toEqual(awareness);
-    expect(harness.rows.size).toBe(0);
+  test('checkpoints after 512 updates and rehydrates after every client leaves', async () => {
+    const h = createRoom();
+    await h.initialization;
+    const doc = new Y.Doc();
+    doc.on('update', update => send(h, encodeUpdate(update)));
+    for (let i = 0; i < 520; i++) doc.getText('body').insert(i, String(i % 10));
+    await flush(h);
+    expect([...h.rows.keys()].filter(key => key.startsWith('update:'))).toHaveLength(8);
+    expect(h.rows.has('checkpoint')).toBe(true);
+    const restarted = createRoom(h.rows);
+    await restarted.initialization;
+    restarted.sockets.length = 0;
+    const joined = await join(restarted);
+    const restored = rehydrate(frames(joined));
+    expect(restored.getText('body').toString()).toBe(doc.getText('body').toString());
+    expect(decodeMessages(frames(joined).at(-1)!)[0].type).toBe('sync-step-1');
+    doc.destroy(); restored.destroy();
   });
 
-  test("broadcasts sync-step-1 so live peers answer it, without retaining it", async () => {
-    const query = Uint8Array.of(0, 0, 1, 15);
-    const harness = createRoom();
-    await harness.initialization;
-
-    harness.room.webSocketMessage(
-      harness.sender as never,
-      query.buffer as ArrayBuffer,
-    );
-
-    expect(harness.sender.close).not.toHaveBeenCalled();
-    expect(harness.peer.send).toHaveBeenCalledTimes(1);
-    expect(harness.peer.send.mock.calls[0][0]).toEqual(query);
-    expect(harness.rows.size).toBe(0);
-  });
-});
-
-describe("CollaborationRoom expiry", () => {
-  const HOUR_MS = 60 * 60 * 1000;
-  const DAY_MS = 24 * HOUR_MS;
-  const START_MS = Date.UTC(2026, 0, 1);
-  const document = Uint8Array.of(0, 2, 2, 10, 11);
-
-  afterEach(() => {
-    setSystemTime();
-  });
-
-  function send(harness: ReturnType<typeof createRoom>): void {
-    harness.room.webSocketMessage(
-      harness.sender as never,
-      document.buffer as ArrayBuffer,
-    );
-  }
-
-  test("throttles deadline rewrites but extends on later activity", async () => {
-    setSystemTime(new Date(START_MS));
-    const harness = createRoom();
-    await harness.initialization;
-
-    send(harness);
-    send(harness);
-    await Promise.all(harness.pending);
-    expect(harness.alarms).toEqual([START_MS + DAY_MS]);
-
-    setSystemTime(new Date(START_MS + 2 * HOUR_MS));
-    send(harness);
-    await Promise.all(harness.pending);
-    expect(harness.alarms).toEqual([
-      START_MS + DAY_MS,
-      START_MS + 2 * HOUR_MS + DAY_MS,
-    ]);
-  });
-
-  test("replays retained frames to a joining socket", async () => {
-    const harness = createRoom();
-    await harness.initialization;
-    send(harness);
-    await Promise.all(harness.pending);
-
-    const joiner = await join(harness);
-    expect(joiner.send.mock.calls[0][0]).toEqual(document);
-  });
-
-  test("wipes an idle room when the alarm fires", async () => {
-    const harness = createRoom();
-    await harness.initialization;
-    send(harness);
-    await Promise.all(harness.pending);
-    expect(harness.rows.size).toBe(1);
-
-    harness.sockets.length = 0;
-    await harness.room.alarm();
-
-    expect(harness.deleteAll).toHaveBeenCalledTimes(1);
-    expect(harness.rows.size).toBe(0);
-
-    const joiner = await join(harness);
-    expect(joiner.send).toHaveBeenCalledTimes(1);
-    expect(joiner.send.mock.calls[0][0]).toBe(
-      JSON.stringify({ type: "peers", count: 1 }),
-    );
-  });
-
-  test("reschedules instead of wiping while a socket is connected", async () => {
-    setSystemTime(new Date(START_MS));
-    const harness = createRoom();
-    await harness.initialization;
-    send(harness);
-    await Promise.all(harness.pending);
-
-    setSystemTime(new Date(START_MS + DAY_MS));
-    await harness.room.alarm();
-
-    expect(harness.deleteAll).not.toHaveBeenCalled();
-    expect(harness.rows.size).toBe(1);
-    expect(harness.alarms).toEqual([START_MS + DAY_MS, START_MS + 2 * DAY_MS]);
-  });
-});
-
-describe("CollaborationRoom persistence", () => {
-  function documentAt(payload: number): Uint8Array {
-    return Uint8Array.of(0, 2, 1, payload);
-  }
-
-  function send(
-    harness: ReturnType<typeof createRoom>,
-    document: Uint8Array,
-  ): void {
-    harness.room.webSocketMessage(
-      harness.sender as never,
-      document.buffer as ArrayBuffer,
-    );
-  }
-
-  function replayed(socket: FakeSocket, count: number): unknown[] {
-    return socket.send.mock.calls.slice(0, count).map(([value]) => value);
-  }
-
-  test("writes one key per retained frame and rewrites nothing", async () => {
-    const harness = createRoom();
-    await harness.initialization;
-
-    for (const payload of [1, 2, 3]) send(harness, documentAt(payload));
-    await Promise.all(harness.pending);
-
-    expect(harness.putKeys).toEqual([
-      [updateKey(0)],
-      [updateKey(1)],
-      [updateKey(2)],
-    ]);
-    expect(harness.deletedKeys).toEqual([]);
-    expect(harness.rows.size).toBe(3);
-  });
-
-  test("evicts only the oldest key once the entry cap is reached", async () => {
-    const harness = createRoom();
-    await harness.initialization;
-
-    for (let index = 0; index <= 512; index += 1) {
-      send(harness, documentAt(index & 0xff));
+  test('requests the initial seed and synchronizes an offline client against the checkpoint', async () => {
+    const h = createRoom();
+    await h.initialization;
+    const source = rehydrate([documentFrame('seed')]);
+    const offline = rehydrate([documentFrame('seed')]);
+    const joined = await join(h);
+    const query = decodeMessages(frames(joined)[0])[0];
+    expect(query.type).toBe('sync-step-1');
+    if (query.type !== 'sync-step-1') throw new Error('Missing initial handshake');
+    send(h, encodeSyncStep2(Y.encodeStateAsUpdate(source, query.stateVector)));
+    await flush(h);
+    await h.room.checkpoint();
+    source.getText('body').insert(4, ' online');
+    send(h, encodeUpdate(Y.encodeStateAsUpdate(source)));
+    await flush(h);
+    await h.room.checkpoint();
+    offline.getText('body').insert(0, 'offline ');
+    const restart = createRoom(h.rows);
+    await restart.initialization;
+    send(restart, encodeSyncStep1(Y.encodeStateVector(offline)));
+    await flush(restart);
+    for (const frame of frames(restart.sender)) for (const message of decodeMessages(frame)) {
+      if (message.type === 'sync-step-2') Y.applyUpdate(offline, message.update);
     }
-    await Promise.all(harness.pending);
-
-    expect(harness.rows.size).toBe(512);
-    expect(harness.deletedKeys).toEqual([[updateKey(0)]]);
-    expect(harness.rows.has(updateKey(512))).toBe(true);
+    send(restart, encodeUpdate(Y.encodeStateAsUpdate(offline)));
+    await flush(restart);
+    await restart.room.checkpoint();
+    const final = createRoom(restart.rows);
+    await final.initialization;
+    const restored = rehydrate(frames(await join(final)));
+    expect(restored.getText('body').toString()).toBe('offline seed online');
+    for (const doc of [source, offline, restored]) doc.destroy();
   });
 
-  test("rehydrates in sequence order and appends above the highest seq", async () => {
-    const first = documentAt(4);
-    const second = documentAt(5);
-    const harness = createRoom([
-      [updateKey(9), second],
-      [updateKey(2), first],
+  test('stores large checkpoints in bounded chunks and restores all bytes', async () => {
+    const h = createRoom();
+    await h.initialization;
+    const text = 'large document '.repeat(15000);
+    send(h, documentFrame(text));
+    await flush(h);
+    expect([...h.rows.keys()].filter(key => key.startsWith('checkpoint:')).length).toBeGreaterThan(2);
+    const restart = createRoom(h.rows);
+    await restart.initialization;
+    const doc = rehydrate(frames(await join(restart)));
+    expect(doc.getText('body').toString()).toBe(text);
+    doc.destroy();
+  });
+
+  test('serializes updates arriving during checkpoint persistence', async () => {
+    const h = createRoom();
+    await h.initialization;
+    send(h, documentFrame('first', 1));
+    await flush(h);
+    let release!: () => void;
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    h.onCommit(async () => { started(); await gate; });
+    const checkpoint = h.room.checkpoint();
+    await ready;
+    send(h, documentFrame('second', 2));
+    expect(h.rows.has('checkpoint')).toBe(false);
+    release();
+    await checkpoint;
+    await flush(h);
+    const restart = createRoom(h.rows);
+    await restart.initialization;
+    const doc = rehydrate(frames(await join(restart)));
+    expect(doc.getText('body').toString()).toBe('firstsecond');
+    doc.destroy();
+  });
+
+  test('serializes joining-client replay with updates awaiting commit', async () => {
+    const h = createRoom();
+    await h.initialization;
+    send(h, documentFrame('first', 1));
+    await flush(h);
+    let release!: () => void;
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    h.onCommit(async () => { started(); await gate; });
+    send(h, documentFrame('second', 2));
+    await ready;
+    const joining = join(h);
+    await Promise.resolve();
+    expect(h.sockets).toHaveLength(2);
+    release();
+    const joined = await joining;
+    expect(rehydrate(frames(joined)).getText('body').toString()).toBe('firstsecond');
+  });
+
+  test('keeps committed data after a failed checkpoint and refuses uncommitted broadcasts', async () => {
+    const h = createRoom();
+    await h.initialization;
+    send(h, documentFrame());
+    await flush(h);
+    const before = structuredClone(h.rows);
+    h.fail('delete');
+    const log = spyOn(console, 'error').mockImplementation(() => {});
+    await expect(h.room.checkpoint()).rejects.toThrow('Room storage unavailable');
+    expect(h.rows).toEqual(before);
+    expect(h.sender.close).toHaveBeenCalledWith(1011, 'Room storage unavailable; reconnect');
+    h.fail('all');
+    send(h, documentFrame('unsaved', 2));
+    await flush(h);
+    expect(frames(h.peer)).toHaveLength(1);
+    expect((await h.room.fetch(UPGRADE)).status).toBe(503);
+    h.recover();
+    expect(rehydrate(frames(await join(h))).getText('body').toString()).toBe('hello');
+    await h.room.checkpoint();
+    expect(h.rows.has('checkpoint')).toBe(true);
+    expect(log).toHaveBeenCalled();
+  });
+
+  test('repairs malformed old keys while rehydrating valid retained updates', async () => {
+    const h = createRoom([
+      ['update:nope', Uint8Array.of(1)],
+      [updateKey(1), 'invalid value'],
+      [updateKey(2), documentFrame('valid')],
+      [updateKey(3), Uint8Array.of(0, 2, 1, 255)],
+      [updateKey(4), Uint8Array.of(0x80)],
     ]);
-    await harness.initialization;
-
-    expect(harness.putKeys).toEqual([]);
-    expect(harness.deletedKeys).toEqual([]);
-    expect(replayed(await join(harness), 2)).toEqual([first, second]);
-
-    send(harness, documentAt(6));
-    await Promise.all(harness.pending);
-    expect(harness.putKeys).toEqual([[updateKey(10)]]);
+    await h.initialization;
+    expect(h.rows.has('update:nope')).toBe(false);
+    expect(h.rows.has(updateKey(1))).toBe(false);
+    expect(h.rows.has(updateKey(3))).toBe(false);
+    expect(h.rows.has(updateKey(4))).toBe(false);
+    expect(rehydrate(frames(await join(h))).getText('body').toString()).toBe('valid');
   });
 
-  test("repairs a non-canonical entry and drops unreadable ones", async () => {
-    const document = documentAt(7);
-    const survivor = documentAt(9);
-    const harness = createRoom([
-      [updateKey(0), frame(document, Uint8Array.of(1, 1, 8))],
-      [updateKey(1), Uint8Array.of(0x80)],
-      ["update:nope", document],
-      [updateKey(2), survivor],
-    ]);
-    await harness.initialization;
-
-    expect(harness.deletedKeys).toEqual([["update:nope"], [updateKey(1)]]);
-    expect(harness.putKeys).toEqual([[updateKey(0)]]);
-    expect(harness.rows.get(updateKey(0))).toEqual(document);
-    expect(replayed(await join(harness), 2)).toEqual([document, survivor]);
+  test('recovers on reconnect after a temporary alarm failure', async () => {
+    const h = createRoom();
+    await h.initialization;
+    send(h, documentFrame('saved'));
+    await flush(h);
+    h.fail('all');
+    spyOn(console, 'error').mockImplementation(() => {});
+    await expect(h.room.alarm()).rejects.toThrow('Room storage unavailable');
+    h.recover();
+    expect(rehydrate(frames(await join(h))).getText('body').toString()).toBe('saved');
   });
 
-  test("discards the legacy single-blob log on rehydrate", async () => {
-    const harness = createRoom([["updates", [documentAt(10)]]]);
-    await harness.initialization;
+  test('rejects multiple sync queries in one frame before computing responses', async () => {
+    const h = createRoom();
+    await h.initialization;
+    const query = encodeSyncStep1(Uint8Array.of(0));
+    send(h, new Uint8Array([...query, ...query]));
+    await flush(h);
+    expect(h.sender.close).toHaveBeenCalledWith(1002, 'Invalid document update');
+    expect(h.sender.send).not.toHaveBeenCalled();
+    expect(h.peer.send).not.toHaveBeenCalled();
+  });
 
-    expect(harness.deletedKeys).toEqual([["updates"]]);
-    expect(harness.rows.size).toBe(0);
-    expect((await join(harness)).send).toHaveBeenCalledTimes(1);
+  test('releases queued work when rehydration fails so recovered clients can write', async () => {
+    const h = createRoom();
+    await h.initialization;
+    send(h, documentFrame('saved'));
+    await flush(h);
+    h.fail('all');
+    spyOn(console, 'error').mockImplementation(() => {});
+    await expect(h.room.checkpoint()).rejects.toThrow();
+    for (let i = 0; i < 1024; i++) send(h, encodeSyncStep1(Uint8Array.of(0)));
+    await flush(h);
+    h.recover();
+    const joined = await join(h);
+    const update = documentFrame('tail', 18);
+    h.room.webSocketMessage(joined as never, update.buffer as ArrayBuffer);
+    await flush(h);
+    expect(joined.close).not.toHaveBeenCalled();
+    const restart = createRoom(h.rows);
+    await restart.initialization;
+    expect(rehydrate(frames(await join(restart))).getText('body').toString()).toBe('savedtail');
+  });
+
+  test('migrates the retained and legacy logs without dropping their updates', async () => {
+    const h = createRoom([[updateKey(7), documentFrame('new', 2)], ['updates', [documentFrame('old', 1)]]]);
+    await h.initialization;
+    expect(h.rows.has('updates')).toBe(false);
+    expect(h.rows.has(updateKey(7))).toBe(false);
+    const restart = createRoom(h.rows);
+    await restart.initialization;
+    expect(rehydrate(frames(await join(restart))).getText('body').toString()).toBe('oldnew');
+    send(restart, documentFrame('tail', 3));
+    await flush(restart);
+    expect(restart.rows.has(updateKey(9))).toBe(true);
+  });
+
+  test('refuses incomplete checkpoint storage instead of serving a partial document', async () => {
+    const h = createRoom();
+    await h.initialization;
+    send(h, documentFrame());
+    await flush(h);
+    await h.room.checkpoint();
+    h.rows.delete('checkpoint:0000');
+    await expect(createRoom(h.rows).initialization).rejects.toThrow('Incomplete relay checkpoint');
+  });
+
+  test('retains the existing idle-room expiration policy', async () => {
+    const start = Date.UTC(2026, 0, 1);
+    setSystemTime(start);
+    const h = createRoom();
+    await h.initialization;
+    send(h, documentFrame());
+    await flush(h);
+    await h.room.checkpoint();
+    expect(h.alarms).toEqual([start + 86400000]);
+    setSystemTime(start + 86400000);
+    await h.room.alarm();
+    expect(h.rows.has('checkpoint')).toBe(true);
+    h.sockets.length = 0;
+    await h.room.alarm();
+    expect(h.rows.size).toBe(0);
+    expect(frames(await join(h))).toEqual([encodeSyncStep1(Uint8Array.of(0))]);
   });
 });

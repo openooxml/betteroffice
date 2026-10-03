@@ -150,7 +150,7 @@ export const COLLABORATION = {
 export const PEERS = [
   {
     name: "People",
-    desc: "Live co-editing over any WebSocket relay. Offline edits converge on reconnect — merging is the data structure, not a server feature.",
+    desc: "Live co-editing over any WebSocket relay. Offline edits converge on reconnect. The reference relay checkpoints updates and restores rooms after restarts; its 24-hour idle expiration still applies.",
   },
   {
     name: "Agents",
