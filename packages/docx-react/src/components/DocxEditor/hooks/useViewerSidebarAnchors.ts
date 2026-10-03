@@ -36,10 +36,15 @@ export function useViewerSidebarAnchors(options: {
   const lastRanges = useRef<{ value: DocxSidebarRead; ranges: ViewerCommentRanges } | null>(null);
   const commentIdsKey = JSON.stringify(options.commentIds.map(String));
   const lastEmitAt = useRef(0);
+  const rangesVersion = useRef<string | null>(null);
   useEffect(() => {
     const { queries, canvasHostRef, pagesContainerRef, overlayTarget, zoom, document } = options;
     const commentIds = JSON.parse(commentIdsKey) as string[];
     const version = presentedWorkerVersion(queries);
+    if (rangesVersion.current !== null && rangesVersion.current !== version) {
+      rangesVersion.current = null;
+      latest.current.onRanges?.(new Map());
+    }
     if (!reads || !queries || version === null) return;
     let cancelled = false;
     let frame: number | null = null;
@@ -62,6 +67,7 @@ export function useViewerSidebarAnchors(options: {
       if (lastRanges.current?.value !== value) {
         lastRanges.current = { value, ranges: viewerCommentRanges(value) };
       }
+      rangesVersion.current = version;
       latest.current.onRanges?.(lastRanges.current.ranges);
       const hfRegions = new Map<string, 'header' | 'footer'>();
       for (const rId of document?.package?.headers?.keys() ?? []) hfRegions.set(rId, 'header');

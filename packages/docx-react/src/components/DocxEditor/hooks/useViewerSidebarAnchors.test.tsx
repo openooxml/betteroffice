@@ -95,3 +95,21 @@ test('a cancelled run cannot publish a delayed sidebar reply', async () => {
   await waitFor(() => expect(view.positions).toHaveLength(1));
   expect(view.tracked).toHaveLength(1);
 });
+
+test('comment ranges from an older version are withdrawn when a newer frame is shown', async () => {
+  const pending = new Map<string, (reply: { version: string; value: DocxSidebarRead }) => void>();
+  const read = ((request: ResidentDocumentRead) => request.kind === 'sidebar' && request.expectVersion === 'A'
+    ? Promise.resolve({ version: 'A', value })
+    : new Promise<unknown>((resolve) => {
+      if ('expectVersion' in request) pending.set(request.expectVersion, resolve);
+    })) as ResidentEngineWorkerClient['documentRead'];
+  const view = setup(read);
+  const { rerender } = renderHook((shown: DisplayListQueries) => useViewerSidebarAnchors({ ...view.options, queries: shown }),
+    { initialProps: queries('A') });
+  await waitFor(() => expect(view.ranges.at(-1)).toEqual(new Map([[7, { from: 5, to: 15 }]])));
+  await act(async () => rerender(queries('B')));
+  expect(view.ranges.at(-1)).toEqual(new Map());
+  await waitFor(() => expect(pending.has('B')).toBe(true));
+  await act(async () => pending.get('B')!({ version: 'B', value }));
+  await waitFor(() => expect(view.ranges.at(-1)).toEqual(new Map([[7, { from: 5, to: 15 }]])));
+});
