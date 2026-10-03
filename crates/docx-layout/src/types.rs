@@ -1951,6 +1951,8 @@ pub struct LayoutOptions {
     pub title_page: Option<bool>,
     pub even_and_odd_headers: Option<bool>,
     pub footnote_reserved_heights: Option<BTreeMap<String, f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note_separator_heights: Option<crate::footnotes::NoteSeparatorHeights>,
     pub body_break_type: Option<SectionBreakType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub section_page_restarts: Option<Vec<Option<SectionPageRestart>>>,

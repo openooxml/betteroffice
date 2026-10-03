@@ -90,6 +90,28 @@ impl NoteKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteSeparatorHeights {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footnote: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endnote: Option<f64>,
+}
+
+impl NoteSeparatorHeights {
+    pub fn get(self, kind: NoteKind) -> Option<f64> {
+        match kind {
+            NoteKind::Footnote => self.footnote,
+            NoteKind::Endnote => self.endnote,
+        }
+    }
+
+    pub fn height(self, kind: NoteKind) -> f64 {
+        self.get(kind).unwrap_or(FOOTNOTE_SEPARATOR_HEIGHT)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteAnchor {
@@ -530,6 +552,7 @@ pub fn calculate_note_reserved_heights(
     page_note_map: &OrderedMap<u32, Vec<i64>>,
     contents: &[NoteContent],
     columns_by_page: &OrderedMap<u32, u64>,
+    separator_heights: &NoteSeparatorHeights,
 ) -> OrderedMap<u32, f64> {
     let contents = content_map(contents);
     let mut reserved = OrderedMap::new();
@@ -554,7 +577,7 @@ pub fn calculate_note_reserved_heights(
                 .iter()
                 .map(|column| column.iter().map(HasHeight::height).sum::<f64>())
                 .fold(0.0_f64, f64::max);
-            total_height += tallest + FOOTNOTE_SEPARATOR_HEIGHT;
+            total_height += tallest + separator_heights.height(kind);
         }
         if total_height > 0.0 {
             reserved.set(*page_number, total_height);
@@ -603,6 +626,7 @@ pub fn stabilize_note_layout<F>(
     mut layout_with_reserved: F,
     refs: &[NoteRefLocation],
     contents: &[NoteContent],
+    separator_heights: &NoteSeparatorHeights,
     initial_layout: Layout,
     regions: &DocumentRegions,
 ) -> Result<StabilizedNoteLayout, LayoutError>
@@ -611,7 +635,8 @@ where
 {
     let mut page_note_map = map_notes_to_pages(&initial_layout.pages, refs, regions);
     let mut columns = footnote_columns_by_page(&initial_layout.pages, regions);
-    let mut reserved = calculate_note_reserved_heights(&page_note_map, contents, &columns);
+    let mut reserved =
+        calculate_note_reserved_heights(&page_note_map, contents, &columns, separator_heights);
     if reserved.is_empty() {
         return Ok(StabilizedNoteLayout {
             layout: initial_layout,
@@ -627,7 +652,8 @@ where
         layout = layout_with_reserved(&reserved)?;
         page_note_map = map_notes_to_pages(&layout.pages, refs, regions);
         columns = footnote_columns_by_page(&layout.pages, regions);
-        let next = calculate_note_reserved_heights(&page_note_map, contents, &columns);
+        let next =
+            calculate_note_reserved_heights(&page_note_map, contents, &columns, separator_heights);
         if reserved_heights_equal(&reserved, &next) {
             reserved = next;
             converged = true;
@@ -643,7 +669,8 @@ where
             layout = layout_with_reserved(&fallback)?;
             page_note_map = map_notes_to_pages(&layout.pages, refs, regions);
             columns = footnote_columns_by_page(&layout.pages, regions);
-            let required = calculate_note_reserved_heights(&page_note_map, contents, &columns);
+            let required =
+                calculate_note_reserved_heights(&page_note_map, contents, &columns, separator_heights);
             if reserved_heights_cover(&fallback, &required) {
                 covered = true;
                 break;
@@ -747,18 +774,19 @@ pub(crate) fn note_area_bottom(mut limit: f64, needed: f64, bands: &[PageFloatBa
     limit
 }
 
-fn note_group_height(group: &[&NoteContent], columns: u64) -> f64 {
+fn note_group_height(group: &[&NoteContent], columns: u64, separator_height: f64) -> f64 {
     distribute_notes_into_columns(group.to_vec(), columns)
         .iter()
         .map(|column| column.iter().map(|content| content.height).sum::<f64>())
         .fold(0.0_f64, f64::max)
-        + FOOTNOTE_SEPARATOR_HEIGHT
+        + separator_height
 }
 
 pub fn attach_note_areas(
     layout: &mut Layout,
     page_note_map: &OrderedMap<u32, Vec<i64>>,
     contents: &[NoteContent],
+    separator_heights: &NoteSeparatorHeights,
     regions: &DocumentRegions,
 ) {
     let contents = content_map(contents);
@@ -792,7 +820,7 @@ pub fn attach_note_areas(
                     } else {
                         1
                     };
-                    note_group_height(group, columns)
+                    note_group_height(group, columns, separator_heights.height(*kind))
                 })
                 .sum()
         };
@@ -814,7 +842,7 @@ pub fn attach_note_areas(
             } else {
                 1
             };
-            let height = note_group_height(group, columns);
+            let height = note_group_height(group, columns, separator_heights.height(*kind));
             let y = if placement == "beneathText" {
                 let mut y = beneath_text_cursor.min(note_bottom - height);
                 let first = page.float_bands.partition_point(|band| band.bottom <= y);
@@ -840,7 +868,12 @@ pub fn attach_note_areas(
                 y: Some(y),
                 height: Some(height),
                 columns: Some(columns),
-                separator: None,
+                separator: separator_heights.get(*kind).map(|height| {
+                    crate::types::NoteLayoutItemContract {
+                        height: Some(height),
+                        ..Default::default()
+                    }
+                }),
                 notes: Some(group.iter().map(|content| note_item(content)).collect()),
             });
         }
@@ -1075,8 +1108,16 @@ mod tests {
             content(2, NoteKind::Endnote, 9.0),
         ];
 
-        let reserved = calculate_note_reserved_heights(&page_map, &contents, &columns);
-        assert_eq!(reserved.get(&1), Some(&(20.0 + 12.0 + 17.0 + 12.0)));
+        let reserved = calculate_note_reserved_heights(
+            &page_map,
+            &contents,
+            &columns,
+            &NoteSeparatorHeights {
+                footnote: Some(16.0),
+                endnote: Some(64.0),
+            },
+        );
+        assert_eq!(reserved.get(&1), Some(&(20.0 + 16.0 + 17.0 + 64.0)));
     }
 
     #[test]
@@ -1142,6 +1183,7 @@ mod tests {
             },
             &refs,
             &contents,
+            &NoteSeparatorHeights::default(),
             initial,
             &DocumentRegions::default(),
         )
@@ -1172,7 +1214,13 @@ mod tests {
             ..Default::default()
         };
 
-        attach_note_areas(&mut output, &map, &contents, &regions);
+        attach_note_areas(
+            &mut output,
+            &map,
+            &contents,
+            &NoteSeparatorHeights::default(),
+            &regions,
+        );
         let area = &output.pages[0].note_areas.as_ref().unwrap()[0];
         assert_eq!(area.placement.as_deref(), Some("beneathText"));
         assert_eq!(area.y, Some(116.0));
@@ -1206,6 +1254,7 @@ mod tests {
             &mut output,
             &map,
             &[content(1, NoteKind::Footnote, 142.0)],
+            &NoteSeparatorHeights::default(),
             &DocumentRegions::default(),
         );
         let page = &output.pages[0];
@@ -1244,6 +1293,7 @@ mod tests {
             &mut output,
             &map,
             &[content(1, NoteKind::Footnote, 142.0)],
+            &NoteSeparatorHeights::default(),
             &DocumentRegions::default(),
         );
         assert_eq!(output.pages.len(), 1);
@@ -1296,7 +1346,13 @@ mod tests {
             },
             ..Default::default()
         };
-        attach_note_areas(&mut output, &map, &contents, &regions);
+        attach_note_areas(
+            &mut output,
+            &map,
+            &contents,
+            &NoteSeparatorHeights::default(),
+            &regions,
+        );
         let areas = output.pages[0].note_areas.as_ref().unwrap();
         assert_eq!(areas[0].y, Some(372.0));
         assert_eq!(areas[1].y, Some(340.0));
