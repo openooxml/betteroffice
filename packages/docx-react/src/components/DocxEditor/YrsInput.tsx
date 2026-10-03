@@ -605,8 +605,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     if (range.start.paraId === range.end.paraId && range.start.offset === range.end.offset) {
       return null;
     }
-    session.deleteRange(range, suggestingAuthor());
-    const collapsed = { story: range.story, ...range.start };
+    const landed = session.deleteRange(range, suggestingAuthor()).range;
+    const collapsed = landed
+      ? { story: landed.story, ...landed.start }
+      : { story: range.story, ...range.start };
     session.setSelection(collapsed);
     return collapsed;
   }, [ensureSelection, inputPositionMap, session, suggestingAuthor]);
@@ -652,8 +654,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
                   caret = { ...caret, offset: caret.offset + piece.length };
                 }
               } else {
-                session.insertText(caret, piece, suggestingAuthor());
-                caret = { ...caret, offset: caret.offset + piece.length };
+                const landed = session.insertText(caret, piece, suggestingAuthor()).range;
+                insertedAt = landed ? { story: landed.story, ...landed.start } : caret;
+                caret = landed
+                  ? { story: landed.story, ...landed.end }
+                  : { ...caret, offset: caret.offset + piece.length };
               }
               const insertedStored =
                 carried ?? storedFormattingByParagraphRef.current.get(storedKey(insertedAt));
@@ -774,15 +779,17 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         if (direction === 'backward') {
           if (caret.offset > 0) {
             const start = previousCodePointOffset(paragraph.text, caret.offset);
-            session.deleteRange(
+            const landed = session.deleteRange(
               {
                 story: activeStory,
                 start: { paraId: caret.paraId, offset: start },
                 end: { paraId: caret.paraId, offset: caret.offset },
               },
               suggestingAuthor()
+            ).range;
+            session.setSelection(
+              landed ? { story: landed.story, ...landed.start } : { ...caret, offset: start }
             );
-            session.setSelection({ ...caret, offset: start });
           } else if (index > 0) {
             const previous = paragraphs[index - 1];
             const offset = inputPositionMap(activeStory)?.paragraphs.find(
@@ -801,15 +808,15 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           const length = map.paragraphs.find((entry) => entry.paraId === caret.paraId)?.length ?? 0;
           if (caret.offset < length) {
             const end = nextCodePointOffset(paragraph.text, caret.offset);
-            session.deleteRange(
+            const landed = session.deleteRange(
               {
                 story: activeStory,
                 start: { paraId: caret.paraId, offset: caret.offset },
                 end: { paraId: caret.paraId, offset: end },
               },
               suggestingAuthor()
-            );
-            session.setSelection(caret);
+            ).range;
+            session.setSelection(landed ? { story: landed.story, ...landed.start } : caret);
           } else if (index + 1 < paragraphs.length) {
             session.mergeParagraphs(activeStory, caret.paraId, suggestingAuthor());
             session.setSelection(caret);

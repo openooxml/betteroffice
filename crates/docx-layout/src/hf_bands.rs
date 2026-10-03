@@ -680,6 +680,7 @@ fn compose_region(
                     row_end: block.rows.len(),
                     clip_top: None,
                     clip_bottom: None,
+                    cell_clips: None,
                     header_row_count: None,
                     carried_from_prev: None,
                     carried_to_next: None,

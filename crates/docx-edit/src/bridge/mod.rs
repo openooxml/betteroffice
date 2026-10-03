@@ -3652,6 +3652,11 @@ fn lower_font_family(attributes: Option<&Attrs>, result: &mut RunFormatting) {
     }
 }
 
+/// A `w:sz` half-point size in points, clamped to Word's 1–1638 pt range.
+pub(crate) fn font_size_pt(half_points: f64) -> f64 {
+    (half_points / 2.0).clamp(1.0, 1638.0)
+}
+
 fn lower_font_size(attributes: Option<&Attrs>, result: &mut RunFormatting) {
     let Some(value) = attribute(attributes, "fontSize").or_else(|| attribute(attributes, "sz"))
     else {
@@ -3661,14 +3666,14 @@ fn lower_font_size(attributes: Option<&Attrs>, result: &mut RunFormatting) {
         // A scalar mark is the authored `w:sz`; the object form additionally
         // preserves an independent `w:szCs`. Both stay in half-points until
         // this conversion.
-        Any::Number(half_points) => result.font_size = Some(*half_points / 2.0),
-        Any::BigInt(half_points) => result.font_size = Some(*half_points as f64 / 2.0),
+        Any::Number(half_points) => result.font_size = Some(font_size_pt(*half_points)),
+        Any::BigInt(half_points) => result.font_size = Some(font_size_pt(*half_points as f64)),
         Any::Map(map) => {
             let size = map_number(map, "size").or_else(|| map_number(map, "sz"));
             let size_cs = map_number(map, "sizeCs").or_else(|| map_number(map, "szCs"));
             let rtl = mark_bool(attributes, "rtl") == Some(true);
-            result.font_size = if rtl { size_cs.or(size) } else { size }.map(|value| value / 2.0);
-            result.font_size_cs = size_cs.map(|value| value / 2.0);
+            result.font_size = if rtl { size_cs.or(size) } else { size }.map(font_size_pt);
+            result.font_size_cs = size_cs.map(font_size_pt);
         }
         _ => {}
     }
@@ -4194,7 +4199,7 @@ fn paragraph_default_font_size(values: &BTreeMap<String, Any>) -> f64 {
         .get("defaultTextFormatting")
         .and_then(any_map)
         .and_then(|defaults| map_number(defaults, "fontSize"))
-        .map_or(10.0, |value| value / 2.0)
+        .map_or(10.0, font_size_pt)
 }
 
 fn lower_paragraph_defaults(values: &BTreeMap<String, Any>, result: &mut ParagraphAttrs) {
@@ -4236,7 +4241,7 @@ fn paragraph_run_defaults(values: &BTreeMap<String, Any>) -> RunFormatting {
             .or_else(|| slots.cs.clone());
         result.font_slots = Some(slots);
     }
-    result.font_size_cs = map_number(defaults, "fontSizeCs").map(|value| value / 2.0);
+    result.font_size_cs = map_number(defaults, "fontSizeCs").map(font_size_pt);
     result.bold_cs = map_bool(defaults, "boldCs");
     result.italic_cs = map_bool(defaults, "italicCs");
     result.complex_script = map_bool(defaults, "cs");

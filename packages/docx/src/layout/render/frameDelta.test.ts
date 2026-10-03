@@ -1,12 +1,11 @@
-import { beforeAll, describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { beforeAll, describe, expect, it, spyOn } from 'bun:test';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../../docx/rezip/parts';
-import { createEditSession, preloadEditWasm } from '../../wasm/edit';
-import * as layoutWasm from '../../wasm/layout';
+import type { PartsMap } from '../../docx/rezip/parts';
 import {
   applyFrameDelta,
+  applyFrameDeltaInternal,
   applyFrameDeltaOwned,
   decodeFrameDelta,
   decodeFrameDeltaSteps,
@@ -14,14 +13,25 @@ import {
   displayPageRevision,
   displayPageShiftsSince,
   FRAME_DELTA_VERSION,
+  FrameDeltaError,
+  retainedFramePageById,
   type DecodedFrameDelta,
+  type FramePageOperation,
+  type FramePageShiftRange,
   type RetainedFrame,
 } from './frameDelta';
 import { createDisplayListQueries } from './displayListQueries';
 import type { RustDisplayListQueryEngine } from './rustDisplayList';
-import type { DisplayList, DisplayPage } from './displayList';
+import type { DisplayList, DisplayPage, DisplayPrimitive } from './displayList';
 
 const WASM = resolve(import.meta.dir, '../../wasm/generated/edit/docx_edit_bg.wasm');
+const LAYOUT_WASM = resolve(import.meta.dir, '../../wasm/generated/layout/docx_layout_bg.wasm');
+const hasEditWasm = existsSync(WASM);
+const hasLayoutWasm = hasEditWasm && existsSync(LAYOUT_WASM);
+let createEditSession: typeof import('../../wasm/edit').createEditSession;
+let layoutWasm: typeof import('../../wasm/layout');
+let rezipPartsToArrayBuffer: typeof import('../../docx/rezip/parts').rezipPartsToArrayBuffer;
+let toBytes: typeof import('../../docx/rezip/parts').toBytes;
 const FONT = resolve(
   import.meta.dir,
   '../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
@@ -194,6 +204,617 @@ function notedFrame(): RetainedFrame {
   };
 }
 
+/** A page record with no data region. */
+type CraftedRange = {
+  opcode?: number;
+  pageIndex: number;
+  pageId: bigint;
+  count?: number;
+  delta?: bigint;
+  salt?: bigint;
+};
+
+/** Encode range shifts and payload-free page operations. */
+function shiftRangeFrame(
+  operations: readonly CraftedRange[] = [{ pageIndex: 1, pageId: 2n, count: 3, delta: -2n }],
+  pageCount = 5,
+  full = false
+): Uint8Array {
+  const stringsOffset = 80 + operations.length * 48;
+  const bytes = new Uint8Array(stringsOffset + 8);
+  const view = new DataView(bytes.buffer);
+  bytes.set([0x46, 0x44, 0x56, 0x31]);
+  view.setUint16(4, FRAME_DELTA_VERSION, true);
+  view.setUint16(6, 80, true);
+  view.setUint32(8, bytes.byteLength, true);
+  view.setUint32(12, full ? 1 : 0, true);
+  view.setBigUint64(16, 1n, true);
+  view.setBigUint64(24, 2n, true);
+  view.setBigUint64(32, 2n, true);
+  view.setBigUint64(40, full ? 0n : 1n, true);
+  view.setUint32(48, pageCount, true);
+  view.setUint32(52, operations.length, true);
+  view.setUint32(56, 80, true);
+  view.setUint32(60, stringsOffset, true);
+  view.setUint32(64, 4, true);
+  view.setUint32(68, bytes.byteLength, true);
+  operations.forEach((operation, index) => {
+    const at = 80 + index * 48;
+    const opcode = operation.opcode ?? 6;
+    bytes[at] = opcode;
+    view.setUint32(at + 4, operation.pageIndex, true);
+    view.setBigUint64(at + 8, operation.pageId, true);
+    view.setBigUint64(at + 16, operation.salt ?? 2n, true);
+    if (opcode === 6) {
+      view.setUint32(at + 24, operation.count ?? 1, true);
+      view.setBigInt64(at + 32, operation.delta ?? 1n, true);
+    }
+  });
+  return bytes;
+}
+
+/** Retain hand-built pages with stable, distinct primitive identities. */
+function retainedPagesFrame(
+  displayPages: DisplayPage[],
+  fingerprints?: readonly bigint[]
+): RetainedFrame {
+  const pages = displayPages.map((page, pageIndex) => {
+    const count =
+      page.primitives.length +
+      (page.noteAreas ?? []).reduce(
+        (total, area) =>
+          total + (area.separatorPrimitives?.length ?? 0) + (area.primitives?.length ?? 0),
+        0
+      ) +
+      (page.header?.primitives.length ?? 0) +
+      (page.footer?.primitives.length ?? 0);
+    return {
+      pageIndex,
+      pageId: BigInt(pageIndex + 1),
+      fingerprint: fingerprints?.[pageIndex] ?? BigInt(pageIndex + 1),
+      primitiveIds: BigUint64Array.from({ length: count }, (_, index) =>
+        BigInt(pageIndex * 100 + index + 1)
+      ),
+      page,
+    };
+  });
+  return { ...notedFrame(), pages, displayList: { pages: displayPages } };
+}
+
+/** Build a delta against a retained fixture. */
+function pageDelta(
+  previous: RetainedFrame,
+  operations: readonly FramePageOperation[],
+  overrides: Partial<DecodedFrameDelta> = {}
+): DecodedFrameDelta {
+  return {
+    protocolVersion: FRAME_DELTA_VERSION,
+    full: false,
+    docEpoch: previous.docEpoch,
+    layoutEpoch: previous.layoutEpoch + 1,
+    frameEpoch: previous.frameEpoch + 1,
+    baseFrameEpoch: previous.frameEpoch,
+    pageCount: previous.pages.length,
+    operations,
+    bytes: new Uint8Array(),
+    ...overrides,
+  };
+}
+
+/** Mixed body fields, separate regions, placeholders, and empty pages. */
+function rangeTestFrame(): RetainedFrame {
+  const regionPrimitive: DisplayPrimitive = {
+    kind: 'rect',
+    x: 1,
+    y: 2,
+    w: 3,
+    h: 4,
+    fill: '#000',
+    docStart: 50,
+    docEnd: 60,
+    fragmentDocStart: 49,
+    fragmentDocEnd: 61,
+    inlineSdtWidget: { kind: 'checkbox', groupId: 'region', pos: 51 },
+  };
+  return retainedPagesFrame(
+    [
+      {
+        pageIndex: 0,
+        width: 100,
+        height: 200,
+        sectionId: 'main',
+        pageLabel: 'i',
+        background: '#fff',
+        contentBounds: { x: 10, y: 20, width: 80, height: 160 },
+        positionSpan: [8, 30],
+        watermarkPrimitiveCount: 1,
+        primitives: [
+          { kind: 'rect', x: 0, y: 1, w: 2, h: 3, fill: '#000', docStart: 10, fragmentDocEnd: 30 },
+          {
+            kind: 'rect',
+            x: 4,
+            y: 5,
+            w: 6,
+            h: 7,
+            fill: '#000',
+            docStart: 20,
+            docEnd: 21,
+            fragmentDocStart: 19,
+            fragmentDocEnd: 22,
+            inlineSdtWidget: { kind: 'checkbox', groupId: 'body', pos: 20, checked: true },
+          },
+          { kind: 'rect', x: 8, y: 9, w: 10, h: 11, fill: '#000', docEnd: undefined },
+        ],
+        noteAreas: [
+          {
+            kind: 'footnote',
+            noteIds: [1],
+            notes: [{ id: 1, anchorDocStart: 3, anchorDocEnd: 4 }],
+            separatorPrimitives: [structuredClone(regionPrimitive)],
+            primitives: [structuredClone(regionPrimitive)],
+          },
+        ],
+        header: {
+          kind: 'header',
+          rId: 'rId1',
+          y: 0,
+          height: 10,
+          primitives: [structuredClone(regionPrimitive)],
+        },
+        footer: {
+          kind: 'footer',
+          rId: 'rId2',
+          y: 190,
+          height: 10,
+          primitives: [structuredClone(regionPrimitive)],
+        },
+      },
+      {
+        pageIndex: 1,
+        width: 100,
+        height: 200,
+        primitives: [],
+        unbuilt: true,
+        positionSpan: [40, 80],
+      },
+      { pageIndex: 2, width: 100, height: 200, primitives: [], unbuilt: true },
+      {
+        pageIndex: 3,
+        width: 100,
+        height: 200,
+        primitives: [],
+        header: {
+          kind: 'header',
+          rId: 'rId3',
+          y: 0,
+          height: 10,
+          primitives: [structuredClone(regionPrimitive)],
+        },
+      },
+      { pageIndex: 4, width: 100, height: 200, primitives: [] },
+    ],
+    [1n, 2n, 0n, 0xffffffffffffffffn, 5n]
+  );
+}
+
+describe('FrameDelta range shifts', () => {
+  it('decodes payload-free signed range shifts and safe boundary deltas', () => {
+    expect(decodeFrameDelta(shiftRangeFrame()).operations).toEqual([
+      { kind: 'shift-range', pageIndex: 1, pageId: 2n, count: 3, delta: -2, salt: 2n },
+    ]);
+    for (const delta of [
+      1n,
+      -1n,
+      BigInt(Number.MAX_SAFE_INTEGER),
+      BigInt(Number.MIN_SAFE_INTEGER),
+    ]) {
+      expect(
+        decodeFrameDelta(shiftRangeFrame([{ pageIndex: 0, pageId: 1n, delta }])).operations[0]
+      ).toMatchObject({ delta: Number(delta) });
+    }
+    expect(
+      decodeFrameDelta(
+        shiftRangeFrame([
+          { pageIndex: 3, pageId: 4n, count: 2 },
+          { pageIndex: 0, pageId: 1n, count: 2 },
+          { opcode: 3, pageIndex: 2, pageId: 3n },
+        ])
+      ).operations
+    ).toHaveLength(3);
+  });
+
+  it('rejects every reserved byte and undeclared data', () => {
+    for (const offset of [1, 2, 3, 28, 29, 30, 31, 40, 41, 42, 43, 44, 45, 46, 47]) {
+      const bytes = shiftRangeFrame();
+      bytes[80 + offset] = 1;
+      expect(() => decodeFrameDelta(bytes)).toThrow(FrameDeltaError);
+    }
+    const original = shiftRangeFrame();
+    const bytes = new Uint8Array(original.length + 8);
+    bytes.set(original);
+    new DataView(bytes.buffer).setUint32(8, bytes.length, true);
+    expect(() => decodeFrameDelta(bytes)).toThrow('data section has trailing bytes');
+  });
+
+  it('rejects invalid range bounds, deltas, salts, identities, and full frames', () => {
+    for (const operation of [
+      { count: 0 },
+      { pageIndex: 4, count: 2 },
+      { pageIndex: 5 },
+      { delta: 0n },
+      { delta: 2n ** 53n },
+      { delta: -(2n ** 53n) },
+      { salt: 0n },
+      { pageId: 0n },
+    ]) {
+      expect(() =>
+        decodeFrameDelta(shiftRangeFrame([{ pageIndex: 1, pageId: 2n, ...operation }]))
+      ).toThrow(FrameDeltaError);
+    }
+    expect(() =>
+      decodeFrameDelta(shiftRangeFrame([{ pageIndex: 0xffffffff, pageId: 1n }], 0xffffffff))
+    ).toThrow(FrameDeltaError);
+    expect(() => decodeFrameDelta(shiftRangeFrame(undefined, 5, true))).toThrow(
+      'full frame may contain only page upserts'
+    );
+    expect(() =>
+      decodeFrameDelta(
+        shiftRangeFrame([
+          { pageIndex: 0, pageId: 1n },
+          { pageIndex: 4, pageId: 1n },
+        ])
+      )
+    ).toThrow('duplicate page operation');
+  });
+
+  it('rejects overlaps with named pages and other ranges', () => {
+    for (const operations of [
+      [
+        { pageIndex: 1, pageId: 2n, count: 3 },
+        { opcode: 3, pageIndex: 2, pageId: 3n },
+      ],
+      [
+        { opcode: 2, pageIndex: 3, pageId: 4n },
+        { pageIndex: 1, pageId: 2n, count: 3 },
+      ],
+      [
+        { pageIndex: 2, pageId: 3n, count: 2 },
+        { pageIndex: 1, pageId: 2n, count: 2 },
+      ],
+    ]) {
+      expect(() => decodeFrameDelta(shiftRangeFrame(operations))).toThrow(FrameDeltaError);
+    }
+  });
+
+  it('matches equivalent per-page shifts including revisions and replay logs', () => {
+    const salt = 0x8000000000000001n;
+    const fingerprints = [
+      0x8000000000000000n,
+      0x8000000000000003n,
+      0x8000000000000001n,
+      0x7ffffffffffffffen,
+      5n,
+    ];
+    for (const apply of [applyFrameDelta, applyFrameDeltaOwned]) {
+      for (const delta of [6, -4]) {
+        const previous = rangeTestFrame();
+        const equivalent = rangeTestFrame();
+        const before = structuredClone(previous);
+        const range: FramePageShiftRange = {
+          kind: 'shift-range',
+          pageIndex: 0,
+          pageId: 1n,
+          count: 4,
+          delta,
+          salt,
+        };
+        const shifts: FramePageOperation[] = equivalent.pages
+          .slice(0, 4)
+          .map(({ page, pageIndex, pageId }) => ({
+            kind: 'shift-positions',
+            pageIndex,
+            pageId,
+            fingerprint: fingerprints[pageIndex]!,
+            runs:
+              page.primitives.length === 0
+                ? []
+                : [
+                    {
+                      start: 0,
+                      count: page.primitives.length,
+                      changedMask: 0x1f | PRESENT_ONLY,
+                      delta,
+                    },
+                  ],
+            anchors: [],
+            ...(page.positionSpan === undefined ? {} : { spanDelta: delta }),
+          }));
+        const next = apply(previous, pageDelta(previous, [range]));
+        const expected = apply(equivalent, pageDelta(equivalent, shifts));
+        expect(next).toEqual(expected);
+        expect(next.pages.map((page) => page.fingerprint)).toEqual(fingerprints);
+        expect(next.displayList.pages[0]!.primitives).toEqual([
+          {
+            ...before.pages[0]!.page.primitives[0],
+            docStart: 10 + delta,
+            fragmentDocEnd: 30 + delta,
+          },
+          {
+            ...before.pages[0]!.page.primitives[1],
+            docStart: 20 + delta,
+            docEnd: 21 + delta,
+            fragmentDocStart: 19 + delta,
+            fragmentDocEnd: 22 + delta,
+            inlineSdtWidget: { kind: 'checkbox', groupId: 'body', pos: 20 + delta, checked: true },
+          },
+          before.pages[0]!.page.primitives[2],
+        ]);
+        expect(next.displayList.pages[0]!.positionSpan).toEqual([8 + delta, 30 + delta]);
+        expect(next.displayList.pages[1]!.positionSpan).toEqual([40 + delta, 80 + delta]);
+        for (const field of ['noteAreas', 'header', 'footer'] as const) {
+          expect(next.displayList.pages[0]![field]).toEqual(before.displayList.pages[0]![field]);
+        }
+        for (let index = 0; index < next.pages.length; index++) {
+          const page = next.pages[index]!.page;
+          const expectedPage = expected.pages[index]!.page;
+          expect(next.pages[index]!.primitiveIds).toBe(previous.pages[index]!.primitiveIds);
+          expect(displayPageRevision(page)).toBe(displayPageRevision(expectedPage));
+          expect(displayPageNoteAnchorRevision(page)).toBe(
+            displayPageNoteAnchorRevision(expectedPage)
+          );
+          expect(displayPageShiftsSince(page, 0)).toEqual(displayPageShiftsSince(expectedPage, 0));
+          expect(Object.getOwnPropertyDescriptors(page)).toEqual(
+            Object.getOwnPropertyDescriptors(expectedPage)
+          );
+          if (index < 4) {
+            expect(displayPageRevision(page)).toBe(apply === applyFrameDeltaOwned ? 1 : 0);
+            expect(page === previous.pages[index]!.page).toBe(apply === applyFrameDeltaOwned);
+          }
+        }
+        if (apply === applyFrameDelta) expect(previous).toEqual(before);
+        expect(next.pages[4]).toBe(previous.pages[4]);
+        if (apply === applyFrameDeltaOwned) {
+          const twice = apply(next, pageDelta(next, [range]));
+          const expectedTwice = apply(
+            expected,
+            pageDelta(
+              expected,
+              shifts.map((shift, index) => ({
+                ...shift,
+                fingerprint: equivalent.pages[index]!.fingerprint,
+              }))
+            )
+          );
+          expect(twice).toEqual(expectedTwice);
+          for (let index = 0; index < 4; index++) {
+            expect(displayPageRevision(twice.pages[index]!.page)).toBe(2);
+            expect(displayPageShiftsSince(twice.pages[index]!.page, 0)).toEqual(
+              displayPageShiftsSince(expectedTwice.pages[index]!.page, 0)
+            );
+            expect(displayPageShiftsSince(twice.pages[index]!.page, 1)).toHaveLength(1);
+          }
+        }
+      }
+    }
+  });
+
+  it('rejects ranges in frames whose page identities or ordering change', () => {
+    for (const apply of [applyFrameDelta, applyFrameDeltaOwned]) {
+      const previous = rangeTestFrame();
+      const range: FramePageShiftRange = {
+        kind: 'shift-range',
+        pageIndex: 0,
+        pageId: 1n,
+        count: 2,
+        delta: 1,
+        salt: 2n,
+      };
+      const before = structuredClone(previous);
+      for (const delta of [
+        pageDelta(previous, [range], { full: true, baseFrameEpoch: 0 }),
+        pageDelta(previous, [range], { pageCount: 4 }),
+        pageDelta(previous, [{ ...range, pageId: 2n }]),
+        pageDelta(previous, [range, { kind: 'remove', pageIndex: 4, pageId: 5n }]),
+        pageDelta(previous, [range, { kind: 'move', pageIndex: 4, pageId: 5n, fingerprint: 5n }]),
+        pageDelta(previous, [range, { kind: 'upsert', ...previous.pages[4]!, pageId: 6n }]),
+        pageDelta(previous, [
+          range,
+          { kind: 'patch-positions', pageIndex: 4, pageId: 4n, fingerprint: 6n, patches: [] },
+        ]),
+      ]) {
+        expect(() => apply(previous, delta)).toThrow('requires an index-stable frame');
+        expect(previous).toEqual(before);
+      }
+      for (const operations of [
+        [range, { kind: 'upsert' as const, ...previous.pages[1]! }],
+        [range, { ...range, pageIndex: 1, pageId: 2n }],
+      ]) {
+        expect(() => apply(previous, pageDelta(previous, operations))).toThrow('overlap');
+        expect(previous).toEqual(before);
+      }
+    }
+  });
+
+  it('uses the existing span and primitive overflow checks', () => {
+    for (const apply of [applyFrameDelta, applyFrameDeltaOwned]) {
+      const range: FramePageShiftRange = {
+        kind: 'shift-range',
+        pageIndex: 0,
+        pageId: 1n,
+        count: 1,
+        delta: 1,
+        salt: 2n,
+      };
+      const span = rangeTestFrame();
+      span.pages[0]!.page.positionSpan = [0, Number.MAX_SAFE_INTEGER];
+      expect(() => apply(span, pageDelta(span, [range]))).toThrow('overflows positionSpan');
+      for (const field of ['docStart', 'docEnd', 'fragmentDocStart', 'fragmentDocEnd'] as const) {
+        const previous = rangeTestFrame();
+        previous.pages[0]!.page.primitives[0]![field] = Number.MAX_SAFE_INTEGER;
+        expect(() => apply(previous, pageDelta(previous, [range]))).toThrow(`overflows ${field}`);
+      }
+      const widget = rangeTestFrame();
+      widget.pages[0]!.page.primitives[1]!.inlineSdtWidget!.pos = Number.MAX_SAFE_INTEGER;
+      expect(() => apply(widget, pageDelta(widget, [range]))).toThrow(
+        'requires retained inline widget metadata'
+      );
+    }
+  });
+});
+
+describe('FrameDelta index-stable apply', () => {
+  it('matches general storage for upserts, patches, shifts and ranges without changing old arrays', () => {
+    for (const apply of [applyFrameDelta, applyFrameDeltaOwned]) {
+      for (const contractVersion of [undefined, 7]) {
+        const previous = retainedPagesFrame(
+          Array.from({ length: 7 }, (_, pageIndex) => ({
+            ...structuredClone(notedFrame().pages[0]!.page),
+            pageIndex,
+          }))
+        );
+        const general = structuredClone(previous);
+        const oldPages = previous.pages;
+        const oldListPages = previous.displayList.pages;
+        const oldPageEntries = oldPages.slice();
+        const oldListEntries = oldListPages.slice();
+        const operations: FramePageOperation[] = [
+          { kind: 'upsert', ...previous.pages[0]!, page: structuredClone(previous.pages[0]!.page) },
+          {
+            kind: 'upsert',
+            ...previous.pages[1]!,
+            fingerprint: 20n,
+            primitiveIds: new BigUint64Array([200n]),
+            page: { ...previous.pages[1]!.page, width: 150 },
+          },
+          {
+            kind: 'patch-positions',
+            pageIndex: 2,
+            pageId: 3n,
+            fingerprint: 30n,
+            patches: [{ primitiveId: 201n, docStart: 12, docEnd: null }],
+          },
+          {
+            kind: 'shift-positions',
+            pageIndex: 3,
+            pageId: 4n,
+            fingerprint: 40n,
+            runs: [{ start: 0, count: 1, changedMask: 3, delta: 2 }],
+            anchors: [{ area: 0, note: 0, start: 8, end: null }],
+          },
+          {
+            kind: 'shift-range',
+            pageIndex: 4,
+            pageId: 5n,
+            count: 2,
+            delta: -1,
+            salt: 0x8000000000000001n,
+          },
+        ];
+        retainedFramePageById(previous, 1n);
+        const delta = pageDelta(previous, operations, { contractVersion });
+        const next = apply(previous, delta);
+        const expected = applyFrameDeltaInternal(
+          general,
+          delta,
+          apply === applyFrameDeltaOwned,
+          false
+        );
+        expect(next).toEqual(expected);
+        expect(next).not.toBe(previous);
+        expect(next.displayList).not.toBe(previous.displayList);
+        expect(next.pages).not.toBe(oldPages);
+        expect(next.displayList.pages).not.toBe(oldListPages);
+        expect(previous.pages).toBe(oldPages);
+        expect(previous.displayList.pages).toBe(oldListPages);
+        expect(next.pages[0]).toBe(oldPages[0]);
+        expect([...next.damagedPageIds]).toEqual([2n]);
+        expect([...next.removedPageIds]).toEqual([]);
+        for (let index = 0; index < next.pages.length; index++) {
+          expect(oldPages[index]).toBe(oldPageEntries[index]);
+          expect(oldListPages[index]).toBe(oldListEntries[index]);
+          expect(displayPageRevision(next.pages[index]!.page)).toBe(
+            displayPageRevision(expected.pages[index]!.page)
+          );
+          expect(displayPageNoteAnchorRevision(next.pages[index]!.page)).toBe(
+            displayPageNoteAnchorRevision(expected.pages[index]!.page)
+          );
+          expect(displayPageShiftsSince(next.pages[index]!.page, 0)).toEqual(
+            displayPageShiftsSince(expected.pages[index]!.page, 0)
+          );
+        }
+      }
+    }
+  });
+
+  it('shares its lazy index across stable frames and rebuilds it after moves and removals', () => {
+    const get = spyOn(Map.prototype, 'get');
+    try {
+      const previous = rangeTestFrame();
+      expect(retainedFramePageById(previous, 1n)).toBe(previous.pages[0]);
+      const originalIndex = get.mock.contexts.at(-1);
+      const next = applyFrameDelta(previous, pageDelta(previous, []));
+      expect(retainedFramePageById(next, 1n)).toBe(next.pages[0]);
+      expect(get.mock.contexts.at(-1)).toBe(originalIndex);
+      const moved = applyFrameDelta(
+        next,
+        pageDelta(next, [
+          { kind: 'move', pageIndex: 1, pageId: 1n, fingerprint: 1n },
+          { kind: 'move', pageIndex: 0, pageId: 2n, fingerprint: 2n },
+        ])
+      );
+      expect(retainedFramePageById(moved, 1n)).toBe(moved.pages[1]);
+      const movedIndex = get.mock.contexts.at(-1);
+      expect(movedIndex).not.toBe(originalIndex);
+      const removed = applyFrameDelta(
+        moved,
+        pageDelta(moved, [{ kind: 'remove', pageIndex: 4, pageId: 5n }], { pageCount: 4 })
+      );
+      expect(retainedFramePageById(removed, 5n)).toBeUndefined();
+      expect(get.mock.contexts.at(-1)).not.toBe(movedIndex);
+      expect(retainedFramePageById(removed, 1n)).toBe(removed.pages[1]);
+      expect(retainedFramePageById(previous, 1n)).toBe(previous.pages[0]);
+      expect(retainedFramePageById(moved, 5n)).toBe(moved.pages[4]);
+      expect([...removed.removedPageIds]).toEqual([5n]);
+    } finally {
+      get.mockRestore();
+    }
+  });
+
+  it('avoids page map writes and sorting on a warm range shift', () => {
+    const previous = rangeTestFrame();
+    retainedFramePageById(previous, 1n);
+    const set = spyOn(Map.prototype, 'set');
+    const sort = spyOn(Array.prototype, 'sort');
+    try {
+      const next = applyFrameDeltaOwned(
+        previous,
+        pageDelta(previous, [
+          { kind: 'shift-range', pageIndex: 0, pageId: 1n, count: 4, delta: 1, salt: 2n },
+        ])
+      );
+      expect(next.pages).toHaveLength(5);
+      expect(set).not.toHaveBeenCalled();
+      expect(sort).not.toHaveBeenCalled();
+    } finally {
+      set.mockRestore();
+      sort.mockRestore();
+    }
+  });
+
+  it('keeps general-path page count and contiguity validation', () => {
+    const previous = rangeTestFrame();
+    expect(() =>
+      applyFrameDelta(previous, pageDelta(previous, [{ kind: 'remove', pageIndex: 4, pageId: 5n }]))
+    ).toThrow('applied page count');
+    expect(() =>
+      applyFrameDelta(
+        previous,
+        pageDelta(previous, [{ kind: 'move', pageIndex: 1, pageId: 1n, fingerprint: 1n }])
+      )
+    ).toThrow('not a contiguous zero-based sequence');
+  });
+});
+
 const W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
 const OFFICE_DOC = 'application/vnd.openxmlformats-officedocument';
 const FOOTNOTES = [1, 2, 3, 4];
@@ -280,6 +901,10 @@ function expectStrictShiftMasks(frame: Uint8Array): void {
     const record = 80 + index * 48;
     if (frame[record] === 5) maskOffset = view.getUint32(record + 32, true) + 16;
   }
+  if (maskOffset < 0) {
+    expect(decodeFrameDelta(frame).operations.some((operation) => operation.kind === 'shift-range')).toBe(true);
+    return;
+  }
   expect(maskOffset).toBeGreaterThan(0);
   for (const mask of [PRESENT_ONLY, (frame[maskOffset]! & 0x1f) | 0x40]) {
     const patched = frame.slice();
@@ -289,9 +914,14 @@ function expectStrictShiftMasks(frame: Uint8Array): void {
 }
 
 describe('FrameDelta wire round-trip', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(async () => {
+    if (!hasEditWasm) return;
+    const editWasm = await import('../../wasm/edit');
+    createEditSession = editWasm.createEditSession;
+    await editWasm.preloadEditWasm(new Uint8Array(readFileSync(WASM)));
+  });
 
-  it('decodes wasm-encoded full and delta frames to the equivalent JSON list', () => {
+  it.skipIf(!hasEditWasm)('decodes wasm-encoded full and delta frames to the equivalent JSON list', () => {
     const session = createEditSession(11);
     const { paraId } = JSON.parse(session.create_story('body', 'Hello frame', 'Normal', 'left'));
     const fontId = session.register_measure_font(new Uint8Array(readFileSync(FONT)));
@@ -343,7 +973,7 @@ describe('FrameDelta wire round-trip', () => {
     expect(pageText).toContain('typed');
   });
 
-  it('retains owned primitive ids, so no retained page keeps its frame buffer alive', () => {
+  it.skipIf(!hasEditWasm)('retains owned primitive ids, so no retained page keeps its frame buffer alive', () => {
     const session = createEditSession(12);
     session.create_story('body', 'Hello frame', 'Normal', 'left');
     const fontId = session.register_measure_font(new Uint8Array(readFileSync(FONT)));
@@ -379,7 +1009,7 @@ describe('FrameDelta wire round-trip', () => {
     }
   });
 
-  it('records owned position shifts and ships them as query-store shift ops', () => {
+  it.skipIf(!hasEditWasm)('records owned position shifts and ships them as query-store shift ops', () => {
     const session = createEditSession(13);
     const sentence = 'shift the following pages with enough text to fill several tiny pages. ';
     const { paraId } = JSON.parse(
@@ -781,7 +1411,12 @@ describe('FrameDelta position span shifts', () => {
 
 describe('FrameDelta note anchor shifts', () => {
   beforeAll(async () => {
-    await preloadEditWasm(new Uint8Array(readFileSync(WASM)));
+    if (!hasLayoutWasm) return;
+    const editWasm = await import('../../wasm/edit');
+    createEditSession = editWasm.createEditSession;
+    layoutWasm = await import('../../wasm/layout');
+    ({ rezipPartsToArrayBuffer, toBytes } = await import('../../docx/rezip/parts'));
+    await editWasm.preloadEditWasm(new Uint8Array(readFileSync(WASM)));
     await layoutWasm.preloadLayoutWasm();
   });
 
@@ -867,7 +1502,7 @@ describe('FrameDelta note anchor shifts', () => {
     }
   });
 
-  it('matches a fresh layout on footnote, endnote and mixed pages, in frames and the query store', () => {
+  it.skipIf(!hasLayoutWasm)('matches a fresh layout on footnote, endnote and mixed pages, in frames and the query store', () => {
     const session = createEditSession(71);
     session.seed_from_docx(notedDocx(), undefined);
     const fontId = session.register_measure_font(new Uint8Array(readFileSync(FONT)));
