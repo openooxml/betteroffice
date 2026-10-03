@@ -68,8 +68,8 @@ use crate::{
     ParaAttrDelta, ParaSelector, ParagraphAnchor, ParagraphIdDiagnostic, ParagraphIdOrigin,
     ParagraphIdRefusal, ParagraphOrigin, ParagraphRef, Patch, PersistedParagraphIds, Position,
     RawOp, ReadParagraphsRequest, SeedParagraph, SegmentContent, SimpleFormat, SourceParagraphRef,
-    SourceStory, SourceStoryKind, StoryRange, StorySegment, TabStop, TableLocator, TableRange,
-    TextTarget, TriState, UndoCaptureMode, UndoSession, story_ref,
+    SourceStory, SourceStoryKind, SpliceAnchor, StoryRange, StorySegment, TabStop, TableLocator,
+    TableRange, TextTarget, TriState, UndoCaptureMode, UndoSession, story_ref,
 };
 
 #[wasm_bindgen]
@@ -4733,8 +4733,9 @@ impl EditSession {
     /// `paragraphIds` request field: `{"assignments":[{"part","ordinal",
     /// "paraId"}],"patchedParts":[{"part","paraIds":[[ordinal,"ID"]]}]}`,
     /// plus `"splicedParts":[{"part","sha256","paragraphs":[[ordinal,"key"]],
-    /// "changed":[ordinal]}]`, whose session keys the caller resolves to the
-    /// model paragraphs it marks with their ordinals.
+    /// "changed":[ordinal],"inserted":[{"before"|"after":ordinal}],"removed":[ordinal]}]`,
+    /// whose session keys the caller resolves to the model paragraphs it marks
+    /// with their ordinals.
     pub fn paragraph_save_plan(&self) -> Result<String, JsValue> {
         let plan = self.engine.doc().paragraph_save_plan();
         serde_json::to_string(&json!({
@@ -4759,6 +4760,15 @@ impl EditSession {
                         "sha256": part.sha256,
                         "paragraphs": part.paragraphs,
                         "changed": part.changed,
+                        "inserted": part
+                            .inserted
+                            .iter()
+                            .map(|anchor| match anchor {
+                                SpliceAnchor::Before(ordinal) => json!({ "before": ordinal }),
+                                SpliceAnchor::After(ordinal) => json!({ "after": ordinal }),
+                            })
+                            .collect::<Vec<_>>(),
+                        "removed": part.removed,
                     })
                 })
                 .collect::<Vec<_>>(),

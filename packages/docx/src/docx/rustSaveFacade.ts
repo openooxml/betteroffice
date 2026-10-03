@@ -46,9 +46,18 @@ export interface RustParagraphIds {
    * re-serialized: those whose `sourceOrdinal` is in `changed`, or whose
    * written comments, revisions, notes or relationships differ from their
    * source. `paragraphs` lists every `sourceOrdinal` the model holds for the
-   * part, `sha256` the source part it addresses.
+   * part, `sha256` the source part it addresses, `removed` the source
+   * paragraphs it no longer holds, and `inserted`, in writing order, where
+   * each paragraph written without a `sourceOrdinal` goes.
    */
-  splicedParts?: Array<{ part: string; sha256: string; paragraphs: number[]; changed: number[] }>;
+  splicedParts?: Array<{
+    part: string;
+    sha256: string;
+    paragraphs: number[];
+    changed: number[];
+    inserted?: Array<{ before: number } | { after: number }>;
+    removed?: number[];
+  }>;
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
