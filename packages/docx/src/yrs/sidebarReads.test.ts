@@ -67,6 +67,10 @@ test('outline headings have trimmed text and the editor display positions', asyn
     expect(headings.map(({ text, level }) => [text, level])).toEqual([
       ['First heading', 0], ['Second heading', 1],
     ]);
+    const levels = new Set(session.headings('body').map(({ paraId }) => paraId));
+    expect(headings.map(({ paraId, text }) => [paraId, text])).toEqual(session.paragraphs('body')
+      .filter(({ paraId, text }) => levels.has(paraId) && text.trim())
+      .map(({ paraId, text }) => [paraId, text.trim()]));
     const projection = createYrsSidebarProjection(session);
     const editorProjection = createYrsPositionProjection(session, 'body');
     for (const heading of headings) {

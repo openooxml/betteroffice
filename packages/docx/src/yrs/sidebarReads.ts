@@ -74,20 +74,29 @@ export function readOutlineHeadings(
   expectVersion: string
 ): DocxOutlineHeading[] | null {
   if (reader.version() !== expectVersion) return null;
-  const projection = createYrsSidebarProjection(reader);
   const levels = new Map(
     reader.headings('body').map((entry) => [entry.paraId, entry.heading.outlineLevel])
   );
   const headings: DocxOutlineHeading[] = [];
-  for (const paragraph of reader.paragraphs('body')) {
-    const level = levels.get(paragraph.paraId);
-    const text = paragraph.text.trim();
+  if (levels.size === 0) return headings;
+  const projection = createYrsSidebarProjection(reader);
+  // A paragraph's text is its text segments up to its pilcrow, as `paragraphs()` reads it.
+  const parts: string[] = [];
+  for (const segment of reader.storySegments('body')) {
+    if (segment.kind === 'text') {
+      parts.push(segment.text);
+      continue;
+    }
+    if (segment.kind !== 'pilcrow') continue;
+    const level = levels.get(segment.paraId);
+    const text = level == null ? '' : parts.join('').trim();
+    parts.length = 0;
     if (level == null || !text) continue;
     const position = projection.locToDisplayPoint({
-      story: 'body', paraId: paragraph.paraId, offset: 0,
+      story: 'body', paraId: segment.paraId, offset: 0,
     })?.position;
     if (position == null) continue;
-    headings.push({ story: 'body', paraId: paragraph.paraId, text, level, position });
+    headings.push({ story: 'body', paraId: segment.paraId, text, level, position });
   }
   return headings;
 }
