@@ -1,5 +1,12 @@
 # @betteroffice/rust-crates
 
+## 0.4.4
+
+### Patch Changes
+
+- 0650355: Footnote and endnote areas now take the height of the document's own separator, so pages with notes break where Word breaks them.
+- 2f97c01: Tall table rows now split at each cell's own line boundary at the page bottom, like Word, instead of moving whole to the next page when the cells' lines don't line up.
+
 ## 0.4.3
 
 ### Patch Changes
