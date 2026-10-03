@@ -7208,7 +7208,7 @@ mod tests {
                 .iter()
                 .any(|primitive| matches!(
                     primitive,
-                    docx_layout::display_list::Primitive::TextRun(_)
+                    docx_layout::display_list::Primitive::Text(_)
                 ))
         );
         let first_extent = {
