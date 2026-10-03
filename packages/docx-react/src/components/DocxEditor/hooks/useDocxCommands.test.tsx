@@ -606,3 +606,27 @@ describe('editor command bridge', () => {
     expect(bridge.imagePosition(second)).toBeNull();
   });
 });
+
+test('viewer sidebar commands stay available without document reads', async () => {
+  const { session } = await newSession();
+  const reads = [
+    spyOn(session, 'selection'), spyOn(session, 'paragraphs'),
+    spyOn(session, 'listRevisions'), spyOn(session, 'version'),
+    spyOn(session, 'canUndo'), spyOn(session, 'canRedo'),
+  ];
+  let opened = false;
+  try {
+    const editor = mount(session, {
+      viewerSession: true, readOnly: true, mode: 'viewing',
+      setShowCommentsSidebar: (next) => { opened = typeof next === 'function' ? next(opened) : next; },
+    });
+    expect(editor.store.getState('commentsSidebar').enabled).toBe(true);
+    await act(async () => {
+      expect(code(await editor.store.execute('commentsSidebar', null))).toBe('executed');
+    });
+    expect(opened).toBe(true);
+    for (const read of reads) expect(read).not.toHaveBeenCalled();
+  } finally {
+    for (const read of reads) read.mockRestore();
+  }
+});

@@ -17,6 +17,7 @@ import type {
 import type { FindOptions } from '../utils/findReplace';
 import type { DocxFindDisplayMatch } from './findMatches';
 import type { CollaborationCursor } from '../collaboration/types';
+import type { DocxSidebarRead, DocxOutlineHeading } from './sidebarReads';
 import type { ResidentSearchResult } from './residentSearch';
 import type { DocxFindParagraphsOptions, DocxParagraphMatch } from './findParagraphs';
 import type { ResidentCaretPaintStyle } from './residentCaret';
@@ -88,7 +89,9 @@ export type ResidentDocumentRead =
   | { kind: 'paragraphTarget'; story: string; paraId: string; expectVersion: string }
   | { kind: 'commentTarget'; story: string; commentId: string; expectVersion: string }
   | { kind: 'revisionTarget'; story: string; revisionId: string; expectVersion: string }
-  | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string };
+  | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string }
+  | { kind: 'sidebar'; commentIds: string[]; expectVersion: string }
+  | { kind: 'headings'; expectVersion: string };
 
 /** @internal */
 export interface ResidentDocumentReadValues {
@@ -112,6 +115,8 @@ export interface ResidentDocumentReadValues {
   commentTarget: DocxDisplayRange | null;
   revisionTarget: DocxDisplayRange | null;
   bookmarkPosition: number | null;
+  sidebar: DocxSidebarRead | null;
+  headings: DocxOutlineHeading[] | null;
 }
 
 /** How long a warm waits for the host's compiled module before loading the engine itself. */

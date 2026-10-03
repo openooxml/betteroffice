@@ -30,6 +30,7 @@ import {
   resolveSelectionText,
   resolveSelectionUnit,
 } from './viewerSelection';
+import { readSidebar, readOutlineHeadings } from './sidebarReads';
 import { createResidentScheduler, type SchedulerMessage } from './residentScheduler';
 import { hasCachedYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import {
@@ -694,6 +695,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           request.read.revisionId,
           request.read.expectVersion
         );
+        break;
+      case 'sidebar':
+        value = readSidebar(session.geometryReader, request.read.commentIds, request.read.expectVersion);
+        break;
+      case 'headings':
+        value = readOutlineHeadings(session.geometryReader, request.read.expectVersion);
         break;
       case 'stickyAnchors': {
         const currentSession = session;

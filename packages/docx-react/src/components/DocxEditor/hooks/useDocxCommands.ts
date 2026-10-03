@@ -72,6 +72,7 @@ export interface DocxCommandInputs {
   document: Document | null;
   session: YrsSession | null;
   readOnly: boolean;
+  viewerSession?: boolean;
   mode: EditorMode;
   modeControlled: boolean;
   onModeChange: ((mode: EditorMode) => void) | undefined;
@@ -363,17 +364,19 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
     const environment = (executing: boolean): DocxCommandEnvironment => {
       const current = latest.current;
       const editor = bridge();
-      const session = current.session;
+      const authoritySession = current.session;
+      const session = current.viewerSession ? null : authoritySession;
       const t = translationRef.current;
       const status: DocxCommandEnvironment['status'] = current.isLoading
         ? 'loading'
         : current.parseError || !current.document
           ? 'empty'
-          : !session || !editor || editor.session() !== session
+          : !authoritySession || !editor || editor.session() !== authoritySession
             ? 'loading'
             : 'ready';
       let toolbar: YrsToolbarSelection | null | undefined;
       const readToolbar = () => {
+        if (current.viewerSession) return null;
         if (toolbar === undefined) toolbar = editor?.toolbarSelection(executing) ?? null;
         return toolbar;
       };
@@ -411,7 +414,7 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
           const read = status === 'ready' ? readToolbar() : null;
           selectionMemo = read
             ? selectionEnvironment(read, current)
-            : status === 'ready' && editor?.hasSelection()
+            : !current.viewerSession && status === 'ready' && editor?.hasSelection()
               ? 'unsupported'
               : null;
           return selectionMemo;
@@ -426,7 +429,7 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
         },
         get image() {
           if (imageMemo !== undefined) return imageMemo;
-          const selected = status === 'ready' ? (editor?.selectedImage() ?? null) : null;
+          const selected = !current.viewerSession && status === 'ready' ? (editor?.selectedImage() ?? null) : null;
           imageMemo = selected ? { wrap: imageWrapTarget(selected.attrs) } : null;
           return imageMemo;
         },
