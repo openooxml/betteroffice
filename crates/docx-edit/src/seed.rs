@@ -5420,7 +5420,7 @@ pub(crate) fn parse_docx_package_with_media(
     ),
     String,
 > {
-    docx_parse::parse_docx_s9_wire_with_media_table(
+    docx_parse::parse_docx_s9_wire_with_media_table_bytes(
         bytes,
         docx_parse::S9ParseOptions {
             source_ordinals: true,
@@ -6108,7 +6108,7 @@ pub(crate) fn parse_docx_preview(
     blocks: usize,
 ) -> Result<Option<(docx_parse::S9WireEnvelope, docx_parse::media::MediaTable)>, String> {
     let (parts, media) =
-        docx_parse::media_table_parts(&bytes).map_err(|error| error.to_string())?;
+        docx_parse::media_table_parts_bytes(&bytes).map_err(|error| error.to_string())?;
     let envelope = docx_parse::parse_docx_s9_preview_with_media_table(
         &parts,
         &media,
