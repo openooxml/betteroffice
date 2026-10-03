@@ -71,6 +71,14 @@ async function expectUnchanged(page: Page, before: Awaited<ReturnType<typeof sta
   expect(await status(page)).toEqual({ ...before, reads, replica: { started: false, loaded: false }, errors: [] });
 }
 
+async function expectNoDocumentReads(page: Page, before: Awaited<ReturnType<typeof status>>) {
+  const current = await status(page);
+  const reads = Object.fromEntries(Object.keys(before.reads).map((method) => [method, 0]));
+  // Deleting may read the empty main session's selection; every document read stays at zero.
+  reads.selection = current.reads.selection ?? 0;
+  expect(current).toEqual({ ...before, reads, replica: { started: false, loaded: false }, errors: [] });
+}
+
 test('viewer comment and tracked-change cards are placed without a document replica', async ({ page }) => {
   const { before, firstCanvasAt } = await open(page);
   await openSidebar(page, firstCanvasAt);
@@ -133,7 +141,7 @@ test('deleting a viewer comment removes its worker anchor without a document rep
     (window as unknown as ViewerWindow).__viewerSidebarsProbe.commentAnchors('7')
   )).toEqual([]);
   await expect(page.locator('.docx-canvas-brighten-comment')).toHaveCount(0);
-  await expectUnchanged(page, before);
+  await expectNoDocumentReads(page, before);
 
   const canvas = page.locator('canvas[data-page-index="0"]');
   const width = await canvas.evaluate((element) => element.getBoundingClientRect().width);
@@ -143,5 +151,5 @@ test('deleting a viewer comment removes its worker anchor without a document rep
   await expect.poll(() => page.evaluate(() =>
     (window as unknown as ViewerWindow).__viewerSidebarsProbe.commentAnchors('7')
   )).toEqual([]);
-  expect(await status(page)).toMatchObject({ wasm: before.wasm, replica: { started: false, loaded: false }, errors: [] });
+  await expectNoDocumentReads(page, before);
 });
