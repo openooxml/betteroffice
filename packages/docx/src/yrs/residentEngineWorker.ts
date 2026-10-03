@@ -849,6 +849,7 @@ function hydrate(
   clearProvisionalFinalPages();
   completedLayout = null;
   if (loadState && !snapshot.workerAuthoritative) {
+    noteDocumentChange();
     fontRequirements = null;
     session.loadState(snapshot.state);
   }

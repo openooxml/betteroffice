@@ -3149,6 +3149,26 @@ describe('resident worker opening', () => {
     expect(first.ok && first.documentAsOpened).toBeUndefined();
   });
 
+  test('a replica state synced before the first frame of the whole document leaves that frame not as opened', async () => {
+    const { w } = openingWorker();
+    let version = 'opened';
+    Object.assign(w.harness.session, {
+      loadState: () => { version = 'changed'; },
+    });
+    w.harness.session.proposalEngine.version = () => version;
+    expect((await w.send({ type: 'open', bytes: new Uint8Array([1]).buffer })).ok).toBe(true);
+    const synced = await w.send({
+      type: 'sync',
+      snapshot,
+      extras: '',
+      layoutExtras: '{}',
+      expectedFrameEpoch: 0,
+      paintCaret: false,
+    });
+    expect(synced.ok && synced.documentVersion).toBe('changed');
+    expect(synced.ok && synced.documentAsOpened).toBeUndefined();
+  });
+
   test('proposal requests between open and bootstrap leave the worker registry empty', async () => {
     const { w } = openingWorker();
     expect((await w.send({ type: 'open', bytes: new Uint8Array([4]).buffer })).ok).toBe(true);
