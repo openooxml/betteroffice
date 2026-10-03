@@ -7,8 +7,9 @@ const STAGE_TEXT: Record<DocxWorkerErrorStage, string> = {
 };
 
 /**
- * The document worker of a viewer session failed and a fresh worker could not take over. The editor
- * shows the error instead of the pages; the original failure is the `cause`.
+ * The document worker failed and a fresh worker could not take over. The editor shows the error
+ * instead of the pages and does not open the document on the main thread; the original failure is
+ * the `cause`.
  */
 export class DocxWorkerError extends Error {
   constructor(readonly stage: DocxWorkerErrorStage, cause?: unknown) {

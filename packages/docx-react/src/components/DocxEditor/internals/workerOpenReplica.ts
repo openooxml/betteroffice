@@ -11,7 +11,6 @@ interface PendingReplica {
   fail(error: unknown): void;
   cancel(): void;
   pending: boolean;
-  onDemand?: WorkerOpenReplicaDemand;
   readonly started: boolean;
   initialVersion: string;
   readyVersion?: string;
@@ -20,12 +19,6 @@ interface PendingReplica {
   mirrorVersion?: string;
   /** The worker's version the replica took over, when it hydrated from worker-held proposals. */
   handoverVersion?: string;
-}
-
-/** Loads a replica only when asked: `request` starts it at the point its owner allows. */
-export interface WorkerOpenReplicaDemand {
-  active(): boolean;
-  request(): void;
 }
 
 const replicas = new WeakMap<YrsSession, PendingReplica>();
@@ -41,7 +34,7 @@ export class WorkerOpenDocumentHeldError extends Error {
 
 /**
  * Registers the document of a viewer session as held only in its worker. It reads as a replica still
- * pending, so worker routing and version bookkeeping work as before, but nothing generic loads it:
+ * pending, so worker routing and version bookkeeping work as before, but nothing loads it here:
  * starting, awaiting or ensuring it throws {@link WorkerOpenDocumentHeldError}. `release` registers the
  * editor replica with {@link deferWorkerOpenReplica}; {@link releaseWorkerOpenDocument} calls it once
  * the session leaves viewer kind (or for an explicit save).
@@ -56,7 +49,6 @@ export function holdWorkerOpenDocument(session: YrsSession, release: () => Pendi
     ready,
     held: true,
     pending: true,
-    onDemand: { active: () => true, request() {} },
     started: false,
     initialVersion: session.version(),
     start() {},
@@ -100,8 +92,7 @@ export function deferWorkerOpenReplica(
   session: YrsSession,
   hydrate: () => Promise<() => void>,
   fallback: (reason: WorkerOpenFallbackReason) => void,
-  onReady: () => void,
-  onDemand?: WorkerOpenReplicaDemand
+  onReady: () => void
 ): PendingReplica {
   let resolve!: () => void;
   let reject!: (error: unknown) => void;
@@ -143,7 +134,6 @@ export function deferWorkerOpenReplica(
   const replica: PendingReplica = {
     ready,
     pending: true,
-    onDemand,
     get started() {
       return started || !replica.pending;
     },
@@ -196,19 +186,7 @@ export function requestWorkerOpenReplica(session: YrsSession): Promise<void> | u
 export function awaitWorkerOpenReplica(session: YrsSession): Promise<void> | undefined {
   const replica = replicas.get(session);
   if (replica?.held && replica.pending) return Promise.reject(new WorkerOpenDocumentHeldError());
-  if (replica?.pending && replica.onDemand?.active() === true) replica.onDemand.request();
   return replica?.ready;
-}
-
-export function workerOpenReplicaOnDemand(session: YrsSession): boolean {
-  const replica = replicas.get(session);
-  return replica?.pending === true && replica.onDemand?.active() === true;
-}
-
-/** Asks an on-demand replica of `session` to load; see {@link WorkerOpenReplicaDemand}. */
-export function requestOnDemandWorkerOpenReplica(session: YrsSession): void {
-  const replica = replicas.get(session);
-  if (replica?.pending && replica.onDemand?.active() === true) replica.onDemand.request();
 }
 
 /** The version `session` had when its replica loaded; a later version holds a newer change. */
