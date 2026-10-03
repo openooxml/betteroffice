@@ -1065,13 +1065,14 @@ impl EditingDoc {
             let len = range.len()?;
             let story = story_ref(&txn, &range.story)?;
             check_range(&story, &txn, range.start, len)?;
+            let (from, to) = crate::ops::code_point_range(&story, &txn, range.start, range.end);
             let start = story
-                .sticky_index(&txn, range.start, Assoc::After)
+                .sticky_index(&txn, from, Assoc::After)
                 .ok_or_else(|| {
                     EditError::InvalidComment("start anchor could not be made".into())
                 })?;
             let end = story
-                .sticky_index(&txn, range.end, Assoc::Before)
+                .sticky_index(&txn, to, Assoc::Before)
                 .ok_or_else(|| EditError::InvalidComment("end anchor could not be made".into()))?;
             anchors.push(anchor_value(&range.story, &start, &end));
         }
@@ -1111,13 +1112,14 @@ impl EditingDoc {
             }
             let story = story_ref(&txn, &range.story)?;
             check_range(&story, &txn, range.start, len)?;
+            let (from, to) = crate::ops::code_point_range(&story, &txn, range.start, range.end);
             let start = story
-                .sticky_index(&txn, range.start, Assoc::After)
+                .sticky_index(&txn, from, Assoc::After)
                 .ok_or_else(|| {
                     EditError::InvalidComment("start anchor could not be made".into())
                 })?;
             let end = story
-                .sticky_index(&txn, range.end, Assoc::Before)
+                .sticky_index(&txn, to, Assoc::Before)
                 .ok_or_else(|| EditError::InvalidComment("end anchor could not be made".into()))?;
             anchors.push(anchor_value(&range.story, &start, &end));
         }

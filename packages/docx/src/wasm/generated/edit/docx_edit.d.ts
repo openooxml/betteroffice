@@ -273,7 +273,8 @@ export class EditSession {
      * Deletes `[start, end)`. Because a range crossing a paragraph boundary
      * includes the boundary pilcrow, a plain delete also merges those
      * paragraphs. Suggesting mode removes nothing and stamps the content
-     * `del` instead. Receipt: `{"revisionId": string|null}`.
+     * `del` instead. Receipt: `{"revisionId": string|null, "range"}`, the
+     * range being what the delete left.
      */
     delete_range(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, author_name?: string | null, author_date?: string | null): string;
     /**
@@ -508,10 +509,10 @@ export class EditSession {
     /**
      * Inserts `text` at `(story, para_id, offset)`. It must contain no
      * paragraph or line breaks, and it inherits the formatting at the
-     * insertion point. Receipt: `{"revisionId": string|null}` — non-null in
-     * suggesting mode, where the text is stamped `ins` and coalesces into an
-     * adjacent insertion by the same author rather than opening a second
-     * revision.
+     * insertion point. Receipt: `{"revisionId": string|null, "range"}` —
+     * the id is non-null in suggesting mode, where the text is stamped `ins`
+     * and coalesces into an adjacent insertion by the same author rather than
+     * opening a second revision; the range is where the text landed.
      */
     insert_text(story: string, para_id: string, offset: number, text: string, author_name?: string | null, author_date?: string | null): string;
     /**

@@ -44,7 +44,8 @@ fn assert_texts(doc: &EditingDoc, expected: &[&str]) {
 #[track_caller]
 fn assert_round_trips(doc: &EditingDoc) {
     let peer = EditingDoc::new(8);
-    peer.apply_update_v1(&doc.encode_state_as_update_v1()).unwrap();
+    peer.apply_update_v1(&doc.encode_state_as_update_v1())
+        .unwrap();
     assert_eq!(texts(&peer), texts(doc));
 }
 
@@ -414,7 +415,9 @@ fn hyperlink_double_click_range_links_the_whole_emoji() {
     let receipt = doc
         .set_hyperlink(&ctx, range(1, 2), Some(hyperlink.clone()))
         .unwrap();
-    expected.set_hyperlink(&ctx, range(1, 3), Some(hyperlink)).unwrap();
+    expected
+        .set_hyperlink(&ctx, range(1, 3), Some(hyperlink))
+        .unwrap();
     assert_receipt(&doc, &receipt, 1, 3);
     assert_same_story(&doc, &expected);
     assert_round_trips(&doc);
@@ -450,7 +453,9 @@ fn triple_click_text_length_after_embed_deletes_the_embed_and_whole_emoji() {
     let receipt = doc.delete_range(&ctx, range(0, end)).unwrap();
     assert_texts(&doc, &["", "b"]);
     assert_eq!(
-        doc.embed_kind(&Position::new("body", 0)).unwrap().as_deref(),
+        doc.embed_kind(&Position::new("body", 0))
+            .unwrap()
+            .as_deref(),
         Some("pilcrow")
     );
     assert_receipt(&doc, &receipt, 0, 0);
@@ -479,7 +484,9 @@ fn backspace_fallback_after_embed_deletes_the_emoji_and_keeps_the_embed() {
     let receipt = doc.delete_range(&ctx, range(2, 3)).unwrap();
     assert_texts(&doc, &["", "b"]);
     assert_eq!(
-        doc.embed_kind(&Position::new("body", 0)).unwrap().as_deref(),
+        doc.embed_kind(&Position::new("body", 0))
+            .unwrap()
+            .as_deref(),
         Some("image")
     );
     assert_receipt(&doc, &receipt, 1, 1);
@@ -502,7 +509,12 @@ fn code_point_boundary_edits_keep_their_existing_offsets() {
     for (offset, expected) in [(1, "ax😀"), (3, "a😀x")] {
         let (doc, ctx) = story();
         let receipt = doc
-            .insert_text(&ctx, Position::new("body", offset), "x", FormatPolicy::Inherit)
+            .insert_text(
+                &ctx,
+                Position::new("body", offset),
+                "x",
+                FormatPolicy::Inherit,
+            )
             .unwrap();
         assert_texts(&doc, &[expected, "b"]);
         assert_receipt(&doc, &receipt, offset, offset + 1);

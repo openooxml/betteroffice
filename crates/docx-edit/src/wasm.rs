@@ -105,6 +105,22 @@ fn validate_frame_epoch(epoch: f64) -> Result<u64, JsValue> {
     Ok(epoch as u64)
 }
 
+/// `{"revisionId", "range"}` for a text edit's receipt.
+fn text_receipt_json(receipt: crate::Receipt) -> String {
+    let range = receipt.range.map(|range| {
+        json!({
+            "story": range.start.story,
+            "start": { "paraId": range.start.para, "offset": range.start.offset },
+            "end": { "paraId": range.end.para, "offset": range.end.offset },
+        })
+    });
+    json!({
+        "revisionId": receipt.revision_ids.into_iter().next(),
+        "range": range,
+    })
+    .to_string()
+}
+
 fn js_err(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
 }
@@ -3174,10 +3190,10 @@ impl EditSession {
 
     /// Inserts `text` at `(story, para_id, offset)`. It must contain no
     /// paragraph or line breaks, and it inherits the formatting at the
-    /// insertion point. Receipt: `{"revisionId": string|null}` — non-null in
-    /// suggesting mode, where the text is stamped `ins` and coalesces into an
-    /// adjacent insertion by the same author rather than opening a second
-    /// revision.
+    /// insertion point. Receipt: `{"revisionId": string|null, "range"}` —
+    /// the id is non-null in suggesting mode, where the text is stamped `ins`
+    /// and coalesces into an adjacent insertion by the same author rather than
+    /// opening a second revision; the range is where the text landed.
     pub fn insert_text(
         &self,
         story: &str,
@@ -3194,13 +3210,14 @@ impl EditSession {
             .doc()
             .insert_text(&ctx, Position::new(story, at), text, FormatPolicy::Inherit)
             .map_err(js_err)?;
-        Ok(json!({ "revisionId": receipt.revision_ids.into_iter().next() }).to_string())
+        Ok(text_receipt_json(receipt))
     }
 
     /// Deletes `[start, end)`. Because a range crossing a paragraph boundary
     /// includes the boundary pilcrow, a plain delete also merges those
     /// paragraphs. Suggesting mode removes nothing and stamps the content
-    /// `del` instead. Receipt: `{"revisionId": string|null}`.
+    /// `del` instead. Receipt: `{"revisionId": string|null, "range"}`, the
+    /// range being what the delete left.
     #[allow(clippy::too_many_arguments)]
     pub fn delete_range(
         &self,
@@ -3220,7 +3237,7 @@ impl EditSession {
             .doc()
             .delete_range(&ctx, StoryRange::new(story, start, end))
             .map_err(js_err)?;
-        Ok(json!({ "revisionId": receipt.revision_ids.into_iter().next() }).to_string())
+        Ok(text_receipt_json(receipt))
     }
 
     /// Replaces `[start, end)` with `text` in one transaction. The inserted
@@ -3247,18 +3264,7 @@ impl EditSession {
             .doc()
             .replace_range(&ctx, StoryRange::new(story, start, end), text)
             .map_err(js_err)?;
-        let range = receipt.range.map(|range| {
-            json!({
-                "story": range.start.story,
-                "start": { "paraId": range.start.para, "offset": range.start.offset },
-                "end": { "paraId": range.end.para, "offset": range.end.offset },
-            })
-        });
-        Ok(json!({
-            "revisionId": receipt.revision_ids.into_iter().next(),
-            "range": range,
-        })
-        .to_string())
+        Ok(text_receipt_json(receipt))
     }
 
     /// Splits a paragraph at `(story, para_id, offset)` by inserting one

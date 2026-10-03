@@ -484,7 +484,10 @@ export interface YrsRevisionReceipt {
   revisionId: string | null;
 }
 
-/** Where the replacement text landed; after the struck-out text when suggesting. */
+/**
+ * Where an edit landed, in whole characters: the inserted text (after the struck-out text when
+ * suggesting), or what a delete left (collapsed when plain, the struck-out text when suggesting).
+ */
 export interface YrsReplaceReceipt extends YrsRevisionReceipt {
   range?: YrsStoryRange;
 }
@@ -1169,12 +1172,12 @@ export interface YrsSession extends CollaborationReplica {
   /** Sets the table-wide preferred width in twips. */
   setTableWidth(table: YrsTableLoc, widthTwips: number): YrsTableReceipt;
   /** Inserts paragraph-break-free text. Suggesting mode mints a revision. */
-  insertText(at: YrsLoc, text: string, suggesting?: YrsAuthor): YrsRevisionReceipt;
+  insertText(at: YrsLoc, text: string, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /**
    * Deletes a range (plain) or marks it as a suggested deletion (suggesting).
    * A range spanning paragraphs also merges them (pilcrow-as-character).
    */
-  deleteRange(range: YrsStoryRange, suggesting?: YrsAuthor): YrsRevisionReceipt;
+  deleteRange(range: YrsStoryRange, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /** Replaces a range with text in one transaction (one shared revision when suggesting). */
   replaceRange(range: YrsStoryRange, text: string, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /**
@@ -2307,7 +2310,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
               suggesting?.name,
               suggesting?.date
             )
-          ) as YrsRevisionReceipt
+          ) as YrsReplaceReceipt
       );
     },
     deleteRange: (range, suggesting) => {
@@ -2324,7 +2327,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
               suggesting?.name,
               suggesting?.date
             )
-          ) as YrsRevisionReceipt
+          ) as YrsReplaceReceipt
       );
     },
     replaceRange: (range, text, suggesting) => {

@@ -1160,8 +1160,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
                 const receipt = session.replaceRange(range, command.displayText, structuralAuthor);
                 range = receipt.range ?? insertedRange;
               } else {
-                session.insertText(at, command.displayText, structuralAuthor);
-                range = insertedRange;
+                range =
+                  session.insertText(at, command.displayText, structuralAuthor).range ??
+                  insertedRange;
               }
             }
             if (
