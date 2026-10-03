@@ -1891,6 +1891,46 @@ fn text_in_the_default_family_needs_that_family_measured() {
 }
 
 #[test]
+fn a_zero_font_size_lays_out_at_words_minimum_and_exports() {
+    let sized = |half_points: u32| {
+        format!(
+            r#"<w:r><w:rPr><w:sz w:val="{half_points}"/><w:szCs w:val="{half_points}"/></w:rPr><w:t xml:space="preserve"> </w:t></w:r>"#
+        )
+    };
+    let body = [
+        fixture::p("00000001", &fixture::r("before")),
+        fixture::p("00000002", &sized(0)),
+        fixture::p("00000003", &sized(2)),
+        fixture::p("00000004", &fixture::r("after")),
+    ]
+    .concat();
+    let bytes = fixture::with_body(&body);
+    docx_layout::clear_measure_fonts();
+    let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
+    let engine = EngineSession::new(7);
+    docx_edit::seed_from_docx(engine.doc(), &bytes).unwrap();
+    let request = fixture::region_request(&engine, &bytes, font).to_string();
+    let reply: serde_json::Value = serde_json::from_str(
+        &engine
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap(),
+    )
+    .unwrap();
+    let tops: Vec<f64> = reply["layout"]["pages"][0]["fragments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|fragment| fragment["y"].as_f64().unwrap())
+        .collect();
+    assert_eq!(tops.len(), 4);
+    let advance = |index: usize| tops[index + 1] - tops[index];
+    assert_eq!(advance(1), advance(2), "a zero size lays out at 1 pt");
+    assert!(advance(1) < advance(0) / 4.0, "{tops:?}");
+    let content = export(&engine, &options(RevisionView::Markup));
+    assert_eq!(content.layout.pages.len(), 1);
+}
+
+#[test]
 fn text_a_header_table_clips_has_no_page_fragments() {
     let (engine, _) = fixture::laid_out(&fixture::clipped_header_docx(), 7);
     let content = export(&engine, &options(RevisionView::Markup));
