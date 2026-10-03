@@ -213,6 +213,43 @@ test('a right-click inside a viewer selection keeps it for the context-menu copy
   expect(await copy).toBe('selected text');
 });
 
+const ignoredInputs: Array<[string, (handleEditorKeyDown: (e: never) => void) => void]> = [
+  ['a header press', () => mouse('mousedown', 50, 40, canvasOf())],
+  ['a footnote press', () => mouse('mousedown', 50, 950, canvasOf())],
+  ['a middle-button press', () => { fireEvent.mouseDown(canvasOf(), { button: 1, clientX: 300, clientY: 400 }); }],
+  ['a key outside the hidden input', (handleEditorKeyDown) => {
+    act(() => handleEditorKeyDown({ target: document.body } as never));
+  }],
+];
+for (const [name, ignore] of ignoredInputs) {
+  test(`${name} hides the viewer selection it does not replace`, async () => {
+    const queries = fakeQueries();
+    stampWorkerFrameVersion(queries, 'A', false, false);
+    const read = (() => new Promise(() => {})) as unknown as ResidentEngineWorkerClient['documentRead'];
+    const ref = createRef<YrsInputRef>();
+    render(createElement(ViewerInput, {
+      ref, read, story: 'body', queries, document: { isDisplayOnly: () => false },
+      onSelectionChange: () => {},
+    }));
+    const { opts } = options({
+      viewerSelection: true,
+      yrsSession: null,
+      yrsInputRef: ref,
+      displayListQueries: queries,
+      getYrsPositionProjection: () => null,
+    });
+    const { result } = renderHook(() => usePagesPointer(opts));
+    mouse('mousedown', 200, 400, canvasOf());
+    mouse('mousemove', 450, 600, window);
+    await nextFrame();
+    mouse('mouseup', 450, 600, window);
+    expect(ref.current!.displaySelection()).toEqual({ anchor: 20, head: 45 });
+    ignore(result.current.handleEditorKeyDown);
+    expect(ref.current!.displaySelection()).toBeNull();
+    expect(ref.current!.readSelectedText!()).toBeNull();
+  });
+}
+
 test('a read-only press places the caret and a drag extends the selection', async () => {
   const { opts, selections, focused } = options();
   renderHook(() => usePagesPointer(opts));

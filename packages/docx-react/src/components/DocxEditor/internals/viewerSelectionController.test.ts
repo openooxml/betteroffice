@@ -263,6 +263,24 @@ test('R6: copy rejects when a new gesture starts', async () => {
   expect((await copy as Error).message).toBe('Selection gesture changed');
 });
 
+test('a gesture that selects nothing hides the selection it replaced', async () => {
+  const { controller, answer } = setup();
+  let changes = 0;
+  controller.subscribe(() => { changes += 1; });
+  controller.select(1, 6);
+  await answer('selectionText', 'A', captured());
+  expect(controller.readSelectedText()).not.toBeNull();
+  changes = 0;
+  controller.beginGesture();
+  expect(changes).toBe(1);
+  expect(controller.displaySelection()).toBeNull();
+  expect(controller.readSelectedText()).toBeNull();
+  controller.select(3, 8);
+  expect(controller.displaySelection()).toEqual({ anchor: 3, head: 8 });
+  await answer('selectionText', 'A', captured('Beta'));
+  expect(await controller.readSelectedText()).toBe('Beta');
+});
+
 test('copy rejects when a valid null story answer drops the selection', async () => {
   const { controller, answer } = setup();
   controller.selectAll();

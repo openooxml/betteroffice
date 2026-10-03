@@ -114,6 +114,7 @@ export class ViewerSelectionController {
     this.unit.clearQueued();
     this.captures.clearQueued();
     this.rejectWaiters('Selection gesture changed');
+    if (this.selection) this.emit();
     return this.gesture;
   }
 
@@ -154,7 +155,7 @@ export class ViewerSelectionController {
   }
 
   displaySelection(): DocxDisplayRange | null {
-    const selection = this.selection;
+    const selection = this.liveSelection();
     return selection && selection.frame.version === this.frame?.version
       ? { anchor: selection.anchor, head: selection.head }
       : null;
@@ -172,7 +173,7 @@ export class ViewerSelectionController {
   }
 
   readSelectedText(): Promise<string> | null {
-    const selection = this.selection;
+    const selection = this.liveSelection();
     return selection && (selection.anchor !== selection.head || selection.unitPending)
       ? this.whenSettled(this.gesture)
       : null;
@@ -256,6 +257,12 @@ export class ViewerSelectionController {
     this.setRange({ anchor: extend ? selection.anchor : head, head }, this.frame, gesture, extend ? 'range' : 'caret', false);
     this.goalX = goalX;
     return true;
+  }
+
+  /** The selection, unless a newer gesture that has not selected yet replaced it. */
+  private liveSelection(): Selection | null {
+    const selection = this.selection;
+    return selection && !(this.reservedGesture && selection.gesture !== this.gesture) ? selection : null;
   }
 
   private takeGesture(): number {
