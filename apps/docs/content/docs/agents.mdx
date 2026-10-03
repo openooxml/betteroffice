@@ -1,0 +1,65 @@
+---
+title: Agents
+description: Search, inspect, propose, and preview DOCX edits through the agents SDK and MCP server.
+---
+
+`@betteroffice/agents` gives agents a bounded document workflow:
+discover → grep → read → propose → render → verify → export.
+The first release supports DOCX, including body text, headers, footers, and table
+cell stories exposed by the editing engine.
+
+## MCP
+
+```sh
+bun add @betteroffice/agents
+codex mcp add betteroffice -- /absolute/path/to/node_modules/.bin/betteroffice-mcp --root /absolute/path/to/documents
+```
+
+Start a new Codex session. Ask it to find a section, propose a precise edit,
+inspect the proposed page, and export a new file. The local server exposes
+literal search, bounded reads, reviewable edits, PNG page previews, and
+save/reopen checks. File paths are checked against the configured root and exports never
+overwrite existing files. Use `--read-only` to expose inspection tools only.
+
+## SDK
+
+```ts
+import { openDocx } from '@betteroffice/agents';
+import { renderDocxPage } from '@betteroffice/agents/render';
+
+const doc = await openDocx(bytes, { renderer: renderDocxPage });
+try {
+  const page = doc.grep({ query: 'Executive summary' });
+  const paragraph = doc.read(page.matches[0].ref);
+  const proposal = doc.propose({
+    author: 'document-agent',
+    edits: [{
+      ref: paragraph.ref,
+      revision: paragraph.revision,
+      oldText: 'Executive summary',
+      newText: 'Board summary',
+    }],
+  });
+  const preview = await doc.render(1, proposal.id);
+  const checks = await doc.verify(proposal.id);
+  const revisedBytes = await doc.export(proposal.id);
+} finally {
+  doc.close();
+}
+```
+
+Use `attachDocx(session)` to work with an existing editor session. Proposals
+check target text and formatting before acceptance; unrelated edits survive.
+Acceptance is one undo step. Exporting a pending proposal leaves the live
+document unchanged.
+
+Follow search `nextCursor`, outline `nextOffset`, and read `nextStart` values
+to retrieve more context. Paragraph refs belong to an open session. Text
+offsets use UTF-16. Edits replace text within one paragraph; embeds, structural
+changes, and existing tracked changes are outside this release's edit surface.
+
+Save/reopen checks do not establish semantic or visual correctness. Inspect
+the rendered pages and their warnings before delivery.
+
+The [package guide](https://github.com/openooxml/betteroffice/tree/main/packages/agents)
+contains the complete tool catalog, limits, host integration, and testing setup.

@@ -46,6 +46,14 @@
 
 ## Packages
 
+### Agent tools
+
+[`@betteroffice/agents`](packages/agents) provides grep-style DOCX discovery,
+bounded reads, precise edit proposals, rendered previews, and save/reopen checks.
+Use its TypeScript SDK with an existing document session or connect the local
+`betteroffice-mcp` server to an agent. DOCX is supported first; other formats are
+planned.
+
 ### Documents — `.docx`
 
 | package | registry | what it does |
