@@ -1184,6 +1184,12 @@ pub struct ResidentDisplayInput {
     input: BuildInput,
 }
 
+impl ResidentDisplayInput {
+    pub fn font_chains(&self) -> &HashMap<String, Vec<u32>> {
+        &self.input.font_chains
+    }
+}
+
 impl std::fmt::Debug for ResidentDisplayInput {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter

@@ -542,6 +542,67 @@ test('font suffixes preserve ids and glyph caches; mismatches require a full sna
   expect(w.harness.glyphCacheCreations).toBe(2);
 });
 
+test('full font sync repaints retained pages while suffix appends preserve their pixels', async () => {
+  for (const paintCaret of [false, true]) {
+    const w = worker();
+    expect(await w.bootstrap()).toMatchObject({ ok: true });
+    w.harness.caret = paintCaret ? caret(1) : null;
+    const sync = (
+      fontsRevision: number,
+      fonts: YrsResidentWorkerSnapshot['fonts'],
+      fontsBaseRevision?: number
+    ) => {
+      w.delta([]);
+      return w.send({
+        type: 'sync',
+        extras: '',
+        expectedFrameEpoch: w.harness.delta!.baseFrameEpoch,
+        paintCaret,
+        snapshot: {
+          clientId: 1,
+          state: new Uint8Array(),
+          selection: null,
+          fonts,
+          fontsRevision,
+          ...(fontsBaseRevision === undefined ? {} : { fontsBaseRevision }),
+          renderInputs: [],
+          measureInputs: [],
+          layoutInput: '',
+          layoutWithRegions: false,
+          layoutRevision: 1,
+        },
+      });
+    };
+    expect(await sync(1, [new Uint8Array([1])])).toMatchObject({ ok: true });
+    expect(await w.attach([1, 2])).toMatchObject({ ok: true });
+    expect(w.harness.rasterized).toEqual([1, 2]);
+    w.resetCalls();
+    expect(await sync(2, [new Uint8Array([2])])).toMatchObject({
+      ok: true,
+      replayedPages: 2,
+      caretPainted: paintCaret,
+    });
+    expect(w.harness.delta!.operations).toEqual([]);
+    expect(w.harness.rasterized).toEqual([1, 2]);
+    expect(w.harness.presented).toEqual([1, 2]);
+    expect(w.surfaces.get('1')!.pixels).toBe(paintCaret ? '1:100|caret:#000' : '1:100');
+    expect(w.surfaces.get('2')!.pixels).toBe('2:100');
+    w.resetCalls();
+    expect(await w.build([], 100, w.harness.caret)).toMatchObject({
+      ok: true,
+      replayedPages: 0,
+      caretPainted: paintCaret,
+    });
+    expect(await sync(3, [new Uint8Array([3])], 2)).toMatchObject({
+      ok: true,
+      replayedPages: 0,
+      caretPainted: paintCaret,
+    });
+    expect(w.harness.rasterized).toEqual([]);
+    expect(w.harness.presented).toEqual([]);
+  }
+});
+
 describe('resident display page release', () => {
   test('answers build, release, then input in FIFO order', async () => {
     const w = worker();

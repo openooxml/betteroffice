@@ -804,6 +804,8 @@ function hydrate(
     if (snapshot.fontsBaseRevision === undefined) {
       session.clearFonts();
       glyphCache = null;
+      for (const pageId of activeOffscreenPageIds) pendingOffscreenPageIds.add(pageId);
+      intactBackBuffers.clear();
     }
     fontsRevision = -1;
     for (const font of snapshot.fonts) {
