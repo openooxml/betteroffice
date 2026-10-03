@@ -9,6 +9,11 @@ use docx_edit::{EditCtx, EngineSession, FormatPolicy, Position, StoryRange, seed
 fn seeded(bytes: &[u8]) -> EngineSession {
     let engine = EngineSession::new(75200);
     seed_from_docx(engine.doc(), bytes).unwrap();
+    let primer = RenderEnv {
+        show_hidden_text: true,
+        ..RenderEnv::default()
+    };
+    engine.lower_story_json("body", &primer).unwrap();
     engine
 }
 

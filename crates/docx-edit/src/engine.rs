@@ -2243,8 +2243,10 @@ impl EngineSession {
         env: &RenderEnv,
     ) -> Result<(), BridgeError> {
         let mut local = crate::bridge::local::LocalLowering::new(self.local_lowering.get());
+        // Preview units serve later decisions, so a story's first lowering (the open) skips them.
+        let record = self.render.borrow().stories.contains_key(story);
         let (blocks, map, revealable_blocks, preview) =
-            crate::bridge::preview::lower_recorded(&self.doc, story, env, &mut local)?;
+            crate::bridge::preview::lower_recorded(&self.doc, story, env, &mut local, record)?;
         let mut render = self.render.borrow_mut();
         render.cache_misses = render.cache_misses.wrapping_add(1);
         render.stories.insert(
@@ -13373,7 +13375,40 @@ mod tests {
     fn preview_seeded(bytes: &[u8]) -> EngineSession {
         let engine = EngineSession::new(75210);
         crate::seed_from_docx(engine.doc(), bytes).unwrap();
+        let primer = RenderEnv {
+            show_hidden_text: true,
+            ..RenderEnv::default()
+        };
+        engine.lower_story_json("body", &primer).unwrap();
         engine
+    }
+
+    #[test]
+    fn preview_local_first_lowering_records_no_units() {
+        let engine = EngineSession::new(75211);
+        crate::seed_from_docx(engine.doc(), &preview_fixture::plain()).unwrap();
+        let id = preview_fixture::ids(&engine).remove(0);
+        preview_mapped_oracle(&engine, &RenderEnv::default());
+        assert!(engine.render.borrow().stories["body"].preview.is_none());
+        let before = engine.stats();
+        preview_mapped_oracle(
+            &engine,
+            &RenderEnv::default().with_revision_preview(&id, RevisionPreview::Accepted),
+        );
+        assert_eq!(
+            engine.stats().lower_preview_patches,
+            before.lower_preview_patches
+        );
+        assert!(engine.render.borrow().stories["body"].preview.is_some());
+        let before = engine.stats();
+        preview_mapped_oracle(
+            &engine,
+            &RenderEnv::default().with_revision_preview(&id, RevisionPreview::Rejected),
+        );
+        assert_eq!(
+            engine.stats().lower_preview_patches,
+            before.lower_preview_patches + 1
+        );
     }
 
     #[test]

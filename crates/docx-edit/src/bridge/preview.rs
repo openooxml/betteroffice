@@ -351,6 +351,7 @@ pub(crate) fn lower_recorded(
     story: &str,
     env: &RenderEnv,
     local: &mut local::LocalLowering,
+    record: bool,
 ) -> Result<
     (
         Vec<LayoutBlock>,
@@ -360,7 +361,7 @@ pub(crate) fn lower_recorded(
     ),
     BridgeError,
 > {
-    let mut preview = (story == "body").then(PreviewUnits::default);
+    let mut preview = (record && story == "body").then(PreviewUnits::default);
     let mut revealable = Some(Vec::new());
     let (blocks, map) = yrs_doc_to_mapped_layout_blocks_inner(
         doc,
