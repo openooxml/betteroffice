@@ -233,15 +233,20 @@ impl EditingDoc {
                     .get(first_after(index))
                     .filter(|chunk| chunk.start <= index && index < chunk.end())
             };
-            self.aggregate_selection_context(range, txn, chunks, SelectionLookups {
-                paragraph_start: start_para.start,
-                pilcrow_index: start_para.pilcrow,
-                start_para_id: &start_para.para_id,
-                end_para_id: &end_para.para_id,
-                pilcrow_chunk: chunk_at(start_para.pilcrow),
-                chunk_at,
-                first_after,
-            })
+            self.aggregate_selection_context(
+                range,
+                txn,
+                chunks,
+                SelectionLookups {
+                    paragraph_start: start_para.start,
+                    pilcrow_index: start_para.pilcrow,
+                    start_para_id: &start_para.para_id,
+                    end_para_id: &end_para.para_id,
+                    pilcrow_chunk: chunk_at(start_para.pilcrow),
+                    chunk_at,
+                    first_after,
+                },
+            )
         })
     }
 
@@ -438,22 +443,35 @@ impl EditingDoc {
             let para_at = |index| bounds.iter().find(|para| index <= para.pilcrow);
             let unknown = || OpError::UnknownStory(range.story.clone());
             let start_para = para_at(range.start).ok_or_else(unknown)?;
-            let end_para = para_at(range.end).or_else(|| bounds.last()).ok_or_else(unknown)?;
-            let pilcrow_chunk = chunks.iter().find_map(|chunk| match &chunk.kind {
-                ChunkKind::Pilcrow(_) if chunk.start == start_para.pilcrow => Some(chunk),
-                _ => None,
+            let end_para = para_at(range.end)
+                .or_else(|| bounds.last())
+                .ok_or_else(unknown)?;
+            let pilcrow_chunk = chunks.iter().find(|chunk| {
+                matches!(chunk.kind, ChunkKind::Pilcrow(_)) && chunk.start == start_para.pilcrow
             });
-            self.aggregate_selection_context(range, txn, chunks, SelectionLookups {
-                paragraph_start: start_para.start,
-                pilcrow_index: start_para.pilcrow,
-                start_para_id: &start_para.para_id,
-                end_para_id: &end_para.para_id,
-                pilcrow_chunk,
-                chunk_at: |index| chunks.iter()
-                    .find(|chunk| chunk.start <= index && index < chunk.end()),
-                first_after: |index| chunks.iter().position(|chunk| chunk.end() > index)
-                    .unwrap_or(chunks.len()),
-            })
+            self.aggregate_selection_context(
+                range,
+                txn,
+                chunks,
+                SelectionLookups {
+                    paragraph_start: start_para.start,
+                    pilcrow_index: start_para.pilcrow,
+                    start_para_id: &start_para.para_id,
+                    end_para_id: &end_para.para_id,
+                    pilcrow_chunk,
+                    chunk_at: |index| {
+                        chunks
+                            .iter()
+                            .find(|chunk| chunk.start <= index && index < chunk.end())
+                    },
+                    first_after: |index| {
+                        chunks
+                            .iter()
+                            .position(|chunk| chunk.end() > index)
+                            .unwrap_or(chunks.len())
+                    },
+                },
+            )
         })
     }
 
@@ -600,22 +618,38 @@ mod tests {
     #[test]
     fn selection_context_matches_seeded_random_oracle_after_text_edits() {
         fn random(state: &mut u64, upper: u32) -> u32 {
-            *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (*state >> 32) as u32 % upper
         }
         fn map(entries: impl IntoIterator<Item = (&'static str, Any)>) -> Any {
-            Any::Map(Arc::new(entries.into_iter().map(|(k, v)| (k.to_owned(), v)).collect()))
+            Any::Map(Arc::new(
+                entries
+                    .into_iter()
+                    .map(|(k, v)| (k.to_owned(), v))
+                    .collect(),
+            ))
         }
         fn attrs(state: &mut u64) -> Attrs {
             let mut attrs = Attrs::new();
-            for key in ["bold", "italic", "underline", "strike", "superscript", "subscript",
-                crate::INS, crate::DEL] {
+            for key in [
+                "bold",
+                "italic",
+                "underline",
+                "strike",
+                "superscript",
+                "subscript",
+                crate::INS,
+                crate::DEL,
+            ] {
                 let value = match random(state, 4) {
                     0 => continue,
                     1 => Any::Null,
                     2 => Any::Bool(false),
                     _ if key == crate::INS || key == crate::DEL => map([
-                        ("id", Any::from("revision")), ("author", Any::from("Reviewer")),
+                        ("id", Any::from("revision")),
+                        ("author", Any::from("Reviewer")),
                         ("date", Any::from(DATE)),
                     ]),
                     _ => Any::Bool(true),
@@ -629,50 +663,102 @@ mod tests {
         for seed in 1..=12 {
             let mut state = seed;
             let doc = EditingDoc::new(7);
-            for id in ["body", "body:t0:r0c0", "empty", "unmarked", "trailing", "broken"] {
+            for id in [
+                "body",
+                "body:t0:r0c0",
+                "empty",
+                "unmarked",
+                "trailing",
+                "broken",
+            ] {
                 doc.create_story(id, "", "Normal", "left").unwrap();
             }
             let mut txn = doc.yrs_doc().transact_mut();
             for id in ["empty", "unmarked", "body", "body:t0:r0c0"] {
                 let story = story_ref(&txn, id).unwrap();
                 story.remove_range(&mut txn, 0, 1);
-                if id == "empty" { continue; }
-                if id == "unmarked" { story.insert(&mut txn, 0, "text"); continue; }
+                if id == "empty" {
+                    continue;
+                }
+                if id == "unmarked" {
+                    story.insert(&mut txn, 0, "text");
+                    continue;
+                }
                 let cell = map([("story", Any::from("body:t0:r0c0"))]);
                 let row = map([("cells", Any::Array(Arc::from(vec![cell])))]);
                 let mut index = 0;
                 for paragraph in 0..4 + random(&mut state, 3) {
                     if paragraph == 0 || paragraph == 2 {
-                        let kind = if id == "body" && paragraph == 0 { "table" } else { "pageBreak" };
-                        story.insert_embed_with_attributes(&mut txn, index, MapPrelim::from_iter([
-                            (KIND_KEY, Any::from(kind)), ("rows", Any::Array(Arc::from(vec![row.clone()]))),
-                        ]), attrs(&mut state));
+                        let kind = if id == "body" && paragraph == 0 {
+                            "table"
+                        } else {
+                            "pageBreak"
+                        };
+                        story.insert_embed_with_attributes(
+                            &mut txn,
+                            index,
+                            MapPrelim::from_iter([
+                                (KIND_KEY, Any::from(kind)),
+                                ("rows", Any::Array(Arc::from(vec![row.clone()]))),
+                            ]),
+                            attrs(&mut state),
+                        );
                         index += 1;
                     }
-                    for run in 0..if paragraph == 1 { 0 } else { 2 + random(&mut state, 3) } {
+                    for run in 0..if paragraph == 1 {
+                        0
+                    } else {
+                        2 + random(&mut state, 3)
+                    } {
                         if run == 1 {
-                            story.insert_embed_with_attributes(&mut txn, index,
-                                MapPrelim::from_iter([(KIND_KEY, Any::from("image"))]), attrs(&mut state));
+                            story.insert_embed_with_attributes(
+                                &mut txn,
+                                index,
+                                MapPrelim::from_iter([(KIND_KEY, Any::from("image"))]),
+                                attrs(&mut state),
+                            );
                             index += 1;
                         }
                         let text = ["a", "bc", "é", "😀", "xyz"][random(&mut state, 5) as usize];
                         story.insert_with_attributes(&mut txn, index, text, attrs(&mut state));
                         index += text.encode_utf16().count() as u32;
                     }
-                    story.insert_embed_with_attributes(&mut txn, index, MapPrelim::from_iter([
-                        (KIND_KEY, Any::from("pilcrow")),
-                        (crate::PARA_ID, Any::from(format!("{id}:p{}", paragraph % 2))),
-                        ("pStyle", Any::from(format!("Style{paragraph}"))),
-                    ]), attrs(&mut state));
+                    story.insert_embed_with_attributes(
+                        &mut txn,
+                        index,
+                        MapPrelim::from_iter([
+                            (KIND_KEY, Any::from("pilcrow")),
+                            (
+                                crate::PARA_ID,
+                                Any::from(format!("{id}:p{}", paragraph % 2)),
+                            ),
+                            ("pStyle", Any::from(format!("Style{paragraph}"))),
+                        ]),
+                        attrs(&mut state),
+                    );
                     index += 1;
                 }
             }
-            story_ref(&txn, "trailing").unwrap().insert(&mut txn, 1, "tail");
+            story_ref(&txn, "trailing")
+                .unwrap()
+                .insert(&mut txn, 1, "tail");
             drop(txn);
-            let check = |range: StoryRange| assert_eq!(doc.selection_context(&range),
-                doc.selection_context_reference(&range), "range {range:?}, seed {seed}");
+            let check = |range: StoryRange| {
+                assert_eq!(
+                    doc.selection_context(&range),
+                    doc.selection_context_reference(&range),
+                    "range {range:?}, seed {seed}"
+                )
+            };
             for edit in 0..=10 {
-                for id in ["body", "body:t0:r0c0", "empty", "unmarked", "trailing", "missing"] {
+                for id in [
+                    "body",
+                    "body:t0:r0c0",
+                    "empty",
+                    "unmarked",
+                    "trailing",
+                    "missing",
+                ] {
                     let len = doc.story_len(id).unwrap_or(0);
                     for start in 0..=len + 2 {
                         for end in (start..=start + 4).chain([len, 0, u32::MAX]) {
@@ -681,39 +767,67 @@ mod tests {
                     }
                     check(StoryRange::new(id, u32::MAX, 0));
                 }
-                if edit == 10 { break; }
+                if edit == 10 {
+                    break;
+                }
                 let id = ["body", "body:t0:r0c0"][random(&mut state, 2) as usize];
                 let txn = doc.yrs_doc().transact();
                 let story = story_ref(&txn, id).unwrap();
                 let chunks = doc.chunk_snapshot(id, &story, &txn);
                 drop(txn);
                 let chunk = &chunks[random(&mut state, chunks.len() as u32) as usize];
-                if let ChunkKind::Text(text) = &chunk.kind && edit % 3 == 0 {
+                if let ChunkKind::Text(text) = &chunk.kind
+                    && edit % 3 == 0
+                {
                     let end = chunk.start + text.chars().next().unwrap().len_utf16() as u32;
-                    doc.delete_range(&local(), StoryRange::new(id, chunk.start, end)).unwrap();
+                    doc.delete_range(&local(), StoryRange::new(id, chunk.start, end))
+                        .unwrap();
                 } else {
                     let text = ["q", "rs", "😀"][random(&mut state, 3) as usize];
                     let before = doc.committed_epoch();
                     let mut txn = doc.yrs_doc().transact_mut();
                     story.insert_with_attributes(&mut txn, chunk.start, text, attrs(&mut state));
                     drop(txn);
-                    doc.advance_paragraph_index_after_text_insert(id, before,
-                        doc.committed_epoch(), chunk.start, text.encode_utf16().count() as u32);
+                    doc.advance_paragraph_index_after_text_insert(
+                        id,
+                        before,
+                        doc.committed_epoch(),
+                        chunk.start,
+                        text.encode_utf16().count() as u32,
+                    );
                 }
             }
-            doc.chunk_snapshots.lock().unwrap().insert("broken", doc.committed_epoch(),
-                Arc::new(vec![Chunk { start: 0, len: 1, kind: ChunkKind::Embed(None),
-                    attrs: BTreeMap::new() }]));
+            doc.chunk_snapshots.lock().unwrap().insert(
+                "broken",
+                doc.committed_epoch(),
+                Arc::new(vec![Chunk {
+                    start: 0,
+                    len: 1,
+                    kind: ChunkKind::Embed(None),
+                    attrs: BTreeMap::new(),
+                }]),
+            );
             for (id, start, end, error) in [
                 ("missing", 1, 0, OpError::InvalidRange { start: 1, end: 0 }),
                 ("missing", 0, 1, OpError::UnknownStory("missing".into())),
                 ("empty", 0, 1, OpError::OutOfBounds { index: 1, len: 0 }),
                 ("empty", 0, 0, OpError::UnknownStory("empty".into())),
                 ("broken", 0, 2, OpError::OutOfBounds { index: 2, len: 1 }),
-                ("broken", 0, 0, OpError::ExpectedPilcrow { story: "broken".into(), index: 0 }),
+                (
+                    "broken",
+                    0,
+                    0,
+                    OpError::ExpectedPilcrow {
+                        story: "broken".into(),
+                        index: 0,
+                    },
+                ),
             ] {
                 check(StoryRange::new(id, start, end));
-                assert_eq!(doc.selection_context(&StoryRange::new(id, start, end)), Err(error));
+                assert_eq!(
+                    doc.selection_context(&StoryRange::new(id, start, end)),
+                    Err(error)
+                );
             }
         }
     }
