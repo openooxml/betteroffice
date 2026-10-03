@@ -1,5 +1,11 @@
 # @betteroffice/rust-crates
 
+## 0.4.3
+
+### Patch Changes
+
+- d8fe3c0: Documents open faster, especially ones with many comments.
+
 ## 0.4.2
 
 ### Patch Changes
