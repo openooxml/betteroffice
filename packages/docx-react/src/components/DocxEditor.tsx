@@ -2107,12 +2107,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             editor?.syncYrsInputState(true);
           } catch {}
         };
-        if (viewerReads) {
-          const authority = workerOpenReplicaPending(session) && registeredWorkerProposalAuthority(session);
-          if (authority) void authority.removeComment(String(id), main).catch(() => {});
-        } else {
-          main();
-        }
+        const authority = viewerReads ? registeredWorkerProposalAuthority(session) : null;
+        if (authority) void authority.removeComment(String(id), main).catch(() => {});
+        else main();
       }
       if (target) onCommentDelete?.(target);
     },
