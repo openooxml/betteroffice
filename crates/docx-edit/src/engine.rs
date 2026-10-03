@@ -9,8 +9,9 @@ use std::rc::Rc;
 use docx_layout::display_list::DisplayList;
 use docx_layout::footnotes::{
     FOOTNOTE_COLUMN_GAP_PX, OrderedMap, apply_note_presentation, assign_note_presentations,
-    attach_note_areas, build_note_presentations, collect_note_refs, map_note_anchors_to_pages,
-    map_notes_to_pages, stabilize_note_layout, stamp_note_pages,
+    attach_note_areas, build_note_presentations, calculate_note_reserved_heights, collect_note_refs,
+    footnote_columns_by_page, map_note_anchors_to_pages, map_notes_to_pages, reserved_heights_equal,
+    stabilize_note_layout, stamp_note_pages,
 };
 use docx_layout::header_footer::{
     HeaderFooterKind, HeaderFooterMetrics, HeaderFooterPayload, HeaderFooterType,
@@ -47,6 +48,9 @@ use crate::structured::{
     AnchorScope, DocxLayoutMap, DocxPagedStructuredContent, DocxSnapshotLayoutMap, ExportFailure,
     ExportFailureCode, ExportRead, ExportRefusal, PageExportOptions, RevisionView, StoryKind,
 };
+
+mod pagination_signature;
+use pagination_signature::pagination_signature;
 
 #[derive(Debug)]
 struct LoweredStory {
@@ -105,6 +109,43 @@ struct ResidentRegionState {
     /// edit can relayout residently. `None` when the pass was not
     /// resident-body or the document shape rules the fast path out.
     fast_path: Option<RegionFastPathState>,
+    note_reuse: Option<Rc<NoteReuseState>>,
+}
+
+#[derive(Debug, PartialEq)]
+struct NoteReuseIdentity {
+    request: String,
+    options: serde_json::Value,
+    measurement: serde_json::Value,
+    measurement_fingerprint: u64,
+    fonts: (u64, usize),
+    render_env: RenderEnv,
+    regional: u64,
+    note_stories: Vec<(String, Option<Fingerprint>)>,
+    note_input: serde_json::Value,
+    separator_heights: [f64; 2],
+}
+
+#[derive(Debug)]
+struct NoteReuseState {
+    identity: NoteReuseIdentity,
+    doc_epoch: u64,
+    block_fingerprints: Vec<Fingerprint>,
+    signatures: Vec<Option<Rc<serde_json::Value>>>,
+    final_options: docx_layout::types::LayoutOptions,
+    reserved_heights: OrderedMap<u32, f64>,
+    anchor_pages: OrderedMap<u32, Vec<i64>>,
+    note_pages: OrderedMap<u32, Vec<i64>>,
+    presentations: OrderedMap<i64, docx_layout::footnotes::NotePresentation>,
+    contents: Rc<Vec<docx_layout::footnotes::NoteContent>>,
+    notes_converged: bool,
+    page_count: usize,
+}
+
+#[derive(Debug)]
+struct NoteReuseEdit {
+    paragraph: String,
+    epochs: (u64, u64),
 }
 
 /// Retained region-pass configuration consumed by
@@ -933,6 +974,9 @@ struct PaginationState {
     pagination_calls: u64,
     incremental_pagination_calls: u64,
     pagination_blocks_placed: u64,
+    note_shortcut_taken: u64,
+    note_shortcut_fell_back: u64,
+    note_stabilization_placements: u64,
 }
 
 #[derive(Debug, Default)]
@@ -1058,6 +1102,7 @@ pub struct EngineSession {
     partial_document: Cell<bool>,
     /// Resident text edits re-lower only their paragraph when eligible.
     local_lowering: Cell<bool>,
+    note_reuse_edit: RefCell<Option<NoteReuseEdit>>,
 }
 
 /// The font requirements of `blocks` that `measurement` gives no chain of registered fonts, so
@@ -2006,6 +2051,7 @@ impl EngineSession {
             font_fingerprints: RefCell::new(HashMap::new()),
             partial_document: Cell::new(false),
             local_lowering: Cell::new(false),
+            note_reuse_edit: RefCell::new(None),
         }
     }
 
@@ -2037,6 +2083,7 @@ impl EngineSession {
         text: Option<&str>,
         lower_locally: bool,
     ) -> crate::OpResult<crate::Receipt> {
+        self.note_reuse_edit.replace(None);
         let before = self.doc_epoch();
         let paragraph_epoch =
             (self.local_lowering.get() && text.is_some() && range.start == range.end)
@@ -2053,6 +2100,17 @@ impl EngineSession {
             )?,
             None => self.doc.delete_range(&ctx, range.clone())?,
         };
+        if range.story == "body"
+            && (text.is_none() || range.start == range.end)
+            && receipt.new_para_ids.is_empty()
+            && let Some(locations) = &receipt.range
+            && locations.start.para == locations.end.para
+        {
+            self.note_reuse_edit.replace(Some(NoteReuseEdit {
+                paragraph: locations.start.para.clone(),
+                epochs: (before, self.doc_epoch()),
+            }));
+        }
         if let (Some(before), Some(text)) = (paragraph_epoch, text) {
             self.doc.advance_paragraph_index_after_text_insert(
                 &range.story,
@@ -2988,85 +3046,226 @@ impl EngineSession {
             .iter()
             .flat_map(|measured| collect_note_refs(std::slice::from_ref(&measured.block)))
             .collect::<Vec<_>>();
+        let note_identity = if resident_body
+            && main_body
+            && !provisional
+            && !self.partial_document.get()
+            && !has_floats
+            && !refs.is_empty()
+        {
+            parsed_render_env
+                .as_ref()
+                .map(|env| {
+                    self.note_reuse_identity(
+                        &input_json,
+                        &input,
+                        &regions,
+                        &notes,
+                        &measurement,
+                        measurement_fingerprint,
+                        fonts,
+                        env,
+                    )
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        let note_fingerprints = block_fingerprints.clone();
+        let retained_notes = self
+            .regions
+            .borrow()
+            .as_ref()
+            .and_then(|state| state.note_reuse.as_ref().map(Rc::clone));
+        let note_signatures: Vec<_> = if note_identity.is_some() {
+            input
+                .measured
+                .iter()
+                .enumerate()
+                .map(|(index, measured)| {
+                    if let Some(retained) = retained_notes.as_ref()
+                        && retained.block_fingerprints.get(index) == block_fingerprints.get(index)
+                        && let Some(signature) = retained.signatures.get(index)
+                    {
+                        signature.clone()
+                    } else {
+                        pagination_signature(measured).map(Rc::new)
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let candidate = retained_notes.as_ref().filter(|retained| {
+            let edit = self.note_reuse_edit.borrow();
+            let Some(edit) = edit.as_ref() else {
+                return false;
+            };
+            note_identity.as_ref() == Some(&retained.identity)
+                && edit.epochs == (retained.doc_epoch, self.doc_epoch())
+                && retained.block_fingerprints.len() == block_fingerprints.len()
+                && retained.signatures.len() == note_signatures.len()
+                && retained.block_fingerprints != block_fingerprints
+                && input.measured.iter().enumerate().all(|(index, measured)| {
+                    retained.block_fingerprints[index] == block_fingerprints[index]
+                        || (matches!(&measured.block, LayoutBlock::Paragraph(paragraph)
+                            if block_key(&paragraph.id).as_ref() == edit.paragraph.as_str())
+                            && note_signatures[index].is_some()
+                            && note_signatures[index] == retained.signatures[index])
+                })
+        });
         let previous_notes = note_page_keys(self.pagination.borrow().layout.as_ref());
-        // The note fixpoint replays `base_input`. Without notes `input` is the
-        // final pass; with notes the final pass carries reserved heights, so
-        // the reservation-free pass stays out of the retained pagination state
-        // that the next edit paginates against.
-        // Placement only zeroes contextual spacing, which every pass applies
-        // again, so the note passes replay the body arena in place. Page-side
-        // wrapping rewrites shapes per pass, so it replays a copy instead.
-        let base_input = (!refs.is_empty()
-            && resident_body
-            && input.measured.iter().any(|measured| {
-                matches!(&measured.block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape))
-            }))
-        .then(|| input.clone());
-        let (mut initial_layout, mut arena) = if refs.is_empty() {
-            self.layout_document_value_with_fingerprints(
-                input,
+        let mut reused = None;
+        if let Some(retained) = candidate {
+            let mut final_input = input.clone();
+            final_input.options = retained.final_options.clone();
+            let attempt = self.layout_document_value_with_fingerprints(
+                final_input,
                 block_fingerprints.clone(),
                 Some((revision_preview_key, &revision_preview, main_body)),
                 cached_page_totals,
-            )?;
-            let layout = self
-                .pagination
-                .borrow_mut()
-                .layout
-                .take()
-                .expect("layout retained after successful pagination");
-            (layout, None)
-        } else {
-            let layout =
-                docx_layout::place::layout_document(&mut input).map_err(layout_error_message)?;
-            (layout, Some(input))
-        };
-        apply_document_regions(&mut initial_layout, &regions);
-        let presentations = build_note_presentations(&refs, &initial_layout.pages, &regions);
-        assign_note_presentations(&mut notes.contents, &presentations);
-        if resident_body {
-            self.measure_resident_notes(
-                &mut notes.contents,
-                &refs,
-                &initial_layout,
-                &regions,
-                &measurement,
-                parsed_render_env
-                    .as_ref()
-                    .expect("resident body required render environment"),
-            )?;
-        }
-        let stabilized = stabilize_note_layout(
-            |reserved| {
-                let mut copy;
-                let pass = match (&base_input, arena.as_mut()) {
-                    (Some(base), _) => {
-                        copy = base.clone();
-                        &mut copy
+            );
+            let mut pagination = self.pagination.borrow_mut();
+            if attempt.is_ok()
+                && let Some(layout) = pagination.layout.as_mut()
+            {
+                apply_document_regions(layout, &regions);
+                let anchors = map_note_anchors_to_pages(&layout.pages, &refs);
+                let assignments = map_notes_to_pages(&layout.pages, &refs, &regions);
+                let required = calculate_note_reserved_heights(
+                    &assignments,
+                    &retained.contents,
+                    &footnote_columns_by_page(&layout.pages, &regions),
+                );
+                if layout.pages.len() == retained.page_count
+                    && anchors == retained.anchor_pages
+                    && assignments == retained.note_pages
+                    && reserved_heights_equal(&required, &retained.reserved_heights)
+                {
+                    let mut presentations = retained.presentations.clone();
+                    for (id, _) in retained.presentations.iter() {
+                        if let Some(reference) =
+                            refs.iter().find(|reference| reference.map_id() == *id)
+                            && let Some(presentation) = presentations.get_mut(id)
+                        {
+                            presentation.anchor.doc_start = Some(reference.pm_pos);
+                            presentation.anchor.doc_end = Some(reference.pm_pos + 1.0);
+                        }
                     }
-                    (None, Some(arena)) => arena,
-                    (None, None) => {
-                        return Err(docx_layout::LayoutError::Invalid(
-                            "note passes without a body arena".to_owned(),
-                        ));
-                    }
-                };
-                pass.options.footnote_reserved_heights = reservation_options(reserved);
-                if resident_body {
-                    stabilize_shape_wrapping(pass, &regions, &measurement)?;
+                    notes.contents = retained.contents.as_ref().clone();
+                    assign_note_presentations(&mut notes.contents, &presentations);
+                    reused = Some((
+                        docx_layout::footnotes::StabilizedNoteLayout {
+                            layout: pagination.layout.take().expect("checked note layout"),
+                            page_note_map: assignments,
+                            reserved_heights: retained.reserved_heights.clone(),
+                            converged: retained.notes_converged,
+                        },
+                        presentations,
+                    ));
                 }
-                let mut layout = docx_layout::place::layout_document(pass)?;
-                apply_document_regions(&mut layout, &regions);
-                Ok(layout)
-            },
-            &refs,
-            &notes.contents,
-            initial_layout,
-            &regions,
-        )
-        .map_err(layout_error_message)?;
+            }
+            if reused.is_none() {
+                pagination.checkpoints.clear();
+            }
+        }
+        if !refs.is_empty() && retained_notes.is_some() {
+            let mut pagination = self.pagination.borrow_mut();
+            if reused.is_some() {
+                pagination.note_shortcut_taken = pagination.note_shortcut_taken.wrapping_add(1);
+            } else {
+                pagination.note_shortcut_fell_back =
+                    pagination.note_shortcut_fell_back.wrapping_add(1);
+            }
+        }
+        let (stabilized, final_input, presentations) = if let Some((stabilized, presentations)) = reused
+        {
+            (stabilized, None, presentations)
+        } else {
+            // The note fixpoint replays `base_input`. Without notes `input` is the
+            // final pass; with notes the final pass carries reserved heights, so
+            // the reservation-free pass stays out of the retained pagination state
+            // that the next edit paginates against.
+            // Placement only zeroes contextual spacing, which every pass applies
+            // again, so the note passes replay the body arena in place. Page-side
+            // wrapping rewrites shapes per pass, so it replays a copy instead.
+            let base_input = (!refs.is_empty()
+                && resident_body
+                && input.measured.iter().any(|measured| {
+                    matches!(&measured.block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape))
+                }))
+            .then(|| input.clone());
+            let (mut initial_layout, mut arena) = if refs.is_empty() {
+                self.layout_document_value_with_fingerprints(
+                    input,
+                    block_fingerprints.clone(),
+                    Some((revision_preview_key, &revision_preview, main_body)),
+                    cached_page_totals,
+                )?;
+                let layout = self
+                    .pagination
+                    .borrow_mut()
+                    .layout
+                    .take()
+                    .expect("layout retained after successful pagination");
+                (layout, None)
+            } else {
+                let layout =
+                    docx_layout::place::layout_document(&mut input).map_err(layout_error_message)?;
+                (layout, Some(input))
+            };
+            apply_document_regions(&mut initial_layout, &regions);
+            let presentations = build_note_presentations(&refs, &initial_layout.pages, &regions);
+            assign_note_presentations(&mut notes.contents, &presentations);
+            if resident_body {
+                self.measure_resident_notes(
+                    &mut notes.contents,
+                    &refs,
+                    &initial_layout,
+                    &regions,
+                    &measurement,
+                    parsed_render_env
+                        .as_ref()
+                        .expect("resident body required render environment"),
+                )?;
+            }
+            let stabilized = stabilize_note_layout(
+                |reserved| {
+                    let mut pagination = self.pagination.borrow_mut();
+                    pagination.note_stabilization_placements =
+                        pagination.note_stabilization_placements.wrapping_add(1);
+                    drop(pagination);
+                    let mut copy;
+                    let pass = match (&base_input, arena.as_mut()) {
+                        (Some(base), _) => {
+                            copy = base.clone();
+                            &mut copy
+                        }
+                        (None, Some(arena)) => arena,
+                        (None, None) => {
+                            return Err(docx_layout::LayoutError::Invalid(
+                                "note passes without a body arena".to_owned(),
+                            ));
+                        }
+                    };
+                    pass.options.footnote_reserved_heights = reservation_options(reserved);
+                    if resident_body {
+                        stabilize_shape_wrapping(pass, &regions, &measurement)?;
+                    }
+                    let mut layout = docx_layout::place::layout_document(pass)?;
+                    apply_document_regions(&mut layout, &regions);
+                    Ok(layout)
+                },
+                &refs,
+                &notes.contents,
+                initial_layout,
+                &regions,
+            )
+            .map_err(layout_error_message)?;
+            (stabilized, base_input.or(arena), presentations)
+        };
         let notes_converged = stabilized.converged;
-        if let Some(mut final_input) = base_input.or(arena) {
+        if let Some(mut final_input) = final_input {
             final_input.options.footnote_reserved_heights =
                 reservation_options(&stabilized.reserved_heights);
             let reshaped = resident_body
@@ -3087,6 +3286,12 @@ impl EngineSession {
             self.pagination.borrow_mut().layout = Some(stabilized.layout);
         }
         let mut pagination = self.pagination.borrow_mut();
+        let final_options = pagination
+            .input
+            .as_ref()
+            .expect("input retained after successful pagination")
+            .options
+            .clone();
         let layout = pagination
             .layout
             .as_mut()
@@ -3101,8 +3306,25 @@ impl EngineSession {
         layout.cached_page_totals = cached_page_totals;
         apply_document_regions(layout, &regions);
         let page_note_map = map_notes_to_pages(&layout.pages, &refs, &regions);
+        let note_contents = Rc::new(notes.contents);
+        let note_reuse = note_identity.map(|identity| {
+            Rc::new(NoteReuseState {
+                identity,
+                doc_epoch: self.doc_epoch(),
+                block_fingerprints: note_fingerprints,
+                signatures: note_signatures,
+                final_options,
+                reserved_heights: stabilized.reserved_heights.clone(),
+                anchor_pages: map_note_anchors_to_pages(&layout.pages, &refs),
+                note_pages: page_note_map.clone(),
+                presentations,
+                contents: Rc::clone(&note_contents),
+                notes_converged,
+                page_count: layout.pages.len(),
+            })
+        });
         stamp_note_pages(layout, &page_note_map, &regions);
-        attach_note_areas(layout, &page_note_map, &notes.contents, &regions);
+        attach_note_areas(layout, &page_note_map, &note_contents, &regions);
         let note_changed_pages: Vec<usize> = note_page_keys(Some(layout))
             .iter()
             .enumerate()
@@ -3120,7 +3342,7 @@ impl EngineSession {
         pagination.note_changed_pages = note_changed_pages;
         let serial = pagination.layout_epoch;
         let headers_footers = measured_value.or_else(|| regions.headers_footers.clone());
-        let notes_clear = notes.contents.is_empty() && refs.is_empty();
+        let notes_clear = note_contents.is_empty() && refs.is_empty();
         // Multi-section documents are excluded: an edit can move a section
         // boundary without changing the total page count, which changes
         // section-relative page labels and the PAGE/NUMPAGES field widths
@@ -3139,6 +3361,7 @@ impl EngineSession {
             request_json: input_json,
             request_fingerprint,
             headers_footers,
+            note_reuse,
             fast_path: regional.map(|(regional, render_env)| RegionFastPathState {
                 cached_page_totals,
                 regions: Rc::new(regions),
@@ -3173,7 +3396,7 @@ impl EngineSession {
                 notes_converged,
                 render_env,
                 headers_footers: measured_headers_footers.map(Rc::new),
-                notes: Rc::new(notes.contents),
+                notes: note_contents,
             }));
         }
         Ok(RegionPass {
@@ -3224,6 +3447,45 @@ impl EngineSession {
             bytes.push(u8::from(lowered.is_some()));
         }
         hash_bytes(&bytes)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn note_reuse_identity(
+        &self,
+        request: &str,
+        input: &LayoutInput,
+        regions: &DocumentRegions,
+        notes: &docx_layout::footnotes::NoteLayoutInput,
+        measurement: &docx_layout::measure_blocks::MeasurementConfig,
+        measurement_fingerprint: u64,
+        fonts: (u64, usize),
+        env: &RenderEnv,
+    ) -> Result<NoteReuseIdentity, String> {
+        let mut note_stories = Vec::new();
+        for content in &notes.contents {
+            let prefix = match content.note_kind {
+                docx_layout::footnotes::NoteKind::Footnote => "fn",
+                docx_layout::footnotes::NoteKind::Endnote => "en",
+            };
+            let story = format!("{prefix}:{}", content.id);
+            let fingerprint = self
+                .with_lowered_story(&story, env, crate::fingerprint::fingerprint_with_positions)
+                .ok()
+                .transpose()?;
+            note_stories.push((story, fingerprint));
+        }
+        Ok(NoteReuseIdentity {
+            request: request.to_owned(),
+            options: serde_json::to_value(&input.options).map_err(|error| error.to_string())?,
+            measurement: serde_json::to_value(measurement).map_err(|error| error.to_string())?,
+            measurement_fingerprint,
+            fonts,
+            render_env: env.clone(),
+            regional: self.regional_fingerprint(regions, env),
+            note_stories,
+            note_input: serde_json::to_value(notes).map_err(|error| error.to_string())?,
+            separator_heights: [docx_layout::footnotes::FOOTNOTE_SEPARATOR_HEIGHT; 2],
+        })
     }
 
     fn measure_resident_notes(
@@ -6532,6 +6794,90 @@ mod tests {
         assert_region_state_matches_cold(&engine, &request, "full pass after the fallback");
     }
 
+    fn region_note_snapshot(engine: &EngineSession) -> serde_json::Value {
+        let pagination = engine.pagination.borrow();
+        let input = pagination.input.as_ref().unwrap();
+        let refs: Vec<_> = input
+            .measured
+            .iter()
+            .flat_map(|measured| collect_note_refs(std::slice::from_ref(&measured.block)))
+            .collect();
+        if refs.is_empty()
+            && engine
+                .capture
+                .borrow()
+                .as_ref()
+                .is_none_or(|capture| capture.notes.is_empty())
+        {
+            return serde_json::Value::Null;
+        }
+        let state = engine.regions.borrow();
+        let state = state.as_ref().unwrap();
+        let request: RegionLayoutInput = serde_json::from_str(&state.request_json).unwrap();
+        let (_, regions, _, _, _, _) = request.split();
+        let layout = pagination.layout.as_ref().unwrap();
+        let anchors = map_note_anchors_to_pages(&layout.pages, &refs);
+        let assignments = map_notes_to_pages(&layout.pages, &refs, &regions);
+        let capture = engine.capture.borrow();
+        let capture = capture.as_ref().unwrap();
+        let required = calculate_note_reserved_heights(
+            &assignments,
+            capture.notes.as_ref(),
+            &footnote_columns_by_page(&layout.pages, &regions),
+        );
+        let reserved = |page: u32| {
+            input
+                .options
+                .footnote_reserved_heights
+                .as_ref()
+                .and_then(|heights| heights.get(&page.to_string()))
+                .copied()
+                .unwrap_or(0.0)
+        };
+        let settlement = if capture.notes_converged {
+            "converged"
+        } else if required.iter().all(|(page, height)| reserved(*page) >= *height) {
+            "covering"
+        } else {
+            "unsettled"
+        };
+        let presentations = state.note_reuse.as_ref().map(|retained| {
+            retained
+                .presentations
+                .iter()
+                .map(|(id, presentation)| {
+                    json!([
+                        id,
+                        presentation.display_number,
+                        presentation.display_label,
+                        presentation.anchor,
+                    ])
+                })
+                .collect::<Vec<_>>()
+        });
+        let surplus_pages: Vec<_> = layout
+            .pages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, page)| {
+                (reserved(page.number) > required.get(&page.number).copied().unwrap_or(0.0))
+                    .then_some(index)
+            })
+            .collect();
+        json!({
+            "reservations": input.options.footnote_reserved_heights,
+            "requiredReservations": required.iter().collect::<Vec<_>>(),
+            "anchors": anchors.iter().collect::<Vec<_>>(),
+            "assignments": assignments.iter().collect::<Vec<_>>(),
+            "notes": capture.notes.as_ref(),
+            "presentations": presentations,
+            "converged": capture.notes_converged,
+            "settlement": settlement,
+            "surplusPages": surplus_pages,
+            "pageCount": layout.pages.len(),
+        })
+    }
+
     /// The retained region state equals a cold full pass of `request` over the same document.
     fn assert_region_state_matches_cold(engine: &EngineSession, request: &str, label: &str) {
         let snapshot = |engine: &EngineSession| {
@@ -6540,6 +6886,7 @@ mod tests {
                 serde_json::to_string(&pagination.input.as_ref().unwrap().measured).unwrap(),
                 pagination.block_fingerprints.clone(),
                 serde_json::to_string(&pagination.layout.as_ref().unwrap().pages).unwrap(),
+                region_note_snapshot(engine),
             )
         };
         let resident = snapshot(engine);
@@ -6687,6 +7034,7 @@ mod tests {
                 serde_json::to_string(&pagination.input.as_ref().unwrap().measured).unwrap(),
                 pagination.block_fingerprints.clone(),
                 serde_json::to_string(&pagination.layout.as_ref().unwrap().pages).unwrap(),
+                region_note_snapshot(engine),
             )
         };
         let before = Rc::as_ptr(&engine.render.borrow().stories["body"].blocks);
@@ -6720,6 +7068,447 @@ mod tests {
             patched && enabled,
             "{story} [{start}, {end}) {text:?} enabled={enabled}"
         );
+    }
+
+    fn note_typing_fixture(prefix: &str, suffix: &str) -> (EngineSession, String) {
+        let engine = EngineSession::new(9620);
+        crate::seed::seed_from_docx(
+            engine.doc(),
+            include_bytes!("../tests/fixtures/footnote-anchor.docx"),
+        )
+        .unwrap();
+        let mut ops = vec![crate::RawOp::Delete {
+            index: 0,
+            len: engine.doc().story_len("body").unwrap(),
+        }];
+        let mut cursor = 0;
+        for (index, text) in [prefix, suffix].into_iter().enumerate() {
+            if index == 1 {
+                ops.push(crate::RawOp::InsertEmbed {
+                    index: cursor,
+                    kind: "noteRef".to_owned(),
+                    payload: vec![("footnoteRefId".to_owned(), Any::Number(2.0))],
+                    attrs: Attrs::new(),
+                });
+                cursor += 1;
+            }
+            if !text.is_empty() {
+                ops.push(crate::RawOp::Insert {
+                    index: cursor,
+                    text: text.to_owned(),
+                    attrs: Attrs::new(),
+                });
+                cursor += text.encode_utf16().count() as u32;
+            }
+        }
+        ops.push(crate::RawOp::InsertEmbed {
+            index: cursor,
+            kind: "pilcrow".to_owned(),
+            payload: vec![("paraId".to_owned(), Any::from("note-body"))],
+            attrs: Attrs::new(),
+        });
+        engine
+            .doc()
+            .apply_raw_ops("body", ops, &crate::EditCtx::local("", ""))
+            .unwrap();
+        let mut request = note_area_layout_request();
+        request.as_object_mut().unwrap().remove("measured");
+        request["bodyStory"] = json!("body");
+        request["renderEnv"] = json!({});
+        request["regions"]["sections"][0]["pageSize"] = json!({"w": 200, "h": 240});
+        request["regions"]["sections"][0]["margins"] =
+            json!({"top": 10, "right": 10, "bottom": 10, "left": 10});
+        request["regions"]["sections"][0]["noteSettings"] = json!({"footnoteColumns": 1});
+        request["notes"] = json!({"contents": [{"id": 2, "height": 0}]});
+        request["measurement"] = json!({
+            "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+            "authoritativeShaping": false,
+        });
+        let request = request.to_string();
+        engine
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap();
+        engine.build_display_list_frame("{}", 0).unwrap();
+        (engine, request)
+    }
+
+    fn note_body_lines(engine: &EngineSession) -> usize {
+        let pagination = engine.pagination.borrow();
+        let BlockExtent::Paragraph(extent) = &pagination.input.as_ref().unwrap().measured[0].measure
+        else {
+            panic!("paragraph expected");
+        };
+        extent.lines.len()
+    }
+
+    fn note_body_reference_line(engine: &EngineSession) -> u64 {
+        pagination_signature(&engine.pagination.borrow().input.as_ref().unwrap().measured[0])
+            .unwrap()["references"][0][1]
+            .as_u64()
+            .unwrap()
+    }
+
+    fn note_boundary_prefix(suffix: &str, move_reference: Option<bool>) -> String {
+        let (engine, _) = note_typing_fixture(&"x".repeat(240), suffix);
+        let state = engine.regions.borrow();
+        let measurement = state
+            .as_ref()
+            .unwrap()
+            .fast_path
+            .as_ref()
+            .unwrap()
+            .measurement
+            .clone();
+        let pagination = engine.pagination.borrow();
+        let measured = &pagination.input.as_ref().unwrap().measured[0];
+        let width = pagination.measured_widths[0];
+        let signature = |count: usize| {
+            let mut block = measured.block.clone();
+            let LayoutBlock::Paragraph(paragraph) = &mut block else {
+                panic!("paragraph expected");
+            };
+            let Run::Text(prefix) = &mut paragraph.runs[0] else {
+                panic!("text expected");
+            };
+            prefix.text = "x".repeat(count);
+            prefix.pm_end = prefix.pm_start.map(|start| start + count as f64);
+            let mut position = prefix.pm_end.unwrap();
+            for run in &mut paragraph.runs[1..] {
+                let Run::Text(text) = run else {
+                    panic!("text expected");
+                };
+                text.pm_start = Some(position);
+                position += text.text.encode_utf16().count() as f64;
+                text.pm_end = Some(position);
+            }
+            paragraph.pm_end = Some(position);
+            let measure =
+                docx_layout::measure_blocks::measure_block(&mut block, width, &measurement).unwrap();
+            pagination_signature(&MeasuredBlock { block, measure }).unwrap()
+        };
+        for count in 30..180 {
+            let before = signature(count);
+            let after = signature(count + 1);
+            let before_lines = before["lines"].as_array().unwrap().len();
+            let after_lines = after["lines"].as_array().unwrap().len();
+            let matches = match move_reference {
+                Some(true) => {
+                    before_lines == after_lines && before["references"] != after["references"]
+                }
+                Some(false) => before_lines < after_lines,
+                None => before == after,
+            };
+            if matches {
+                return "x".repeat(count);
+            }
+        }
+        panic!("a measured line boundary must exist");
+    }
+
+    #[test]
+    fn footnote_middle_letter_reuses_layout() {
+        let prefix = note_boundary_prefix(" tail", None);
+        let (engine, request) = note_typing_fixture(&prefix, " tail");
+        let before = engine.pagination.borrow().note_shortcut_taken;
+        let passes = engine.pagination.borrow().note_stabilization_placements;
+        local_patch_step(&engine, &request, "body", (8, 8, Some("x")), false);
+        assert_eq!(engine.pagination.borrow().note_shortcut_taken, before + 1);
+        assert_eq!(engine.pagination.borrow().note_stabilization_placements, passes);
+        assert_region_state_matches_cold(&engine, &request, "middle letter with footnotes");
+    }
+
+    #[test]
+    fn footnote_line_wrap_uses_full_layout() {
+        let prefix = note_boundary_prefix("", Some(false));
+        let (engine, request) = note_typing_fixture(&prefix, "");
+        let lines = note_body_lines(&engine);
+        local_patch_step(&engine, &request, "body", (8, 8, Some("x")), false);
+        assert!(note_body_lines(&engine) > lines);
+        assert_eq!(engine.pagination.borrow().note_shortcut_taken, 0);
+        assert_eq!(engine.pagination.borrow().note_shortcut_fell_back, 1);
+    }
+
+    #[test]
+    fn footnote_reference_line_move_uses_full_layout() {
+        let suffix = "x".repeat(137);
+        let prefix = note_boundary_prefix(&suffix, Some(true));
+        let (engine, request) = note_typing_fixture(&prefix, &suffix);
+        let line = note_body_reference_line(&engine);
+        let lines = note_body_lines(&engine);
+        local_patch_step(&engine, &request, "body", (8, 8, Some("x")), false);
+        assert_eq!(note_body_lines(&engine), lines);
+        assert!(note_body_reference_line(&engine) > line);
+        assert_eq!(engine.pagination.borrow().note_shortcut_taken, 0);
+    }
+
+    #[test]
+    fn footnote_line_delete_uses_full_layout() {
+        let (engine, request) = note_typing_fixture(&"x".repeat(137), " tail");
+        let lines = note_body_lines(&engine);
+        local_patch_step(&engine, &request, "body", (4, 44, None), false);
+        assert!(note_body_lines(&engine) < lines);
+        assert_eq!(engine.pagination.borrow().note_shortcut_taken, 0);
+    }
+
+    #[test]
+    fn footnote_story_edit_uses_full_layout() {
+        let (engine, request) = note_typing_fixture(&"x".repeat(137), " tail");
+        local_patch_step(&engine, &request, "fn:2", (0, 0, Some("x")), false);
+        assert_eq!(engine.pagination.borrow().note_shortcut_taken, 0);
+        assert_eq!(engine.pagination.borrow().note_shortcut_fell_back, 1);
+    }
+
+    #[test]
+    fn footnote_shortcut_post_check_falls_back_to_cold_layout() {
+        let prefix = note_boundary_prefix(" tail", None);
+        let (engine, request) = note_typing_fixture(&prefix, " tail");
+        {
+            let mut state = engine.regions.borrow_mut();
+            let retained = state.as_mut().unwrap().note_reuse.as_mut().unwrap();
+            Rc::get_mut(retained).unwrap().page_count += 1;
+        }
+        let calls = engine.pagination.borrow().pagination_calls;
+        local_patch_step(&engine, &request, "body", (8, 8, Some("x")), false);
+        assert_eq!(engine.pagination.borrow().note_shortcut_taken, 0);
+        assert_eq!(engine.pagination.borrow().note_shortcut_fell_back, 1);
+        assert_eq!(engine.pagination.borrow().pagination_calls, calls + 2);
+    }
+
+    #[test]
+    fn pagination_signature_covers_placement_inputs() {
+        let paragraph = json!({
+            "block": {"kind": "paragraph", "id": "p", "pmStart": 0, "pmEnd": 5,
+                "attrs": {}, "runs": [
+                    {"kind": "text", "text": "abc", "pmStart": 1, "pmEnd": 4},
+                    {"kind": "text", "text": "1", "pmStart": 4, "pmEnd": 5, "footnoteRefId": 1}
+                ]},
+            "measure": {"kind": "paragraph", "totalHeight": 20, "lines": [
+                {"headRun": 0, "headChar": 0, "tailRun": 1, "tailChar": 1,
+                 "width": 40, "ascent": 15, "descent": 5, "lineHeight": 20}
+            ]}
+        });
+        let signature = |value: serde_json::Value| {
+            pagination_signature(&serde_json::from_value::<MeasuredBlock>(value).unwrap()).unwrap()
+        };
+        let original = signature(paragraph.clone());
+        for (field, value) in [
+            ("keepNext", json!(true)),
+            ("keepLines", json!(true)),
+            ("widowControl", json!(false)),
+            ("pageBreakBefore", json!(true)),
+            ("pageBreakBeforeRun", json!(true)),
+            ("contextualSpacing", json!(true)),
+            ("styleId", json!("Heading1")),
+            ("effectiveStyleId", json!("Normal")),
+            ("spacingExplicit", json!({"before": true})),
+            ("spacing", json!({"before": 10, "after": 20})),
+        ] {
+            let mut changed = paragraph.clone();
+            changed["block"]["attrs"][field] = value;
+            assert_ne!(signature(changed), original, "{field}");
+        }
+        for field in ["ascent", "descent", "lineHeight", "floatSkipBefore"] {
+            let mut changed = paragraph.clone();
+            changed["measure"]["lines"][0][field] = json!(30);
+            assert_ne!(signature(changed), original, "{field}");
+        }
+        let mut glyphs = paragraph.clone();
+        glyphs["block"]["runs"][0]["text"] = json!("xyz");
+        glyphs["measure"]["lines"][0]["width"] = json!(80);
+        glyphs["measure"]["lines"][0]["clusterAdvances"] =
+            json!([{"runIndex": 0, "startChar": 0, "endChar": 1, "advance": 30, "xOffset": 5}]);
+        assert_eq!(signature(glyphs), original);
+        let mut moved = paragraph.clone();
+        moved["block"]["pmStart"] = json!(100);
+        moved["block"]["pmEnd"] = json!(105);
+        for run in moved["block"]["runs"].as_array_mut().unwrap() {
+            for field in ["pmStart", "pmEnd"] {
+                run[field] = json!(run[field].as_u64().unwrap() + 100);
+            }
+        }
+        assert_eq!(signature(moved), original);
+        let table = json!({
+            "block": {"kind": "table", "id": "t", "rows": [{"id": "r", "cells": [{
+                "id": "c", "blocks": [paragraph["block"].clone()]
+            }]}]},
+            "measure": {"kind": "table", "totalWidth": 100, "totalHeight": 20,
+                "columnWidths": [100], "rows": [{"height": 20, "cells": [{
+                    "width": 100, "height": 20, "blocks": [paragraph["measure"].clone()]
+                }]}]}
+        });
+        let original = signature(table.clone());
+        for (field, value) in [
+            ("cantSplit", json!(true)),
+            ("heightRule", json!("exact")),
+            ("isHeader", json!(true)),
+        ] {
+            let mut changed = table.clone();
+            changed["block"]["rows"][0][field] = value;
+            assert_ne!(signature(changed), original, "{field}");
+        }
+        let mut nested = table.clone();
+        nested["block"]["rows"][0]["cells"][0]["blocks"][0]["attrs"]["keepLines"] = json!(true);
+        assert_ne!(signature(nested), original);
+        let mut floating = table;
+        floating["block"]["floating"] = json!({"vertAnchor": "page", "tblpY": 40});
+        assert_ne!(signature(floating), original);
+    }
+
+    fn footnote_stream_fixture() -> (EngineSession, String) {
+        use super::lowering_fixture::{Package, para, run};
+        let section = r#"<w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="3000" w:h="2700"/><w:pgMar w:top="150" w:right="150" w:bottom="150" w:left="150"/></w:sectPr>"#;
+        let mut body = format!(
+            r#"<w:p w14:paraId="30000000"><w:pPr><w:spacing w:after="1650"/></w:pPr>{}</w:p>{}"#,
+            run("Spacer"),
+            para(
+                "30000001",
+                &format!(r#"{}<w:r><w:footnoteReference w:id="1"/></w:r>"#, run("Anchor")),
+            ),
+        );
+        for index in 2..=17 {
+            let properties = if index == 9 { section } else { "" };
+            body.push_str(&format!(
+                r#"<w:p w14:paraId="{:08X}"><w:pPr><w:pageBreakBefore/>{properties}</w:pPr><w:r><w:footnoteReference w:id="{index}"/></w:r>{}</w:p>{}"#,
+                0x30000000 + index,
+                run(&"word ".repeat(10 + index as usize % 4)),
+                para(
+                    &format!("{:08X}", 0x40000000 + index),
+                    &run("A short line with room for typing."),
+                ),
+            ));
+        }
+        body.push_str(&format!(
+            r#"<w:p w14:paraId="50000001"><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:endnoteReference w:id="1"/></w:r>{}</w:p>"#,
+            run(&"x".repeat(185)),
+        ));
+        body.push_str(section);
+        let engine = EngineSession::new(9621);
+        crate::seed::seed_from_docx(engine.doc(), &Package::new(&body).bytes()).unwrap();
+        for id in 1..=17 {
+            let text = if id == 1 {
+                "A longer note with several words to fill two lines of the note area."
+            } else {
+                "Note text"
+            };
+            engine
+                .doc()
+                .create_story(&format!("fn:{id}"), text, "Normal", "left")
+                .unwrap();
+        }
+        engine
+            .doc()
+            .create_story("en:1", &"x".repeat(185), "Normal", "left")
+            .unwrap();
+        let mut contents: Vec<_> = (1..=17).map(|id| json!({"id": id, "height": 0})).collect();
+        contents.push(json!({"id": 1, "noteKind": "endnote", "height": 0}));
+        let request = json!({
+            "bodyStory": "body",
+            "renderEnv": {},
+            "regions": {"sections": [
+                {"sectionId": "first", "pageSize": {"w": 200, "h": 180},
+                 "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}},
+                {"sectionId": "second", "pageSize": {"w": 200, "h": 180},
+                 "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}}
+            ]},
+            "notes": {"contents": contents},
+            "measurement": {"defaults": {"fontSize": 11, "fontFamily": "Calibri"}, "authoritativeShaping": false},
+        })
+        .to_string();
+        engine
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap();
+        engine.build_display_list_frame("{}", 0).unwrap();
+        (engine, request)
+    }
+
+    fn scalar_utf16_boundaries(text: &str) -> Vec<u32> {
+        let mut result = vec![0];
+        let mut offset = 0;
+        for character in text.chars() {
+            offset += character.len_utf16() as u32;
+            result.push(offset);
+        }
+        result
+    }
+
+    #[test]
+    fn resident_footnote_seeded_edits_match_cold_full() {
+        for seed in 1..=30_u64 {
+            let (engine, request) = footnote_stream_fixture();
+            assert!(engine.stats().retained_pages > 10);
+            assert!(!engine.capture.borrow().as_ref().unwrap().notes_converged);
+            assert!(
+                engine.pagination.borrow().note_stabilization_placements
+                    > docx_layout::footnotes::MAX_FOOTNOTE_LAYOUT_PASSES as u64
+            );
+            assert_region_state_matches_cold(
+                &engine,
+                &request,
+                "alternating reservations at the pass cap",
+            );
+            let paragraph = engine.doc().paragraphs("body").unwrap().pop().unwrap();
+            let index = engine.doc().paragraph_index("body").unwrap();
+            let (reference, _) = index.para_span(&paragraph.para_id).unwrap();
+            local_patch_step(&engine, &request, "body", (reference, reference + 1, None), false);
+            let paragraph = engine.doc().paragraphs("body").unwrap().remove(1);
+            let index = engine.doc().paragraph_index("body").unwrap();
+            let (start, _) = index.para_span(&paragraph.para_id).unwrap();
+            let reference = start + "Anchor".encode_utf16().count() as u32;
+            local_patch_step(&engine, &request, "body", (reference, reference + 1, None), false);
+            assert!(engine.capture.borrow().as_ref().unwrap().notes_converged);
+            let mut random = seed;
+            let mut next = || {
+                random ^= random << 13;
+                random ^= random >> 7;
+                random ^= random << 17;
+                random
+            };
+            let mut hits = 0;
+            for step in 0..25 {
+                let paragraphs = engine.doc().paragraphs("body").unwrap();
+                let candidates: Vec<_> = paragraphs
+                    .iter()
+                    .filter(|paragraph| step != 0 || paragraph.text.starts_with("A short line"))
+                    .collect();
+                let paragraph = candidates[next() as usize % candidates.len()];
+                let index = engine.doc().paragraph_index("body").unwrap();
+                let (start, _) = index.para_span(&paragraph.para_id).unwrap();
+                let text = engine
+                    .doc()
+                    .para_text(&paragraph.para_id, crate::TextView::Raw)
+                    .unwrap();
+                let boundaries = scalar_utf16_boundaries(&text);
+                let slot = if step == 0 {
+                    8
+                } else {
+                    next() as usize % boundaries.len()
+                };
+                let offset = boundaries[slot];
+                let before = engine.pagination.borrow().note_shortcut_taken;
+                let operation = if step == 0 || next() % 3 != 0 || slot + 1 == boundaries.len() {
+                    let inserted = if step == 0 {
+                        "x"
+                    } else {
+                        ["x", " ", "😀"][next() as usize % 3]
+                    };
+                    (start + offset, start + offset, Some(inserted))
+                } else {
+                    let limit = 1 + next() as u32 % 3;
+                    let end = boundaries[slot + 1..]
+                        .iter()
+                        .copied()
+                        .take_while(|end| *end - offset <= limit)
+                        .last()
+                        .unwrap_or(boundaries[slot + 1]);
+                    (start + offset, start + end, None)
+                };
+                local_patch_step(&engine, &request, "body", operation, false);
+                let taken = engine.pagination.borrow().note_shortcut_taken - before;
+                assert!(taken <= 1, "seed {seed}, step {step}");
+                hits += taken;
+            }
+            assert!(hits > 0, "seed {seed} must take a cold-equal shortcut");
+        }
     }
 
     #[test]
