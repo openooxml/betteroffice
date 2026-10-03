@@ -466,6 +466,60 @@ describe('wasm loader', () => {
       handle.dispose();
     }
   });
+
+  it('batches public cross-sheet inputs and formats into one collaborative undo', () => {
+    const source = openWorkbook(sampleBytes());
+    let bytes: Uint8Array;
+    try {
+      source.patchRangeStyle(0, 'A8', { bold: true });
+      bytes = source.save();
+    } finally {
+      source.dispose();
+    }
+    const handle = openWorkbook(bytes, { collaborative: true, clientId: 5030 });
+    const peer = openWorkbook(bytes, { collaborative: true, clientId: 5031 });
+    try {
+      const format = handle.captureFormat(0, 'A8');
+      const beforeBudget = handle.cell(0, 40, 1).input;
+      const beforeSummary = handle.cell(1, 12, 2).input;
+      const edits = [
+        { sheet: 0, row: 40, col: 1, input: '=1+2' },
+        { sheet: 1, row: 12, col: 2, input: '7' },
+      ];
+      expect(handle.editWorkbookCells(edits, [{ sheet: 1, range: 'C13', format }]).applied).toBe(true);
+      expect(handle.historyState()).toMatchObject({ undoDepth: 1, redoDepth: 0 });
+      expect(handle.cell(0, 40, 1).input).toBe('=1+2');
+      expect(handle.cell(1, 12, 2).input).toBe('7');
+      expect(handle.selectionFormatting(1, 'C13').bold).toBe(true);
+      peer.applyUpdate(handle.encodeStateAsUpdate());
+      expect(peer.cell(0, 40, 1).input).toBe('=1+2');
+      expect(peer.cell(1, 12, 2).input).toBe('7');
+      expect(peer.selectionFormatting(1, 'C13').bold).toBe(true);
+
+      expect(() => handle.editWorkbookCells([
+        { sheet: 0, row: 40, col: 1, input: 'should not commit' },
+        { sheet: -1, row: 0, col: 0, input: 'bad' },
+      ], [])).toThrow();
+      expect(handle.cell(0, 40, 1).input).toBe('=1+2');
+      expect(handle.historyState()).toMatchObject({ undoDepth: 1, redoDepth: 0 });
+      handle.undo();
+      expect(handle.cell(0, 40, 1).input).toBe(beforeBudget);
+      expect(handle.cell(1, 12, 2).input).toBe(beforeSummary);
+      expect(handle.selectionFormatting(1, 'C13').bold).toBe(false);
+      handle.redo();
+      const reopened = openWorkbook(handle.save());
+      try {
+        expect(reopened.cell(0, 40, 1).input).toBe('=1+2');
+        expect(reopened.cell(1, 12, 2).input).toBe('7');
+        expect(reopened.selectionFormatting(1, 'C13').bold).toBe(true);
+      } finally {
+        reopened.dispose();
+      }
+    } finally {
+      handle.dispose();
+      peer.dispose();
+    }
+  });
 });
 
 // the two paths are gated on `isProposalsAvailable()` so this file passes

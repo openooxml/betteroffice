@@ -27,7 +27,7 @@ pub use types::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
     EditStage, HistoryState, MutationResult, NumberFormatKind, ProposalAcceptance,
     ProposalEditInput, ProposalRequest, RenderOptions, RenderedPng, SelectionFormatting, SheetInfo,
-    TextSearchMatch, UpdateEvent, UpdateOrigin,
+    TextSearchMatch, UpdateEvent, UpdateOrigin, WorkbookCellInput, WorkbookFormatInput,
 };
 pub use workbook::batch::{
     CalculationRequest, CellGuard, DocumentVersion, EditApplication, EditCalculation, EditFailure,
